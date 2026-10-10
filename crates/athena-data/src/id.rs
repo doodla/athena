@@ -150,6 +150,11 @@ impl JobId {
         }
     }
 
+    /// Whether this is a job made from a request (not the bootstrap).
+    pub fn is_request(&self) -> bool {
+        matches!(self, JobId::Id(_))
+    }
+
     /// The directory that holds this job's records, relative to the repository root.
     pub fn dir(&self) -> String {
         match self {

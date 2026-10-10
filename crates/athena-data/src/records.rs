@@ -671,7 +671,8 @@ pub struct Outcome {
     pub branch: Option<String>,
     pub base_commit: Option<String>,
     pub candidate_commit: Option<String>,
-    /// True for the late-landing outcome of a job that was blocked first.
+    /// True for the outcome that follows `blocked`: `outcome-landed.json` when the retried landing
+    /// succeeds, `outcome-abandoned.json` when the job is closed instead.
     pub after_blocked: bool,
     /// For the bootstrap: the last commit of its range (D39).
     pub through_commit: Option<String>,
@@ -879,7 +880,7 @@ impl AnyRecord {
             AnyRecord::Candidate(r) => format!("{}/candidate.json", r.job.dir()),
             AnyRecord::Verification(r) => format!("{}/verification.json", r.job.dir()),
             AnyRecord::Outcome(r) if r.after_blocked => {
-                format!("{}/outcome-landed.json", r.job.dir())
+                format!("{}/outcome-{}.json", r.job.dir(), r.state.as_str())
             }
             AnyRecord::Outcome(r) => format!("{}/outcome.json", r.job.dir()),
             AnyRecord::Score(r) => match &r.cause {

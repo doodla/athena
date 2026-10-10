@@ -1,0 +1,636 @@
+//! `ask` and `correct`: the reader's reading, with forecasts, committed before any work (design §3.2–3.3).
+
+use crate::capability::{JobConfig, ToolGrant};
+use crate::commits::{NewFile, message};
+use crate::invocation::InvocationFacts;
+use crate::store::{JobRecords, JobState, Records};
+use crate::{Athena, Ui};
+use anyhow::{Context, Result, bail};
+use athena_agent::AgentInvocation;
+use athena_agent::env::{EnvSpec, Side};
+use athena_agent::policy::Policy;
+use athena_context::briefs::{ReaderInputs, reader_brief, render_catalog};
+use athena_context::outputs::{
+    CriterionKindOutput, DeliverableActionOutput, ReaderChoices, ReadingOutput, reading_schema,
+};
+use athena_context::{CONTRACT, Component, Composed, READER_FRAME, compose};
+use athena_data::records::{
+    AnyRecord, Correction, CorrectionKind, Criterion, CriterionKind, DefaultApplied, Deliverable,
+    DeliverableAction, Forecast, Forecasts, Intervention, InterventionCategory, InterventionSource,
+    Invocation, Quantiles, Reading, Request, Role,
+};
+use athena_data::{JobId, RecordId};
+use athena_gate::redact::Redactor;
+use athena_git::snapshot::{Snapshot, SnapshotRepo};
+use std::collections::BTreeMap;
+use std::time::Duration;
+
+/// What `ask` and `correct` leave behind: a proposed (or declined) job, committed.
+#[derive(Debug, Clone)]
+pub struct Proposal {
+    pub job: JobId,
+    pub reading: Option<Reading>,
+    /// Why there is no reading, when the reader failed.
+    pub reader_error: Option<String>,
+    pub invocation: Option<Invocation>,
+    /// The proposal commit.
+    pub commit: String,
+    /// The job's total spend so far.
+    pub spent_usd: f64,
+}
+
+/// The reader's system prompt: contract, frame, defaults model, capability catalog.
+pub fn reader_system_prompt(athena: &Athena, jc: &JobConfig) -> Composed {
+    let cards: Vec<_> = athena
+        .capabilities
+        .iter()
+        .filter(|c| jc.config.capability(c.id()).is_some())
+        .map(|c| c.card())
+        .collect();
+    compose(&[
+        CONTRACT.into(),
+        READER_FRAME.into(),
+        Component::new("defaults", jc.defaults.version, jc.defaults.render()),
+        Component::new("catalog", 1, render_catalog(&cards)),
+    ])
+}
+
+/// The snapshot's top-level listing, for the reader's brief.
+fn listing(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .map(|e| {
+                    let name = e.file_name().to_string_lossy().into_owned();
+                    if e.file_type().is_ok_and(|t| t.is_dir()) {
+                        format!("{name}/")
+                    } else {
+                        name
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+fn normalize_path(path: &str) -> Option<String> {
+    let trimmed = path.trim().trim_start_matches("./");
+    if trimmed.is_empty() || trimmed.starts_with('/') || trimmed.split('/').any(|p| p == "..") {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+impl Athena {
+    /// Builds the invocation spec common to every role.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn agent_spec(
+        &self,
+        jc: &JobConfig,
+        job: &JobId,
+        seq: u32,
+        role: Role,
+        model: &str,
+        composed: &Composed,
+        user_prompt: String,
+        grant: &ToolGrant,
+        snapshot: &std::path::Path,
+        side: Side,
+        capability_env: &BTreeMap<String, String>,
+        cap_usd: f64,
+        timeout_s: u64,
+        schema: serde_json::Value,
+    ) -> Result<AgentInvocation> {
+        let job_dir = self.state.job_dir(job);
+        let scratch = job_dir.join("agent");
+        std::fs::create_dir_all(&scratch)?;
+        let policy = Policy {
+            role,
+            root: snapshot.to_path_buf(),
+            commands: grant.commands.clone(),
+            writes: grant.writes,
+        };
+        let policy_file = scratch.join(format!("policy-{seq:02}-{}.json", role.as_str()));
+        std::fs::write(&policy_file, serde_json::to_string_pretty(&policy)?)?;
+        let env = athena_agent::env::build(
+            &EnvSpec {
+                agents: &jc.config.agents,
+                job: job.as_str(),
+                job_dir: &job_dir,
+                snapshot,
+                side,
+                capability_env,
+            },
+            |key| std::env::var(key).ok(),
+        )
+        .map_err(anyhow::Error::msg)?;
+        Ok(AgentInvocation {
+            job: job.as_str().to_string(),
+            seq,
+            role,
+            model: model.to_string(),
+            system_prompt: composed.text.clone(),
+            user_prompt,
+            tools: grant.tools.clone(),
+            allowed_tools: athena_agent::policy::allowed_tool_rules(&grant.commands),
+            permission_mode: grant.permission_mode.clone(),
+            workdir: snapshot.to_path_buf(),
+            env,
+            hook: Some(athena_agent::HookSpec {
+                athena_bin: self.athena_bin.clone(),
+                policy_file,
+            }),
+            max_budget_usd: cap_usd,
+            timeout: Duration::from_secs(timeout_s),
+            json_schema: schema,
+            scratch,
+        })
+    }
+
+    pub(crate) fn is_fake(&self) -> bool {
+        self.driver.info().name == "fake"
+    }
+
+    /// Refuses an invocation whose cap would exceed what is left of the job's budget (design §10.4).
+    pub(crate) fn check_budget(
+        &self,
+        jc: &JobConfig,
+        spent: f64,
+        cap: f64,
+        what: &str,
+    ) -> Result<()> {
+        let left = jc.config.budget.job_usd - spent;
+        if cap > left + 1e-9 {
+            bail!(
+                "the job has ${:.2} of its ${:.2} budget left, less than the {what}'s cap of ${cap:.2}; \
+                 raise [budget] in athena.toml through a job, or close this one",
+                left.max(0.0),
+                jc.config.budget.job_usd
+            );
+        }
+        Ok(())
+    }
+
+    /// Runs the reader once and builds the reading.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn read_for(
+        &self,
+        jc: &JobConfig,
+        records: &Records,
+        job: &JobId,
+        request: &Request,
+        history: &[(Reading, Option<String>)],
+        n: u32,
+        seq: u32,
+        spent: f64,
+        redactor: &Redactor,
+        ui: &dyn Ui,
+    ) -> Result<(Option<Reading>, Invocation, Option<String>)> {
+        self.check_budget(jc, spent, jc.config.budget.reader_usd, "reader")?;
+        let snapshot_dir = self.state.job_dir(job).join(format!("read-{n}"));
+        if snapshot_dir.exists() {
+            std::fs::remove_dir_all(&snapshot_dir)?;
+        }
+        Snapshot::create(
+            &self.git,
+            &jc.commit,
+            &jc.commit,
+            &snapshot_dir,
+            SnapshotRepo::None,
+        )?;
+        let (global_reference, basis) =
+            crate::scoring::reference(&jc.config.forecast.reference, "", records);
+        let composed = reader_system_prompt(self, jc);
+        let prompt = reader_brief(&ReaderInputs {
+            request: request.text.clone(),
+            history: history.to_vec(),
+            reference: global_reference,
+            reference_basis: basis,
+            classes: jc.config.classes.list.clone(),
+            producer_models: jc.config.models.producer_allowed.clone(),
+            producer_default: jc.config.models.producer_default.clone(),
+            listing: listing(&snapshot_dir),
+        });
+        let capability_ids: Vec<String> = self
+            .capabilities
+            .iter()
+            .map(|c| c.id().to_string())
+            .filter(|id| jc.config.capability(id).is_some())
+            .collect();
+        let schema = reading_schema(&ReaderChoices {
+            classes: jc.config.classes.list.clone(),
+            capabilities: capability_ids.clone(),
+            producer_models: jc.config.models.producer_allowed.clone(),
+        });
+        let grant = ToolGrant {
+            tools: vec!["Read".into(), "Grep".into(), "Glob".into()],
+            commands: BTreeMap::new(),
+            writes: false,
+            permission_mode: "dontAsk".into(),
+        };
+        let model = jc.config.models.reader.clone();
+        let spec = self.agent_spec(
+            jc,
+            job,
+            seq,
+            Role::Reader,
+            &model,
+            &composed,
+            prompt,
+            &grant,
+            &snapshot_dir,
+            Side::Read,
+            &BTreeMap::new(),
+            jc.config.budget.reader_usd,
+            jc.config.budget.reader_timeout_s,
+            schema,
+        )?;
+        ui.line(&format!(
+            "reading    {} · {model} reads the request (reading {n})",
+            job.as_str()
+        ));
+        let facts = InvocationFacts {
+            job,
+            spec: &spec,
+            composed: &composed,
+            config: &jc.config,
+            fake: self.is_fake(),
+        };
+        let (output, record) = match self.invoke_and_record(&facts, redactor)? {
+            Ok(done) => done,
+            Err(error) => bail!("the reader could not run: {error}"),
+        };
+        let _ = std::fs::remove_dir_all(&snapshot_dir);
+        if output.outcome != athena_data::records::InvocationOutcome::Success {
+            let why = record
+                .detail
+                .clone()
+                .unwrap_or_else(|| "the reader did not complete".into());
+            return Ok((None, record, Some(why)));
+        }
+        let Some(structured) = output.structured.clone() else {
+            return Ok((
+                None,
+                record,
+                Some("the reader returned no structured reading".into()),
+            ));
+        };
+        match self.build_reading(
+            jc,
+            records,
+            job,
+            n,
+            seq,
+            structured,
+            &capability_ids,
+            redactor,
+        ) {
+            Ok(reading) => Ok((Some(reading), record, None)),
+            Err(e) => Ok((
+                None,
+                record,
+                Some(format!("the reader's output was invalid: {e:#}")),
+            )),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_reading(
+        &self,
+        jc: &JobConfig,
+        records: &Records,
+        job: &JobId,
+        n: u32,
+        seq: u32,
+        structured: serde_json::Value,
+        capabilities: &[String],
+        redactor: &Redactor,
+    ) -> Result<Reading> {
+        let out: ReadingOutput =
+            serde_json::from_value(structured).context("parsing the reading")?;
+        let config = &jc.config;
+        if !config.is_class(&out.class_of_work) {
+            bail!("class {:?} is not in the closed list", out.class_of_work);
+        }
+        if let Some(cap) = &out.capability
+            && !capabilities.contains(cap)
+        {
+            bail!("capability {cap:?} is not in the catalog");
+        }
+        if out.capability.is_none()
+            && out
+                .decline_reason
+                .as_deref()
+                .is_none_or(|r| r.trim().is_empty())
+        {
+            bail!("a reading without a capability must say why");
+        }
+        if !config.models.producer_allowed.contains(&out.producer_model) {
+            bail!("producer model {:?} is not allowed", out.producer_model);
+        }
+        let f = &out.forecast;
+        let reader = Forecast {
+            p_reading_accepted: f.p_reading_accepted,
+            p_verification_passes: f.p_verification_passes,
+            p_user_intervenes: f.p_user_intervenes,
+            cost_usd: Quantiles::new(f.cost_usd.p10, f.cost_usd.p50, f.cost_usd.p90)
+                .map_err(anyhow::Error::msg)?,
+            wall_time_s: Quantiles::new(f.wall_time_s.p10, f.wall_time_s.p50, f.wall_time_s.p90)
+                .map_err(anyhow::Error::msg)?,
+        };
+        reader.validate().map_err(anyhow::Error::msg)?;
+        let (reference, _) =
+            crate::scoring::reference(&config.forecast.reference, &out.class_of_work, records);
+
+        // Agent free text is redacted before it is recorded.
+        let mut text: Vec<String> = vec![
+            out.title.clone(),
+            out.summary.clone(),
+            out.decline_reason.clone().unwrap_or_default(),
+            out.question.clone().unwrap_or_default(),
+            f.departures.clone().unwrap_or_default(),
+        ];
+        let fixed = text.len();
+        text.extend(out.assumptions.iter().cloned());
+        text.extend(out.out_of_scope.iter().cloned());
+        text.extend(out.acceptance_criteria.iter().map(|c| c.text.clone()));
+        text.extend(out.defaults_applied.iter().map(|d| d.how.clone()));
+        redactor.redact_all(&mut text)?;
+        let mut rest = text.split_off(fixed).into_iter();
+        let opt = |s: &String| (!s.trim().is_empty()).then(|| s.clone());
+        let assumptions: Vec<String> = rest.by_ref().take(out.assumptions.len()).collect();
+        let out_of_scope: Vec<String> = rest.by_ref().take(out.out_of_scope.len()).collect();
+        let criteria_text: Vec<String> =
+            rest.by_ref().take(out.acceptance_criteria.len()).collect();
+        let hows: Vec<String> = rest.collect();
+
+        let mut deliverables: Vec<Deliverable> = Vec::new();
+        for d in &out.deliverables {
+            let Some(path) = normalize_path(&d.path) else {
+                bail!("deliverable path {:?} is not a repository path", d.path)
+            };
+            if deliverables.iter().any(|x| x.path == path) {
+                continue;
+            }
+            deliverables.push(Deliverable {
+                path,
+                action: match d.action {
+                    DeliverableActionOutput::Create => DeliverableAction::Create,
+                    DeliverableActionOutput::Modify => DeliverableAction::Modify,
+                    DeliverableActionOutput::Delete => DeliverableAction::Delete,
+                },
+                p: d.p,
+            });
+        }
+        let title: String = text[0]
+            .lines()
+            .next()
+            .unwrap_or("")
+            .chars()
+            .take(72)
+            .collect();
+        let reading = Reading {
+            job: job.clone(),
+            n,
+            at: crate::now(),
+            invocation_seq: seq,
+            base_commit: jc.commit.clone(),
+            config_sha256: jc.config_sha256.clone(),
+            defaults_sha256: jc.defaults_sha256.clone(),
+            defaults_version: jc.defaults.version,
+            title,
+            summary: text[1].clone(),
+            class_of_work: out.class_of_work.clone(),
+            capability: out.capability.clone(),
+            decline_reason: opt(&text[2]),
+            producer_model: out.producer_model.clone(),
+            verifier_model: config.models.verifier.clone(),
+            defaults_applied: out
+                .defaults_applied
+                .iter()
+                .zip(hows)
+                .map(|(d, how)| DefaultApplied {
+                    id: d.id.clone(),
+                    how,
+                })
+                .collect(),
+            assumptions,
+            question: opt(&text[3]),
+            acceptance_criteria: out
+                .acceptance_criteria
+                .iter()
+                .zip(criteria_text)
+                .map(|(c, text)| Criterion {
+                    text,
+                    kind: match c.kind {
+                        CriterionKindOutput::Content => CriterionKind::Content,
+                        CriterionKindOutput::Behavior => CriterionKind::Behavior,
+                    },
+                })
+                .collect(),
+            deliverables,
+            out_of_scope,
+            forecasts: Forecasts { reader, reference },
+            departures: opt(&text[4]),
+        };
+        reading.validate().map_err(anyhow::Error::msg)?;
+        if reading.capability.is_some() && reading.acceptance_criteria.is_empty() {
+            bail!("a reading needs at least one acceptance criterion");
+        }
+        Ok(reading)
+    }
+
+    /// `athena ask`: reads a request and commits the proposal.
+    pub fn ask(&self, text: &str, ui: &dyn Ui) -> Result<Proposal> {
+        self.refuse_if_stopped()?;
+        self.state.registry().reap();
+        if text.trim().is_empty() {
+            bail!("the request is empty; say what you want in a line or two");
+        }
+        let head = self.head()?;
+        let jc = JobConfig::at(&self.git, &head)?;
+        let records = crate::store::Records::load(&self.git, &head)?;
+        let redactor = Redactor::new(&jc.config)?;
+        let mut id = RecordId::generate(crate::now());
+        while records.jobs.contains_key(id.as_str()) {
+            id = RecordId::generate(crate::now());
+        }
+        let job = JobId::Id(id);
+        let request = Request {
+            job: job.clone(),
+            text: redactor.redact(text.trim())?,
+            received_at: crate::now(),
+            channel: "cli".into(),
+        };
+        let (reading, invocation, error) =
+            self.read_for(&jc, &records, &job, &request, &[], 1, 1, 0.0, &redactor, ui)?;
+        let mut files = vec![NewFile::record(&AnyRecord::Request(request.clone()))];
+        files.push(NewFile::record(&AnyRecord::Invocation(Box::new(
+            invocation.clone(),
+        ))));
+        if let Some(r) = &reading {
+            files.push(NewFile::record(&AnyRecord::Reading(Box::new(r.clone()))));
+        }
+        let subject = match &reading {
+            Some(r) => format!("Read a request: {}", r.title),
+            None => "Read a request (the reader failed)".to_string(),
+        };
+        let body = "The request, the reader's reading with its forecasts, and the reader's invocation, committed before any work.";
+        let commit = self.commit_records(
+            &files,
+            &message(&subject, body, &[("Athena-Job", job.as_str().to_string())]),
+        )?;
+        Ok(Proposal {
+            job,
+            reading,
+            reader_error: error,
+            spent_usd: invocation.cost.best_lower(),
+            invocation: Some(invocation),
+            commit,
+        })
+    }
+
+    /// `athena correct`: records a one-line correction (or an answer), and reads again.
+    pub fn correct(&self, job_ref: &str, line: &str, ui: &dyn Ui) -> Result<Proposal> {
+        self.refuse_if_stopped()?;
+        if line.trim().is_empty() {
+            bail!("the correction is empty");
+        }
+        let head = self.head()?;
+        let records = crate::store::Records::load(&self.git, &head)?;
+        let job_id = records.resolve(job_ref)?;
+        let job = records.jobs.get(job_id.as_str()).expect("resolved").clone();
+        match job.state() {
+            JobState::Proposed | JobState::Declined => {}
+            other => bail!(
+                "job {} is {}; only a proposed or declined job can be corrected",
+                job_id,
+                other.name()
+            ),
+        }
+        let jc = JobConfig::at(&self.git, &head)?;
+        let max = jc.config.budget.max_readings;
+        let n = job.readings.iter().map(|r| r.n).max().unwrap_or(0);
+        if n >= max {
+            bail!(
+                "job {job_id} already has {n} readings, the most a job may have; close it and ask again with a fuller request"
+            );
+        }
+        let redactor = Redactor::new(&jc.config)?;
+        let request = job
+            .request
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("job {job_id} has no request record"))?;
+        let line = redactor.redact(line.trim())?;
+        let mut files = Vec::new();
+        let mut intervention_id = None;
+        if let Some(previous) = job.latest_reading() {
+            let answer = previous.question.is_some();
+            let id = RecordId::generate(crate::now());
+            let intervention = Intervention {
+                id: id.clone(),
+                at: crate::now(),
+                what: if answer {
+                    format!(
+                        "Answered the reader's question on reading {}: {line}",
+                        previous.n
+                    )
+                } else {
+                    format!("Corrected reading {}: {line}", previous.n)
+                },
+                why: if answer {
+                    "The reader asked a question that the repository and the defaults did not settle.".into()
+                } else {
+                    "The reading did not match what the user meant.".into()
+                },
+                class_of_work: previous.class_of_work.clone(),
+                category: if answer {
+                    InterventionCategory::AnsweredQuestion
+                } else {
+                    InterventionCategory::CorrectedOutput
+                },
+                job: Some(job_id.clone()),
+                source: InterventionSource::Observed,
+                with_staged_changes: false,
+            };
+            files.push(NewFile::record(&AnyRecord::Correction(Correction {
+                job: job_id.clone(),
+                n: previous.n,
+                at: crate::now(),
+                kind: if answer {
+                    CorrectionKind::Answer
+                } else {
+                    CorrectionKind::Correction
+                },
+                text: line.clone(),
+                intervention: id.clone(),
+            })));
+            files.push(NewFile::record(&AnyRecord::Intervention(intervention)));
+            intervention_id = Some(id);
+        }
+        // Earlier readings, each followed by the line that answered or corrected it.
+        let mut corrections: BTreeMap<u32, String> = job
+            .corrections
+            .iter()
+            .map(|c| (c.n, c.text.clone()))
+            .collect();
+        if let Some(previous) = job.latest_reading() {
+            corrections.insert(previous.n, line.clone());
+        }
+        let history: Vec<(Reading, Option<String>)> = job
+            .readings
+            .iter()
+            .map(|r| (r.clone(), corrections.get(&r.n).cloned()))
+            .collect();
+        let seq = job.next_seq();
+        let spent = job.spent_usd();
+        let (reading, invocation, error) = self.read_for(
+            &jc,
+            &records,
+            &job_id,
+            &request,
+            &history,
+            n + 1,
+            seq,
+            spent,
+            &redactor,
+            ui,
+        )?;
+        files.push(NewFile::record(&AnyRecord::Invocation(Box::new(
+            invocation.clone(),
+        ))));
+        if let Some(r) = &reading {
+            files.push(NewFile::record(&AnyRecord::Reading(Box::new(r.clone()))));
+        }
+        let subject = match &reading {
+            Some(r) => format!("Read again after a correction: {}", r.title),
+            None => "Read again after a correction (the reader failed)".to_string(),
+        };
+        let mut trailers = vec![("Athena-Job", job_id.as_str().to_string())];
+        if let Some(id) = &intervention_id {
+            trailers.push(("Athena-Intervention", id.as_str().to_string()));
+        }
+        let body = "The user's one-line correction, the intervention it implies, and the new reading with its forecasts.";
+        let commit = self.commit_records(&files, &message(&subject, body, &trailers))?;
+        Ok(Proposal {
+            job: job_id,
+            reading,
+            reader_error: error,
+            spent_usd: spent + invocation.cost.best_lower(),
+            invocation: Some(invocation),
+            commit,
+        })
+    }
+}
+
+/// The records of a job at the current commit.
+pub fn job_records(athena: &Athena, job_ref: &str) -> Result<(Records, JobRecords)> {
+    let head = athena.head()?;
+    let records = Records::load(&athena.git, &head)?;
+    let id = records.resolve(job_ref)?;
+    let job = records.jobs.get(id.as_str()).expect("resolved").clone();
+    Ok((records, job))
+}
