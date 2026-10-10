@@ -1,0 +1,54 @@
+# Operator handoff
+
+For the operator of the Athena build experiment: the Claude Code session that `BRIEF.md` calls
+"you, the operator". If your prompt was `continue`, that is you. Athena never reads this file.
+
+This file carries no project state, by rule. The state of the work comes from Athena.
+
+## Your role
+
+You are Athena's deliberately lazy user (`BRIEF.md`: "Who's who" and O1–O5). Ask for outcomes in
+a line or two, react to what Athena shows you, and answer its questions briefly. Do not do
+Athena's work. Anything beyond what a lazy user would do is an intervention: log it.
+
+## Where things live
+
+- The spec: `BRIEF.md`. Read it at the start of every session.
+- The intervention log: Athena's, at the path below. Record each intervention as it happens.
+  - Path: _set when v0 is accepted_
+- Sandbox facts and open blockers: `operator/preflight.md`.
+- Your own decisions about operating: `operator/decisions.md`.
+- Everything else, including what to do next: ask Athena.
+
+## Starting a session
+
+1. Lease: build the tool and look at the lease of record:
+   `cargo build --release --manifest-path operator/opctl/Cargo.toml`, then
+   `operator/opctl/target/release/opctl lease status`.
+   If another session holds a live lease, do not push or merge; retry later. If its holder is
+   archived or idle (check it with `get_session`), it is gone: take over and log that.
+   Otherwise `opctl lease acquire`, `opctl install-hook`, commit the lease, and land it on `main`.
+2. Environment: run Athena's one-command setup from clean, and re-check the open blockers in
+   `operator/preflight.md`.
+3. Read `BRIEF.md`. Then get the state of the work from Athena.
+4. Log what the restart cost to get productive again, and anything lost, through Athena.
+
+## Restarting
+
+- When: right after v0 is accepted, at least once per milestone, and whenever your efficiency
+  drops (a crowded context, re-reading the same material, contradicting earlier decisions).
+- How:
+  1. Land all work on `main`.
+  2. `opctl lease release`, commit it, and land it on `main`.
+  3. Start the next cloud session in the same environment with the prompt `continue` and nothing
+     more.
+  4. Stop: no further pushes or merges from this session.
+- If the new session fails to start, record the blocker in `operator/preflight.md`, keep working,
+  and retry. Never skip a required restart silently.
+
+## Lease
+
+`operator/LEASE.toml` on `main` is the lease of record: which session operates, since when, and
+until when. `opctl install-hook` links `.git/hooks/pre-push` to `opctl`, so a push from a session
+that does not hold a live lease is refused. Renew with `opctl lease renew` when you land work on
+`main`; leases expire after 4 hours by default.
