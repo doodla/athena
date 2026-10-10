@@ -610,6 +610,12 @@ fn check_cargo(
             allowed.join(", ")
         ));
     }
+    if sub == "fmt" && !policy.writes && !args[i + 1..].iter().any(|(a, _)| *a == "--check") {
+        return Err(format!(
+            "cargo fmt rewrites files; the {} role may run `cargo fmt --check`",
+            policy.role.as_str()
+        ));
+    }
     let mut rest = args[i + 1..].iter();
     while let Some((arg, _)) = rest.next() {
         let (name, inline) = match arg.split_once('=') {
@@ -908,6 +914,14 @@ mod tests {
             bash(&verifier, "cargo clippy --fix"),
             Decision::Deny(_)
         ));
+        assert!(
+            matches!(bash(&verifier, "cargo fmt --all"), Decision::Deny(_)),
+            "fmt without --check writes"
+        );
+        assert_eq!(
+            bash(&verifier, "cargo fmt --all --check"),
+            Decision::NoObjection
+        );
     }
 
     #[test]
