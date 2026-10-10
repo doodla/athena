@@ -69,14 +69,18 @@ pub fn run_check(spec: &CheckSpec, ctx: &CheckContext<'_>) -> Result<CheckRun> {
         .run
         .split_first()
         .ok_or_else(|| anyhow::anyhow!("check {} has no command", spec.name))?;
+    // One open file shared by both streams: two separate opens would each write from offset 0 and
+    // overwrite each other, losing the harness's summary lines (acceptance verification 1, m2).
+    let stdout = output_file.reopen()?;
+    let stderr = stdout.try_clone()?;
     let mut cmd = Command::new(program);
     cmd.args(args)
         .env_clear()
         .envs(ctx.env)
         .current_dir(ctx.dir)
         .stdin(Stdio::null())
-        .stdout(Stdio::from(output_file.reopen()?))
-        .stderr(Stdio::from(output_file.reopen()?));
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr));
     isolate(&mut cmd);
     let mut child = match cmd.spawn() {
         Ok(child) => child,
@@ -201,6 +205,38 @@ mod tests {
             kind: CheckKind::Test,
         };
         assert!(run_check(&real, &ctx).unwrap().passed);
+    }
+
+    #[test]
+    fn test_counts_survive_output_on_both_streams() {
+        // m2 of acceptance verification 1: with stdout and stderr interleaved, every summary line counts.
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let registry = Registry::new(state.path());
+        let redactor = Redactor::new(&athena_gate::builtin_config()).unwrap();
+        let env = BTreeMap::from([("PATH".to_string(), std::env::var("PATH").unwrap())]);
+        let ctx = CheckContext {
+            dir: dir.path(),
+            env: &env,
+            timeout: Duration::from_secs(30),
+            registry: &registry,
+            job: "j",
+            redactor: &redactor,
+        };
+        let noisy = CheckSpec {
+            name: "test".into(),
+            run: vec![
+                "sh".into(),
+                "-c".into(),
+                "i=0; while [ $i -lt 200 ]; do echo '   Compiling something on stderr' >&2; \
+                 echo 'test result: ok. 1 passed; 0 failed; 0 ignored'; i=$((i+1)); done"
+                    .into(),
+            ],
+            kind: CheckKind::Test,
+        };
+        let run = run_check(&noisy, &ctx).unwrap();
+        assert_eq!(run.tests_ran, Some(200));
+        assert!(run.passed);
     }
 
     #[test]
