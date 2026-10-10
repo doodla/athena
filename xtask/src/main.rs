@@ -101,6 +101,7 @@ fn found(program: &str, arg: &str) -> Option<String> {
 }
 
 fn setup(flags: &Flags) -> Result<()> {
+    refuse_inside_a_job(std::env::var_os("ATHENA_NESTED"))?;
     let root = repo_root();
     let config = Config::parse(&std::fs::read_to_string(root.join("athena.toml"))?)
         .map_err(|e| anyhow!("athena.toml: {e}"))?;
@@ -162,6 +163,30 @@ fn setup(flags: &Flags) -> Result<()> {
     );
     println!("next: athena ask \"<a one-line request>\"   (or: athena status)");
     Ok(())
+}
+
+/// Setup changes the machine: it installs tools and adopts the binary the git hooks run. Agents and checks
+/// run with the nested-run marker set, and none of them may do that (acceptance verification 1, m4).
+fn refuse_inside_a_job(marker: Option<std::ffi::OsString>) -> Result<()> {
+    match marker.filter(|v| !v.is_empty()) {
+        Some(job) => bail!(
+            "setup does not run inside an Athena job (ATHENA_NESTED={}): it installs tools and adopts the \
+             binary that the git hooks run, for the whole machine",
+            job.to_string_lossy()
+        ),
+        None => Ok(()),
+    }
+}
+
+/// The path of the `athena` binary in cargo's `--message-format=json` output, wherever the target
+/// directory is (`CARGO_TARGET_DIR` included; acceptance verification 1, m5).
+fn built_binary(messages: &str) -> Option<PathBuf> {
+    messages
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|m| m["reason"] == "compiler-artifact" && m["target"]["name"] == "athena")
+        .filter_map(|m| m["executable"].as_str().map(PathBuf::from))
+        .next_back()
 }
 
 fn install_gitleaks(config: &Config) -> Result<()> {
@@ -245,13 +270,23 @@ fn build_and_adopt(root: &Path, flags: &Flags) -> Result<PathBuf> {
              Commit or stash them, or adopt anyway with --allow-dirty"
         );
     }
-    run(Command::new("cargo")
-        .args(["build", "--release", "--locked", "-p", "athena-cli"])
-        // These two feed `athena --version` through wiring::build_info().
-        .env("ATHENA_BUILD_COMMIT", &commit)
-        .env("ATHENA_BUILD_DIRTY", if dirty { "true" } else { "false" })
-        .current_dir(root))?;
-    let built = root.join("target/release/athena");
+    let messages = output(
+        Command::new("cargo")
+            .args([
+                "build",
+                "--release",
+                "--locked",
+                "-p",
+                "athena-cli",
+                "--message-format=json-render-diagnostics",
+            ])
+            // These two feed `athena --version` through wiring::build_info().
+            .env("ATHENA_BUILD_COMMIT", &commit)
+            .env("ATHENA_BUILD_DIRTY", if dirty { "true" } else { "false" })
+            .current_dir(root),
+    )?;
+    let built = built_binary(&messages)
+        .ok_or_else(|| anyhow!("cargo built athena but did not say where"))?;
     let adopted = paths::athena_home().join("bin/athena");
     std::fs::create_dir_all(adopted.parent().expect("bin has a parent"))?;
     let same = std::fs::read(&adopted).ok() == Some(std::fs::read(&built)?);
@@ -449,4 +484,32 @@ fn set_executable(_path: &Path) -> Result<()> {
 #[cfg(not(unix))]
 fn symlink(_target: &Path, _link: &Path) -> Result<()> {
     bail!("Athena's git hooks are symlinks, which need a Unix-like system")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn setup_refuses_inside_a_job() {
+        assert!(refuse_inside_a_job(Some("20261010-153012-k7q2".into())).is_err());
+        assert!(refuse_inside_a_job(Some("".into())).is_ok());
+        assert!(refuse_inside_a_job(None).is_ok());
+    }
+
+    #[test]
+    fn the_built_binary_is_found_wherever_cargo_put_it() {
+        let messages = concat!(
+            r#"{"reason":"compiler-artifact","target":{"name":"athena_cli","kind":["lib"]},"executable":null}"#,
+            "\n",
+            r#"{"reason":"compiler-artifact","target":{"name":"athena","kind":["bin"]},"executable":"/elsewhere/release/athena"}"#,
+            "\n",
+            r#"{"reason":"build-finished","success":true}"#,
+        );
+        assert_eq!(
+            built_binary(messages),
+            Some(PathBuf::from("/elsewhere/release/athena"))
+        );
+        assert_eq!(built_binary(r#"{"reason":"build-finished"}"#), None);
+    }
 }

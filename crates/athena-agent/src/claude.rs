@@ -11,6 +11,7 @@ use crate::{
     AgentDriver, AgentInvocation, AgentOutput, DriverError, UsageSink, nested_marker, refuse_nested,
 };
 use athena_data::records::{DriverInfo, InvocationOutcome};
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -175,6 +176,51 @@ pub fn check_hermetic(args: &[OsString]) -> Result<(), String> {
     Ok(())
 }
 
+/// The longest project folder name Claude Code uses before it shortens the name and adds a hash.
+const PROJECT_NAME_MAX: usize = 200;
+
+/// Claude Code's name for a working directory's project folder: every character that is not an ASCII
+/// letter or digit becomes `-`.
+pub fn project_dir_name(workdir: &Path) -> String {
+    workdir
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
+/// Removes what Claude Code leaves under its configuration directory after a run, even with
+/// `--no-session-persistence`: the project folder named after the working directory, where it spills large
+/// tool results, and the run's empty session folder. Agents work only in per-job snapshots, so both belong
+/// to this invocation alone (acceptance verification 1, m4).
+pub fn remove_host_traces(env: &BTreeMap<String, String>, workdir: &Path, session: Option<&str>) {
+    let config = match env.get("CLAUDE_CONFIG_DIR").filter(|v| !v.is_empty()) {
+        Some(dir) => PathBuf::from(dir),
+        None => match env.get("HOME").filter(|v| !v.is_empty()) {
+            Some(home) => Path::new(home).join(".claude"),
+            None => return,
+        },
+    };
+    let name = project_dir_name(workdir);
+    let projects = config.join("projects");
+    if name.len() <= PROJECT_NAME_MAX {
+        let _ = std::fs::remove_dir_all(projects.join(&name));
+    } else if let Ok(entries) = std::fs::read_dir(&projects) {
+        let prefix = &name[..PROJECT_NAME_MAX];
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().starts_with(prefix) {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+    }
+    if let Some(id) =
+        session.filter(|id| !id.is_empty() && id.chars().all(|c| c.is_ascii_hexdigit() || c == '-'))
+    {
+        // `remove_dir` removes only an empty folder.
+        let _ = std::fs::remove_dir(config.join("session-env").join(id));
+    }
+}
+
 fn shell_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
 }
@@ -280,6 +326,7 @@ impl AgentDriver for ClaudeCodeDriver {
         let _ = reader.join();
         let _ = child.wait();
         self.registry.unregister(pgid);
+        remove_host_traces(&spec.env, &spec.workdir, state.session_id.as_deref());
         let ended_at = jiff::Timestamp::now();
         let wall_s = clock.elapsed().as_secs_f64();
         let stderr_tail = std::fs::read_to_string(&stderr_file)
@@ -464,7 +511,12 @@ mod stand_in_tests {
     const STAND_IN: &str = r#"#!/bin/sh
 if [ "$1" = "--version" ]; then echo "2.1.296 (Claude Code)"; exit 0; fi
 cat > /dev/null
-echo '{"type":"system","subtype":"init"}'
+echo '{"type":"system","subtype":"init","session_id":"0c32611b-5c0a-43eb-bacb-20a90569b268"}'
+if [ "$MODE" = "spill" ]; then
+  d="$HOME/.claude/projects/$(pwd | sed 's/[^A-Za-z0-9]/-/g')/0c32611b-5c0a-43eb-bacb-20a90569b268/tool-results"
+  mkdir -p "$d" && echo 'a large tool result' > "$d/toolu_1.txt"
+  mkdir -p "$HOME/.claude/session-env/0c32611b-5c0a-43eb-bacb-20a90569b268"
+fi
 echo '{"type":"assistant","message":{"id":"msg_1","model":"claude-haiku-5-5","content":[{"type":"tool_use","id":"tu_1","name":"Bash","input":{"command":"cargo test"}}],"usage":{"input_tokens":3,"cache_creation_input_tokens":100,"cache_read_input_tokens":0,"output_tokens":7}}}'
 if [ "$MODE" = "hang" ]; then sleep 60; exit 0; fi
 echo '{"type":"result","subtype":"success","is_error":false,"num_turns":2,"duration_api_ms":900,"total_cost_usd":0.002,"usage":{"input_tokens":5,"cache_creation_input_tokens":120,"cache_read_input_tokens":40,"output_tokens":60},"modelUsage":{"claude-haiku-5-5":{"inputTokens":5,"outputTokens":60,"cacheReadInputTokens":40,"cacheCreationInputTokens":120,"costUSD":0.002}},"permission_denials":[],"structured_output":{"answer":42}}'
@@ -550,6 +602,40 @@ echo '{"type":"result","subtype":"success","is_error":false,"num_turns":2,"durat
         assert_eq!(out.structured.unwrap()["answer"], 42);
         assert_eq!(out.commands_run, vec!["cargo test".to_string()]);
         assert!(!sink.0.is_empty(), "usage was persisted as it accrued");
+    }
+
+    #[test]
+    fn claude_codes_leftovers_are_removed_after_each_run() {
+        // m4 of acceptance verification 1: the project folder Claude Code names after the snapshot, where
+        // it spills large tool results, and the run's empty session folder do not outlive the run. Other
+        // folders under the configuration directory are left alone.
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let other = home.path().join(".claude/projects/-home-someone-project");
+        std::fs::create_dir_all(&other).unwrap();
+        let driver = driver(stand_in(dir.path()), Registry::new(state.path()));
+        let mut invocation = spec(dir.path(), "spill", Duration::from_secs(30));
+        invocation
+            .env
+            .insert("HOME".to_string(), home.path().display().to_string());
+        let out = driver
+            .invoke(&invocation, &mut Recorder::default())
+            .unwrap();
+        assert_eq!(out.outcome, InvocationOutcome::Success);
+        let projects = home.path().join(".claude/projects");
+        assert!(
+            !projects.join(project_dir_name(dir.path())).exists(),
+            "the snapshot's project folder is gone"
+        );
+        assert!(
+            !home
+                .path()
+                .join(".claude/session-env/0c32611b-5c0a-43eb-bacb-20a90569b268")
+                .exists(),
+            "the session folder is gone"
+        );
+        assert!(other.exists(), "nothing else is touched");
     }
 
     #[test]

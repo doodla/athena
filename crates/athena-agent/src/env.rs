@@ -8,6 +8,8 @@
 //! - `GIT_CEILING_DIRECTORIES` (the snapshot's parent), `GIT_CONFIG_GLOBAL=/dev/null`, and
 //!   `GIT_CONFIG_NOSYSTEM=1`, so git inside the snapshot finds nothing of the user's;
 //! - the nested-run marker, `ATHENA_NESTED=<job>`;
+//! - `ATHENA_STATE_DIR` inside the job's own directory, so an Athena that an agent or a check runs keeps
+//!   its state (kill switch, locks, scratch repositories) there and never in the user's (D56);
 //! - the capability's environment, with `{job_dir}` and `{side}` filled in. A build directory outside the
 //!   job's own directory is refused, so one job's checks never run another job's build (D46).
 
@@ -39,6 +41,9 @@ impl Side {
 
 /// Variables that name build output locations; each must lie inside the job's own directory.
 pub const BUILD_DIR_VARS: [&str; 2] = ["CARGO_TARGET_DIR", "CARGO_BUILD_TARGET_DIR"];
+
+/// Where an Athena run inside a job keeps its state, relative to the job's directory.
+pub const NESTED_STATE_DIR: &str = "athena-state";
 
 /// What an environment is built from.
 #[derive(Debug, Clone)]
@@ -87,6 +92,10 @@ pub fn build(
     env.insert("GIT_CONFIG_GLOBAL".into(), "/dev/null".into());
     env.insert("GIT_CONFIG_NOSYSTEM".into(), "1".into());
     env.insert(NESTED_ENV.into(), spec.job.to_string());
+    env.insert(
+        "ATHENA_STATE_DIR".into(),
+        spec.job_dir.join(NESTED_STATE_DIR).display().to_string(),
+    );
     for (key, template) in spec.capability_env {
         let value = template
             .replace("{job_dir}", &spec.job_dir.display().to_string())
@@ -184,6 +193,10 @@ mod tests {
         assert_eq!(
             env[NESTED_ENV], "20261010-153012-k7q2",
             "M25: the nested-run marker is set"
+        );
+        assert_eq!(
+            env["ATHENA_STATE_DIR"], "/state/jobs/20261010-153012-k7q2/athena-state",
+            "an Athena run inside the job keeps its state in the job's directory"
         );
         assert_eq!(
             env["CARGO_TARGET_DIR"],

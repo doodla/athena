@@ -36,6 +36,8 @@ pub struct StreamState {
     bash: Vec<(String, String)>,
     tools_used: BTreeSet<String>,
     pub result: Option<ResultEvent>,
+    /// The session id Claude Code gave the run, from the first event that names one.
+    pub session_id: Option<String>,
     pub lines: usize,
     pub unparsed: usize,
 }
@@ -65,6 +67,12 @@ impl StreamState {
             self.unparsed += 1;
             return;
         };
+        if self.session_id.is_none() {
+            self.session_id = event
+                .get("session_id")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+        }
         match event.get("type").and_then(Value::as_str) {
             Some("assistant") => self.on_assistant(&event),
             Some("result") => self.result = Some(parse_result(&event)),
