@@ -238,7 +238,16 @@ fn violations(findings: Vec<Finding>, commit: Option<&str>) -> Vec<Violation> {
 /// Secrets in the staged changes (the `pre-commit` hook), under the parent's `[secrets]`.
 pub fn check_staged(git: &Git, config: &Config) -> Result<Vec<Violation>> {
     let gitleaks = Gitleaks::new(config)?;
-    Ok(violations(gitleaks.scan_staged(git)?, None))
+    // The findings name the temporary scan commit, which the user never sees; report the staged change.
+    let findings = gitleaks
+        .scan_staged(git)?
+        .into_iter()
+        .map(|f| Finding {
+            commit: String::new(),
+            ..f
+        })
+        .collect();
+    Ok(violations(findings, None))
 }
 
 /// Secrets in one commit, under its parent's `[secrets]` (Athena's in-process gate).
