@@ -213,6 +213,17 @@ impl Athena {
             producer_models: jc.config.models.producer_allowed.clone(),
             producer_default: jc.config.models.producer_default.clone(),
             listing: listing(&snapshot_dir),
+            verifier_can_run: self
+                .capabilities
+                .iter()
+                .filter(|c| jc.config.capability(c.id()).is_some())
+                .map(|c| {
+                    let mut lines =
+                        athena_agent::policy::describe_commands(&c.verifier_grant(jc).commands);
+                    lines.push("cargo fmt only with --check".into());
+                    (c.id().to_string(), lines)
+                })
+                .collect(),
         });
         let capability_ids: Vec<String> = self
             .capabilities

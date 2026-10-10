@@ -337,10 +337,12 @@ pub struct ReaderInputs {
     pub producer_models: Vec<String>,
     pub producer_default: String,
     pub listing: Vec<String>,
+    /// Per capability, what its verifier can run: behavior criteria must be exercisable with these.
+    pub verifier_can_run: Vec<(String, Vec<String>)>,
 }
 
 /// The reader brief: the request, earlier readings and corrections, the reference forecast, the closed
-/// lists, and the repository's top level.
+/// lists, what the verifier can run, and the repository's top level.
 pub fn reader_brief(inputs: &ReaderInputs) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "# Request (verbatim)\n\n{}\n", quote(&inputs.request));
@@ -389,6 +391,17 @@ pub fn reader_brief(inputs: &ReaderInputs) -> String {
         inputs.producer_models.join(", "),
         inputs.producer_default
     );
+    if !inputs.verifier_can_run.is_empty() {
+        let _ = writeln!(
+            out,
+            "# What the verifier can run\n\nThe verifier exercises behavior criteria only with these commands, from the repository root, \
+             with no environment variables of its own, no other programs, and no writes. Write behavior criteria it can check this way.\n"
+        );
+        for (capability, lines) in &inputs.verifier_can_run {
+            let _ = writeln!(out, "{capability}: {}", lines.join("; "));
+        }
+        out.push('\n');
+    }
     let _ = writeln!(out, "# Repository top level\n");
     list(&mut out, &inputs.listing, "(empty)");
     let _ = writeln!(out, "\nEnd with the reading as your structured output.");
@@ -537,8 +550,13 @@ mod tests {
             producer_models: vec!["claude-haiku-5-5".into()],
             producer_default: "claude-haiku-5-5".into(),
             listing: vec!["README.md".into()],
+            verifier_can_run: vec![("change".into(), vec!["cargo test".into()])],
         });
         assert!(brief.contains("> call it CHANGES.md"));
+        assert!(
+            brief.contains("change: cargo test"),
+            "the reader knows what the verifier can run"
+        );
         assert!(brief.contains("p_reading_accepted 0.80"));
         assert!(brief.contains("- README.md"));
     }
