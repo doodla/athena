@@ -247,6 +247,7 @@ fn build_and_adopt(root: &Path, flags: &Flags) -> Result<PathBuf> {
     }
     run(Command::new("cargo")
         .args(["build", "--release", "--locked", "-p", "athena-cli"])
+        // These two feed `athena --version` through wiring::build_info().
         .env("ATHENA_BUILD_COMMIT", &commit)
         .env("ATHENA_BUILD_DIRTY", if dirty { "true" } else { "false" })
         .current_dir(root))?;

@@ -21,6 +21,10 @@ checks downloads against pinned SHA-256 sums, and reads credentials only to repo
 authenticate. It never stores them. It needs git 2.40 or later, a C linker, curl, and either Claude Code
 2.1.296 or npm to install it. `./setup.sh --ci` stops after building Athena.
 
+`athena --version` prints the package version and the commit the binary was built from, for example
+`athena 0.1.0 (commit 0123abc…, dirty)`. A build that names no commit shows `unknown`, and any build that
+is not a clean commit shows `dirty`.
+
 ## What happens when you ask
 
 ```text

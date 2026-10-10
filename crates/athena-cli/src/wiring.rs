@@ -31,6 +31,13 @@ pub fn build_info() -> Build {
     }
 }
 
+/// The text `athena --version` shows after the name: the package version, the source commit, and a
+/// `dirty` marker when the build does not name a clean commit.
+pub fn version_string(build: &Build) -> String {
+    let dirty = if build.dirty { ", dirty" } else { "" };
+    format!("{} (commit {}{dirty})", build.version, build.source_commit)
+}
+
 /// The Claude Code binary setup chose: `$ATHENA_HOME/config.toml`'s `claude_bin`, else `claude` on `PATH`.
 pub fn claude_bin() -> PathBuf {
     let config = athena_data::paths::athena_home().join("config.toml");

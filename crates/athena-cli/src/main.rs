@@ -9,7 +9,7 @@ use athena_core::reading::Proposal;
 use athena_core::run::GoResult;
 use athena_core::{Athena, Ui};
 use athena_data::records::{AcceptedBy, OutcomeState};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -17,7 +17,6 @@ use std::process::ExitCode;
 #[derive(Parser, Debug)]
 #[command(
     name = "athena",
-    version,
     about = "Take a lazy request, show how it was read and what is predicted, run it on a sub-agent, verify it independently, and land a traceable commit."
 )]
 struct Cli {
@@ -154,7 +153,13 @@ fn main() -> ExitCode {
     if name == "pre-commit" || name == "commit-msg" {
         return ExitCode::from(hooks::git_hook(&name, &args[1..]) as u8);
     }
-    let cli = Cli::parse();
+    let version: &'static str =
+        Box::leak(wiring::version_string(&wiring::build_info()).into_boxed_str());
+    let matches = Cli::command().version(version).get_matches();
+    let cli = match Cli::from_arg_matches(&matches) {
+        Ok(cli) => cli,
+        Err(error) => error.exit(),
+    };
     match run(cli) {
         Ok(code) => ExitCode::from(code),
         Err(error) => {
