@@ -1,0 +1,556 @@
+//! Briefs: the job-specific user prompts of the three roles (design §7.1, §7.2).
+//!
+//! Briefs are Markdown generated deterministically from records. They carry pointers rather than dumps:
+//! the request, the reading, and paths. Only the verifier's brief inlines content, the diff, because the
+//! diff is the artifact under judgment. No brief carries a prediction: the producer works toward the
+//! criteria, not toward a forecast, and the verifier judges the artifact, not anyone's expectations.
+
+use athena_data::DefaultsModel;
+use athena_data::records::{CriterionKind, DeliverableAction, Forecast, Reading};
+use std::fmt::Write;
+
+/// The largest diff the verifier's brief inlines; a larger one is read with `git diff HEAD~1`.
+pub const MAX_INLINE_DIFF_BYTES: usize = 40 * 1024;
+
+/// What the reader sees of a capability in its catalog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityCard {
+    pub id: &'static str,
+    pub purpose: &'static str,
+    pub when: &'static str,
+    pub produces: &'static str,
+}
+
+/// The capability catalog component of the reader's system prompt.
+pub fn render_catalog(cards: &[CapabilityCard]) -> String {
+    let mut out = String::from("# Capability catalog\n\n");
+    for card in cards {
+        let _ = writeln!(
+            out,
+            "- {}: {} Use it {} It produces {}",
+            card.id, card.purpose, card.when, card.produces
+        );
+    }
+    out
+}
+
+/// A default that applies to the job, with how it applies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppliedDefault {
+    pub id: String,
+    pub statement: String,
+    pub how: String,
+}
+
+/// The accepted reading as the producer and verifier see it: no forecasts, no probabilities.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AcceptedReading {
+    pub n: u32,
+    pub title: String,
+    pub summary: String,
+    pub assumptions: Vec<String>,
+    pub criteria: Vec<(String, CriterionKind)>,
+    pub deliverables: Vec<(String, DeliverableAction, bool)>,
+    pub out_of_scope: Vec<String>,
+    pub defaults: Vec<AppliedDefault>,
+}
+
+impl AcceptedReading {
+    /// Builds the view from a reading record and the defaults model it was made under. `governance`
+    /// tells whether a path is a governance file, so the brief can name it as such.
+    pub fn new(
+        reading: &Reading,
+        defaults: &DefaultsModel,
+        governance: impl Fn(&str) -> bool,
+    ) -> Self {
+        AcceptedReading {
+            n: reading.n,
+            title: reading.title.clone(),
+            summary: reading.summary.clone(),
+            assumptions: reading.assumptions.clone(),
+            criteria: reading
+                .acceptance_criteria
+                .iter()
+                .map(|c| (c.text.clone(), c.kind))
+                .collect(),
+            deliverables: reading
+                .deliverables
+                .iter()
+                .map(|d| (d.path.clone(), d.action, governance(&d.path)))
+                .collect(),
+            out_of_scope: reading.out_of_scope.clone(),
+            defaults: reading
+                .defaults_applied
+                .iter()
+                .map(|d| AppliedDefault {
+                    id: d.id.clone(),
+                    statement: defaults
+                        .get(&d.id)
+                        .map(|x| x.statement.clone())
+                        .unwrap_or_else(|| "(not in the defaults model)".into()),
+                    how: d.how.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// A check Athena will run, by name and command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckView {
+    pub name: String,
+    pub command: String,
+}
+
+fn kind(kind: CriterionKind) -> &'static str {
+    match kind {
+        CriterionKind::Content => "content",
+        CriterionKind::Behavior => "behavior",
+    }
+}
+
+fn action(action: DeliverableAction) -> &'static str {
+    match action {
+        DeliverableAction::Create => "create",
+        DeliverableAction::Modify => "modify",
+        DeliverableAction::Delete => "delete",
+    }
+}
+
+fn list(out: &mut String, items: &[String], empty: &str) {
+    if items.is_empty() {
+        let _ = writeln!(out, "{empty}");
+    }
+    for item in items {
+        let _ = writeln!(out, "- {item}");
+    }
+}
+
+fn reading_sections(out: &mut String, reading: &AcceptedReading) {
+    let _ = writeln!(
+        out,
+        "## Reading (accepted by the user)\n\n{}\n",
+        reading.summary.trim()
+    );
+    if !reading.assumptions.is_empty() {
+        let _ = writeln!(out, "Assumptions:");
+        list(out, &reading.assumptions, "");
+        out.push('\n');
+    }
+    let _ = writeln!(out, "## Acceptance criteria\n");
+    for (i, (text, k)) in reading.criteria.iter().enumerate() {
+        let _ = writeln!(out, "{}. [{}] {}", i + 1, kind(*k), text);
+    }
+    let _ = writeln!(out, "\n## Expected deliverables\n");
+    if reading.deliverables.is_empty() {
+        let _ = writeln!(out, "(none listed)");
+    }
+    for (path, a, governance) in &reading.deliverables {
+        let note = if *governance {
+            " (a governance file: allowed because the reading lists it)"
+        } else {
+            ""
+        };
+        let _ = writeln!(out, "- {path} ({}){note}", action(*a));
+    }
+    let _ = writeln!(out, "\n## Out of scope\n");
+    list(out, &reading.out_of_scope, "(nothing stated)");
+    let _ = writeln!(out, "\n## User defaults that apply\n");
+    if reading.defaults.is_empty() {
+        let _ = writeln!(out, "(none named)");
+    }
+    for d in &reading.defaults {
+        let _ = writeln!(
+            out,
+            "- {}: {} Here: {}",
+            d.id,
+            d.statement.trim(),
+            d.how.trim()
+        );
+    }
+    out.push('\n');
+}
+
+/// Everything the producer's brief is built from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProducerInputs {
+    pub job: String,
+    pub request: String,
+    pub reading: AcceptedReading,
+    pub checks: Vec<CheckView>,
+    pub commands: Vec<String>,
+}
+
+/// The producer brief (design §7.1), stored verbatim as `brief-producer.md`.
+pub fn producer_brief(inputs: &ProducerInputs) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "# Job {}: {}\n", inputs.job, inputs.reading.title);
+    let _ = writeln!(out, "## Request (verbatim)\n\n{}\n", quote(&inputs.request));
+    reading_sections(&mut out, &inputs.reading);
+    let _ = writeln!(out, "## Checks Athena will run\n");
+    for check in &inputs.checks {
+        let _ = writeln!(out, "- {}: `{}`", check.name, check.command);
+    }
+    let _ = writeln!(
+        out,
+        "\nYou may run them first. Athena runs them again on your result, with the base commit's tool configuration.\n"
+    );
+    let _ = writeln!(out, "## Commands Bash may run\n");
+    list(&mut out, &inputs.commands, "(none)");
+    let _ = writeln!(
+        out,
+        "\n## Working directory\n\nA snapshot of the base commit's files, with a one-commit git repository of its own. \
+         records/, the owner's private files, and history are absent by design. Your edits become the candidate.\n"
+    );
+    let _ = writeln!(
+        out,
+        "## Report\n\nEnd with the producer report as your structured output."
+    );
+    out
+}
+
+/// What the core shows the verifier of the candidate: built from git, never from the producer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CandidateView {
+    pub base: String,
+    pub candidate: String,
+    /// `git diff --stat HEAD~1` in the verifier's snapshot.
+    pub stat: String,
+    /// `git diff HEAD~1`, inlined when it is small enough.
+    pub diff: String,
+}
+
+/// One check result as the verifier sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckResultView {
+    pub name: String,
+    pub command: String,
+    pub passed: bool,
+    pub detail: String,
+}
+
+/// The verifier's inputs. No field can carry the producer's report, commands, reasoning, or cost, and
+/// nothing here holds a forecast (design §6.3, M8).
+#[derive(Debug, Clone, PartialEq)]
+pub struct VerifierInputs {
+    pub job: String,
+    pub request: String,
+    pub reading: AcceptedReading,
+    pub candidate: CandidateView,
+    pub checks: Vec<CheckResultView>,
+    pub commands: Vec<String>,
+    /// Tool-configuration files whose base versions are in the working tree for this verification.
+    pub tool_config_from_base: Vec<String>,
+}
+
+impl VerifierInputs {
+    /// The names of the inputs, recorded in `verification.json`.
+    pub fn names(&self) -> Vec<String> {
+        [
+            "request",
+            "accepted reading",
+            "acceptance criteria",
+            "deliverables and out of scope",
+            "applicable defaults",
+            "candidate diff and stat",
+            "check results",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect()
+    }
+}
+
+/// The verifier brief (design §7.2). With `inline_diff` false, the diff is elided, as stored in the record.
+pub fn verifier_brief(inputs: &VerifierInputs, inline_diff: bool) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "# Job {}: verify \"{}\"\n",
+        inputs.job, inputs.reading.title
+    );
+    let _ = writeln!(out, "## Request (verbatim)\n\n{}\n", quote(&inputs.request));
+    reading_sections(&mut out, &inputs.reading);
+    let c = &inputs.candidate;
+    let _ = writeln!(
+        out,
+        "## The change\n\nBase {} → candidate {}. In your working directory, `git diff HEAD~1` shows it.\n",
+        short(&c.base),
+        short(&c.candidate)
+    );
+    let _ = writeln!(out, "```text\n{}\n```\n", c.stat.trim_end());
+    if !inputs.tool_config_from_base.is_empty() {
+        let _ = writeln!(
+            out,
+            "The working tree holds the base's version of these tool-configuration files, so the checks and your commands \
+             run under the rules in force at dispatch; the candidate's versions are in the candidate commit: {}.\n",
+            inputs.tool_config_from_base.join(", ")
+        );
+    }
+    if !inline_diff {
+        let _ = writeln!(
+            out,
+            "(The diff was inlined for the verifier; it is elided in this record.)\n"
+        );
+    } else if c.diff.len() <= MAX_INLINE_DIFF_BYTES {
+        let _ = writeln!(out, "```diff\n{}\n```\n", c.diff.trim_end());
+    } else {
+        let _ = writeln!(
+            out,
+            "(The diff is {} bytes, too large to inline: read it with `git diff HEAD~1`.)\n",
+            c.diff.len()
+        );
+    }
+    let _ = writeln!(out, "## Checks Athena ran on this tree\n");
+    for check in &inputs.checks {
+        let _ = writeln!(
+            out,
+            "- {}: `{}` {}{}",
+            check.name,
+            check.command,
+            if check.passed { "passed" } else { "failed" },
+            if check.detail.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", check.detail)
+            }
+        );
+    }
+    let _ = writeln!(out, "\n## Commands Bash may run\n");
+    list(&mut out, &inputs.commands, "(none)");
+    let _ = writeln!(
+        out,
+        "\n## Verdict\n\nEnd with the verdict as your structured output: one criteria entry per acceptance criterion, in order."
+    );
+    out
+}
+
+/// Everything the reader's brief is built from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReaderInputs {
+    pub request: String,
+    /// Earlier readings and the corrections or answers that followed each, oldest first.
+    pub history: Vec<(Reading, Option<String>)>,
+    pub reference: Forecast,
+    pub reference_basis: String,
+    pub classes: Vec<String>,
+    pub producer_models: Vec<String>,
+    pub producer_default: String,
+    pub listing: Vec<String>,
+}
+
+/// The reader brief: the request, earlier readings and corrections, the reference forecast, the closed
+/// lists, and the repository's top level.
+pub fn reader_brief(inputs: &ReaderInputs) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "# Request (verbatim)\n\n{}\n", quote(&inputs.request));
+    if !inputs.history.is_empty() {
+        let _ = writeln!(out, "# Earlier readings\n");
+        for (reading, followed_by) in &inputs.history {
+            let _ = writeln!(out, "Reading {}: {}", reading.n, reading.summary.trim());
+            for c in &reading.acceptance_criteria {
+                let _ = writeln!(out, "  - [{}] {}", kind(c.kind), c.text);
+            }
+            if let Some(q) = &reading.question {
+                let _ = writeln!(out, "  Question asked: {q}");
+            }
+            match followed_by {
+                Some(line) => {
+                    let _ = writeln!(out, "  The user replied: {}\n", quote(line));
+                }
+                None => out.push('\n'),
+            }
+        }
+        let _ = writeln!(
+            out,
+            "Read the request again with the user's replies; they take precedence over earlier readings.\n"
+        );
+    }
+    let r = &inputs.reference;
+    let _ = writeln!(
+        out,
+        "# Reference forecast\n\n{}\n\np_reading_accepted {:.2} · p_verification_passes {:.2} · p_user_intervenes {:.2}\n\
+         cost_usd p10 {} p50 {} p90 {} · wall_time_s p10 {} p50 {} p90 {}\n",
+        inputs.reference_basis,
+        r.p_reading_accepted,
+        r.p_verification_passes,
+        r.p_user_intervenes,
+        r.cost_usd.p10(),
+        r.cost_usd.p50(),
+        r.cost_usd.p90(),
+        r.wall_time_s.p10(),
+        r.wall_time_s.p50(),
+        r.wall_time_s.p90()
+    );
+    let _ = writeln!(
+        out,
+        "# Closed lists\n\nclass_of_work: {}\nproducer_model: {} (default {})\n",
+        inputs.classes.join(", "),
+        inputs.producer_models.join(", "),
+        inputs.producer_default
+    );
+    let _ = writeln!(out, "# Repository top level\n");
+    list(&mut out, &inputs.listing, "(empty)");
+    let _ = writeln!(out, "\nEnd with the reading as your structured output.");
+    out
+}
+
+/// Quotes user text as a Markdown block quote, so it reads as data inside the brief.
+fn quote(text: &str) -> String {
+    text.lines()
+        .map(|l| format!("> {l}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn short(id: &str) -> &str {
+    &id[..id.len().min(12)]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use athena_data::JobId;
+    use athena_data::records::{Criterion, DefaultApplied, Deliverable, Forecasts, Quantiles};
+
+    pub(crate) fn reading() -> Reading {
+        let f = Forecast {
+            p_reading_accepted: 0.8,
+            p_verification_passes: 0.7,
+            p_user_intervenes: 0.1,
+            cost_usd: Quantiles::new(0.2, 0.5, 1.5).unwrap(),
+            wall_time_s: Quantiles::new(100.0, 300.0, 900.0).unwrap(),
+        };
+        Reading {
+            job: JobId::parse("20261010-153012-k7q2").unwrap(),
+            n: 1,
+            at: "2026-10-10T15:30:12Z".parse().unwrap(),
+            invocation_seq: 1,
+            base_commit: "a".repeat(40),
+            config_sha256: "b".repeat(64),
+            defaults_sha256: "c".repeat(64),
+            defaults_version: 1,
+            title: "Add a changelog".into(),
+            summary: "Create CHANGELOG.md.".into(),
+            class_of_work: "docs".into(),
+            capability: Some("change".into()),
+            decline_reason: None,
+            producer_model: "claude-haiku-5-5".into(),
+            verifier_model: "claude-opus-5-5".into(),
+            defaults_applied: vec![DefaultApplied {
+                id: "strangers".into(),
+                how: "plain prose".into(),
+            }],
+            assumptions: vec!["No release is tagged.".into()],
+            question: None,
+            acceptance_criteria: vec![
+                Criterion {
+                    text: "CHANGELOG.md exists".into(),
+                    kind: CriterionKind::Content,
+                },
+                Criterion {
+                    text: "cargo test passes".into(),
+                    kind: CriterionKind::Behavior,
+                },
+            ],
+            deliverables: vec![Deliverable {
+                path: "CHANGELOG.md".into(),
+                action: DeliverableAction::Create,
+                p: 0.97,
+            }],
+            out_of_scope: vec![],
+            forecasts: Forecasts {
+                reader: f.clone(),
+                reference: f,
+            },
+            departures: None,
+        }
+    }
+
+    fn defaults() -> DefaultsModel {
+        DefaultsModel::parse(include_str!("../../../defaults.toml")).unwrap()
+    }
+
+    #[test]
+    fn producer_briefs_carry_no_predictions() {
+        let accepted = AcceptedReading::new(&reading(), &defaults(), |_| false);
+        let brief = producer_brief(&ProducerInputs {
+            job: "20261010-153012-k7q2".into(),
+            request: "add a changelog".into(),
+            reading: accepted,
+            checks: vec![CheckView {
+                name: "test".into(),
+                command: "cargo test --locked".into(),
+            }],
+            commands: vec!["cargo test".into()],
+        });
+        assert!(brief.contains("## Acceptance criteria"));
+        assert!(brief.contains("1. [content] CHANGELOG.md exists"));
+        assert!(brief.contains(
+            "strangers: Code, commits, docs, and records are written for an outside reader."
+        ));
+        for forecast in ["0.97", "0.8", "p10", "cost"] {
+            assert!(
+                !brief.contains(forecast),
+                "the producer brief must not contain {forecast}"
+            );
+        }
+    }
+
+    #[test]
+    fn verifier_briefs_inline_small_diffs_and_elide_them_in_the_record() {
+        let inputs = VerifierInputs {
+            job: "20261010-153012-k7q2".into(),
+            request: "add a changelog".into(),
+            reading: AcceptedReading::new(&reading(), &defaults(), |_| false),
+            candidate: CandidateView {
+                base: "1".repeat(40),
+                candidate: "2".repeat(40),
+                stat: " CHANGELOG.md | 3 +++".into(),
+                diff: "+# Changelog".into(),
+            },
+            checks: vec![CheckResultView {
+                name: "test".into(),
+                command: "cargo test".into(),
+                passed: true,
+                detail: "12 tests".into(),
+            }],
+            commands: vec!["cargo test".into()],
+            tool_config_from_base: vec![],
+        };
+        assert!(verifier_brief(&inputs, true).contains("+# Changelog"));
+        let recorded = verifier_brief(&inputs, false);
+        assert!(!recorded.contains("+# Changelog"));
+        assert!(recorded.contains("elided"));
+        assert!(!recorded.contains("0.97"));
+    }
+
+    #[test]
+    fn reader_briefs_carry_corrections_and_the_reference() {
+        let r = reading();
+        let brief = reader_brief(&ReaderInputs {
+            request: "add a changelog".into(),
+            history: vec![(r.clone(), Some("call it CHANGES.md".into()))],
+            reference: r.forecasts.reference.clone(),
+            reference_basis: "priors".into(),
+            classes: vec!["docs".into()],
+            producer_models: vec!["claude-haiku-5-5".into()],
+            producer_default: "claude-haiku-5-5".into(),
+            listing: vec!["README.md".into()],
+        });
+        assert!(brief.contains("> call it CHANGES.md"));
+        assert!(brief.contains("p_reading_accepted 0.80"));
+        assert!(brief.contains("- README.md"));
+    }
+
+    #[test]
+    fn catalogs_list_cards() {
+        let text = render_catalog(&[CapabilityCard {
+            id: "change",
+            purpose: "A change.",
+            when: "for edits.",
+            produces: "a commit.",
+        }]);
+        assert!(text.contains("- change: A change. Use it for edits. It produces a commit."));
+    }
+}

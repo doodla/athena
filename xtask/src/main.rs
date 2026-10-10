@@ -19,7 +19,9 @@ fn main() -> ExitCode {
         Some("setup") => setup(&Flags::parse(&args[1..])),
         Some("ci") => ci(),
         _ => {
-            eprintln!("usage: cargo run -p xtask -- setup [--ci] [--force] [--allow-dirty]\n       cargo run -p xtask -- ci");
+            eprintln!(
+                "usage: cargo run -p xtask -- setup [--ci] [--force] [--allow-dirty]\n       cargo run -p xtask -- ci"
+            );
             return ExitCode::from(2);
         }
     };
@@ -50,7 +52,10 @@ impl Flags {
 }
 
 fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("xtask lives in the repository").to_path_buf()
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("xtask lives in the repository")
+        .to_path_buf()
 }
 
 fn step(name: &str) {
@@ -59,7 +64,9 @@ fn step(name: &str) {
 
 fn run(cmd: &mut Command) -> Result<()> {
     let shown = format!("{cmd:?}");
-    let status = cmd.status().with_context(|| format!("could not run {shown}"))?;
+    let status = cmd
+        .status()
+        .with_context(|| format!("could not run {shown}"))?;
     if !status.success() {
         bail!("{shown} failed with {status}");
     }
@@ -68,7 +75,10 @@ fn run(cmd: &mut Command) -> Result<()> {
 
 fn output(cmd: &mut Command) -> Result<String> {
     let shown = format!("{cmd:?}");
-    let out = cmd.stderr(Stdio::inherit()).output().with_context(|| format!("could not run {shown}"))?;
+    let out = cmd
+        .stderr(Stdio::inherit())
+        .output()
+        .with_context(|| format!("could not run {shown}"))?;
     if !out.status.success() {
         bail!("{shown} failed with {}", out.status);
     }
@@ -76,8 +86,18 @@ fn output(cmd: &mut Command) -> Result<String> {
 }
 
 fn found(program: &str, arg: &str) -> Option<String> {
-    let out = Command::new(program).arg(arg).stderr(Stdio::null()).output().ok()?;
-    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).lines().next().unwrap_or("").to_string())
+    let out = Command::new(program)
+        .arg(arg)
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    out.status.success().then(|| {
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_string()
+    })
 }
 
 fn setup(flags: &Flags) -> Result<()> {
@@ -86,23 +106,33 @@ fn setup(flags: &Flags) -> Result<()> {
         .map_err(|e| anyhow!("athena.toml: {e}"))?;
 
     step("1. Prerequisites");
-    let git = found("git", "--version").ok_or_else(|| anyhow!("git is required; install git 2.40 or later"))?;
+    let git = found("git", "--version")
+        .ok_or_else(|| anyhow!("git is required; install git 2.40 or later"))?;
     let version = git.split_whitespace().nth(2).unwrap_or("0.0");
     let mut parts = version.split('.').map(|p| p.parse::<u32>().unwrap_or(0));
     let (major, minor) = (parts.next().unwrap_or(0), parts.next().unwrap_or(0));
     if (major, minor) < (2, 40) {
-        bail!("git {version} is too old: Athena needs 2.40 or later (check-attr --source, merge-tree --merge-base)");
+        bail!(
+            "git {version} is too old: Athena needs 2.40 or later (check-attr --source, merge-tree --merge-base)"
+        );
     }
     println!("git {version}");
-    let cc = found("cc", "--version")
-        .ok_or_else(|| anyhow!("a C linker (cc) is required by cargo; install your platform's build tools"))?;
+    let cc = found("cc", "--version").ok_or_else(|| {
+        anyhow!("a C linker (cc) is required by cargo; install your platform's build tools")
+    })?;
     println!("cc: {cc}");
-    let curl = found("curl", "--version").ok_or_else(|| anyhow!("curl is required to download pinned tools"))?;
+    let curl = found("curl", "--version")
+        .ok_or_else(|| anyhow!("curl is required to download pinned tools"))?;
     println!("{}", curl.split(' ').take(2).collect::<Vec<_>>().join(" "));
 
     step("2. Toolchain and crates");
-    println!("{}", output(Command::new("rustc").arg("--version").current_dir(&root))?);
-    run(Command::new("cargo").args(["fetch", "--locked"]).current_dir(&root))?;
+    println!(
+        "{}",
+        output(Command::new("rustc").arg("--version").current_dir(&root))?
+    );
+    run(Command::new("cargo")
+        .args(["fetch", "--locked"])
+        .current_dir(&root))?;
 
     step("3. gitleaks");
     install_gitleaks(&config)?;
@@ -125,7 +155,11 @@ fn setup(flags: &Flags) -> Result<()> {
     check_credentials(&claude);
 
     step("Ready");
-    println!("athena {} adopted at {}", env!("CARGO_PKG_VERSION"), binary.display());
+    println!(
+        "athena {} adopted at {}",
+        env!("CARGO_PKG_VERSION"),
+        binary.display()
+    );
     println!("next: athena ask \"<a one-line request>\"   (or: athena status)");
     Ok(())
 }
@@ -137,11 +171,19 @@ fn install_gitleaks(config: &Config) -> Result<()> {
         && let Some(v) = found(target.to_str().unwrap_or(""), "version")
         && v.trim() == pin.version
     {
-        println!("gitleaks {} already installed at {}", pin.version, target.display());
+        println!(
+            "gitleaks {} already installed at {}",
+            pin.version,
+            target.display()
+        );
         return Ok(());
     }
-    let platform = paths::platform_key().ok_or_else(|| anyhow!("no gitleaks pin for this platform"))?;
-    let expected = pin.sha256.get(platform).ok_or_else(|| anyhow!("athena.toml pins no gitleaks checksum for {platform}"))?;
+    let platform =
+        paths::platform_key().ok_or_else(|| anyhow!("no gitleaks pin for this platform"))?;
+    let expected = pin
+        .sha256
+        .get(platform)
+        .ok_or_else(|| anyhow!("athena.toml pins no gitleaks checksum for {platform}"))?;
     let url = format!(
         "https://github.com/gitleaks/gitleaks/releases/download/v{v}/gitleaks_{v}_{platform}.tar.gz",
         v = pin.version
@@ -149,11 +191,19 @@ fn install_gitleaks(config: &Config) -> Result<()> {
     let dir = tempfile::tempdir()?;
     let archive = dir.path().join("gitleaks.tar.gz");
     println!("downloading {url}");
-    run(Command::new("curl").args(["-fsSL", "--retry", "3", "-o"]).arg(&archive).arg(&url))?;
+    run(Command::new("curl")
+        .args(["-fsSL", "--retry", "3", "-o"])
+        .arg(&archive)
+        .arg(&url))?;
     let bytes = std::fs::read(&archive)?;
-    let actual: String = Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
+    let actual: String = Sha256::digest(&bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
     if &actual != expected {
-        bail!("gitleaks archive checksum mismatch: expected {expected}, got {actual}; refusing to install");
+        bail!(
+            "gitleaks archive checksum mismatch: expected {expected}, got {actual}; refusing to install"
+        );
     }
     println!("sha256 verified: {actual}");
     let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(bytes.as_slice()));
@@ -178,8 +228,16 @@ fn install_gitleaks(config: &Config) -> Result<()> {
 }
 
 fn build_and_adopt(root: &Path, flags: &Flags) -> Result<PathBuf> {
-    let commit = output(Command::new("git").args(["rev-parse", "HEAD"]).current_dir(root))?;
-    let status = output(Command::new("git").args(["status", "--porcelain"]).current_dir(root))?;
+    let commit = output(
+        Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(root),
+    )?;
+    let status = output(
+        Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(root),
+    )?;
     let dirty = !status.is_empty();
     if dirty && !flags.allow_dirty {
         bail!(
@@ -197,13 +255,22 @@ fn build_and_adopt(root: &Path, flags: &Flags) -> Result<PathBuf> {
     std::fs::create_dir_all(adopted.parent().expect("bin has a parent"))?;
     let same = std::fs::read(&adopted).ok() == Some(std::fs::read(&built)?);
     if same {
-        println!("athena at {} is already this build ({})", adopted.display(), &commit[..12]);
+        println!(
+            "athena at {} is already this build ({})",
+            adopted.display(),
+            &commit[..12]
+        );
     } else {
         let partial = adopted.with_extension("partial");
         std::fs::copy(&built, &partial)?;
         set_executable(&partial)?;
         std::fs::rename(&partial, &adopted)?;
-        println!("adopted athena built from {}{} at {}", &commit[..12], if dirty { " (dirty)" } else { "" }, adopted.display());
+        println!(
+            "adopted athena built from {}{} at {}",
+            &commit[..12],
+            if dirty { " (dirty)" } else { "" },
+            adopted.display()
+        );
     }
     if let Some(home) = std::env::var_os("HOME") {
         let local_bin = PathBuf::from(home).join(".local/bin");
@@ -218,13 +285,26 @@ fn build_and_adopt(root: &Path, flags: &Flags) -> Result<PathBuf> {
         }
         let on_path = std::env::var_os("PATH")
             .is_some_and(|p| std::env::split_paths(&p).any(|d| d == local_bin));
-        println!("{} -> {}{}", link.display(), adopted.display(), if on_path { "" } else { "  (add ~/.local/bin to PATH)" });
+        println!(
+            "{} -> {}{}",
+            link.display(),
+            adopted.display(),
+            if on_path {
+                ""
+            } else {
+                "  (add ~/.local/bin to PATH)"
+            }
+        );
     }
     Ok(adopted)
 }
 
 fn install_hooks(root: &Path, binary: &Path, force: bool) -> Result<()> {
-    let common = output(Command::new("git").args(["rev-parse", "--path-format=absolute", "--git-common-dir"]).current_dir(root))?;
+    let common = output(
+        Command::new("git")
+            .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+            .current_dir(root),
+    )?;
     let hooks = PathBuf::from(common).join("hooks");
     std::fs::create_dir_all(&hooks)?;
     for name in ["pre-commit", "commit-msg"] {
@@ -259,7 +339,11 @@ fn ensure_claude(config: &Config) -> Result<PathBuf> {
         if let Some(text) = found(candidate.to_str().unwrap_or("claude"), "--version")
             && text.split_whitespace().next() == Some(pin.as_str())
         {
-            let resolved = if candidate == Path::new("claude") { which("claude").unwrap_or(candidate) } else { candidate };
+            let resolved = if candidate == Path::new("claude") {
+                which("claude").unwrap_or(candidate)
+            } else {
+                candidate
+            };
             write_machine_config(&resolved)?;
             println!("Claude Code {pin} at {}", resolved.display());
             return Ok(resolved);
@@ -270,19 +354,27 @@ fn ensure_claude(config: &Config) -> Result<PathBuf> {
     })?;
     println!("installing Claude Code {pin} privately with npm {npm}");
     std::fs::create_dir_all(&local)?;
-    run(Command::new("npm").args(["install", "--no-fund", "--no-audit", "--prefix"]).arg(&local).arg(format!("@anthropic-ai/claude-code@{pin}")))?;
+    run(Command::new("npm")
+        .args(["install", "--no-fund", "--no-audit", "--prefix"])
+        .arg(&local)
+        .arg(format!("@anthropic-ai/claude-code@{pin}")))?;
     write_machine_config(&private)?;
     Ok(private)
 }
 
 fn which(program: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).map(|d| d.join(program)).find(|p| p.is_file())
+    std::env::split_paths(&path)
+        .map(|d| d.join(program))
+        .find(|p| p.is_file())
 }
 
 fn write_machine_config(claude: &Path) -> Result<()> {
     let file = paths::athena_home().join("config.toml");
-    let text = format!("# Machine-local settings written by setup. Not committed.\nclaude_bin = {:?}\n", claude.to_string_lossy());
+    let text = format!(
+        "# Machine-local settings written by setup. Not committed.\nclaude_bin = {:?}\n",
+        claude.to_string_lossy()
+    );
     if std::fs::read_to_string(&file).ok().as_deref() != Some(text.as_str()) {
         std::fs::create_dir_all(file.parent().expect("config has a parent"))?;
         std::fs::write(&file, text)?;
@@ -292,15 +384,22 @@ fn write_machine_config(claude: &Path) -> Result<()> {
 
 fn check_credentials(claude: &Path) {
     // `claude auth status` reports whether Claude Code can authenticate, without a model call (E20).
-    let out = Command::new(claude).args(["auth", "status"]).stderr(Stdio::null()).output();
+    let out = Command::new(claude)
+        .args(["auth", "status"])
+        .stderr(Stdio::null())
+        .output();
     let logged_in = out
         .ok()
         .and_then(|o| serde_json::from_slice::<serde_json::Value>(&o.stdout).ok())
         .and_then(|v| v.get("loggedIn").and_then(serde_json::Value::as_bool));
     match logged_in {
         Some(true) => println!("Claude Code can authenticate."),
-        Some(false) => println!("Claude Code is not logged in: run `claude` once to log in, or set ANTHROPIC_API_KEY."),
-        None => println!("could not read `claude auth status`; Athena's agents may fail to authenticate."),
+        Some(false) => println!(
+            "Claude Code is not logged in: run `claude` once to log in, or set ANTHROPIC_API_KEY."
+        ),
+        None => println!(
+            "could not read `claude auth status`; Athena's agents may fail to authenticate."
+        ),
     }
 }
 
@@ -308,7 +407,17 @@ fn ci() -> Result<()> {
     let root = repo_root();
     for (name, args) in [
         ("fmt", vec!["fmt", "--all", "--check"]),
-        ("clippy", vec!["clippy", "--all-targets", "--locked", "--", "-D", "warnings"]),
+        (
+            "clippy",
+            vec![
+                "clippy",
+                "--all-targets",
+                "--locked",
+                "--",
+                "-D",
+                "warnings",
+            ],
+        ),
         ("test", vec!["test", "--locked"]),
     ] {
         step(name);

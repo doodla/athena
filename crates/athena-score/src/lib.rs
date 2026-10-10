@@ -21,7 +21,8 @@ use athena_data::{JobId, RecordId};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The rules and their version, recorded in every score.
-pub const RULES: &str = "brier events; brier-sum deliverables; wis-log 80% (alpha 0.2) quantities; v1";
+pub const RULES: &str =
+    "brier events; brier-sum deliverables; wis-log 80% (alpha 0.2) quantities; v1";
 /// Floors applied before taking logs, so a job that cost nothing still scores (M4).
 pub const COST_FLOOR_USD: f64 = 0.001;
 pub const TIME_FLOOR_S: f64 = 1.0;
@@ -70,7 +71,13 @@ pub fn deliverable_score(listed: &[(String, f64)], changed: &BTreeSet<String>) -
             let listed = forecast.contains_key(path);
             let p = forecast.get(path).copied().unwrap_or(0.0);
             let was_changed = changed.contains(path);
-            DeliverableTerm { path: path.to_string(), p, listed, changed: was_changed, brier: brier(p, was_changed) }
+            DeliverableTerm {
+                path: path.to_string(),
+                p,
+                listed,
+                changed: was_changed,
+                brier: brier(p, was_changed),
+            }
         })
         .collect();
     let sum = terms.iter().map(|t| t.brier).sum();
@@ -91,19 +98,28 @@ pub struct PastJob {
 /// The reference forecast for a job of `class`, from the configured priors and the resolved history.
 pub fn reference_forecast(priors: &ReferencePriors, class: &str, history: &[PastJob]) -> Forecast {
     let class_jobs: Vec<&PastJob> = history.iter().filter(|j| j.class == class).collect();
-    let pool: Vec<&PastJob> =
-        if class_jobs.len() >= MIN_CLASS_HISTORY { class_jobs } else { history.iter().collect() };
+    let pool: Vec<&PastJob> = if class_jobs.len() >= MIN_CLASS_HISTORY {
+        class_jobs
+    } else {
+        history.iter().collect()
+    };
     let k = priors.pseudo_count;
     let posterior = |p0: f64, outcomes: Vec<bool>| {
         let n = outcomes.len() as f64;
         let successes = outcomes.iter().filter(|o| **o).count() as f64;
         (k * p0 + successes) / (k + n)
     };
-    let accepted: Vec<bool> = pool.iter().flat_map(|j| j.reading_accepted.iter().copied()).collect();
+    let accepted: Vec<bool> = pool
+        .iter()
+        .flat_map(|j| j.reading_accepted.iter().copied())
+        .collect();
     let passed: Vec<bool> = pool.iter().filter_map(|j| j.verification_passed).collect();
     let intervened: Vec<bool> = pool.iter().filter_map(|j| j.user_intervened).collect();
     let costs: Vec<f64> = pool.iter().filter_map(|j| j.cost_execution_usd).collect();
-    let times: Vec<f64> = pool.iter().filter_map(|j| j.wall_time_execution_s).collect();
+    let times: Vec<f64> = pool
+        .iter()
+        .filter_map(|j| j.wall_time_execution_s)
+        .collect();
     Forecast {
         p_reading_accepted: posterior(priors.p_reading_accepted, accepted),
         p_verification_passes: posterior(priors.p_verification_passes, passed),
@@ -115,7 +131,8 @@ pub fn reference_forecast(priors: &ReferencePriors, class: &str, history: &[Past
 
 /// Empirical 10th, 50th, and 90th percentiles in log space once there are enough values; the prior before.
 fn empirical_quantiles(values: &[f64], prior: QuantilePrior, floor: f64) -> Quantiles {
-    let from_prior = || Quantiles::new(prior.p10, prior.p50, prior.p90).expect("validated priors are ordered");
+    let from_prior =
+        || Quantiles::new(prior.p10, prior.p50, prior.p90).expect("validated priors are ordered");
     if values.len() < MIN_CLASS_HISTORY {
         return from_prior();
     }
@@ -165,13 +182,31 @@ pub fn score_job(
     resolution: &Resolution,
 ) -> Score {
     let mut events = Vec::new();
-    let event = |name: &str, reading: u32, reader: f64, reference: f64, outcome: Option<bool>, provisional: bool| {
-        let forecasts = BTreeMap::from([("reader".to_string(), reader), ("reference".to_string(), reference)]);
+    let event = |name: &str,
+                 reading: u32,
+                 reader: f64,
+                 reference: f64,
+                 outcome: Option<bool>,
+                 provisional: bool| {
+        let forecasts = BTreeMap::from([
+            ("reader".to_string(), reader),
+            ("reference".to_string(), reference),
+        ]);
         let brier = match outcome {
-            Some(o) => forecasts.iter().map(|(k, p)| (k.clone(), brier(*p, o))).collect(),
+            Some(o) => forecasts
+                .iter()
+                .map(|(k, p)| (k.clone(), brier(*p, o)))
+                .collect(),
             None => BTreeMap::new(),
         };
-        EventScore { event: name.to_string(), reading, forecasts, outcome, brier, provisional }
+        EventScore {
+            event: name.to_string(),
+            reading,
+            forecasts,
+            outcome,
+            brier,
+            provisional,
+        }
     };
     for r in readings {
         let outcome = resolution.reading_accepted.get(&r.n).copied().flatten();
@@ -204,30 +239,59 @@ pub fn score_job(
             Some(resolution.user_intervened),
             resolution.intervention_provisional,
         ));
-        deliverables = Some(deliverable_score(&r.deliverables, &resolution.changed_paths));
-        let mut quantity = |name: &str, actual: Option<f64>, floor: f64, pick: fn(&Forecast) -> Quantiles| {
-            if let Some(actual) = actual {
-                let forecasts = [("reader", &r.reader), ("reference", &r.reference)]
-                    .into_iter()
-                    .map(|(name, f)| {
-                        let q = pick(f);
-                        let (wis, inside) = wis_log(&q, actual, floor);
-                        (
-                            name.to_string(),
-                            QuantileScore { p10: q.p10(), p50: q.p50(), p90: q.p90(), wis, inside_80: inside },
-                        )
-                    })
-                    .collect();
-                quantities.push(QuantityScore { quantity: name.to_string(), actual, floor, forecasts });
-            }
-        };
-        quantity("cost_usd", resolution.cost_execution_usd, COST_FLOOR_USD, |f| f.cost_usd);
-        quantity("wall_time_s", resolution.wall_time_execution_s, TIME_FLOOR_S, |f| f.wall_time_s);
+        deliverables = Some(deliverable_score(
+            &r.deliverables,
+            &resolution.changed_paths,
+        ));
+        let mut quantity =
+            |name: &str, actual: Option<f64>, floor: f64, pick: fn(&Forecast) -> Quantiles| {
+                if let Some(actual) = actual {
+                    let forecasts = [("reader", &r.reader), ("reference", &r.reference)]
+                        .into_iter()
+                        .map(|(name, f)| {
+                            let q = pick(f);
+                            let (wis, inside) = wis_log(&q, actual, floor);
+                            (
+                                name.to_string(),
+                                QuantileScore {
+                                    p10: q.p10(),
+                                    p50: q.p50(),
+                                    p90: q.p90(),
+                                    wis,
+                                    inside_80: inside,
+                                },
+                            )
+                        })
+                        .collect();
+                    quantities.push(QuantityScore {
+                        quantity: name.to_string(),
+                        actual,
+                        floor,
+                        forecasts,
+                    });
+                }
+            };
+        quantity(
+            "cost_usd",
+            resolution.cost_execution_usd,
+            COST_FLOOR_USD,
+            |f| f.cost_usd,
+        );
+        quantity(
+            "wall_time_s",
+            resolution.wall_time_execution_s,
+            TIME_FLOOR_S,
+            |f| f.wall_time_s,
+        );
     }
     let models = (!resolution.models_expected.is_empty()).then(|| {
         let expected: BTreeSet<&String> = resolution.models_expected.iter().collect();
-        let unexpected: Vec<String> =
-            resolution.models_observed.iter().filter(|m| !expected.contains(m)).cloned().collect();
+        let unexpected: Vec<String> = resolution
+            .models_observed
+            .iter()
+            .filter(|m| !expected.contains(m))
+            .cloned()
+            .collect();
         ModelsCheck {
             expected: resolution.models_expected.clone(),
             observed: resolution.models_observed.clone(),
@@ -235,7 +299,16 @@ pub fn score_job(
             unexpected,
         }
     });
-    Score { job: job.clone(), at, rules: RULES.to_string(), cause, events, deliverables, quantities, models }
+    Score {
+        job: job.clone(),
+        at,
+        rules: RULES.to_string(),
+        cause,
+        events,
+        deliverables,
+        quantities,
+        models,
+    }
 }
 
 /// Summed scores for one forecaster over a set of jobs.
@@ -320,7 +393,10 @@ mod tests {
                 .map(|i| i as f64 / 1000.0)
                 .min_by(|a, b| expected(*a).partial_cmp(&expected(*b)).unwrap())
                 .unwrap();
-            assert!((best - true_p).abs() <= 0.001, "true {true_p}, best report {best}");
+            assert!(
+                (best - true_p).abs() <= 0.001,
+                "true {true_p}, best report {best}"
+            );
         }
     }
 
@@ -348,7 +424,12 @@ mod tests {
     fn wis_median_term_is_proper_for_the_median() {
         // The pinball loss at the median: among candidate medians, the sample median scores best.
         let actuals = [1.0, 2.0, 2.5, 3.0, 10.0];
-        let total = |m: f64| actuals.iter().map(|a| wis_log(&q(m, m, m), *a, TIME_FLOOR_S).0).sum::<f64>();
+        let total = |m: f64| {
+            actuals
+                .iter()
+                .map(|a| wis_log(&q(m, m, m), *a, TIME_FLOOR_S).0)
+                .sum::<f64>()
+        };
         let best = [1.0, 2.0, 2.5, 3.0, 10.0]
             .into_iter()
             .min_by(|a, b| total(*a).partial_cmp(&total(*b)).unwrap())
@@ -392,7 +473,10 @@ mod tests {
 
     #[test]
     fn reference_uses_priors_without_history_and_moves_with_it() {
-        let priors = athena_data::Config::parse(include_str!("../../../athena.toml")).unwrap().forecast.reference;
+        let priors = athena_data::Config::parse(include_str!("../../../athena.toml"))
+            .unwrap()
+            .forecast
+            .reference;
         let none = reference_forecast(&priors, "docs", &[]);
         assert!((none.p_verification_passes - priors.p_verification_passes).abs() < 1e-12);
         assert_eq!(none.cost_usd.p50(), priors.cost_usd.p50);
@@ -446,12 +530,20 @@ mod tests {
         let at: jiff::Timestamp = "2026-10-10T16:00:00Z".parse().unwrap();
         let score = score_job(&job, at, None, &[reading], Some(1), &resolution);
         assert_eq!(score.events.len(), 3);
-        assert!(score.events.iter().any(|e| e.event == "user_intervenes" && e.provisional));
+        assert!(
+            score
+                .events
+                .iter()
+                .any(|e| e.event == "user_intervenes" && e.provisional)
+        );
         assert!(score.models.as_ref().unwrap().as_expected);
         let few: Vec<&Score> = std::iter::repeat_n(&score, 9).collect();
         assert_eq!(aggregate(&few).event_skill, None);
         let enough: Vec<&Score> = std::iter::repeat_n(&score, 10).collect();
         let skill = aggregate(&enough).event_skill.unwrap();
-        assert!(skill > 0.0, "a sharp, correct reader beats the base rate: {skill}");
+        assert!(
+            skill > 0.0,
+            "a sharp, correct reader beats the base rate: {skill}"
+        );
     }
 }
