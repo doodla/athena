@@ -8,12 +8,14 @@
 //!
 //! Every check judges a change by the rules of its parent commit, never by rules the change itself makes
 //! (D38). The checks are: secrets ([`secrets`]), append-only and valid records, size, and personal data
-//! ([`content`]), the governed-content invariant and the prediction trailer ([`invariant`]), and
-//! reconciliation of usage records ([`reconcile`]). [`redact`] scrubs agent free text before it is recorded.
+//! ([`content`]), the governed-content invariant and the prediction trailer ([`invariant`]), a job's
+//! records judged as a set ([`jobs`]), and reconciliation of usage records ([`reconcile`]). [`redact`]
+//! scrubs agent free text before it is recorded.
 
 pub mod content;
 pub mod history;
 pub mod invariant;
+pub mod jobs;
 pub mod reconcile;
 pub mod records;
 pub mod redact;
@@ -44,6 +46,7 @@ pub enum Rule {
     Configuration,
     Invariant,
     Prediction,
+    JobRecords,
     Reconciliation,
 }
 
@@ -60,6 +63,7 @@ impl Rule {
                 "governed content changes only through a verified landing, a declared intervention, or the open bootstrap range"
             }
             Rule::Prediction => "the prediction precedes the outcome",
+            Rule::JobRecords => "scores and outcomes follow from the job's own records",
             Rule::Reconciliation => "usage records reconcile",
         }
     }
@@ -302,6 +306,7 @@ pub fn gate(git: &Git, change: &Change, scope: Scope) -> Result<Vec<Violation>> 
         }
         Scope::CommitMsg => {
             violations.extend(invariant::check(git, change, &judged, None)?);
+            violations.extend(jobs::check(git, change, &judged, None)?);
         }
         Scope::Commit => {
             let commit = change
@@ -317,6 +322,7 @@ pub fn gate(git: &Git, change: &Change, scope: Scope) -> Result<Vec<Violation>> 
             violations.extend(content::check(git, change, &judged, None)?);
             violations.extend(invariant::check(git, change, &judged, None)?);
             violations.extend(invariant::check_prediction(git, change)?);
+            violations.extend(jobs::check(git, change, &judged, None)?);
             violations.extend(reconcile::check_tree(git, &change.tree)?);
         }
     }

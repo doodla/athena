@@ -3,7 +3,7 @@
 use crate::capability::JobConfig;
 use crate::commits::{NewFile, message};
 use crate::invocation::{PartialUsage, interrupted_record};
-use crate::scoring::{Happened, rescore, score, totals};
+use crate::scoring::{Closing, rescore, score, totals};
 use crate::store::{JobRecords, JobState, Records};
 use crate::{Athena, Ui};
 use anyhow::{Context, Result, bail};
@@ -84,20 +84,18 @@ impl Athena {
         let config = JobConfig::at(&self.git, &head)?.config;
         let redactor = self.redactor(&config, Some(&id))?;
         let why = redactor.redact(why.trim())?;
-        let (state, after_blocked, mut files, invocations, happened) = match job.state() {
+        let (state, after_blocked, files, invocations) = match job.state() {
             JobState::Proposed => (
                 OutcomeState::Dropped,
                 false,
                 Vec::new(),
                 job.invocations.clone(),
-                Happened::default(),
             ),
             JobState::Declined => (
                 OutcomeState::Declined,
                 false,
                 Vec::new(),
                 job.invocations.clone(),
-                Happened::default(),
             ),
             JobState::Blocked => {
                 let outcome = job
@@ -139,15 +137,10 @@ impl Athena {
                     bail!("job {id} is running; `athena stop` terminates it first");
                 }
                 let (files, invocations) = self.recover_interrupted(&job, &config)?;
-                let happened = Happened {
-                    verification_passed: Some(false),
-                    ..Happened::default()
-                };
-                (OutcomeState::Abandoned, false, files, invocations, happened)
+                (OutcomeState::Abandoned, false, files, invocations)
             }
             JobState::Closed(state) => bail!("job {id} is already closed ({})", state.as_str()),
         };
-        let score = score(&job, &records, &invocations, &happened, None, crate::now());
         let outcome = Outcome {
             job: id.clone(),
             state,
@@ -160,8 +153,6 @@ impl Athena {
             after_blocked,
             through_commit: None,
         };
-        files.push(NewFile::record(&AnyRecord::Score(Box::new(score))));
-        files.push(NewFile::record(&AnyRecord::Outcome(Box::new(outcome))));
         let mut trailers = vec![("Athena-Job", id.as_str().to_string())];
         if let Some(n) = job.job.as_ref().and_then(|j| j.accepted_reading) {
             let path = format!("{}/reading-{n}.json", id.dir());
@@ -169,8 +160,26 @@ impl Athena {
                 trailers.push(("Athena-Prediction", prediction));
             }
         }
-        let commit = self.commit_records(
-            &files,
+        // The score reads the interventions on the commit it is built on (M27).
+        let scored_at = crate::now();
+        let commit = self.commit_records_with(
+            &|head: &str| {
+                let records = Records::load(&self.git, head)?;
+                let score = score(
+                    &job,
+                    &records,
+                    &invocations,
+                    Closing::default(),
+                    None,
+                    scored_at,
+                );
+                let mut all = files.clone();
+                all.push(NewFile::record(&AnyRecord::Score(Box::new(score))));
+                all.push(NewFile::record(&AnyRecord::Outcome(Box::new(
+                    outcome.clone(),
+                ))));
+                Ok(all)
+            },
             &message(
                 &crate::run::closing_subject(state, &job.title()),
                 &why,

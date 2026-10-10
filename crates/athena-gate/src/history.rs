@@ -2,15 +2,16 @@
 //!
 //! It runs gitleaks once over every commit reachable from the tip, under the tip's `[secrets]`, then judges
 //! every commit, oldest first, by its parent's rules: the content checks, the governed-content invariant
-//! (including the fingerprint audit of landing commits), and the prediction trailers. The two allow-lists
+//! (including the audit of landing commits), the prediction trailers, and the records each commit adds to a
+//! job, judged against the rest of the job. The two allow-lists
 //! for sensitive content, `[secrets]` and `[personal_data]`, come from the tip, where allow-listing an old
 //! false positive is legitimate. Finally it validates and reconciles every record at the tip.
 
 use crate::invariant::{HistoryState, JOB, VERIFIED_CONTENT};
 use crate::records::RecordSet;
 use crate::{
-    Change, Judged, Result, Rule, Violation, config_at, content, invariant, reconcile, secrets,
-    trailer_values,
+    Change, Judged, Result, Rule, Violation, config_at, content, invariant, jobs, reconcile,
+    secrets, trailer_values,
 };
 use athena_git::Git;
 
@@ -58,6 +59,9 @@ pub fn check_history(git: &Git, tip: &str) -> Result<HistoryReport> {
         report
             .violations
             .extend(invariant::check_prediction(git, &change)?);
+        report
+            .violations
+            .extend(jobs::check(git, &change, &judged, Some(&state))?);
         let trailers = change.trailers(git)?;
         if !trailer_values(&trailers, VERIFIED_CONTENT).is_empty() {
             for job in trailer_values(&trailers, JOB) {

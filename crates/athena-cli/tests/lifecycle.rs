@@ -828,3 +828,326 @@ fn hand_work_is_declared_with_staged_changes_and_rescores_the_job() {
         Some(&1)
     );
 }
+
+/// Commits the work tree as it is, with hooks off, the way a user who skips them would.
+fn commit_by_hand(fx: &Fixture, message: &str) -> String {
+    fx.git.run(["add", "-A"]).unwrap();
+    fx.git
+        .run(["commit", "-q", "--no-verify", "-m", message])
+        .unwrap();
+    fx.head()
+}
+
+/// What the commit-msg hook and the history check say about the commit at `HEAD`.
+fn refusals(fx: &Fixture, athena: &athena_core::Athena) -> (Vec<String>, Vec<String>) {
+    let head = fx.head();
+    let change = athena_gate::Change::of_commit(&fx.git, &head).unwrap();
+    let hook = athena_gate::gate(&fx.git, &change, athena_gate::Scope::CommitMsg)
+        .unwrap()
+        .iter()
+        .map(|v| v.to_string())
+        .collect();
+    let history = athena
+        .check_history()
+        .unwrap()
+        .violations
+        .iter()
+        .map(|v| v.to_string())
+        .collect();
+    (hook, history)
+}
+
+#[test]
+fn a_hand_written_verification_does_not_make_a_landing() {
+    // M6/M7 (blocks), acceptance verification 1, M1: a hand change dressed up with a copied
+    // verification record and the landing trailers is refused by the hook and found by the history check.
+    let fx = Fixture::new();
+    let athena = fx.athena(Scenario::default().script());
+    let proposal = athena.ask("add a greeting", &Lines::default()).unwrap();
+    let real = finished(
+        athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(real.state, OutcomeState::Landed, "{}", real.reason);
+    let prediction = real.prediction_commit.clone().unwrap();
+    let parent = fx.head();
+
+    write(fx.root(), &[("README.md", "# Demo\n\nedited by hand\n")]);
+    fx.git.run(["add", "README.md"]).unwrap();
+    let tree = fx.git.write_index_tree().unwrap();
+    let fp = athena_git::attrs::fingerprint(&fx.git, &tree, &parent).unwrap();
+    let forged_job = "20261010-142000-f0rg";
+    let forged_dir = athena_data::JobId::parse(forged_job).unwrap().dir();
+    let mut verification = real.verification.clone().unwrap();
+    verification.job = athena_data::JobId::parse(forged_job).unwrap();
+    verification.verified_fingerprint = fp.clone();
+    write(
+        fx.root(),
+        &[(
+            &format!("{forged_dir}/verification.json"),
+            &AnyRecord::Verification(Box::new(verification)).to_json(),
+        )],
+    );
+    commit_by_hand(
+        &fx,
+        &format!(
+            "Hand edit\n\nAthena-Job: {forged_job}\nAthena-Prediction: {prediction}\n{VERIFIED_CONTENT}: {fp}\n"
+        ),
+    );
+    let (hook, history) = refusals(&fx, &athena);
+    assert!(
+        hook.iter().any(|v| v.contains("governed content")),
+        "the commit-msg hook refuses it: {hook:?}"
+    );
+    assert!(
+        history.iter().any(|v| v.contains("governed content")),
+        "the history check finds it: {history:?}"
+    );
+
+    // Naming the real job instead, which already landed, fails too.
+    fx.git.run(["reset", "-q", "--hard", &parent]).unwrap();
+    write(fx.root(), &[("README.md", "# Demo\n\nedited by hand\n")]);
+    commit_by_hand(
+        &fx,
+        &format!(
+            "Hand edit\n\nAthena-Job: {}\nAthena-Prediction: {prediction}\n{VERIFIED_CONTENT}: {fp}\n",
+            proposal.job.as_str()
+        ),
+    );
+    let (hook, _) = refusals(&fx, &athena);
+    assert!(
+        hook.iter().any(|v| v.contains("governed content")),
+        "{hook:?}"
+    );
+}
+
+#[test]
+fn hand_written_scores_and_outcomes_are_refused() {
+    // M27 (blocks), acceptance verification 1, M2: a re-score that no intervention caused, a re-score
+    // that does not follow from the records, an edited closing score, and a landed outcome for a rejected
+    // job are refused by the hook and found by the history check.
+    let fx = Fixture::new();
+    let mut scenario = Scenario::default();
+    scenario.verdict = serde_json::json!({
+        "verdict": "fail",
+        "criteria": [
+            { "criterion": "criterion 1", "met": false, "evidence": "missing", "commands": [] },
+            { "criterion": "criterion 2", "met": true, "evidence": "ran", "commands": ["cargo test"] }
+        ],
+        "findings": [],
+        "request_reading_mismatch": null,
+        "summary": "The greeting is missing."
+    });
+    let athena = fx.athena(scenario.script());
+    let proposal = athena.ask("add a greeting", &Lines::default()).unwrap();
+    let rejected = finished(
+        athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(
+        rejected.state,
+        OutcomeState::Rejected,
+        "{}",
+        rejected.reason
+    );
+    assert!(athena.check_history().unwrap().violations.is_empty());
+    let clean = fx.head();
+    let dir = proposal.job.dir();
+    let score = rejected.score.clone().unwrap();
+    let perfect = |mut s: athena_data::records::Score| {
+        for e in s.events.iter_mut() {
+            for b in e.brier.values_mut() {
+                *b = 0.0;
+            }
+        }
+        s
+    };
+
+    // A re-score naming an intervention that does not exist.
+    let cause = athena_data::RecordId::parse("20261010-150000-abcd").unwrap();
+    let mut forged = perfect(score.clone());
+    forged.cause = Some(cause.clone());
+    write(
+        fx.root(),
+        &[(
+            &format!("{dir}/score-{cause}.json"),
+            &AnyRecord::Score(Box::new(forged.clone())).to_json(),
+        )],
+    );
+    commit_by_hand(
+        &fx,
+        &format!("Re-score\n\nAthena-Job: {}\n", proposal.job.as_str()),
+    );
+    let (hook, history) = refusals(&fx, &athena);
+    assert!(hook.iter().any(|v| v.contains("re-score")), "{hook:?}");
+    assert!(
+        history.iter().any(|v| v.contains("re-score")),
+        "{history:?}"
+    );
+
+    // The same perfect re-score, with a real intervention in the same commit: it does not follow from
+    // the records.
+    fx.git.run(["reset", "-q", "--hard", &clean]).unwrap();
+    let intervention = athena_data::records::Intervention {
+        id: cause.clone(),
+        at: "2026-10-10T15:00:00Z".parse().unwrap(),
+        what: "Fixed the greeting by hand".into(),
+        why: "The job was rejected".into(),
+        class_of_work: "docs".into(),
+        category: athena_data::records::InterventionCategory::DidWorkThemselves,
+        job: Some(proposal.job.clone()),
+        source: athena_data::records::InterventionSource::User,
+        with_staged_changes: false,
+    };
+    let record = AnyRecord::Intervention(intervention);
+    write(
+        fx.root(),
+        &[
+            (&record.canonical_path(), &record.to_json()),
+            (
+                &format!("{dir}/score-{cause}.json"),
+                &AnyRecord::Score(Box::new(forged)).to_json(),
+            ),
+        ],
+    );
+    commit_by_hand(
+        &fx,
+        &format!(
+            "Re-score\n\nAthena-Intervention: {cause}\nAthena-Job: {}\n",
+            proposal.job.as_str()
+        ),
+    );
+    let (hook, history) = refusals(&fx, &athena);
+    assert!(
+        hook.iter().any(|v| v.contains("does not follow")),
+        "{hook:?}"
+    );
+    assert!(
+        history.iter().any(|v| v.contains("does not follow")),
+        "{history:?}"
+    );
+
+    // A landed outcome for the rejected job.
+    fx.git.run(["reset", "-q", "--hard", &clean]).unwrap();
+    let AnyRecord::Outcome(mut outcome) =
+        record_at(&fx, &clean, &format!("{dir}/outcome.json")).unwrap()
+    else {
+        panic!("an outcome")
+    };
+    outcome.state = OutcomeState::Landed;
+    outcome.after_blocked = true;
+    write(
+        fx.root(),
+        &[(
+            &format!("{dir}/outcome-landed.json"),
+            &AnyRecord::Outcome(outcome).to_json(),
+        )],
+    );
+    commit_by_hand(
+        &fx,
+        &format!(
+            "Landed after all\n\nAthena-Job: {}\n",
+            proposal.job.as_str()
+        ),
+    );
+    let (hook, history) = refusals(&fx, &athena);
+    assert!(hook.iter().any(|v| v.contains("blocked")), "{hook:?}");
+    assert!(history.iter().any(|v| v.contains("blocked")), "{history:?}");
+}
+
+#[test]
+fn an_intervention_during_the_job_is_scored_when_it_closes() {
+    // M27 (allows): the closing score reads the interventions on the commit it is built on, so an
+    // intervention recorded while the job ran resolves `user_intervenes`, and the gate agrees.
+    let fx = Fixture::new();
+    let mut scenario = Scenario::default();
+    let root = fx.root().to_path_buf();
+    let job_slot: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+    let slot = job_slot.clone();
+    scenario.during_verification = Some(Arc::new(move || {
+        let job = slot.lock().unwrap().clone().unwrap();
+        let git = athena_git::Git::at(&root);
+        let now = jiff::Timestamp::now();
+        let record = format!(
+            r#"{{
+  "schema": "athena.intervention/1",
+  "id": "20261010-170000-abcd",
+  "at": "{now}",
+  "what": "Told the producer which file to change",
+  "why": "It was taking long",
+  "class_of_work": "docs",
+  "category": "gave-detailed-instructions",
+  "job": "{job}",
+  "source": "user",
+  "with_staged_changes": false
+}}
+"#
+        );
+        write(
+            &root,
+            &[(
+                "records/interventions/2026-10/20261010-170000-abcd.json",
+                &record,
+            )],
+        );
+        git.run(["add", "-A"]).unwrap();
+        git.run([
+            "commit",
+            "-q",
+            "-m",
+            "Record an intervention\n\nAthena-Intervention: 20261010-170000-abcd",
+        ])
+        .unwrap();
+    }));
+    let athena = fx.athena(scenario.script());
+    let proposal = athena.ask("add a greeting", &Lines::default()).unwrap();
+    *job_slot.lock().unwrap() = Some(proposal.job.as_str().to_string());
+    let f = finished(
+        athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(f.state, OutcomeState::Landed, "{}", f.reason);
+    let event = f
+        .score
+        .as_ref()
+        .unwrap()
+        .events
+        .iter()
+        .find(|e| e.event == "user_intervenes")
+        .cloned()
+        .unwrap();
+    assert_eq!(event.outcome, Some(true));
+    let report = athena.check_history().unwrap();
+    assert!(report.violations.is_empty(), "{:?}", report.violations);
+}
+
+#[test]
+fn merging_a_branch_where_a_job_landed_passes() {
+    // M27 (allows): a merge brings in a job's records from the branch where they were judged.
+    let fx = Fixture::new();
+    fx.git.run(["checkout", "-q", "-b", "side"]).unwrap();
+    let athena = fx.athena(Scenario::default().script());
+    let proposal = athena.ask("add a greeting", &Lines::default()).unwrap();
+    let f = finished(
+        athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(f.state, OutcomeState::Landed, "{}", f.reason);
+    fx.git.run(["checkout", "-q", "main"]).unwrap();
+    fx.git
+        .run([
+            "merge",
+            "-q",
+            "--no-ff",
+            "-m",
+            "Merge the side branch",
+            "side",
+        ])
+        .unwrap();
+    let report = athena.check_history().unwrap();
+    assert!(report.violations.is_empty(), "{:?}", report.violations);
+}

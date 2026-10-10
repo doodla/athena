@@ -42,9 +42,9 @@ depends on another, and `athena-data` and `athena-git` are leaves.
 | Crate | Responsibility | Depends on (Athena crates) |
 |---|---|---|
 | `athena-data` | Every persisted shape: the twelve record types and their canonical paths, `athena.toml`, `defaults.toml`, `Quantity` with provenance, ids, machine-local paths | none |
-| `athena-score` | Proper scoring rules (Brier, the summed deliverable score, log-scale WIS), the reference forecast, aggregates | data |
+| `athena-score` | Proper scoring rules (Brier, the summed deliverable score, log-scale WIS), scoring a job from its records, the reference forecast, aggregates | data |
 | `athena-git` | A typed wrapper over the git CLI: detached snapshots, temporary indexes, attributes from committed rules, fingerprints, plumbing commits, merge-tree, fast-forwards | none |
-| `athena-gate` | The commit gate: secrets (gitleaks), append-only and valid records, size, personal data, the governed-content invariant, prediction trailers, reconciliation, the full-history check, redaction | git, data |
+| `athena-gate` | The commit gate: secrets (gitleaks), append-only and valid records, size, personal data, the governed-content invariant, prediction trailers, a job's records judged as a set (scores recomputed with the scorer), reconciliation, the full-history check, redaction | git, data, score |
 | `athena-context` | Prompt assets, composition with hashes, the token estimator and budgets, briefs, and the typed outputs of the three roles with generated JSON Schemas | data |
 | `athena-agent` | The driver interface, the Claude Code driver, the fake driver, agent environments, stream-json usage capture, process groups, the kill switch, and the tool policy behind the hook | data |
 | `athena-core` | The job lifecycle, the `Capability` trait, admission, tool configuration from the base, checks, the final verdict, landing, records commits, scoring, status, nested runs | data, score, git, gate, context, agent |

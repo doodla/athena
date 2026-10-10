@@ -3,12 +3,12 @@
 use crate::store::{JobRecords, Records};
 use athena_data::config::ReferencePriors;
 use athena_data::records::{
-    AcceptedBy, Forecast, InterventionSource, Invocation, OutcomeState, Role, Score, Totals,
-    Verdict,
+    Candidate, Forecast, Intervention, Invocation, OutcomeState, Role, Score, Totals, Verdict,
+    Verification,
 };
 use athena_data::{JobId, Provenance, Quantity, RecordId, Unit};
-use athena_score::{PastJob, ReadingForecasts, Resolution, reference_forecast, score_job};
-use std::collections::{BTreeMap, BTreeSet};
+use athena_score::{JobFacts, PastJob, reference_forecast, score_records};
+use std::collections::BTreeSet;
 
 /// The resolved history the reference forecaster learns from: every closed, scored job.
 pub fn history(records: &Records) -> Vec<PastJob> {
@@ -129,7 +129,7 @@ pub fn totals(invocations: &[Invocation], wall_time_execution: Option<f64>) -> T
     }
 }
 
-/// What happened, as the scorer needs it.
+/// What happened, as the closing path tracks it.
 #[derive(Debug, Clone, Default)]
 pub struct Happened {
     /// The final verdict, if verification ran; `Some(false)` for a failure before verification.
@@ -141,92 +141,43 @@ pub struct Happened {
     pub reason: Option<String>,
 }
 
-/// Scores a job from its records plus what just happened. `invocations` holds every invocation of the
-/// job, committed or new. `cause` is set for a re-score.
+/// What a closing commit adds that the score reads.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Closing<'a> {
+    pub candidate: Option<&'a Candidate>,
+    pub verification: Option<&'a Verification>,
+    pub wall_time_execution_s: Option<f64>,
+}
+
+/// Scores a job from its records: the committed ones in `job`, every invocation (committed or new) in
+/// `invocations`, what the closing commit adds, and the interventions in `records`, which must be the
+/// records the closing commit is built on. The gate recomputes the score from the commit with the same
+/// function, so it must see what the commit will hold (M27).
 pub fn score(
     job: &JobRecords,
     records: &Records,
     invocations: &[Invocation],
-    happened: &Happened,
+    closing: Closing<'_>,
     cause: Option<RecordId>,
     at: jiff::Timestamp,
 ) -> Score {
     let id: &JobId = job.id();
-    let readings: Vec<ReadingForecasts> = job
-        .readings
-        .iter()
-        .map(|r| ReadingForecasts {
-            n: r.n,
-            reader: r.forecasts.reader.clone(),
-            reference: r.forecasts.reference.clone(),
-            deliverables: r
-                .deliverables
-                .iter()
-                .map(|d| (d.path.clone(), d.p))
-                .collect(),
-        })
-        .collect();
-    let accepted = job.job.as_ref().and_then(|j| j.accepted_reading);
-    let accepted_by = job.job.as_ref().and_then(|j| j.accepted_by);
-    let corrected: BTreeSet<u32> = job.corrections.iter().map(|c| c.n).collect();
-    let mut reading_accepted = BTreeMap::new();
-    for r in &job.readings {
-        let outcome = if corrected.contains(&r.n) {
-            Some(false)
-        } else if Some(r.n) == accepted {
-            match accepted_by {
-                Some(AcceptedBy::User) => Some(true),
-                _ => None,
-            }
-        } else {
-            // Closed without being accepted or corrected.
-            Some(false)
-        };
-        reading_accepted.insert(r.n, outcome);
-    }
-    let dispatched_at = job.job.as_ref().and_then(|j| j.dispatched_at);
-    let intervened = dispatched_at.is_some_and(|t| {
-        records
-            .interventions_for(id)
-            .iter()
-            .any(|i| i.source == InterventionSource::User && i.at >= t)
-    }) || cause.is_some();
-    let execution: Vec<&Invocation> = invocations
-        .iter()
-        .filter(|i| i.role != Role::Reader)
-        .collect();
-    let mut observed: BTreeSet<String> = BTreeSet::new();
-    for inv in invocations {
-        observed.extend(inv.models_used.keys().cloned());
-    }
-    let mut expected: Vec<String> = Vec::new();
-    if let Some(r) = job.latest_reading() {
-        expected.push(r.producer_model.clone());
-        expected.push(r.verifier_model.clone());
-    }
-    for inv in invocations.iter().filter(|i| i.role == Role::Reader) {
-        if !expected.contains(&inv.model) {
-            expected.push(inv.model.clone());
-        }
-    }
-    let resolution = Resolution {
-        reading_accepted,
-        verification_passed: if accepted.is_some() {
-            happened.verification_passed
-        } else {
-            None
+    let interventions: Vec<&Intervention> = records.interventions_for(id);
+    score_records(
+        &JobFacts {
+            job: id,
+            readings: &job.readings,
+            corrections: &job.corrections,
+            dispatched: job.job.as_ref(),
+            invocations,
+            candidate: closing.candidate,
+            verification: closing.verification,
+            wall_time_execution_s: closing.wall_time_execution_s,
+            interventions: &interventions,
         },
-        user_intervened: intervened,
-        intervention_provisional: cause.is_none(),
-        changed_paths: happened.changed_paths.clone(),
-        cost_execution_usd: (accepted.is_some() && !execution.is_empty())
-            .then(|| execution.iter().map(|i| i.cost.best_lower()).sum())
-            .or(accepted.map(|_| 0.0)),
-        wall_time_execution_s: happened.wall_time_execution_s,
-        models_expected: expected,
-        models_observed: observed.into_iter().collect(),
-    };
-    score_job(id, at, cause, &readings, accepted, &resolution)
+        cause,
+        at,
+    )
 }
 
 /// Whether a final verdict passed.
@@ -234,24 +185,4 @@ pub fn passed(verdict: Verdict) -> bool {
     verdict == Verdict::Pass
 }
 
-/// A re-score after an intervention against a closed job: the closing score with `user_intervenes`
-/// resolved true for good (design §9.5).
-pub fn rescore(previous: &Score, cause: RecordId, at: jiff::Timestamp) -> Score {
-    let mut score = previous.clone();
-    score.cause = Some(cause);
-    score.at = at;
-    for event in score
-        .events
-        .iter_mut()
-        .filter(|e| e.event == "user_intervenes")
-    {
-        event.outcome = Some(true);
-        event.provisional = false;
-        event.brier = event
-            .forecasts
-            .iter()
-            .map(|(k, p)| (k.clone(), athena_score::brier(*p, true)))
-            .collect();
-    }
-    score
-}
+pub use athena_score::rescore;

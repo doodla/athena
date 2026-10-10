@@ -7,7 +7,7 @@ use crate::commits::{NewFile, Refusal, message};
 use crate::invocation::InvocationFacts;
 use crate::land::{Plan, plan};
 use crate::reading::Proposal;
-use crate::scoring::{Happened, score, totals};
+use crate::scoring::{self, Happened, score, totals};
 use crate::store::{JobRecords, JobState, Records};
 use crate::verify::{VerdictInputs, Verified, judge, verified};
 use crate::{Athena, Ui};
@@ -272,7 +272,7 @@ impl Athena {
             ui,
         };
         let closing = self.produce_and_verify(&ctx, &brief, &accepted)?;
-        self.close_dispatched(&ctx, records, closing)
+        self.close_dispatched(&ctx, closing)
     }
 
     fn reread_after_configuration_change(
@@ -908,24 +908,32 @@ impl Athena {
     }
 
     /// Commits the closing records of a dispatched job, landing the change when it was verified.
-    fn close_dispatched(
-        &self,
-        ctx: &RunContext<'_>,
-        records: &Records,
-        mut closing: Closing,
-    ) -> Result<GoResult> {
+    fn close_dispatched(&self, ctx: &RunContext<'_>, mut closing: Closing) -> Result<GoResult> {
         let id = ctx.id().clone();
         let mut all_invocations = ctx.job.invocations.clone();
         all_invocations.extend(closing.new_invocations.iter().cloned());
         let totals = totals(&all_invocations, closing.happened.wall_time_execution_s);
-        let score = score(
-            ctx.job,
-            records,
-            &all_invocations,
-            &closing.happened,
-            None,
-            crate::now(),
-        );
+        // The score reads the interventions on the commit the closing commit is built on, so it is
+        // computed for each attempt; the gate recomputes it from that commit (M27).
+        let scored_at = crate::now();
+        let candidate_record = closing.candidate.clone();
+        let verification_record = closing.verification.clone();
+        let wall_time = closing.happened.wall_time_execution_s;
+        let score_on = |head: &str| -> Result<Score> {
+            let records = Records::load(&self.git, head)?;
+            Ok(score(
+                ctx.job,
+                &records,
+                &all_invocations,
+                scoring::Closing {
+                    candidate: candidate_record.as_ref(),
+                    verification: verification_record.as_ref(),
+                    wall_time_execution_s: wall_time,
+                },
+                None,
+                scored_at,
+            ))
+        };
         for inv in &closing.new_invocations {
             closing
                 .files
@@ -947,9 +955,6 @@ impl Athena {
                     verification.clone(),
                 ))));
         }
-        closing
-            .files
-            .push(NewFile::record(&AnyRecord::Score(Box::new(score.clone()))));
         let reading_path = format!("{}/reading-{}.json", id.dir(), ctx.reading.n);
         let prediction = introducing_commit(self, "HEAD", &reading_path)?
             .unwrap_or_else(|| ctx.prediction.clone());
@@ -1037,18 +1042,30 @@ impl Athena {
                 &trailers,
                 outcome,
                 totals,
-                score,
+                &score_on,
                 verification,
             );
         }
-        let mut files = closing.files.clone();
-        files.push(NewFile::record(&AnyRecord::Outcome(Box::new(outcome(
-            state,
-            reason.clone(),
-            false,
-        )))));
+        let last_score: std::cell::RefCell<Option<Score>> = std::cell::RefCell::new(None);
         let subject = closing_subject(state, &ctx.reading.title);
-        let commit = self.commit_records(&files, &message(&subject, &reason, &trailers))?;
+        let commit = self.commit_records_with(
+            &|head: &str| {
+                let score = score_on(head)?;
+                let mut files = closing.files.clone();
+                files.push(NewFile::record(&AnyRecord::Score(Box::new(score.clone()))));
+                files.push(NewFile::record(&AnyRecord::Outcome(Box::new(outcome(
+                    state,
+                    reason.clone(),
+                    false,
+                )))));
+                *last_score.borrow_mut() = Some(score);
+                Ok(files)
+            },
+            &message(&subject, &reason, &trailers),
+        )?;
+        let score = last_score
+            .into_inner()
+            .expect("a committed closing has a score");
         ctx.ui.line(&format!("{:<10} {reason}", state.as_str()));
         self.state.clean_job(&id);
         Ok(GoResult::Finished(Box::new(Finished {
@@ -1075,17 +1092,24 @@ impl Athena {
         trailers: &[(&str, String)],
         outcome: impl Fn(OutcomeState, String, bool) -> Outcome,
         totals: Totals,
-        score: Score,
+        score_on: &dyn Fn(&str) -> Result<Score>,
         verification: Verification,
     ) -> Result<GoResult> {
         let id = ctx.id().clone();
         let _lock = self.state.lock_repository()?;
         let mut result: Option<(OutcomeState, String, String, Option<String>)> = None;
+        let mut score = None;
         for _attempt in 0..3 {
             let head = self.head()?;
+            let attempt_score = score_on(&head)?;
+            let mut closing_files = closing.files.clone();
+            closing_files.push(NewFile::record(&AnyRecord::Score(Box::new(
+                attempt_score.clone(),
+            ))));
+            score = Some(attempt_score);
             match plan(&self.git, verified, &head)? {
                 Plan::Stale(reason) => {
-                    let mut files = closing.files.clone();
+                    let mut files = closing_files.clone();
                     files.push(NewFile::record(&AnyRecord::Outcome(Box::new(outcome(
                         OutcomeState::Stale,
                         reason.clone(),
@@ -1113,7 +1137,7 @@ impl Athena {
                     }
                 }
                 Plan::Tree(tree) => {
-                    let mut files = closing.files.clone();
+                    let mut files = closing_files.clone();
                     files.push(NewFile::record(&AnyRecord::Outcome(Box::new(outcome(
                         OutcomeState::Landed,
                         "verified and landed".into(),
@@ -1125,7 +1149,7 @@ impl Athena {
                             // The in-process gate refused the landing commit: the job fails, with its records.
                             let reason =
                                 format!("the gate refused the landing commit: {refused:#}");
-                            let mut files = closing.files.clone();
+                            let mut files = closing_files.clone();
                             files.push(NewFile::record(&AnyRecord::Outcome(Box::new(outcome(
                                 OutcomeState::Failed,
                                 reason.clone(),
@@ -1170,7 +1194,7 @@ impl Athena {
                                 "verified, but local edits in the checkout conflict with the change: {}",
                                 stderr.trim()
                             );
-                            let mut files = closing.files.clone();
+                            let mut files = closing_files.clone();
                             files.push(NewFile::record(&AnyRecord::Outcome(Box::new(outcome(
                                 OutcomeState::Blocked,
                                 reason.clone(),
@@ -1232,7 +1256,7 @@ impl Athena {
             closing_commit: commit,
             landed_commit: landed,
             totals: Some(totals),
-            score: Some(score),
+            score,
             verification: Some(verification),
         })))
     }

@@ -5,16 +5,23 @@
 //! `Athena-Intervention:`, or `Athena-Record:` trailer, unless it touched only owner paths. If the
 //! fingerprint changed, X must be exactly one of:
 //!
-//! - (a) a landing commit: `Athena-Verified-Content` equals its fingerprint, the job's `verification.json`
-//!   at X holds that fingerprint with a final verdict of pass, and no earlier commit landed that job;
+//! - (a) a landing commit of a job that Athena read, dispatched, and verified (D55): it carries
+//!   `Athena-Job`, `Athena-Prediction`, and an `Athena-Verified-Content` equal to its fingerprint; the
+//!   job's `job.json` is on the parent commit and the prediction commit, an ancestor, added the accepted
+//!   reading; X adds the job's candidate, verification, and landed outcome (or, after `blocked`, its
+//!   `outcome-landed.json`); the candidate and the verification both hold X's fingerprint, the final
+//!   verdict is pass, the verifier invocation the verification names is recorded, succeeded, used the
+//!   job's verifier model, and reconciles, as do the outcome's totals; and no earlier commit landed that
+//!   job;
 //! - (b) a declared intervention: `Athena-Intervention: <id>`, and X adds that intervention record;
 //! - (c) a bootstrap commit: `Athena-Job: bootstrap`, while the bootstrap range is open, or at or before
 //!   the commit that `records/jobs/bootstrap/outcome.json` names.
 //!
 //! A merge passes when its fingerprint equals one parent's; otherwise it needs (a) or (b).
 
-use crate::{Change, Judged, Result, Rule, Violation, short, trailer_values};
-use athena_data::records::{AnyRecord, Verdict};
+use crate::jobs::JobFiles;
+use crate::{Change, Judged, Result, Rule, Violation, reconcile, short, trailer_values};
+use athena_data::records::{AnyRecord, Invocation, InvocationOutcome, OutcomeState, Role, Verdict};
 use athena_data::{JobId, RecordId};
 use athena_git::Git;
 use athena_git::attrs::fingerprint;
@@ -97,7 +104,7 @@ pub fn check(
         if parent_fps.contains(&fp) {
             return Ok(Vec::new());
         }
-        if landing(git, change, &trailers, &fp, history)?.is_ok()
+        if landing(git, change, judged, &trailers, &fp, history)?.is_ok()
             || intervention(judged, &trailers).is_ok()
         {
             return Ok(Vec::new());
@@ -126,7 +133,7 @@ pub fn check(
     }
 
     // Governed content changed.
-    let landing_result = landing(git, change, &trailers, &fp, history)?;
+    let landing_result = landing(git, change, judged, &trailers, &fp, history)?;
     if landing_result.is_ok() {
         return Ok(Vec::new());
     }
@@ -170,68 +177,196 @@ pub fn check(
     ))
 }
 
-/// `Ok` when the commit is a valid landing (case a); `Err(Some(reason))` when it claims to be one but is not.
+/// The job a commit validly lands (case a), if it is a landing commit at all.
+pub fn landing_job(
+    git: &Git,
+    change: &Change,
+    judged: &Judged,
+    history: Option<&HistoryState>,
+) -> Result<Option<JobId>> {
+    let trailers = change.trailers(git)?;
+    let fp = fingerprint(git, &change.tree, &judged.rules)?;
+    Ok(landing(git, change, judged, &trailers, &fp, history)?.ok())
+}
+
+/// `Ok(job)` when the commit is a valid landing of `job` (case a); `Err(Some(reason))` when it claims to
+/// be one but is not; `Err(None)` when it does not claim to be one.
 fn landing(
     git: &Git,
     change: &Change,
+    judged: &Judged,
     trailers: &[(String, String)],
     fp: &str,
     history: Option<&HistoryState>,
-) -> Result<std::result::Result<(), Option<String>>> {
+) -> Result<std::result::Result<JobId, Option<String>>> {
     let claimed = trailer_values(trailers, VERIFIED_CONTENT);
     let Some(claimed) = claimed.first() else {
         return Ok(Err(None));
     };
+    let refuse = |reason: String| Ok(Err(Some(reason)));
     if *claimed != fp {
-        return Ok(Err(Some(format!(
+        return refuse(format!(
             "Athena-Verified-Content {claimed} does not match the landed content {fp}"
-        ))));
+        ));
     }
-    let jobs = trailer_values(trailers, JOB);
-    let Some(job) = jobs.first().and_then(|j| JobId::parse(j).ok()) else {
-        return Ok(Err(Some(
-            "a landing commit needs an Athena-Job trailer naming its job".into(),
-        )));
+    let Some(job) = trailer_values(trailers, JOB)
+        .first()
+        .and_then(|j| JobId::parse(j).ok())
+        .filter(JobId::is_request)
+    else {
+        return refuse("a landing commit needs an Athena-Job trailer naming its job".into());
     };
-    let path = format!("{}/verification.json", job.dir());
-    let verified = match git.show_file(&change.tree, &path)? {
-        Some(bytes) => match AnyRecord::parse(&path, &bytes) {
-            Ok(AnyRecord::Verification(v)) => v,
-            _ => {
-                return Ok(Err(Some(format!(
-                    "{path} is not a valid verification record"
-                ))));
-            }
-        },
-        None => {
-            return Ok(Err(Some(format!(
-                "{path} is missing, so the landing has no verification"
-            ))));
+    let Some(parent) = change.parents.first() else {
+        return refuse("a root commit cannot land a job".into());
+    };
+    let dir = job.dir();
+
+    // The job was read and dispatched before it landed.
+    let before = JobFiles::load(git, parent, &job)?;
+    let Some(dispatched) = &before.job else {
+        return refuse(format!(
+            "{dir}/job.json is not on the parent commit, so no dispatched job lands here"
+        ));
+    };
+    let Some(n) = dispatched.accepted_reading else {
+        return refuse(format!("{dir}/job.json names no accepted reading"));
+    };
+    let Some(prediction) = trailer_values(trailers, PREDICTION).first().copied() else {
+        return refuse(
+            "a landing commit needs an Athena-Prediction trailer naming the commit that added its accepted reading"
+                .into(),
+        );
+    };
+    if let Some(problem) = prediction_problem(git, parent, &job, n, prediction)? {
+        return refuse(problem);
+    }
+
+    // It lands with its own closing records.
+    let after = JobFiles::load(git, &change.tree, &job)?;
+    let added = |name: &str| {
+        let path = format!("{dir}/{name}");
+        judged
+            .diff
+            .iter()
+            .any(|d| d.status == 'A' && d.path == path)
+    };
+    let fresh = added("candidate.json")
+        && added("verification.json")
+        && added("outcome.json")
+        && after
+            .outcome
+            .as_ref()
+            .is_some_and(|o| o.state == OutcomeState::Landed);
+    let retried = added("outcome-landed.json")
+        && before
+            .outcome
+            .as_ref()
+            .is_some_and(|o| o.state == OutcomeState::Blocked);
+    let (outcome_path, outcome) = match (fresh, retried) {
+        (true, _) => (format!("{dir}/outcome.json"), after.outcome.as_ref()),
+        (false, true) => (
+            format!("{dir}/outcome-landed.json"),
+            after.later_outcome.as_ref(),
+        ),
+        (false, false) => {
+            return refuse(format!(
+                "a landing commit adds {dir}/candidate.json, verification.json, and a landed outcome.json, \
+                 or outcome-landed.json after a blocked outcome"
+            ));
         }
     };
+    let (Some(candidate), Some(verified), Some(outcome)) =
+        (&after.candidate, &after.verification, outcome)
+    else {
+        return refuse(format!(
+            "{dir} lacks the candidate, verification, or outcome record a landing needs"
+        ));
+    };
+    if candidate.fingerprint.as_deref() != Some(fp) {
+        return refuse(format!(
+            "{dir}/candidate.json does not hold the landed content {fp}"
+        ));
+    }
     if verified.verified_fingerprint != fp {
-        return Ok(Err(Some(format!(
-            "{path} verified {}, not the landed content {fp}",
+        return refuse(format!(
+            "{dir}/verification.json verified {}, not the landed content {fp}",
             verified.verified_fingerprint
-        ))));
+        ));
     }
     if verified.final_verdict != Verdict::Pass {
-        return Ok(Err(Some(format!("{path} records a final verdict of fail"))));
+        return refuse(format!(
+            "{dir}/verification.json records a final verdict of fail"
+        ));
     }
+    if candidate.candidate_commit.as_deref() != Some(verified.candidate_commit.as_str()) {
+        return refuse(format!(
+            "{dir}/verification.json and candidate.json name different candidate commits"
+        ));
+    }
+
+    // An independent verifier ran, and its usage reconciles.
+    let Some(seq) = verified.verifier_invocation else {
+        return refuse(format!(
+            "{dir}/verification.json names no verifier invocation"
+        ));
+    };
+    let Some((path, invocation)) = after.invocations.iter().find(|(_, i)| i.seq == seq) else {
+        return refuse(format!("{dir} has no record of verifier invocation {seq}"));
+    };
+    if invocation.role != Role::Verifier || invocation.outcome != InvocationOutcome::Success {
+        return refuse(format!("{path} is not a successful verifier invocation"));
+    }
+    if dispatched.verifier_model.as_deref() != Some(invocation.model.as_str()) {
+        return refuse(format!(
+            "{path} used {}, not the job's verifier model",
+            invocation.model
+        ));
+    }
+    if let Some(v) = reconcile::check_invocation(path, invocation).first() {
+        return refuse(v.detail.clone());
+    }
+    let invocations: Vec<&Invocation> = after.invocations.iter().map(|(_, i)| i).collect();
+    if let Some(v) = reconcile::check_outcome(&outcome_path, outcome, &invocations).first() {
+        return refuse(v.detail.clone());
+    }
+
     let already = match history {
         Some(state) => state.landed.contains(job.as_str()),
-        None => match change.parents.first() {
-            Some(parent) => earlier_landing(git, parent, job.as_str())?,
-            None => false,
-        },
+        None => earlier_landing(git, parent, job.as_str())?,
     };
     if already {
-        return Ok(Err(Some(format!(
-            "job {} has already landed",
-            job.as_str()
-        ))));
+        return refuse(format!("job {} has already landed", job.as_str()));
     }
-    Ok(Ok(()))
+    Ok(Ok(job))
+}
+
+/// Why `prediction` is not the commit that added reading `n` of `job` before `parent`, if it is not.
+fn prediction_problem(
+    git: &Git,
+    parent: &str,
+    job: &JobId,
+    n: u32,
+    prediction: &str,
+) -> Result<Option<String>> {
+    let Some(predicted) = git.rev_parse(prediction)? else {
+        return Ok(Some(format!(
+            "Athena-Prediction {prediction} is not a commit"
+        )));
+    };
+    if !git.is_ancestor(&predicted, parent)? {
+        return Ok(Some(format!(
+            "the prediction commit {} is not an ancestor",
+            short(&predicted)
+        )));
+    }
+    let reading = format!("{}/reading-{n}.json", job.dir());
+    if !git.added_paths(&predicted)?.contains(&reading) {
+        return Ok(Some(format!(
+            "the prediction commit {} did not add {reading}",
+            short(&predicted)
+        )));
+    }
+    Ok(None)
 }
 
 /// Whether a commit reachable from `rev` already landed `job`.
@@ -321,23 +456,10 @@ pub fn check_prediction(git: &Git, change: &Change) -> Result<Vec<Violation>> {
             ));
             continue;
         };
-        let Some(predicted) = git.rev_parse(prediction)? else {
-            violations.push(fail(format!(
-                "Athena-Prediction {prediction} is not a commit"
-            )));
-            continue;
-        };
         let Some(parent) = change.parents.first() else {
             violations.push(fail("a root commit cannot follow its prediction".into()));
             continue;
         };
-        if !git.is_ancestor(&predicted, parent)? {
-            violations.push(fail(format!(
-                "the prediction commit {} is not an ancestor",
-                short(&predicted)
-            )));
-            continue;
-        }
         let job_path = format!("{}/job.json", job.dir());
         let accepted = match git.show_file(&change.tree, &job_path)? {
             Some(bytes) => match AnyRecord::parse(&job_path, &bytes) {
@@ -350,12 +472,8 @@ pub fn check_prediction(git: &Git, change: &Change) -> Result<Vec<Violation>> {
             violations.push(fail(format!("{job_path} names no accepted reading")));
             continue;
         };
-        let reading = format!("{}/reading-{n}.json", job.dir());
-        if !git.added_paths(&predicted)?.contains(&reading) {
-            violations.push(fail(format!(
-                "the prediction commit {} did not add {reading}",
-                short(&predicted)
-            )));
+        if let Some(problem) = prediction_problem(git, parent, &job, n, prediction)? {
+            violations.push(fail(problem));
         }
     }
     Ok(violations)
@@ -596,10 +714,14 @@ mod tests {
             &git,
             &format!("Land\n\nAthena-Job: {job}\nAthena-Verified-Content: {landed_here}\n"),
         );
-        assert_eq!(
-            judge(&git, "HEAD"),
-            vec![],
-            "a landing whose verification matches passes"
+        // A matching verification record alone is not a landing: no job was read, dispatched, or
+        // verified (acceptance verification 1, M1). Real landings pass in the lifecycle tests.
+        let found = judge(&git, "HEAD");
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0]
+                .detail
+                .contains("job.json is not on the parent commit")
         );
     }
 

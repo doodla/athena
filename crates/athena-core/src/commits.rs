@@ -125,10 +125,21 @@ impl Athena {
     /// Commits `files` (records only) on top of the current branch, gated, and fast-forwards to it.
     /// Returns the new commit.
     pub fn commit_records(&self, files: &[NewFile], message: &str) -> Result<String> {
+        self.commit_records_with(&|_head: &str| Ok(files.to_vec()), message)
+    }
+
+    /// Like [`Athena::commit_records`], for records that depend on the commit they are built on, such as a
+    /// score that reads the interventions there. `files` is called again whenever the branch moved.
+    pub fn commit_records_with(
+        &self,
+        files: &dyn Fn(&str) -> Result<Vec<NewFile>>,
+        message: &str,
+    ) -> Result<String> {
         let _lock = self.state.lock_repository()?;
         for _attempt in 0..3 {
             let head = self.head()?;
-            let commit = self.build_commit(&head, &head, files, message)?;
+            let files = files(&head)?;
+            let commit = self.build_commit(&head, &head, &files, message)?;
             match self.advance(&commit, &head)? {
                 Ok(()) => return Ok(commit),
                 Err(Refusal::Moved) => continue,

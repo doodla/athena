@@ -14,8 +14,9 @@
 
 use athena_data::config::{QuantilePrior, ReferencePriors};
 use athena_data::records::{
-    DeliverableScore, DeliverableTerm, EventScore, Forecast, ModelsCheck, QuantileScore, Quantiles,
-    QuantityScore, Score,
+    AcceptedBy, Candidate, Correction, DeliverableScore, DeliverableTerm, EventScore, Forecast,
+    Intervention, InterventionSource, Invocation, Job, ModelsCheck, QuantileScore, Quantiles,
+    QuantityScore, Reading, Role, Score, Verdict, Verification,
 };
 use athena_data::{JobId, RecordId};
 use std::collections::{BTreeMap, BTreeSet};
@@ -309,6 +310,137 @@ pub fn score_job(
         quantities,
         models,
     }
+}
+
+/// A job's records, as the scorer reads them. A score is a function of these and nothing else, so Athena
+/// writes it and the commit gate recomputes it with this same code (M27).
+#[derive(Debug, Clone, Copy)]
+pub struct JobFacts<'a> {
+    pub job: &'a JobId,
+    /// Every reading, in order of `n`.
+    pub readings: &'a [Reading],
+    pub corrections: &'a [Correction],
+    /// The job record, once dispatched.
+    pub dispatched: Option<&'a Job>,
+    /// Every invocation of the job, in order of `seq`.
+    pub invocations: &'a [Invocation],
+    pub candidate: Option<&'a Candidate>,
+    pub verification: Option<&'a Verification>,
+    /// From the outcome's totals: dispatch to the final verdict.
+    pub wall_time_execution_s: Option<f64>,
+    /// The interventions that name this job.
+    pub interventions: &'a [&'a Intervention],
+}
+
+/// Scores a job from its records. `cause` is set for a re-score; see also [`rescore`].
+pub fn score_records(facts: &JobFacts<'_>, cause: Option<RecordId>, at: jiff::Timestamp) -> Score {
+    let readings: Vec<ReadingForecasts> = facts
+        .readings
+        .iter()
+        .map(|r| ReadingForecasts {
+            n: r.n,
+            reader: r.forecasts.reader.clone(),
+            reference: r.forecasts.reference.clone(),
+            deliverables: r
+                .deliverables
+                .iter()
+                .map(|d| (d.path.clone(), d.p))
+                .collect(),
+        })
+        .collect();
+    let accepted = facts.dispatched.and_then(|j| j.accepted_reading);
+    let accepted_by = facts.dispatched.and_then(|j| j.accepted_by);
+    let corrected: BTreeSet<u32> = facts.corrections.iter().map(|c| c.n).collect();
+    let mut reading_accepted = BTreeMap::new();
+    for r in facts.readings {
+        let outcome = if corrected.contains(&r.n) {
+            Some(false)
+        } else if Some(r.n) == accepted {
+            match accepted_by {
+                Some(AcceptedBy::User) => Some(true),
+                _ => None,
+            }
+        } else {
+            // Closed without being accepted or corrected.
+            Some(false)
+        };
+        reading_accepted.insert(r.n, outcome);
+    }
+    let dispatched_at = facts.dispatched.and_then(|j| j.dispatched_at);
+    let intervened = dispatched_at.is_some_and(|t| {
+        facts
+            .interventions
+            .iter()
+            .any(|i| i.source == InterventionSource::User && i.at >= t)
+    }) || cause.is_some();
+    // A dispatched job that never reached a verdict failed before verification.
+    let verification_passed = match (facts.verification, facts.dispatched) {
+        (Some(v), _) => Some(v.final_verdict == Verdict::Pass),
+        (None, Some(_)) => Some(false),
+        (None, None) => None,
+    };
+    let execution: Vec<&Invocation> = facts
+        .invocations
+        .iter()
+        .filter(|i| i.role != Role::Reader)
+        .collect();
+    let mut observed: BTreeSet<String> = BTreeSet::new();
+    for inv in facts.invocations {
+        observed.extend(inv.models_used.keys().cloned());
+    }
+    let mut expected: Vec<String> = Vec::new();
+    if let Some(r) = facts.readings.last() {
+        expected.push(r.producer_model.clone());
+        expected.push(r.verifier_model.clone());
+    }
+    for inv in facts.invocations.iter().filter(|i| i.role == Role::Reader) {
+        if !expected.contains(&inv.model) {
+            expected.push(inv.model.clone());
+        }
+    }
+    let resolution = Resolution {
+        reading_accepted,
+        verification_passed: if accepted.is_some() {
+            verification_passed
+        } else {
+            None
+        },
+        user_intervened: intervened,
+        intervention_provisional: cause.is_none(),
+        changed_paths: facts
+            .candidate
+            .map(|c| c.changes.iter().map(|e| e.path.clone()).collect())
+            .unwrap_or_default(),
+        cost_execution_usd: (accepted.is_some() && !execution.is_empty())
+            .then(|| execution.iter().map(|i| i.cost.best_lower()).sum())
+            .or(accepted.map(|_| 0.0)),
+        wall_time_execution_s: facts.wall_time_execution_s,
+        models_expected: expected,
+        models_observed: observed.into_iter().collect(),
+    };
+    score_job(facts.job, at, cause, &readings, accepted, &resolution)
+}
+
+/// A re-score after an intervention against a closed job: the closing score with `user_intervenes`
+/// resolved true for good (design §9.5).
+pub fn rescore(previous: &Score, cause: RecordId, at: jiff::Timestamp) -> Score {
+    let mut score = previous.clone();
+    score.cause = Some(cause);
+    score.at = at;
+    for event in score
+        .events
+        .iter_mut()
+        .filter(|e| e.event == "user_intervenes")
+    {
+        event.outcome = Some(true);
+        event.provisional = false;
+        event.brier = event
+            .forecasts
+            .iter()
+            .map(|(k, p)| (k.clone(), brier(*p, true)))
+            .collect();
+    }
+    score
 }
 
 /// Summed scores for one forecaster over a set of jobs.
