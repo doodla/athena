@@ -57,3 +57,13 @@ Athena's decision log, not here. Newest last.
   sub-agents of the first operator session. Their work is recorded as bootstrap work, outside
   Athena, with their measured usage.
 - Why: Athena does not exist yet, and the brief makes the bootstrap the only work done outside it.
+
+## OP-6. Lease timing, learned from the bootstrap (2026-10-10)
+
+- What happened: the first lease (6 hours) expired during the bootstrap's long build, and the
+  pre-push gate refused the next push, as designed. The lease was renewed and the push went through.
+- Decision: renew the lease whenever work lands on `main`, and release it only while this session
+  is still the holder of record on `main`. The gate lets the holder of record push a release; a
+  session whose lease of record is missing or expired cannot push one.
+- Also: landing is fast-forward only, so the operator never commits on a branch while one of
+  Athena's jobs is in flight on it. Uncommitted operator edits wait, stashed, until the job lands.
