@@ -1,0 +1,99 @@
+{
+  "schema": "athena.candidate/1",
+  "job": "20261010-224301-4ex7",
+  "base_commit": "fbab9ebb8f6dc79ffc9e4ae592d68ea50565cba7",
+  "candidate_commit": "28dd1b533d5d00a9d7c29eaf432e27750eb9f2c9",
+  "candidate_tree": "8bada6a54d89a6d301b2a250630b7278251ae57e",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 3590
+    },
+    {
+      "path": "crates/athena-core/src/checks.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 14693
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 59842
+    },
+    {
+      "path": "docs/decisions.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 79144
+    },
+    {
+      "path": "docs/enforcement.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 15428
+    }
+  ],
+  "fingerprint": "sha256:48819d3ed512042b3e39675de63caea4957ea73fe967fe4060aa2886be849d4f",
+  "violations": [],
+  "producer_report": {
+    "summary": "Only part of the job is done. Verification now runs the candidate's own gate on `check --history`, but I could not find the cause of 64ecdc9 and could not add its exemption. My copy of the repository has a single commit and no `records/`, so `git show 64ecdc9` fails and I have no full 40-character id. I invented no id and added no exemption. Criteria 1, 3 and 4 are therefore not met.\n\n**What I changed**\n- **Candidate-gate check (criteria 5, 6, 8):** `checks.rs` gets `changes_the_gate`, `candidate_history_command` and `run_candidate_history`. They apply when a candidate touches `crates/athena-gate/`, `checks.rs`, `land.rs`, `verify.rs` or `commits.rs` in the core, or the CLI's `main.rs`. `run.rs` then adds a `history` check after the configured checks (skipped in nested runs). It runs `cargo run --locked --quiet --bin athena --manifest-path <verifier snapshot>/Cargo.toml -- check --history` from the user's repository. The candidate's freshly built gate therefore judges the real history, not the compiled-in one. A failed `history` check fails the verdict, so no `Verified` value is made.\n- **Tests:** three new tests cover a gate candidate whose own gate fails (refused), one whose gate passes (accepted), and a candidate that leaves the gate alone (no history check). They run the check against stand-in commands, not a real `cargo run`, so the cargo wiring in `run.rs` has no test.\n- **Docs:** I added row M30 to `docs/enforcement.md`, an Unreleased entry in `CHANGELOG.md`, and D61 in `docs/decisions.md`.\n\n**Why 64ecdc9 is unexplained (criteria 1, 2)**\n- I read the staging code: `close_dispatched` and `land_or_block` in `run.rs`, `plan` in `land.rs`, and `build_commit` in `commits.rs`. I found no path that stages one job's records under another job's trailer, so I found no code bug and wrote no regression test.\n- That is a reading of the code, not proof. D61 records it as open.\n\n**Acceptance command (criterion 3)**\n- The literal `cargo run -- check --history` fails with \"could not determine which binary to run\", because the workspace has two binaries (`athena` and `xtask`).\n- `cargo run --locked --bin athena -- check --history` builds and runs. In my one-commit copy it exits 2 with a governed-content violation on the base commit b2a5b4c8f477. That result says nothing about 64ecdc9.\n\n**Checks I ran**\n- `cargo fmt --all --check` passes.\n- `cargo clippy --all-targets --locked -- -D warnings` passes.\n- `cargo test --locked` passes (full run, before I added `--bin athena` to the command). After that edit I re-ran fmt, clippy, and the athena-core and xtask tests, and all pass.",
+    "files": [
+      "crates/athena-core/src/checks.rs",
+      "crates/athena-core/src/run.rs",
+      "docs/enforcement.md",
+      "docs/decisions.md",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "Full run passed before adding `--bin athena`; afterwards re-ran athena-core and xtask tests, which passed."
+      },
+      {
+        "command": "cargo run -- check --history",
+        "result": "fail",
+        "note": "Fails to run: two binaries in the workspace."
+      },
+      {
+        "command": "cargo run --locked --bin athena -- check --history",
+        "result": "fail",
+        "note": "Builds and runs; exits 2 in the one-commit snapshot (violation on base commit b2a5b4c8f477). Not meaningful for 64ecdc9."
+      }
+    ],
+    "open_issues": [
+      "Root cause of 64ecdc9 carrying job adcd's records under ezm8's trailer is not established; it needs `git show 64ecdc9` on the real repository.",
+      "The 40-character id of 64ecdc9 was not available, so no athena.toml [history] exempt entry was added. If the commit is genuine history, add the full id there in a follow-up with the evidence.",
+      "Criterion 3 as written (`cargo run -- check --history` from the root) cannot pass without making the binary unambiguous. Fix by changing the criterion to `cargo run --bin athena -- check --history`, or by a workspace change that keeps xtask covered by test and clippy.",
+      "The expected-deliverable files that are not listed in this change (the other core, gate, CLI and binary-test files, plus athena.toml) were left untouched.",
+      "The cargo wiring in run.rs is covered only by the stand-in tests, not by a lifecycle test that changes the gate."
+    ],
+    "mistakes": [
+      "I ran `cargo test` before adding `--bin athena` to the candidate command, so I re-ran only the athena-core and xtask tests after that edit.",
+      "I tried a `grep` and a `tail` through Bash and the hook refused both; I switched to the Read and Grep tools."
+    ],
+    "learnings": [
+      "The producer snapshot has a single base commit and no records/, so history-based questions such as the cause of 64ecdc9 cannot be answered from it.",
+      "The workspace has two binaries (athena, xtask), so a bare `cargo run` from the root fails. default-members would change what `cargo test` and `cargo clippy` cover, so I did not add it.",
+      "In `landing()` (invariant.rs), the mismatch is raised when the Athena-Job trailer names a request job that differs from the job whose closing records (candidate, verification, outcome, outcome-landed) the commit adds.",
+      "Check env for the verifier side uses CARGO_TARGET_DIR under the job dir, so the candidate-gate build stays outside the working tree."
+    ],
+    "desires": [
+      "Read access to the real repository history, or the output of `git show 64ecdc9` and the records of jobs adcd and ezm8.",
+      "A lifecycle test fixture that can change crates/athena-gate in a nested run."
+    ]
+  }
+}
