@@ -1169,6 +1169,7 @@ fn a_queued_request_is_open_work_until_it_is_read_and_run() {
     let (unwanted, _) = athena.queue("translate the readme into Latin").unwrap();
     assert!(calls.lock().unwrap().is_empty(), "no model was called");
     let status = athena.status().unwrap();
+    assert!(status.recent.is_empty(), "queued requests have not run");
     for id in [&job, &unwanted] {
         assert!(
             status
@@ -1207,7 +1208,17 @@ fn a_queued_request_is_open_work_until_it_is_read_and_run() {
         .close(unwanted.as_str(), "not wanted after all", &Lines::default())
         .unwrap();
     assert_eq!(closed.state, OutcomeState::Dropped);
-    assert!(athena.status().unwrap().open.is_empty());
+    let status = athena.status().unwrap();
+    assert!(status.open.is_empty());
+    let dropped = status
+        .recent
+        .iter()
+        .find(|l| l.id == unwanted.as_str())
+        .unwrap();
+    assert!(
+        dropped.cost_usd.is_sign_positive(),
+        "a job that never ran costs $0, not $-0"
+    );
     let report = athena.check_history().unwrap();
     assert!(report.violations.is_empty(), "{:?}", report.violations);
 }

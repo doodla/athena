@@ -132,7 +132,7 @@ impl JobRecords {
 
     /// The sum of every invocation's cost (best value or lower bound).
     pub fn spent_usd(&self) -> f64 {
-        self.invocations.iter().map(|i| i.cost.best_lower()).sum()
+        positive_zero(self.invocations.iter().map(|i| i.cost.best_lower()).sum())
     }
 
     fn add(&mut self, path: &str, record: AnyRecord) {
@@ -159,6 +159,11 @@ impl JobRecords {
         self.invocations.sort_by_key(|i| i.seq);
         self.scores.sort_by_key(|s| s.at);
     }
+}
+
+/// `value`, with a negative zero (what summing no values gives) made positive, so nothing shows `$-0.00`.
+pub fn positive_zero(value: f64) -> f64 {
+    if value == 0.0 { 0.0 } else { value }
 }
 
 /// Every record at one commit.

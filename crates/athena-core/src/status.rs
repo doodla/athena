@@ -190,7 +190,8 @@ impl Athena {
         for job in records.request_jobs() {
             let state = self.state_name(job);
             *jobs_by_state.entry(state.clone()).or_default() += 1;
-            if recent.len() < 10 {
+            // Queued requests have not run; they show under open work.
+            if recent.len() < 10 && state != "queued" {
                 recent.push(job_line(job, &state));
             }
             if matches!(

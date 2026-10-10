@@ -74,7 +74,7 @@ pub fn sum_costs<'a>(
     what: &str,
 ) -> Quantity {
     let invocations: Vec<&Invocation> = invocations.into_iter().collect();
-    let value: f64 = invocations.iter().map(|i| i.cost.best_lower()).sum();
+    let value = crate::store::positive_zero(invocations.iter().map(|i| i.cost.best_lower()).sum());
     if invocations
         .iter()
         .all(|i| i.cost.provenance() == Provenance::Reported)
