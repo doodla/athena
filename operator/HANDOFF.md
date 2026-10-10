@@ -14,8 +14,10 @@ Athena's work. Anything beyond what a lazy user would do is an intervention: log
 ## Where things live
 
 - The spec: `BRIEF.md`. Read it at the start of every session.
-- The intervention log: Athena's, at the path below. Record each intervention as it happens.
-  - Path: _set when v0 is accepted_
+- The intervention log: Athena's, in `records/interventions/` (one JSON record per intervention).
+  Record each intervention as it happens with `athena intervene "<what>" --why "<why>" --class
+  <class of work> --category <category>`. Athena records a one-line correction of its reading
+  automatically.
 - Sandbox facts and open blockers: `operator/preflight.md`.
 - Your own decisions about operating: `operator/decisions.md`.
 - Everything else, including what to do next: ask Athena.
@@ -28,10 +30,11 @@ Athena's work. Anything beyond what a lazy user would do is an intervention: log
    If another session holds a live lease, do not push or merge; retry later. If its holder is
    archived or idle (check it with `get_session`), it is gone: take over and log that.
    Otherwise `opctl lease acquire`, `opctl install-hook`, commit the lease, and land it on `main`.
-2. Environment: run Athena's one-command setup from clean, and re-check the open blockers in
-   `operator/preflight.md`.
-3. Read `BRIEF.md`. Then get the state of the work from Athena.
-4. Log what the restart cost to get productive again, and anything lost, through Athena.
+2. Environment: run Athena's one-command setup from clean (`./setup.sh`), and re-check the open
+   blockers in `operator/preflight.md`. A hand fix to the environment is an intervention.
+3. Read `BRIEF.md`. Then get the state of the work from Athena: `athena status`.
+4. Log what the restart cost to get productive again, and anything lost:
+   `athena restart --cost "<what it cost>" --lost "<what was lost>"`.
 
 ## Restarting
 
