@@ -217,7 +217,7 @@ fn a_candidate_that_deletes_a_check_still_has_it_run() {
     let fx = Fixture::new();
     let config = test_config();
     let without_test_check = config.replace(
-        "[[capabilities.change.checks]]\nname = \"test\"\nkind = \"test\"\nrun = [\"sh\", \"-c\", \"test -f README.md && echo 'test result: ok. 1 passed; 0 failed; 0 ignored'\"]\n",
+        "[[capabilities.change.checks]]\nname = \"test\"\nkind = \"test\"\nrun = [\"sh\", \"-c\", \"test -f README.md && ! test -f .cargo/config.toml && echo 'test result: ok. 1 passed; 0 failed; 0 ignored'\"]\n",
         "",
     );
     assert_ne!(config, without_test_check);
@@ -291,6 +291,46 @@ fn relaxed_tool_configuration_does_not_relax_its_check() {
     assert_eq!(
         verification.tool_config_from_base,
         vec!["rustfmt.toml".to_string()]
+    );
+}
+
+#[test]
+fn a_cargo_config_runner_in_the_candidate_is_set_aside_for_the_checks() {
+    // M12 (blocks): a `.cargo/config.toml` runner that skips tests does not relax the test check: the
+    // checks run with the base's tool configuration, where the file does not exist.
+    let fx = Fixture::new();
+    let mut scenario = Scenario::default();
+    scenario.reading = reading(
+        &[(".cargo/config.toml", "create"), ("README.md", "modify")],
+        &[
+            ("content", ".cargo/config.toml sets a test runner"),
+            ("behavior", "the tests still pass"),
+        ],
+    );
+    scenario.edits.push((
+        ".cargo/config.toml".into(),
+        Some("[target.x86_64-unknown-linux-gnu]\nrunner = \"true\"\n".into()),
+    ));
+    let athena = fx.athena(scenario.script());
+    let proposal = athena.ask("add a test runner", &Lines::default()).unwrap();
+    let f = finished(
+        athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    let verification = f.verification.clone().unwrap();
+    assert_eq!(
+        verification.tool_config_from_base,
+        vec![".cargo/config.toml".to_string()]
+    );
+    assert!(
+        verification.checks.iter().all(|c| c.passed),
+        "the checks ran without the candidate's runner"
+    );
+    assert_eq!(f.state, OutcomeState::Landed, "{}", f.reason);
+    assert!(
+        fx.file(".cargo/config.toml").is_some(),
+        "the change itself lands, and governs later jobs"
     );
 }
 

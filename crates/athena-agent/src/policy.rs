@@ -266,7 +266,7 @@ fn tokenize(command: &str) -> Result<Vec<Token>, String> {
                 tokens.push(Token::Separator);
             }
             '<' | '>' => {
-                // A word of digits right before the operator is its file descriptor.
+                // A word of digits right before `<` or `>` is the file descriptor it redirects.
                 let fd = if in_word && !word.is_empty() && word.chars().all(|d| d.is_ascii_digit())
                 {
                     in_word = false;
@@ -796,10 +796,10 @@ mod tests {
         let p = policy(Role::Producer, dir.path());
         for command in [
             "git -c core.hooksPath=/tmp status",
-            "git --git-dir=/home/user/repo/.git log",
-            "git -C /home/user/repo log",
+            "git --git-dir=/srv/repo/.git log",
+            "git -C /srv/repo log",
             "git update-ref refs/heads/main HEAD",
-            "GIT_DIR=/home/user/repo/.git git log",
+            "GIT_DIR=/srv/repo/.git git log",
             "git commit -m x",
             "git diff --no-index /etc/passwd src/lib.rs",
             "git log --output=/tmp/x",
@@ -813,7 +813,7 @@ mod tests {
             "cargo --config 'build.rustflags=[]' build",
             "cargo +nightly build",
             "cargo build --target-dir /tmp/t",
-            "cargo build --manifest-path /home/user/repo/Cargo.toml",
+            "cargo build --manifest-path /srv/repo/Cargo.toml",
             "/usr/bin/git status",
             "ls ~",
         ] {

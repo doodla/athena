@@ -1,0 +1,45 @@
+# Athena's CI (docs/design/athena-v0.md §11.2): a thin call into Rust. Both jobs check out the full
+# history and start with `./setup.sh --ci`. Actions are pinned by commit SHA, the token is read-only, and
+# nothing is deployed. Tests that call real models are opt-in and never run here.
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # Weekly, so that new gitleaks rules reach old commits.
+    - cron: "17 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: fmt, clippy, tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          # For pull requests, check the commits that would land, not GitHub's merge commit.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Set up (pinned toolchain, gitleaks, athena)
+        run: ./setup.sh --ci
+      - name: cargo fmt --check, cargo clippy -D warnings, cargo test
+        run: cargo run --locked -p xtask -- ci
+
+  history:
+    name: the full history
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Set up (pinned toolchain, gitleaks, athena)
+        run: ./setup.sh --ci
+      - name: athena check --history
+        run: '"$HOME/.local/bin/athena" check --history'

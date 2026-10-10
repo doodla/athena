@@ -15,7 +15,8 @@ use std::sync::{Arc, Mutex};
 
 /// The repository's own configuration, with checks that are fast and observable:
 /// - `fmt` fails when `src/lib.rs` contains `BADLY`, unless `rustfmt.toml` says `relaxed`;
-/// - `test` fails without `README.md`, and otherwise reports one test.
+/// - `test` fails without `README.md` or with a `.cargo/config.toml` in the tree, and otherwise reports
+///   one test.
 pub fn test_config() -> String {
     let base = include_str!("../../../../athena.toml");
     let start = base
@@ -29,7 +30,7 @@ run = ["sh", "-c", "grep -q relaxed rustfmt.toml || ! grep -q BADLY src/lib.rs"]
 [[capabilities.change.checks]]
 name = "test"
 kind = "test"
-run = ["sh", "-c", "test -f README.md && echo 'test result: ok. 1 passed; 0 failed; 0 ignored'"]
+run = ["sh", "-c", "test -f README.md && ! test -f .cargo/config.toml && echo 'test result: ok. 1 passed; 0 failed; 0 ignored'"]
 
 "#;
     format!("{}{}{}", &base[..start], checks, &base[end..])

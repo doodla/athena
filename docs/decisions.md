@@ -8,7 +8,7 @@ Every significant choice in Athena's design gets an entry here. Each entry conta
 - **Reversal cost:** what it would take to undo it.
 - **Provenance:** where the rationale comes from, labeled as one of the following:
   - **stated:** the requirement comes from the user's brief, and the entry cites where;
-  - **evidenced:** the rationale rests on a measurement or experiment, cited as E1–E20 from Appendix A of
+  - **evidenced:** the rationale rests on a measurement or experiment, cited as E1–E21 from Appendix A of
     [`docs/design/athena-v0.md`](design/athena-v0.md), or as R1–R10 from the appendix of
     [review 1](design/reviews/athena-v0-review-1.md);
   - **inferred:** the rationale is the designer's own reasoning, and is never presented as stated.
@@ -24,8 +24,8 @@ replaces.
 Entries D01–D37 were written in revision 1 of the v0 design, and D38–D45 were added in revision 2 after
 review 1. The re-check (review 2) left five decisions to the user. They are folded into D22, D38, and D39,
 and added as D46 and D47, with the provenance "user decision after review 2". With them the design was
-accepted, so from here on entries are superseded, not revised. All of these entries belong to the
-`bootstrap` job.
+accepted, so from here on entries are superseded, not revised. D48–D53 were added while building v0, and
+amend earlier entries without rewriting them. All of these entries belong to the `bootstrap` job.
 
 ---
 
@@ -1046,3 +1046,99 @@ accepted, so from here on entries are superseded, not revised. All of these entr
 - **Provenance:** User decision after review 2 (N2): no model call may happen outside a job's records and
   budget. Evidenced: review 2's R15, a nested `claude` inside a snapshot authenticates. Stated: every model
   invocation is recorded (bootstrap brief, item 5).
+
+---
+
+## Entries added while building v0
+
+The entries below record what building v0 taught. Each supersedes or amends an accepted entry, which is
+left as it was. Their provenance is "build", with the evidence that prompted them.
+
+## D48 · Secret scans read commits through the git directory; staged changes are scanned as a commit
+
+- **Decision:** Amends D17. gitleaks scans only commits, through the repository's git directory, from an
+  empty working directory, and with git's location variables removed from its environment. The
+  `pre-commit` hook builds a temporary commit object from the index (never on any branch) and scans
+  `HEAD..<that commit>`. Redaction runs `gitleaks stdin` from the same empty directory. Admission also scans
+  the candidate commit, so a secret fails a job before verification.
+- **Alternatives:**
+  - (a) gitleaks' own `--pre-commit --staged` mode on the work tree, as first designed.
+  - (b) Refuse to run when a `.gitleaksignore` exists in the work tree.
+- **Tradeoff:** A temporary commit object per hook run; it is never referenced and is collected with other
+  loose objects. (a) lets a `.gitleaksignore` in the work tree exempt a finding whatever
+  `--gitleaks-ignore-path` names, so a commit could still carry its own exemption. (b) is fragile: the file
+  only needs to exist when the scan runs.
+- **Reversal cost:** Low.
+- **Provenance:** Found while building. Evidenced: E21, found by `content_cannot_relax_the_scan`.
+
+## D49 · Nested runs copy the working tree, can keep a named scratch, and skip the checks
+
+- **Decision:** Amends D47.
+  - Under the marker, Athena copies the working tree it was started in (tracked and untracked files, not
+    ignored ones) into a fresh scratch repository, rather than cloning it, so a producer can exercise its own
+    uncommitted edits.
+  - `ATHENA_SCRATCH_DIR`, when set, names a scratch directory that persists across nested commands, so a
+    nested `ask` and a later nested `go` see the same repository. Without it, every command gets a fresh
+    copy.
+  - A nested `go` records its checks as not run: the outer job runs its own checks on the same tree, and
+    running them again inside would recurse.
+- **Alternatives:** (a) `git clone`, as first designed, which sees only committed content, so a producer
+  exercising Athena would test the base rather than its change. (b) Run the checks in nested runs too.
+- **Tradeoff:** A nested `go` shows the command-line flow, not the checks; those stay the outer job's.
+  (b) would run the whole test suite inside a check inside a verifier, without bound.
+- **Reversal cost:** Low.
+- **Provenance:** Found while building. Inferred from the producer's case, which D47 did not consider.
+
+## D50 · Reserved domains may appear in committed content; history uses the tip's allow-lists
+
+- **Decision:** Amends D29. `[personal_data] email_allow` entries now have three forms: a local part
+  (`noreply@`), a domain (`@example.com`), and a domain suffix (`.invalid`). The reserved top-level domains
+  of RFC 2606 (`.invalid`, `.test`, `.example`) are allowed, since no person can own an address there. The
+  full-history check takes both sensitive-content allow-lists, `[secrets]` and `[personal_data]`, from the
+  tip, as D17 already did for secrets; commit-time checks still use the parent's.
+- **Alternatives:** (a) Rewrite the address in the code and accept a history that fails its own check.
+  (b) Exempt the commit.
+- **Tradeoff:** Allow-listing at the tip can excuse an old commit retroactively. That is the point for false
+  positives, and the change is itself a reviewed governance commit.
+- **Reversal cost:** Low.
+- **Provenance:** Found while building. Evidenced: the first history check flagged the snapshot identity
+  `snapshot@noreply.invalid` committed earlier in the bootstrap.
+
+## D51 · Every reading is committed before Athena waits for the user
+
+- **Decision:** Refines D40. `ask` and `correct` commit the request, the reading, its corrections and
+  interventions, and the reader's invocation before showing the prompt. Pressing Enter then makes the
+  prediction commit. The proposal commit is therefore the commit that introduced the accepted reading, and
+  `Athena-Prediction` names it. Every closing commit of a dispatched job carries `Athena-Prediction`, not
+  only landings.
+- **Alternatives:** Commit the proposal only when the command exits with the job still proposed, as first
+  designed.
+- **Tradeoff:** One more commit per interactive job. The alternative loses the reader's invocation record
+  if the user interrupts the prompt with Ctrl-C, and the brief requires every model invocation recorded.
+- **Reversal cost:** Low.
+- **Provenance:** Found while building. Inferred; stated requirement: every model invocation is recorded (brief, item 5).
+
+## D52 · A blocked job closed later records `outcome-abandoned.json`; budget overruns refuse dispatch
+
+- **Decision:** Refines D06 and D28.
+  - An outcome that follows `blocked` is named after its state: `outcome-landed.json` when the retried
+    landing succeeds, `outcome-abandoned.json` when the job is closed instead. Records stay append-only.
+  - When the producer's and verifier's caps together exceed what is left of the job's budget, `go` refuses
+    to dispatch and leaves the job proposed, rather than recording a failure; nothing was spent.
+  - A landing that the in-process gate refuses closes the job as `failed`, with all its records.
+- **Alternatives:** (a) Write the abandonment into `outcome-landed.json`, whose name would then mislead.
+  (b) Record a failed outcome for a dispatch that never happened.
+- **Tradeoff:** One more file name in the layout.
+- **Reversal cost:** Low.
+- **Provenance:** Found while building. Inferred.
+
+## D53 · Agents get the machine's network settings, when set
+
+- **Decision:** Amends D04's environment allow-list. `env_pass_if_set` includes the standard proxy and
+  certificate variables (`HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY` and their lowercase forms,
+  `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, `CARGO_HTTP_CAINFO`) and Claude Code's endpoint
+  variable, `ANTHROPIC_BASE_URL`. Each passes only when set, and none carries context.
+- **Alternatives:** Leave them out, which breaks agents on any network that requires a proxy.
+- **Tradeoff:** More names on the list. They configure the network, not the agent.
+- **Reversal cost:** Low.
+- **Provenance:** Found while building. Inferred.

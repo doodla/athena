@@ -536,6 +536,125 @@ mod tests {
         assert_eq!(judge(&git, "HEAD").len(), 1);
     }
 
+    fn verification_record(job: &str, fingerprint: &str) -> String {
+        format!(
+            "{{\n  \"schema\": \"athena.verification/1\",\n  \"job\": \"{job}\",\n  \"candidate_commit\": \"{c}\",\n  \"verified_fingerprint\": \"{fingerprint}\",\n  \"tool_config_from_base\": [],\n  \"checks\": [],\n  \"check_cleanup\": [],\n  \"verifier_invocation\": null,\n  \"criteria\": [],\n  \"findings\": [],\n  \"request_reading_mismatch\": null,\n  \"agent_verdict\": \"pass\",\n  \"final_verdict\": \"pass\",\n  \"reasons\": [],\n  \"inputs\": [],\n  \"summary\": null\n}}\n",
+            c = "0".repeat(40)
+        )
+    }
+
+    #[test]
+    fn a_landing_whose_content_differs_from_its_verification_is_refused() {
+        // M7 (blocks): a landing commit whose content differs from its verification (the CI audit).
+        let job = "20261010-153012-k7q2";
+        let dir_of = |job: &str| JobId::parse(job).unwrap().dir();
+        let (dir, git) = owner_repo();
+        let base = git.head().unwrap().unwrap();
+        write(
+            dir.path(),
+            &[("src/lib.rs", "pub fn a() { /* landed */ }\n")],
+        );
+        git.run(["add", "-A"]).unwrap();
+        let tree = git.write_index_tree().unwrap();
+        let landed = fingerprint(&git, &tree, &base).unwrap();
+        let verified_elsewhere = fingerprint(&git, &base, &base).unwrap();
+        write(
+            dir.path(),
+            &[(
+                &format!("{}/verification.json", dir_of(job)),
+                &verification_record(job, &verified_elsewhere),
+            )],
+        );
+        commit(
+            &git,
+            &format!("Land\n\nAthena-Job: {job}\nAthena-Verified-Content: {verified_elsewhere}\n"),
+        );
+        assert_eq!(
+            judge(&git, "HEAD").len(),
+            1,
+            "the trailer does not match the landed content"
+        );
+
+        let (dir, git) = owner_repo();
+        let base = git.head().unwrap().unwrap();
+        write(
+            dir.path(),
+            &[("src/lib.rs", "pub fn a() { /* landed */ }\n")],
+        );
+        git.run(["add", "-A"]).unwrap();
+        let tree = git.write_index_tree().unwrap();
+        let landed_here = fingerprint(&git, &tree, &base).unwrap();
+        assert_eq!(landed, landed_here);
+        write(
+            dir.path(),
+            &[(
+                &format!("{}/verification.json", dir_of(job)),
+                &verification_record(job, &landed_here),
+            )],
+        );
+        commit(
+            &git,
+            &format!("Land\n\nAthena-Job: {job}\nAthena-Verified-Content: {landed_here}\n"),
+        );
+        assert_eq!(
+            judge(&git, "HEAD"),
+            vec![],
+            "a landing whose verification matches passes"
+        );
+    }
+
+    #[test]
+    fn a_prediction_trailer_must_name_an_ancestor_that_added_the_reading() {
+        // M23 (blocks): a closing commit whose prediction commit is not an ancestor, or did not add the
+        // accepted reading.
+        let job = "20261010-153012-k7q2";
+        let dir = JobId::parse(job).unwrap().dir();
+        let (root, git) = owner_repo();
+        let unrelated = git.head().unwrap().unwrap();
+        write(root.path(), &[(&format!("{dir}/reading-1.json"), "{}")]);
+        let prediction = commit(&git, &format!("Read\n\nAthena-Job: {job}\n"));
+        let job_record = format!(
+            "{{\"schema\":\"athena.job/1\",\"id\":\"{job}\",\"kind\":\"request\",\"title\":\"t\",\"class_of_work\":\"docs\",\"capability\":\"change\",\"accepted_reading\":1,\"accepted_by\":\"user\",\"owner\":{{\"role\":\"producer\",\"capability\":null,\"model\":null,\"note\":null}},\"verifier_model\":null,\"caps\":null,\"base_commit\":null,\"config_sha256\":null,\"defaults_sha256\":null,\"athena\":null,\"driver\":null,\"brief_sha256\":null,\"dispatched_at\":null,\"request_path\":null,\"request_sha256\":null,\"cost\":null,\"tokens\":null,\"note\":null}}"
+        );
+        write(root.path(), &[(&format!("{dir}/job.json"), &job_record)]);
+        commit(&git, &format!("Dispatch\n\nAthena-Job: {job}\n"));
+        write(root.path(), &[(&format!("{dir}/outcome.json"), "{}")]);
+        let good = commit(
+            &git,
+            &format!("Close\n\nAthena-Job: {job}\nAthena-Prediction: {prediction}\n"),
+        );
+        assert_eq!(
+            check_prediction(&git, &Change::of_commit(&git, &good).unwrap()).unwrap(),
+            vec![]
+        );
+        write(root.path(), &[(&format!("{dir}/score.json"), "{}")]);
+        let wrong = commit(
+            &git,
+            &format!("Close\n\nAthena-Job: {job}\nAthena-Prediction: {unrelated}\n"),
+        );
+        assert_eq!(
+            check_prediction(&git, &Change::of_commit(&git, &wrong).unwrap())
+                .unwrap()
+                .len(),
+            1,
+            "it did not add the reading"
+        );
+        git.run(["checkout", "-q", "-b", "other", &unrelated])
+            .unwrap();
+        write(root.path(), &[(&format!("{dir}/job.json"), &job_record)]);
+        let elsewhere = commit(
+            &git,
+            &format!("Close\n\nAthena-Job: {job}\nAthena-Prediction: {prediction}\n"),
+        );
+        assert_eq!(
+            check_prediction(&git, &Change::of_commit(&git, &elsewhere).unwrap())
+                .unwrap()
+                .len(),
+            1,
+            "not an ancestor"
+        );
+    }
+
     #[test]
     fn exempt_commits_are_skipped() {
         let (_dir, git) = owner_repo();

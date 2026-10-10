@@ -12,6 +12,8 @@
 > **Evidence:** numbers in this document come from experiments run while designing. Appendix A lists them.
 > **Review response:** [Appendix D](#appendix-d-response-to-review-1) maps every finding of review 1 to
 > what changed, or to why it did not, and records the user's decisions after review 2.
+> **Built:** [Appendix E](#appendix-e-changes-made-while-building-v0) lists what building v0 changed, each
+> with its decision entry (D48–D53) and evidence (E21).
 
 ## Contents
 
@@ -37,6 +39,7 @@
 - [Appendix B: structured outputs of the three roles](#appendix-b-structured-outputs-of-the-three-roles)
 - [Appendix C: record examples](#appendix-c-record-examples)
 - [Appendix D: response to review 1](#appendix-d-response-to-review-1)
+- [Appendix E: changes made while building v0](#appendix-e-changes-made-while-building-v0)
 
 ---
 
@@ -219,7 +222,7 @@ creates records commits them before it exits:
 
 | Commit | Made when | Contains |
 |---|---|---|
-| proposal commit | a command exits with the job still proposed or declined (non-interactive `ask`, `q` at the prompt, `correct`) | request, readings, corrections, the interventions they imply, reader invocations |
+| proposal commit | every reading, before Athena waits for the user (D51) | request, readings, corrections, the interventions they imply, reader invocations |
 | prediction commit | dispatch | anything not yet committed from the proposal, `job.json`, and the producer brief |
 | closing commit | every terminal state, and `blocked` | invocations, candidate, verification, outcome, score; for a landed job it *is* the landing commit: the change plus its records |
 | late-landing commit | `go` on a blocked job that now lands | the change, plus an `outcome-landed.json` record |
@@ -573,6 +576,7 @@ records/
         verification.json           athena.verification/1 checks, verdict, findings, commands run
         outcome.json                athena.outcome/1      terminal state, totals
         outcome-landed.json         athena.outcome/1      only when a blocked job lands later
+        outcome-abandoned.json      athena.outcome/1      only when a blocked job is closed instead (D52)
         score.json                  athena.score/1
         score-<intervention-id>.json athena.score/1       re-score after a late intervention
     bootstrap/                      the reserved job that built v0
@@ -947,7 +951,10 @@ changes (D38):
      extends gitleaks' default rules with the reviewed allow-list entries. For commit-time scans the section
      is read from the parent commit; for the full-history scan, from `HEAD`, where allow-listing an old false
      positive is legitimate.
-   - `--gitleaks-ignore-path` points to an empty directory Athena controls.
+   - `--gitleaks-ignore-path` points to an empty directory Athena controls. gitleaks also reads a
+     `.gitleaksignore` from the directory it scans, so Athena scans commits only, through the git
+     directory, from an empty working directory; staged changes are scanned as a temporary commit object
+     (E21, D48).
    - `--ignore-gitleaks-allow` disables inline markers.
    - `--max-decode-depth=5` is pinned explicitly.
 
@@ -1028,8 +1035,10 @@ moving it off the candidate. Nested runs are made safe by mechanism (D47):
   real Claude Code driver refuses to start, so no model call can happen outside a job's records and
   budget.
 - **The scratch repository.** Under the marker, Athena never touches the repository it was started in. It
-  clones that repository into a fresh scratch directory, runs there with a scratch state directory, prints
-  where, and leaves the original untouched, so a nested `ask` leaves the snapshot at its candidate.
+  copies that working tree (tracked and untracked files) into a fresh scratch repository, runs there with a
+  scratch state directory, prints where, and leaves the original untouched, so a nested `ask` leaves the
+  snapshot at its candidate. `ATHENA_SCRATCH_DIR` names a scratch that persists across nested commands, and
+  a nested `go` leaves the checks to the outer job (D49).
 - **No live tests.** The hook denies `--ignored` and `--include-ignored` to agents (§7.5). The live tests
   also refuse to run under the marker.
 
@@ -1646,6 +1655,7 @@ about $0.0001 for the Jev probe.
 | E18 | What does Claude Code's default system prompt cost, given each role's tools? | 2,328 tokens with Read, Grep, and Glob, with Bash added, and with Edit and Write added as well. The 17,586 of E2 included 25 default tools, so replacing the prompt saves about 2.3k tokens per invocation, not 17k. |
 | E19 | Which flags keep an auto-memory file out? | A memory file planted at `projects/<sanitized cwd>/memory/MEMORY.md` reached the agent with no flags and with `--setting-sources ""`. It did not with `--restricted`, or with `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`. The design's first runs had also created an empty memory folder under `HOME`. |
 | E20 | Can credentials be checked without a model call? | `claude auth status` returned JSON (`loggedIn`, the auth method) in about 250 ms, with no model call. |
+| E21 | (Build) Does an empty `--gitleaks-ignore-path` keep every ignore file out? | No. With `--config` and an empty ignore path, a `.gitleaksignore` in the scanned repository's work tree holding `src/config.rs:github-pat:1` still exempted a generated token in a `gitleaks git` scan. An in-repository `.gitleaks.toml` and inline markers did not. Scanning through the git directory, from an empty working directory, found the token. |
 
 ## Appendix B: structured outputs of the three roles
 
@@ -1812,3 +1822,17 @@ decision after review 2".
 | **N1** shared build caches | Each job gets its own build directories, one per side. Nothing is shared across jobs: correctness over speed. | §10.4, §8 M26; D46 |
 | **N2** nested runs | A marker in every agent and check environment makes Athena use its fake driver and a scratch repository, and the hook denies live tests. No model call happens outside a job's records and budget. | §7.6, §8 M25; D47 |
 | **N3** file operations | The producer may run `rm`, `mv`, and `chmod`, confined to its own snapshot. | §7.5, §8 M11; D22 |
+
+## Appendix E: changes made while building v0
+
+Building v0 tested the design against running code. Where the code had to differ, the change is recorded
+here and as a decision entry that amends the accepted one.
+
+| Change | Why | Entry |
+|---|---|---|
+| gitleaks scans only commits, through the git directory, from an empty working directory; the `pre-commit` hook scans a temporary commit object built from the index; admission scans the candidate | a `.gitleaksignore` in the work tree exempted findings despite an empty `--gitleaks-ignore-path` (E21) | D48 |
+| Nested runs copy the working tree instead of cloning, can keep a named scratch across commands, and leave the checks to the outer job | a clone sees only committed content, so a producer could not exercise its own edits; checks inside a check would recurse | D49 |
+| Reserved top-level domains are allowed in committed content, and the history check takes `[personal_data]` from the tip, as it does `[secrets]` | a no-reply address under `.invalid` failed the history check under its parent's rules | D50 |
+| Every reading is committed before Athena waits at the prompt; every closing commit carries `Athena-Prediction` | an interrupted prompt would otherwise lose the reader's invocation record | D51 |
+| `outcome-abandoned.json` for a blocked job that is closed; a budget that cannot cover the producer and verifier refuses dispatch; a landing refused by the gate closes the job as failed | records stay append-only and accurate in every path | D52 |
+| Agents get the machine's proxy and certificate variables, and Claude Code's endpoint variable, when set | agents could not reach the model API on a network that requires a proxy | D53 |

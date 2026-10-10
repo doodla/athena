@@ -22,6 +22,31 @@ fn refuse_if_nested() {
     );
 }
 
+#[test]
+fn live_tests_refuse_inside_a_job() {
+    // M25 (blocks): the live tests refuse under the marker, before any model call.
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "live_the_contract_is_within_its_budget",
+            "--ignored",
+            "--test-threads=1",
+        ])
+        .env("ATHENA_NESTED", "20261010-153012-k7q2")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        text.contains("refuse to run inside an Athena job"),
+        "{text}"
+    );
+}
+
 fn config() -> Config {
     Config::parse(include_str!("../../../athena.toml")).unwrap()
 }
