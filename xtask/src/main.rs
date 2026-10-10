@@ -1,1 +1,342 @@
-fn main() {}
+//! Athena's setup and CI tasks (design §11).
+//!
+//! - `cargo run -p xtask -- setup [--ci] [--force] [--allow-dirty]`: takes a machine to a working Athena.
+//!   Every step is idempotent. `./setup.sh` installs rustup if needed and then runs this.
+//! - `cargo run -p xtask -- ci`: the checks CI runs (fmt, clippy, tests), runnable locally.
+//!
+//! Setup reads every pin from `athena.toml`, reads credentials only to report whether they work, and never
+//! stores them.
+
+use anyhow::{Context, Result, anyhow, bail};
+use athena_data::{Config, paths};
+use sha2::{Digest, Sha256};
+use std::path::{Path, PathBuf};
+use std::process::{Command, ExitCode, Stdio};
+
+fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let result = match args.first().map(String::as_str) {
+        Some("setup") => setup(&Flags::parse(&args[1..])),
+        Some("ci") => ci(),
+        _ => {
+            eprintln!("usage: cargo run -p xtask -- setup [--ci] [--force] [--allow-dirty]\n       cargo run -p xtask -- ci");
+            return ExitCode::from(2);
+        }
+    };
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("error: {error:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct Flags {
+    ci: bool,
+    force: bool,
+    allow_dirty: bool,
+}
+
+impl Flags {
+    fn parse(args: &[String]) -> Self {
+        Flags {
+            ci: args.iter().any(|a| a == "--ci"),
+            force: args.iter().any(|a| a == "--force"),
+            allow_dirty: args.iter().any(|a| a == "--allow-dirty"),
+        }
+    }
+}
+
+fn repo_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("xtask lives in the repository").to_path_buf()
+}
+
+fn step(name: &str) {
+    println!("\n== {name}");
+}
+
+fn run(cmd: &mut Command) -> Result<()> {
+    let shown = format!("{cmd:?}");
+    let status = cmd.status().with_context(|| format!("could not run {shown}"))?;
+    if !status.success() {
+        bail!("{shown} failed with {status}");
+    }
+    Ok(())
+}
+
+fn output(cmd: &mut Command) -> Result<String> {
+    let shown = format!("{cmd:?}");
+    let out = cmd.stderr(Stdio::inherit()).output().with_context(|| format!("could not run {shown}"))?;
+    if !out.status.success() {
+        bail!("{shown} failed with {}", out.status);
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+fn found(program: &str, arg: &str) -> Option<String> {
+    let out = Command::new(program).arg(arg).stderr(Stdio::null()).output().ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).lines().next().unwrap_or("").to_string())
+}
+
+fn setup(flags: &Flags) -> Result<()> {
+    let root = repo_root();
+    let config = Config::parse(&std::fs::read_to_string(root.join("athena.toml"))?)
+        .map_err(|e| anyhow!("athena.toml: {e}"))?;
+
+    step("1. Prerequisites");
+    let git = found("git", "--version").ok_or_else(|| anyhow!("git is required; install git 2.40 or later"))?;
+    let version = git.split_whitespace().nth(2).unwrap_or("0.0");
+    let mut parts = version.split('.').map(|p| p.parse::<u32>().unwrap_or(0));
+    let (major, minor) = (parts.next().unwrap_or(0), parts.next().unwrap_or(0));
+    if (major, minor) < (2, 40) {
+        bail!("git {version} is too old: Athena needs 2.40 or later (check-attr --source, merge-tree --merge-base)");
+    }
+    println!("git {version}");
+    let cc = found("cc", "--version")
+        .ok_or_else(|| anyhow!("a C linker (cc) is required by cargo; install your platform's build tools"))?;
+    println!("cc: {cc}");
+    let curl = found("curl", "--version").ok_or_else(|| anyhow!("curl is required to download pinned tools"))?;
+    println!("{}", curl.split(' ').take(2).collect::<Vec<_>>().join(" "));
+
+    step("2. Toolchain and crates");
+    println!("{}", output(Command::new("rustc").arg("--version").current_dir(&root))?);
+    run(Command::new("cargo").args(["fetch", "--locked"]).current_dir(&root))?;
+
+    step("3. gitleaks");
+    install_gitleaks(&config)?;
+
+    step("4. Athena");
+    let binary = build_and_adopt(&root, flags)?;
+
+    if flags.ci {
+        println!("\n--ci: skipping hooks, Claude Code, and credentials.");
+        return Ok(());
+    }
+
+    step("5. Git hooks");
+    install_hooks(&root, &binary, flags.force)?;
+
+    step("6. Claude Code");
+    let claude = ensure_claude(&config)?;
+
+    step("7. Credentials");
+    check_credentials(&claude);
+
+    step("Ready");
+    println!("athena {} adopted at {}", env!("CARGO_PKG_VERSION"), binary.display());
+    println!("next: athena ask \"<a one-line request>\"   (or: athena status)");
+    Ok(())
+}
+
+fn install_gitleaks(config: &Config) -> Result<()> {
+    let pin = &config.tools.gitleaks;
+    let target = paths::tool_path("gitleaks", &pin.version);
+    if target.exists()
+        && let Some(v) = found(target.to_str().unwrap_or(""), "version")
+        && v.trim() == pin.version
+    {
+        println!("gitleaks {} already installed at {}", pin.version, target.display());
+        return Ok(());
+    }
+    let platform = paths::platform_key().ok_or_else(|| anyhow!("no gitleaks pin for this platform"))?;
+    let expected = pin.sha256.get(platform).ok_or_else(|| anyhow!("athena.toml pins no gitleaks checksum for {platform}"))?;
+    let url = format!(
+        "https://github.com/gitleaks/gitleaks/releases/download/v{v}/gitleaks_{v}_{platform}.tar.gz",
+        v = pin.version
+    );
+    let dir = tempfile::tempdir()?;
+    let archive = dir.path().join("gitleaks.tar.gz");
+    println!("downloading {url}");
+    run(Command::new("curl").args(["-fsSL", "--retry", "3", "-o"]).arg(&archive).arg(&url))?;
+    let bytes = std::fs::read(&archive)?;
+    let actual: String = Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
+    if &actual != expected {
+        bail!("gitleaks archive checksum mismatch: expected {expected}, got {actual}; refusing to install");
+    }
+    println!("sha256 verified: {actual}");
+    let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(bytes.as_slice()));
+    let mut installed = false;
+    for entry in tar.entries()? {
+        let mut entry = entry?;
+        if entry.path()?.file_name().is_some_and(|n| n == "gitleaks") {
+            std::fs::create_dir_all(target.parent().expect("tool path has a parent"))?;
+            let partial = target.with_extension("partial");
+            entry.unpack(&partial)?;
+            set_executable(&partial)?;
+            std::fs::rename(&partial, &target)?;
+            installed = true;
+            break;
+        }
+    }
+    if !installed {
+        bail!("the gitleaks archive has no gitleaks binary");
+    }
+    println!("installed gitleaks {} at {}", pin.version, target.display());
+    Ok(())
+}
+
+fn build_and_adopt(root: &Path, flags: &Flags) -> Result<PathBuf> {
+    let commit = output(Command::new("git").args(["rev-parse", "HEAD"]).current_dir(root))?;
+    let status = output(Command::new("git").args(["status", "--porcelain"]).current_dir(root))?;
+    let dirty = !status.is_empty();
+    if dirty && !flags.allow_dirty {
+        bail!(
+            "the working tree has uncommitted changes, so this build would not name a commit (D45). \
+             Commit or stash them, or adopt anyway with --allow-dirty"
+        );
+    }
+    run(Command::new("cargo")
+        .args(["build", "--release", "--locked", "-p", "athena-cli"])
+        .env("ATHENA_BUILD_COMMIT", &commit)
+        .env("ATHENA_BUILD_DIRTY", if dirty { "true" } else { "false" })
+        .current_dir(root))?;
+    let built = root.join("target/release/athena");
+    let adopted = paths::athena_home().join("bin/athena");
+    std::fs::create_dir_all(adopted.parent().expect("bin has a parent"))?;
+    let same = std::fs::read(&adopted).ok() == Some(std::fs::read(&built)?);
+    if same {
+        println!("athena at {} is already this build ({})", adopted.display(), &commit[..12]);
+    } else {
+        let partial = adopted.with_extension("partial");
+        std::fs::copy(&built, &partial)?;
+        set_executable(&partial)?;
+        std::fs::rename(&partial, &adopted)?;
+        println!("adopted athena built from {}{} at {}", &commit[..12], if dirty { " (dirty)" } else { "" }, adopted.display());
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let local_bin = PathBuf::from(home).join(".local/bin");
+        std::fs::create_dir_all(&local_bin)?;
+        let link = local_bin.join("athena");
+        let points_here = std::fs::read_link(&link).ok().as_deref() == Some(adopted.as_path());
+        if !points_here {
+            if link.symlink_metadata().is_ok() {
+                std::fs::remove_file(&link)?;
+            }
+            symlink(&adopted, &link)?;
+        }
+        let on_path = std::env::var_os("PATH")
+            .is_some_and(|p| std::env::split_paths(&p).any(|d| d == local_bin));
+        println!("{} -> {}{}", link.display(), adopted.display(), if on_path { "" } else { "  (add ~/.local/bin to PATH)" });
+    }
+    Ok(adopted)
+}
+
+fn install_hooks(root: &Path, binary: &Path, force: bool) -> Result<()> {
+    let common = output(Command::new("git").args(["rev-parse", "--path-format=absolute", "--git-common-dir"]).current_dir(root))?;
+    let hooks = PathBuf::from(common).join("hooks");
+    std::fs::create_dir_all(&hooks)?;
+    for name in ["pre-commit", "commit-msg"] {
+        let hook = hooks.join(name);
+        match std::fs::read_link(&hook) {
+            Ok(target) if target == binary => {
+                println!("{name}: already linked");
+                continue;
+            }
+            Ok(_) | Err(_) if hook.symlink_metadata().is_ok() && !force => {
+                bail!(
+                    "{} exists and is not Athena's; leaving it alone. Re-run with --force to replace it",
+                    hook.display()
+                );
+            }
+            _ => {}
+        }
+        if hook.symlink_metadata().is_ok() {
+            std::fs::remove_file(&hook)?;
+        }
+        symlink(binary, &hook)?;
+        println!("{name} -> {}", binary.display());
+    }
+    Ok(())
+}
+
+fn ensure_claude(config: &Config) -> Result<PathBuf> {
+    let pin = &config.agents.claude_version;
+    let local = paths::athena_home().join("claude-code").join(pin);
+    let private = local.join("node_modules/.bin/claude");
+    for candidate in [PathBuf::from("claude"), private.clone()] {
+        if let Some(text) = found(candidate.to_str().unwrap_or("claude"), "--version")
+            && text.split_whitespace().next() == Some(pin.as_str())
+        {
+            let resolved = if candidate == Path::new("claude") { which("claude").unwrap_or(candidate) } else { candidate };
+            write_machine_config(&resolved)?;
+            println!("Claude Code {pin} at {}", resolved.display());
+            return Ok(resolved);
+        }
+    }
+    let npm = found("npm", "--version").ok_or_else(|| {
+        anyhow!("Claude Code {pin} is not installed, and npm is needed to install it privately; install Node.js and npm")
+    })?;
+    println!("installing Claude Code {pin} privately with npm {npm}");
+    std::fs::create_dir_all(&local)?;
+    run(Command::new("npm").args(["install", "--no-fund", "--no-audit", "--prefix"]).arg(&local).arg(format!("@anthropic-ai/claude-code@{pin}")))?;
+    write_machine_config(&private)?;
+    Ok(private)
+}
+
+fn which(program: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path).map(|d| d.join(program)).find(|p| p.is_file())
+}
+
+fn write_machine_config(claude: &Path) -> Result<()> {
+    let file = paths::athena_home().join("config.toml");
+    let text = format!("# Machine-local settings written by setup. Not committed.\nclaude_bin = {:?}\n", claude.to_string_lossy());
+    if std::fs::read_to_string(&file).ok().as_deref() != Some(text.as_str()) {
+        std::fs::create_dir_all(file.parent().expect("config has a parent"))?;
+        std::fs::write(&file, text)?;
+    }
+    Ok(())
+}
+
+fn check_credentials(claude: &Path) {
+    // `claude auth status` reports whether Claude Code can authenticate, without a model call (E20).
+    let out = Command::new(claude).args(["auth", "status"]).stderr(Stdio::null()).output();
+    let logged_in = out
+        .ok()
+        .and_then(|o| serde_json::from_slice::<serde_json::Value>(&o.stdout).ok())
+        .and_then(|v| v.get("loggedIn").and_then(serde_json::Value::as_bool));
+    match logged_in {
+        Some(true) => println!("Claude Code can authenticate."),
+        Some(false) => println!("Claude Code is not logged in: run `claude` once to log in, or set ANTHROPIC_API_KEY."),
+        None => println!("could not read `claude auth status`; Athena's agents may fail to authenticate."),
+    }
+}
+
+fn ci() -> Result<()> {
+    let root = repo_root();
+    for (name, args) in [
+        ("fmt", vec!["fmt", "--all", "--check"]),
+        ("clippy", vec!["clippy", "--all-targets", "--locked", "--", "-D", "warnings"]),
+        ("test", vec!["test", "--locked"]),
+    ] {
+        step(name);
+        run(Command::new("cargo").args(&args).current_dir(&root))?;
+    }
+    println!("\nci: fmt, clippy, and tests passed");
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_executable(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn symlink(target: &Path, link: &Path) -> Result<()> {
+    std::os::unix::fs::symlink(target, link)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_executable(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn symlink(_target: &Path, _link: &Path) -> Result<()> {
+    bail!("Athena's git hooks are symlinks, which need a Unix-like system")
+}

@@ -6,13 +6,15 @@
 //! - [`quantity`]: numbers that always carry their provenance (measured, reported, estimated, or pending);
 //! - [`id`]: time-sortable ids, and the reserved `bootstrap` job id;
 //! - [`config`]: `athena.toml`, the repository's configuration;
-//! - [`defaults`]: `defaults.toml`, the model of the user's default expectations.
+//! - [`defaults`]: `defaults.toml`, the model of the user's default expectations;
+//! - [`paths`]: where Athena keeps machine-local things (install and state directories).
 //!
 //! This crate is a leaf: it depends on no other Athena crate.
 
 pub mod config;
 pub mod defaults;
 pub mod id;
+pub mod paths;
 pub mod quantity;
 pub mod records;
 
