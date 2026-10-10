@@ -1,0 +1,163 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261010-225741-yvk0",
+  "n": 1,
+  "at": "2026-10-10T22:58:03.922111133Z",
+  "invocation_seq": 1,
+  "base_commit": "a0986ede51dc5cb8b490b805c8e27f8344ace9f8",
+  "config_sha256": "67db129587a26d4dcf0f2c3f54e46cfa967037cd9d4481a75f8ae4d2462c26fb",
+  "defaults_sha256": "34395568ed0684d5b19642d761d9d16e023f3263e4313e645b083d31b302e9bc",
+  "defaults_version": 1,
+  "title": "Give producers and verifiers read-only, filtered git history",
+  "summary": "Agent snapshots hold one or two synthetic commits (D08), so a job that cites a real commit such as 64ecdc9 cannot see it. I read this as: when a job needs history, the producer and verifier snapshots also carry the visible, filtered history, and the git commands they may run stay read-only.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "All changes are Rust code and tests, plus markdown docs."
+    },
+    {
+      "id": "tested",
+      "how": "New snapshot-history tests are added, and cargo test and clippy must pass."
+    },
+    {
+      "id": "designed",
+      "how": "The change touches the D08 isolation design, so the decision record is updated with alternatives."
+    },
+    {
+      "id": "small",
+      "how": "One focused change to snapshot creation and its call sites, with history limited to named commits."
+    },
+    {
+      "id": "public",
+      "how": "History is filtered so that no private content is exposed."
+    },
+    {
+      "id": "lazy-requests",
+      "how": "The scope was recovered from D08 and snapshot.rs instead of asking."
+    }
+  ],
+  "assumptions": [
+    "History is added only for commits the request or brief names (for example 64ecdc9), not the whole log, to keep snapshots small.",
+    "Excluded content stays hidden: records/ and athena-exclude paths are stripped from every history commit and message, so D08's isolation guarantee still holds.",
+    "The history lives in the snapshot's own throwaway repository, which shares no objects, refs or config with the user's repository. Agents can read it but cannot reach or move the user's branches.",
+    "The reader has no Bash, so it gets the same material as plain files (commit message and filtered diff).",
+    "Implementation sits in athena-git snapshot creation, with the call sites in athena-core run.rs and reading.rs. D08 needs a revision or a new decision entry."
+  ],
+  "question": "Should history be always available, or only for commits the request names (such as 64ecdc9)? I assumed only commits the request names.",
+  "acceptance_criteria": [
+    {
+      "text": "A new athena-git test creates a user repo with an extra commit, builds a snapshot with that commit requested, and checks that `git show <sha>` works inside the snapshot. Run `cargo test -p athena-git`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test commits a change to an athena-exclude path and to records/, then checks that neither the path's content nor its name appears in the snapshot's history (git log -p, git show). Run `cargo test`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test checks that the snapshot's git has no reachable path to the user's repository: no alternates, no remotes, and the user's refs unchanged. Run `cargo test`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Existing snapshot behavior is unchanged when no history is requested: the producer still gets one commit and the verifier two. Run `cargo test`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`cargo fmt --check` and `cargo clippy` are clean, and `cargo test` passes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "docs/decisions.md D08 (or a new decision) records the change with alternatives and tradeoffs, and the text no longer says agents never see real history.",
+      "kind": "content"
+    },
+    {
+      "text": "docs/enforcement.md and CHANGELOG.md describe the new read-only history access and what stays hidden.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-git/src/snapshot.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "docs/enforcement.md",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "p": 0.35
+    },
+    {
+      "path": "docs/design/athena-v0.md",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-git/src/lib.rs",
+      "action": "modify",
+      "p": 0.3
+    }
+  ],
+  "out_of_scope": [
+    "Giving agents write access to git or to the user's repository.",
+    "Exposing records/ or athena-exclude content through history.",
+    "Re-running the two rejected fix attempts on commit 64ecdc9.",
+    "Changes to athena.toml, defaults.toml, CI workflows or lint configuration."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.5,
+      "p_verification_passes": 0.45,
+      "p_user_intervenes": 0.4,
+      "cost_usd": {
+        "p10": 0.4,
+        "p50": 0.9,
+        "p90": 2.5
+      },
+      "wall_time_s": {
+        "p10": 350.0,
+        "p50": 700.0,
+        "p90": 1400.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.6285714285714287,
+      "p_verification_passes": 0.5,
+      "p_user_intervenes": 0.38,
+      "cost_usd": {
+        "p10": 0.24414328369548896,
+        "p50": 0.5587641091220517,
+        "p90": 1.6805115480266715
+      },
+      "wall_time_s": {
+        "p10": 213.4470922344518,
+        "p50": 416.2199364913404,
+        "p90": 729.2547017096414
+      }
+    }
+  },
+  "departures": "The reference forecast covers smaller jobs. This change touches the isolation design, which needs filtered history construction and security tests, so I raised cost and time and lowered acceptance and pass odds."
+}
