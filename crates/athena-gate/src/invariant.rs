@@ -5,14 +5,19 @@
 //! `Athena-Intervention:`, or `Athena-Record:` trailer, unless it touched only owner paths. If the
 //! fingerprint changed, X must be exactly one of:
 //!
-//! - (a) a landing commit of a job that Athena read, dispatched, and verified (D55): it carries
-//!   `Athena-Job`, `Athena-Prediction`, and an `Athena-Verified-Content` equal to its fingerprint; the
-//!   job's `job.json` is on the parent commit and the prediction commit, an ancestor, added the accepted
-//!   reading; X adds the job's candidate, verification, and landed outcome (or, after `blocked`, its
-//!   `outcome-landed.json`); the candidate and the verification both hold X's fingerprint, the final
-//!   verdict is pass, the verifier invocation the verification names is recorded, succeeded, used the
-//!   job's verifier model, and reconciles, as do the outcome's totals; and no earlier commit landed that
-//!   job;
+//! - (a) a landing commit of a job that Athena read, dispatched, and verified (D55). The job is the one
+//!   whose closing records X adds: X adds its candidate, verification, and landed outcome (or, after
+//!   `blocked`, its `outcome-landed.json`). Nothing is taken from trailers or ancestry, so a merge, a
+//!   squash merge, and a rebase merge all land the same way. The landed tree holds the job's `job.json`,
+//!   naming an accepted reading, and that reading; the reading's recorded time and invocation number
+//!   precede the dispatch and every producer and verifier invocation the records list (prediction before
+//!   work, proved from the records); the candidate and the verification both hold X's fingerprint, the
+//!   final verdict is pass, the verifier invocation the verification names is recorded, succeeded, used
+//!   the job's verifier model, and reconciles, as do the outcome's totals; and the job has not landed
+//!   before: its landed outcome is not on the parent, and (in a history walk) no earlier commit validly
+//!   landed it. Trailers are only hints that must agree: an `Athena-Verified-Content` that is not X's
+//!   fingerprint, or an `Athena-Job` naming another request job, refuses the landing; `Athena-Prediction`
+//!   is ignored;
 //! - (b) a declared intervention: `Athena-Intervention: <id>`, and X adds that intervention record;
 //! - (c) a bootstrap commit: `Athena-Job: bootstrap`, while the bootstrap range is open, or at or before
 //!   the commit that `records/jobs/bootstrap/outcome.json` names.
@@ -186,8 +191,44 @@ pub fn landing_job(
     Ok(landing(git, change, judged, &trailers, &fp, history)?.ok())
 }
 
+/// The jobs whose closing records (`candidate.json`, `verification.json`, `outcome.json`, or
+/// `outcome-landed.json`) `judged` adds. A commit that adds none does not claim to land a job.
+fn closing_jobs(judged: &Judged) -> BTreeSet<JobId> {
+    const CLOSING: [&str; 4] = [
+        "candidate.json",
+        "verification.json",
+        "outcome.json",
+        "outcome-landed.json",
+    ];
+    let mut jobs = BTreeSet::new();
+    for d in judged.diff.iter().filter(|d| d.status == 'A') {
+        let mut parts = d.path.split('/');
+        if let (Some("records"), Some("jobs"), Some(_month), Some(id), Some(name), None) = (
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+        ) && CLOSING.contains(&name)
+            && let Ok(job) = JobId::parse(id)
+            && job.is_request()
+            && d.path == format!("{}/{name}", job.dir())
+        {
+            jobs.insert(job);
+        }
+    }
+    jobs
+}
+
 /// `Ok(job)` when the commit is a valid landing of `job` (case a); `Err(Some(reason))` when it claims to
 /// be one but is not; `Err(None)` when it does not claim to be one.
+///
+/// The job is identified by the closing records the commit adds, never by trailers; the proof that it was
+/// read before the work is in the landed records (see [`prediction_problem`]); and ancestry is not used,
+/// so a squash or rebase merge, which leaves no ancestor to point at, lands the same way a merge does.
+/// Trailers are hints that must agree with the records: a verified-content value that is not the landed
+/// content, or an `Athena-Job` that names another request job, refuses the landing.
 fn landing(
     git: &Git,
     change: &Change,
@@ -196,50 +237,54 @@ fn landing(
     fp: &str,
     history: Option<&HistoryState>,
 ) -> Result<std::result::Result<JobId, Option<String>>> {
-    let claimed = trailer_values(trailers, VERIFIED_CONTENT);
-    let Some(claimed) = claimed.first() else {
+    let refuse = |reason: String| Ok(Err(Some(reason)));
+    let mut jobs = closing_jobs(judged).into_iter();
+    let Some(job) = jobs.next() else {
         return Ok(Err(None));
     };
-    let refuse = |reason: String| Ok(Err(Some(reason)));
-    if *claimed != fp {
-        return refuse(format!(
-            "Athena-Verified-Content {claimed} does not match the landed content {fp}"
-        ));
+    if jobs.next().is_some() {
+        return refuse("a commit adds closing records for more than one job".into());
     }
-    let Some(job) = trailer_values(trailers, JOB)
-        .first()
-        .and_then(|j| JobId::parse(j).ok())
-        .filter(JobId::is_request)
-    else {
-        return refuse("a landing commit needs an Athena-Job trailer naming its job".into());
-    };
+    for claimed in trailer_values(trailers, VERIFIED_CONTENT) {
+        if claimed != fp {
+            return refuse(format!(
+                "Athena-Verified-Content {claimed} does not match the landed content {fp}"
+            ));
+        }
+    }
+    for named in trailer_values(trailers, JOB) {
+        if let Ok(named) = JobId::parse(named)
+            && named.is_request()
+            && named != job
+        {
+            return refuse(format!(
+                "the Athena-Job trailer names {}, but the commit adds the records of {}",
+                named.as_str(),
+                job.as_str()
+            ));
+        }
+    }
     let Some(parent) = change.parents.first() else {
         return refuse("a root commit cannot land a job".into());
     };
     let dir = job.dir();
 
-    // The job was read and dispatched before it landed.
+    // The job was read and dispatched, and the reading came before the work, as its records show.
     let before = JobFiles::load(git, parent, &job)?;
-    let Some(dispatched) = &before.job else {
+    let after = JobFiles::load(git, &change.tree, &job)?;
+    let Some(dispatched) = &after.job else {
         return refuse(format!(
-            "{dir}/job.json is not on the parent commit, so no dispatched job lands here"
+            "{dir}/job.json is not in the landed tree, so no dispatched job lands here"
         ));
     };
     let Some(n) = dispatched.accepted_reading else {
         return refuse(format!("{dir}/job.json names no accepted reading"));
     };
-    let Some(prediction) = trailer_values(trailers, PREDICTION).first().copied() else {
-        return refuse(
-            "a landing commit needs an Athena-Prediction trailer naming the commit that added its accepted reading"
-                .into(),
-        );
-    };
-    if let Some(problem) = prediction_problem(git, parent, &job, n, prediction)? {
+    if let Some(problem) = prediction_problem(&after, &job, n) {
         return refuse(problem);
     }
 
     // It lands with its own closing records.
-    let after = JobFiles::load(git, &change.tree, &job)?;
     let added = |name: &str| {
         let path = format!("{dir}/{name}");
         judged
@@ -254,8 +299,9 @@ fn landing(
             .outcome
             .as_ref()
             .is_some_and(|o| o.state == OutcomeState::Landed);
+    // After a blocked outcome, which the parent holds, or which a squash brings in with the rest.
     let retried = added("outcome-landed.json")
-        && before
+        && after
             .outcome
             .as_ref()
             .is_some_and(|o| o.state == OutcomeState::Blocked);
@@ -327,54 +373,48 @@ fn landing(
         return refuse(v.detail.clone());
     }
 
-    let already = match history {
-        Some(state) => state.landed.contains(job.as_str()),
-        None => earlier_landing(git, parent, job.as_str())?,
-    };
-    if already {
+    // No second landing: the parent's records show none, and (in a history walk) no earlier commit did.
+    let landed_before = [&before.outcome, &before.later_outcome]
+        .into_iter()
+        .flatten()
+        .any(|o| o.state == OutcomeState::Landed);
+    let walked = history.is_some_and(|state| state.landed.contains(job.as_str()));
+    if landed_before || walked {
         return refuse(format!("job {} has already landed", job.as_str()));
     }
     Ok(Ok(job))
 }
 
-/// Why `prediction` is not the commit that added reading `n` of `job` before `parent`, if it is not.
-fn prediction_problem(
-    git: &Git,
-    parent: &str,
-    job: &JobId,
-    n: u32,
-    prediction: &str,
-) -> Result<Option<String>> {
-    let Some(predicted) = git.rev_parse(prediction)? else {
-        return Ok(Some(format!(
-            "Athena-Prediction {prediction} is not a commit"
-        )));
+/// Why the records of a landed job do not show that its accepted reading `n` came before the work, if
+/// they do not. The reading must be in the tree, and neither its time nor its invocation number may
+/// come after the dispatch, a producer invocation, or a verifier invocation that the records list.
+/// Nothing here depends on the history being kept: a squash holds the same records.
+fn prediction_problem(files: &JobFiles, job: &JobId, n: u32) -> Option<String> {
+    let dir = job.dir();
+    let Some(reading) = files.readings.iter().find(|r| r.n == n && &r.job == job) else {
+        return Some(format!("{dir}/reading-{n}.json is not in the landed tree"));
     };
-    if !git.is_ancestor(&predicted, parent)? {
-        return Ok(Some(format!(
-            "the prediction commit {} is not an ancestor",
-            short(&predicted)
-        )));
+    if let Some(dispatched_at) = files.job.as_ref().and_then(|j| j.dispatched_at)
+        && reading.at > dispatched_at
+    {
+        return Some(format!(
+            "{dir}/reading-{n}.json was recorded at {}, after the job was dispatched at {dispatched_at}",
+            reading.at
+        ));
     }
-    let reading = format!("{}/reading-{n}.json", job.dir());
-    if !git.added_paths(&predicted)?.contains(&reading) {
-        return Ok(Some(format!(
-            "the prediction commit {} did not add {reading}",
-            short(&predicted)
-        )));
-    }
-    Ok(None)
-}
-
-/// Whether a commit reachable from `rev` already landed `job`.
-pub fn earlier_landing(git: &Git, rev: &str, job: &str) -> Result<bool> {
-    for commit in git.log_grep(rev, &format!("^{JOB}: {}$", regex::escape(job)))? {
-        let trailers = git.trailers(&git.message(&commit)?)?;
-        if !trailer_values(&trailers, VERIFIED_CONTENT).is_empty() {
-            return Ok(true);
+    for (path, inv) in &files.invocations {
+        if inv.role == Role::Reader {
+            continue;
+        }
+        if reading.at > inv.started_at || reading.invocation_seq >= inv.seq {
+            return Some(format!(
+                "{dir}/reading-{n}.json (recorded at {}, invocation {}) does not precede {path} (started at {}), \
+                 so the prediction was not made before the work",
+                reading.at, reading.invocation_seq, inv.started_at
+            ));
         }
     }
-    Ok(false)
+    None
 }
 
 /// `Ok` when the commit declares an intervention and adds its record (case b).
@@ -428,52 +468,6 @@ fn names_existing_work(
     Ok(Some(
         "a commit that changes records names no job, intervention, or record that exists".into(),
     ))
-}
-
-/// The prediction trailer: `Athena-Prediction` names an earlier commit that added the job's accepted reading.
-pub fn check_prediction(git: &Git, change: &Change) -> Result<Vec<Violation>> {
-    let commit = change.commit.as_deref();
-    let trailers = change.trailers(git)?;
-    let mut violations = Vec::new();
-    for prediction in trailer_values(&trailers, PREDICTION) {
-        let fail = |detail: String| {
-            Violation::new(
-                Rule::Prediction,
-                detail,
-                "close jobs through athena, which names the commit that added the accepted reading",
-            )
-            .in_commit(commit)
-        };
-        let Some(job) = trailer_values(&trailers, JOB)
-            .first()
-            .and_then(|j| JobId::parse(j).ok())
-        else {
-            violations.push(fail(
-                "Athena-Prediction without an Athena-Job trailer".into(),
-            ));
-            continue;
-        };
-        let Some(parent) = change.parents.first() else {
-            violations.push(fail("a root commit cannot follow its prediction".into()));
-            continue;
-        };
-        let job_path = format!("{}/job.json", job.dir());
-        let accepted = match git.show_file(&change.tree, &job_path)? {
-            Some(bytes) => match AnyRecord::parse(&job_path, &bytes) {
-                Ok(AnyRecord::Job(j)) => j.accepted_reading,
-                _ => None,
-            },
-            None => None,
-        };
-        let Some(n) = accepted else {
-            violations.push(fail(format!("{job_path} names no accepted reading")));
-            continue;
-        };
-        if let Some(problem) = prediction_problem(git, parent, &job, n, prediction)? {
-            violations.push(fail(problem));
-        }
-    }
-    Ok(violations)
 }
 
 #[cfg(test)]
@@ -718,59 +712,7 @@ mod tests {
         assert!(
             found[0]
                 .detail
-                .contains("job.json is not on the parent commit")
-        );
-    }
-
-    #[test]
-    fn a_prediction_trailer_must_name_an_ancestor_that_added_the_reading() {
-        // M23 (blocks): a closing commit whose prediction commit is not an ancestor, or did not add the
-        // accepted reading.
-        let job = "20261010-153012-k7q2";
-        let dir = JobId::parse(job).unwrap().dir();
-        let (root, git) = owner_repo();
-        let unrelated = git.head().unwrap().unwrap();
-        write(root.path(), &[(&format!("{dir}/reading-1.json"), "{}")]);
-        let prediction = commit(&git, &format!("Read\n\nAthena-Job: {job}\n"));
-        let job_record = format!(
-            "{{\"schema\":\"athena.job/1\",\"id\":\"{job}\",\"kind\":\"request\",\"title\":\"t\",\"class_of_work\":\"docs\",\"capability\":\"change\",\"accepted_reading\":1,\"accepted_by\":\"user\",\"owner\":{{\"role\":\"producer\",\"capability\":null,\"model\":null,\"note\":null}},\"verifier_model\":null,\"caps\":null,\"base_commit\":null,\"config_sha256\":null,\"defaults_sha256\":null,\"athena\":null,\"driver\":null,\"brief_sha256\":null,\"dispatched_at\":null,\"request_path\":null,\"request_sha256\":null,\"cost\":null,\"tokens\":null,\"note\":null}}"
-        );
-        write(root.path(), &[(&format!("{dir}/job.json"), &job_record)]);
-        commit(&git, &format!("Dispatch\n\nAthena-Job: {job}\n"));
-        write(root.path(), &[(&format!("{dir}/outcome.json"), "{}")]);
-        let good = commit(
-            &git,
-            &format!("Close\n\nAthena-Job: {job}\nAthena-Prediction: {prediction}\n"),
-        );
-        assert_eq!(
-            check_prediction(&git, &Change::of_commit(&git, &good).unwrap()).unwrap(),
-            vec![]
-        );
-        write(root.path(), &[(&format!("{dir}/score.json"), "{}")]);
-        let wrong = commit(
-            &git,
-            &format!("Close\n\nAthena-Job: {job}\nAthena-Prediction: {unrelated}\n"),
-        );
-        assert_eq!(
-            check_prediction(&git, &Change::of_commit(&git, &wrong).unwrap())
-                .unwrap()
-                .len(),
-            1,
-            "it did not add the reading"
-        );
-        git.run(["checkout", "-q", "-b", "other", &unrelated])
-            .unwrap();
-        write(root.path(), &[(&format!("{dir}/job.json"), &job_record)]);
-        let elsewhere = commit(
-            &git,
-            &format!("Close\n\nAthena-Job: {job}\nAthena-Prediction: {prediction}\n"),
-        );
-        assert_eq!(
-            check_prediction(&git, &Change::of_commit(&git, &elsewhere).unwrap())
-                .unwrap()
-                .len(),
-            1,
-            "not an ancestor"
+                .contains("job.json is not in the landed tree")
         );
     }
 

@@ -321,13 +321,15 @@ pub fn gate(git: &Git, change: &Change, scope: Scope) -> Result<Vec<Violation>> 
             )?);
             violations.extend(content::check(git, change, &judged, None)?);
             violations.extend(invariant::check(git, change, &judged, None)?);
-            violations.extend(invariant::check_prediction(git, change)?);
             violations.extend(jobs::check(git, change, &judged, None)?);
             violations.extend(reconcile::check_tree(git, &change.tree)?);
         }
     }
     Ok(violations)
 }
+
+#[cfg(test)]
+mod landing_tests;
 
 #[cfg(test)]
 pub(crate) mod testutil {
