@@ -34,7 +34,8 @@ pub enum DefaultsError {
 
 impl DefaultsModel {
     pub fn parse(text: &str) -> Result<Self, DefaultsError> {
-        let model: DefaultsModel = toml::from_str(text).map_err(|e| DefaultsError::Parse(e.to_string()))?;
+        let model: DefaultsModel =
+            toml::from_str(text).map_err(|e| DefaultsError::Parse(e.to_string()))?;
         let mut seen = std::collections::BTreeSet::new();
         for d in &model.defaults {
             if !seen.insert(d.id.clone()) {
@@ -53,7 +54,10 @@ impl DefaultsModel {
 
     /// The compact text the reader loads: one line per default.
     pub fn render(&self) -> String {
-        let mut out = format!("# The user's default expectations (version {})\n\n", self.version);
+        let mut out = format!(
+            "# The user's default expectations (version {})\n\n",
+            self.version
+        );
         for d in &self.defaults {
             out.push_str(&format!(
                 "- {} [{}]: {}\n",
@@ -95,6 +99,9 @@ statement = "y"
 applies_to = ["*"]
 source = "s"
 "#;
-        assert_eq!(DefaultsModel::parse(text), Err(DefaultsError::Duplicate("a".into())));
+        assert_eq!(
+            DefaultsModel::parse(text),
+            Err(DefaultsError::Duplicate("a".into()))
+        );
     }
 }

@@ -187,6 +187,26 @@ pub struct PersonalData {
     pub email_allow: Vec<String>,
 }
 
+impl PersonalData {
+    /// Whether an email address may appear in committed content.
+    ///
+    /// An entry ending in `@` allows that local part, one starting with `@` allows that exact domain, and
+    /// one starting with `.` allows every domain ending in that suffix.
+    pub fn allows(&self, email: &str) -> bool {
+        let email = email.to_ascii_lowercase();
+        self.email_allow.iter().any(|entry| {
+            let entry = entry.to_ascii_lowercase();
+            if entry.ends_with('@') {
+                email.starts_with(&entry)
+            } else if entry.starts_with('@') || entry.starts_with('.') {
+                email.ends_with(&entry)
+            } else {
+                email == entry
+            }
+        })
+    }
+}
+
 /// Why a configuration cannot be used.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum ConfigError {
@@ -221,10 +241,18 @@ impl Config {
             return Err(ConfigError::Schema(self.athena.schema));
         }
         if self.models.producer_allowed.contains(&self.models.verifier) {
-            return Err(ConfigError::VerifierCanProduce(self.models.verifier.clone()));
+            return Err(ConfigError::VerifierCanProduce(
+                self.models.verifier.clone(),
+            ));
         }
-        if !self.models.producer_allowed.contains(&self.models.producer_default) {
-            return Err(ConfigError::DefaultProducerNotAllowed(self.models.producer_default.clone()));
+        if !self
+            .models
+            .producer_allowed
+            .contains(&self.models.producer_default)
+        {
+            return Err(ConfigError::DefaultProducerNotAllowed(
+                self.models.producer_default.clone(),
+            ));
         }
         if !self.classes.list.iter().any(|c| c == "other") {
             return Err(ConfigError::NoOtherClass);
@@ -244,14 +272,20 @@ impl Config {
             return Err(ConfigError::Budget("max_readings"));
         }
         let r = &self.forecast.reference;
-        for p in [r.p_reading_accepted, r.p_verification_passes, r.p_user_intervenes] {
+        for p in [
+            r.p_reading_accepted,
+            r.p_verification_passes,
+            r.p_user_intervenes,
+        ] {
             if !(0.0..=1.0).contains(&p) {
                 return Err(ConfigError::Reference("probabilities must lie in [0, 1]"));
             }
         }
         for q in [r.cost_usd, r.wall_time_s] {
             if !(q.p10 > 0.0 && q.p10 <= q.p50 && q.p50 <= q.p90) {
-                return Err(ConfigError::Reference("quantiles must satisfy 0 < p10 <= p50 <= p90"));
+                return Err(ConfigError::Reference(
+                    "quantiles must satisfy 0 < p10 <= p50 <= p90",
+                ));
             }
         }
         if r.pseudo_count <= 0.0 {
@@ -262,7 +296,11 @@ impl Config {
 
     /// The display name for a model, for Co-Authored-By trailers.
     pub fn model_name<'a>(&'a self, model: &'a str) -> &'a str {
-        self.models.names.get(model).map(String::as_str).unwrap_or(model)
+        self.models
+            .names
+            .get(model)
+            .map(String::as_str)
+            .unwrap_or(model)
     }
 
     pub fn capability(&self, id: &str) -> Option<&CapabilityConfig> {
@@ -296,7 +334,10 @@ pub(crate) mod tests {
             "producer_allowed = [\"claude-haiku-5-5\", \"claude-sonnet-5-5\"]",
             "producer_allowed = [\"claude-haiku-5-5\", \"claude-sonnet-5-5\", \"claude-opus-5-5\"]",
         );
-        assert!(matches!(Config::parse(&text), Err(ConfigError::VerifierCanProduce(_))));
+        assert!(matches!(
+            Config::parse(&text),
+            Err(ConfigError::VerifierCanProduce(_))
+        ));
     }
 
     #[test]
@@ -312,10 +353,31 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn email_allow_list_matches_by_kind() {
+        let config = Config::parse(REPO_CONFIG).unwrap();
+        let allow =
+            |local: &str, domain: &str| config.personal_data.allows(&format!("{local}@{domain}"));
+        assert!(allow("noreply", "anthropic.com"));
+        assert!(allow("someone", "example.org"));
+        assert!(allow("snapshot", "noreply.invalid"));
+        assert!(!allow("someone", "sub.example.org"));
+        assert!(!allow("jane", "corp.com"));
+        assert!(!allow("noreply.jane", "corp.com"));
+    }
+
+    #[test]
     fn test_checks_are_marked() {
         let config = Config::parse(REPO_CONFIG).unwrap();
         let checks = &config.capability("change").unwrap().checks;
-        assert!(checks.iter().any(|c| c.name == "test" && c.kind == CheckKind::Test));
-        assert!(checks.iter().any(|c| c.name == "fmt" && c.kind == CheckKind::Command));
+        assert!(
+            checks
+                .iter()
+                .any(|c| c.name == "test" && c.kind == CheckKind::Test)
+        );
+        assert!(
+            checks
+                .iter()
+                .any(|c| c.name == "fmt" && c.kind == CheckKind::Command)
+        );
     }
 }

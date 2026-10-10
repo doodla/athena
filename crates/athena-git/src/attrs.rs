@@ -43,7 +43,11 @@ impl PathClass {
 }
 
 /// Classifies `paths` by the rules committed in `rules_commit`. Paths need not exist in that commit.
-pub fn classify(git: &Git, rules_commit: &str, paths: &[String]) -> Result<BTreeMap<String, PathClass>> {
+pub fn classify(
+    git: &Git,
+    rules_commit: &str,
+    paths: &[String],
+) -> Result<BTreeMap<String, PathClass>> {
     refuse_info_attributes(git)?;
     let mut classes = BTreeMap::new();
     let mut to_check = Vec::new();
@@ -67,12 +71,21 @@ pub fn classify(git: &Git, rules_commit: &str, paths: &[String]) -> Result<BTree
         .with_config("core.attributesFile", "/dev/null")
         .with_env("GIT_ATTR_NOSYSTEM", "1");
     let out = rules.run_bytes(
-        ["check-attr", &format!("--source={rules_commit}"), "-z", "--stdin", EXCLUDE, READONLY],
+        [
+            "check-attr",
+            &format!("--source={rules_commit}"),
+            "-z",
+            "--stdin",
+            EXCLUDE,
+            READONLY,
+        ],
         Some(&input),
         &[] as &[(&str, &OsStr)],
     )?;
-    let fields: Vec<String> =
-        out.split(|b| *b == 0).map(|c| String::from_utf8_lossy(c).into_owned()).collect();
+    let fields: Vec<String> = out
+        .split(|b| *b == 0)
+        .map(|c| String::from_utf8_lossy(c).into_owned())
+        .collect();
     let mut excluded = std::collections::BTreeSet::new();
     let mut readonly = std::collections::BTreeSet::new();
     for triple in fields.chunks(3) {
@@ -130,12 +143,24 @@ pub fn fingerprint(git: &Git, treeish: &str, rules_commit: &str) -> Result<Strin
     let mut hasher = Sha256::new();
     for entry in &entries {
         if classes.get(&entry.path) == Some(&PathClass::Governed) {
-            hasher.update(format!("{} {} {}\t{}", entry.mode, entry.kind, entry.oid, entry.path).as_bytes());
+            hasher.update(
+                format!(
+                    "{} {} {}\t{}",
+                    entry.mode, entry.kind, entry.oid, entry.path
+                )
+                .as_bytes(),
+            );
             hasher.update([0u8]);
         }
     }
     let digest = hasher.finalize();
-    Ok(format!("sha256:{}", digest.iter().map(|b| format!("{b:02x}")).collect::<String>()))
+    Ok(format!(
+        "sha256:{}",
+        digest
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    ))
 }
 
 /// Paths whose class differs between the rules of two commits.
@@ -147,7 +172,11 @@ pub fn classification_changes(
 ) -> Result<Vec<String>> {
     let a = classify(git, rules_a, paths)?;
     let b = classify(git, rules_b, paths)?;
-    Ok(paths.iter().filter(|p| a.get(*p) != b.get(*p)).cloned().collect())
+    Ok(paths
+        .iter()
+        .filter(|p| a.get(*p) != b.get(*p))
+        .cloned()
+        .collect())
 }
 
 #[cfg(test)]
@@ -157,7 +186,10 @@ mod tests {
 
     fn owner_repo() -> (tempfile::TempDir, Git) {
         repo_with(&[
-            (".gitattributes", "/FRONT.md athena-exclude\n/SPEC.md athena-readonly\n"),
+            (
+                ".gitattributes",
+                "/FRONT.md athena-exclude\n/SPEC.md athena-readonly\n",
+            ),
             ("private/.gitattributes", "* athena-exclude\n"),
             ("private/notes.md", "owner notes"),
             ("FRONT.md", "front door"),
@@ -171,13 +203,24 @@ mod tests {
     fn committed_rules_classify_paths() {
         let (_dir, git) = owner_repo();
         let head = git.head().unwrap().unwrap();
-        let paths: Vec<String> = ["private/notes.md", "private/new-file.md", "FRONT.md", "SPEC.md", "records/jobs/x.json", "src/main.rs"]
-            .into_iter()
-            .map(String::from)
-            .collect();
+        let paths: Vec<String> = [
+            "private/notes.md",
+            "private/new-file.md",
+            "FRONT.md",
+            "SPEC.md",
+            "records/jobs/x.json",
+            "src/main.rs",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
         let classes = classify(&git, &head, &paths).unwrap();
         assert_eq!(classes["private/notes.md"], PathClass::Excluded);
-        assert_eq!(classes["private/new-file.md"], PathClass::Excluded, "rules apply to paths that do not exist yet");
+        assert_eq!(
+            classes["private/new-file.md"],
+            PathClass::Excluded,
+            "rules apply to paths that do not exist yet"
+        );
         assert_eq!(classes["FRONT.md"], PathClass::Excluded);
         assert_eq!(classes["SPEC.md"], PathClass::Readonly);
         assert_eq!(classes["records/jobs/x.json"], PathClass::Records);
@@ -190,7 +233,11 @@ mod tests {
         let (dir, git) = owner_repo();
         let home = dir.path().join("fakehome");
         std::fs::create_dir_all(home.join(".config/git")).unwrap();
-        std::fs::write(home.join(".config/git/attributes"), "src/main.rs athena-exclude\n").unwrap();
+        std::fs::write(
+            home.join(".config/git/attributes"),
+            "src/main.rs athena-exclude\n",
+        )
+        .unwrap();
         let git = git
             .with_env("HOME", home.to_str().unwrap())
             .with_env("XDG_CONFIG_HOME", home.join(".config").to_str().unwrap());
@@ -216,10 +263,20 @@ mod tests {
         let (dir, git) = owner_repo();
         let first = git.head().unwrap().unwrap();
         let fp1 = fingerprint(&git, &first, &first).unwrap();
-        write_files(dir.path(), &[("records/jobs/y.json", "{}"), ("private/more.md", "x"), ("SPEC.md", "edited spec")]);
+        write_files(
+            dir.path(),
+            &[
+                ("records/jobs/y.json", "{}"),
+                ("private/more.md", "x"),
+                ("SPEC.md", "edited spec"),
+            ],
+        );
         let second = commit_all(&git, "owner and records changes");
         assert_eq!(fingerprint(&git, &second, &first).unwrap(), fp1);
-        write_files(dir.path(), &[("src/main.rs", "fn main() { println!(); }\n")]);
+        write_files(
+            dir.path(),
+            &[("src/main.rs", "fn main() { println!(); }\n")],
+        );
         let third = commit_all(&git, "code change");
         assert_ne!(fingerprint(&git, &third, &first).unwrap(), fp1);
     }
@@ -228,9 +285,21 @@ mod tests {
     fn classification_changes_are_detected() {
         let (dir, git) = owner_repo();
         let first = git.head().unwrap().unwrap();
-        write_files(dir.path(), &[(".gitattributes", "/FRONT.md athena-exclude\n/SPEC.md athena-readonly\n/src/** athena-exclude\n")]);
+        write_files(
+            dir.path(),
+            &[(
+                ".gitattributes",
+                "/FRONT.md athena-exclude\n/SPEC.md athena-readonly\n/src/** athena-exclude\n",
+            )],
+        );
         let second = commit_all(&git, "exclude src");
-        let changed = classification_changes(&git, &first, &second, &["src/main.rs".into(), "SPEC.md".into()]).unwrap();
+        let changed = classification_changes(
+            &git,
+            &first,
+            &second,
+            &["src/main.rs".into(), "SPEC.md".into()],
+        )
+        .unwrap();
         assert_eq!(changed, vec!["src/main.rs".to_string()]);
     }
 }

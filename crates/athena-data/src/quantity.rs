@@ -135,7 +135,9 @@ impl Quantity {
             Provenance::Measured | Provenance::Reported if self.value.is_none() => {
                 return Err(QuantityError::MissingValue(self.provenance));
             }
-            Provenance::Pending if self.value.is_some() => return Err(QuantityError::PendingWithValue),
+            Provenance::Pending if self.value.is_some() => {
+                return Err(QuantityError::PendingWithValue);
+            }
             Provenance::Estimated
                 if self.value.is_none() && self.lower.is_none() && self.upper.is_none() =>
             {
@@ -147,7 +149,9 @@ impl Quantity {
             (Some(a), Some(b)) => a <= b,
             _ => true,
         };
-        if !(ordered(self.lower, self.value) && ordered(self.value, self.upper) && ordered(self.lower, self.upper))
+        if !(ordered(self.lower, self.value)
+            && ordered(self.value, self.upper)
+            && ordered(self.lower, self.upper))
         {
             return Err(QuantityError::BoundsOutOfOrder);
         }
@@ -211,7 +215,14 @@ struct RawQuantity {
 impl TryFrom<RawQuantity> for Quantity {
     type Error = QuantityError;
     fn try_from(raw: RawQuantity) -> Result<Self, Self::Error> {
-        Quantity::build(raw.value, raw.unit, raw.provenance, raw.basis, raw.lower, raw.upper)
+        Quantity::build(
+            raw.value,
+            raw.unit,
+            raw.provenance,
+            raw.basis,
+            raw.lower,
+            raw.upper,
+        )
     }
 }
 

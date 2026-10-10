@@ -33,13 +33,26 @@ pub struct Snapshot {
 impl Snapshot {
     /// Builds a snapshot of `source_commit` in `dir`, which must not exist yet, hiding what the rules of
     /// `rules_commit` mark private and everything under `records/`.
-    pub fn create(user: &Git, source_commit: &str, rules_commit: &str, dir: &Path, repo: SnapshotRepo) -> Result<Self> {
+    pub fn create(
+        user: &Git,
+        source_commit: &str,
+        rules_commit: &str,
+        dir: &Path,
+        repo: SnapshotRepo,
+    ) -> Result<Self> {
         if dir.exists() {
-            return Err(crate::GitError::Refused(format!("snapshot directory {} already exists", dir.display())));
+            return Err(crate::GitError::Refused(format!(
+                "snapshot directory {} already exists",
+                dir.display()
+            )));
         }
         std::fs::create_dir_all(dir)?;
         materialize(user, source_commit, rules_commit, dir)?;
-        let mut snapshot = Snapshot { dir: dir.to_path_buf(), base: None, candidate: None };
+        let mut snapshot = Snapshot {
+            dir: dir.to_path_buf(),
+            base: None,
+            candidate: None,
+        };
         if repo == SnapshotRepo::None {
             return Ok(snapshot);
         }
@@ -76,13 +89,23 @@ impl Snapshot {
     fn commit_all(&self, message: &str) -> Result<String> {
         let git = self.git();
         git.run(["add", "-A"])?;
-        git.run(["commit", "-q", "--allow-empty", "--no-verify", "-m", message])?;
+        git.run([
+            "commit",
+            "-q",
+            "--allow-empty",
+            "--no-verify",
+            "-m",
+            message,
+        ])?;
         Ok(git.head()?.expect("a commit was just made"))
     }
 
     /// Everything that changed in the work tree since the base commit, without rename detection.
     pub fn change_list(&self) -> Result<Vec<DiffEntry>> {
-        let base = self.base.as_deref().ok_or_else(|| crate::GitError::Refused("this snapshot has no base commit".into()))?;
+        let base = self
+            .base
+            .as_deref()
+            .ok_or_else(|| crate::GitError::Refused("this snapshot has no base commit".into()))?;
         let tree = self.work_tree_tree()?;
         self.git().diff_tree(base, &tree)
     }
@@ -135,7 +158,12 @@ impl Snapshot {
 }
 
 /// Writes the files of `commit` that agents may see (under `rules_commit`'s rules) into `dir`.
-pub fn materialize(user: &Git, commit: &str, rules_commit: &str, dir: &Path) -> Result<Vec<String>> {
+pub fn materialize(
+    user: &Git,
+    commit: &str,
+    rules_commit: &str,
+    dir: &Path,
+) -> Result<Vec<String>> {
     let entries = user.ls_tree(commit)?;
     let paths: Vec<String> = entries.iter().map(|e| e.path.clone()).collect();
     let classes = classify(user, rules_commit, &paths)?;
@@ -143,9 +171,14 @@ pub fn materialize(user: &Git, commit: &str, rules_commit: &str, dir: &Path) -> 
     let mut removals = Vec::new();
     let mut visible = Vec::new();
     for entry in &entries {
-        let class = classes.get(&entry.path).copied().unwrap_or(PathClass::Governed);
+        let class = classes
+            .get(&entry.path)
+            .copied()
+            .unwrap_or(PathClass::Governed);
         if !class.visible_to_agents() || entry.mode == "160000" {
-            removals.push(IndexEdit::Remove { path: entry.path.clone() });
+            removals.push(IndexEdit::Remove {
+                path: entry.path.clone(),
+            });
         } else {
             visible.push(entry.path.clone());
         }
@@ -196,7 +229,10 @@ mod tests {
 
     fn user_repo() -> (tempfile::TempDir, Git, String) {
         let (dir, git) = repo_with(&[
-            (".gitattributes", "/FRONT.md athena-exclude\n/SPEC.md athena-readonly\n"),
+            (
+                ".gitattributes",
+                "/FRONT.md athena-exclude\n/SPEC.md athena-readonly\n",
+            ),
             ("private/.gitattributes", "* athena-exclude\n"),
             ("private/notes.md", "owner notes"),
             ("FRONT.md", "front door"),
@@ -208,7 +244,11 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(dir.path().join("src/run.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(
+                dir.path().join("src/run.sh"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
             std::os::unix::fs::symlink("main.rs", dir.path().join("src/link.rs")).unwrap();
         }
         let head = commit_all(&git, "exec bit and symlink");
@@ -230,9 +270,17 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(snap.dir().join("src/run.sh")).unwrap().permissions().mode();
+            let mode = std::fs::metadata(snap.dir().join("src/run.sh"))
+                .unwrap()
+                .permissions()
+                .mode();
             assert_eq!(mode & 0o111, 0o111, "the executable bit survives");
-            assert!(std::fs::symlink_metadata(snap.dir().join("src/link.rs")).unwrap().file_type().is_symlink());
+            assert!(
+                std::fs::symlink_metadata(snap.dir().join("src/link.rs"))
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
         }
     }
 
@@ -246,10 +294,21 @@ mod tests {
         let snap = Snapshot::create(&git, &head, &head, &snap_dir, SnapshotRepo::Base).unwrap();
         let inner = snap.git();
         assert!(inner.show_file("HEAD", "FRONT.md").unwrap().is_none());
-        assert!(inner.show_file("HEAD", "private/notes.md").unwrap().is_none());
-        assert!(inner.rev_parse(&head).unwrap().is_none(), "the user's commit is not in the snapshot");
+        assert!(
+            inner
+                .show_file("HEAD", "private/notes.md")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            inner.rev_parse(&head).unwrap().is_none(),
+            "the user's commit is not in the snapshot"
+        );
         assert_eq!(inner.rev_list_reverse("--all").unwrap().len(), 1);
-        assert_eq!(std::fs::read(dir.path().join(".git/config")).unwrap(), config_before);
+        assert_eq!(
+            std::fs::read(dir.path().join(".git/config")).unwrap(),
+            config_before
+        );
     }
 
     #[test]
@@ -258,17 +317,32 @@ mod tests {
         let parent = tempfile::tempdir().unwrap();
         let snap_dir = parent.path().join("snap-edits");
         let snap = Snapshot::create(&git, &head, &head, &snap_dir, SnapshotRepo::Base).unwrap();
-        write_files(snap.dir(), &[("src/main.rs", "fn main() { /* edited */ }\n"), ("src/new.rs", "pub fn f() {}\n")]);
+        write_files(
+            snap.dir(),
+            &[
+                ("src/main.rs", "fn main() { /* edited */ }\n"),
+                ("src/new.rs", "pub fn f() {}\n"),
+            ],
+        );
         std::fs::remove_file(snap.dir().join("SPEC.md")).unwrap();
         let changes = snap.change_list().unwrap();
-        let summary: Vec<(char, &str)> = changes.iter().map(|c| (c.status, c.path.as_str())).collect();
-        assert_eq!(summary, vec![('D', "SPEC.md"), ('M', "src/main.rs"), ('A', "src/new.rs")]);
+        let summary: Vec<(char, &str)> = changes
+            .iter()
+            .map(|c| (c.status, c.path.as_str()))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![('D', "SPEC.md"), ('M', "src/main.rs"), ('A', "src/new.rs")]
+        );
     }
 
     #[test]
     fn verifier_snapshots_carry_base_then_candidate() {
         let (dir, git, head) = user_repo();
-        write_files(dir.path(), &[("src/main.rs", "fn main() { println!(\"candidate\"); }\n")]);
+        write_files(
+            dir.path(),
+            &[("src/main.rs", "fn main() { println!(\"candidate\"); }\n")],
+        );
         let candidate = commit_all(&git, "candidate");
         let parent = tempfile::tempdir().unwrap();
         let snap_dir = parent.path().join("snap-verify");
@@ -277,7 +351,9 @@ mod tests {
             &head,
             &head,
             &snap_dir,
-            SnapshotRepo::BaseAndCandidate { candidate_commit: candidate.clone() },
+            SnapshotRepo::BaseAndCandidate {
+                candidate_commit: candidate.clone(),
+            },
         )
         .unwrap();
         let inner = snap.git();
@@ -285,7 +361,11 @@ mod tests {
         let diff = inner.diff_tree("HEAD~1", "HEAD").unwrap();
         assert_eq!(diff.len(), 1);
         assert_eq!(diff[0].path, "src/main.rs");
-        assert!(std::fs::read_to_string(snap.dir().join("src/main.rs")).unwrap().contains("candidate"));
+        assert!(
+            std::fs::read_to_string(snap.dir().join("src/main.rs"))
+                .unwrap()
+                .contains("candidate")
+        );
     }
 
     #[test]
@@ -295,9 +375,15 @@ mod tests {
         let snap_dir = parent.path().join("snap-restore");
         let snap = Snapshot::create(&git, &head, &head, &snap_dir, SnapshotRepo::Base).unwrap();
         let tree = snap.work_tree_tree().unwrap();
-        write_files(snap.dir(), &[("junk.txt", "left by a check"), ("src/main.rs", "changed")]);
+        write_files(
+            snap.dir(),
+            &[("junk.txt", "left by a check"), ("src/main.rs", "changed")],
+        );
         let restored = snap.restore_to(&tree).unwrap();
-        assert_eq!(restored, vec!["junk.txt".to_string(), "src/main.rs".to_string()]);
+        assert_eq!(
+            restored,
+            vec!["junk.txt".to_string(), "src/main.rs".to_string()]
+        );
         assert_eq!(snap.work_tree_tree().unwrap(), tree);
     }
 }

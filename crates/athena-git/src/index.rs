@@ -15,7 +15,11 @@ pub struct TempIndex<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IndexEdit {
     /// Add or replace `path` with blob `oid` and `mode` (such as `100644`).
-    Put { mode: String, oid: String, path: String },
+    Put {
+        mode: String,
+        oid: String,
+        path: String,
+    },
     /// Remove `path`.
     Remove { path: String },
 }
@@ -74,7 +78,10 @@ impl<'a> TempIndex<'a> {
         if !prefix.ends_with('/') {
             prefix.push('/');
         }
-        self.run(["checkout-index", "-a", "-f", &format!("--prefix={prefix}")], None)?;
+        self.run(
+            ["checkout-index", "-a", "-f", &format!("--prefix={prefix}")],
+            None,
+        )?;
         Ok(())
     }
 }
@@ -93,13 +100,27 @@ mod tests {
         let oid = git.hash_object_w(b"new").unwrap();
         index
             .apply(&[
-                IndexEdit::Put { mode: "100644".into(), oid, path: "c/d.txt".into() },
-                IndexEdit::Remove { path: "b.txt".into() },
+                IndexEdit::Put {
+                    mode: "100644".into(),
+                    oid,
+                    path: "c/d.txt".into(),
+                },
+                IndexEdit::Remove {
+                    path: "b.txt".into(),
+                },
             ])
             .unwrap();
         let tree = index.write_tree().unwrap();
-        let paths: Vec<String> = git.ls_tree(&tree).unwrap().into_iter().map(|e| e.path).collect();
+        let paths: Vec<String> = git
+            .ls_tree(&tree)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.path)
+            .collect();
         assert_eq!(paths, vec!["a.txt", "c/d.txt"]);
-        assert_eq!(std::fs::read(dir.path().join(".git/index")).unwrap(), before);
+        assert_eq!(
+            std::fs::read(dir.path().join(".git/index")).unwrap(),
+            before
+        );
     }
 }

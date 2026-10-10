@@ -232,7 +232,9 @@ impl Quantiles {
             return Err("quantiles must be finite".into());
         }
         if !(p10 > 0.0 && p10 <= p50 && p50 <= p90) {
-            return Err(format!("quantiles must satisfy 0 < p10 <= p50 <= p90, got {p10}, {p50}, {p90}"));
+            return Err(format!(
+                "quantiles must satisfy 0 < p10 <= p50 <= p90, got {p10}, {p50}, {p90}"
+            ));
         }
         Ok(Quantiles { p10, p50, p90 })
     }
@@ -256,7 +258,11 @@ impl TryFrom<RawQuantiles> for Quantiles {
 
 impl From<Quantiles> for RawQuantiles {
     fn from(q: Quantiles) -> Self {
-        RawQuantiles { p10: q.p10, p50: q.p50, p90: q.p90 }
+        RawQuantiles {
+            p10: q.p10,
+            p50: q.p50,
+            p90: q.p90,
+        }
     }
 }
 
@@ -398,7 +404,10 @@ impl Reading {
         self.forecasts.reference.validate()?;
         for d in &self.deliverables {
             if !(0.0..=1.0).contains(&d.p) {
-                return Err(format!("deliverable {} has p = {} outside [0, 1]", d.path, d.p));
+                return Err(format!(
+                    "deliverable {} has p = {} outside [0, 1]",
+                    d.path, d.p
+                ));
             }
         }
         if self.capability.is_none() && self.decline_reason.is_none() {
@@ -833,7 +842,10 @@ impl AnyRecord {
             path: path.to_string(),
             reason: e.to_string(),
         })?;
-        let invalid = |reason: String| RecordError::Invalid { path: path.to_string(), reason };
+        let invalid = |reason: String| RecordError::Invalid {
+            path: path.to_string(),
+            reason,
+        };
         match &record {
             AnyRecord::Reading(r) => r.validate().map_err(invalid)?,
             AnyRecord::Intervention(i) if i.what.trim().is_empty() || i.why.trim().is_empty() => {
@@ -857,19 +869,30 @@ impl AnyRecord {
             AnyRecord::Correction(r) => format!("{}/correction-{}.json", r.job.dir(), r.n),
             AnyRecord::Job(r) => format!("{}/job.json", r.id.dir()),
             AnyRecord::Invocation(r) => {
-                format!("{}/invocations/{:02}-{}.json", r.job.dir(), r.seq, r.role.as_str())
+                format!(
+                    "{}/invocations/{:02}-{}.json",
+                    r.job.dir(),
+                    r.seq,
+                    r.role.as_str()
+                )
             }
             AnyRecord::Candidate(r) => format!("{}/candidate.json", r.job.dir()),
             AnyRecord::Verification(r) => format!("{}/verification.json", r.job.dir()),
-            AnyRecord::Outcome(r) if r.after_blocked => format!("{}/outcome-landed.json", r.job.dir()),
+            AnyRecord::Outcome(r) if r.after_blocked => {
+                format!("{}/outcome-landed.json", r.job.dir())
+            }
             AnyRecord::Outcome(r) => format!("{}/outcome.json", r.job.dir()),
             AnyRecord::Score(r) => match &r.cause {
                 None => format!("{}/score.json", r.job.dir()),
                 Some(cause) => format!("{}/score-{}.json", r.job.dir(), cause),
             },
-            AnyRecord::Intervention(r) => format!("records/interventions/{}/{}.json", r.id.month(), r.id),
+            AnyRecord::Intervention(r) => {
+                format!("records/interventions/{}/{}.json", r.id.month(), r.id)
+            }
             AnyRecord::Restart(r) => format!("records/restarts/{}/{}.json", r.id.month(), r.id),
-            AnyRecord::Resolution(r) => format!("records/resolutions/{}/{}.json", r.id.month(), r.id),
+            AnyRecord::Resolution(r) => {
+                format!("records/resolutions/{}/{}.json", r.id.month(), r.id)
+            }
         }
     }
 
@@ -897,7 +920,10 @@ const JOB_MARKDOWN: [&str; 2] = ["brief-producer.md", "brief-verifier.md"];
 /// Checks a file added under `records/`: a record at its canonical location, or an allowed Markdown file.
 /// Returns the parsed record for JSON files.
 pub fn check_record_file(path: &str, bytes: &[u8]) -> Result<Option<AnyRecord>, RecordError> {
-    if let Some(name) = path.strip_suffix(".md").map(|_| path.rsplit('/').next().unwrap_or(path)) {
+    if let Some(name) = path
+        .strip_suffix(".md")
+        .map(|_| path.rsplit('/').next().unwrap_or(path))
+    {
         let dir = path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
         let in_job_dir = is_job_dir(dir);
         let bootstrap_brief = dir == "records/jobs/bootstrap"
@@ -909,15 +935,22 @@ pub fn check_record_file(path: &str, bytes: &[u8]) -> Result<Option<AnyRecord>, 
         if (in_job_dir && JOB_MARKDOWN.contains(&name)) || bootstrap_brief {
             return Ok(None);
         }
-        return Err(RecordError::UnknownFile { path: path.to_string() });
+        return Err(RecordError::UnknownFile {
+            path: path.to_string(),
+        });
     }
     if !path.ends_with(".json") {
-        return Err(RecordError::UnknownFile { path: path.to_string() });
+        return Err(RecordError::UnknownFile {
+            path: path.to_string(),
+        });
     }
     let record = AnyRecord::parse(path, bytes)?;
     let expected = record.canonical_path();
     if expected != path {
-        return Err(RecordError::Misplaced { path: path.to_string(), expected });
+        return Err(RecordError::Misplaced {
+            path: path.to_string(),
+            expected,
+        });
     }
     Ok(Some(record))
 }
@@ -927,7 +960,9 @@ fn is_job_dir(dir: &str) -> bool {
     if dir == "records/jobs/bootstrap" {
         return true;
     }
-    let Some(rest) = dir.strip_prefix("records/jobs/") else { return false };
+    let Some(rest) = dir.strip_prefix("records/jobs/") else {
+        return false;
+    };
     let mut parts = rest.split('/');
     match (parts.next(), parts.next(), parts.next()) {
         (Some(month), Some(id), None) => RecordId::parse(id).is_ok_and(|id| id.month() == month),
@@ -974,13 +1009,26 @@ mod tests {
             decline_reason: None,
             producer_model: "claude-sonnet-5-5".into(),
             verifier_model: "claude-opus-5-5".into(),
-            defaults_applied: vec![DefaultApplied { id: "strangers".into(), how: "plain prose".into() }],
+            defaults_applied: vec![DefaultApplied {
+                id: "strangers".into(),
+                how: "plain prose".into(),
+            }],
             assumptions: vec![],
             question: None,
-            acceptance_criteria: vec![Criterion { text: "CHANGELOG.md exists".into(), kind: CriterionKind::Content }],
-            deliverables: vec![Deliverable { path: "CHANGELOG.md".into(), action: DeliverableAction::Create, p: 0.95 }],
+            acceptance_criteria: vec![Criterion {
+                text: "CHANGELOG.md exists".into(),
+                kind: CriterionKind::Content,
+            }],
+            deliverables: vec![Deliverable {
+                path: "CHANGELOG.md".into(),
+                action: DeliverableAction::Create,
+                p: 0.95,
+            }],
             out_of_scope: vec![],
-            forecasts: Forecasts { reader: forecast.clone(), reference: forecast },
+            forecasts: Forecasts {
+                reader: forecast.clone(),
+                reference: forecast,
+            },
             departures: None,
         }
     }
@@ -997,10 +1045,15 @@ mod tests {
     #[test]
     fn unknown_fields_in_records_are_refused() {
         // M5 (blocks): an unknown field fails parsing.
-        let mut value: serde_json::Value = serde_json::from_str(&AnyRecord::Reading(Box::new(sample_reading())).to_json()).unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_str(&AnyRecord::Reading(Box::new(sample_reading())).to_json())
+                .unwrap();
         value["surprise"] = serde_json::json!(1);
         let text = serde_json::to_vec(&value).unwrap();
-        assert!(matches!(AnyRecord::parse("x", &text), Err(RecordError::Parse { .. })));
+        assert!(matches!(
+            AnyRecord::parse("x", &text),
+            Err(RecordError::Parse { .. })
+        ));
     }
 
     #[test]
@@ -1010,13 +1063,18 @@ mod tests {
         let good = "records/jobs/2026-10/20261010-153012-k7q2/reading-1.json";
         assert!(check_record_file(good, text.as_bytes()).is_ok());
         let bad = "records/jobs/2026-10/20261010-153012-k7q2/reading-2.json";
-        assert!(matches!(check_record_file(bad, text.as_bytes()), Err(RecordError::Misplaced { .. })));
+        assert!(matches!(
+            check_record_file(bad, text.as_bytes()),
+            Err(RecordError::Misplaced { .. })
+        ));
     }
 
     #[test]
     fn out_of_order_quantiles_are_refused() {
         // M4: a reading with p10 > p50 does not parse.
-        let text = AnyRecord::Reading(Box::new(sample_reading())).to_json().replacen("\"p10\": 0.2", "\"p10\": 0.9", 1);
+        let text = AnyRecord::Reading(Box::new(sample_reading()))
+            .to_json()
+            .replacen("\"p10\": 0.2", "\"p10\": 0.9", 1);
         assert!(AnyRecord::parse("x", text.as_bytes()).is_err());
     }
 
@@ -1025,7 +1083,10 @@ mod tests {
         let mut reading = sample_reading();
         reading.deliverables[0].p = 1.5;
         let text = AnyRecord::Reading(Box::new(reading)).to_json();
-        assert!(matches!(AnyRecord::parse("x", text.as_bytes()), Err(RecordError::Invalid { .. })));
+        assert!(matches!(
+            AnyRecord::parse("x", text.as_bytes()),
+            Err(RecordError::Invalid { .. })
+        ));
     }
 
     #[test]
@@ -1053,7 +1114,10 @@ mod tests {
             source: InterventionSource::User,
             with_staged_changes: true,
         });
-        assert_eq!(record.canonical_path(), "records/interventions/2026-10/20261010-153012-k7q2.json");
+        assert_eq!(
+            record.canonical_path(),
+            "records/interventions/2026-10/20261010-153012-k7q2.json"
+        );
     }
 
     #[test]
@@ -1069,7 +1133,11 @@ mod tests {
             quantities: vec![],
             models: None,
         }));
-        assert!(score.canonical_path().ends_with("/score-20261011-090000-abcd.json"));
+        assert!(
+            score
+                .canonical_path()
+                .ends_with("/score-20261011-090000-abcd.json")
+        );
     }
 
     #[test]
@@ -1082,7 +1150,12 @@ mod tests {
             capability: None,
             accepted_reading: None,
             accepted_by: None,
-            owner: Owner { role: "automation engineer".into(), capability: None, model: None, note: None },
+            owner: Owner {
+                role: "automation engineer".into(),
+                capability: None,
+                model: None,
+                note: None,
+            },
             verifier_model: None,
             caps: None,
             base_commit: None,
@@ -1094,8 +1167,14 @@ mod tests {
             dispatched_at: None,
             request_path: Some("records/jobs/bootstrap/brief.md".into()),
             request_sha256: None,
-            cost: Some(Quantity::pending(Unit::Usd, "resolved later from measured usage")),
-            tokens: Some(Quantity::pending(Unit::Tokens, "resolved later from measured usage")),
+            cost: Some(Quantity::pending(
+                Unit::Usd,
+                "resolved later from measured usage",
+            )),
+            tokens: Some(Quantity::pending(
+                Unit::Tokens,
+                "resolved later from measured usage",
+            )),
             note: None,
         };
         let record = AnyRecord::Job(Box::new(job));

@@ -52,7 +52,10 @@ impl RecordId {
 
     /// Parses and validates an id.
     pub fn parse(input: &str) -> Result<Self, IdError> {
-        let err = |reason| IdError { input: input.to_string(), reason };
+        let err = |reason| IdError {
+            input: input.to_string(),
+            reason,
+        };
         let bytes = input.as_bytes();
         if bytes.len() != 20 {
             return Err(err("expected YYYYMMDD-HHMMSS-xxxx"));
@@ -60,18 +63,29 @@ impl RecordId {
         if bytes[8] != b'-' || bytes[15] != b'-' {
             return Err(err("expected dashes after the date and the time"));
         }
-        if !bytes[..8].iter().chain(&bytes[9..15]).all(u8::is_ascii_digit) {
+        if !bytes[..8]
+            .iter()
+            .chain(&bytes[9..15])
+            .all(u8::is_ascii_digit)
+        {
             return Err(err("the date and time must be digits"));
         }
         if !bytes[16..].iter().all(|b| CROCKFORD.contains(b)) {
-            return Err(err("the suffix must be four lowercase Crockford base32 characters"));
+            return Err(err(
+                "the suffix must be four lowercase Crockford base32 characters",
+            ));
         }
         let month: u32 = input[4..6].parse().map_err(|_| err("bad month"))?;
         let day: u32 = input[6..8].parse().map_err(|_| err("bad day"))?;
         let hour: u32 = input[9..11].parse().map_err(|_| err("bad hour"))?;
         let minute: u32 = input[11..13].parse().map_err(|_| err("bad minute"))?;
         let second: u32 = input[13..15].parse().map_err(|_| err("bad second"))?;
-        if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || minute > 59 || second > 60 {
+        if !(1..=12).contains(&month)
+            || !(1..=31).contains(&day)
+            || hour > 23
+            || minute > 59
+            || second > 60
+        {
             return Err(err("the date or time is out of range"));
         }
         Ok(RecordId(input.to_string()))
@@ -209,6 +223,9 @@ mod tests {
         assert_eq!(JobId::Bootstrap.dir(), "records/jobs/bootstrap");
         let job = JobId::parse("20261010-153012-k7q2").unwrap();
         assert_eq!(job.dir(), "records/jobs/2026-10/20261010-153012-k7q2");
-        assert_eq!(serde_json::to_string(&job).unwrap(), "\"20261010-153012-k7q2\"");
+        assert_eq!(
+            serde_json::to_string(&job).unwrap(),
+            "\"20261010-153012-k7q2\""
+        );
     }
 }

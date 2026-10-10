@@ -10,30 +10,40 @@
 use std::path::{Path, PathBuf};
 
 fn home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/"))
 }
 
 fn env_dir(key: &str) -> Option<PathBuf> {
-    std::env::var_os(key).filter(|v| !v.is_empty()).map(PathBuf::from)
+    std::env::var_os(key)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
 }
 
 /// The install directory.
 pub fn athena_home() -> PathBuf {
     env_dir("ATHENA_HOME").unwrap_or_else(|| {
-        env_dir("XDG_DATA_HOME").unwrap_or_else(|| home().join(".local/share")).join("athena")
+        env_dir("XDG_DATA_HOME")
+            .unwrap_or_else(|| home().join(".local/share"))
+            .join("athena")
     })
 }
 
 /// The root of all per-repository state directories.
 pub fn state_root() -> PathBuf {
     env_dir("ATHENA_STATE_DIR").unwrap_or_else(|| {
-        env_dir("XDG_STATE_HOME").unwrap_or_else(|| home().join(".local/state")).join("athena")
+        env_dir("XDG_STATE_HOME")
+            .unwrap_or_else(|| home().join(".local/state"))
+            .join("athena")
     })
 }
 
 /// The state directory for one repository, keyed by its git common directory.
 pub fn repo_state_dir(common_git_dir: &Path) -> PathBuf {
-    let canonical = common_git_dir.canonicalize().unwrap_or_else(|_| common_git_dir.to_path_buf());
+    let canonical = common_git_dir
+        .canonicalize()
+        .unwrap_or_else(|_| common_git_dir.to_path_buf());
     let text = canonical.to_string_lossy();
     let name = canonical
         .parent()
@@ -46,7 +56,11 @@ pub fn repo_state_dir(common_git_dir: &Path) -> PathBuf {
 
 /// The path of a pinned tool's binary inside the install directory.
 pub fn tool_path(tool: &str, version: &str) -> PathBuf {
-    athena_home().join("tools").join(tool).join(version).join(tool)
+    athena_home()
+        .join("tools")
+        .join(tool)
+        .join(version)
+        .join(tool)
 }
 
 /// The platform key used in tool pins, such as `linux_x64`.
