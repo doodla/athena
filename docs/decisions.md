@@ -24,7 +24,7 @@ replaces.
 Entries D01–D37 were written in revision 1 of the v0 design, and D38–D45 were added in revision 2 after
 review 1. The re-check (review 2) left five decisions to the user. They are folded into D22, D38, and D39,
 and added as D46 and D47, with the provenance "user decision after review 2". With them the design was
-accepted, so from here on entries are superseded, not revised. D48–D53 were added while building v0, and
+accepted, so from here on entries are superseded, not revised. D48–D54 were added while building v0, and
 amend earlier entries without rewriting them. All of these entries belong to the `bootstrap` job.
 
 ---
@@ -1142,3 +1142,15 @@ left as it was. Their provenance is "build", with the evidence that prompted the
 - **Tradeoff:** More names on the list. They configure the network, not the agent.
 - **Reversal cost:** Low.
 - **Provenance:** Found while building. Inferred.
+
+## D54 · Machine paths are replaced with placeholders before anything is recorded
+
+- **Decision:** Amends D29. Besides secrets and private addresses, redaction replaces the job's state
+  directory with `<job>`, the repository's state directory with `<state>`, and the home directory with `~`,
+  in agent free text, commands run, denials, and check output.
+- **Alternatives:** Record paths as they are, since they are not secrets.
+- **Tradeoff:** A recorded path no longer says exactly where a file was on the machine; the placeholder
+  says which directory it was under, which is what a reader needs.
+- **Reversal cost:** Low.
+- **Provenance:** Found while building. Evidenced: the first acceptance jobs recorded clippy's output with
+  absolute paths under the home directory, which on a user's machine names the user.

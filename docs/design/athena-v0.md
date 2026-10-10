@@ -13,7 +13,7 @@
 > **Review response:** [Appendix D](#appendix-d-response-to-review-1) maps every finding of review 1 to
 > what changed, or to why it did not, and records the user's decisions after review 2.
 > **Built:** [Appendix E](#appendix-e-changes-made-while-building-v0) lists what building v0 changed, each
-> with its decision entry (D48–D53) and evidence (E21).
+> with its decision entry (D48–D54) and evidence (E21).
 
 ## Contents
 
@@ -1836,3 +1836,5 @@ here and as a decision entry that amends the accepted one.
 | Every reading is committed before Athena waits at the prompt; every closing commit carries `Athena-Prediction` | an interrupted prompt would otherwise lose the reader's invocation record | D51 |
 | `outcome-abandoned.json` for a blocked job that is closed; a budget that cannot cover the producer and verifier refuses dispatch; a landing refused by the gate closes the job as failed | records stay append-only and accurate in every path | D52 |
 | Agents get the machine's proxy and certificate variables, and Claude Code's endpoint variable, when set | agents could not reach the model API on a network that requires a proxy | D53 |
+| Redaction also replaces the job's directory, the state directory, and the home directory with placeholders | the first acceptance jobs recorded check output with paths under the home directory, which names the user | D54 |
+| The hook has no objection to Claude Code's `StructuredOutput` tool; the reader's brief lists what the verifier can run; the verifier may run `cargo fmt --check` | found by the live tests and the acceptance run: the first would have left every role without its output, and the second produced a reading whose behavior criterion the verifier could not exercise | — |

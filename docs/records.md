@@ -159,5 +159,7 @@ later commit labeled `Athena-Job: bootstrap` that changes governed content is re
 ## What is never recorded
 
 No transcripts. Claude Code runs with `--no-session-persistence`, and the driver keeps only usage figures,
-tool names, Bash command lines, denials, and structured outputs. Agent free text is redacted before it is
-recorded: private email addresses become `[email]` and gitleaks findings become `[secret:<rule>]`.
+tool names, Bash command lines, denials, and structured outputs. Agent free text, commands, and check output
+are redacted before they are recorded: private email addresses become `[email]`, gitleaks findings become
+`[secret:<rule>]`, and this machine's paths become placeholders (`<job>`, `<state>`, and `~` for the home
+directory).
