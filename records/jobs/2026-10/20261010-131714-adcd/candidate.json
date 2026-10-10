@@ -1,0 +1,103 @@
+{
+  "schema": "athena.candidate/1",
+  "job": "20261010-131714-adcd",
+  "base_commit": "29c72cf873079beca2269b25ad8496558f1894d9",
+  "candidate_commit": "b2f048b463ead215bf13cb443b6023a7a8c123bd",
+  "candidate_tree": "6477b143ce71ae074e0025bc9aa83e661e294ef1",
+  "changes": [
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 15010
+    },
+    {
+      "path": "crates/athena-cli/src/wiring.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 6349
+    },
+    {
+      "path": "crates/athena-cli/tests/binary.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 8657
+    },
+    {
+      "path": "docs/architecture.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 5549
+    }
+  ],
+  "fingerprint": "sha256:44081a08199acab8e656633da7376695707f6a01016e037fa7aaae0a6ff02fa1",
+  "violations": [],
+  "producer_report": {
+    "summary": "`athena --version` and `-V` now print the package version, the first seven characters of the build's source commit, and `, dirty` when the build is dirty, e.g. `athena 0.1.0 (abc1234, dirty)`. The text comes from a new `wiring::version_string()`, which formats `build_info()`; main.rs wires it into clap's `version` attribute. A build with no commit prints `athena 0.1.0 (unknown, dirty)`. `build_info()`, xtask, setup and job records are unchanged, and no build.rs or non-Rust files were added. Four unit tests in wiring.rs cover clean, dirty, unknown and full-hash cases. A binary test in tests/binary.rs runs `--version` and `-V` and checks the version, a hex commit or `unknown`, and the flag. docs/architecture.md's athena-cli row now mentions `--version`. Checks: fmt, clippy with warnings denied, and the full `cargo test --locked` all pass. The run with the build variables set was not done: the Bash policy denied the `env` prefix, and I did not route around it.",
+    "files": [
+      "crates/athena-cli/src/main.rs",
+      "crates/athena-cli/src/wiring.rs",
+      "crates/athena-cli/tests/binary.rs",
+      "docs/architecture.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo fmt --all",
+        "result": "pass",
+        "note": "Applied rustfmt to the workspace."
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "Run after the last edit."
+      },
+      {
+        "command": "cargo test --locked -p athena-cli",
+        "result": "pass",
+        "note": "5 unit tests and 6 binary tests pass, including the new version tests."
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "Run after the last source edit."
+      },
+      {
+        "command": "cargo run -q --locked -p athena-cli -- --version",
+        "result": "pass",
+        "note": "Plain build, no build variables. Printed `athena 0.1.0 (unknown, dirty)`."
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "Full workspace, including xtask policy tests (dependency direction, enforcement map, personal-data scan). All pass; live tests are ignored, as before."
+      },
+      {
+        "command": "env ATHENA_BUILD_COMMIT=abc1234 ATHENA_BUILD_DIRTY=false cargo run -q --locked -p athena-cli -- --version",
+        "result": "not-run",
+        "note": "Denied by the Bash policy (`env` is not on the producer's list). Not run, and not routed around."
+      },
+      {
+        "command": "env ATHENA_BUILD_COMMIT=0123...4567 ATHENA_BUILD_DIRTY=true cargo run -q --locked -p athena-cli -- -V",
+        "result": "not-run",
+        "note": "Denied by the same policy. Not run."
+      }
+    ],
+    "open_issues": [
+      "Acceptance check 1 was not run on a binary built with ATHENA_BUILD_COMMIT and ATHENA_BUILD_DIRTY set. The formatting is covered by unit tests, and the wiring from `build_info()` is unchanged, but the end-to-end run is not verified. The verifier should run it.",
+      "The binary test accepts any hex commit of at least seven characters, or `unknown`. It does not check the commit against a known value. This is deliberate, because the test build sets no variable."
+    ],
+    "mistakes": [
+      "The first `version_string()` returned `String`, which clap rejects. Fixed by caching a `&'static str` in a `OnceLock`.",
+      "I did not check clap's accepted `version` types against Cargo.lock before writing the code. The compile error caught it."
+    ],
+    "learnings": [
+      "clap 4.6.7's `version` attribute accepts only `&'static str`, not `String`, so the formatted string is cached in a `OnceLock` in wiring.rs.",
+      "xtask passes the full `git rev-parse HEAD` hash in ATHENA_BUILD_COMMIT, so the formatter shortens it to seven characters.",
+      "An xtask policy test parses the architecture doc's crate table. Only the Responsibility column changed there, and the test passes.",
+      "Bash in this job is limited to a policy list. `env VAR=... cargo ...` is denied by the PreToolUse hook."
+    ],
+    "desires": [
+      "A permitted way to run cargo with build environment variables set (the `env` prefix is denied), so acceptance check 1 can be run on the binary."
+    ]
+  }
+}
