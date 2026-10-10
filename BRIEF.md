@@ -1,6 +1,6 @@
 <!-- The requirements brief for this repository, from Sri (the requirements owner). The text is
 verbatim; only Markdown heading markers were added so it renders. Do not edit it: requirement
-changes come only from Sri. -->
+changes come only from Sri, and are appended as dated addenda in Sri's words. -->
 
 # Athena
 
@@ -439,3 +439,10 @@ Stopping: you're done when "How I'll judge it" passes. If you're blocked on ever
    * Licenses are respected.
    * Every commit on main traces to accepted work.
    * Spend stayed within its caps.
+
+## Addenda
+
+### 2026-10-10: Athena as a plugin
+
+* At the end, the user is working within Claude Code or their own harness, with Athena powering the experience via a plugin.
+* The first version should work with Claude Code.
