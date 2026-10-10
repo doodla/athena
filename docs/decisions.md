@@ -22,7 +22,10 @@ readable. After acceptance, an entry is never rewritten: a new entry supersedes 
 replaces.
 
 Entries D01–D37 were written in revision 1 of the v0 design, and D38–D45 were added in revision 2 after
-review 1. All of them belong to the `bootstrap` job.
+review 1. The re-check (review 2) left five decisions to the user. They are folded into D22, D38, and D39,
+and added as D46 and D47, with the provenance "user decision after review 2". With them the design was
+accepted, so from here on entries are superseded, not revised. All of these entries belong to the
+`bootstrap` job.
 
 ---
 
@@ -548,6 +551,11 @@ review 1. All of them belong to the `bootstrap` job.
 - **Bundle:** Shaped by *Maximize autonomy inside explicit authority*.
 - **Revised** (review 1, B1, m11): the denylist became an allow-list, snapshots were added as a layer, and
   Claude Code's Bash confinement was evaluated and deferred.
+- **Revised** (user decision after review 2, N3 and N2):
+  - The producer may also run `rm`, `mv`, and `chmod`, with every path argument confined to its snapshot.
+    Without them, a reading could promise a deletion that no agent could perform.
+  - Cargo's `--ignored` and `--include-ignored` are denied to every role, so agents cannot start the live
+    tests.
 
 ## D23 · Setup is a minimal POSIX bootstrap, then Rust
 
@@ -857,6 +865,15 @@ review 1. All of them belong to the `bootstrap` job.
   Evidenced: E17 (gitleaks relaxed by content); R5.
 - **Bundle:** Shaped by *Maximize autonomy inside explicit authority*: one decision point, and authority
   that the worker cannot rewrite.
+- **Revised** (user decision after review 2, M1):
+  - The governance files now include the check tools' configuration: any `.cargo/config.toml` or
+    `.cargo/config`, `rustfmt.toml` or `.rustfmt.toml`, `clippy.toml` or `.clippy.toml`, and the `[lints]`
+    and `[workspace.lints]` tables of every `Cargo.toml`.
+  - These are judged from the base commit. In the verifier's snapshot the working tree holds the base's
+    versions, and a manifest new in the candidate inherits the workspace lints. The checks and the
+    verifier's own commands therefore run under the rules in force at dispatch.
+  - A test check that ran zero tests fails.
+  - Evidence: review 2's R13, where each of the three files switched a failing check to a pass.
 
 ## D39 · Governed content changes only through a verified landing, a declared intervention, or the closed bootstrap range
 
@@ -883,6 +900,11 @@ review 1. All of them belong to the `bootstrap` job.
   its work (A5); doing work yourself is an intervention, and every intervention is logged (O3); every commit
   on main traces to accepted work (How I'll judge it). Evidenced: today's history satisfies the rule (R9,
   and every commit after the first carries `Athena-Job: bootstrap`).
+- **Revised** (user decision after review 2, M2):
+  - Writing `records/jobs/bootstrap/outcome.json`, which names the last bootstrap commit and carries the
+    bootstrap's measured usage, is the final step of acceptance. It is written when the user asks, after
+    their acceptance check.
+  - Until then, `athena status` flags the open range.
 
 ## D40 · Usage is captured as it accrues, records are committed before their process exits, and costs reconcile
 
@@ -978,3 +1000,49 @@ review 1. All of them belong to the `bootstrap` job.
   reconstructed from the records and the source tree they name.
 - **Reversal cost:** Low.
 - **Provenance:** Stated: versions are adopted deliberately (A3). Inferred from review 1 (m9).
+
+## D46 · Each job builds in its own directories
+
+- **Decision:** The capability's environment points `CARGO_TARGET_DIR` at directories inside the job's own
+  state directory, one per side: `jobs/<id>/target/produce` and `jobs/<id>/target/verify`.
+  - Nothing is shared across jobs.
+  - The directories are removed when the job closes.
+  - Setup prefetches dependency sources with `cargo fetch --locked`.
+- **Alternatives:**
+  - (a) Persistent caches per side, shared across jobs, which was revision 2's design.
+  - (b) One cache for everything.
+  - (c) A content-addressed compiler cache such as sccache.
+- **Tradeoff:** Every job compiles its workspace and dependencies cold, so jobs take longer.
+  - (a) and (b) let one job's checks run another job's binaries, because cargo judges freshness by
+    modification times. Review 2's R14 showed a job's `cargo test` recompiling nothing and running the
+    other job's tests.
+  - (c) keys outputs by content and would be safe and fast, but it is a new dependency. It is left out until
+    cold builds are shown to dominate job time or cost.
+- **Reversal cost:** Low.
+- **Provenance:** User decision after review 2 (N1): correctness over speed. Evidenced: review 2's R14.
+
+## D47 · Nested runs use the fake driver and a scratch repository
+
+- **Decision:** The core sets `ATHENA_NESTED=<outer job id>` in every agent environment and every check
+  environment. When an `athena` process sees the marker, three things change:
+  - it uses the fake agent driver, and the real Claude Code driver refuses to start;
+  - it clones the repository it was started in into a scratch directory, and works there with a scratch
+    state directory, never committing into the original;
+  - the live tests refuse to run.
+
+  Separately, the hook denies cargo's `--ignored` and `--include-ignored` to every agent.
+- **Alternatives:**
+  - (a) Record the path as a residual: narrow "every invocation is recorded" to Athena's own invocations,
+    and have the reader mark criteria about model-calling commands `content`.
+  - (b) Strip credentials from the agent environment.
+  - (c) Forbid running `athena` inside a job.
+- **Tradeoff:** A nested run exercises the candidate's real command-line behavior, but with fake agents, so
+  it cannot show how real agents would behave under the change. That remains the job of live tests run by
+  a person, and of later jobs.
+  - (a) leaves money unrecorded and behavior criteria unpassable.
+  - (b) cannot work, because authentication lives in a file under `HOME`, and the agents need `HOME`.
+  - (c) makes changes to Athena's own commands unverifiable by exercise.
+- **Reversal cost:** Low.
+- **Provenance:** User decision after review 2 (N2): no model call may happen outside a job's records and
+  budget. Evidenced: review 2's R15, a nested `claude` inside a snapshot authenticates. Stated: every model
+  invocation is recorded (bootstrap brief, item 5).

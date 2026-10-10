@@ -1,14 +1,17 @@
 # Athena v0: design
 
-> **Status:** revision 2, after independent review 1 ([`reviews/athena-v0-review-1.md`](reviews/athena-v0-review-1.md)).
-> Awaiting the re-check of the blocker and the majors. Nothing described here is built yet.
+> **Status:** accepted. Revision 2 answered independent review 1
+> ([`reviews/athena-v0-review-1.md`](reviews/athena-v0-review-1.md)). The re-check
+> ([`reviews/athena-v0-review-2.md`](reviews/athena-v0-review-2.md)) left five decisions to the user, who
+> decided all five; they are folded in here, and they closed the design loop. This is the design v0 is
+> built to.
 > **Work item:** `bootstrap`, the one piece of work done outside Athena.
 > **Companion:** the decision log, [`docs/decisions.md`](../decisions.md), holds the alternatives, tradeoffs,
 > reversal costs, and provenance for every significant choice. This document cites its entries as D01, D02,
 > and so on.
 > **Evidence:** numbers in this document come from experiments run while designing. Appendix A lists them.
 > **Review response:** [Appendix D](#appendix-d-response-to-review-1) maps every finding of review 1 to
-> what changed, or to why it did not.
+> what changed, or to why it did not, and records the user's decisions after review 2.
 
 ## Contents
 
@@ -231,7 +234,7 @@ usage is missing is recorded with estimated bounds ([§10.2](#102-the-claude-cod
 | Location | Contents | Lifetime |
 |---|---|---|
 | The repository | code, `athena.toml`, `defaults.toml`, `records/`, docs | Permanent and public |
-| State directory: `$ATHENA_STATE_DIR`, default `${XDG_STATE_HOME:-~/.local/state}/athena/<repo-key>/` | snapshots, live records of a running job, the process-group registry, locks, the kill switch, and per-side build caches | One machine; disposable once the job's records are committed |
+| State directory: `$ATHENA_STATE_DIR`, default `${XDG_STATE_HOME:-~/.local/state}/athena/<repo-key>/` | snapshots, live records of a running job, the process-group registry, locks, the kill switch, and per-job build directories | One machine; disposable once the job's records are committed |
 | Install directory: `$ATHENA_HOME`, default `${XDG_DATA_HOME:-~/.local/share}/athena/` | the adopted `athena` binary, the pinned gitleaks, and a private Claude Code when the pinned version is not on `PATH` | One machine |
 
 Snapshots live outside the user's checkout, in directories no git command can connect to the user's
@@ -789,10 +792,25 @@ stream of its tool calls, and a `behavior` criterion whose cited commands were n
 **unmet**, with a finding added to say so. The capability's checks are necessary but not independent: they
 run tests the producer may have written. The verifier's own commands are its evidence.
 
+**Tool configuration is judged from the base commit** (D38). A file the candidate controls can switch a
+check off. Review 2's R13 showed three ways:
+- a `.cargo/config.toml` runner that skips tests;
+- a `[lints]` table that allows everything;
+- a `rustfmt.toml` that disables formatting.
+
+So in the verifier's snapshot, the working tree holds the **base's** version of every check-tool
+configuration file, and every manifest's `[lints]` and `[workspace.lints]` tables come from the base too.
+A manifest new in the candidate gets `[lints] workspace = true` when the base workspace defines lints. The
+candidate's own versions stay in the snapshot's candidate commit, where `git diff HEAD~1` shows them. The
+checks and the verifier's own commands therefore run under the rules in force when the job was dispatched.
+A change to those rules governs only later jobs.
+
 **Checks before the verifier.** The core runs the checks in the verifier's snapshot, with the agent
-environment plus the capability's check environment ([§10.4](#104-caps-the-kill-switch-and-build-caches)).
-It then records, and removes, any untracked files the checks left, so the verifier starts from exactly the
-candidate.
+environment, plus the capability's check environment, and the nested-run marker
+([§7.6](#76-nested-runs-athena-exercising-athena)). A check of kind `test` fails if it ran **zero tests**,
+counted from the test harness's own summary lines, even when its exit status is 0. The core then records,
+and removes, any untracked files the checks left. The verifier starts from exactly the snapshot state
+described above.
 
 The **verifier brief** has these sections:
 
@@ -832,8 +850,13 @@ governed content is byte-identical.
    - the candidate would change how any path is classified, by adding, removing, or editing an `athena-*`
      declaration;
    - a **governance file** changed without the accepted reading listing it as a deliverable and naming it
-     in an acceptance criterion. The governance files are `athena.toml`, `defaults.toml`, any
-     `.gitattributes`, `.github/workflows/*`, `setup.sh`, and `rust-toolchain.toml`.
+     in an acceptance criterion. The governance files are:
+     - `athena.toml`, `defaults.toml`, any `.gitattributes`, `.github/workflows/*`, `setup.sh`, and
+       `rust-toolchain.toml`;
+     - the check tools' configuration: any `.cargo/config.toml` or `.cargo/config`, any `rustfmt.toml` or
+       `.rustfmt.toml`, and any `clippy.toml` or `.clippy.toml`;
+     - the `[lints]` and `[workspace.lints]` tables of any `Cargo.toml`. Only those tables are governance
+       content, not the rest of the manifest.
 
    Then the capability's `admit` runs. Each refusal is a policy violation, and the job fails before
    verification.
@@ -971,7 +994,10 @@ Four layers keep each agent inside its role. Each one blocks independently of th
      classify, including subshells, command substitution, `eval`, backgrounding, and environment
      assignments.
    - Each segment's program must be on the role's list: `cargo` (with listed subcommands), `git` (with
-     `status`, `diff`, `log`, or `show` only), and `ls`.
+     `status`, `diff`, `log`, or `show` only), and `ls`. The producer may also run `rm`, `mv`, and `chmod`,
+     with every path argument confined to its snapshot (D22).
+   - Cargo's `--ignored` and `--include-ignored` are denied to every role, so no agent can start the live
+     tests, which make real model calls ([§7.6](#76-nested-runs-athena-exercising-athena)).
    - For git it denies `-c`, `-C`, `--git-dir`, `--work-tree`, `--exec-path`, and any `GIT_*` override.
    - It denies paths outside the snapshot, after resolving `..` and symlinks, and output redirection
      outside the snapshot.
@@ -987,6 +1013,28 @@ mechanism fires is measured from the first job onward.
 with the user's privileges: the checks, and any build or test an agent's allowed commands start. Such code
 could open files by absolute path, including the user's repository. Containing executed code is left out
 of v0, and the evidence that would pull it in is named in [§14](#14-what-v0-leaves-out).
+
+### 7.6 Nested runs: Athena exercising Athena
+
+v0's main workload is changing Athena itself, and D43 requires behavior to be exercised. A verifier
+judging a change to `athena ask` must therefore run the candidate's own `athena`. Without a guard, that
+nested Athena would authenticate with the inherited `HOME` (review 2, R15) and make real model calls. Those
+calls would sit outside the job's records and caps, and the nested Athena would commit into the snapshot,
+moving it off the candidate. Nested runs are made safe by mechanism (D47):
+
+- **The marker.** The core sets `ATHENA_NESTED=<outer job id>` in every agent environment and every check
+  environment.
+- **The fake driver.** Under the marker, Athena uses its fake agent driver, which makes no model calls. The
+  real Claude Code driver refuses to start, so no model call can happen outside a job's records and
+  budget.
+- **The scratch repository.** Under the marker, Athena never touches the repository it was started in. It
+  clones that repository into a fresh scratch directory, runs there with a scratch state directory, prints
+  where, and leaves the original untouched, so a nested `ask` leaves the snapshot at its candidate.
+- **No live tests.** The hook denies `--ignored` and `--include-ignored` to agents (§7.5). The live tests
+  also refuse to run under the marker.
+
+A nested `athena ask` or `go` therefore exercises the candidate's real command-line behavior, with
+deterministic fake agents, at no model cost.
 
 ---
 
@@ -1008,8 +1056,8 @@ every named test exists, so the map cannot drift from the code (A8).
 | M8 | The verifier never sees the producer's reasoning (brief item 4; A7) | `VerifierInputs` type; separate process, model, and snapshot repository; no session persistence | a canary planted in the producer's report and commands is absent from the composed verifier context and snapshot | the verifier context contains the request, reading, criteria, diff, and check results |
 | M9 | Nothing verifies its own work (brief item 4; A7) | configuration validation: the verifier model lies outside the producer's allowed set | a configuration letting one model produce and verify is rejected | the default configuration loads |
 | M10 | Agents receive only composed context (brief; D04) | one function builds every agent command line and environment | a command line missing `--restricted` or another hermetic flag; an environment variable not on the allow-list; live opt-in canary: a secret word planted in a `CLAUDE.md` and in an auto-memory file is not reported | allow-listed variables and flags |
-| M11 | Agents' tool calls cannot reach the user's repository, records, owner-private files, or history (B1; D08, D22) | detached snapshots; the hook's allow-list; `--restricted` | from an agent snapshot: `git show <rev>:<excluded path>` and `git log --all` find nothing of the user's; `git -c core.hooksPath=… status`, `git --git-dir=<user repo> log`, `git update-ref`, and `GIT_DIR=… git log` are denied; excluded paths and `records/` are absent on disk; a whole fake job leaves the user's `.git/config` byte-identical | listed git and cargo commands; edits inside the snapshot (producer only) |
-| M12 | No commit is judged by rules it changes (D38) | configuration and attributes read from the base or parent commit; generated gitleaks configuration; admission refuses changes to `athena-*` declarations, and governance changes not listed as deliverables | a candidate that deletes a check still has that check run; a candidate that marks a path `athena-exclude` is refused; a governance file changed without being a listed deliverable is refused; `info/attributes` naming `athena-exclude` makes Athena refuse to run | a listed, criterion-covered change to `athena.toml` |
+| M11 | Agents' tool calls cannot reach the user's repository, records, owner-private files, or history (B1; D08, D22) | detached snapshots; the hook's allow-list; `--restricted` | from an agent snapshot: `git show <rev>:<excluded path>` and `git log --all` find nothing of the user's; `git -c core.hooksPath=… status`, `git --git-dir=<user repo> log`, `git update-ref`, and `GIT_DIR=… git log` are denied; excluded paths and `records/` are absent on disk; a whole fake job leaves the user's `.git/config` byte-identical | listed git and cargo commands; edits, and `rm`, `mv`, and `chmod` inside the snapshot (producer only) |
+| M12 | No commit is judged by rules it changes (D38) | configuration and attributes read from the base or parent commit; generated gitleaks configuration; admission refuses changes to `athena-*` declarations, and governance changes not listed as deliverables | a candidate that deletes a check still has that check run; a candidate that marks a path `athena-exclude` is refused; a governance file changed without being a listed deliverable is refused; `info/attributes` naming `athena-exclude` makes Athena refuse to run; a candidate `rustfmt.toml` that disables formatting, a `.cargo/config.toml` runner that skips tests, or a `[lints]` table that allows everything does not relax its check; a test check that ran zero tests fails | a listed, criterion-covered change to `athena.toml` |
 | M13 | Spend is bounded, with a kill switch that reaches every agent (Settings; D28) | `--max-budget-usd`; per-job budget; timeouts with a process-group kill; the parent-death signal; the process-group registry; `athena stop` | a stop file blocks new invocations; `stop` terminates a running fake agent; a job over budget fails before its next invocation; a timeout kills the group; killing `athena go` mid-invocation kills its agent | normal runs proceed |
 | M14 | Every model invocation is recorded and committed, including killed ones (brief item 5; D40) | stream-json usage capture; commit before exit | a killed invocation yields a record with lower-bound tokens and cost bounded by its cap; `ask` without a terminal leaves a proposal commit; a blocked job's records are committed | completed invocations record measured usage |
 | M15 | Token and cost records reconcile (How I'll judge it) | reconciliation in `athena check` | per-model costs that do not sum to the total; outcome totals that differ from the invocations | consistent records |
@@ -1022,6 +1070,8 @@ every named test exists, so the map cannot drift from the code (A8).
 | M22 | Personal data never reaches committed content (Boundaries; A5) | redaction of agent free text before recording; the personal-data gate on added lines | an email address or generated token in a producer summary is redacted; an added line with a non-allow-listed email is refused | ordinary text; `noreply@` addresses |
 | M23 | The prediction precedes the outcome (A2; D07) | the `Athena-Prediction` trailer and its CI check, plus append-only records | a closing commit whose prediction commit is not an ancestor, or did not add the accepted reading | a proper prediction commit |
 | M24 | The enforcement map names real tests (A8) | a test that every test named in `docs/enforcement.md` exists | a missing test | the map |
+| M25 | Exercising Athena inside a job never calls a model, spends, or moves the snapshot (review 2, N2; D47) | the nested-run marker in every agent and check environment; the fake driver; a scratch repository; the hook's denial of `--ignored` | under the marker, the real driver refuses to start; a nested `ask` leaves the repository it ran in at its commit; the hook denies `cargo test -- --ignored`; the live tests refuse under the marker | a nested `ask` and `go` run with fake agents in a scratch repository |
+| M26 | One job's checks never run another job's build (review 2, N1; D46) | per-job build directories, one per side, under the job's state directory | a check or agent environment whose build directory is not inside its own job's directory fails to construct | each job's environment names its own directories |
 
 **Prose-only in v0.** Each of these is a judgment or a boundary that a mechanism would not yet pay for:
 
@@ -1221,7 +1271,7 @@ job, it verifies that the totals in `outcome.json` equal the sum of the job's in
 fails the check and names the record. This is the brief's "token records are complete and reconcile", made
 checkable.
 
-### 10.4 Caps, the kill switch, and build caches
+### 10.4 Caps, the kill switch, and build directories
 
 | Cap | Default (`athena.toml`) | Enforced by |
 |---|---|---|
@@ -1238,12 +1288,14 @@ has died. The driver checks for `STOP` before every invocation, and polls for it
 Any `athena` command reaps registry entries whose owner process is gone. `athena start` removes `STOP`.
 Every invocation record carries the caps that applied to it.
 
-**Build caches.** Fresh snapshots start without build output. To keep cold builds tolerable, the
-capability's environment points `CARGO_TARGET_DIR` at a cache in the state directory that persists across
-jobs. There is one cache per side, `target/produce` and `target/verify`, and setup prefetches dependencies
-with `cargo fetch --locked`. Separate sides keep the producer's build output out of the evidence the checks
-and the verifier produce. That is a hygiene boundary, not a security one, because a build script can write
-anywhere.
+**Build directories, per job** (D46). Each job builds in its own directories, one per side:
+`jobs/<id>/target/produce` and `jobs/<id>/target/verify` in the state directory. The capability's
+environment points `CARGO_TARGET_DIR` at them. Nothing is shared across jobs. Cargo decides freshness by
+modification times, so a shared cache could let one job's checks run another job's binaries (review 2,
+R14). The directories are removed when the job closes. Cold builds are slower, which is accepted:
+correctness over speed. Setup prefetches dependency sources with `cargo fetch --locked`, so a cold build
+compiles but does not download. A content-addressed compiler cache can come later if evidence pulls it in
+([§14](#14-what-v0-leaves-out)).
 
 ---
 
@@ -1465,6 +1517,7 @@ grow is itself evidence-driven.
 | Proportional, multi-tier verification (A7) | Verification cost dominating cost per verified result, or an escape |
 | Transcript capture with redaction | A failed job that cannot be diagnosed from usage, commands, and structured outputs, or the study's need to observe Athena's runs |
 | An evaluation of Claude Code's own system prompt for the producer (append rather than replace) | Producer failures that look like missing host guidance, such as tool misuse |
+| A content-addressed compiler cache shared safely across jobs (sccache, for example) | Cold builds dominate job time or cost |
 | An independent audit for missed interventions | The first audit the study runs on the intervention log |
 | Windows support | An adopter on Windows |
 
@@ -1508,7 +1561,7 @@ repository carries this attribution in `README.md`.
 | gitleaks false positives in history | Reviewed allow-list entries in `athena.toml`, each with a reason, committed before the commit they excuse |
 | The verifier is wrong: a false pass | Deterministic checks first; behavior criteria must cite commands that ran; escapes recorded as interventions against landed jobs; proportional verification pulled in by escapes |
 | Claude Code's reported cost differs from the bill | Labeled `reported`, with its basis |
-| A cold build in a fresh snapshot exceeds a Bash timeout | Bash timeouts raised in the agent environment; dependencies prefetched; persistent per-side build caches |
+| A cold build in a fresh snapshot exceeds a Bash timeout | Bash timeouts raised in the agent environment; dependency sources prefetched; per-job build directories, so every job builds cold by design (D46) |
 | Matching evidence commands exactly fails a verifier that ran an equivalent command | The verifier frame asks it to cite commands exactly as run. False failures are recorded as findings, and their rate is visible. |
 | Two to three commits per job make history noisier | Trailers make history filterable; `athena status <job>` presents a job as one unit |
 
@@ -1555,6 +1608,13 @@ athena check --history                      # what CI runs over the full history
 
 Before reporting, the build runs this flow once end to end with a real, small, useful request, and the
 resulting job is the first entry in Athena's own records.
+
+**The final step of acceptance closes the bootstrap range** (D39). Until
+`records/jobs/bootstrap/outcome.json` exists, any commit labeled `Athena-Job: bootstrap` may change governed
+content unverified. `athena status` flags the open range. After accepting v0, the user asks for the
+bootstrap's outcome record. That record names the last bootstrap commit and resolves the bootstrap's
+measured usage, and from then on governed content changes only through verified landings and declared
+interventions.
 
 ---
 
@@ -1737,3 +1797,18 @@ Every finding of [review 1](reviews/athena-v0-review-1.md) is listed here with w
 | Q4 The git attribute | Kept, with the review's four conditions, all met. It is documented as the setting an adopting owner needs, together with `athena-readonly`. | §4.2; D09 |
 | Q5 Contract budget | Kept at 350, with per-role set budgets added. | §12; D25 |
 | Q6 Jev | Left out, per the review and the user's default. | §9.2, §14; D31 |
+
+### The user's decisions after review 2
+
+The re-check ([review 2](reviews/athena-v0-review-2.md)) resolved B1, M2, M4, and M5, found M1 and M3
+partly resolved, and raised three new majors. It reduced the open items to five decisions. The user decided
+all five "yes", and they closed the design loop: there is no third review round. Their provenance is "user
+decision after review 2".
+
+| Item | Decision | Where |
+|---|---|---|
+| **M1** check-tool configuration | The cargo, rustfmt, and clippy configuration files, and the `[lints]` and `[workspace.lints]` tables of every `Cargo.toml`, are governance files judged from the base commit. A test check that ran zero tests fails. | §7.2, §7.3, §8 M12; D38 |
+| **M2** closing the bootstrap range | Writing `records/jobs/bootstrap/outcome.json` is the final step of acceptance, made when the user asks, with the bootstrap's measured usage. `athena status` flags the range while it is open. | §17; D39 |
+| **N1** shared build caches | Each job gets its own build directories, one per side. Nothing is shared across jobs: correctness over speed. | §10.4, §8 M26; D46 |
+| **N2** nested runs | A marker in every agent and check environment makes Athena use its fake driver and a scratch repository, and the hook denies live tests. No model call happens outside a job's records and budget. | §7.6, §8 M25; D47 |
+| **N3** file operations | The producer may run `rm`, `mv`, and `chmod`, confined to its own snapshot. | §7.5, §8 M11; D22 |
