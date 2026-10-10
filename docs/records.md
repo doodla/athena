@@ -12,7 +12,9 @@ names.
    it: a re-score, a later outcome, or a resolution. The commit gate refuses any change to, deletion of, or
    rename of a committed record.
 2. **Per-job directories, sharded by month.** A job writes only under `records/jobs/<YYYY-MM>/<job id>/`.
-3. **State is derived.** No record holds a mutable status; a job's state follows from which records exist.
+3. **State is derived.** No record holds a mutable status; a job's state follows from which records exist:
+   only `request.json` is a queued request (`athena ask --later`); a reading makes it proposed; `job.json`
+   dispatched; an outcome closed, or blocked.
 4. **Every number carries its provenance.** Tokens, time, and money are quantities:
    `{"value", "unit", "provenance", "basis"}` with optional `"lower"` and `"upper"`; `unit` is `usd`,
    `tokens`, `seconds`, or `minutes`. `provenance` is
@@ -63,7 +65,7 @@ Every record has a `schema` field naming its type and version.
 | `athena.candidate/1` | `base_commit` (the prediction commit), `candidate_commit` and `candidate_tree`, `changes` (path, status, mode, bytes), `fingerprint`, `violations` from admission, and the redacted `producer_report` |
 | `athena.verification/1` | `verified_fingerprint`; `tool_config_from_base`; `checks` (command, exit code, tests run, duration, a redacted output tail of at most 4 KiB); `check_cleanup`; the `verifier_invocation`; `criteria` with evidence, cited commands, and whether every cited command was seen running; `findings` by severity and source; `request_reading_mismatch`; `agent_verdict`; `final_verdict`; `reasons`; the `inputs` the verifier was given, by name |
 | `athena.outcome/1` | `state` (`landed`, `blocked`, `rejected`, `failed`, `stale`, `dropped`, `declined`, `abandoned`, or `closed` for the bootstrap), `reason`, `at`, `totals` (all-in cost, execution cost, execution wall time, tokens by model, invocation count), the branch, base, and candidate; `after_blocked`; for the bootstrap, `through_commit` |
-| `athena.score/1` | the `rules` and their version; per event (`reading_accepted` for every reading, `verification_passes`, `user_intervenes`), each forecaster's probability, the outcome, each Brier score, and whether it is provisional; `deliverables` (the scoring set, each term, the sum); per quantity (`cost_usd`, `wall_time_s`), each forecaster's quantiles, the actual, the WIS, and whether it fell inside the 80% interval; the unscored `models` check; `cause` for a re-score |
+| `athena.score/1` | the `rules` and their version; per event (`reading_accepted` for every reading, `verification_passes`, `user_intervenes`), each forecaster's probability, the outcome, each Brier score, and whether it is provisional; `deliverables` (the scoring set, each term, the sum); per quantity (`cost_usd`, `wall_time_s`), each forecaster's quantiles, the actual, the WIS, and whether it fell inside the 80% interval; the unscored `models` check; `cause` for a re-score. A score is derived data: the gate recomputes every score a commit adds from the job's records in that commit and refuses one that differs, and a re-score must come in the commit that adds its intervention (D56) |
 | `athena.intervention/1` | `what`, `why`, `class_of_work`, `category`, `job`, `source` (`user` or `observed`), `with_staged_changes` |
 | `athena.restart/1` | `cost` (free text), `minutes` and `tokens` (estimated unless measured), `lost`, `via` |
 | `athena.resolution/1` | `target_path`, `target_field`, `value`, `note`: supplies a pending quantity |
@@ -108,6 +110,11 @@ Co-Authored-By: <producer's name> <noreply@anthropic.com>
 
 The trace runs: `request.json` → `reading-<n>.json` (the prediction) → `job.json` (the owner and models)
 → `invocations/` (tokens, cost, time) → `verification.json` → `outcome.json` → `score.json`.
+
+A commit that changes governed content passes the gate as a landing only with its whole job behind it: the
+job's `job.json` on the parent commit, an `Athena-Prediction` that added the accepted reading, and, in the
+commit itself, the candidate, the verification, a successful verifier invocation that reconciles, and the
+landed outcome (D55).
 `git log --grep "Athena-Job: <id>"` lists a job's commits; `athena status <id>` shows the same trace.
 
 ## Resolving a pending quantity
@@ -155,6 +162,16 @@ as the last step of accepting v0, with a records-only commit that adds:
 
 From then on, governed content changes only through verified landings and declared interventions, and a
 later commit labeled `Athena-Job: bootstrap` that changes governed content is refused.
+
+## Known inaccuracies in earlier records
+
+Records are never edited, so an error in one is corrected here, not in the file.
+
+- `tests_ran` in the `test` checks of jobs `20261010-131714-adcd`, `20261010-132713-ezm8`, and
+  `20261010-135737-y9gg` undercounts the tests that ran, and their `output_tail` may have lost lines. The
+  check's standard output and standard error were written through two separate opens of one file, which
+  overwrote each other. Checks recorded from the fix round after acceptance verification 1 on share one open
+  file.
 
 ## What is never recorded
 

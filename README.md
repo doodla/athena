@@ -16,8 +16,9 @@ This is v0, the walking skeleton. Its design is [`docs/design/athena-v0.md`](doc
 athena ask "add a changelog"      # shows the reading and predictions; Enter runs it
 ```
 
-`./setup.sh` is idempotent and pinned: it reads every version from `athena.toml` and `rust-toolchain.toml`,
-checks downloads against pinned SHA-256 sums, and reads credentials only to report whether Claude Code can
+`./setup.sh` is idempotent and pinned: it reads every version from `athena.toml` and `rust-toolchain.toml`
+(rustup-init, which runs before any Rust can, is pinned in `setup.sh` itself), checks downloads against pinned
+SHA-256 sums, and reads credentials only to report whether Claude Code can
 authenticate. It never stores them. It needs git 2.40 or later, a C linker, curl, and either Claude Code
 2.1.296 or npm to install it. `./setup.sh --ci` stops after building Athena.
 
@@ -45,9 +46,9 @@ itself erred.
 
 | Command | What it does |
 |---|---|
-| `athena ask "<request>" [--yes]` | Read a request; on a terminal, Enter runs it, a typed line corrects it, `q` leaves it proposed |
+| `athena ask "<request>" [--yes \| --later]` | Read a request; on a terminal, Enter runs it, a typed line corrects it, `q` leaves it proposed. `--later` only queues the request, with no model call |
 | `athena correct <job> "<line>"` | Correct the latest reading, or answer its question, and read again |
-| `athena go <job>` | Run a proposed job, or retry the landing of a blocked one |
+| `athena go <job>` | Run a proposed job, read a queued one, or retry the landing of a blocked one |
 | `athena close <job> --why "..."` | Close a job that will not run or finish |
 | `athena status [<job>] [--json]` | The state of the work, or one job's full trace |
 | `athena intervene "<what>" --why ... --class ... --category ... [--job <job>] [--with-staged]` | Record something you did beyond what a lazy user would; `--with-staged` commits your staged hand changes with it |
@@ -55,8 +56,8 @@ itself erred.
 | `athena check [--history]` | Check records, reconciliation, and the commit gate, now or over the whole history |
 | `athena stop` / `athena start` | The kill switch: terminate every running agent and check, and block new ones |
 
-Wherever a command takes `<job>`, it accepts a full id, a unique suffix, or `latest`. Every command takes
-`--json`, so an agent can drive Athena through a shell as well as a person can.
+Wherever a command takes `<job>`, it accepts a full id, a unique suffix, or `latest`. Every command except
+`stop` and `start` takes `--json`, so an agent can drive Athena through a shell as well as a person can.
 
 ## Accepting v0 from a clean clone
 
@@ -81,7 +82,8 @@ see "Closing the bootstrap" in [`docs/records.md`](docs/records.md).
 
 Nothing about the state of the work lives in a hand-maintained file. A new context needs this page, then
 `athena status` (or `athena status --json`), then the records themselves: plain JSON under `records/`,
-documented in [`docs/records.md`](docs/records.md).
+documented in [`docs/records.md`](docs/records.md). Open work, including requests queued for later with
+`athena ask --later`, is listed under `open`, each with the command that picks it up.
 
 ## Map
 

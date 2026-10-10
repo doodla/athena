@@ -13,7 +13,8 @@
 > **Review response:** [Appendix D](#appendix-d-response-to-review-1) maps every finding of review 1 to
 > what changed, or to why it did not, and records the user's decisions after review 2.
 > **Built:** [Appendix E](#appendix-e-changes-made-while-building-v0) lists what building v0 changed, each
-> with its decision entry (D48–D54) and evidence (E21).
+> with its decision entry (D48–D54) and evidence (E21), and what the fix round after the first acceptance
+> verification changed (D55–D59).
 
 ## Contents
 
@@ -237,7 +238,7 @@ usage is missing is recorded with estimated bounds ([§10.2](#102-the-claude-cod
 | Location | Contents | Lifetime |
 |---|---|---|
 | The repository | code, `athena.toml`, `defaults.toml`, `records/`, docs | Permanent and public |
-| State directory: `$ATHENA_STATE_DIR`, default `${XDG_STATE_HOME:-~/.local/state}/athena/<repo-key>/` | snapshots, live records of a running job, the process-group registry, locks, the kill switch, and per-job build directories | One machine; disposable once the job's records are committed |
+| State directory: `<root>/<repo-key>/`, where the root is `$ATHENA_STATE_DIR`, by default `${XDG_STATE_HOME:-~/.local/state}/athena` | snapshots, live records of a running job, the process-group registry, locks, the kill switch, and per-job build directories | One machine; disposable once the job's records are committed |
 | Install directory: `$ATHENA_HOME`, default `${XDG_DATA_HOME:-~/.local/share}/athena/` | the adopted `athena` binary, the pinned gitleaks, and a private Claude Code when the pinned version is not on `PATH` | One machine |
 
 Snapshots live outside the user's checkout, in directories no git command can connect to the user's
@@ -1586,6 +1587,9 @@ repository carries this attribution in `README.md`.
   in-process gate, which run the adopted binary, are the backstop.
 - **Interventions that change no content are recorded only if the user records them.** See the prose-only
   list in [§8](#8-enforcement-map).
+- **Records are not signed.** The gate refuses a hand change dressed as a landing and a hand-written score
+  or outcome, but a deliberate fabrication of every record of a job, across two commits and with usage that
+  reconciles, still passes (D55).
 
 ### 16.3 Open questions
 
@@ -1838,3 +1842,23 @@ here and as a decision entry that amends the accepted one.
 | Agents get the machine's proxy and certificate variables, and Claude Code's endpoint variable, when set | agents could not reach the model API on a network that requires a proxy | D53 |
 | Redaction also replaces the job's directory, the state directory, and the home directory with placeholders | the first acceptance jobs recorded check output with paths under the home directory, which names the user | D54 |
 | The hook has no objection to Claude Code's `StructuredOutput` tool; the reader's brief lists what the verifier can run; the verifier may run `cargo fmt --check` | found by the live tests and the acceptance run: the first would have left every role without its output, and the second produced a reading whose behavior criterion the verifier could not exercise | — |
+
+### The fix round after acceptance verification 1
+
+The first independent acceptance verification,
+[`reviews/athena-v0-acceptance-1.md`](reviews/athena-v0-acceptance-1.md), accepted v0 with fixes. The user
+required its majors and four of its minors fixed, a decision on its escape, every deferred finding visible
+in `athena status`, and a check of one hazard the user met: a commit on the branch while a job runs.
+
+| Finding | What changed | Entry |
+|---|---|---|
+| M1: a hand change with a copied verification record passed as a landing | a landing commit must carry its whole job: the dispatch on the parent, the prediction, and the candidate, verification, successful verifier invocation, and landed outcome it adds | D55 |
+| M2: hand-written records could rewrite a score or an outcome | the gate recomputes every added score from the job's records with the scorer Athena writes it with; a re-score comes with its intervention; a landed outcome only with a landing; Athena scores a closing from the commit it builds on | D56 |
+| m1: the verifier passed instructions that this repository's rules refuse | recorded as an intervention; the change capability's verifier checks documented instructions against the repository's own rules | D59 |
+| m2: check output on two streams overwrote itself, so test counts were wrong | both streams share one open file; earlier records are listed as inaccurate in `docs/records.md` | — |
+| m3: the boundary test missed two of the four subjects | the scan covers all four, singular and plural | — |
+| m4: agents and checks used the user's own Athena state, and agent runs left files under the user's home | nested Athena state lives in the job's directory; setup refuses inside a job; the driver removes what Claude Code leaves behind | D57 |
+| m5: setup ignored `CARGO_TARGET_DIR` | setup takes the built binary's path from cargo's messages | D57 |
+| n1: three inaccurate statements in the docs | corrected | — |
+| m6, m7, m8, n2–n7 | deferred: each is a queued request (`athena ask --later`), open work in `athena status` | D58 |
+| The base moving under a running job | already fails safe: the job closes `stale`, nothing lands, and the user's commit is untouched. The reason now names the commit that moved the base, and `go` says to ask again. Switching branches while a job runs is deferred as a queued request | — |

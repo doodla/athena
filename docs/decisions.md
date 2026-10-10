@@ -1154,3 +1154,117 @@ left as it was. Their provenance is "build", with the evidence that prompted the
 - **Reversal cost:** Low.
 - **Provenance:** Found while building. Evidenced: the first acceptance jobs recorded clippy's output with
   absolute paths under the home directory, which on a user's machine names the user.
+
+---
+
+## Entries added in the fix round after acceptance verification 1
+
+The entries below answer the first independent acceptance verification,
+[`design/reviews/athena-v0-acceptance-1.md`](design/reviews/athena-v0-acceptance-1.md). The user required
+its two major findings and four of its minor ones fixed before v0 is accepted, a decision on the escape it
+found, and every deferred finding visible in `athena status`. Each entry's provenance names its finding.
+
+## D55 · A landing commit carries its whole job
+
+- **Decision:** Amends D39's case (a). A commit that changes governed content is a landing only when it
+  carries `Athena-Job`, `Athena-Prediction`, and an `Athena-Verified-Content` equal to its fingerprint, and
+  the job's records show a job that was read, dispatched, and independently verified:
+  - the job's `job.json` is on the parent commit, and the prediction commit is an ancestor that added the
+    accepted reading;
+  - the commit adds the job's `candidate.json`, `verification.json`, and a landed `outcome.json`, or, after
+    `blocked`, its `outcome-landed.json`;
+  - the candidate and the verification both hold the commit's fingerprint, and the final verdict is pass;
+  - the verifier invocation that the verification names is recorded, succeeded, used the job's verifier
+    model, and reconciles, and so do the outcome's totals.
+
+  The rule runs in the `commit-msg` hook, in process, and over the history.
+- **Alternatives:** (a) Sign records with a key kept outside the repository, so only Athena can write
+  them. (b) Keep the one-record rule and rely on review.
+- **Tradeoff:** A forger who fabricates every record of a job across two commits, with usage that
+  reconciles, still passes. That is deliberate forgery of many records rather than a hand change dressed
+  up with one file, and the forged job shows in `athena status` like any other. (a) would close that too,
+  but a key on one machine cannot be checked in CI, and v0 has no key management.
+- **Reversal cost:** Low.
+- **Provenance:** Acceptance verification 1, M1: a hand change with a copied `verification.json` and two
+  trailers passed both hooks and the history check (probe 2j). Evidenced by
+  `a_hand_written_verification_does_not_make_a_landing`.
+
+## D56 · Scores and outcomes follow from the job's own records
+
+- **Decision:** Amends D06 and D14. The gate judges every record a commit adds to a job against the rest
+  of the job:
+  - a score must equal the score that the job's records in that commit imply, recomputed with the function
+    Athena writes scores with (`athena_score::score_records`), under the rules the score names;
+  - a re-score must name an intervention that the same commit adds for the same job;
+  - a landed outcome comes only with a valid landing commit of its job (D55), and an outcome after
+    `blocked` needs the job's blocked outcome on the parent commit.
+
+  So that Athena and the gate always agree, Athena now computes a closing score from the records on the
+  commit the closing commit is built on, once per attempt. An intervention recorded while a job runs
+  therefore resolves its `user_intervenes` event, which the closing score used to miss.
+- **Alternatives:** (a) Check only that a re-score's cause exists. (b) Make `athena status` ignore records
+  it cannot explain.
+- **Tradeoff:** Old scores must keep equaling their recomputation, so a change to the scorer needs a new
+  rules version that the gate still recomputes, or the history check flags every earlier score. That is
+  intended: a score is derived data, and a proper scoring rule is only as good as the record of its inputs.
+  (a) leaves forged numbers in place. (b) hides a forgery instead of refusing it.
+- **Reversal cost:** Medium.
+- **Provenance:** Acceptance verification 1, M2: a hand-written re-score with perfect forecasts, and a
+  hand-written `outcome-landed.json` for a rejected job, passed every gate and changed `athena status`
+  (probes 3j and 3k).
+
+## D57 · What agents and checks run stays inside the job
+
+- **Decision:** Amends D04 and D47.
+  - Agent and check environments set `ATHENA_STATE_DIR` inside the job's own directory, so an Athena that
+    an agent or a check runs (always nested, D47) keeps its kill switch, locks, and scratch repositories
+    there.
+  - `xtask setup` refuses to run under the nested-run marker: it installs tools and adopts the binary that
+    the git hooks run, for the whole machine.
+  - After every agent run, the driver removes the folder Claude Code names after the snapshot, where it
+    spills large tool results despite `--no-session-persistence`, and the run's empty session folder.
+  - Setup takes the path of the binary it built from cargo's own messages, so `CARGO_TARGET_DIR` works,
+    and a stale `./target` is never adopted.
+- **Alternatives:** (a) Point agents' `HOME` or `CLAUDE_CONFIG_DIR` at a scratch directory, which loses
+  Claude Code's login. (b) Deny `cargo run -p xtask` in the hook. (c) Redirect `ATHENA_HOME` too.
+- **Tradeoff:** The cleanup depends on how Claude Code 2.1.296 names its folders, which the live tests
+  re-check at each upgrade. (b) is a second layer that the refusal makes unnecessary. (c) would hide the
+  pinned gitleaks from Athena's own tests, which need it, and once setup refuses, nothing nested writes to
+  the install directory.
+- **Reversal cost:** Low.
+- **Provenance:** Acceptance verification 1, m4 and m5. The verification noted that fixing m5 alone would
+  let an agent's `cargo run -p xtask -- setup` replace the user's adopted binary, so both are fixed
+  together.
+
+## D58 · Deferred work is a queued request
+
+- **Decision:** `athena ask --later "<request>"` records the request and nothing else: no reading and no
+  model call. The job is `queued`, which `athena status` lists as open work with the command that picks it
+  up. `athena go` reads it first and then runs it like any proposal; `athena close` drops it. Every finding
+  of acceptance verification 1 that the fix round defers is queued this way, so a fresh context finds it in
+  `athena status`, from the records alone.
+- **Alternatives:** (a) A new record type for deferred findings, with its own rule for closing them.
+  (b) Read each deferred request now with `athena ask`, leaving it proposed. (c) The review document alone.
+- **Tradeoff:** A queued job has no forecasts until it is read. That is right: a forecast made long before
+  the work would score the wait, not the reader. (a) needs its own closing rule, while a queued request
+  closes the way every job does. (b) spends a reading per finding, and scores readings that wait for weeks.
+  (c) is what the user ruled out: capability 10 covers open work.
+- **Reversal cost:** Low.
+- **Provenance:** User decision for the fix round, point 3: every deferred finding must be visible to a
+  fresh context through `athena status`, from Athena's own records, by the smallest mechanism that does it.
+
+## D59 · The verifier checks documented instructions against the repository's own rules
+
+- **Decision:** The change capability's verifier section gains one sentence: for docs, check every
+  instruction against the repository's own checks and commit rules, since an instruction a reader would
+  follow must work here. The escape that prompted it is recorded as an intervention (category `other`,
+  class `docs`) with no job, since that job ran in a throwaway clone.
+- **Alternatives:** (a) Change nothing in v0 and queue the improvement. (b) Ask the reader to keep the
+  criteria that a correction does not address.
+- **Tradeoff:** About 35 tokens of verifier context, within its budget, for the observed class of false
+  pass (design §16.1). (b) treats the cause in the reading, but one escape is too little evidence to change
+  how corrections are read.
+- **Reversal cost:** Low.
+- **Provenance:** Acceptance verification 1, m1: the verifier passed a CONTRIBUTING.md telling outside
+  contributors to open pull requests of hand-made commits, which the commit gate and CI's history check
+  refuse. The correction that made reading 2 had dropped the criterion covering Athena's workflow.
