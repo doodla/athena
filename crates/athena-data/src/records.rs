@@ -790,21 +790,21 @@ pub enum AnyRecord {
     #[serde(rename = "athena.request/1")]
     Request(Request),
     #[serde(rename = "athena.reading/1")]
-    Reading(Reading),
+    Reading(Box<Reading>),
     #[serde(rename = "athena.correction/1")]
     Correction(Correction),
     #[serde(rename = "athena.job/1")]
-    Job(Job),
+    Job(Box<Job>),
     #[serde(rename = "athena.invocation/1")]
-    Invocation(Invocation),
+    Invocation(Box<Invocation>),
     #[serde(rename = "athena.candidate/1")]
-    Candidate(Candidate),
+    Candidate(Box<Candidate>),
     #[serde(rename = "athena.verification/1")]
-    Verification(Verification),
+    Verification(Box<Verification>),
     #[serde(rename = "athena.outcome/1")]
-    Outcome(Outcome),
+    Outcome(Box<Outcome>),
     #[serde(rename = "athena.score/1")]
-    Score(Score),
+    Score(Box<Score>),
     #[serde(rename = "athena.intervention/1")]
     Intervention(Intervention),
     #[serde(rename = "athena.restart/1")]
@@ -987,7 +987,7 @@ mod tests {
 
     #[test]
     fn records_round_trip_through_the_envelope() {
-        let record = AnyRecord::Reading(sample_reading());
+        let record = AnyRecord::Reading(Box::new(sample_reading()));
         let text = record.to_json();
         assert!(text.contains("\"schema\": \"athena.reading/1\""));
         let back = AnyRecord::parse("x", text.as_bytes()).unwrap();
@@ -997,7 +997,7 @@ mod tests {
     #[test]
     fn unknown_fields_in_records_are_refused() {
         // M5 (blocks): an unknown field fails parsing.
-        let mut value: serde_json::Value = serde_json::from_str(&AnyRecord::Reading(sample_reading()).to_json()).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&AnyRecord::Reading(Box::new(sample_reading())).to_json()).unwrap();
         value["surprise"] = serde_json::json!(1);
         let text = serde_json::to_vec(&value).unwrap();
         assert!(matches!(AnyRecord::parse("x", &text), Err(RecordError::Parse { .. })));
@@ -1005,7 +1005,7 @@ mod tests {
 
     #[test]
     fn records_must_sit_at_their_canonical_path() {
-        let record = AnyRecord::Reading(sample_reading());
+        let record = AnyRecord::Reading(Box::new(sample_reading()));
         let text = record.to_json();
         let good = "records/jobs/2026-10/20261010-153012-k7q2/reading-1.json";
         assert!(check_record_file(good, text.as_bytes()).is_ok());
@@ -1016,7 +1016,7 @@ mod tests {
     #[test]
     fn out_of_order_quantiles_are_refused() {
         // M4: a reading with p10 > p50 does not parse.
-        let text = AnyRecord::Reading(sample_reading()).to_json().replacen("\"p10\": 0.2", "\"p10\": 0.9", 1);
+        let text = AnyRecord::Reading(Box::new(sample_reading())).to_json().replacen("\"p10\": 0.2", "\"p10\": 0.9", 1);
         assert!(AnyRecord::parse("x", text.as_bytes()).is_err());
     }
 
@@ -1024,7 +1024,7 @@ mod tests {
     fn probabilities_must_lie_in_the_unit_interval() {
         let mut reading = sample_reading();
         reading.deliverables[0].p = 1.5;
-        let text = AnyRecord::Reading(reading).to_json();
+        let text = AnyRecord::Reading(Box::new(reading)).to_json();
         assert!(matches!(AnyRecord::parse("x", text.as_bytes()), Err(RecordError::Invalid { .. })));
     }
 
@@ -1059,7 +1059,7 @@ mod tests {
     #[test]
     fn rescore_names_its_cause() {
         let cause = RecordId::parse("20261011-090000-abcd").unwrap();
-        let score = AnyRecord::Score(Score {
+        let score = AnyRecord::Score(Box::new(Score {
             job: job(),
             at: ts(),
             rules: "v1".into(),
@@ -1068,7 +1068,7 @@ mod tests {
             deliverables: None,
             quantities: vec![],
             models: None,
-        });
+        }));
         assert!(score.canonical_path().ends_with("/score-20261011-090000-abcd.json"));
     }
 
@@ -1098,7 +1098,7 @@ mod tests {
             tokens: Some(Quantity::pending(Unit::Tokens, "resolved later from measured usage")),
             note: None,
         };
-        let record = AnyRecord::Job(job);
+        let record = AnyRecord::Job(Box::new(job));
         assert_eq!(record.canonical_path(), "records/jobs/bootstrap/job.json");
         let back = AnyRecord::parse("x", record.to_json().as_bytes()).unwrap();
         assert_eq!(back, record);
