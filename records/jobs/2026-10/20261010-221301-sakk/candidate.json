@@ -1,0 +1,131 @@
+{
+  "schema": "athena.candidate/1",
+  "job": "20261010-221301-sakk",
+  "base_commit": "6e7f4ee82b51cad97994ff57d56c2fc53596c88d",
+  "candidate_commit": "4c13d14ccde23c12ffb47e37a104348cabb26db9",
+  "candidate_tree": "e8a67594f37351071bc7bf96e6b866d0fc0dc070",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 3329
+    },
+    {
+      "path": "README.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 7691
+    },
+    {
+      "path": "crates/athena-gate/src/history.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 9447
+    },
+    {
+      "path": "crates/athena-gate/src/invariant.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 29748
+    },
+    {
+      "path": "crates/athena-gate/src/jobs.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 14302
+    },
+    {
+      "path": "crates/athena-gate/src/landing_tests.rs",
+      "status": "added",
+      "mode": "100644",
+      "bytes": 16182
+    },
+    {
+      "path": "crates/athena-gate/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 13769
+    },
+    {
+      "path": "docs/design/athena-v0.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 147386
+    },
+    {
+      "path": "docs/enforcement.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 14987
+    },
+    {
+      "path": "docs/records.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 12104
+    }
+  ],
+  "fingerprint": "sha256:0b86ca19860327f17a56187bec1705d6bec1e68784af0a55f754297a29f96daf",
+  "violations": [],
+  "producer_report": {
+    "summary": "The landing check and `athena check --history` now accept merge, squash and rebase merges. Everything passes except one xtask policy test, which fails only because my new test file isn't tracked by git yet (details below). A landing is now identified by the job records the commit adds (candidate, verification, landed outcome or `outcome-landed.json`), not by `Athena-*` trailers or ancestry.\n\n**What the check does now** (`landing` and `closing_jobs` in `crates/athena-gate/src/invariant.rs`):\n- The job's `job.json` and its accepted reading must be in the landed tree, not on the parent. A squash adds them in the same commit.\n- Prediction-before-work is proved by `prediction_problem` from the records themselves. The reading's `at` must not be after `dispatched_at`. Its `at` and `invocation_seq` must not be after the start time or sequence number of any producer or verifier invocation in the records.\n- Trailers are hints that must agree with the records. An `Athena-Verified-Content` that isn't the fingerprint, or an `Athena-Job` naming another request job, refuses the landing. A stale or edited `Athena-Prediction` is ignored.\n- No second landing: the first parent's tree must hold no landed outcome for the job. The history walk also tracks jobs it has already seen validly landed, so a landing after the records were hand-removed is still caught. The old `earlier_landing` trailer grep is removed.\n- `jobs.rs`: an outcome after `blocked` now accepts the blocked outcome arriving in the same commit, because a squash folds the whole job into one commit.\n- The Athena-Prediction ancestry check (`check_prediction`) is removed, along with its old test, and `Rule::Prediction` no longer fires. The prediction-order refusal is reported as `Rule::Invariant`. I left the enum variant in place.\n\n**Tests:** new `crates/athena-gate/src/landing_tests.rs` (7 tests in the gate crate cover these) covers each acceptance behavior:\n- A squash landing with no trailers passes both the single-commit check and the history check.\n- A rebase merge passes, with the prediction commit confirmed not to be an ancestor of main.\n- A squash with no records, or with records verifying other content, is refused with `Rule::Invariant`.\n- A reading written after the work is refused, in two variants (after dispatch, and with no dispatch time).\n- A second landing after a squash is refused (\"already landed\") in the history walk.\n- Stale or edited trailers neither admit nor refuse a landing. Contradicting `Athena-Job` and `Athena-Verified-Content` trailers refuse it. Trailers alone cannot admit a change with no records.\n\n**Docs:**\n- Design §7.3 (merge/squash/rebase, trailers as hints, prediction proof from records, no second landing, alternatives considered) and §7.4 (check 7).\n- The module doc of `invariant.rs`.\n- `docs/records.md` and the `docs/enforcement.md` M23 row.\n- A `CHANGELOG.md` entry and a README paragraph.\n\n**Checks:** `cargo fmt --all --check` and `cargo clippy --all-targets --locked -- -D warnings` are clean. `cargo test --locked --no-fail-fast` passes everything except `xtask --test policy every_test_named_in_the_enforcement_map_exists`. It fails only because it lists tracked files with `git ls-files`, and my new `landing_tests.rs` is untracked in this throwaway repo. It should pass once Athena adds the file. I could not confirm that, because I may not change git state.",
+    "files": [
+      "crates/athena-gate/src/invariant.rs",
+      "crates/athena-gate/src/history.rs",
+      "crates/athena-gate/src/jobs.rs",
+      "crates/athena-gate/src/lib.rs",
+      "crates/athena-gate/src/landing_tests.rs",
+      "docs/design/athena-v0.md",
+      "docs/records.md",
+      "docs/enforcement.md",
+      "CHANGELOG.md",
+      "README.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "clean after `cargo fmt --all`"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "clean; run after the code changes and before the final docs edits, which touch no Rust"
+      },
+      {
+        "command": "cargo test -p athena-gate --locked",
+        "result": "pass",
+        "note": "all 46 gate tests pass, including the 6 new landing tests"
+      },
+      {
+        "command": "cargo test --locked --no-fail-fast",
+        "result": "fail",
+        "note": "everything passes except xtask policy `every_test_named_in_the_enforcement_map_exists`: it uses `git ls-files`, so the untracked new landing_tests.rs is invisible to it until Athena adds the file"
+      }
+    ],
+    "open_issues": [
+      "A squashed PR that only adds records (no governed change) still needs an Athena-Job, Athena-Intervention or Athena-Record trailer, as before. A squash that drops the trailers would be refused. Rebase merges keep the messages, so they are fine.",
+      "The reading-before-work proof relies on timestamps that Athena writes and does not sign. Someone who consistently forges every record could forge the order. The design doc says so.",
+      "I changed the retry rule: `outcome-landed.json` now requires the `blocked` outcome in the landed tree, not specifically on the parent. A forged blocked outcome added in the same commit still has to pass every other landing check.",
+      "The deliverables list names athena-core/land.rs, athena-git, content.rs and lifecycle.rs, but I changed none of them. The lifecycle tests passed unchanged and the brief says the landing flow keeps emitting trailers.",
+      "`Rule::Prediction` and the `PREDICTION` constant are now unused. I left them in place to avoid touching the public enum.",
+      "The xtask policy test needs `landing_tests.rs` to be tracked before it passes (see summary)."
+    ],
+    "mistakes": [
+      "I first added a records-derived fallback to `names_existing_work`, so a squashed records-only commit would pass without trailers. It contradicted the existing test `a_records_only_commit_must_name_existing_work`, so I removed it.",
+      "I wrote a muddled tail in the second-landing test and a clumsy `.replace` in the trailer test. I cleaned both up before running."
+    ],
+    "learnings": [
+      "xtask/tests/policy.rs resolves the test names in docs/enforcement.md by scanning `git ls-files` output only, so a test in a new untracked file is not found until the file is added.",
+      "The fingerprint excludes records and owner paths, so a test can compute it before writing the job records.",
+      "Real Athena landings already hold job.json and the reading on the parent. A squash adds everything in one commit, so the check must read job.json and the reading from the landed tree.",
+      "`Change::of_commit`, `Judged::new` and `invariant::check` can be called directly on a single commit with history `None` in tests.",
+      "History walk order is `git rev-list --reverse`, not an explicit topological order."
+    ],
+    "desires": [
+      "A way to run the xtask policy tests against a candidate with new files added to the index, without changing git state.",
+      "A pointer to where the lifecycle fixtures build fake landings, to reuse them instead of hand-building records in the gate tests."
+    ]
+  }
+}

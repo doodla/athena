@@ -919,8 +919,12 @@ owner-maintained paths. Such a commit needs an `Athena-Job:`, `Athena-Interventi
 trailer naming something that exists at `HEAD`, unless it touched only owner paths. If the fingerprint
 changed, X must be exactly one of the following:
 
-- **(a) a landing commit.** `Athena-Verified-Content` equals its fingerprint. The job's `verification.json`,
-  present at X, holds that fingerprint with a final verdict of pass. No earlier commit has landed that job.
+- **(a) a landing commit.** The job is the one whose `candidate.json`, `verification.json`, and landed
+  `outcome.json` (or, after `blocked`, `outcome-landed.json`) X adds under `records/jobs/`. The candidate and
+  the verification hold X's fingerprint, with a final verdict of pass; a successful verifier invocation that
+  reconciles is recorded; the job's `job.json` and its accepted reading are in X's tree, and the reading was
+  recorded before the work (below). The parent holds no landed outcome for the job, and no earlier commit
+  in a history walk has landed it. Trailers play no part (below).
 - **(b) a declared intervention.** It carries `Athena-Intervention: <id>` and adds that intervention record
   in the same commit.
 - **(c) a bootstrap commit.** It carries `Athena-Job: bootstrap` and is an ancestor of, or equal to, the
@@ -930,6 +934,53 @@ changed, X must be exactly one of the following:
 A **merge commit** passes if its fingerprint equals one parent's, because a clean merge brings no new
 content. Otherwise it needs (a) or (b). The commits in `athena.toml`'s `[history] exempt` list are exempt:
 in this repository, the single commit that predates Athena.
+
+**Merge, squash, and rebase merges.** A project may land pull requests any of the three ways, and the
+invariant treats them alike, because it reads the records a commit adds and not how the commit was made
+(`landing` and `closing_jobs` in `crates/athena-gate/src/invariant.rs`).
+
+- A *merge commit* keeps its rule above. Its first-parent diff would also pass (a), since the records are in
+  its tree.
+- A *squash merge* makes one commit with no `Athena-*` trailers, whose diff adds the code and every record of
+  the job at once. It is checked as a landing, with the parent being the base it was squashed onto.
+- A *rebase merge* replays the PR's commits with new ids. The closing commit is checked as a landing against
+  its new parent; the commit that added the reading is no longer an ancestor by id, and need not be.
+
+The clause that matters is the one about trailers. **Trailers are hints, not evidence.** A squash drops or
+rewrites them, and anyone can type them. The job is identified from the records the commit adds. A trailer
+that contradicts the records refuses the landing (`Athena-Verified-Content` that is not the fingerprint, or
+an `Athena-Job` naming a different request job). A trailer that agrees changes nothing, and `Athena-Prediction`
+is ignored. Athena still writes all of them on the commits it makes, because they are cheap and make
+`git log --grep` useful.
+
+**Prediction before work, from the records** (`prediction_problem`). The old proof was a named commit that
+is an ancestor and added the reading; a squash has neither. The proof now needs only what survives it:
+`job.json`, in the landed tree, names an accepted reading; that `reading-<n>.json` is in the tree; and its
+recorded `at` and `invocation_seq` come no later than `dispatched_at` and no later than the start time and
+sequence number of every producer and verifier invocation the job's records list. A reading written after
+the work cannot satisfy that. The limit of the proof is stated plainly: the timestamps are written by
+Athena and are not signed, so someone who forges every record, consistently, forges the order. That attacker
+could equally forge the trailer and the commit order the old proof leaned on; what the records add is that
+nothing outside the commit is needed to check it.
+
+**No second landing.** The check reads the first parent's tree: if it holds a landed outcome for the job,
+the commit is refused. The history walk additionally keeps the set of jobs that earlier commits validly
+landed (`HistoryState::landed`), so a landing that follows a hand-made removal of the records is still
+caught. It no longer greps `Athena-Job` trailers, which a squash would not carry.
+
+*Alternatives considered.*
+
+- *Require merge commits, and refuse the others.* Simple, but it dictates a hosting strategy, and the
+  repository owner here squashes. Rejected.
+- *Keep the trailers and require squash messages to preserve them.* Platforms rewrite squash messages
+  (GitHub takes the PR title and body by default), and a trailer is only text. Rejected as a proof, kept as
+  a hint.
+- *Follow the prediction through ancestry, by the id of the commit that added the reading.* Rebase changes
+  every id, and a squash removes the commit. Rejected.
+- *Match the prediction commit by patch id or tree content.* It survives a rebase, but not a squash, and it
+  adds a search through history. Rejected.
+- *Record the order in the records themselves (chosen).* It works for all three strategies and needs no
+  schema change, because the reading and the invocations already carry times and numbers.
 
 The invariant makes "nothing reaches main unverified, and hand work is always declared" a property of the
 history, checked in three places ([§7.4](#74-commit-gates)).
@@ -971,8 +1022,10 @@ changes (D38):
 6. **The governed-content invariant** of [§7.3](#73-landing-fingerprints-and-trailers), including the
    merge rule.
 7. **History only:**
-   - every landing commit's fingerprint matches its trailer and its `verification.json`;
-   - every `Athena-Prediction` names an ancestor commit that added that job's accepted reading.
+   - every landing commit's fingerprint matches its `verification.json` and `candidate.json` (and its
+     `Athena-Verified-Content` trailer, when it has one);
+   - every job's accepted reading was recorded before the dispatch and the producer and verifier
+     invocations, as its records show, whatever the merge strategy; and no job is landed twice.
 8. **Reconciliation**, in `athena check`, both over the working state and over the history:
    - per invocation, the per-model costs sum to the reported total within rounding, and the requested
      model's per-model tokens equal the invocation's tokens;

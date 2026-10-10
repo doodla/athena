@@ -7,6 +7,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- The governed-content invariant and `athena check --history` now accept a landing that was squash-merged
+  or rebase-merged, as well as a merge commit. A landing is identified by the job records the commit adds,
+  not by `Athena-*` trailers or by the prediction commit being an ancestor. "Prediction before work" is
+  proved from the records: the accepted reading must be recorded before the dispatch and before every
+  producer and verifier invocation. A trailer that contradicts the records still refuses the landing;
+  `Athena-Prediction` is no longer checked, and the `prediction` rule no longer reports. A second landing
+  of a job is found from the parent's records and the history walk, not from trailers. See design §7.3.
+
 ## [0.1.0]
 
 The first version: the v0 walking skeleton. It takes one request, runs one job through a sub-agent,

@@ -112,9 +112,10 @@ The trace runs: `request.json` → `reading-<n>.json` (the prediction) → `job.
 → `invocations/` (tokens, cost, time) → `verification.json` → `outcome.json` → `score.json`.
 
 A commit that changes governed content passes the gate as a landing only with its whole job behind it: the
-job's `job.json` on the parent commit, an `Athena-Prediction` that added the accepted reading, and, in the
-commit itself, the candidate, the verification, a successful verifier invocation that reconciles, and the
-landed outcome (D55).
+job's `job.json` and its accepted reading in the landed tree, the reading recorded before the dispatch and
+the producer and verifier invocations, and, in the commit itself, the candidate, the verification, a
+successful verifier invocation that reconciles, and the landed outcome (D55). The gate reads these records,
+not the trailers, so a merge, squash, or rebase merge lands the same way.
 `git log --grep "Athena-Job: <id>"` lists a job's commits; `athena status <id>` shows the same trace.
 
 ## Resolving a pending quantity

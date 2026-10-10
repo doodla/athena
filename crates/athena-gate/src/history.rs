@@ -7,11 +7,11 @@
 //! for sensitive content, `[secrets]` and `[personal_data]`, come from the tip, where allow-listing an old
 //! false positive is legitimate. Finally it validates and reconciles every record at the tip.
 
-use crate::invariant::{HistoryState, JOB, VERIFIED_CONTENT};
+use crate::invariant::HistoryState;
 use crate::records::RecordSet;
 use crate::{
     Change, GateError, Judged, Result, Rule, Violation, builtin_config, config_at, content,
-    invariant, jobs, reconcile, secrets, trailer_values,
+    invariant, jobs, reconcile, secrets,
 };
 use athena_git::Git;
 
@@ -71,15 +71,10 @@ pub fn check_history(git: &Git, tip: &str) -> Result<HistoryReport> {
             .extend(invariant::check(git, &change, &judged, Some(&state))?);
         report
             .violations
-            .extend(invariant::check_prediction(git, &change)?);
-        report
-            .violations
             .extend(jobs::check(git, &change, &judged, Some(&state))?);
-        let trailers = change.trailers(git)?;
-        if !trailer_values(&trailers, VERIFIED_CONTENT).is_empty() {
-            for job in trailer_values(&trailers, JOB) {
-                state.landed.insert(job.to_string());
-            }
+        // A job has landed once a commit validly lands it, by its records and not by its trailers.
+        if let Some(job) = invariant::landing_job(git, &change, &judged, Some(&state))? {
+            state.landed.insert(job.as_str().to_string());
         }
     }
 

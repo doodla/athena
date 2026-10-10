@@ -9,7 +9,7 @@
 //! - a landed outcome (`outcome.json` or `outcome-landed.json`) comes only with a valid landing commit of
 //!   its own job (the governed-content invariant's case a);
 //! - an outcome after `blocked` (`outcome-landed.json`, `outcome-abandoned.json`) needs the job's
-//!   `blocked` outcome on the parent commit.
+//!   `blocked` outcome on the parent commit, or in the same commit when a squash folds the job into one.
 
 use crate::invariant::{self, HistoryState};
 use crate::{Change, Judged, Result, Rule, Violation};
@@ -297,9 +297,14 @@ pub fn check(
             AnyRecord::Outcome(outcome) if outcome.job.is_request() => {
                 let dir = outcome.job.dir();
                 if outcome.after_blocked {
-                    let blocked = JobFiles::load(git, &judged.base, &outcome.job)?
-                        .outcome
-                        .is_some_and(|o| o.state == OutcomeState::Blocked);
+                    // The blocked outcome is on the parent, or arrives in this very commit when a squash
+                    // or rebase merge folds the whole job into one.
+                    let is_blocked = |treeish: &str| -> Result<bool> {
+                        Ok(JobFiles::load(git, treeish, &outcome.job)?
+                            .outcome
+                            .is_some_and(|o| o.state == OutcomeState::Blocked))
+                    };
+                    let blocked = is_blocked(&judged.base)? || is_blocked(&change.tree)?;
                     if !blocked
                         || !matches!(
                             outcome.state,
