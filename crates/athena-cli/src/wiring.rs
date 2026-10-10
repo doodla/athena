@@ -126,7 +126,14 @@ pub fn open(cwd: &Path, writes: bool, announce: &dyn Fn(&str)) -> Result<Athena>
         });
     }
     let state = StateDir::for_repository(&user.common_dir()?);
-    let config = athena_gate::config_at(&user, user.head()?.as_deref())?;
+    // The driver only needs the pinned Claude Code version, and is built when an agent first runs. A
+    // configuration that does not parse must not stop `check` and `status` from reporting it; commands
+    // that run agents read the configuration again, and refuse it there.
+    let config = match athena_gate::config_at(&user, user.head()?.as_deref()) {
+        Ok(config) => config,
+        Err(athena_gate::GateError::Config(_)) if !writes => athena_gate::builtin_config(),
+        Err(other) => return Err(other.into()),
+    };
     let driver = DeferredDriver::new(config.agents.claude_version.clone(), state.registry());
     Ok(Athena {
         git: user,

@@ -251,3 +251,47 @@ fn ask_later_queues_a_request_without_calling_a_model() {
         "{view}"
     );
 }
+
+#[test]
+fn check_reports_a_configuration_that_does_not_parse() {
+    // M6 (blocks), N1 of acceptance verification 2: a prefix exemption committed without hooks does not
+    // stop the history check, which reports it and still judges the commits after it.
+    let fx = Fixture::new();
+    let config = fx.file("athena.toml").unwrap();
+    let broken: String = config
+        .lines()
+        .map(|l| {
+            if l.starts_with("exempt = ") {
+                "exempt = [\"0\"]".to_string()
+            } else {
+                l.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    write(fx.root(), &[("athena.toml", &broken)]);
+    fx.git.run(["add", "-A"]).unwrap();
+    fx.git
+        .run([
+            "commit",
+            "-q",
+            "-m",
+            "Exempt everything\n\nAthena-Job: bootstrap",
+        ])
+        .unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let out = athena()
+        .current_dir(fx.root())
+        .env("ATHENA_STATE_DIR", state.path())
+        .args(["check", "--history"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "violations, not an error: {}{stdout}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("is not a full commit id"), "{stdout}");
+}

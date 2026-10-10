@@ -1282,7 +1282,8 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   - A commit that adds an entry must already have the named commit in its history, so an exemption can
     only name the past, such as a commit that predates Athena.
   - The history check reports a tip whose configuration does not parse as a violation, and judges with
-    the built-in configuration, instead of stopping.
+    the built-in configuration, instead of stopping; `athena check` and `athena status` open such a
+    repository, while the commands that run agents still refuse it.
   - An outcome of a request job must record its totals; only the bootstrap's outcome has none.
 - **Alternatives:** (a) Require only full-length ids, since a future commit's full id cannot be ground to
   match. (b) Drop exemptions, and with them the history before Athena.
