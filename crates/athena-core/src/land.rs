@@ -62,9 +62,14 @@ pub fn plan(git: &Git, verified: &Verified, head: &str) -> Result<Plan> {
             }
         }
     } else {
-        return Ok(Plan::Stale(
-            "governed content changed on the branch since dispatch".into(),
-        ));
+        let by = match first_governed_change(git, p, head)? {
+            Some((commit, subject)) => format!(" (first by {} \"{subject}\")", &commit[..12]),
+            None => String::new(),
+        };
+        return Ok(Plan::Stale(format!(
+            "governed content changed on the branch since dispatch{by}; nothing landed, and that \
+             change is untouched"
+        )));
     };
     let landed = fingerprint(git, &tree, p)?;
     if landed != verified.fingerprint() {
@@ -74,6 +79,24 @@ pub fn plan(git: &Git, verified: &Verified, head: &str) -> Result<Plan> {
         );
     }
     Ok(Plan::Tree(tree))
+}
+
+/// The first commit after `base` on the way to `head` that changed governed content, with its subject.
+fn first_governed_change(git: &Git, base: &str, head: &str) -> Result<Option<(String, String)>> {
+    let before = fingerprint(git, base, base)?;
+    let commits = git.run([
+        "rev-list",
+        "--reverse",
+        "--first-parent",
+        &format!("{base}..{head}"),
+    ])?;
+    for commit in commits.lines() {
+        if fingerprint(git, commit, base)? != before {
+            let subject = git.run(["log", "-1", "--format=%s", commit])?;
+            return Ok(Some((commit.to_string(), subject.trim().to_string())));
+        }
+    }
+    Ok(None)
 }
 
 #[cfg(test)]

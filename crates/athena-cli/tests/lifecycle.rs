@@ -715,7 +715,11 @@ fn a_governed_change_on_the_branch_makes_the_job_stale() {
     let fx = Fixture::new();
     let mut scenario = Scenario::default();
     let root = fx.root().to_path_buf();
+    let once = Arc::new(std::sync::atomic::AtomicBool::new(false));
     scenario.during_verification = Some(Arc::new(move || {
+        if once.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
         let git = athena_git::Git::at(&root);
         let record = r#"{
   "schema": "athena.intervention/1",
@@ -757,7 +761,35 @@ fn a_governed_change_on_the_branch_makes_the_job_stale() {
             .unwrap(),
     );
     assert_eq!(f.state, OutcomeState::Stale, "{}", f.reason);
+    assert!(
+        f.reason.contains("\"Edit by hand\"") && f.reason.contains("nothing landed"),
+        "the reason names the commit that moved the base: {}",
+        f.reason
+    );
     assert!(!fx.file("README.md").unwrap().contains("Hello, reader."));
+    assert!(
+        fx.file("src/lib.rs").unwrap().contains("// by hand"),
+        "the user's own change is untouched"
+    );
+    assert!(athena.check_history().unwrap().violations.is_empty());
+    let shown = athena_cli::display::finished(&f);
+    assert!(shown.contains("ask again"), "{shown}");
+    let status = athena.status().unwrap();
+    assert!(
+        status.open.is_empty(),
+        "nothing is left open or locked: {:?}",
+        status.open
+    );
+    // Recovering costs nothing beyond asking again: the next job runs on top of the user's change.
+    let again = athena.ask("add a greeting", &Lines::default()).unwrap();
+    let redo = finished(
+        athena
+            .go(again.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(redo.state, OutcomeState::Landed, "{}", redo.reason);
+    assert!(fx.file("README.md").unwrap().contains("Hello, reader."));
+    assert!(fx.file("src/lib.rs").unwrap().contains("// by hand"));
     assert!(athena.check_history().unwrap().violations.is_empty());
 }
 

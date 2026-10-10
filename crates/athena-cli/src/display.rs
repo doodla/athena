@@ -268,6 +268,13 @@ pub fn finished(f: &Finished) -> String {
             f.job.as_str()
         );
     }
+    if f.state == OutcomeState::Stale {
+        let _ = writeln!(
+            out,
+            "next   nothing landed and the branch is as you left it; ask again to redo the work on top of it (`athena status {}` shows the request)",
+            f.job.as_str()
+        );
+    }
     out
 }
 
