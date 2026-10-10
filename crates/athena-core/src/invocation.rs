@@ -116,7 +116,7 @@ pub fn host_baseline(config: &Config) -> Quantity {
     Quantity::estimated(
         Some(config.agents.host_baseline_tokens as f64),
         Unit::Tokens,
-        "measured once at design time with the pinned host (E3, E8); not measured per invocation",
+        "measured once with the pinned host and a role's structured-output tool (athena.toml [agents]); not measured per invocation",
         None,
         None,
     )
