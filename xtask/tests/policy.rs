@@ -86,6 +86,12 @@ fn boundary_words() -> Vec<String> {
         ["sand", "box"],
         ["sand", "boxes"],
         ["sand", "boxed"],
+        ["lea", "se"],
+        ["lea", "ses"],
+        ["hand", "off"],
+        ["hand", "offs"],
+        ["hand-", "off"],
+        ["hand-", "offs"],
     ]
     .iter()
     .map(|parts| parts.concat())
@@ -182,6 +188,20 @@ fn the_boundary_scanner_flags_a_planted_term() {
     assert_eq!(found.len(), 3, "{found:?}");
     assert!(
         boundary_scan("Cooperators accrue the opcode.").is_empty(),
+        "whole words only"
+    );
+    // All four subjects the bootstrap brief rules out, not only the first two (acceptance
+    // verification 1, m3).
+    let planted = format!(
+        "Renew the {} at each {}.\nTwo {} and one {}.",
+        ["lea", "se"].concat(),
+        ["hand", "off"].concat(),
+        ["lea", "ses"].concat(),
+        ["hand-", "off"].concat()
+    );
+    assert_eq!(boundary_scan(&planted).len(), 4, "{planted}");
+    assert!(
+        boundary_scan("The release hands off to cargo.").is_empty(),
         "whole words only"
     );
 }
