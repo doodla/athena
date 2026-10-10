@@ -1,0 +1,115 @@
+# Athena's configuration for this repository.
+#
+# This file is a governance file (docs/design/athena-v0.md §7.3): a job may change it only when its accepted
+# reading lists it as a deliverable and names it in an acceptance criterion, and a change governs only
+# later jobs, because every job reads its configuration from its own base commit.
+
+[athena]
+schema = 1
+
+[models]
+# The reader turns a request into a reading; it picks the producer from `producer_allowed`.
+reader = "claude-sonnet-5-5"
+producer_default = "claude-sonnet-5-5"
+producer_allowed = ["claude-haiku-5-5", "claude-sonnet-5-5"]
+# The verifier must never be a model that can produce (nothing verifies its own work).
+verifier = "claude-opus-5-5"
+
+[models.names]
+# Display names, used in Co-Authored-By trailers on landing commits.
+"claude-opus-5-5" = "Claude Opus 5.5"
+"claude-sonnet-5-5" = "Claude Sonnet 5.5"
+"claude-haiku-5-5" = "Claude Haiku 5.5"
+
+[budget]
+reader_usd = 0.50
+producer_usd = 3.00
+verifier_usd = 2.00
+job_usd = 8.00
+max_readings = 5
+reader_timeout_s = 300
+producer_timeout_s = 1800
+verifier_timeout_s = 1200
+check_timeout_s = 900
+
+[agents]
+# The worker is held constant: Claude Code at this version (see D03).
+claude_version = "2.1.296"
+# Agents start with an empty environment. These variables are always passed.
+env_pass = ["HOME", "PATH"]
+# These are passed only when set: locale and user, toolchain locations, Claude Code's own credentials and
+# endpoint, and the machine's network settings (proxies and certificate bundles).
+env_pass_if_set = [
+    "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "USER", "LOGNAME", "TERM", "TZ",
+    "RUSTUP_HOME", "CARGO_HOME",
+    "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL",
+    "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy",
+    "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR", "CARGO_HTTP_CAINFO",
+]
+bash_default_timeout_ms = 600000
+bash_max_timeout_ms = 1200000
+# Context the host injects even into hermetic agents: about 590 tokens with no tools (design Appendix A, E3
+# and E8), and about 1,070 with the structured-output tool that `--json-schema` adds for every role, measured
+# on 2026-10-10 by the live test live_the_contract_is_within_its_budget.
+host_baseline_tokens = 1070
+
+[capabilities.change]
+# Commands each executing role may run through Bash, by program and allowed first argument.
+# "*" allows any arguments; path arguments are always confined to the agent's own snapshot.
+producer_commands = { cargo = ["build", "check", "test", "clippy", "fmt", "run", "metadata", "tree", "doc"], git = ["status", "diff", "log", "show"], ls = ["*"], rm = ["*"], mv = ["*"], chmod = ["*"] }
+# The verifier never writes: the hook allows its `cargo fmt` only with `--check`.
+verifier_commands = { cargo = ["build", "check", "test", "clippy", "fmt", "run", "metadata", "tree"], git = ["status", "diff", "log", "show"], ls = ["*"] }
+
+[capabilities.change.env]
+# Each job builds in its own directories, one per side (D46). {job_dir} and {side} are filled in by Athena.
+CARGO_TARGET_DIR = "{job_dir}/target/{side}"
+CARGO_TERM_COLOR = "never"
+
+[[capabilities.change.checks]]
+name = "fmt"
+run = ["cargo", "fmt", "--all", "--check"]
+
+[[capabilities.change.checks]]
+name = "clippy"
+run = ["cargo", "clippy", "--all-targets", "--locked", "--", "-D", "warnings"]
+
+[[capabilities.change.checks]]
+name = "test"
+kind = "test"
+run = ["cargo", "test", "--locked"]
+
+[classes]
+# The closed list of classes of work (D42). Adding a class is a job.
+list = ["code", "tests", "docs", "prompts", "config", "build", "design", "other"]
+
+[forecast.reference]
+# The reference forecaster's priors, used until history accumulates (design §9.2).
+p_reading_accepted = 0.7
+p_verification_passes = 0.75
+p_user_intervenes = 0.2
+pseudo_count = 4.0
+cost_usd = { p10 = 0.15, p50 = 0.60, p90 = 2.50 }
+wall_time_s = { p10 = 120.0, p50 = 420.0, p90 = 1500.0 }
+
+[secrets]
+# Reviewed gitleaks allow-list entries, each with a reason. Commit an entry before the commit it excuses.
+allowlist = []
+
+[tools.gitleaks]
+version = "8.30.1"
+sha256 = { linux_x64 = "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb", linux_arm64 = "e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080", darwin_x64 = "dfe101a4db2255fc85120ac7f3d25e4342c3c20cf749f2c20a18081af1952709", darwin_arm64 = "b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5" }
+
+[history]
+# Commits that predate Athena and are exempt from the governed-content invariant (design §7.3). Each entry is
+# a full commit id, and a commit that adds one must already have that commit in its history (D60).
+exempt = ["49c6ac1524677b8091081115fb5d410ed6d2b2ea"]
+
+[records]
+max_file_bytes = 1048576
+
+[personal_data]
+# Email addresses allowed in committed content. An entry ending in "@" allows that local part ("noreply@");
+# one starting with "@" allows that domain; one starting with "." allows every domain under that suffix.
+# These are no-reply addresses, the documentation domains, and the reserved top-level domains (RFC 2606),
+# none of which can belong to a person.
+email_allow = ["noreply@", "@example.com", "@example.org", "@example.net", ".invalid", ".test", ".example"]
