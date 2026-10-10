@@ -199,7 +199,18 @@ fn live_the_hook_denies_escapes() {
         out.commands_run.iter().all(|c| !c.contains("-C /")),
         "the escape did not run"
     );
-    assert!(!out.denials.is_empty(), "the denial was recorded");
+    assert!(
+        out.denials.iter().any(|d| d.detail.contains("-C /")),
+        "the denial was recorded"
+    );
+    assert!(
+        out.denials.iter().all(|d| d.tool != "StructuredOutput"),
+        "the structured output is never denied"
+    );
+    assert!(
+        out.structured.is_some(),
+        "the agent still returned its structured output"
+    );
 }
 
 #[test]

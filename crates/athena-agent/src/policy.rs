@@ -129,12 +129,18 @@ pub fn evaluate(policy: &Policy, tool: &str, input: &Value, cwd: Option<&Path>) 
             },
             None => deny("a Bash call without a command"),
         },
+        // Claude Code returns `--json-schema` output through this tool; it has no effect outside the
+        // conversation, and denying it would leave the role without its structured output.
+        STRUCTURED_OUTPUT_TOOL => Decision::NoObjection,
         other => deny(format!(
             "{other} is not a tool of the {} role",
             policy.role.as_str()
         )),
     }
 }
+
+/// The tool through which Claude Code returns a role's structured output.
+pub const STRUCTURED_OUTPUT_TOOL: &str = "StructuredOutput";
 
 /// A token of a shell command.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -930,6 +936,19 @@ mod tests {
                 .unwrap()
                 .contains("because")
         );
+    }
+
+    #[test]
+    fn the_structured_output_tool_is_never_denied() {
+        // Found by the live hook test: denying it leaves every role without its output.
+        let dir = snapshot();
+        for role in [Role::Reader, Role::Producer, Role::Verifier] {
+            let p = policy(role, dir.path());
+            assert_eq!(
+                evaluate(&p, STRUCTURED_OUTPUT_TOOL, &json!({ "answer": "x" }), None),
+                Decision::NoObjection
+            );
+        }
     }
 
     #[test]
