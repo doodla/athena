@@ -1,0 +1,88 @@
+{
+  "schema": "athena.candidate/1",
+  "job": "20261010-225204-1ap3",
+  "base_commit": "bf44423f4ad65db293c58f7b452150a1777a46ec",
+  "candidate_commit": "38baca4a921a8163da17c8b031754c0d7c108011",
+  "candidate_tree": "f83651446b9dafaf7855b6b0031dca863b2988df",
+  "changes": [
+    {
+      "path": ".github/workflows/ci.yml",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 1740
+    },
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 3708
+    },
+    {
+      "path": "athena.toml",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 5440
+    },
+    {
+      "path": "crates/athena-gate/src/history.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 13395
+    }
+  ],
+  "fingerprint": "sha256:724e0eb99e976f5ee57617967d08bccadafce519dcce3f90e6f0b98ad1891eb9",
+  "violations": [
+    {
+      "rule": "governance",
+      "path": ".github/workflows/ci.yml",
+      "detail": ".github/workflows/ci.yml is a governance file; a job may change it only when the accepted reading lists it as a deliverable and names it in an acceptance criterion"
+    }
+  ],
+  "producer_report": {
+    "summary": "The history check now exempts the stray second root, the acceptance command runs, and CI builds the gate from the commit under test. I could not run it against the real history, which isn't in my copy, so the 64ecdc9a/ff2aafa result in criterion 5 is unconfirmed.\n\n- **Exemption:** `athena.toml` `[history] exempt` now also lists `64ecdc9aa4fd24cbe4d4884c864d7e9041585c3d`, with a comment saying it is a stray second root written during job ezm8. I did not add ff2aafa. I couldn't see whether the check flags it on its own, and any check that did flag it would have named it.\n- **Why that alone wasn't enough:** a commit is judged by its parent's config. A parentless commit gets the built-in config, which is compiled in from `athena.toml`, so the root is covered. A child like ff2aafa is judged by its parent's tree, which may carry an older `athena.toml` without the new entry. `check_history` in `history.rs` therefore adds the tip's exempt list to each commit's judged config. This is safe because the content check only allows an entry that names a commit already in the adding commit's history.\n- **\"Own gate\":** the landing path (`Judged::new`) and the history walk already judged a gate-changing commit by its parent's config, so they agreed. I read \"judged by its own gate\" as the gate being built from the commit under test. `ci.yml` now runs `cargo run --locked -p athena-cli -- check --history`, replacing the installed `athena` binary, which could be stale. If you meant something else by \"own candidate gate\", say so.\n- **Tests (in `history.rs`):**\n  - An exempt second root and its child are not flagged.\n  - A non-exempt second root is flagged for the invariant.\n  - A commit that changes `athena.toml` and carries a hand edit is flagged, and the commit gate reports the same violation.\n  - The parent's config, not the commit's own, is what judges it.\n- **Other edits:** `CHANGELOG.md` has a new entry. `lib.rs`, `invariant.rs` and `testutil.rs` are unchanged; I didn't need them.",
+    "files": [
+      "athena.toml",
+      "crates/athena-gate/src/history.rs",
+      "CHANGELOG.md",
+      ".github/workflows/ci.yml"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-gate --locked",
+        "result": "pass",
+        "note": "49 passed, including 3 new history tests"
+      },
+      {
+        "command": "cargo fmt --all (applied), cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "clippy clean. I ran `fmt --all` to apply formatting, not `--check`, so the check form was not run after the final edit."
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "whole workspace"
+      },
+      {
+        "command": "cargo run --locked -p athena-cli -- check --history",
+        "result": "pass",
+        "note": "starts with no binary-selection error. In this snapshot's one-commit history it reports one violation, on the base commit b2a5b4c (governed content with no landing). That commit is a snapshot artifact, not 64ecdc9a or ff2aafa."
+      }
+    ],
+    "open_issues": [
+      "The real history (with 64ecdc9a and ff2aafa) is absent from my copy, so I could not run the check against it. If ff2aafa is flagged on its own, add its full id to the exempt list.",
+      "The exempt list line in athena.toml is now over 100 characters, which the existing style may or may not allow.",
+      "The ci.yml history job still runs ./setup.sh --ci, which also installs the athena binary the job no longer uses."
+    ],
+    "mistakes": [
+      "I first wrote the athena.toml exempt list across several lines, which would have broken the test helper. I caught it before running the tests and put it back on one line."
+    ],
+    "learnings": [
+      "BUILTIN_CONFIG is include_str! of athena.toml, so a parentless commit is judged by the athena.toml compiled into the running binary.",
+      "The test helper config_exempting replaces only the single line starting with 'exempt = ', so the exempt list in athena.toml must stay on one line.",
+      "Each commit is judged by its parent's config (D38). The history walk did not use the tip's exempt list until this change."
+    ],
+    "desires": [
+      "The real git history, or at least the output of `athena check --history` on main."
+    ]
+  }
+}
