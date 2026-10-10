@@ -2,727 +2,979 @@
 
 Every significant choice in Athena's design gets an entry here. Each entry contains:
 
-- **Decision**: the choice that was made.
-- **Alternatives**: the options that were considered.
-- **Tradeoff**: what the choice gives up.
-- **Reversal cost**: what it would take to undo it.
-- **Provenance**: where the rationale comes from.
-- **Bundle**: where Ryan Lopopolo's *Harness Engineering* bundle (CC BY 4.0) shaped the choice, or where
-  Athena departs from it. This field appears only when relevant.
+- **Decision:** the choice that was made.
+- **Alternatives:** the options that were considered.
+- **Tradeoff:** what the choice gives up.
+- **Reversal cost:** what it would take to undo it.
+- **Provenance:** where the rationale comes from, labeled as one of the following:
+  - **stated:** the requirement comes from the user's brief, and the entry cites where;
+  - **evidenced:** the rationale rests on a measurement or experiment, cited as E1–E20 from Appendix A of
+    [`docs/design/athena-v0.md`](design/athena-v0.md), or as R1–R10 from the appendix of
+    [review 1](design/reviews/athena-v0-review-1.md);
+  - **inferred:** the rationale is the designer's own reasoning, and is never presented as stated.
+- **Bundle:** where Ryan Lopopolo's *Harness Engineering* bundle shaped the choice, or where Athena departs
+  from it. The bundle is licensed CC BY 4.0 and was read at commit
+  `226c8d35fb6ea3ed55467753dba6dea2b5fd5778`. This field appears only when relevant.
 
-The bundle was read at commit `226c8d35fb6ea3ed55467753dba6dea2b5fd5778`.
+**How entries change.** Until the v0 design is accepted, an entry may be revised. Each revision adds a
+**Revised** line that says what changed and which review finding prompted it, so the history stays
+readable. After acceptance, an entry is never rewritten: a new entry supersedes it and names the entry it
+replaces.
 
-Provenance takes one of three labels:
-
-- **stated**: the requirement comes from the user's brief, and the entry cites where;
-- **evidenced**: the rationale rests on a measurement or experiment, cited as E1 to E12 from Appendix A of
-  [`docs/design/athena-v0.md`](design/athena-v0.md);
-- **inferred**: the rationale is the designer's own reasoning, and is never presented as stated.
-
-Entries are never rewritten once accepted. A later decision that changes an earlier one adds a new entry
-that supersedes it, and names the entry it replaces.
-
-Entries D01–D37 were written while designing v0, in the `bootstrap` job.
+Entries D01–D37 were written in revision 1 of the v0 design, and D38–D45 were added in revision 2 after
+review 1. All of them belong to the `bootstrap` job.
 
 ---
 
 ## D01 · Code owns the job lifecycle; agents own bounded roles
 
-- **Decision:** The core is a deterministic Rust program. It sequences the job, isolates it, commits,
-  gates, records, and scores. Model contexts are used only for bounded judgments: reading the request,
-  producing the change, and verifying it. No model context orchestrates.
+- **Decision:**
+  - The core is a deterministic Rust program. It sequences, isolates, commits, gates, records, and scores.
+  - Model contexts are used only for bounded judgments: reading the request, producing the change, and
+    verifying it. No model context orchestrates.
+  - The reader is a separate agent from the producer, for two reasons. The forecasts must not become the
+    executor's targets, and the reader must stay read-only.
 - **Alternatives:**
   - (a) An orchestrator agent (an LLM supervisor) that plans, dispatches, and closes the job.
-  - (b) A single agent that does the whole job end to end and is checked afterward.
+  - (b) One agent for the whole job: read, pause for the user's acceptance, then produce.
   - (c) Claude Code's own sub-agent mechanism, with a parent session spawning children.
-- **Tradeoff:** The core cannot improvise around unforeseen situations. It fails with a precise error
-  where an agent might have adapted. In return, the steps that must never be skipped (commit gates,
-  verification before landing, recording every invocation) are mechanisms rather than requests, and the
-  orchestrating context costs zero tokens.
-- **Reversal cost:** Medium. The lifecycle sits behind `athena-core`'s job API, so an agent-driven
-  planner could later sit above it, choosing among jobs, without replacing it.
-- **Provenance:** Stated, for the mechanism over hope requirement (A8), orchestrating contexts as the
-  scarcest resource (A6), deterministic work going to code (startup notes), and independent verification
-  (A7). Inferred, for the conclusion that lifecycle closure is deterministic work.
-- **Bundle:** Departs from *Give one agent the whole job*, where one primary trajectory owns closure.
-  Follows the same thesis's exception: a separate context window earns its cost when it buys independent
-  evidence, such as adversarial review. Each of Athena's three contexts is justified that way.
+- **Tradeoff:**
+  - The core cannot improvise around unforeseen situations: it fails with a precise error where an agent
+    might have adapted. In return, the steps that must never be skipped are mechanisms rather than
+    requests, and the orchestrating context costs zero tokens.
+  - Option (b) would give the same ordering more cheaply, since the producer re-reads what the reader read.
+    But it would put the forecasts, such as the predicted cost and the predicted verdict, in the executor's
+    context, where they could become targets. It would also give the reader Bash.
+- **Reversal cost:** Medium. The lifecycle sits behind `athena-core`'s job API, so a planner could later
+  sit above it without replacing it.
+- **Provenance:**
+  - Stated: mechanism over hope (A8); orchestrating contexts as the scarcest resource (A6); deterministic
+    work goes to code (startup notes); independent verification (A7).
+  - Inferred: that lifecycle closure is deterministic work, and that forecasts should be kept from the
+    executor.
+- **Bundle:** Two departures from *Give one agent the whole job*:
+  - code, not a trajectory, owns closure;
+  - the reader/producer split, which ordering alone would not require.
 
-## D02 · The user talks to Athena through a command-line tool
+  The verifier follows the bundle's own exception: a separate context earns its cost when it buys
+  independent evidence, such as adversarial review.
+- **Revised** (review 1, m12): the reader/producer split is now justified by forecast isolation and a
+  read-only reader, rather than by ordering, and recorded as a departure from the bundle.
 
-- **Decision:** `athena ask "<request>"` shows the reading and predictions. On a terminal, the user then
-  presses Enter to run the job or types a one-line correction. `athena correct`, `go`, and `drop` are the
-  same steps as separate commands, for callers without a terminal. Every command offers `--json`.
+## D02 · The user talks to Athena through a command-line tool with ten commands
+
+- **Decision:** The commands are `ask`, `correct`, `go`, `close`, `status [<job>]`, `intervene`,
+  `restart`, `check`, `stop`, and `start`.
+  - On a terminal, `ask` waits after showing the reading: Enter runs the job, `q` leaves it proposed, and
+    any other line is a correction.
+  - Without a terminal, `ask` commits its proposal and exits with the follow-up commands.
+  - `go` also retries the landing of a blocked job.
+  - `close` replaces drop and abandon.
+  - `status <job>` replaces a separate trace command.
+  - Every command offers `--json`.
 - **Alternatives:**
   - (a) A Claude Code skill or plugin inside the user's own agent context.
-  - (b) A long-running chat service or daemon.
-  - (c) An MCP server exposing Athena's operations as tools.
+  - (b) A chat service or daemon.
+  - (c) An MCP server.
   - (d) A web interface.
-- **Tradeoff:** A CLI has no conversational memory and no rich UI. Neither is needed: the records hold the
-  memory, and the reading fits in a terminal. Option (a) would load Athena's working details into the
-  user's context, which the brief says should hold intent and verdicts only (O2). Options (b) and (d)
-  add infrastructure that v0 does not need.
-- **Reversal cost:** Low. A skill, an MCP server, or a UI can wrap the CLI's `--json` interface later.
-- **Provenance:** Stated, for the lazy one-line request and correction in one line (A2, O2). Inferred,
-  for the interface choice.
+  - (e) Revision 1's fifteen commands.
+- **Tradeoff:** A CLI has no conversational memory, but the records hold the memory. Option (a) would load
+  Athena's details into the user's context (O2). Options (b) and (d) add infrastructure. Option (e) carried
+  commands that fold into others.
+- **Reversal cost:** Low. Other front ends can wrap the `--json` interface.
+- **Provenance:** Stated: a lazy one-line request, correctable in one line (A2, O2). Inferred: the
+  interface.
 - **Bundle:** Shaped by *Make capabilities legible*: familiar CLIs carry strong model priors, which
-  matters because Athena's user may itself be an agent driving a shell.
+  matters because the user may itself be an agent.
+- **Revised** (review 1, M5): fifteen commands became ten; `show`, `calibration`, `drop`, `abandon`, `land`,
+  and `doctor` were folded into others or removed.
 
-## D03 · Agents run as headless Claude Code processes, one process per invocation, at a pinned version
+## D03 · Agents run as headless Claude Code processes, one per invocation, at a pinned version
 
-- **Decision:** Every agent invocation is a separate `claude -p` process. Its result comes back as JSON,
-  with measured usage and reported cost. Claude Code is pinned at 2.1.296, and agents never spawn further
-  agents.
+- **Decision:** Every agent invocation is a separate `claude -p` process with `--output-format stream-json`.
+  Claude Code is pinned at 2.1.296, and agents never spawn further agents.
 - **Alternatives:**
-  - (a) Call the Messages API directly from Rust and implement the tool loop (file editing, shell) in
-    Athena.
+  - (a) Call the Messages API directly and implement the tool loop in Athena.
   - (b) Embed the Claude Agent SDK, which runs under TypeScript or Python.
-  - (c) Use the gateway's chat-completions route.
+  - (c) Use a gateway's chat-completions route.
   - (d) Use `--bare` mode.
-  - (e) Let one Claude Code process spawn sub-agents through its Agent tool.
-- **Tradeoff:** Each invocation pays Claude Code's startup time and about 590 tokens of host-injected
-  context (E3). Option (a) avoids both but means rebuilding a mature agent loop, which fails buy before
-  build. Option (b) would put non-Rust code in Athena's runtime path. Option (c) has no tools. Option (d)
-  failed authentication in the build environment and accepts only API keys. Option (e) would hide
-  per-agent cost and context inside one process.
-- **Reversal cost:** Medium. The `AgentDriver` trait isolates the runtime, so a direct-API driver could
-  replace this one per role.
-- **Provenance:** Evidenced: headless JSON output with usage, cost, and `modelUsage` (E2, E6), and
-  authentication that needs only `HOME` and `PATH` (E7). Stated: buy before build, and all code in Rust.
-  Inferred: process-per-invocation as the unit of cost capture.
-- **Bundle:** Shaped by *Hold the worker constant*. The model plus its host is a black box, pinned for an
-  adoption epoch and recorded in every invocation.
+  - (e) Let one Claude Code process spawn sub-agents.
+- **Tradeoff:** Each invocation pays Claude Code's startup time and about 600 tokens of host-injected
+  context (E3).
+  - (a) means rebuilding a mature agent loop.
+  - (b) puts non-Rust code in Athena's runtime path.
+  - (c) has no tools.
+  - (d) failed authentication in the build environment.
+  - (e) hides per-agent cost and context.
+- **Reversal cost:** Medium, behind the `AgentDriver` trait.
+- **Provenance:** Evidenced: headless output with usage, cost, and per-model usage (E2, E6, E16), and
+  authentication needing only `HOME` and `PATH` (E7). Stated: buy before build, and Rust.
+- **Bundle:** Shaped by *Hold the worker constant*: the model plus its host is a black box, pinned and
+  recorded.
+- **Revised** (review 1, M3): `json` output became `stream-json`, so usage is captured as it accrues (D40).
 
 ## D04 · Every agent gets a hermetic, explicitly composed context
 
-- **Decision:** The core launches every agent through one function. It sets
-  `--system-prompt-file <composed>` (replacing Claude Code's default system prompt), an empty
-  `--setting-sources ""`, `--restricted`, `--strict-mcp-config`, an explicit `--tools` list,
-  `--disable-slash-commands`, and `--no-session-persistence`. It runs the agent with an environment
-  cleared and rebuilt from an allow-list.
+- **Decision:** One function launches every agent with these flags: `--system-prompt-file <composed>`
+  (replacing Claude Code's default system prompt), `--restricted`, `--strict-mcp-config`, an explicit
+  `--tools`, `--disable-slash-commands`, and `--no-session-persistence`. It also sets the environment:
+  - cleared, then rebuilt from an allow-list;
+  - `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`;
+  - git configuration and discovery fenced to the snapshot.
 - **Alternatives:**
-  - (a) Append Athena's prompt to the default system prompt with `--append-system-prompt-file`.
-  - (b) Rely on `--setting-sources user` alone.
-  - (c) Use the defaults and instruct agents to ignore project files.
-- **Tradeoff:** Replacing the default system prompt drops Claude Code's own behavioral guidance, so
-  Athena's role frames must say what each role needs. Athena then owns, and can measure, everything except
-  the host's injected text. Option (a) costs about 17k tokens per agent and changes with every Claude Code
-  release (E2). Option (b) still loads user-level settings, plugins, and skills. Option (c) leaks the
-  project's `CLAUDE.md` (E1).
-- **Reversal cost:** Low. Switching is one flag in one function.
-- **Provenance:** Stated: Athena owns and composes the context of every agent it runs, and the root
-  `CLAUDE.md` must never reach Athena's agents. Evidenced: E1 (the leak with default flags, and its
-  absence when hermetic), E2 (17,586 tokens with defaults against 680–5,303 when hermetic), and E7 (an
-  environment of `HOME` and `PATH` suffices; a child process otherwise inherits its parent's identifying
-  variables).
-- **Bundle:** Departs from the bundle's routing through the repository's `AGENTS.md`. Athena does not
-  let the host discover context. It composes context per role and routes with briefs instead. Shaped by
-  *Route context just in time*: a small fixed map, with depth retrieved on demand.
+  - (a) Append to the default system prompt.
+  - (b) `--setting-sources ""` instead of `--restricted`.
+  - (c) Default flags, with instructions to ignore project files.
+- **Tradeoff:**
+  - Replacing the default system prompt saves about 2,300 tokens per invocation, measured with each role's
+    own tools (E18). It also gives Athena ownership of, and measurements for, everything except the host's
+    injected text. But it drops Claude Code's own behavioral guidance, whose effect on the producer's
+    quality is unmeasured, and is listed for evaluation in §14 of the design.
+  - Option (b) blocks a project `CLAUDE.md` but not auto-memory (E19).
+  - Option (c) leaks both (E1, E19).
+- **Reversal cost:** Low. The prompt mode is one flag.
+- **Provenance:** Stated: Athena owns and composes every agent's context, and the root `CLAUDE.md` must
+  never reach its agents. Evidenced: E1, E2, E7, E18, E19.
+- **Bundle:** Departs from routing through the repository's `AGENTS.md`. Shaped by *Route context just in
+  time*: a small fixed map, with depth retrieved on demand.
+- **Revised** (review 1, m8 and n4):
+  - The cost comparison now uses E18's 2,328 tokens, not E2's total, which included 25 tools.
+  - `--setting-sources ""` was dropped in favor of `--restricted`, because E19 showed only the latter
+    blocks auto-memory.
+  - The auto-memory variable was added.
 
-## D05 · Host-injected context is measured and redacted, not owned
+## D05 · Host-injected context is measured and contained, not owned
 
-- **Decision:** Athena accepts that, even when launched hermetically, the host injects about 590 tokens
-  of its own. These are an identity line, an account-context reminder containing the account's email
-  address, an environment block, and the date. Athena records the host's baseline per invocation and
-  redacts email addresses from agent free text before recording it.
+- **Decision:** Athena accepts that the host injects about 600 tokens of its own (E3), including the
+  account's email address. Athena takes three measures:
+  - it records the host's baseline per invocation;
+  - it redacts email addresses from agent free text before recording it;
+  - its gate refuses non-allow-listed email addresses in added lines.
 - **Alternatives:**
-  - (a) A direct-API driver that injects nothing.
+  - (a) A direct-API driver.
   - (b) Ignore the injection.
-- **Tradeoff:** v0 cannot remove text it does not control. Option (a) costs the agent loop (see D03).
-  Option (b) risks personal data reaching public records whenever an agent echoes it.
+- **Tradeoff:** v0 cannot remove text it does not control. Option (a) costs the agent loop. Option (b)
+  risks personal data reaching public records.
 - **Reversal cost:** Low.
 - **Provenance:** Evidenced: E3. Stated: never commit personal data (Boundaries).
+- **Revised** (review 1, m5): the personal-data gate on added lines was added.
 
-## D06 · Records are immutable JSON files, one fact per file, in per-job directories
-
-- **Decision:** Each record is a pretty-printed JSON file with a `schema` field. It is written once and
-  never modified or deleted. Each job writes only under `records/jobs/<id>/`. State is derived from which
-  records exist. New knowledge about an old fact becomes a new record, such as a re-score or a resolution
-  of a pending value.
-- **Alternatives:**
-  - (a) A SQLite database committed to the repository.
-  - (b) Append-only JSON Lines ledgers, one per kind of record.
-  - (c) One mutable `job.json` per job, updated in place.
-  - (d) git notes.
-  - (e) A separate records branch.
-- **Tradeoff:** Many small files, and status computed rather than stored. In return, parallel jobs never
-  touch the same path, so merges are trivially clean. Every change is an addition, so diffs are readable.
-  The append-only rule can be enforced by a simple gate. Option (a) is binary and conflicts on every
-  change. Option (b) conflicts when two branches append to the same file. Option (c) invites
-  after-the-fact edits, including to predictions. Option (d) is invisible to most tools and to strangers.
-  Option (e) separates records from the work they explain.
-- **Reversal cost:** Medium, since a migration tool could fold the files into another store. Low for
-  readers, because the files are plain JSON with published schemas.
-- **Provenance:** Stated: records are machine-readable and live in the repository (A5); storage is
-  diff-friendly, merge-friendly, and safe under parallel work (bootstrap brief). Inferred: immutability
-  as the mechanism for all three.
-- **Bundle:** Shaped by *Make the repository teach the agent*: one owner per concept, and parse at the
-  boundary.
-
-## D07 · Predictions are committed before dispatch
-
-- **Decision:** At dispatch, a prediction commit lands on the user's branch. It contains the request,
-  every reading and correction, the accepted job definition, and the producer brief. The closing commit
-  follows at the terminal state.
-- **Alternatives:**
-  - (a) Keep predictions uncommitted until the job closes.
-  - (b) Store predictions in git notes or a side ref.
-  - (c) Rely on file timestamps.
-- **Tradeoff:** Two commits per job instead of one, so the history is noisier. The trailers make it
-  filterable. In return, the history itself proves the forecast came first. The append-only gate stops
-  the forecast from being edited afterward, and a crash mid-job still leaves the prediction on record.
-  Option (a) loses the ordering proof. Option (b) loses visibility. Option (c) is easily forged.
-- **Reversal cost:** Low.
-- **Provenance:** Stated: record predictions before dispatch (A2, bootstrap brief item 2). Inferred:
-  commit order as tamper evidence.
-
-## D08 · Agents work in git worktrees outside the checkout, one per role
-
-- **Decision:** The reader works in a worktree at `HEAD`. The producer works in a worktree at the
-  prediction commit, and the verifier in one at the candidate commit. All live under the state directory,
-  outside the user's checkout, and all are removed when the job closes.
-- **Alternatives:**
-  - (a) Copy the repository per job.
-  - (b) Use a container per job.
-  - (c) Let agents work in the user's checkout.
-  - (d) Nest worktrees under a hidden directory inside the checkout.
-- **Tradeoff:** Worktrees share the object store, so they are cheap but not a security boundary.
-  Containers are stronger but heavier, and Docker is not a dependency Athena should impose. Option (c)
-  makes parallel work collide. Option (d) lets tools that walk up the directory tree (cargo workspaces,
-  Claude Code's memory discovery, ripgrep) confuse the nested tree with the outer one.
-- **Reversal cost:** Low. Creating a workspace sits behind one function in `athena-git`.
-- **Provenance:** Stated: parallel work never corrupts other work (A5). Evidenced: worktree and sparse
-  checkout behavior (E9). Inferred: placement outside the checkout.
-
-## D09 · Owner-private paths are marked with a git attribute and kept off agents' disks
-
-- **Decision:** Any path the repository marks `athena-exclude` in `.gitattributes` is left out of every
-  agent worktree by sparse checkout, and so is `records/`. Athena reads the attribute generically and
-  never names the paths itself.
-- **Alternatives:**
-  - (a) Deny reads of those paths in the tool hook.
-  - (b) List the paths in `athena.toml`.
-  - (c) Rely on hermetic launch only.
-- **Tradeoff:** Repository owners must learn one attribute. Option (a) cannot stop Grep or Glob from
-  surfacing a file's contents in search results. Option (b) would put the owner's private paths into
-  Athena's own configuration. Option (c) prevents automatic loading but not an agent's own reads.
-- **Reversal cost:** Low.
-- **Provenance:** Stated: the root `CLAUDE.md` must never reach Athena's agents, and Athena must know
-  nothing about the people or tools around it. Evidenced: sparse worktrees keep attributed paths off
-  disk and intact in the tree (E9). Inferred: the attribute as the boundary.
-
-## D10 · Landing is fast-forward only, gated in process, and keyed on a content fingerprint
+## D06 · Records are immutable JSON files, one fact per file, in per-job directories sharded by month
 
 - **Decision:**
-  - Athena builds every commit as an object with git plumbing: a temporary index and `commit-tree`,
-    signed with `-S` when the user's configuration asks for signing.
-  - It gates the commit with the same function the hooks use.
-  - It then advances the user's branch with `git merge --ff-only`.
-  - A landing is allowed only if the landed content, meaning every path outside `records/` and the
-    owner-private paths, has the same SHA-256 fingerprint as the content the verifier judged.
-  - Records-only interleavings replay through `merge-tree`. Any other change to the base makes the job
+  - Each record is a pretty-printed JSON file with a `schema` field, written once and never modified or
+    deleted.
+  - A job writes only under `records/jobs/<YYYY-MM>/<id>/`.
+  - State is derived from which records exist.
+  - New knowledge about an old fact is a new record: a re-score named after the intervention that caused
+    it, a later outcome, or a resolution.
+- **Alternatives:**
+  - (a) SQLite.
+  - (b) Append-only JSON Lines ledgers.
+  - (c) A mutable `job.json`.
+  - (d) git notes.
+  - (e) A records branch.
+  - (f) One flat jobs directory.
+- **Tradeoff:** Many small files, and status computed rather than stored.
+  - (a) is binary and conflicts.
+  - (b) conflicts on concurrent appends.
+  - (c) invites after-the-fact edits.
+  - (d) is invisible by default.
+  - (e) separates records from the work they explain.
+  - (f) rewrites an ever-growing tree object on every commit.
+- **Reversal cost:** Medium, since a migration tool could fold the files into another store. Low for
+  readers.
+- **Provenance:** Stated: machine-readable records in the repository (A5); diff-friendly, merge-friendly,
+  and safe under parallel work (bootstrap brief). Inferred: immutability as the mechanism.
+- **Bundle:** Shaped by *Make the repository teach the agent*: one owner per concept, and parse at the
+  boundary.
+- **Revised** (review 1, m6, m13): month shards were added, and re-scores are named after their
+  intervention.
+
+## D07 · Forecasts are committed before dispatch, and the closing commit points back to them
+
+- **Decision:**
+  - Readings, with their forecasts, are committed no later than dispatch: in a proposal commit if the
+    command exits first, otherwise in the prediction commit.
+  - The closing commit carries `Athena-Prediction: <commit>`.
+  - CI checks that the named commit is an ancestor and added the job's accepted reading, which the
+    append-only gate then protects.
+- **Alternatives:**
+  - (a) Commit predictions only at closing.
+  - (b) git notes, or a side ref.
+  - (c) File timestamps.
+- **Tradeoff:** Extra commits per job. Option (a) loses the ordering proof. Option (b) is not fetched by
+  default, and a side ref can be force-moved without a trace (review 1, Q1). Option (c) is easily forged.
+- **Reversal cost:** Low.
+- **Provenance:** Stated: predictions recorded before dispatch (A2; bootstrap brief, item 2). Inferred:
+  commit order as tamper evidence, strong once the commit is shared.
+- **Revised** (review 1, Q1 and M3): proposal commits and the `Athena-Prediction` trailer and check were
+  added.
+
+## D08 · Agents work in detached snapshots, each with its own throwaway repository
+
+- **Decision:**
+  - For each agent, the core writes the visible files of the source commit into a fresh directory outside
+    the checkout, using a temporary index, `read-tree`, and `checkout-index`. The visible files exclude
+    `records/` and `athena-exclude` paths, under the source commit's committed rules.
+  - The reader gets a plain directory. The producer gets a repository with one commit, base. The verifier
+    gets a repository with two commits, base and candidate.
+  - The core turns the producer's edits into a candidate commit in the user's repository from the change
+    list, with `--no-renames`, `hash-object -w`, a temporary index over the base's full tree, and
+    `commit-tree`.
+- **Alternatives:**
+  - (a) Linked git worktrees with sparse checkout, which was revision 1's design.
+  - (b) Full clones per job.
+  - (c) Containers.
+  - (d) `git archive` exports.
+- **Tradeoff:** Each snapshot is a copy, and agents lose `git log` of the real history. That is the point.
+  - (a) shares objects, refs, and configuration with the user's repository: `git show` reaches excluded
+    content, `update-ref` moves branches, and `sparse-checkout set` rewrites shared configuration (review
+    1, R1 and R2).
+  - (b) copies history, including excluded files.
+  - (c) imposes Docker.
+  - (d) drops `export-ignore` paths and rewrites `export-subst` files.
+- **Reversal cost:** Low, behind `athena-git`'s workspace function.
+- **Provenance:** Stated: parallel work never corrupts other work (A5), and the root `CLAUDE.md` never
+  reaches agents. Evidenced: E14 and E15 (isolation, candidate transfer, and a byte-identical
+  configuration), and review 1's R1 and R2 (the worktree escapes).
+- **Revised** (review 1, B1): linked worktrees were replaced by detached snapshots.
+
+## D09 · Owner-private paths are declared with a git attribute, read from committed rules at the base commit
+
+- **Decision:**
+  - A path marked `athena-exclude` in a committed `.gitattributes` file is absent from every snapshot,
+    outside the governed content, and unchangeable by jobs.
+  - The rules are evaluated with `check-attr --source=<base>`, `core.attributesFile=/dev/null`, and
+    `GIT_ATTR_NOSYSTEM=1`.
+  - Athena refuses to run if `info/attributes` mentions an `athena-*` attribute.
+  - No candidate may change any path's classification.
+  - In this repository, the owner's tooling directory declares itself from inside its own zone, and the
+    root `.gitattributes` marks `/CLAUDE.md`.
+- **Alternatives:**
+  - (a) Deny reads in the tool hook.
+  - (b) List the paths in `athena.toml`.
+  - (c) Rely on hermetic launch alone.
+  - (d) Evaluate the attributes with git's defaults.
+- **Tradeoff:** Owners learn one attribute (two, with D44).
+  - (a) cannot stop Grep or Glob from surfacing contents.
+  - (b) puts owner paths into Athena's own files.
+  - (c) stops automatic loading but not an agent's own reads.
+  - (d) lets files outside the repository, such as the per-user and system attribute files and
+    `info/attributes`, change the fingerprint and the agents' view (review 1, R7; E14).
+- **Reversal cost:** Low.
+- **Provenance:** Stated: the root `CLAUDE.md` must never reach Athena's agents, and Athena knows nothing
+  about the people and tools around it. Evidenced: E14; R7.
+- **Revised** (review 1, B1, M1, m1, Q4):
+  - Enforcement now rests on snapshots, not sparse checkout.
+  - The rules come from committed files only, at the base commit.
+  - Candidates cannot change classifications.
+
+## D10 · Landing is fast-forward only, gated in process, and keyed on a content fingerprint under the base's rules
+
+- **Decision:**
+  - The core builds every commit with plumbing, signed with `-S` when the user's configuration asks for
+    signing, and gates it with the hooks' own function.
+  - It then advances the branch with `merge --ff-only`.
+  - A landing requires all of the following:
+    - the base commit P is an ancestor of the branch tip H;
+    - every path's classification is the same under P's and H's rules;
+    - the landed governed content has the fingerprint that was verified, computed under P's rules.
+  - Interleavings of records or owner paths replay through `merge-tree`. Any other change makes the job
     `stale`.
 - **Alternatives:**
-  - (a) Commit with porcelain in the user's checkout.
-  - (b) Cherry-pick or merge, and trust the result.
-  - (c) Open pull requests.
-  - (d) Rebase onto the new base and verify again automatically.
-- **Tradeoff:** Plumbing commits skip hooks, so Athena must gate its own commits (M2). A stale job must
-  be asked again; v0 does not re-verify it automatically. In return, the bytes that land are provably
-  the bytes that were verified, and the user's index and uncommitted work are never touched. Option (a)
-  would mix Athena's commits with the user's staged changes. Option (b) breaks the link between
-  verification and the landed artifact. Option (c) is unavailable in the build environment and adds a
-  step that v0 does not need. Option (d) is left out until stale landings recur.
+  - (a) Porcelain commits in the user's checkout.
+  - (b) A cherry-pick or merge, trusted as it comes.
+  - (c) Pull requests.
+  - (d) Automatic re-verification on the new base.
+- **Tradeoff:** Plumbing skips hooks, so Athena gates itself (M2). Stale jobs must be asked again.
+  - (a) mixes Athena's commits with the user's staged work.
+  - (b) breaks the link between verification and the artifact.
+  - (c) is unavailable here and adds a step.
+  - (d) is left out until stale landings recur.
 - **Reversal cost:** Medium.
-- **Provenance:** Stated: nothing reaches the main branch without passing verification, and parallel
-  work never corrupts other work (A5). Evidenced: `commit-tree` needs `-S` to sign, and `merge-tree`
-  preserves the fingerprint (E9). Inferred: the fingerprint as the identity of what was verified.
-- **Bundle:** Shaped by *Prove the outcome*, specifically release integrity: deliver the artifact that
-  was tested, and do not rebuild it under different conditions.
+- **Provenance:** Stated: nothing reaches main without passing verification, and parallel work never
+  corrupts other work (A5). Evidenced: signing needs `-S`, and `merge-tree` preserves the fingerprint (E9,
+  E15).
+- **Bundle:** Shaped by *Prove the outcome* (release integrity): deliver exactly the artifact that was
+  verified.
+- **Revised** (review 1, B1, m1): the candidate is built from the snapshot's change list; fingerprints use
+  the base's rules; the ancestry and classification checks were added.
 
-## D11 · Every commit names its work in trailers, checked at commit time and in CI
+## D11 · Records-only commits name their work in a trailer
 
-- **Decision:** Every commit that touches anything other than owner-private paths must carry
-  `Athena-Job: <id>` or `Athena-Record: <path>`, naming something that exists at `HEAD`. Landing commits
-  also carry the class, capability, producer, verifier and verdict, cost, and verified-content
-  fingerprint. Merge commits are exempt, as are the commits listed in `athena.toml`: the one commit that
-  predates Athena.
+- **Decision:** A commit that leaves the governed content unchanged needs an `Athena-Job:`,
+  `Athena-Intervention:`, or `Athena-Record:` trailer naming something that exists at `HEAD`. A commit that
+  touches only owner paths needs no trailer. Commits that change governed content fall under D39.
 - **Alternatives:**
-  - (a) Put job ids in subjects only.
-  - (b) Keep a commit-to-job index file.
-  - (c) Use git notes.
-- **Tradeoff:** People committing by hand must add a trailer, which is the point (A5). Option (a)
-  clutters subjects and is hard to parse. Option (b) is a second source of truth that drifts. Option (c)
-  is not visible by default.
+  - (a) Job ids in subjects.
+  - (b) An index file mapping commits to jobs.
+  - (c) git notes.
+- **Tradeoff:** Hand commits need a trailer. Option (a) is hard to parse. Option (b) is a second source of
+  truth. Option (c) is invisible by default.
 - **Reversal cost:** Low.
-- **Provenance:** Stated: every commit traces to the work that produced it (A5), and a commit must be
-  followable from request to outcome (bootstrap brief item 7). Inferred: resolving trailers against
-  `HEAD`, so that records may arrive after the commits they explain, as the bootstrap's do.
+- **Provenance:** Stated: every commit traces to the work that produced it (A5). Inferred: resolving
+  trailers against `HEAD`, so records may arrive after the commits they explain.
+- **Revised** (review 1, M2): for commits that change governed content, the trailer-only rule is
+  superseded by D39's invariant.
 
-## D12 · The verifier is independent by type, process, model, and worktree
+## D12 · The verifier is independent by type, process, model, and snapshot
 
-- **Decision:** The verifier runs as its own process, on a model that never produces (Opus 5.5 in v0),
-  in a fresh worktree at the exact candidate commit. Its context is composed from `VerifierInputs`, a
-  type with no field that can carry the producer's report. Before it runs, the core runs the capability's
-  checks. The final verdict is computed by code from the agent's verdict, the criteria, the findings, and
-  the checks.
+- **Decision:**
+  - The verifier runs as its own process, on Opus 5.5, which is outside the producer's allowed set.
+  - It works in its own snapshot repository, holding base and the exact candidate.
+  - Its context is composed from `VerifierInputs`, which cannot carry the producer's report or commands.
+  - The capability's checks run first, by code.
+  - The final verdict is computed by code.
 - **Alternatives:**
-  - (a) The same model as the producer, in a separate context.
-  - (b) A verifier that sees the producer's report, for efficiency.
+  - (a) The same model as the producer.
+  - (b) A verifier that sees the producer's report.
   - (c) Self-review by the producer.
   - (d) Deterministic checks only.
-- **Tradeoff:** An Opus verdict costs more than a Sonnet one, and a fresh worktree means a fresh build.
-  Option (a) is weaker on independence: the same model shares blind spots. Option (b) violates the brief.
-  Option (c) is the producer verifying its own work. Option (d) cannot judge whether a change does what
-  was asked.
-- **Reversal cost:** Low for the choice of model, which is configuration. High for the independence
-  property, which is the brief's.
-- **Provenance:** Stated: verifiers never see the producer's reasoning, nothing verifies its own work,
-  and high-stakes conclusions are verified at the highest tier (A7, bootstrap brief item 4). Inferred:
-  model-level separation, and a fresh worktree at the candidate.
-- **Bundle:** Departs from *Prove the outcome* where the worker produces its own proof. Athena lets the
-  producer self-check, but counts only checks run by code and an independent verdict.
+- **Tradeoff:** An Opus verdict costs more, and every snapshot starts with a cold build.
+  - (a) shares blind spots.
+  - (b) breaks the brief.
+  - (c) is the producer verifying its own work.
+  - (d) cannot judge fitness to the request.
+- **Reversal cost:** Low for the choice of model. High for the independence property, which is the brief's
+  own.
+- **Provenance:** Stated: verifiers never see the producer's reasoning, nothing verifies its own work, and
+  the highest tier verifies high-stakes conclusions (A7; bootstrap brief, item 4). Inferred: model-level
+  separation. Review 1 (Q2) concurred.
+- **Bundle:** Follows the bundle: its whole-job closure includes adversarial review in a separate context.
+- **Revised** (review 1, B1, m2): the verifier works in a snapshot, and its exercise is made mechanical
+  (D43).
 
 ## D13 · One verification round, with severities and a verdict computed by code
 
-- **Decision:** Findings carry a severity: `blocker`, `major`, `minor`, or `nit`. A job passes only if
-  the agent says pass, every criterion is met, no finding is a blocker or major, and every check passed.
-  v0 runs exactly one round. A fail closes the job, and the user can ask again.
+- **Decision:**
+  - Findings are `blocker`, `major`, `minor`, or `nit`.
+  - A job passes only if the agent says pass, every criterion is met, no finding is a blocker or major, and
+    every check passed.
+  - v0 runs exactly one round. A fail closes the job, and the user can ask again.
 - **Alternatives:**
-  - (a) A bounded fix-and-reverify loop, for example two rounds.
-  - (b) Unbounded iteration until the verifier passes.
-- **Tradeoff:** Some fixable jobs are rejected that a loop would have rescued. In return, the stopping
-  rule is trivial and the cost is bounded. Option (b) has no stopping rule and invites reviewer bullying,
-  which the bundle documents. Option (a) is left out until the rework rate argues for it.
-- **Reversal cost:** Low. A loop wraps produce and verify.
-- **Provenance:** Stated: every loop has a stopping rule, and findings carry severity (A7). Inferred:
-  that one round is enough for v0.
-- **Bundle:** Shaped by *Keep review convergent*: severity thresholds, explicit outcomes, and a stopping
-  rule.
+  - (a) A bounded fix-and-reverify loop.
+  - (b) Unbounded iteration.
+- **Tradeoff:** Some fixable jobs are rejected. Option (b) has no stopping rule.
+- **Reversal cost:** Low.
+- **Provenance:** Stated: a stopping rule for every loop, and findings carry severity (A7).
+- **Bundle:** Shaped by *Keep review convergent*.
 
-## D14 · Brier score for events, weighted interval score on a log scale for quantities, components kept separate
+## D14 · Brier for events, a summed Brier over an unchosen set for deliverables, log-scale WIS for quantities
 
-- **Decision:** Events are scored with the Brier score. Cost and time are forecast as 10th, 50th, and
-  90th percentiles and scored with the weighted interval score (WIS) on natural-log values. Each
-  component is stored separately, together with skill against a reference forecast.
+- **Decision:**
+  - Events are scored with the Brier score.
+  - Deliverables are scored with the *sum* of Brier terms over the union of the listed paths and the paths
+    that changed. Unlisted paths count as p = 0.
+  - Cost and time are 10th, 50th, and 90th percentiles, scored with WIS on natural-log values. Values are
+    floored first, at $0.001 and 1 s, and out-of-order quantiles are rejected.
+  - Components are stored raw and separately. Skill against the reference is computed only for aggregates
+    of 10 or more jobs.
+  - The models forecast is checked, not scored.
 - **Alternatives:**
-  - (a) The log score for events.
-  - (b) The continuous ranked probability score (CRPS) over full distributions.
-  - (c) Point predictions scored by absolute error.
+  - (a) The log score.
+  - (b) CRPS over full distributions.
+  - (c) Point predictions with absolute error.
   - (d) Interval coverage alone.
-  - (e) One blended number per job.
+  - (e) One blended number.
+  - (f) A mean Brier score over the listed deliverables, which was revision 1's design.
+  - (g) Skill per job.
 - **Tradeoff:**
-  - The Brier score is less harsh than the log score on confident misses. It is still strictly proper,
-    and it stays finite with small samples while decomposing into calibration and resolution.
-  - WIS needs only three numbers from a forecaster, unlike (b), and it penalizes width, so vague
-    intervals score badly.
-  - Option (c) does not reward honest uncertainty: it is not a proper score for a distribution.
-  - Option (d) can be gamed with very wide intervals.
-  - Option (e) hides tradeoffs between unlike units.
-- **Reversal cost:** Low. Raw forecasts and outcomes are stored, so any rule can re-score history.
-- **Provenance:** Stated: a proper scoring rule, so that vague predictions do not score well (A2,
-  bootstrap brief item 6). Inferred: the specific rules, following Gneiting and Raftery (2007) on proper
-  scores, and Bracher et al. (2021) on WIS.
-- **Bundle:** Shaped by *Measure effectiveness*: keep the dimensions visible as separate measures.
+  - (a) is harsh with small samples.
+  - (b) needs whole distributions.
+  - (c) is not a proper score for distributions.
+  - (d) can be gamed with wide intervals.
+  - (e) hides tradeoffs.
+  - (f) can be gamed by padding: nine padded paths turn a complete miss of 0.81 into 0.08 (review 1, M4).
+  - (g) is unstable when the reference's score is near zero.
+- **Reversal cost:** Low. Raw forecasts and outcomes are stored, so history can be re-scored.
+- **Provenance:** Stated: a proper scoring rule under which vague predictions do not score well (A2;
+  bootstrap brief, item 6). Inferred: the rules, after Gneiting and Raftery (2007) and Bracher et al.
+  (2021).
+- **Bundle:** Shaped by *Measure effectiveness*: keep the dimensions separate.
+- **Revised** (review 1, M4):
+  - The deliverable score became a sum over an unchosen set.
+  - `only_listed_paths` was dropped.
+  - Floors and quantile ordering were added.
+  - Skill moved to aggregates only.
+  - Models are checked, not scored.
 
-## D15 · Every forecast is made by up to three forecasters, scored side by side
+## D15 · Two forecasters: the reader, and a reference forecast computed by code
 
-- **Decision:** The reader, Jev, and a code-computed reference forecast all forecast the same events.
-  The reader and the reference also forecast cost and time. The reader sees the reference first, and may
-  move away from it only with a stated reason. All three are scored with the same rules.
+- **Decision:** The reader and the reference forecast every event and quantity, except deliverables, which
+  only the reader forecasts. The reader sees the reference first, and departs from it only with a stated
+  reason.
 - **Alternatives:**
   - (a) The reader alone.
-  - (b) The reference alone, computed by code.
-  - (c) Jev alone.
-- **Tradeoff:** Extra fields in every reading, and about a second of extra latency per reading. In
-  return, from the first job Athena gathers evidence on whether the expensive forecaster adds skill over
-  the cheap one, and over the base rate. That is exactly the evidence that routing revisions need (A6).
-  With option (a) a vague reader could not be told apart from a sharp one, (b) has no judgment, and (c)
-  has no calibration record yet.
+  - (b) The reference alone.
+  - (c) Add Jev as a third forecaster, which was revision 1's design.
+- **Tradeoff:** With (a), vagueness would be invisible. With (b), there is no judgment. Option (c) is moot:
+  Jev's forecasts can be computed retroactively (D31).
 - **Reversal cost:** Low.
-- **Provenance:** Stated: Jev is the default for typed decisions, calibrated alongside use and shadowed
-  by a stronger model (A6), and calibration is tracked (A2). Evidenced: Jev answers predicate questions
-  with probabilities, cheaply (E12). Inferred: the reference forecast as the yardstick for skill.
+- **Provenance:** Stated: calibration is tracked (A2). Inferred: the reference as the yardstick for skill.
+- **Revised** (review 1, M5): three forecasters became two.
 
-## D16 · Every quantity carries its provenance
+## D16 · Every quantity carries its provenance, and bounds when it is not measured
 
 - **Decision:** Every number for tokens, time, or money is a `Quantity`:
-  `{value, unit, provenance, basis}`. Provenance is one of `measured`, `reported`, `estimated`, or
-  `pending`. Claude Code's cost is `reported`, with the basis "list price". Token counts reported by the
-  API are `measured`. The bootstrap's own token cost is `pending`.
+  `{value, unit, provenance, basis, lower?, upper?}`. Provenance is one of `measured`, `reported`,
+  `estimated`, or `pending`. Killed invocations record lower-bound tokens, and cost bounded by the cap.
 - **Alternatives:**
-  - (a) Bare numbers, with a convention in the docs.
-  - (b) A separate estimated flag on some fields only.
-- **Tradeoff:** Records are wordier. In return, an unlabeled number cannot be written, because the
-  schema refuses it.
+  - (a) Bare numbers.
+  - (b) An estimated flag on some fields only.
+- **Tradeoff:** Records are wordier, but an unlabeled number cannot be written.
 - **Reversal cost:** Low.
-- **Provenance:** Stated: numbers are measured or labeled as estimates (Standards), and tokens are
-  measured or labeled (A6). Evidenced: Claude Code reports cost at list price (`costBasis: "list"`
-  inside `modelUsage`).
+- **Provenance:** Stated: numbers are measured or labeled as estimates (Standards, A6). Evidenced: cost is
+  reported at list price, and partial usage is a lower bound (E16).
+- **Revised** (review 1, M3): the bounds were added.
 
-## D17 · Secret scanning uses gitleaks, pinned and checksum-verified, in three places
+## D17 · Secret scanning uses gitleaks, pinned and verified, and always run with Athena's own configuration
 
-- **Decision:** gitleaks 8.30.1 is installed by setup with its SHA-256 verified. Athena's single gate
-  function runs it from the `pre-commit` hook, inside Athena's own commit path, and over the full history
-  in CI. The gate fails closed when gitleaks is missing. Tests generate fake tokens at runtime, so no
-  secret-shaped literal ever sits in the repository.
+- **Decision:**
+  - gitleaks 8.30.1 is installed by setup, checked against its SHA-256.
+  - One gate function runs it in the `pre-commit` hook, in Athena's own commit path, and over the full
+    history in CI.
+  - It always gets four settings:
+    - a generated `--config` that extends gitleaks' default rules with `athena.toml`'s `[secrets]`
+      allow-list, taken from the parent commit, or from `HEAD` for the history scan;
+    - an empty `--gitleaks-ignore-path`;
+    - `--ignore-gitleaks-allow`;
+    - `--max-decode-depth=5`.
+  - The gate fails closed when gitleaks is missing.
+  - Tests generate fake tokens at runtime.
 - **Alternatives:**
-  - (a) TruffleHog. It is capable, but licensed AGPL-3.0, and its strength is verifying live
-    credentials.
-  - (b) ripsecrets. It is written in Rust, but has a smaller rule set and no git-history mode.
-  - (c) detect-secrets, which is Python.
-  - (d) The hosting service's secret scanning and push protection.
+  - (a) TruffleHog (AGPL-3.0, focused on verifying live credentials).
+  - (b) ripsecrets (Rust, a smaller rule set, no history mode).
+  - (c) detect-secrets (Python).
+  - (d) The hosting service's own secret scanning.
   - (e) A regex scanner written in Rust.
-- **Tradeoff:** gitleaks is a Go binary, which makes it a non-Rust tool used through interop. Athena's
-  logic (when to scan, what to block, how to report) stays in Rust. Option (d) cannot be configured from
-  the build environment and acts only after a push. Option (e) fails buy before build.
-- **Reversal cost:** Low. The scanner sits behind one function.
-- **Provenance:** Stated: every commit gated, and CI scans the full history (bootstrap brief item 8; A5).
-  Evidenced: release checksums are published per platform (E11). Inferred: the tool choice.
+  - (f) gitleaks with its defaults, which honor a `.gitleaks.toml`, a `.gitleaksignore`, and inline markers
+    found in the scanned content.
+- **Tradeoff:**
+  - gitleaks is a Go binary used through interop; Athena's policy stays in Rust.
+  - (d) cannot be configured from here and acts only after a push.
+  - (e) fails buy before build.
+  - (f) lets a commit carry its own exemption (E17; review 1, R5).
+- **Reversal cost:** Low.
+- **Provenance:** Stated: every commit gated, and CI scans the full history (bootstrap brief, item 8; A5).
+  Evidenced: E11, E17.
+- **Revised** (review 1, M1, n3): the scanned content can no longer relax the scan, and the allow-list
+  moved into `athena.toml`, so there is no `.gitleaks.toml`.
 
 ## D18 · Git hooks are symlinks to the `athena` binary, which dispatches on its own name
 
-- **Decision:** Setup links `.git/hooks/pre-commit` and `.git/hooks/commit-msg` to the adopted `athena`
-  binary. Invoked under a hook's name, the binary runs that hook's gate. Setup never overwrites a hook it
-  did not create, and leaves other hooks, such as an existing `pre-push`, alone.
+- **Decision:** Setup links `pre-commit` and `commit-msg` in the common git directory to the adopted
+  `athena` binary. It never overwrites a hook it did not create, and leaves other hooks alone.
 - **Alternatives:**
-  - (a) Committed shell shims in `.githooks/`, with `core.hooksPath`.
-  - (b) The `pre-commit` framework, which is Python.
+  - (a) Committed shell shims with `core.hooksPath`.
+  - (b) The `pre-commit` framework (Python).
   - (c) Hook scripts generated at setup.
-- **Tradeoff:** Symlinks do not work on Windows, which v0 does not support. In return, the hooks contain
-  no shell at all. Option (a) adds shell files and overrides the whole hooks directory. Option (b) adds
-  a Python dependency.
+- **Tradeoff:** Symlinks do not work on Windows, which v0 does not support. In return, there is no shell in
+  the hooks.
 - **Reversal cost:** Low.
-- **Provenance:** Stated: all code is Rust. Evidenced: the repository already uses this pattern for an
-  existing hook. Inferred: name-based dispatch.
+- **Provenance:** Stated: all code is Rust. Evidenced: E13 (git invokes a symlinked hook with `argv[0]` set
+  to the hook's path, also from linked worktrees).
+- **Revised** (review 1, n2): the evidence is now experiment E13.
 
-## D19 · Athena drives git through its CLI
+## D19 · Athena drives git through its CLI, version 2.40 or later
 
-- **Decision:** `athena-git` wraps the `git` command (version 2.38 or later, for `merge-tree
-  --write-tree`), with typed inputs and outputs.
+- **Decision:** `athena-git` wraps the `git` command with typed inputs and outputs, and setup checks for git
+  2.40 or later, which `check-attr --source` and `merge-tree --merge-base` need.
 - **Alternatives:**
   - (a) `git2`, the libgit2 bindings.
   - (b) `gix`, gitoxide in pure Rust.
-- **Tradeoff:** Spawning a process per operation is slower, and output has to be parsed. In return,
-  Athena gets complete support for worktrees, sparse checkout, attributes, signing, and `merge-tree`.
-  Hooks and configuration behave exactly as they do for the user. Option (a) is a C dependency whose
-  sparse and worktree support lags. Option (b) does not yet cover sparse worktrees and signing as
-  completely.
-- **Reversal cost:** Medium, behind the wrapper's typed API.
-- **Provenance:** Evidenced: the needed mechanics work in git 2.43 (E9). Inferred: the comparison.
+- **Tradeoff:** Spawning a process per operation is slower, and its output must be parsed. In return,
+  attributes, signing, plumbing, and configuration behave exactly as they do for the user.
+- **Reversal cost:** Medium.
+- **Provenance:** Evidenced: E9, E14, E15. Inferred: the comparison.
+- **Revised** (review 1, m1): the minimum version was corrected from 2.38 to 2.40.
 
 ## D20 · Crates per concern, with the dependency direction checked against the documentation
 
-- **Decision:** Ten crates ([§6 of the design](design/athena-v0.md#6-modules-and-dependency-direction)). Cargo forbids cycles between crates. A test
-  compares `cargo metadata` against the table in `docs/architecture.md`, and also requires that the core
-  never depends on a capability.
+- **Decision:** Ten crates ([§6 of the design](design/athena-v0.md#6-modules-and-dependency-direction)).
+  Cargo forbids cycles between them. A test compares `cargo metadata` with the table in
+  `docs/architecture.md`, and also requires that the core never depends on a capability.
 - **Alternatives:**
   - (a) One crate with modules.
   - (b) Fewer, larger crates.
-- **Tradeoff:** More manifests to maintain. In return, "no cycles" and "documented direction" become
-  mechanisms, and each crate is tested independently. With (a), cycles between modules go unchecked.
+- **Tradeoff:** More manifests. In return, acyclicity and the documented direction become mechanisms.
 - **Reversal cost:** Low.
-- **Provenance:** Stated: focused, independently tested modules, a documented dependency direction, and
-  no cycles (A4). Inferred: crates as the enforcement unit.
+- **Provenance:** Stated: focused modules, a documented dependency direction, and no cycles (A4).
 
-## D21 · Core and capabilities meet at one trait; v0's capability is `change`
+## D21 · Core and capabilities meet at one trait, configured from the base commit
 
-- **Decision:** `athena-core` defines `Capability`: the reader's catalog card, producer and verifier
-  prompt sections, tool grants, checks, and admission policy. `athena-cap-change` implements it, and the
-  CLI registers it.
+- **Decision:** `athena-core` defines `Capability`: a catalog card, prompt sections, tool grants, checks,
+  and admission. Each method receives a `JobConfig` parsed from the job's base commit. v0's capability is
+  `change`.
 - **Alternatives:**
-  - (a) A capability as configuration only, with prompts and checks in TOML.
-  - (b) Hard-code `change` in the core.
-- **Tradeoff:** A new kind of work needs Rust code, not only configuration. In return, capabilities can
-  carry typed checks and policies. Option (b) would make adding studying a rebuild of the core.
+  - (a) Capabilities as configuration only.
+  - (b) Hard-coding the capability in the core.
+- **Tradeoff:** A new kind of work needs Rust, but it can carry typed checks and policies.
 - **Reversal cost:** Low.
-- **Provenance:** Stated: the core is separate from capabilities from day one, and a new kind of work
-  means adding a capability (A4).
+- **Provenance:** Stated: core separate from capabilities from day one (A4).
+- **Revised** (review 1, M1): configuration comes from the base commit, never from the candidate.
 
-## D22 · Agent tool policy in three layers, with the hook written in Rust
+## D22 · Agent tool policy in four layers, with an allow-list hook written in Rust
 
-- **Decision:** There are three layers of tool policy:
-  - an explicit `--tools` list per role;
-  - `--restricted` mode, with permission rules and `--permission-prompts none`;
-  - a `PreToolUse` hook whose command is the `athena` binary itself.
+- **Decision:** Four layers:
+  - the detached snapshot;
+  - an explicit `--tools` list;
+  - `--restricted`, with permission rules and `--permission-prompts none`;
+  - a `PreToolUse` hook (the `athena` binary itself) whose Bash policy is an allow-list.
 
-  The hook denies paths outside the worktree, writes to `records/` and `.git`, git commands that change
-  state, and any write at all by the reader or the verifier.
+  The hook splits commands into segments and denies what it cannot classify. It allows `cargo` with listed
+  subcommands, `ls`, and git `status`, `diff`, `log`, and `show` only. It denies `-c`, `-C`, `--git-dir`,
+  `--work-tree`, and `GIT_*` overrides, paths outside the snapshot, and, for the reader and verifier, every
+  write.
 - **Alternatives:**
   - (a) Permissions only.
   - (b) A hook only.
-  - (c) Bypass permissions inside a container.
-- **Tradeoff:** Three layers to keep consistent. Inspecting Bash commands is coarse, and the layers are
-  defense in depth rather than a containment boundary. With (a) or (b) alone, one gap opens everything. Option (c)
-  needs container infrastructure.
+  - (c) A git denylist, which was revision 1's design.
+  - (d) Claude Code's built-in confinement of Bash commands.
+  - (e) Containers.
+- **Tradeoff:** Four layers to keep consistent, and command parsing that fails closed.
+  - (a) and (b) each leave one gap open.
+  - (c) missed `sparse-checkout`, `update-ref`, and `-c` (review 1, R1).
+  - (d) confines the agent's Bash, but needs bubblewrap on Linux, which is not installed in the build
+    environment and which setup cannot install pinned and portably. It also would not cover the checks the
+    core runs (R4).
+  - (e) imposes Docker.
+
+  Options (d) and (e) are the candidates for containing executed code, which is left out of v0 with its
+  pull-in evidence named.
 - **Reversal cost:** Low.
-- **Provenance:** Evidenced: a hook's deny overrides an allow rule; `--restricted` confines reads and
-  writes to the working directory; denials are reported (E4, E5). Stated: rules have teeth, using Claude
-  Code's hooks, settings, permissions, and tool restrictions (A8, bootstrap brief).
-- **Bundle:** Shaped by *Maximize autonomy inside explicit authority*: broad capability in a reversible
-  worktree, and no authority over history.
+- **Provenance:** Evidenced: a hook deny overrides an allow rule, and `--restricted` confines file tools
+  (E4, E5); the escapes (R1). Stated: rules have teeth, using Claude Code's mechanisms (A8).
+- **Bundle:** Shaped by *Maximize autonomy inside explicit authority*.
+- **Revised** (review 1, B1, m11): the denylist became an allow-list, snapshots were added as a layer, and
+  Claude Code's Bash confinement was evaluated and deferred.
 
 ## D23 · Setup is a minimal POSIX bootstrap, then Rust
 
 - **Decision:**
-  - `./setup.sh`, about 30 lines, installs rustup only if `cargo` is missing, from a pinned
-    `rustup-init` with its SHA-256 checked. It then hands off to `cargo run -p xtask -- setup`.
-  - Rust installs gitleaks, builds and adopts the `athena` binary, links the hooks, and checks or
-    privately installs the pinned Claude Code.
-  - Downloads use `curl`, which honors proxies and CA settings. Rust verifies checksums and extracts
-    archives.
-  - Pins live in `athena.toml`, apart from rustup's, which lives in `setup.sh`, its only consumer.
+  - `./setup.sh`, about 30 lines, installs rustup only if `cargo` is missing, from a pinned `rustup-init`
+    with its SHA-256 checked, and then hands off to `cargo run -p xtask -- setup`.
+  - The Rust half checks the prerequisites (git 2.40 or later, a C linker, `curl`) and prefetches crates.
+    It installs gitleaks, builds and adopts `athena` (D45), and links the hooks. It also checks, or
+    privately installs, the pinned Claude Code, and confirms credentials with `claude auth status`.
+  - Downloads use `curl`; Rust verifies checksums and extracts the archives.
 - **Alternatives:**
-  - (a) Require rustup to be preinstalled and use `cargo xtask setup` as the one command.
+  - (a) Require rustup to be preinstalled.
   - (b) A shell script for all of setup.
   - (c) Nix or a container image.
   - (d) An HTTP client in Rust for downloads.
-- **Tradeoff:** One shell file exists, and it is listed as an exception. Option (a) fails "a clean machine
-  with one command". Option (b) puts setup logic outside Rust. Option (c) imposes a heavy tool on
-  adopters. Option (d) would have to handle TLS-intercepting proxies and custom CA bundles that `curl`
-  already handles; for the one-time downloads in setup, `curl` is the clearly best tool. Jev's runtime
-  calls, which carry a key, are made in-process instead (D31).
+  - (e) A live model call to check credentials.
+- **Tradeoff:** One shell file exists as a listed exception.
+  - (a) fails "a clean machine with one command".
+  - (b) puts setup logic outside Rust.
+  - (c) imposes a heavy tool.
+  - (d) re-solves the proxy and CA handling that `curl` already does.
+  - (e) is a model call outside any job.
 - **Reversal cost:** Low.
-- **Provenance:** Stated: one command, committed, idempotent, version-pinned, credentials from the
-  environment and never stored, and setup code in Rust with platform exceptions listed (A4, Settings,
-  bootstrap brief). Evidenced: crates.io, rustup, and GitHub release downloads are reachable (E10).
-- **Bundle:** Shaped by *Dependency ownership*: one source of truth per version, and policy that parses
-  the authoritative manifest.
+- **Provenance:** Stated: one command, idempotent, pinned, credentials from the environment and never
+  stored, setup in Rust (A4, bootstrap brief). Evidenced: E10, E20.
+- **Bundle:** Shaped by *Dependency ownership*: one source of truth per version.
+- **Revised** (review 1, M3, m1, m9, m10): prerequisite checks, crate prefetching, `claude auth status`, and
+  build provenance were added. The gateway key is no longer checked, since Jev is out.
 
-## D24 · CI is two thin GitHub Actions workflows that call Rust
+## D24 · CI is one thin GitHub Actions workflow with two jobs
 
-- **Decision:** `ci.yml` runs `./setup.sh --ci` and then `cargo run -p xtask -- ci`, which covers fmt,
-  clippy, tests, and `athena check --history`. `secrets.yml` runs a full-history gitleaks scan on every
-  push and weekly. Both check out full history, run with read-only permissions, and pin actions by commit
-  SHA.
+- **Decision:** `ci.yml` runs on every push and pull request, and weekly. Both of its jobs check out the
+  full history and run `./setup.sh --ci`:
+  - `checks` runs `cargo run -p xtask -- ci`, which covers fmt, clippy, and tests;
+  - `history` runs `athena check --history`, which covers secrets over every commit and the history
+    invariants.
+
+  Actions are pinned by commit SHA, the workflow has read-only permissions, and nothing is deployed.
 - **Alternatives:**
   - (a) Logic in YAML.
   - (b) The official gitleaks action.
-  - (c) One workflow.
-- **Tradeoff:** Two YAML files, listed as exceptions. In return, local `cargo run -p xtask -- ci`
-  reproduces CI exactly. Option (b) requires a license for organization accounts and hides the logic.
+  - (c) Two workflows, which was revision 1's design.
+- **Tradeoff:** One YAML file, listed as an exception. Option (b) needs a license for organization accounts
+  and hides logic. Option (c) adds a file for no gain.
 - **Reversal cost:** Low.
-- **Provenance:** Stated: CI scans the full history, and YAML is acceptable where a platform requires it
-  (bootstrap brief). Inferred: thin YAML.
+- **Provenance:** Stated: CI scans the full history; YAML only where a platform requires it. Inferred:
+  thin YAML.
+- **Revised** (review 1, M5): two workflows became one.
 
-## D25 · The always-loaded contract is compiled in, measured, and budgeted at 350 tokens
-
-- **Decision:** The contract has eight rules and measures 294 tokens. It is compiled into the binary,
-  hashed into every invocation record, and held to a fixed budget of 350 tokens. CI enforces the budget
-  with an estimator that errs high, ⌈bytes/3.0⌉; the measured ratio is 3.3 bytes per token. An opt-in live
-  test measures the real count.
-- **Alternatives:**
-  - (a) Load the contract from the repository at runtime.
-  - (b) A larger budget, such as 1,000 tokens.
-  - (c) No contract, with role frames only.
-- **Tradeoff:** A small budget forces every addition to pay for itself. With option (a), a stray edit in
-  the repository could change every agent's behavior without a new version of Athena. Option (c) would
-  repeat the shared rules in every frame.
-- **Reversal cost:** Low.
-- **Provenance:** Stated: a fixed token budget from day one, and every addition paid for (A13, bootstrap
-  brief). Evidenced: 294 tokens measured, identical on two models (E8).
-
-## D26 · The defaults model is a versioned TOML file seeded from the standing spec
-
-- **Decision:** `defaults.toml` holds eleven defaults, each with an id, a statement, what it applies to,
-  and a source in `BRIEF.md`. The reader loads all of them and names the ones that apply. Only those
-  reach the producer's and verifier's briefs.
-- **Alternatives:**
-  - (a) Put the defaults inside the contract.
-  - (b) Learn defaults only from interventions, starting empty.
-  - (c) Use JSON.
-- **Tradeoff:** Seeding from the spec is the designer's reading of it, so every entry cites its source
-  where it can be checked. Option (a) spends always-loaded budget on things only some jobs need. Option
-  (b) wastes the written spec. Option (c) is harder for people to edit.
-- **Reversal cost:** Low.
-- **Provenance:** Stated: an explicit, versioned model of defaults, learned from the standing spec,
-  requests, and interventions (A2). Inferred: the seed entries.
-
-## D27 · Interventions and restarts are recorded by command; reading corrections are captured automatically
-
-- **Decision:** `athena intervene` and `athena restart` write and commit records at once. A one-line
-  correction of a reading is itself recorded as an intervention (category `corrected-output`, source
-  `observed`), as is an answer to a question the reader asked.
-- **Alternatives:**
-  - (a) Record only interventions the user reports.
-  - (b) Treat a reading correction as part of the normal flow, not an intervention.
-- **Tradeoff:** Intervention counts include cheap corrections, which inflates the rate the user is
-  judged on. The brief says correcting Athena's output is an intervention, and never suppressing one
-  matters more than a low count. Option (b) would hide exactly the signal the defaults model should learn
-  from.
-- **Reversal cost:** Low.
-- **Provenance:** Stated: what counts as an intervention, and never suppress one (O3). Inferred:
-  capturing corrections by mechanism.
-
-## D28 · Spend is bounded per invocation and per job, with timeouts and a kill switch
+## D25 · Fixed token budgets for the contract and for each role's whole always-loaded set
 
 - **Decision:**
-  - Every invocation passes `--max-budget-usd` and runs under a deadline, with a process-group kill on
-    timeout.
-  - The core refuses to start an invocation whose cap would exceed what remains of the job's budget.
-  - `athena stop` creates a stop file that blocks new invocations and terminates running ones.
-  - Every invocation record carries the caps that applied to it.
+  - The contract has eight rules, measured at 294 tokens, and a budget of 350.
+  - Each role's always-loaded set also has a fixed budget: reader 1,800, producer 1,100, and verifier
+    1,300.
+  - The live measurement, by the delta method, is the authority. CI uses ⌈bytes/3.0⌉ as a tripwire for
+    prose.
+  - Every asset is compiled in and hashed into each invocation record.
+- **Alternatives:**
+  - (a) Load prompts at runtime from the repository.
+  - (b) Budget only the contract, which was revision 1's design.
+  - (c) Larger budgets.
+- **Tradeoff:** Small budgets force every addition to be paid for.
+  - (a) would let a stray edit change every agent without a new version.
+  - (b) lets rules escape into frames (review 1, m4).
+  - (c) blunts the discipline.
+- **Reversal cost:** Low.
+- **Provenance:** Stated: a fixed budget from day one, every addition paid for, and the defaults model held
+  to the same discipline (A13; bootstrap brief). Evidenced: E8.
+- **Revised** (review 1, m4, n5, Q5): budgets for each role's whole set were added, and the estimator's
+  domain was stated.
+
+## D26 · The defaults model is a versioned TOML file, read from the base commit
+
+- **Decision:**
+  - `defaults.toml` holds eleven defaults, each with an id, a statement, scope, and its source in `BRIEF.md`.
+  - The reader loads all of them, within its set budget, and names the defaults that apply. Only those reach
+    the briefs.
+  - The file is a governance file: changing it is a job that lists it as a deliverable.
+- **Alternatives:**
+  - (a) Put the defaults in the contract.
+  - (b) Start empty and learn only from interventions.
+  - (c) JSON.
+- **Tradeoff:** The seed is the designer's reading of the spec, so every entry cites its source.
+  - (a) spends always-loaded budget on every job.
+  - (b) wastes the written spec.
+  - (c) is harder for people to edit.
+- **Reversal cost:** Low.
+- **Provenance:** Stated: an explicit, versioned defaults model (A2). Inferred: the seed entries.
+- **Revised** (review 1, M1, m4): the model is read from the base commit and counted inside the reader's
+  budget.
+
+## D27 · Interventions are captured by mechanism wherever Athena can see them
+
+- **Decision:** Three cases:
+  - A one-line correction of a reading, or an answer to the reader's question, is recorded automatically
+    as an intervention (`corrected-output` or `answered-question`, source `observed`).
+  - Hand changes to governed content must be declared with an intervention record in the same commit
+    (D39).
+  - Everything else is recorded with `athena intervene`.
+- **Alternatives:**
+  - (a) Only user-reported interventions.
+  - (b) Treat reading corrections as part of the normal flow.
+- **Tradeoff:** Counts include cheap corrections. Never suppressing an intervention matters more than a
+  low count, and the user has confirmed that a correction is an intervention.
+- **Reversal cost:** Low.
+- **Provenance:** Stated: what counts as an intervention, and never suppress one (O3). The user answered
+  review 1's Q3.
+- **Revised** (review 1, M2, m7): answered questions and declared hand work were added.
+
+## D28 · Spend is bounded per invocation and per job, with a kill switch that reaches orphans
+
+- **Decision:**
+  - Every invocation passes `--max-budget-usd` and runs under a deadline. Termination is SIGTERM to its
+    process group, then SIGKILL after 5 seconds.
+  - Children get the parent-death signal on Linux.
+  - Every process group is recorded in a registry. `athena stop` terminates all recorded groups, and any
+    command reaps groups whose owner has died.
+  - The core refuses an invocation whose cap would exceed the job's remaining budget, and refuses a sixth
+    reading.
 - **Alternatives:**
   - (a) Caps in prompts.
-  - (b) A spending ledger checked after the fact.
-- **Tradeoff:** Claude Code's budget check is approximate within a turn. The deadline backs it up.
+  - (b) A ledger checked after the fact.
+  - (c) Polling for the kill switch only inside the running process, which was revision 1's design.
+- **Tradeoff:** Claude Code's budget check is approximate within a turn, so the deadline backs it up.
+  Option (c) cannot reach an agent whose parent died (review 1, M3).
 - **Reversal cost:** Low.
-- **Provenance:** Stated: spend is bounded with a cap and a kill switch, both recorded (Settings).
+- **Provenance:** Stated: spend is bounded, with a cap and a kill switch, both recorded (Settings).
+  Evidenced: E16 (a group SIGTERM ended a run within 5 s).
+- **Revised** (review 1, M3): the parent-death signal, the registry, and a `stop` that reaches every group
+  were added.
 
-## D29 · No transcripts in v0; agent free text is redacted before it is recorded
+## D29 · No transcripts; agent free text is redacted; personal data is gated
 
-- **Decision:** Claude Code runs with `--no-session-persistence`. Athena keeps only structured outputs.
-  Free-text fields are redacted before writing: every email address outside an allow-list becomes
-  `[email]`, and every gitleaks finding becomes `[secret:<rule>]`.
+- **Decision:**
+  - From the agents' stream, Athena keeps only usage, tool names, Bash command lines, and structured
+    outputs.
+  - Free text is redacted before recording: email addresses outside the allow-list, and gitleaks findings.
+  - The gate refuses non-allow-listed email addresses in added lines.
 - **Alternatives:**
-  - (a) Capture `stream-json` transcripts and redact them.
-  - (b) Keep transcripts outside the repository.
-- **Tradeoff:** Without trajectories, diagnosing a failed job is harder. Transcript capture is left out
-  until a failure needs it. Option (a) has a large redaction surface and makes the repository grow
-  quickly.
+  - (a) Redacted full transcripts.
+  - (b) Transcripts kept outside the repository.
+- **Tradeoff:** Without full trajectories, diagnosis is harder; transcript capture is left out until a
+  failure needs it. Option (a) has a large redaction surface and grows the repository quickly.
 - **Reversal cost:** Low.
-- **Provenance:** Stated: never commit transcripts unredacted, and never commit personal data
-  (bootstrap brief, Boundaries). Evidenced: the host injects the account's email address into every
-  agent's context (E3).
+- **Provenance:** Stated: never commit transcripts unredacted, or personal data. Evidenced: E3.
+- **Revised** (review 1, m2, m5): Bash command lines are kept as evidence, and the added-line gate was
+  added.
 
 ## D30 · Ids are time-sortable with a random suffix
 
-- **Decision:** An id has the form `YYYYMMDD-HHMMSS-xxxx`: UTC time plus four Crockford base32
-  characters. The id `bootstrap` is reserved.
+- **Decision:** `YYYYMMDD-HHMMSS-xxxx`: UTC time, plus four Crockford base32 characters. The id gives the
+  month shard. `bootstrap` is reserved.
 - **Alternatives:**
   - (a) ULIDs.
-  - (b) Sequential numbers.
+  - (b) Sequence numbers.
   - (c) UUIDs.
-- **Tradeoff:** Ids are a little longer than sequence numbers. Option (b) needs coordination between
-  parallel jobs and branches. Options (a) and (c) are harder for people to read and type.
-- **Reversal cost:** Low for new ids. Old ids stay valid.
+- **Tradeoff:** Ids are slightly longer than sequence numbers. Option (b) needs coordination. Options (a)
+  and (c) are hard to read.
+- **Reversal cost:** Low.
 - **Provenance:** Inferred.
 
-## D31 · v0's model routing, with Jev as a shadow forecaster
+## D31 · v0's model routing; Jev is left out of v0
 
 - **Decision:**
   - The reader is Sonnet 5.5.
-  - The reader picks the producer from {Haiku 5.5, Sonnet 5.5}, with Sonnet as the default.
+  - The reader picks the producer from {Haiku 5.5, Sonnet 5.5}, defaulting to Sonnet.
   - The verifier is Opus 5.5, which never produces in v0.
-  - Jev (`typesafe-ai/jev`), through the gateway's decisions API, answers one predicate question per
-    forecast event on every reading. It costs about $0.00001 per question set. Its forecasts are
-    recorded and scored beside the reader's and the reference's. Jev never gates or changes a job. A
-    missing key or a failed call is recorded as skipped, and the job continues.
+  - Jev is **not** part of v0.
 - **Alternatives:**
-  - (a) Leave Jev out of v0, the default the user suggested.
-  - (b) Make Jev the shown, primary forecaster at once.
-  - (c) Route the reading itself through Jev.
-  - (d) Use Opus for everything.
-- **Tradeoff:** Jev adds an HTTP driver and a credential name to setup. Against option (a), the
-  acceptance judgment asks for a calibration record behind Jev's use, and every job run without Jev is
-  calibration data lost. Starting the record at the first job costs fractions of a cent and puts
-  nothing at risk. Option (b) would trust an uncalibrated forecaster. Option (c) fails because a reading
-  is generative and needs repository access, which Jev, a decision model, lacks. Option (d) costs several
-  times more with no evidence that it pays.
-- **Reversal cost:** Low. A configuration switch disables Jev.
-- **Provenance:** Stated: the starting routing (startup notes), using Jev liberally with calibration
-  alongside use (A6), and the gateway authenticating when v0 was designed. Evidenced: Jev answers
-  predicates with probabilities, at measured usage and reported cost (E12). Inferred: the shadow role,
-  and keeping Opus off the producer list so the verifier model always differs.
+  - (a) Jev as a shadow forecaster on every reading, which was revision 1's design.
+  - (b) Jev as the primary forecaster.
+  - (c) Opus for everything.
+- **Tradeoff:** Revision 1 argued that every job run without Jev is calibration data lost. Review 1 showed
+  that argument fails on the design's own data model:
+  - Jev's input is built only from fields the reading record stores;
+  - Jev never sees outcomes;
+  - so a later job can compute Jev's forecasts for every v0 job, labeled as retroactive.
 
-## D32 · The producer's self-report is kept with its run and never fed forward
+  Against that, Jev would add an HTTPS client, a credential, a driver and its fake, refusal handling, and a
+  forecaster column. Option (b) would trust an uncalibrated forecaster. Option (c) costs several times more
+  with no evidence that it pays.
+- **Reversal cost:** Low. The retroactive forecasts are the pull-in plan: at the first calibration review,
+  or with the first typed decision in the flow.
+- **Provenance:** Stated: the starting routing (startup notes), and the user's default to leave Jev out
+  (bootstrap brief, and its update). Evidenced: E12 (Jev works) and the review's argument. Inferred: the
+  pull-in plan.
+- **Revised** (review 1, M5, Q6): reversed, from including Jev as a shadow forecaster to leaving it out.
 
-- **Decision:** The producer's report includes mistakes, learnings, and desires (MLD). It is stored,
-  redacted, in the job's `candidate.json`. It is never given to the verifier, and never injected into a
-  later agent's context. Improvement work reads it as telemetry and corroborates it before acting on it.
+## D32 · The producer's self-report stays with its run and is never fed forward
+
+- **Decision:** The producer's report includes mistakes, learnings, and desires (MLD). It is stored redacted
+  in `candidate.json`, never given to the verifier, and never injected into a later context.
 - **Alternatives:**
   - (a) No self-report.
   - (b) Feed past self-reports into later briefs.
-- **Tradeoff:** Low-trust telemetry is collected, at a little output cost per job. Option (b) turns
-  unverified self-commentary into instructions.
+- **Tradeoff:** Low-trust telemetry at a small output cost. Option (b) turns unverified self-commentary into
+  instructions.
 - **Reversal cost:** Low.
 - **Provenance:** Inferred.
-- **Bundle:** Adopted from *MLD: telemetry for the harness builder*: keep raw telemetry out of agent
-  context, and corroborate before promoting.
+- **Bundle:** Adopted from *MLD: telemetry for the harness builder*.
 
 ## D33 · Non-Rust files are inventoried, and the inventory is enforced
 
-- **Decision:** `docs/non-rust-files.md` lists every kind of non-Rust file, with its reason. A test fails
-  on any tracked file that is neither Rust nor listed. Owner-private paths are outside Athena and exempt.
+- **Decision:** `docs/non-rust-files.md` lists every kind of non-Rust file with its reason, and a test fails
+  on any tracked file that is neither Rust nor listed. Owner paths are outside Athena and exempt.
 - **Alternatives:** (a) List the files in prose only.
-- **Tradeoff:** A table to maintain. In return, a new kind of file cannot slip in.
+- **Tradeoff:** A table to maintain, but no new kind of file slips in.
 - **Reversal cost:** Low.
-- **Provenance:** Stated: non-Rust files only where a platform requires them, each listed with its
-  reason (A4).
+- **Provenance:** Stated: non-Rust files only where a platform requires them, each with its reason (A4).
+- **Revised** (review 1, n3, M5): there is no `.gitleaks.toml` and no `schemas/` directory.
 
 ## D34 · A boundary test keeps Athena free of references to who runs it and where
 
 - **Decision:** A test scans Athena's own files for terms that would tie Athena to the people or machine
-  around it. The files covered are its code, prompts, schemas, configuration, docs, setup, and workflows.
-  The forbidden terms are assembled from fragments, so the test itself contains none of them.
-  - Excluded from the scan: the user's verbatim spec (`BRIEF.md`), records (data, which may quote the
-    user), the license, `.gitattributes` (where the repository owner declares private paths), and
-    owner-private paths.
+  around it. It covers code, prompts, configuration, docs, setup, and workflows. The terms are assembled
+  from fragments, so the test itself contains none of them. The scan excludes the user's verbatim spec,
+  records, the license, `.gitattributes` declarations, and owner paths.
 - **Alternatives:**
   - (a) Review by hand.
   - (b) A plain grep in CI.
-- **Tradeoff:** Term lists produce false positives and miss paraphrases. The test is a tripwire, not
-  proof.
+- **Tradeoff:** A term list is a tripwire, not proof.
 - **Reversal cost:** Low.
-- **Provenance:** Stated: nothing in Athena refers to the people or tools that run it, or to the
-  particular machine it runs on, and a test enforces that (bootstrap brief).
+- **Provenance:** Stated: nothing in Athena refers to the people or tools that run it, or to the particular
+  machine it runs on, and a test enforces that (bootstrap brief).
 
 ## D35 · The state of the work is derived from records, never hand-maintained
 
-- **Decision:** `athena status` and `athena show` compute everything from the records at `HEAD` and the
-  state directory. No status file exists to keep current.
+- **Decision:** `athena status [<job>]` computes everything from the records at `HEAD` and the state
+  directory.
 - **Alternatives:**
-  - (a) A `STATUS.md` updated by each job.
+  - (a) A `STATUS.md` updated by jobs.
   - (b) A state file in the state directory.
 - **Tradeoff:** Reading the state needs the binary, or reading the JSON directly. In return, the view
-  cannot drift from the truth. Option (a) drifts and causes merge conflicts. Option (b) is lost with the
-  machine.
+  cannot drift from the records.
 - **Reversal cost:** Low.
-- **Provenance:** Stated: a fresh context gets the state of the work from the repository alone
-  (bootstrap brief item 10, A11). Inferred: derived views.
+- **Provenance:** Stated: a fresh context gets the state from the repository alone (bootstrap brief, item
+  10; A11).
 
 ## D36 · Buy before build: the crates Athena adopts, and what it builds
 
 - **Decision:**
   - Adopted:
-    - `clap` for the CLI;
-    - `serde`, `serde_json`, and `toml` for serialization;
-    - `schemars` for JSON Schemas generated from types;
-    - `jiff` for timestamps;
-    - `sha2` for hashing;
-    - `getrandom` for id entropy;
-    - `regex` for redaction and policy;
-    - `anyhow` and `thiserror` for errors;
-    - `tempfile` for temporary files;
-    - `flate2` and `tar` for setup;
-    - `libc` for process-group signals;
-    - a small blocking HTTPS client for Jev's decisions API (`ureq`, with native certificate roots so
-      that proxies and custom CA bundles work), chosen at build time after a connectivity test.
-  - Built, each too small to justify a dependency: a 20-line Crockford base32 encoder, the token
-    estimator (D25), and the scoring rules (D14). The scoring rules are formulas worth owning with
-    tests, unlike a statistics crate that would bring many unrelated functions.
+    - `clap`;
+    - `serde`, `serde_json`, and `toml`;
+    - `schemars`, to generate the role output schemas at run time;
+    - `jiff`;
+    - `sha2`;
+    - `getrandom`;
+    - `regex`;
+    - `anyhow` and `thiserror`;
+    - `tempfile`;
+    - `flate2` and `tar`, for setup;
+    - `libc`, for process groups, signals, and `PR_SET_PDEATHSIG`;
+    - `shell-words`, to tokenize commands in the hook, confirmed at build time.
+  - Built, each too small for a dependency: the Crockford base32 encoder, the token estimator, the scoring
+    rules, and the hook's command classifier on top of the tokenizer.
 - **Alternatives:**
   - `chrono` or `time` instead of `jiff`.
-  - `reqwest` instead of `ureq`, which pulls in an async runtime.
-  - `tiktoken-rs` for token counting, which uses another vendor's tokenizer and so gives the wrong
-    counts for Claude.
-  - `proptest` for propriety tests; deterministic grids suffice.
+  - `reqwest` or `ureq`, which are no longer needed now that Jev is out.
+  - `tiktoken-rs`, which counts with another vendor's tokenizer.
+  - `proptest`; deterministic grids suffice.
 - **Tradeoff:** Each dependency is supply-chain surface. All are widely used, and all are pinned in
   `Cargo.lock`.
 - **Reversal cost:** Low per crate.
-- **Provenance:** Stated: buy before build, recording each call and the options considered. Inferred:
-  the selections.
-- **Bundle:** Shaped by *Dependency ownership*: own narrow, central behavior, such as the scoring rules,
-  and adopt specialist capabilities.
+- **Provenance:** Stated: buy before build, recording each call. Inferred: the selections.
+- **Bundle:** Shaped by *Dependency ownership*.
+- **Revised** (review 1, M5, m11): the HTTP client was removed, schemars is limited to run-time role
+  schemas, and the shell tokenizer was added.
 
 ## D37 · Rust 1.97.0, edition 2024, pinned in `rust-toolchain.toml`
 
-- **Decision:** The toolchain is pinned to Rust 1.97.0 with clippy and rustfmt, and the workspace uses
-  edition 2024. Builds and CI use `--locked`.
+- **Decision:** The toolchain is pinned with clippy and rustfmt, the workspace uses edition 2024, and every
+  build uses `--locked`.
 - **Alternatives:**
-  - (a) The stable channel, unpinned.
+  - (a) An unpinned stable channel.
   - (b) An older minimum supported version.
-- **Tradeoff:** Upgrading the toolchain is a deliberate change. That is the point.
+- **Tradeoff:** Upgrading is a deliberate change.
 - **Reversal cost:** Low.
-- **Provenance:** Stated: version-pinned setup (A4). Evidenced: Rust 1.97.0 is current in the build
-  environment.
+- **Provenance:** Stated: version-pinned setup (A4).
+
+---
+
+## D38 · No commit is judged by rules it changes
+
+- **Decision:**
+  - A job's configuration comes from its base commit. That covers the checks, caps, models, verifier,
+    allow-lists, `[secrets]` allow-list, defaults model, and attribute rules.
+  - `job.json` records the hashes of `athena.toml` and `defaults.toml`, and `go` re-reads if they changed
+    since the reading.
+  - Commit gates judge each commit by its parent's rules; the history secret scan uses `HEAD`'s.
+  - Admission refuses a candidate that would change any path's `athena-*` classification. It also refuses
+    a candidate that changes a governance file (`athena.toml`, `defaults.toml`, any `.gitattributes`,
+    `.github/workflows/*`, `setup.sh`, `rust-toolchain.toml`) unless the accepted reading lists that file as
+    a deliverable and an acceptance criterion names it.
+- **Alternatives:**
+  - (a) Read configuration from the working tree.
+  - (b) Read it from the candidate.
+  - (c) Leave it unspecified, as revision 1 did.
+- **Tradeoff:** A legitimate change to the rules governs only later work. A gitleaks false positive is
+  handled by committing its allow-list entry first.
+  - (a) lets uncommitted edits decide, unrecorded.
+  - (b) lets the producer choose its own checks.
+  - (c) leaves both open (review 1, M1).
+- **Reversal cost:** Low.
+- **Provenance:** Stated: enforcement by mechanism (A8); verification before anything lands (A5).
+  Evidenced: E17 (gitleaks relaxed by content); R5.
+- **Bundle:** Shaped by *Maximize autonomy inside explicit authority*: one decision point, and authority
+  that the worker cannot rewrite.
+
+## D39 · Governed content changes only through a verified landing, a declared intervention, or the closed bootstrap range
+
+- **Decision:** For every commit X, compare its governed-content fingerprint with its first parent's, under
+  the parent's rules. If they differ, X must be one of the following:
+  - (a) a landing commit, whose `Athena-Verified-Content` and `verification.json` (a pass) both match;
+  - (b) a declared intervention, which carries `Athena-Intervention: <id>` and adds that record in the same
+    commit, with any category;
+  - (c) a bootstrap commit inside the range closed by `records/jobs/bootstrap/outcome.json`.
+
+  A merge passes if its fingerprint equals one parent's; otherwise it needs (a) or (b). The rule is checked
+  in the `commit-msg` hook, in the in-process gate, and over the history in CI. `athena intervene
+  --with-staged` makes declaring hand work one command.
+- **Alternatives:**
+  - (a) Revision 1's trailer rule, which any existing job id satisfied.
+  - (b) Branch protection, unavailable here.
+  - (c) Restrict declared interventions to `did-work-themselves` and `fixed-environment`, as the review
+    proposed.
+- **Tradeoff:** Hand work by the user now takes one extra command. Without branch protection, CI detects a
+  violating push but cannot prevent it. Option (c) would leave a hand fix of Athena's output
+  (`corrected-output`) unable to declare itself, though it is the most valuable lesson to log.
+- **Reversal cost:** Medium. History written under the rule stays valid.
+- **Provenance:** Stated: nothing reaches main without passing verification, and every commit traces to
+  its work (A5); doing work yourself is an intervention, and every intervention is logged (O3); every commit
+  on main traces to accepted work (How I'll judge it). Evidenced: today's history satisfies the rule (R9,
+  and every commit after the first carries `Athena-Job: bootstrap`).
+
+## D40 · Usage is captured as it accrues, records are committed before their process exits, and costs reconcile
+
+- **Decision:**
+  - The driver reads stream-json and keeps per-message usage, de-duplicated by message id. It persists the
+    running sums, so a killed invocation records lower-bound tokens and cost bounded by its cap.
+  - Every command that creates records commits them before it exits: proposal, prediction, closing
+    (including blocked jobs), and re-score commits.
+  - `athena close` commits what an interrupted job left behind.
+  - No model call happens outside a job.
+  - `athena check` reconciles per-model costs with totals, requested-model tokens with usage, and job totals
+    with invocation sums.
+- **Alternatives:**
+  - (a) Read usage only from the final result, which was revision 1's design.
+  - (b) Keep uncommitted records in the state directory.
+  - (c) Record calls outside jobs as a maintenance job.
+- **Tradeoff:** More commits, and a stream parser to maintain. Option (a) loses the expensive, killed
+  invocations. Option (b) loses records with a fresh environment. Option (c) is unnecessary once setup
+  checks credentials without a model call (E20).
+- **Reversal cost:** Low.
+- **Provenance:** Stated: every model invocation recorded (bootstrap brief, item 5); the token records are
+  complete and reconcile (How I'll judge it). Evidenced: E16, E20.
+
+## D41 · v0 is cut to what its ten capabilities need
+
+- **Decision:** Ten commands, two forecasters, and one workflow. The following are left out, each listed in
+  §14 of the design with the evidence that would pull it back:
+  - Jev;
+  - the calibration view;
+  - committed JSON Schemas and their freshness test;
+  - the decision-log completeness test.
+- **Alternatives:** Revision 1's larger surface: fifteen commands, three forecasters, two workflows, and
+  committed schemas.
+- **Tradeoff:** A few conveniences wait for evidence. The spine (three roles, prediction commits,
+  fingerprinted landing, three-place gates, hermetic launch, append-only records, the reference forecaster,
+  and the crate split) is unchanged.
+- **Reversal cost:** Low per item.
+- **Provenance:** Stated: keep v0 small; its size is a design choice (bootstrap brief). Inferred: review 1's
+  analysis (M5), weighed and accepted by the method owner.
+
+## D42 · Classes of work are a closed list in configuration
+
+- **Decision:** `athena.toml` lists the classes: `code`, `tests`, `docs`, `prompts`, `config`, `build`,
+  `design`, and `other`. The reader and `athena intervene` must choose from the list, and adding a class is
+  a job.
+- **Alternatives:** Free text, as in revision 1.
+- **Tradeoff:** A new kind of work lands in `other` until a job adds its class. In return, synonyms cannot
+  fragment the per-class metrics that immutable records would keep forever.
+- **Reversal cost:** Low going forward. Already-recorded classes never change.
+- **Provenance:** Stated: calibration and intervention trends per class of work (A2, O3, A13). Inferred
+  from review 1 (m3).
+
+## D43 · Behavior criteria must cite commands the verifier actually ran
+
+- **Decision:**
+  - The reader marks each acceptance criterion `content` or `behavior`.
+  - The verifier may build and run the candidate in its snapshot.
+  - Each `behavior` criterion's evidence lists exact commands. The core checks them against the Bash
+    commands it saw the verifier run, and a criterion citing an unrun command counts as unmet.
+- **Alternatives:**
+  - (a) Trust the verifier's account.
+  - (b) Rely on the capability's checks alone.
+- **Tradeoff:** Exact matching may fail a verifier that ran an equivalent command; that rate is visible in
+  the findings. Option (b) runs tests the producer may have written, which is not independent evidence.
+- **Reversal cost:** Low.
+- **Provenance:** Stated: user-facing behavior is verified by exercising it (A7). Evidenced: tool calls,
+  with their commands, arrive in the stream (E16). Inferred from review 1 (m2).
+
+## D44 · Owner-maintained paths: the `athena-readonly` attribute
+
+- **Decision:** Paths marked `athena-readonly` in committed `.gitattributes` are visible in snapshots, so
+  agents read them. They are outside the governed content, and no job may change them. Edits by the owner
+  need no intervention record. In this repository, `BRIEF.md` and `LICENSE` are marked this way.
+- **Alternatives:**
+  - (a) Treat the user's spec as governed content, so that the owner's edits must be declared as
+    interventions.
+  - (b) Mark it `athena-exclude`, which hides it from the reader.
+- **Tradeoff:** One more attribute for owners to learn.
+  - (a) would count requirement changes as interventions and let a job edit the spec, which `BRIEF.md` says
+    only its owner changes.
+  - (b) would hide the standing spec that Athena is meant to read.
+- **Reversal cost:** Low.
+- **Provenance:** Stated: "requirement changes come only from" the owner (`BRIEF.md` header), and Athena
+  may read the brief as its user's standing spec. Inferred: the attribute, while answering review 1's M2.
+
+## D45 · The adopted binary names its source commit, and dirty builds are not adopted by default
+
+- **Decision:** Setup builds the binary with its source commit and a dirty flag embedded. It refuses to
+  adopt a build from a dirty tree unless `--allow-dirty` is given. Every invocation and job record carries
+  the version, the commit, and the flag.
+- **Alternatives:** (a) Adopt whatever the checkout holds, as revision 1 did.
+- **Tradeoff:** Adopting a local experiment takes one flag. In return, every agent's context can be
+  reconstructed from the records and the source tree they name.
+- **Reversal cost:** Low.
+- **Provenance:** Stated: versions are adopted deliberately (A3). Inferred from review 1 (m9).
