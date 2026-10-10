@@ -98,12 +98,57 @@ pub fn check(
                     .at_path(&d.path)
                     .in_commit(commit),
                 );
+            } else if d.path == CONFIG_PATH {
+                violations.extend(new_exemptions(git, change, judged, &text)?);
             }
         }
     }
 
     let allow = allow.unwrap_or(&judged.config.personal_data);
     violations.extend(personal_data(git, judged, allow, &change.tree, commit)?);
+    Ok(violations)
+}
+
+/// An exemption added to `[history] exempt` must name a commit already in this history: an ancestor of
+/// the commit that adds it (acceptance verification 2, N1). Entries the parent's rules already list are
+/// judged where they were added.
+fn new_exemptions(
+    git: &Git,
+    change: &Change,
+    judged: &Judged,
+    text: &str,
+) -> Result<Vec<Violation>> {
+    let Ok(config) = Config::parse(text) else {
+        return Ok(Vec::new());
+    };
+    let mut violations = Vec::new();
+    for entry in config
+        .history
+        .exempt
+        .iter()
+        .filter(|e| !judged.config.history.exempt.contains(e))
+    {
+        let in_the_past = match change.parents.first() {
+            Some(parent) => {
+                git.rev_parse(entry)?.as_deref() == Some(entry.as_str())
+                    && git.is_ancestor(entry, parent)?
+            }
+            None => false,
+        };
+        if !in_the_past {
+            violations.push(
+                Violation::new(
+                    Rule::Configuration,
+                    format!(
+                        "{CONFIG_PATH}: [history] exempt adds {entry}, which is not a commit already in this history"
+                    ),
+                    "an exemption can only name a commit made before it, such as one that predates Athena",
+                )
+                .at_path(CONFIG_PATH)
+                .in_commit(change.commit.as_deref()),
+            );
+        }
+    }
     Ok(violations)
 }
 

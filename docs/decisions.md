@@ -1268,3 +1268,29 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Provenance:** Acceptance verification 1, m1: the verifier passed a CONTRIBUTING.md telling outside
   contributors to open pull requests of hand-made commits, which the commit gate and CI's history check
   refuse. The correction that made reading 2 had dropped the criterion covering Athena's workflow.
+
+---
+
+## Entries added after acceptance verification 2
+
+## D60 · A history exemption names one earlier commit, in full; request outcomes carry totals
+
+- **Decision:** Amends D39's exemption list and D06.
+  - Every `[history] exempt` entry in `athena.toml` must be a full commit id (40 hexadecimal characters,
+    or 64 in a SHA-256 repository); anything else makes the configuration fail to parse. The invariant
+    matches entries exactly, never as prefixes.
+  - A commit that adds an entry must already have the named commit in its history, so an exemption can
+    only name the past, such as a commit that predates Athena.
+  - The history check reports a tip whose configuration does not parse as a violation, and judges with
+    the built-in configuration, instead of stopping.
+  - An outcome of a request job must record its totals; only the bootstrap's outcome has none.
+- **Alternatives:** (a) Require only full-length ids, since a future commit's full id cannot be ground to
+  match. (b) Drop exemptions, and with them the history before Athena.
+- **Tradeoff:** (a) alone would leave an entry naming a commit that does not exist; requiring the past costs
+  one ancestry query per added entry and states the rule directly. (b) would make every repository with
+  earlier history fail its own check.
+- **Reversal cost:** Low.
+- **Provenance:** User decision after acceptance verification 2, N1: an entry `"0"`, added by a declared
+  intervention, hid a later hand edit whose commit id began with 0 from `athena check --history` (11
+  retries). The totals rule follows the same verification's note that an outcome with `"totals": null`
+  skipped reconciliation. Evidenced by `a_short_history_exemption_does_not_hide_a_hand_change`.

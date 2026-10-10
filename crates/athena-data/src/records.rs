@@ -852,6 +852,13 @@ impl AnyRecord {
             AnyRecord::Intervention(i) if i.what.trim().is_empty() || i.why.trim().is_empty() => {
                 return Err(invalid("an intervention needs what and why".into()));
             }
+            // Totals are what reconciliation checks an outcome against; only the bootstrap has none
+            // (acceptance verification 2).
+            AnyRecord::Outcome(o) if o.job.is_request() && o.totals.is_none() => {
+                return Err(invalid(
+                    "an outcome of a request job records its totals".into(),
+                ));
+            }
             _ => {}
         }
         Ok(record)
@@ -1139,6 +1146,32 @@ mod tests {
                 .canonical_path()
                 .ends_with("/score-20261011-090000-abcd.json")
         );
+    }
+
+    #[test]
+    fn an_outcome_of_a_request_job_records_its_totals() {
+        // M5 (blocks): an outcome without totals would skip reconciliation. (allows): the bootstrap's.
+        let outcome = |job: JobId| Outcome {
+            job,
+            state: OutcomeState::Rejected,
+            reason: "the final verdict is fail".into(),
+            at: ts(),
+            totals: None,
+            branch: None,
+            base_commit: None,
+            candidate_commit: None,
+            after_blocked: false,
+            through_commit: None,
+        };
+        let text = AnyRecord::Outcome(Box::new(outcome(job()))).to_json();
+        assert!(matches!(
+            AnyRecord::parse("x", text.as_bytes()),
+            Err(RecordError::Invalid { .. })
+        ));
+        let mut closed = outcome(JobId::Bootstrap);
+        closed.state = OutcomeState::Closed;
+        let text = AnyRecord::Outcome(Box::new(closed)).to_json();
+        assert!(AnyRecord::parse("x", text.as_bytes()).is_ok());
     }
 
     #[test]

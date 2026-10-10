@@ -226,6 +226,10 @@ pub enum ConfigError {
     Budget(&'static str),
     #[error("reference forecast: {0}")]
     Reference(&'static str),
+    #[error(
+        "[history] exempt entry {0:?} is not a full commit id; an exemption names exactly one commit, by all 40 (or, in a SHA-256 repository, 64) hexadecimal characters"
+    )]
+    Exempt(String),
 }
 
 impl Config {
@@ -290,6 +294,16 @@ impl Config {
         }
         if r.pseudo_count <= 0.0 {
             return Err(ConfigError::Reference("pseudo_count must be positive"));
+        }
+        // A short entry would match any commit whose id begins with it, later ones included
+        // (acceptance verification 2, N1).
+        for entry in &self.history.exempt {
+            let hex = entry
+                .chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c));
+            if !(hex && (entry.len() == 40 || entry.len() == 64)) {
+                return Err(ConfigError::Exempt(entry.clone()));
+            }
         }
         Ok(())
     }
@@ -384,5 +398,42 @@ pub(crate) mod tests {
                 .iter()
                 .any(|c| c.name == "fmt" && c.kind == CheckKind::Command)
         );
+    }
+
+    #[test]
+    fn history_exemptions_must_be_full_commit_ids() {
+        // N1 of acceptance verification 2: an exemption names one commit, in full, never a prefix.
+        let with = |entries: &str| {
+            let text = REPO_CONFIG
+                .lines()
+                .map(|l| {
+                    if l.starts_with("exempt = ") {
+                        format!("exempt = [{entries}]")
+                    } else {
+                        l.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            Config::parse(&text)
+        };
+        for bad in [
+            "\"0\"",
+            "\"49c6ac1\"",
+            "\"\"",
+            "\"49C6AC1524677B8091081115FB5D410ED6D2B2EA\"",
+            "\"49c6ac1524677b8091081115fb5d410ed6d2b2eaz\"",
+        ] {
+            assert!(
+                matches!(with(bad), Err(ConfigError::Exempt(_))),
+                "{bad} must be refused"
+            );
+        }
+        assert!(with("\"49c6ac1524677b8091081115fb5d410ed6d2b2ea\"").is_ok());
+        assert!(
+            with(&format!("\"{}\"", "ab".repeat(32))).is_ok(),
+            "SHA-256 ids"
+        );
+        assert!(with("").is_ok(), "no exemptions at all");
     }
 }

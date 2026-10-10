@@ -74,13 +74,10 @@ pub fn check(
     history: Option<&HistoryState>,
 ) -> Result<Vec<Violation>> {
     let commit = change.commit.as_deref();
+    // An exemption names one commit in full (the configuration refuses anything shorter), and only a
+    // commit that existed before the entry was added (the content check), so it cannot cover a later one.
     if let Some(id) = commit
-        && judged
-            .config
-            .history
-            .exempt
-            .iter()
-            .any(|e| !e.is_empty() && id.starts_with(e.as_str()))
+        && judged.config.history.exempt.iter().any(|e| e == id)
     {
         return Ok(Vec::new());
     }

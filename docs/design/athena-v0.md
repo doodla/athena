@@ -14,7 +14,7 @@
 > what changed, or to why it did not, and records the user's decisions after review 2.
 > **Built:** [Appendix E](#appendix-e-changes-made-while-building-v0) lists what building v0 changed, each
 > with its decision entry (D48–D54) and evidence (E21), and what the fix round after the first acceptance
-> verification changed (D55–D59).
+> verification changed (D55–D59), and after the second (D60).
 
 ## Contents
 
@@ -1587,9 +1587,17 @@ repository carries this attribution in `README.md`.
   in-process gate, which run the adopted binary, are the backstop.
 - **Interventions that change no content are recorded only if the user records them.** See the prose-only
   list in [§8](#8-enforcement-map).
-- **Records are not signed.** The gate refuses a hand change dressed as a landing and a hand-written score
-  or outcome, but a deliberate fabrication of every record of a job, across two commits and with usage that
-  reconciles, still passes (D55).
+- **Records are not signed.** Athena writes its records with the user's own rights, so no local check can
+  tell them from records written by hand to look like them. The gate refuses a hand change dressed as a
+  landing, and scores and outcomes that do not follow from a job's records (D55, D56). Deliberate
+  fabrication of consistent records still passes, in three ways that acceptance verification 2 showed:
+  - every record of a job, written by hand across two commits, with usage that reconciles;
+  - one forged commit, for a job that Athena read and dispatched but that never closed, as an interrupted
+    `athena go` leaves it: the commit adds the hand change and the closing records;
+  - no landing at all: a hand-made proposal, closed with `athena close`, is scored like any job, so its
+    invented forecasts move its class's calibration headline.
+
+  Each forged job shows in `athena status` as a job nobody asked for.
 
 ### 16.3 Open questions
 
@@ -1863,3 +1871,15 @@ in `athena status`, and a check of one hazard the user met: a commit on the bran
 | n5, first half: a job that never ran showed a cost of `$-0.0000` | a sum of no costs is a plain zero; queued requests, which made it common, show only under open work | — |
 | m6, m7, m8, n2–n4, the rest of n5, n6, n7 | deferred: each is a queued request (`athena ask --later`), open work in `athena status` | D58 |
 | The base moving under a running job | already fails safe: the job closes `stale`, nothing lands, and the user's commit is untouched. The reason now names the commit that moved the base, and `go` says to ask again. Switching branches while a job runs is deferred as a queued request | — |
+
+### After acceptance verification 2
+
+The re-check, [`reviews/athena-v0-acceptance-2.md`](reviews/athena-v0-acceptance-2.md), found M1 and M2
+resolved and every finding of the first verification fixed, queued, or closed by a recorded decision. It
+raised one new major, and three precisions to the residual of unsigned records.
+
+| Finding | What changed | Entry |
+|---|---|---|
+| N1: a one-character `[history] exempt` entry hid later hand changes from the history check | entries are full commit ids, matched exactly, and must name a commit already in the history when added; the history check reports a tip configuration that does not parse | D60 |
+| An outcome with `"totals": null` skipped reconciliation | an outcome of a request job must record its totals | D60 |
+| The residual understated how fabrication passes | §16.2 and the enforcement map now name all three ways: a whole job by hand, one forged commit for a dispatched job that never closed, and a hand-made proposal that reaches calibration; making them detectable is a queued request | — |
