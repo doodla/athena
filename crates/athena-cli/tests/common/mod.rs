@@ -36,6 +36,25 @@ run = ["sh", "-c", "test -f README.md && ! test -f .cargo/config.toml && echo 't
     format!("{}{}{}", &base[..start], checks, &base[end..])
 }
 
+/// `config` with its job budget set to `value` (whatever it was).
+pub fn with_job_usd(config: &str, value: &str) -> String {
+    let out: Vec<String> = config
+        .lines()
+        .map(|l| {
+            if l.starts_with("job_usd = ") {
+                format!("job_usd = {value}")
+            } else {
+                l.to_string()
+            }
+        })
+        .collect();
+    assert!(
+        out.iter().any(|l| l == &format!("job_usd = {value}")),
+        "the configuration has a job budget"
+    );
+    out.join("\n") + "\n"
+}
+
 pub struct Fixture {
     pub dir: tempfile::TempDir,
     pub state: tempfile::TempDir,

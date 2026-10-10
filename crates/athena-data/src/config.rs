@@ -321,21 +321,26 @@ pub(crate) mod tests {
 
     #[test]
     fn repository_config_parses_and_validates() {
+        // The rules, not the values: a job may change the values through a listed governance change.
         let config = Config::parse(REPO_CONFIG).expect("athena.toml is valid");
-        assert_eq!(config.models.verifier, "claude-opus-5-5");
+        assert!(
+            !config
+                .models
+                .producer_allowed
+                .contains(&config.models.verifier)
+        );
         assert!(config.capability("change").is_some());
-        assert!(config.is_class("docs"));
+        assert!(config.is_class("other"));
     }
 
     #[test]
     fn verifier_that_can_produce_is_rejected() {
         // M9 (blocks): a configuration letting one model produce and verify is rejected.
-        let text = REPO_CONFIG.replace(
-            "producer_allowed = [\"claude-haiku-5-5\", \"claude-sonnet-5-5\"]",
-            "producer_allowed = [\"claude-haiku-5-5\", \"claude-sonnet-5-5\", \"claude-opus-5-5\"]",
-        );
+        let mut config = Config::parse(REPO_CONFIG).unwrap();
+        let verifier = config.models.verifier.clone();
+        config.models.producer_allowed.push(verifier);
         assert!(matches!(
-            Config::parse(&text),
+            config.validate(),
             Err(ConfigError::VerifierCanProduce(_))
         ));
     }

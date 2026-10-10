@@ -164,15 +164,13 @@ mod tests {
             config_sha256: String::new(),
             defaults_sha256: String::new(),
         };
+        let section = jc.config.capability(ID).unwrap().clone();
         let producer = Change.producer_grant(&jc);
         assert!(producer.writes);
-        assert!(
-            producer.commands.contains_key("rm"),
-            "the producer may rm, mv, and chmod (D22)"
-        );
+        assert_eq!(producer.commands, section.producer_commands);
         let verifier = Change.verifier_grant(&jc);
-        assert!(!verifier.writes);
-        assert!(!verifier.commands.contains_key("rm"));
-        assert_eq!(Change.checks(&jc).len(), 3);
+        assert!(!verifier.writes, "the verifier never writes");
+        assert_eq!(verifier.commands, section.verifier_commands);
+        assert_eq!(Change.checks(&jc).len(), section.checks.len());
     }
 }

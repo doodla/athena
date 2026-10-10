@@ -358,11 +358,11 @@ fn a_listed_criterion_covered_change_to_athena_toml_lands() {
     // M12 (allows): a listed, criterion-covered change to athena.toml.
     let fx = Fixture::new();
     let mut scenario = Scenario::default();
-    let raised = test_config().replace("job_usd = 8.00", "job_usd = 9.00");
+    let raised = with_job_usd(&test_config(), "9.25");
     scenario.reading = reading(
         &[("athena.toml", "modify")],
         &[
-            ("content", "athena.toml raises job_usd to 9.00"),
+            ("content", "athena.toml raises job_usd to 9.25"),
             ("behavior", "the tests still pass"),
         ],
     );
@@ -377,7 +377,7 @@ fn a_listed_criterion_covered_change_to_athena_toml_lands() {
             .unwrap(),
     );
     assert_eq!(f.state, OutcomeState::Landed, "{}", f.reason);
-    assert!(fx.file("athena.toml").unwrap().contains("job_usd = 9.00"));
+    assert!(fx.file("athena.toml").unwrap().contains("job_usd = 9.25"));
 }
 
 #[test]
@@ -583,7 +583,7 @@ fn a_killed_invocation_is_recorded_with_bounds() {
 #[test]
 fn a_job_over_budget_is_refused_before_its_next_invocation() {
     // M13 (blocks): a job over budget fails before its next invocation.
-    let fx = Fixture::with_config(&test_config().replace("job_usd = 8.00", "job_usd = 4.00"));
+    let fx = Fixture::with_config(&with_job_usd(&test_config(), "4.00"));
     let scenario = Scenario {
         cost: 0.4,
         ..Scenario::default()
