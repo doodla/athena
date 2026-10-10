@@ -89,6 +89,7 @@ documented in [`docs/records.md`](docs/records.md).
 |---|---|
 | `crates/` | the Rust workspace; [`docs/architecture.md`](docs/architecture.md) maps the crates and their dependency direction |
 | `xtask/` | setup, CI, and the repository-policy tests (`cargo run -p xtask -- setup`, `cargo run -p xtask -- ci`) |
+| [`CHANGELOG.md`](CHANGELOG.md) | what changed in each version, in Keep a Changelog form |
 | `athena.toml` | configuration: models, budgets, agent environment, the `change` capability's checks and allow-lists, classes, priors, pins |
 | `defaults.toml` | the model of the user's default expectations |
 | `records/` | every fact Athena has learned, as immutable JSON |
