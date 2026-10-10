@@ -1860,5 +1860,6 @@ in `athena status`, and a check of one hazard the user met: a commit on the bran
 | m4: agents and checks used the user's own Athena state, and agent runs left files under the user's home | nested Athena state lives in the job's directory; setup refuses inside a job; the driver removes what Claude Code leaves behind | D57 |
 | m5: setup ignored `CARGO_TARGET_DIR` | setup takes the built binary's path from cargo's messages | D57 |
 | n1: three inaccurate statements in the docs | corrected | — |
-| m6, m7, m8, n2–n7 | deferred: each is a queued request (`athena ask --later`), open work in `athena status` | D58 |
+| n5, first half: a job that never ran showed a cost of `$-0.0000` | a sum of no costs is a plain zero; queued requests, which made it common, show only under open work | — |
+| m6, m7, m8, n2–n4, the rest of n5, n6, n7 | deferred: each is a queued request (`athena ask --later`), open work in `athena status` | D58 |
 | The base moving under a running job | already fails safe: the job closes `stale`, nothing lands, and the user's commit is untouched. The reason now names the commit that moved the base, and `go` says to ask again. Switching branches while a job runs is deferred as a queued request | — |
