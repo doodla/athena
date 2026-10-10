@@ -82,7 +82,7 @@ impl Athena {
         };
         let job = records.jobs.get(id.as_str()).expect("resolved").clone();
         let config = JobConfig::at(&self.git, &head)?.config;
-        let redactor = athena_gate::redact::Redactor::new(&config)?;
+        let redactor = self.redactor(&config, Some(&id))?;
         let why = redactor.redact(why.trim())?;
         let (state, after_blocked, mut files, invocations, happened) = match job.state() {
             JobState::Proposed => (
@@ -288,7 +288,7 @@ impl Athena {
                 "--with-staged was given, but nothing is staged; `git add` your hand changes first"
             );
         }
-        let redactor = athena_gate::redact::Redactor::new(&config)?;
+        let redactor = self.redactor(&config, None)?;
         let mut text = vec![args.what.trim().to_string(), args.why.trim().to_string()];
         redactor.redact_all(&mut text)?;
         let mut id = RecordId::generate(crate::now());
@@ -396,7 +396,7 @@ impl Athena {
         let head = self.head()?;
         let records = Records::load(&self.git, &head)?;
         let config = JobConfig::at(&self.git, &head)?.config;
-        let redactor = athena_gate::redact::Redactor::new(&config)?;
+        let redactor = self.redactor(&config, None)?;
         let mut text = vec![args.cost.trim().to_string()];
         text.extend(args.lost.iter().cloned());
         text.extend(args.via.iter().cloned());

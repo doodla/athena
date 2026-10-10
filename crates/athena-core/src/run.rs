@@ -178,7 +178,7 @@ impl Athena {
             jc.config.budget.producer_usd + jc.config.budget.verifier_usd,
             "producer and verifier together",
         )?;
-        let redactor = Redactor::new(&jc.config)?;
+        let redactor = self.redactor(&jc.config, Some(&id))?;
 
         // The prediction commit: the accepted reading's job record and the producer brief, before any work.
         let producer_grant = capability.producer_grant(&jc);
@@ -287,7 +287,7 @@ impl Athena {
         if n >= jc.config.budget.max_readings {
             bail!("job {id} has {n} readings, the most a job may have; close it and ask again");
         }
-        let redactor = Redactor::new(&jc.config)?;
+        let redactor = self.redactor(&jc.config, Some(&id))?;
         let request = job.request.clone().context("the job has no request")?;
         let history: Vec<(Reading, Option<String>)> =
             job.readings.iter().map(|r| (r.clone(), None)).collect();

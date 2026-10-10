@@ -1,7 +1,9 @@
 //! Redaction of agent free text before it is recorded (design §5.6, M22).
 //!
-//! Two substitutions apply: every gitleaks finding becomes `[secret:<rule>]`, and every email address
-//! outside the allow-list becomes `[email]`. Redaction fails closed: without gitleaks, nothing is recorded.
+//! Three substitutions apply: every gitleaks finding becomes `[secret:<rule>]`, every email address
+//! outside the allow-list becomes `[email]`, and machine-local paths the caller names (such as the home
+//! directory, which carries a username) become placeholders. Redaction fails closed: without gitleaks,
+//! nothing is recorded.
 
 use crate::Result;
 use crate::content::redact_emails;
@@ -14,6 +16,8 @@ use athena_data::config::PersonalData;
 pub struct Redactor {
     allow: PersonalData,
     gitleaks: Gitleaks,
+    /// Machine-local paths and their placeholders, longest first.
+    paths: Vec<(String, String)>,
 }
 
 impl Redactor {
@@ -21,7 +25,22 @@ impl Redactor {
         Ok(Redactor {
             allow: config.personal_data.clone(),
             gitleaks: Gitleaks::new(config)?,
+            paths: Vec::new(),
         })
+    }
+
+    /// Replaces `path` with `placeholder` wherever it appears. Longer paths are replaced first, so a
+    /// directory inside another keeps its own placeholder.
+    pub fn with_path(mut self, path: &std::path::Path, placeholder: &str) -> Redactor {
+        let text = path.display().to_string();
+        if text.len() > 1 {
+            self.paths.push((
+                text.trim_end_matches('/').to_string(),
+                placeholder.to_string(),
+            ));
+            self.paths.sort_by_key(|(p, _)| std::cmp::Reverse(p.len()));
+        }
+        self
     }
 
     /// Redacts one text.
@@ -47,6 +66,11 @@ impl Redactor {
                 }
             }
             *text = redact_emails(text, &self.allow);
+            for (path, placeholder) in &self.paths {
+                if text.contains(path.as_str()) {
+                    *text = text.replace(path.as_str(), placeholder);
+                }
+            }
         }
         Ok(())
     }
@@ -71,6 +95,19 @@ mod tests {
         assert!(!out.contains(&private_email()));
         assert!(out.contains("[secret:github-pat]"));
         assert!(out.contains("[email]"));
+    }
+
+    #[test]
+    fn machine_paths_become_placeholders() {
+        let redactor = Redactor::new(&crate::builtin_config())
+            .unwrap()
+            .with_path(std::path::Path::new("/home/jane"), "~")
+            .with_path(
+                std::path::Path::new("/home/jane/.local/state/athena/repo/jobs/j"),
+                "<job>",
+            );
+        let out = redactor.redact("error at /home/jane/.local/state/athena/repo/jobs/j/verify/src/lib.rs and /home/jane/x").unwrap();
+        assert_eq!(out, "error at <job>/verify/src/lib.rs and ~/x");
     }
 
     #[test]

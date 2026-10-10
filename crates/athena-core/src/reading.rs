@@ -464,12 +464,12 @@ impl Athena {
         let head = self.head()?;
         let jc = JobConfig::at(&self.git, &head)?;
         let records = crate::store::Records::load(&self.git, &head)?;
-        let redactor = Redactor::new(&jc.config)?;
         let mut id = RecordId::generate(crate::now());
         while records.jobs.contains_key(id.as_str()) {
             id = RecordId::generate(crate::now());
         }
         let job = JobId::Id(id);
+        let redactor = self.redactor(&jc.config, Some(&job))?;
         let request = Request {
             job: job.clone(),
             text: redactor.redact(text.trim())?,
@@ -530,7 +530,7 @@ impl Athena {
                 "job {job_id} already has {n} readings, the most a job may have; close it and ask again with a fuller request"
             );
         }
-        let redactor = Redactor::new(&jc.config)?;
+        let redactor = self.redactor(&jc.config, Some(&job_id))?;
         let request = job
             .request
             .clone()

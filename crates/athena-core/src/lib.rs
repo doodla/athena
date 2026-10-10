@@ -102,6 +102,24 @@ impl Athena {
         }
     }
 
+    /// A redactor for a job's records: secrets, private addresses, and this machine's paths (the job's
+    /// directory, the state directory, and the home directory, which names the user).
+    pub fn redactor(
+        &self,
+        config: &athena_data::Config,
+        job: Option<&athena_data::JobId>,
+    ) -> Result<athena_gate::redact::Redactor> {
+        let mut redactor =
+            athena_gate::redact::Redactor::new(config)?.with_path(self.state.root(), "<state>");
+        if let Some(job) = job {
+            redactor = redactor.with_path(&self.state.job_dir(job), "<job>");
+        }
+        if let Some(home) = std::env::var_os("HOME") {
+            redactor = redactor.with_path(std::path::Path::new(&home), "~");
+        }
+        Ok(redactor)
+    }
+
     /// Refuses to run when the kill switch is on.
     pub fn refuse_if_stopped(&self) -> Result<()> {
         if self.state.registry().stopped() {
