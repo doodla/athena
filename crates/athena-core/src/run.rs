@@ -540,7 +540,7 @@ impl Athena {
         let stat: Vec<String> = candidate
             .changes
             .iter()
-            .map(|e| format!("{} ({:?})", e.path, e.status).to_lowercase())
+            .map(|e| format!("{} ({})", e.path, format!("{:?}", e.status).to_lowercase()))
             .collect();
         ctx.ui.line(&format!(
             "candidate  {} · fingerprint {}…",
