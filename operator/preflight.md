@@ -8,7 +8,7 @@ made, so a later session can re-run it. Re-check every open blocker at each rest
 | Capability | Result | Evidence |
 |---|---|---|
 | Push access to `doodla/athena` | Available | `gh api repos/doodla/athena` reports `push: true, admin: true` for the session; first push of this branch succeeded (see the commit that added this file). |
-| GitHub Pages, Actions as source | **Blocked** | `gh api repos/doodla/athena` reports `has_pages: false`. The Pages API (`repos/.../pages`) is refused by the sandbox's GitHub proxy (HTTP 403, "Access to this GitHub API path is not permitted"). |
+| GitHub Pages, Actions as source | **Blocked** at first check; resolved at about 10:09Z (see B1) | `gh api repos/doodla/athena` reports `has_pages: false`. The Pages API (`repos/.../pages`) is refused by the sandbox's GitHub proxy (HTTP 403, "Access to this GitHub API path is not permitted"). |
 | Start a new Claude cloud session | Available | `create_session` started probe session `session_01MYgnitwNvqtwBsG6AsXAmZ` (Haiku 5.5), which answered "preflight probe ok"; it was archived right after. One environment exists: `env_011CUwXrgx63fmfaxEf2GKvb`. |
 | Coding-agent harness for firstmate | Available | Claude Code 2.1.296 runs headless: `claude -p --model claude-haiku-5-5 --output-format json` returned a result with measured usage and cost. `tmux` is installed. |
 | LLM provider for Hermes | **Blocked** at first check; resolved at 09:46Z (see B2) | The Vercel AI Gateway (`ai-gateway.vercel.sh`) answers HTTP 401 "Authentication failed" on `/v1/models`, `/v1/chat/completions`, `/v1/messages`, `/v1/ai/language-model`, and `/v1/credits`, with no auth header, with `AI_GATEWAY_API_KEY` as a bearer token or `x-api-key`, and with the proxy placeholder. The proxy is documented to inject the gateway credential, but authentication fails either way. |
@@ -33,9 +33,12 @@ Other facts found on the way:
 
 ## Blockers and workaround plans
 
-### B1. GitHub Pages is not enabled
+### B1. GitHub Pages is not enabled: resolved
 
-- Needed: Sri enables Pages with "GitHub Actions" as the source (repository Settings → Pages).
+- Resolution: at about 10:09Z the same day, Sri set Pages' source to "GitHub Actions" (screenshot
+  of Settings → Pages: "Pages source saved"); `gh api repos/doodla/athena --jq .has_pages` now
+  answers `true`. The site will be served at `https://doodla.github.io/athena/`.
+- Needed (originally): Sri enables Pages with "GitHub Actions" as the source.
 - Workaround: Athena's deploy workflow is built regardless. It tries `actions/configure-pages`
   with `enablement: true`, which may fail with the default token. Until Pages is on, the site is
   verified locally and in CI against the built artifact, and live-site checks are listed as
