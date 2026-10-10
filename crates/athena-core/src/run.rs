@@ -35,7 +35,8 @@ use std::time::Instant;
 /// How `go` ended.
 #[derive(Debug, Clone)]
 pub enum GoResult {
-    /// The configuration changed since the reading: Athena read again, and the new reading needs accepting.
+    /// Athena read the request, and the reading needs accepting: a queued request read for the first
+    /// time, or a reading made again because the configuration changed since it.
     Reread(Box<Proposal>),
     /// The job reached a terminal state, or `blocked`.
     Finished(Box<Finished>),
@@ -114,6 +115,9 @@ impl Athena {
         };
         let job = records.jobs.get(id.as_str()).expect("resolved").clone();
         match job.state() {
+            JobState::Queued => self
+                .read_queued(&job, ui)
+                .map(|p| GoResult::Reread(Box::new(p))),
             JobState::Blocked => self
                 .retry_landing(&records, &job, ui)
                 .map(|f| GoResult::Finished(Box::new(f))),

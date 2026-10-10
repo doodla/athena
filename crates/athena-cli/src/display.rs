@@ -168,6 +168,14 @@ pub fn reading(job: &str, r: &Reading, interactive: bool) -> String {
     out
 }
 
+/// What `ask --later` prints.
+pub fn queued(job: &str, commit: &str) -> String {
+    format!(
+        "queued     {job} · {} (nothing read, no model called)\nnext       athena go {job}   # reads it, then asks to run it\n",
+        &commit[..commit.len().min(12)]
+    )
+}
+
 /// What a non-interactive `ask` or `correct` prints after the reading.
 pub fn follow_up(p: &Proposal) -> String {
     let id = p.job.as_str();

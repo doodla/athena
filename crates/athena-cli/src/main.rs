@@ -32,8 +32,11 @@ enum Command {
         #[arg(required = true, num_args = 1..)]
         request: Vec<String>,
         /// Run without waiting at the prompt (the reading is printed, but its acceptance stays unresolved).
-        #[arg(long)]
+        #[arg(long, conflicts_with = "later")]
         yes: bool,
+        /// Only record the request, to be read and run later with `athena go`; no model is called.
+        #[arg(long)]
+        later: bool,
         #[arg(long)]
         json: bool,
     },
@@ -45,7 +48,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Run a proposed job to its end, or retry the landing of a blocked one.
+    /// Run a proposed job to its end, read a queued one, or retry the landing of a blocked one.
     Go {
         job: String,
         #[arg(long)]
@@ -199,6 +202,8 @@ fn go_and_report(athena: &Athena, job: &str, accepted_by: AcceptedBy, json: bool
         GoResult::Reread(p) => {
             if json {
                 print_json(&proposal_json(&p))?;
+            } else if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+                return prompt_loop(athena, *p);
             } else {
                 if let Some(r) = &p.reading {
                     print!("{}", display::reading(p.job.as_str(), r, false));
@@ -261,8 +266,26 @@ fn prompt_loop(athena: &Athena, mut proposal: Proposal) -> Result<u8> {
 
 fn run(cli: Cli) -> Result<u8> {
     match cli.command {
-        Command::Ask { request, yes, json } => {
+        Command::Ask {
+            request,
+            yes,
+            later,
+            json,
+        } => {
             let athena = open(true)?;
+            if later {
+                let (job, commit) = athena.queue(&request.join(" "))?;
+                if json {
+                    print_json(&serde_json::json!({
+                        "job": job.as_str(),
+                        "state": "queued",
+                        "commit": commit,
+                    }))?;
+                } else {
+                    print!("{}", display::queued(job.as_str(), &commit));
+                }
+                return Ok(0);
+            }
             let proposal = athena.ask(&request.join(" "), &Terminal)?;
             if yes {
                 if let Some(r) = &proposal.reading

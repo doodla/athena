@@ -210,3 +210,44 @@ fn status_and_check_work_from_the_repository_alone() {
         String::from_utf8_lossy(&out.stdout)
     );
 }
+
+#[test]
+fn ask_later_queues_a_request_without_calling_a_model() {
+    // Capability 10, point 3 of the fix round after acceptance verification 1: a request queued for later
+    // is open work in `athena status`, from the records alone, with the command that picks it up.
+    let fx = Fixture::new();
+    let state = tempfile::tempdir().unwrap();
+    let out = athena()
+        .current_dir(fx.root())
+        .env("ATHENA_STATE_DIR", state.path())
+        .args(["ask", "--later", "write down a note"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.starts_with("queued"), "{stdout}");
+    let out = athena()
+        .current_dir(fx.root())
+        .env("ATHENA_STATE_DIR", state.path())
+        .args(["status", "--json"])
+        .output()
+        .unwrap();
+    let view: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let open = view["open"].as_array().unwrap();
+    assert_eq!(open.len(), 1, "{view}");
+    assert_eq!(open[0]["state"], "queued");
+    assert_eq!(open[0]["title"], "write down a note");
+    let id = open[0]["id"].as_str().unwrap();
+    assert!(
+        view["next"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n.as_str().unwrap().starts_with(&format!("athena go {id}"))),
+        "{view}"
+    );
+}

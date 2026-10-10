@@ -33,6 +33,8 @@ pub struct JobRecords {
 /// A job's state, derived from its records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobState {
+    /// Requested for later and not read yet (`athena ask --later`); `go` reads it.
+    Queued,
     /// Read (or being read); waiting for `go`, a correction, or `close`.
     Proposed,
     /// No capability fits; waiting for a correction or `close`.
@@ -48,6 +50,7 @@ pub enum JobState {
 impl JobState {
     pub fn name(self) -> &'static str {
         match self {
+            JobState::Queued => "queued",
             JobState::Proposed => "proposed",
             JobState::Declined => "declined",
             JobState::Dispatched => "dispatched",
@@ -83,6 +86,9 @@ impl JobRecords {
         }
         if self.job.is_some() {
             return JobState::Dispatched;
+        }
+        if self.readings.is_empty() && self.invocations.is_empty() {
+            return JobState::Queued;
         }
         match self.latest_reading() {
             Some(r) if r.capability.is_none() => JobState::Declined,

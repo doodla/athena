@@ -85,7 +85,7 @@ impl Athena {
         let redactor = self.redactor(&config, Some(&id))?;
         let why = redactor.redact(why.trim())?;
         let (state, after_blocked, files, invocations) = match job.state() {
-            JobState::Proposed => (
+            JobState::Queued | JobState::Proposed => (
                 OutcomeState::Dropped,
                 false,
                 Vec::new(),

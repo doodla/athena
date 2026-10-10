@@ -476,9 +476,80 @@ impl Athena {
             received_at: crate::now(),
             channel: "cli".into(),
         };
+        self.first_reading(&jc, &records, &request, true, ui)
+    }
+
+    /// `athena ask --later`: records a request to be read and run later. Nothing is read and no model is
+    /// called; `athena status` lists it as open work, and `athena go` reads it.
+    pub fn queue(&self, text: &str) -> Result<(JobId, String)> {
+        if text.trim().is_empty() {
+            bail!("the request is empty; say what you want in a line or two");
+        }
+        let head = self.head()?;
+        let jc = JobConfig::at(&self.git, &head)?;
+        let records = crate::store::Records::load(&self.git, &head)?;
+        let mut id = RecordId::generate(crate::now());
+        while records.jobs.contains_key(id.as_str()) {
+            id = RecordId::generate(crate::now());
+        }
+        let job = JobId::Id(id);
+        let redactor = self.redactor(&jc.config, Some(&job))?;
+        let request = Request {
+            job: job.clone(),
+            text: redactor.redact(text.trim())?,
+            received_at: crate::now(),
+            channel: "cli".into(),
+        };
+        let first_line: String = request
+            .text
+            .lines()
+            .next()
+            .unwrap_or("")
+            .chars()
+            .take(60)
+            .collect();
+        let commit = self.commit_records(
+            &[NewFile::record(&AnyRecord::Request(request))],
+            &message(
+                &format!("Queue a request: {first_line}"),
+                "The request, recorded to be read and run later. Nothing was read and no model was called.",
+                &[("Athena-Job", job.as_str().to_string())],
+            ),
+        )?;
+        Ok((job, commit))
+    }
+
+    /// Reads a queued request for the first time, as `ask` would have.
+    pub(crate) fn read_queued(&self, job: &JobRecords, ui: &dyn Ui) -> Result<Proposal> {
+        self.refuse_if_stopped()?;
+        let head = self.head()?;
+        let jc = JobConfig::at(&self.git, &head)?;
+        let records = crate::store::Records::load(&self.git, &head)?;
+        let request = job
+            .request
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("job {} has no request record", job.id()))?;
+        self.first_reading(&jc, &records, &request, false, ui)
+    }
+
+    /// Reads `request` for the first time and commits the reading, with the request record when
+    /// `with_request` is set.
+    fn first_reading(
+        &self,
+        jc: &JobConfig,
+        records: &Records,
+        request: &Request,
+        with_request: bool,
+        ui: &dyn Ui,
+    ) -> Result<Proposal> {
+        let job = request.job.clone();
+        let redactor = self.redactor(&jc.config, Some(&job))?;
         let (reading, invocation, error) =
-            self.read_for(&jc, &records, &job, &request, &[], 1, 1, 0.0, &redactor, ui)?;
-        let mut files = vec![NewFile::record(&AnyRecord::Request(request.clone()))];
+            self.read_for(jc, records, &job, request, &[], 1, 1, 0.0, &redactor, ui)?;
+        let mut files = Vec::new();
+        if with_request {
+            files.push(NewFile::record(&AnyRecord::Request(request.clone())));
+        }
         files.push(NewFile::record(&AnyRecord::Invocation(Box::new(
             invocation.clone(),
         ))));

@@ -195,7 +195,7 @@ impl Athena {
             }
             if matches!(
                 state.as_str(),
-                "proposed" | "declined" | "interrupted" | "running" | "blocked"
+                "queued" | "proposed" | "declined" | "interrupted" | "running" | "blocked"
             ) {
                 open.push(job_line(job, &state));
             }
@@ -276,6 +276,7 @@ impl Athena {
         for line in &open {
             let id = &line.id;
             match line.state.as_str() {
+                "queued" => next.push(format!("athena go {id}   # reads it first, then asks to run it · or: athena close {id} --why \"...\"")),
                 "proposed" => next.push(format!("athena go {id}   # or: athena correct {id} \"<line>\" · athena close {id} --why \"...\"")),
                 "declined" => next.push(format!("athena correct {id} \"<line>\"   # or: athena close {id} --why \"...\"")),
                 "interrupted" => next.push(format!("athena close {id} --why \"...\"   # commits what the interrupted job left")),

@@ -1125,6 +1125,62 @@ fn an_intervention_during_the_job_is_scored_when_it_closes() {
 }
 
 #[test]
+fn a_queued_request_is_open_work_until_it_is_read_and_run() {
+    // Capability 10, point 3 of the fix round after acceptance verification 1: `ask --later` records the
+    // request with no model call; `status` lists it as open work with its next command; `go` reads it,
+    // and a second `go` runs it. A queued request that is not wanted is dropped by `close`.
+    let fx = Fixture::new();
+    let scenario = Scenario::default();
+    let calls = scenario.invocations.clone();
+    let athena = fx.athena(scenario.script());
+    let (job, _) = athena.queue("add a greeting to the readme").unwrap();
+    let (unwanted, _) = athena.queue("translate the readme into Latin").unwrap();
+    assert!(calls.lock().unwrap().is_empty(), "no model was called");
+    let status = athena.status().unwrap();
+    for id in [&job, &unwanted] {
+        assert!(
+            status
+                .open
+                .iter()
+                .any(|l| l.id == id.as_str() && l.state == "queued"),
+            "{:?}",
+            status.open
+        );
+        assert!(
+            status
+                .next
+                .iter()
+                .any(|n| n.starts_with(&format!("athena go {}", id.as_str()))),
+            "{:?}",
+            status.next
+        );
+    }
+
+    let GoResult::Reread(proposal) = athena
+        .go(job.as_str(), AcceptedBy::User, &Lines::default())
+        .unwrap()
+    else {
+        panic!("go reads a queued request first");
+    };
+    assert!(proposal.reading.is_some());
+    assert_eq!(*calls.lock().unwrap(), vec![Role::Reader]);
+    let f = finished(
+        athena
+            .go(job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(f.state, OutcomeState::Landed, "{}", f.reason);
+
+    let closed = athena
+        .close(unwanted.as_str(), "not wanted after all", &Lines::default())
+        .unwrap();
+    assert_eq!(closed.state, OutcomeState::Dropped);
+    assert!(athena.status().unwrap().open.is_empty());
+    let report = athena.check_history().unwrap();
+    assert!(report.violations.is_empty(), "{:?}", report.violations);
+}
+
+#[test]
 fn merging_a_branch_where_a_job_landed_passes() {
     // M27 (allows): a merge brings in a job's records from the branch where they were judged.
     let fx = Fixture::new();
