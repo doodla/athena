@@ -115,13 +115,26 @@ fn job_line(job: &JobRecords, state: &str) -> JobLine {
     }
 }
 
+/// A number without float noise: at most six decimals, trailing zeros removed.
+fn number(v: f64) -> String {
+    let text = format!("{v:.6}");
+    let text = text.trim_end_matches('0').trim_end_matches('.');
+    if text.is_empty() {
+        "0".into()
+    } else {
+        text.to_string()
+    }
+}
+
 fn quantity_text(q: &athena_data::Quantity) -> String {
     match (q.value(), q.lower(), q.upper()) {
-        (Some(v), _, _) => format!("{v} {} ({:?})", q.unit(), q.provenance()).to_lowercase(),
+        (Some(v), _, _) => {
+            format!("{} {} ({:?})", number(v), q.unit(), q.provenance()).to_lowercase()
+        }
         (None, l, u) => format!(
             "[{}, {}] {} ({:?})",
-            l.map_or("?".into(), |v| v.to_string()),
-            u.map_or("?".into(), |v| v.to_string()),
+            l.map_or("?".into(), number),
+            u.map_or("?".into(), number),
             q.unit(),
             q.provenance()
         )

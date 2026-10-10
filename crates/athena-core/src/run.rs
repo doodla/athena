@@ -1047,12 +1047,7 @@ impl Athena {
             reason.clone(),
             false,
         )))));
-        let subject = format!(
-            "Close {}: {} ({})",
-            short(id.as_str()),
-            state.as_str(),
-            ctx.reading.title
-        );
+        let subject = closing_subject(state, &ctx.reading.title);
         let commit = self.commit_records(&files, &message(&subject, &reason, &trailers))?;
         ctx.ui.line(&format!("{:<10} {reason}", state.as_str()));
         self.state.clean_job(&id);
@@ -1101,11 +1096,7 @@ impl Athena {
                         &head,
                         &files,
                         &message(
-                            &format!(
-                                "Close {}: stale ({})",
-                                short(id.as_str()),
-                                ctx.reading.title
-                            ),
+                            &closing_subject(OutcomeState::Stale, &ctx.reading.title),
                             &reason,
                             trailers,
                         ),
@@ -1145,11 +1136,7 @@ impl Athena {
                                 &head,
                                 &files,
                                 &message(
-                                    &format!(
-                                        "Close {}: failed ({})",
-                                        short(id.as_str()),
-                                        ctx.reading.title
-                                    ),
+                                    &closing_subject(OutcomeState::Failed, &ctx.reading.title),
                                     &reason,
                                     trailers,
                                 ),
@@ -1194,11 +1181,7 @@ impl Athena {
                                 &head,
                                 &files,
                                 &message(
-                                    &format!(
-                                        "Close {}: blocked ({})",
-                                        short(id.as_str()),
-                                        ctx.reading.title
-                                    ),
+                                    &closing_subject(OutcomeState::Blocked, &ctx.reading.title),
                                     &reason,
                                     trailers,
                                 ),
@@ -1387,6 +1370,17 @@ impl Happened {
         self.reason = Some(reason.to_string());
         self
     }
+}
+
+/// The subject of a closing commit: the outcome, then the job's title (the job id is in the trailer).
+pub fn closing_subject(state: OutcomeState, title: &str) -> String {
+    let word = state.as_str();
+    let mut chars = word.chars();
+    let capitalized = chars
+        .next()
+        .map(|c| c.to_uppercase().collect::<String>() + chars.as_str())
+        .unwrap_or_default();
+    format!("{capitalized}: {title}")
 }
 
 fn provenance_word(q: &athena_data::Quantity) -> &'static str {

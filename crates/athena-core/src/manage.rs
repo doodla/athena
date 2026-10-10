@@ -115,7 +115,7 @@ impl Athena {
                 let commit = self.commit_records(
                     &files,
                     &message(
-                        &format!("Close {}: abandoned after blocked", short(id.as_str())),
+                        &format!("Abandoned after blocked: {}", job.title()),
                         &why,
                         &[("Athena-Job", id.as_str().to_string())],
                     ),
@@ -172,7 +172,7 @@ impl Athena {
         let commit = self.commit_records(
             &files,
             &message(
-                &format!("Close {}: {}", short(id.as_str()), state.as_str()),
+                &crate::run::closing_subject(state, &job.title()),
                 &why,
                 &trailers,
             ),
