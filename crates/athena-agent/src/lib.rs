@@ -30,6 +30,15 @@ pub fn nested_marker() -> Option<String> {
     std::env::var(NESTED_ENV).ok().filter(|v| !v.is_empty())
 }
 
+/// The real driver's refusal to run inside a job: no model call may happen outside a job's records and
+/// budget (D47).
+pub fn refuse_nested(marker: Option<String>) -> Result<(), DriverError> {
+    match marker {
+        Some(job) => Err(DriverError::Nested(job)),
+        None => Ok(()),
+    }
+}
+
 /// How the hook reaches Athena's tool policy for one invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookSpec {
@@ -134,4 +143,19 @@ pub trait AgentDriver {
         spec: &AgentInvocation,
         sink: &mut dyn UsageSink,
     ) -> Result<AgentOutput, DriverError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_real_driver_refuses_under_the_nested_marker() {
+        // M25 (blocks): under the marker, the real driver refuses to start.
+        assert!(matches!(
+            refuse_nested(Some("20261010-153012-k7q2".into())),
+            Err(DriverError::Nested(_))
+        ));
+        assert!(refuse_nested(None).is_ok());
+    }
 }

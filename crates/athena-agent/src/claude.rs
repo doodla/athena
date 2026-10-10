@@ -7,7 +7,9 @@
 
 use crate::procs::{GRACE, Registry, isolate, kill_group};
 use crate::stream::StreamState;
-use crate::{AgentDriver, AgentInvocation, AgentOutput, DriverError, UsageSink, nested_marker};
+use crate::{
+    AgentDriver, AgentInvocation, AgentOutput, DriverError, UsageSink, nested_marker, refuse_nested,
+};
 use athena_data::records::{DriverInfo, InvocationOutcome};
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Write};
@@ -32,6 +34,21 @@ pub struct ClaudeCodeDriver {
     registry: Registry,
 }
 
+/// Retries an operation that executes a program while the program file is busy (ETXTBSY): a file that
+/// was just written can stay open for writing in a child that another thread forked, until it execs.
+fn retry_busy<T>(mut op: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    let mut attempt = 0;
+    loop {
+        match op() {
+            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && attempt < 20 => {
+                attempt += 1;
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            other => return other,
+        }
+    }
+}
+
 /// Reads the version a Claude Code binary reports, such as `2.1.296`.
 pub fn claude_version(bin: &Path) -> Option<String> {
     let mut cmd = Command::new(bin);
@@ -44,7 +61,7 @@ pub fn claude_version(bin: &Path) -> Option<String> {
             cmd.env(key, value);
         }
     }
-    let out = cmd.output().ok()?;
+    let out = retry_busy(|| cmd.output()).ok()?;
     out.status.success().then(|| {
         String::from_utf8_lossy(&out.stdout)
             .split_whitespace()
@@ -57,9 +74,7 @@ pub fn claude_version(bin: &Path) -> Option<String> {
 impl ClaudeCodeDriver {
     /// A driver for the binary at `bin`, which must report the pinned `version`.
     pub fn new(bin: PathBuf, pinned: &str, registry: Registry) -> Result<Self, DriverError> {
-        if let Some(job) = nested_marker() {
-            return Err(DriverError::Nested(job));
-        }
+        refuse_nested(nested_marker())?;
         let version = claude_version(&bin).ok_or_else(|| {
             DriverError::Spawn(format!(
                 "{} --version failed; run ./setup.sh",
@@ -179,9 +194,7 @@ impl AgentDriver for ClaudeCodeDriver {
         spec: &AgentInvocation,
         sink: &mut dyn UsageSink,
     ) -> Result<AgentOutput, DriverError> {
-        if let Some(job) = nested_marker() {
-            return Err(DriverError::Nested(job));
-        }
+        refuse_nested(nested_marker())?;
         if self.registry.stopped() {
             return Err(DriverError::Stopped);
         }
@@ -205,8 +218,7 @@ impl AgentDriver for ClaudeCodeDriver {
         isolate(&mut cmd);
         let started_at = jiff::Timestamp::now();
         let clock = Instant::now();
-        let mut child = cmd
-            .spawn()
+        let mut child = retry_busy(|| cmd.spawn())
             .map_err(|e| DriverError::Spawn(format!("{}: {e}", self.bin.display())))?;
         let pgid = child.id() as i32;
         self.registry

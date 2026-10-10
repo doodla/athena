@@ -527,6 +527,7 @@ impl Athena {
             reading: ctx.reading,
             max_file_bytes: jc.config.records.max_file_bytes,
             personal_data: &jc.config.personal_data,
+            config: &jc.config,
         })?;
         violations.extend(ctx.capability.admit(
             &ChangeList {
@@ -1127,7 +1128,45 @@ impl Athena {
                         "verified and landed".into(),
                         false,
                     )))));
-                    let commit = self.build_commit(&tree, &head, &files, landing_message)?;
+                    let commit = match self.build_commit(&tree, &head, &files, landing_message) {
+                        Ok(commit) => commit,
+                        Err(refused) => {
+                            // The in-process gate refused the landing commit: the job fails, with its records.
+                            let reason =
+                                format!("the gate refused the landing commit: {refused:#}");
+                            let mut files = closing.files.clone();
+                            files.push(NewFile::record(&AnyRecord::Outcome(Box::new(outcome(
+                                OutcomeState::Failed,
+                                reason.clone(),
+                                false,
+                            )))));
+                            let records_commit = self.build_commit(
+                                &head,
+                                &head,
+                                &files,
+                                &message(
+                                    &format!(
+                                        "Close {}: failed ({})",
+                                        short(id.as_str()),
+                                        ctx.reading.title
+                                    ),
+                                    &reason,
+                                    trailers,
+                                ),
+                            )?;
+                            match self.advance(&records_commit, &head)? {
+                                Ok(()) => {
+                                    result =
+                                        Some((OutcomeState::Failed, reason, records_commit, None));
+                                    break;
+                                }
+                                Err(Refusal::Moved) => continue,
+                                Err(Refusal::LocalEdits(e)) => {
+                                    bail!("could not record the failed outcome: {e}")
+                                }
+                            }
+                        }
+                    };
                     match self.advance(&commit, &head)? {
                         Ok(()) => {
                             result = Some((

@@ -5,7 +5,7 @@
 //! - a path is under `records/`, or is marked `athena-exclude` or `athena-readonly` under the base's rules;
 //! - a submodule or gitlink appears;
 //! - a file exceeds the size limit;
-//! - an added line contains an email address outside the allow-list;
+//! - an added line contains an email address outside the allow-list, or gitleaks finds a secret;
 //! - the candidate would change how any path is classified;
 //! - a governance file changed without the accepted reading listing it as a deliverable and naming it in
 //!   an acceptance criterion. For a `Cargo.toml`, only its `[lints]` and `[workspace.lints]` tables are
@@ -92,6 +92,8 @@ pub struct AdmissionInput<'a> {
     pub reading: &'a Reading,
     pub max_file_bytes: u64,
     pub personal_data: &'a PersonalData,
+    /// The base's configuration, whose `[secrets]` judges the candidate.
+    pub config: &'a athena_data::Config,
 }
 
 fn violation(rule: &str, path: Option<&str>, detail: String) -> PolicyViolation {
@@ -184,6 +186,17 @@ pub fn admit(input: &AdmissionInput<'_>) -> Result<Vec<PolicyViolation>> {
             "classification",
             moved.first().map(String::as_str),
             format!("the candidate changes how {} path(s) are classified (athena-* declarations), starting with {}", moved.len(), moved[0]),
+        ));
+    }
+
+    // Secrets: the candidate is scanned now, so a secret fails the job here instead of at landing.
+    for finding in
+        athena_gate::secrets::check_commit(git, input.config, Some(input.base), input.candidate)?
+    {
+        violations.push(violation(
+            "secret",
+            finding.path.as_deref(),
+            finding.detail.clone(),
         ));
     }
 

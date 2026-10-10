@@ -4,7 +4,7 @@
 //! command that would call agents or commit never touches the repository it was started in: it copies
 //! that working tree (committed and uncommitted files, so a producer can exercise its own edits) into a
 //! fresh scratch repository, runs there with a scratch state directory and the fake driver, and says
-//! where. The real driver refuses to start under the marker, so no model call happens outside a job's
+//! where. `ATHENA_SCRATCH_DIR` names a scratch directory that persists across nested commands. The real driver refuses to start under the marker, so no model call happens outside a job's
 //! records and budget.
 
 use anyhow::{Context, Result};
@@ -21,21 +21,28 @@ pub struct Scratch {
 
 /// Copies the working tree of `source` into a fresh scratch repository with one commit.
 pub fn prepare(source: &Git) -> Result<Scratch> {
-    let root = match std::env::var_os("ATHENA_SCRATCH_DIR").filter(|v| !v.is_empty()) {
+    // A named scratch directory persists across nested commands, so `ask` and then `go` see one
+    // repository; without one, every command gets a fresh copy.
+    let (root, reuse) = match std::env::var_os("ATHENA_SCRATCH_DIR").filter(|v| !v.is_empty()) {
         Some(dir) => {
-            std::fs::create_dir_all(&dir)?;
+            let root = PathBuf::from(dir);
+            std::fs::create_dir_all(&root)?;
+            let reuse = root.join("repo").join(".git").exists();
+            (root, reuse)
+        }
+        None => (
             tempfile::Builder::new()
                 .prefix("athena-nested-")
-                .tempdir_in(dir)?
-                .keep()
-        }
-        None => tempfile::Builder::new()
-            .prefix("athena-nested-")
-            .tempdir()?
-            .keep(),
+                .tempdir()?
+                .keep(),
+            false,
+        ),
     };
     let repo = root.join("repo");
     let state = root.join("state");
+    if reuse {
+        return Ok(Scratch { root, repo, state });
+    }
     std::fs::create_dir_all(&repo)?;
     std::fs::create_dir_all(&state)?;
     let listing = source.run_bytes(

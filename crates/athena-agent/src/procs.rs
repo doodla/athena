@@ -249,6 +249,58 @@ mod tests {
         assert!(!group_alive(pgid), "the background sleep is gone too");
     }
 
+    /// Not a test on its own: the parent process for `killing_the_parent_kills_its_agent`. It spawns an
+    /// isolated sleeper, prints its pid, and waits to be killed.
+    #[test]
+    #[ignore = "a helper process for killing_the_parent_kills_its_agent"]
+    fn helper_parent_of_an_isolated_agent() {
+        if std::env::var("ATHENA_TEST_PARENT").as_deref() != Ok("1") {
+            return;
+        }
+        let mut child = sleeper();
+        println!("agent-pid {}", child.id());
+        std::thread::sleep(Duration::from_secs(60));
+        let _ = child.wait();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn killing_the_parent_kills_its_agent() {
+        // M13 (blocks): killing `athena go` mid-invocation kills its agent (the parent-death signal).
+        use std::io::BufRead;
+        let mut parent = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "procs::tests::helper_parent_of_an_isolated_agent",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("ATHENA_TEST_PARENT", "1")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let stdout = parent.stdout.take().unwrap();
+        let mut pid = None;
+        for line in std::io::BufReader::new(stdout).lines() {
+            let line = line.unwrap();
+            if let Some(rest) = line.split("agent-pid ").nth(1) {
+                pid = rest.trim().parse::<i32>().ok();
+                break;
+            }
+        }
+        let pid = pid.expect("the helper reported its agent");
+        assert!(process_alive(pid));
+        parent.kill().unwrap();
+        parent.wait().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while process_alive(pid) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!group_alive(pid), "the agent died with its parent");
+    }
+
     #[test]
     fn reaping_removes_finished_groups() {
         let state = tempfile::tempdir().unwrap();
