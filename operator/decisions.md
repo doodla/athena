@@ -67,3 +67,14 @@ Athena's decision log, not here. Newest last.
   session whose lease of record is missing or expired cannot push one.
 - Also: landing is fast-forward only, so the operator never commits on a branch while one of
   Athena's jobs is in flight on it. Uncommitted operator edits wait, stashed, until the job lands.
+
+## OP-7. Decision sheets for Sri have a fixed structure (2026-10-11)
+
+- Decision: when Sri must decide, the operator writes a decision sheet as a doc. It opens with where
+  things stand in a few sentences, then a "do now" checklist of actions, then the decisions. The
+  decisions start with an at-a-glance table (number, decision, recommended option, what it blocks,
+  a dropdown for Sri's choice). Each decision follows with the same layout: the question, why it
+  matters, an options table (option, what happens, effort or cost, risk) with the recommendation
+  listed first, and a one-line recommendation with its reason. The session's record comes last.
+- Why: Sri asked for better-structured decision sheets after two that mixed context, options and
+  asks in prose and a crowded single table.
