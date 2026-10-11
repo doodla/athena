@@ -48,6 +48,11 @@ pub struct HistoryState {
     pub tip: String,
     /// Jobs already landed by an earlier commit in the walk.
     pub landed: BTreeSet<String>,
+    /// The `[history] exempt` commit ids, read from the tip's configuration. Each commit is otherwise
+    /// judged by its parent's configuration, which cannot hold an entry added later, so an adopter
+    /// could never excuse history from before Athena. Validation still stops an entry from covering
+    /// a commit made after it.
+    pub exempt: Vec<String>,
 }
 
 /// The bootstrap range: open until `records/jobs/bootstrap/outcome.json` names its last commit.
@@ -79,10 +84,17 @@ pub fn check(
     history: Option<&HistoryState>,
 ) -> Result<Vec<Violation>> {
     let commit = change.commit.as_deref();
-    // An exemption names one commit in full (the configuration refuses anything shorter), and only a
-    // commit that existed before the entry was added (the content check), so it cannot cover a later one.
+    // The history check reads the exempt list from the tip's configuration, not the judged commit's
+    // parent's: an entry is added after the commit it excuses, so the parent's list never holds it.
+    // A per-commit check has no tip and uses the parent's list. An exemption names one commit in full
+    // (the configuration refuses anything shorter), and only a commit that existed before the entry was
+    // added (the content check), so it cannot cover a later one.
+    let exempt = match history {
+        Some(state) => &state.exempt,
+        None => &judged.config.history.exempt,
+    };
     if let Some(id) = commit
-        && judged.config.history.exempt.iter().any(|e| e == id)
+        && exempt.iter().any(|e| e == id)
     {
         return Ok(Vec::new());
     }

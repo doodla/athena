@@ -1295,3 +1295,19 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   intervention, hid a later hand edit whose commit id began with 0 from `athena check --history` (11
   retries). The totals rule follows the same verification's note that an outcome with `"totals": null`
   skipped reconciliation. Evidenced by `a_short_history_exemption_does_not_hide_a_hand_change`.
+
+## D61 · The history check reads the exempt list from the tip
+
+- **Decision:** Amends D60. `athena check --history` takes `[history] exempt` from the tip's
+  `athena.toml`, as it does `[secrets]` and `[personal_data]`. If the tip's configuration does not parse,
+  the built-in list applies. Per-commit checks (pre-commit and similar) have no tip and keep judging a
+  commit by its parent's configuration. D60's validation is unchanged: full ids only, and a new entry must
+  name a commit already in history, so an entry still cannot cover a commit made after it.
+- **Alternatives:** (a) Keep the parent's list. (b) Read the list from the commit that adds the entry.
+- **Tradeoff:** (a) meant no entry ever took effect, since an entry is added after the commit it names, so
+  an adopter could not excuse history from before Athena. (b) needs a second lookup per commit for the
+  same result.
+- **Reversal cost:** Low.
+- **Provenance:** Acceptance review 3, probe 4: an entry added after the fact had no effect. Evidenced by
+  `an_exemption_added_later_excuses_the_commit_it_names` and
+  `an_exemption_does_not_cover_a_later_commit_or_one_not_in_history`.

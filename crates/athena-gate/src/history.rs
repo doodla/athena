@@ -4,8 +4,8 @@
 //! every commit, oldest first, by its parent's rules: the content checks, the governed-content invariant
 //! (including the audit of landing commits), the prediction trailers, and the records each commit adds to a
 //! job, judged against the rest of the job. The two allow-lists
-//! for sensitive content, `[secrets]` and `[personal_data]`, come from the tip, where allow-listing an old
-//! false positive is legitimate. Finally it validates and reconciles every record at the tip.
+//! for sensitive content, `[secrets]` and `[personal_data]`, and the `[history] exempt` list come from the
+//! tip, where allow-listing an old false positive or excusing old history is legitimate. Finally it validates and reconciles every record at the tip.
 
 use crate::invariant::HistoryState;
 use crate::records::RecordSet;
@@ -49,6 +49,7 @@ pub fn check_history(git: &Git, tip: &str) -> Result<HistoryReport> {
 
     let mut state = HistoryState {
         tip: tip.clone(),
+        exempt: tip_config.history.exempt.clone(),
         ..HistoryState::default()
     };
     for commit in git.rev_list_reverse(&tip)? {
@@ -142,6 +143,102 @@ mod exemption_tests {
             .collect::<Vec<_>>()
             .join("\n")
             + "\n"
+    }
+
+    const EXEMPTION_RECORD: &str = r#"{
+  "schema": "athena.intervention/1",
+  "id": "20261010-160000-abcd",
+  "at": "2026-10-10T16:00:00Z",
+  "what": "Exempted an old commit from the history check",
+  "why": "It predates Athena",
+  "class_of_work": "code",
+  "category": "did-work-themselves",
+  "job": null,
+  "source": "user",
+  "with_staged_changes": true
+}
+"#;
+
+    /// A history of a hand change, then a declared intervention exempting `exempt(hand)`.
+    /// Returns the repository, the hand change's id, and the exemption commit's id.
+    fn hand_change_then_exemption(
+        exempt: impl Fn(&str) -> String,
+    ) -> (tempfile::TempDir, Git, String, String) {
+        let builtin = crate::builtin_config();
+        let (dir, git) = repo(&[
+            (
+                "athena.toml",
+                &config_exempting(&[&builtin.history.exempt[0]]),
+            ),
+            ("README.md", "hello\n"),
+        ]);
+        write(dir.path(), &[("README.md", "edited by hand\n")]);
+        let hand = commit(&git, "hand edit\n");
+        let entry = exempt(&hand);
+        write(
+            dir.path(),
+            &[
+                (
+                    "athena.toml",
+                    &config_exempting(&[&builtin.history.exempt[0], &entry]),
+                ),
+                (
+                    "records/interventions/2026-10/20261010-160000-abcd.json",
+                    EXEMPTION_RECORD,
+                ),
+            ],
+        );
+        let exemption = commit(
+            &git,
+            "Exempt a commit\n\nAthena-Intervention: 20261010-160000-abcd\n",
+        );
+        (dir, git, hand, exemption)
+    }
+
+    fn flagged(report: &HistoryReport, id: &str, rule: Rule) -> bool {
+        report
+            .violations
+            .iter()
+            .any(|v| v.rule == rule && v.commit.as_deref() == Some(&id[..12]))
+    }
+
+    #[test]
+    fn an_exemption_added_later_excuses_the_commit_it_names() {
+        // The history check reads the exempt list from the tip, so an entry added after the commit
+        // takes effect, though the commit was judged by a parent configuration without it.
+        let (_dir, git, hand, _) = hand_change_then_exemption(|hand| hand.to_string());
+        let report = check_history(&git, "HEAD").unwrap();
+        assert!(
+            !flagged(&report, &hand, Rule::Invariant),
+            "{:?}",
+            report.violations
+        );
+        assert_eq!(report.violations, vec![]);
+    }
+
+    #[test]
+    fn an_exemption_does_not_cover_a_later_commit_or_one_not_in_history() {
+        // A commit made after the entry is not named by it, so it is still judged.
+        let (dir, git, hand, _) = hand_change_then_exemption(|hand| hand.to_string());
+        write(dir.path(), &[("README.md", "edited again\n")]);
+        let later = commit(&git, "later hand edit\n");
+        let report = check_history(&git, "HEAD").unwrap();
+        assert!(!flagged(&report, &hand, Rule::Invariant));
+        assert!(
+            flagged(&report, &later, Rule::Invariant),
+            "{:?}",
+            report.violations
+        );
+
+        // An entry naming a commit not in this history is refused where it is added.
+        let absent = "1234567890abcdef1234567890abcdef12345678";
+        let (_dir, git, _, exemption) = hand_change_then_exemption(|_| absent.to_string());
+        let report = check_history(&git, "HEAD").unwrap();
+        assert!(
+            flagged(&report, &exemption, Rule::Configuration),
+            "{:?}",
+            report.violations
+        );
     }
 
     #[test]

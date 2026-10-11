@@ -17,6 +17,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `Athena-Prediction` is no longer checked, and the `prediction` rule no longer reports. A second landing
   of a job is found from the parent's records and the history walk, not from trailers. See design §7.3.
 
+- `athena check --history` now reads `[history] exempt` from the tip's `athena.toml`, so an entry added
+  after the commit it names takes effect. Before, each commit was judged by its parent's list, which could
+  never hold such an entry. An entry still must be a full commit id already in history, so it cannot cover
+  a later commit. Per-commit checks are unchanged.
+
 ## [0.1.0]
 
 The first version: the v0 walking skeleton. It takes one request, runs one job through a sub-agent,
