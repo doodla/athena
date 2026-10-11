@@ -75,3 +75,15 @@ Athena's decision log, not here. Newest last.
   choice); then one small options table per decision (option, cost or risk in a few words, the
   recommendation bold and first); and a one-line session record. No explanatory paragraphs.
 - Why: Sri asked for better structure, then said the structured version had too much text.
+
+## OP-8. Work lands on `main` by squash, through auto-merge (2026-10-11)
+
+- Decision (Sri, from the decision sheet of 2026-10-11): PRs land by squash only. Sri set the
+  repository to squash-only with auto-merge allowed, and a ruleset on `main` (no deletion, no force
+  push, a PR with 0 approvals, required checks, linear history). The operator turns on auto-merge
+  for a PR once its work is verified; GitHub merges when the required checks pass. This replaces
+  OP-3's merge commits.
+- Also decided: the Claude Code plugin requirement (brief addendum of 2026-10-10) comes after the
+  first milestone; a stuck change gets one more attempt through Athena before any hand fix.
+- Why: Sri wants `main` to read as one intent per PR; zero approvals keeps the operator able to
+  land work, with CI and Athena's independent verifier as the gate.
