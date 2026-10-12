@@ -2,7 +2,7 @@
 //!
 //! This crate is the reusable validation core: the typed study records ([`records`], [`model`]) and the
 //! validation rules of design §5.4 ([`rules`]), plus the [`Capability`] impl with its prompts. It does not
-//! run any studied system, and it is not registered in the CLI wiring. Containment, the run step, replay,
+//! run any studied system. It is registered in the CLI wiring, so the reader can pick `study`. Containment, the run step, replay,
 //! and publishing are later jobs (see D65 in `docs/decisions.md`).
 
 pub mod model;
@@ -47,9 +47,9 @@ impl Capability for Study {
     fn card(&self) -> CapabilityCard {
         CapabilityCard {
             id: ID,
-            purpose: "study how an orchestration system works at one pinned commit, as claims that cite their sources and a work-handling model that code validates.",
-            when: "for a request to study, model, or explain a system's design or behavior from its repository.",
-            produces: "a validated study of typed records, or a rejection with the verifier's findings.",
+            purpose: "study how a system works at one pinned commit, as cited claims and a model that code validates.",
+            when: "for a request to study, model, or explain a system's design from its repository.",
+            produces: "a validated study of typed records, or a rejection with findings.",
         }
     }
 

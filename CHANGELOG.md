@@ -7,6 +7,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- The study capability is registered in the `athena` binary, so the reader can pick `study` and the core can
+  run it. It has no configured checks or commands yet; containment, the run step and publishing are not built.
+
 ### Fixed
 
 - The squash check forms its chain from landed jobs only (D74). A rejected job whose records shipped in the

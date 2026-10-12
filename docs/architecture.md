@@ -51,8 +51,8 @@ depends on another, and `athena-data` and `athena-git` are leaves.
 | `athena-agent` | The driver interface, the Claude Code driver, the fake driver, agent environments, stream-json usage capture, process groups, the kill switch, and the tool policy behind the hook | data |
 | `athena-core` | The job lifecycle, the `Capability` trait, admission, tool configuration from the base, checks, the final verdict, landing, records commits, scoring, status, nested runs | data, score, git, gate, context, agent |
 | `athena-cap-change` | v0's one capability: a focused, independently verified change | core, data, context |
-| `athena-cap-study` | The studying capability's reusable core: typed study records, the work-handling model, and the validation rules that gate a study. Not yet registered in the CLI | core, data, context |
-| `athena-cli` | The `athena` binary: commands, the interactive prompt, displays, the git and tool hook entry points | core, cap-change, data, gate, agent, git |
+| `athena-cap-study` | The studying capability's reusable core: typed study records, the work-handling model, and the validation rules that gate a study. Registered in the CLI | core, data, context |
+| `athena-cli` | The `athena` binary: commands, the interactive prompt, displays, the git and tool hook entry points | core, cap-change, cap-study, data, gate, agent, git |
 | `xtask` | Setup and CI tasks, and the repository-policy tests | data |
 
 ## Where things live
