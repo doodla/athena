@@ -1,0 +1,191 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261012-221537-kmv5",
+  "n": 2,
+  "at": "2026-10-12T22:16:53.415089235Z",
+  "invocation_seq": 2,
+  "base_commit": "64a4cf9122cb876306c265aca22eff98d9d68512",
+  "config_sha256": "758be2bc78e21d1fd19fa5feb9c064f40099b2623835bf9cb21440fc6d0aeacc",
+  "defaults_sha256": "34395568ed0684d5b19642d761d9d16e023f3263e4313e645b083d31b302e9bc",
+  "defaults_version": 1,
+  "title": "Pin the study instance's repo to a SHA and mount it read-only",
+  "summary": "When a study job starts, Athena's Rust core resolves the study instance's configured repo URL and ref (firstmate's main is only the first instance's config, per BRIEF S1) to a commit SHA, records it, and exports that tree read-only into the agents' working directory. A core test with a fake pinner shows the study dispatch calls it with the configured values.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "Pinning, config and tests are all Rust."
+    },
+    {
+      "id": "buy-first",
+      "how": "Use git via athena-git rather than a new crate, recorded in the decisions doc."
+    },
+    {
+      "id": "tested",
+      "how": "Fake-pinner dispatch test, change-negative test and export test; clippy and fmt clean."
+    },
+    {
+      "id": "mechanism",
+      "how": "Read-only is enforced by file mode bits and the grants, not prose."
+    },
+    {
+      "id": "evidence",
+      "how": "The pin is recorded as URL, ref and SHA in job records."
+    },
+    {
+      "id": "small",
+      "how": "One focused change: config, pinner, dispatch hook, record."
+    }
+  ],
+  "assumptions": [
+    "athena.toml has no study-instance setting yet, so the change adds an optional instance table (repo URL, ref) under the study capability config, with firstmate/main as its first value.",
+    "athena-core currently does not mention study in its sources, so the change adds a small pinning seam (trait plus real git implementation) called from the core's job start for the study capability only.",
+    "The real implementation uses git through the existing athena-git crate (resolve with ls-remote, export with a read-only checkout), not a new crate; tests use a fake pinner and a local temporary git repo, never the network.",
+    "The pin record is stored with the job's other records using the existing record types, extended with url, ref and sha.",
+    "The tree is placed at a fixed subdirectory of the agents' working directory, with write bits cleared on every file and directory."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "The study capability's config in athena.toml (and the Config type in athena-data/src/config.rs) carries the instance's repo URL and ref; no Rust source hard-codes the firstmate URL or main outside tests/fixtures.",
+      "kind": "content"
+    },
+    {
+      "text": "A pinning seam exists (trait with a real git-backed implementation) that resolves a URL and ref to a full 40-hex SHA and exports the tree at that SHA into a directory.",
+      "kind": "content"
+    },
+    {
+      "text": "The core's job start calls the pinner only when the capability is study, before the producer runs, and records URL, ref and SHA in the job's records (record type updated as needed).",
+      "kind": "content"
+    },
+    {
+      "text": "The pinned tree is placed inside the agents' working directory with all files read-only, and the study producer/verifier grants give no write access to it.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo test -p athena-core`: a test with a fake pinner asserts the study dispatch calls it once with the URL and ref from the study config (not hard-coded) and records the returned SHA.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`: a test shows the change capability never calls the pinner.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`: an export test on a local temporary git repo checks the tree matches the pinned commit and no file has write permission bits.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo fmt --check`, `cargo clippy` and `cargo test` over the workspace: all pass cleanly.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has an entry, and a design/decisions doc records the git-versus-crate choice (buy-first).",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "athena.toml",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-core/src/pin.rs",
+      "action": "create",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-core/src/capability.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-git/src/lib.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-cap-study/src/lib.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-cli/src/wiring.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "docs/design.md",
+      "action": "modify",
+      "p": 0.3
+    }
+  ],
+  "out_of_scope": [
+    "Pinning Hermes Agent or Athena itself beyond what the config makes possible",
+    "Running the actual study or any network call in tests",
+    "Changing change-capability behavior",
+    "Tag-based pinning of Athena's own release"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.65,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.22,
+      "cost_usd": {
+        "p10": 0.4,
+        "p50": 0.9,
+        "p90": 2.0
+      },
+      "wall_time_s": {
+        "p10": 350.0,
+        "p50": 700.0,
+        "p90": 1100.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.6857142857142857,
+      "p_verification_passes": 0.7,
+      "p_user_intervenes": 0.12666666666666665,
+      "cost_usd": {
+        "p10": 0.3701383740203115,
+        "p50": 0.7365398657906305,
+        "p90": 1.7440690045941418
+      },
+      "wall_time_s": {
+        "p10": 398.66096366246984,
+        "p50": 567.4218258194782,
+        "p90": 793.1899087838799
+      }
+    }
+  },
+  "departures": "Costs and times are higher than the reference: this touches config, records, core and a new module, and athena.toml is governance. Pass probability is lower because the core has no study dispatch yet, so the hook point is uncertain."
+}
