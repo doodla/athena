@@ -21,6 +21,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   (`docs/design/reviews/study-capability-m1-review-1.md`): approve with changes, 7 major findings, answered
   checks 1–8 of the design's §9. The design's status line links to it. No code changed.
 
+- The study capability M1 design is revised to answer all 17 findings of review 1, with a response appendix
+  and the review's eight decisions settled (D64). Evidence rules are non-waivable, citations and runs are
+  tied to the pin, containment and redaction join the run step, and the model gains guards decided by agents,
+  unhandled failures, and retry changes. A re-check is required before building. No code changed.
+
 ### Fixed
 
 - `athena ask "try again on <job>"` on a job that was itself a retry now shows the reader the original

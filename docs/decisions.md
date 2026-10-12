@@ -1353,3 +1353,31 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   producer brief and so could not address a matcher on the verifier side. Enforced by
   `cited_commands_match_whole_simple_commands_inside_what_ran` and
   `cited_commands_with_other_arguments_or_never_run_stay_unseen`.
+
+## D64 · The study capability M1 design: eight decisions after review 1
+
+- **Decision:** In [`docs/design/study-capability-m1.md`](design/study-capability-m1.md):
+  1. Evidence rules (and the quote, pin, and card-completeness rules) are non-waivable; model rules are
+     waivable only by a user-written reason that cites a user intervention, shown on the page.
+  2. Containment of the run step is part of the capability, and no run starts without a boundary; the
+     fallback is an explicit read-only downgrade.
+  3. A per-run cap is enforced before the run (Athena's kill switch plus a provider-side spend limit on
+     the credential); cost recorded afterwards is never the cap.
+  4. The four judgment rules become structural checks (`contradicts` link, `quote` field, provenance-only
+     `authors-say` field, typed `Quantity`); the rest are listed as verifier duties.
+  5. The model gains model-decided guards, unhandled failures, retry changes, and no-answer rules; parallel
+     regions and fan-out are named limits of M1.
+  6. Every `BRIEF.md:298` stream is listed per run as native, added, or absent; absences are findings.
+  7. The Pages design is a required part of M1 and is written and reviewed before the build job.
+  8. "Typed records now, export to a checker later" is recorded as alternative A2-D.
+- **Alternatives:** The other option in each of the review's eight questions: allow waivers of evidence
+  rules with a reason; defer containment and study only trusted systems; accept cost recorded after the
+  fact; relabel all judgment rules as verifier duties; extend the model for parallel regions and fan-out
+  now; require every stream; write the Pages design after the build; leave A2 as it was.
+- **Tradeoff:** Each choice is the more conservative option where `BRIEF.md` does not settle it, at the cost
+  of more build work before a first study (containment, redaction, a spend limit) and a narrower first
+  model. The design needs a re-check (review 2) before building.
+- **Reversal cost:** Low now, because only the design changes. See the design's §7 for costs after a build.
+- **Provenance:** Stated for decisions 2, 3, 6 and the evidence rules: `BRIEF.md:110-111`, `BRIEF.md:298-299`,
+  `BRIEF.md:320-321`. Inferred, as the designer's choice of the conservative option, for 4, 5, 7 and 8. The
+  user asked for all eight to be decided without being asked again.
