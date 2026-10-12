@@ -1545,3 +1545,25 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   read from `invariant.rs`, `crates/athena-data/src/records.rs`, and the design. The security argument and
   where the core writes the candidate are inferred; no command was run to reproduce a failure or to try the
   rule.
+
+## D70 · The squash of PR #9, f2a8453, is exempt from the history check
+
+- **Decision:** At the user's request, the squash commit f2a8453380196b95f2e2cc629ffa969af57e6c85 (PR #9) is
+  added to `[history] exempt` in `athena.toml`, as a full 40-character id, with a comment that gives the reason.
+  Most of PR #9's jobs predate `athena.candidate/2`, so the chain landing rule of D69 cannot link them: it
+  needs the `base_fingerprint` and `previous_job` fields that only `/2` records carry. Following D60, D67,
+  and D68, the commit's content skips the governed-content invariant and the job-records check. No code,
+  test, or workflow changes.
+- **Alternatives:**
+  - Teach the gate to link jobs recorded before `athena.candidate/2`: a new gate rule, not chosen.
+  - Restrict merge methods (D66 option c): enforced only by a host setting, and it would not excuse this
+    commit, which is already on main.
+  - Rewrite main (D66 option d): destructive; rejected there.
+- **Tradeoff:** The cheapest and fully reversible choice. Its cost is a hole in the invariant for this one
+  commit: "nothing reaches main unverified" is not checked for f2a8453. D60 limits the hole to that commit,
+  since a full id cannot cover a later one.
+- **Reversal:** Delete the `f2a8453380196b95f2e2cc629ffa969af57e6c85` entry and its comment from
+  `[history] exempt` in `athena.toml`. The history check then judges f2a8453 again. Reversal cost: low.
+- **Provenance:** User request. The full id is the one the user supplied; this change did not check that it
+  names a commit in history, which D60 requires. The reason is the user's statement, not reproduced here.
+  Enforced by the existing history check and the `[history] exempt` validation of D60 and D61.
