@@ -187,6 +187,7 @@ pub fn producer_brief(inputs: &ProducerInputs) -> String {
     let _ = writeln!(out, "# Job {}: {}\n", inputs.job, inputs.reading.title);
     let _ = writeln!(out, "## Request (verbatim)\n\n{}\n", quote(&inputs.request));
     reading_sections(&mut out, &inputs.reading);
+    let _ = writeln!(out, "{}", banned_words_section());
     let _ = writeln!(out, "## Checks Athena will run\n");
     for check in &inputs.checks {
         let _ = writeln!(out, "- {}: `{}`", check.name, check.command);
@@ -208,6 +209,69 @@ pub fn producer_brief(inputs: &ProducerInputs) -> String {
         "## Report\n\nEnd with the producer report as your structured output."
     );
     out
+}
+
+/// Words the boundary scan (M19) rejects, built from fragments so no tracked file contains them. This
+/// list is the one the producer brief shows; `xtask/tests/policy.rs` keeps its own scanner list and a test
+/// there fails when the two differ (D73). Matched as whole words, case-insensitively.
+pub fn boundary_words() -> Vec<String> {
+    let fragments: [[&str; 2]; 17] = [
+        ["oper", "ator"],
+        ["oper", "ators"],
+        ["op", "ctl"],
+        ["c", "cr"],
+        ["sand", "box"],
+        ["sand", "boxes"],
+        ["sand", "boxed"],
+        ["lea", "se"],
+        ["lea", "ses"],
+        ["hand", "off"],
+        ["hand", "offs"],
+        ["hand-", "off"],
+        ["hand-", "offs"],
+        ["cloud", " session"],
+        ["cloud", " sessions"],
+        ["remote", " session"],
+        ["remote", " sessions"],
+    ];
+    fragments.iter().map(|p| p.concat()).collect()
+}
+
+/// Fragments of machine-specific paths and identifiers the boundary scan rejects anywhere in a file,
+/// case-insensitively. Built from fragments for the same reason as [`boundary_words`].
+pub fn boundary_fragments() -> Vec<String> {
+    [
+        ["/home", "/user"],
+        ["claude", "-0/"],
+        ["/root", "/."],
+        [".c", "cr/"],
+        ["claude.ai", "/code"],
+        ["session", "_01"],
+    ]
+    .iter()
+    .map(|p| p.concat())
+    .collect()
+}
+
+/// The producer brief's banned-words section (D73): placed before the checks so the producer reads it
+/// before writing anything.
+fn banned_words_section() -> String {
+    let words: Vec<String> = boundary_words().iter().map(|w| format!("`{w}`")).collect();
+    let fragments: Vec<String> = boundary_fragments()
+        .iter()
+        .map(|w| format!("`{w}`"))
+        .collect();
+    format!(
+        "## Words you must not write\n\n\
+         Athena's boundary scan fails any tracked file that names who runs Athena or the machine it runs on. \
+         Do not write these words in any file you touch: code, comments, docs, tests, prompts, changelog or \
+         design text. The scan matches whole words, case-insensitively, so capital letters do not help; \
+         singular, plural and hyphenated forms are all listed. Reword instead.\n\n\
+         Words: {}\n\n\
+         Fragments (rejected anywhere in a line, even inside a longer word or path): {}\n",
+        words.join(", "),
+        fragments.join(", ")
+    )
 }
 
 /// Producer guidance on what the verifier can see (D43). Without it, a producer cites its own
@@ -604,6 +668,25 @@ mod tests {
         assert!(brief.contains("git status and git diff runs do not count"));
         assert!(brief.contains("do not exist in the real history"));
         assert!(brief.contains("never pin or cite a commit hash"));
+    }
+
+    #[test]
+    fn producer_briefs_list_the_boundary_words_before_the_checks() {
+        let brief = producer_brief(&ProducerInputs {
+            job: "20261010-153012-k7q2".into(),
+            request: "add a changelog".into(),
+            reading: AcceptedReading::new(&reading(), &defaults(), |_| false),
+            checks: vec![],
+            commands: vec![],
+        });
+        let words = boundary_words();
+        assert_eq!(words.len(), 17);
+        for term in words.iter().chain(boundary_fragments().iter()) {
+            assert!(brief.contains(term.as_str()), "the brief omits {term}");
+        }
+        assert!(brief.contains("whole words, case-insensitively"));
+        let banned = brief.find("## Words you must not write").unwrap();
+        assert!(banned < brief.find("## Checks Athena will run").unwrap());
     }
 
     #[test]

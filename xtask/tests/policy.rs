@@ -206,6 +206,22 @@ fn the_boundary_scanner_flags_a_planted_term() {
     );
 }
 
+#[test]
+fn the_producer_brief_lists_exactly_the_scanners_terms() {
+    // M19 (blocks): the producer brief's banned list cannot drift from the scanner's. The dependency is
+    // dev-only, so the documented graph (M21) is unchanged.
+    assert_eq!(
+        athena_context::briefs::boundary_words(),
+        boundary_words(),
+        "the brief's words differ from the scanner's"
+    );
+    assert_eq!(
+        athena_context::briefs::boundary_fragments(),
+        boundary_fragments(),
+        "the brief's fragments differ from the scanner's"
+    );
+}
+
 // --------------------------------------------------------------------------------------------------------
 // M20: the non-Rust inventory
 

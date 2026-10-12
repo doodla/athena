@@ -9,6 +9,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- The squash check forms its chain from landed jobs only (D74). A rejected job whose records shipped in the
+  squash was counted as a link, so its landed retry looked like a fork ("both follow") and later jobs like
+  invalid landings. A rejected job is now left out, and a chain head may name it as its previous job.
+  Landed jobs that fork are still refused.
 - The history check no longer refuses an intervention's re-score in a squash as not following from the job's
   records (D71). It recomputed the closing score from the whole squashed tree, so it counted interventions
   made after the closing score and resolved `user_intervenes` to true early; the recorded score differed in
@@ -16,6 +20,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   score's own time. A forged re-score is still refused.
 
 ### Added
+
+- The producer brief lists the words the boundary scan (M19) rejects, in a section before the checks (D73).
+  A test fails if that list differs from the scanner's.
+
+- A design for native pull-request landing, including a stealth mode that keeps Athena's records out of a
+  repository the user does not own (D72, `docs/design/native-pr-landing.md`). Design only; no code or rule
+  changes.
 
 - The gate lands a squash of a chain of verified jobs (D69, now accepted). A commit that adds the closing
   records of several jobs passes when their `athena.candidate/2` records form one chain: ordered by

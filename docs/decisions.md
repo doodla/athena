@@ -1587,3 +1587,60 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Provenance:** Cause found by reading `expected_score`, `score_records` and `rescore`; reproduced by the
   new tests in `landing_tests.rs`, which fail without the filter on `events[2].brier.reader` (the
   `user_intervenes` event). The two job ids named in the request were not examined.
+
+## D72 · Pull requests are landed natively; in a repository Athena does not own, its records stay outside it
+
+- **Decision:** Proposed, design only: `docs/design/native-pr-landing.md`. Athena would push a job's work
+  branch with a regular push on the user's explicit command, open the pull request through the user's
+  authenticated host client, and observe the merge; it would not merge on its own. Two modes: in a repository
+  the user owns, records travel in the pull request as now; in stealth mode the records stay in Athena's state
+  directory and the pull request holds only the change. The prose-only rule "Athena does not push" would be
+  replaced by "pushes only on command, only its own work branch, never non-fast-forward"; "published history
+  is never rewritten" stays. No rule changes until the build exists.
+- **Alternatives:** Keep landing local (fails the brief's native-PR addendum); call the host's web API with a
+  token Athena holds (new secret class); push records on a side ref (visible in the third-party repository);
+  keep records in a second repository (deferred).
+- **Tradeoff:** Stealth gives up the repository-side audit in CI, so the proof of verification is local only.
+- **Reversal:** Do not build it; nothing else depends on this document. Reversal cost: low.
+- **Provenance:** `BRIEF.md` addenda of 2026-10-12 (native PRs, brownfield, stealth); D10, D69,
+  `docs/enforcement.md` rows M6, M7, M23, M30. Read from those files; no command was run. This replaces an
+  earlier draft of the same design that failed only the boundary scan (M19) on its wording.
+
+## D73 · The producer brief lists the words the boundary scan rejects
+
+- **Decision:** Amends D62's brief. `producer_brief` gains a "Words you must not write" section before the
+  checks. It lists the scan's words and fragments, and says the scan is whole-word and case-insensitive and
+  covers singular, plural and hyphenated forms. `athena-context` owns the brief's list
+  (`briefs::boundary_words`, `briefs::boundary_fragments`), built from fragments so no tracked file contains
+  the terms. The scanner in `xtask/tests/policy.rs` keeps its own list; `athena-context` is a dev-dependency
+  of `xtask` only, so the documented graph (M21, which counts normal dependencies) is unchanged, and
+  `the_producer_brief_lists_exactly_the_scanners_terms` fails if the two lists differ. The scan is unchanged.
+- **Alternatives:** (a) Make the scanner read the brief's list: a larger change to a rule's mechanism.
+  (b) Write the list in `prompts/producer.md`: the scan would reject that file. (c) Leave producers to learn
+  from the failing check.
+- **Tradeoff:** Two copies of the list, tied by a test. The section costs about 150 tokens of producer
+  context, and it shows the producer the banned terms, which it must then avoid writing.
+- **Reversal cost:** Low.
+- **Provenance:** User report of repeated boundary-scan failures by producers, the latest in a design review.
+  Enforced by `producer_briefs_list_the_boundary_words_before_the_checks` and the test named above. The
+  token figure is an estimate.
+
+## D74 · Only landed jobs form a squash's chain
+
+- **Decision:** Amends D69. `closing_jobs` in the gate's landing check leaves out a job whose recorded
+  outcome in the commit's tree is not landed (rejected, blocked and never landed, failed, and so on). A
+  squash ships the records of a rejected try, but its work never reached the branch, so it is no link.
+  Counting it made the landed retry, whose `previous_job` names the rejected try, look like a fork ("both
+  follow"), and the retry's follow-up like an invalid landing. A chain head may now name a previous job
+  that is not in the chain if that job's recorded outcome is not landed; the head's `base_fingerprint`
+  must still equal the parent's content. A previous job that is absent, or has no outcome record, is still
+  "not linked". A job with no outcome record at all stays in the set and is refused by its landing check.
+  Landed jobs that really fork are still refused.
+- **Alternatives:** Require rejected jobs to chain (they do not: they never landed); ignore every
+  `previous_job` that is not in the commit (opens a hole for unlanded or invented work).
+- **Tradeoff:** A squash made only of a rejected job no longer reports a per-job reason; it is a commit
+  that lands no job, and fails as an ungoverned content change.
+- **Reversal:** Drop the `not_landed` filter and the extra head case. Reversal cost: low.
+- **Provenance:** Cause found by reading `closing_jobs` and `chain_problem`; reproduced by the new tests in
+  `landing_tests.rs` (a rejected job, its landed retry and a follow-up). Detail in
+  `docs/design/squash-chain-landing.md` §4.6.

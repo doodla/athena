@@ -765,6 +765,45 @@ fn a_forked_chain_is_refused() {
     );
 }
 
+/// Marks the outcome of the job at index 0 as rejected.
+fn reject_first(i: usize, records: &mut [AnyRecord]) {
+    if i == 0 {
+        for r in records.iter_mut() {
+            if let AnyRecord::Outcome(o) = r {
+                o.state = OutcomeState::Rejected;
+            }
+        }
+    }
+}
+
+#[test]
+fn a_rejected_job_its_landed_retry_and_a_follow_up_land_as_a_chain() {
+    // A (rejected), B retries A from the parent's content, C follows B.
+    let (dir, git, mut links) = chain_repo(&[STEP_1, STEP_2, STEP_3]);
+    links[1].base_fp = links[0].base_fp.clone();
+    land_chain(dir.path(), &git, &links, STEP_3, &|i, r| reject_first(i, r));
+    assert_eq!(judge(&git, "HEAD"), vec![]);
+    assert_eq!(landed_by(&git, "HEAD"), job_ids(&CHAIN_IDS[1..]));
+}
+
+#[test]
+fn a_rejected_job_does_not_hide_a_fork_of_landed_jobs() {
+    // Two landed retries of the same rejected job are still two followers of it.
+    let (dir, git, mut links) = chain_repo(&[STEP_1, STEP_2, STEP_3]);
+    links[1].base_fp = links[0].base_fp.clone();
+    links[2].prev = Some(CHAIN_IDS[0]);
+    links[2].base_fp = links[0].base_fp.clone();
+    land_chain(dir.path(), &git, &links, STEP_3, &|i, r| reject_first(i, r));
+    only_refusal(judge(&git, "HEAD"), "both follow");
+
+    // Landed jobs that really fork are still refused.
+    refused_chain(
+        |l| l[2].prev = Some(CHAIN_IDS[0]),
+        &untouched,
+        "both follow",
+    );
+}
+
 #[test]
 fn an_unlinked_or_missing_middle_job_is_refused() {
     // A leftover job whose predecessor is not in the commit.
@@ -1034,15 +1073,16 @@ fn every_per_job_check_refuses_a_chain_when_a_middle_job_fails_it() {
         },
         "per-model costs sum to",
     );
-    // An outcome that is neither a landed outcome.json nor an outcome-landed.json after blocked.
-    refused_middle(
-        |r| {
-            if let AnyRecord::Outcome(o) = r {
-                o.state = OutcomeState::Blocked;
-            }
-        },
-        "a landing commit adds",
-    );
+    // No outcome at all: the job claims a landing it has no landed outcome for. (A job whose recorded
+    // outcome is not landed is not part of the chain; see the rejected-job tests.)
+    let (dir, git, links) = chain_repo(&[STEP_1, STEP_2, STEP_3]);
+    let no_outcome = |i: usize, records: &mut Vec<AnyRecord>| {
+        if i == 1 {
+            records.retain(|r| !matches!(r, AnyRecord::Outcome(_)));
+        }
+    };
+    land_chain(dir.path(), &git, &links, STEP_3, &no_outcome);
+    only_refusal(judge(&git, "HEAD"), "a landing commit adds");
 }
 
 #[test]

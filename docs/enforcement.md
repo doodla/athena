@@ -30,7 +30,7 @@ records of more than one job; it refuses one that does not form a valid chain.
 | M16 | Behavior criteria are verified by exercise | the commands a criterion cites are checked against the commands the core saw the verifier run | `a_criterion_citing_a_command_that_never_ran_is_unmet`, `a_behavior_criterion_citing_a_command_that_never_ran_is_unmet`, `denied_commands_are_not_counted_as_run` | `a_behavior_criterion_citing_a_command_that_ran_passes` |
 | M17 | Numbers are measured or labeled | the `Quantity` type | `bare_number_is_refused`, `measured_without_value_is_refused`, `missing_basis_is_refused`, `bounds_must_be_ordered` | `measured_quantity_round_trips`, `estimate_may_be_bounds_only`, `pending_has_no_value` |
 | M18 | Always-loaded context stays within fixed budgets | a per-set budget test with the byte estimator as a tripwire; live measurement as the authority | `an_over_budget_contract_fails`, `an_over_budget_role_set_fails` | `the_contract_is_within_its_budget`, `every_role_set_is_within_its_budget`, `live_the_contract_is_within_its_budget` (live) |
-| M19 | Athena never refers to who runs it or where it runs | the boundary scan over Athena's tracked files | `the_boundary_scanner_flags_a_planted_term` | `athena_refers_to_no_one_who_runs_it_or_where` |
+| M19 | Athena never refers to who runs it or where it runs | the boundary scan over Athena's tracked files; the producer brief lists the banned words up front, and `the_producer_brief_lists_exactly_the_scanners_terms` fails if that list and the scanner's differ | `the_boundary_scanner_flags_a_planted_term` | `athena_refers_to_no_one_who_runs_it_or_where` |
 | M20 | Only listed kinds of non-Rust file exist | the inventory in `docs/non-rust-files.md` | `an_unlisted_file_kind_is_flagged` | `every_tracked_file_is_rust_or_a_listed_kind` |
 | M21 | Dependency direction is documented and acyclic | Cargo, plus the comparison of `cargo metadata` with `docs/architecture.md` | `an_undocumented_edge_is_flagged` | `dependency_direction_matches_the_architecture` |
 | M22 | Personal data never reaches committed content | redaction of agent free text before recording; the personal-data gate on added lines; admission | `tokens_and_private_addresses_are_redacted`, `machine_paths_become_placeholders`, `added_lines_with_private_email_addresses_are_refused` | `ordinary_text_is_unchanged`, `no_reply_addresses_pass`, `email_allow_list_matches_by_kind` |
@@ -54,7 +54,9 @@ Each of these is a judgment or a boundary that a mechanism would not yet pay for
 - *Interventions are never suppressed*. Corrections, answers, and hand changes to governed content are
   captured by mechanism. Interventions that change no content (detailed instructions, overridden
   decisions, state the user carried) depend on the user recording them with `athena intervene`.
-- *Pushes are regular, and published history is never rewritten*: Athena does not push in v0.
+- *Pushes are regular, and published history is never rewritten*: Athena does not push in v0. A proposed
+  design (D72, `design/native-pr-landing.md`) would let it push its own work branch on the user's command,
+  never non-fast-forward, with the mechanism rows added when the tests exist. This text holds until then.
 - *Executed code stays contained*: not enforced in v0. Checks, builds, and tests run with the user's
   privileges (design §7.5, §16.2).
 - *Records are Athena's own*: records are not signed, and Athena writes them with the user's own rights,

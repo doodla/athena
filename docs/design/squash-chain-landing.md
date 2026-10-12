@@ -270,6 +270,13 @@ precede the *previous* job's work: each job predicts its own work.
   members of `jobs`, not to a predecessor already landed. The two orders in the earlier text are one case,
   so there are tests for (a) one job left, judged by the single-job rule, and (b) two or more left with a
   landed predecessor.
+- *Rejected jobs in a squash (D74).* Only landed jobs form the chain. `closing_jobs` leaves out a job whose
+  recorded outcome in the commit's tree is not landed, so a rejected try whose records ship in the squash is
+  not a link, and its landed retry is not a second follower of it. The retry (and so the chain head) may
+  name that rejected job as `previous_job`: a previous job outside the chain is accepted as long as its
+  recorded outcome is not landed. Its `base_fingerprint` must still equal the parent's content, and a
+  previous job that is absent or has no outcome record is still "not linked". Landed jobs that fork are
+  still refused.
 
 ## 5. Follow-up work (not done here)
 
