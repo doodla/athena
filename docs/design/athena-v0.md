@@ -948,6 +948,10 @@ invariant treats them alike, because it reads the records a commit adds and not 
 - A *rebase merge* replays the PR's commits with new ids. The closing commit is checked as a landing against
   its new parent; the commit that added the reading is no longer an ancestor by id, and need not be.
 
+*Proposed, not in force:* a squash of a chain of several verified jobs is refused today (more than one
+closing job, and a whole-tree fingerprint mismatch). [`squash-chain-landing.md`](squash-chain-landing.md)
+and D69 propose a chain-aware rule; this section describes the gate as built until that is accepted and built.
+
 The clause that matters is the one about trailers. **Trailers are hints, not evidence.** A squash drops or
 rewrites them, and anyone can type them. The job is identified from the records the commit adds. A trailer
 that contradicts the records refuses the landing (`Athena-Verified-Content` that is not the fingerprint, or

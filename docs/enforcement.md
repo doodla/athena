@@ -6,6 +6,10 @@ reason (design §8). Each row names the tests that show what the mechanism block
 map cannot drift from the code. Live tests call real models and are opt-in (`#[ignore]`); everything else
 runs in `cargo test`.
 
+Not enforced yet: landing a squash of a chain of several verified jobs. The gate refuses it today; a
+proposed chain-aware rule that would accept it is in `design/squash-chain-landing.md` (D69). Rows M23 and
+the landing rule below describe the gate as built.
+
 | # | Rule | Mechanism | Blocks (tests) | Allows (tests) |
 |---|---|---|---|---|
 | M1 | No secret enters any commit | the `pre-commit` hook runs the gate: gitleaks with Athena's generated configuration, an empty ignore path, inline markers ignored, scanned through the git directory | `a_generated_token_in_a_commit_is_found`, `content_cannot_relax_the_scan`, `staged_tokens_are_found`, `the_pre_commit_hook_refuses_a_generated_token`, `a_missing_gitleaks_fails_closed` | `a_clean_commit_passes`, `a_committed_allow_list_entry_governs_later_commits` |

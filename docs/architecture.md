@@ -2,7 +2,9 @@
 
 This page is the map of the code. The design and its reasons are in
 [`design/athena-v0.md`](design/athena-v0.md), and every significant choice is in
-[`decisions.md`](decisions.md).
+[`decisions.md`](decisions.md). A proposed change to the landing gate, for squash merges of a chain of jobs,
+is in [`design/squash-chain-landing.md`](design/squash-chain-landing.md); the map below describes the code
+as built.
 
 ## The shape
 

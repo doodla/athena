@@ -9,6 +9,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Design `docs/design/squash-chain-landing.md` and decision D69 propose how a squash merge of a chain of
+  verified jobs can land without an exemption: a chain-aware landing rule linked by a new
+  `base_fingerprint`. It is a proposal only; no code, configuration, or records changed.
+
 - A commit on `[history] exempt` now also excuses the job records it adds (D68, after D66 and D67): the
   history check no longer reports a landed outcome or a score in that commit. Later commits are still judged.
 
