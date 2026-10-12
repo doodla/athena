@@ -7,6 +7,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+- The history check no longer refuses an intervention's re-score in a squash as not following from the job's
+  records (D71). It recomputed the closing score from the whole squashed tree, so it counted interventions
+  made after the closing score and resolved `user_intervenes` to true early; the recorded score differed in
+  that event's `outcome`, `provisional` and `brier`. It now counts only interventions made at or before the
+  score's own time. A forged re-score is still refused.
+
 ### Added
 
 - The gate lands a squash of a chain of verified jobs (D69, now accepted). A commit that adds the closing

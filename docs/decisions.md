@@ -1567,3 +1567,23 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Provenance:** User request. The full id is the one the user supplied; this change did not check that it
   names a commit in history, which D60 requires. The reason is the user's statement, not reproduced here.
   Enforced by the existing history check and the `[history] exempt` validation of D60 and D61.
+
+## D71 · A score is recomputed from the interventions that existed when it was made
+
+- **Decision:** `jobs::expected_score` counts only interventions whose `at` is not after the score's own
+  `at`. In a squash, the job's score, its later interventions and their re-scores arrive in one tree. The
+  closing score was made before those interventions, with `user_intervenes` unresolved (outcome false,
+  provisional). Recomputing it from the whole tree counted them and resolved the event early, so a re-score
+  that `athena intervene --job` wrote legitimately differed in that event's `outcome`, `provisional` and
+  `brier` and was refused as not following from the records. A re-score is still the recomputed closing
+  score passed through `athena_score::rescore`, so a forged one (for example with zeroed Brier values) is
+  still refused.
+- **Alternatives:** Exempt such commits from the history check (D66/D67): hides every other check too.
+  Change how `athena intervene` writes scores: not needed, the written scores are correct.
+- **Tradeoff:** A forged intervention record dated later than its score would be ignored for that score;
+  the re-score's cause must still be an intervention the commit adds for the job, so this gives no way to
+  pass a score that differs from the rules.
+- **Reversal:** Remove the `at` filter in `expected_score`. Reversal cost: low.
+- **Provenance:** Cause found by reading `expected_score`, `score_records` and `rescore`; reproduced by the
+  new tests in `landing_tests.rs`, which fail without the filter on `events[2].brier.reader` (the
+  `user_intervenes` event). The two job ids named in the request were not examined.

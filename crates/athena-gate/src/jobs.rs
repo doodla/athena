@@ -112,8 +112,15 @@ pub fn expected_score(
     at: jiff::Timestamp,
 ) -> Result<Score> {
     let files = JobFiles::load(git, treeish, job)?;
+    // Only the interventions that existed when the score was made count. A squash folds a job's closing
+    // score and its later interventions into one tree. The closing score was made before those
+    // interventions, with `user_intervenes` still unresolved (false and provisional); recomputing it from
+    // the whole tree would count them and resolve that event to true, so the recorded closing score, and
+    // each re-score derived from it, would differ in `events[user_intervenes].outcome`, `.provisional` and
+    // `.brier`. A re-score is the closing score as of its own `at` with that event resolved true by
+    // `rescore`, so a forged re-score (for example zeroed Brier values) still differs.
     let interventions = interventions_for(git, treeish, job)?;
-    let interventions: Vec<&Intervention> = interventions.iter().collect();
+    let interventions: Vec<&Intervention> = interventions.iter().filter(|i| i.at <= at).collect();
     let invocations = files.invocation_records();
     let closing = athena_score::score_records(
         &JobFacts {

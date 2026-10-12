@@ -1,0 +1,84 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261012-195832-rrf8",
+  "base_commit": "76313eb69fe6f1ca684484daab4f759d406b5cb6",
+  "base_fingerprint": "sha256:66369d67cd00d5183bab7fa89ec2d66279a0ade13e59e61c99e3e985aef8e3af",
+  "previous_job": "20261012-194212-fmwd",
+  "candidate_commit": "9836a2298ed16d7c3c2c565f87c927b8d1c92fb9",
+  "candidate_tree": "781755bbfcb8a60a62e3a79672475af88def89aa",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 12286
+    },
+    {
+      "path": "crates/athena-gate/src/jobs.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 16884
+    },
+    {
+      "path": "crates/athena-gate/src/landing_tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 36798
+    },
+    {
+      "path": "docs/decisions.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 101606
+    }
+  ],
+  "fingerprint": "sha256:da0f9310a253297e1ccd4ce99be98a5c942c28f4254ca3fdb0cb034bc73e2077",
+  "violations": [],
+  "producer_report": {
+    "summary": "I fixed the false 'does not follow from the job's records' for an intervention re-score in a squash. `expected_score` in `crates/athena-gate/src/jobs.rs` now counts only interventions made at or before the score's own time. The full `cargo test --locked` and `cargo clippy --all-targets --locked -- -D warnings` runs pass. I ran `cargo fmt --all` but not `cargo fmt --check` afterwards.\\n\\nCause: a squash puts the closing score, the later intervention and its re-score in one tree. The old code recomputed the closing score from that whole tree, so it counted the intervention. That resolved the `user_intervenes` event to true early. The recorded score, made before the intervention, differs in that event's `outcome`, `provisional` and `brier`. A forged re-score still differs from `rescore()` of the correct closing score, so it is still refused.\\n\\nTests, in `landing_tests.rs`:\\n- A squash holding a landed job, an intervention and its re-score now passes. With the filter disabled it failed with 'events[2].brier.reader is 0.0225, but the records give 0.7224999999999999'.\\n- A squash with a forged re-score (all Brier values zeroed) is still refused with 'does not follow'.\\n\\nI also added decision D71 to `docs/decisions.md` and a Fixed entry to `CHANGELOG.md`.\\n\\nI did not run the real PR #9 squash, so I did not confirm the cause for jobs f1x7 and knqc. I reproduced it with the new test only.\\n\\nI left `crates/athena-score/src/lib.rs` and `crates/athena-cli/tests/lifecycle.rs` alone. The existing `hand_written_scores_and_outcomes_are_refused` test passes as is.\"",
+    "files": [
+      "crates/athena-gate/src/jobs.rs",
+      "crates/athena-gate/src/landing_tests.rs",
+      "docs/decisions.md",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "all suites pass, including lifecycle hand_written_scores_and_outcomes_are_refused"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo fmt --all",
+        "result": "pass",
+        "note": "ran to format; not run as --check afterwards"
+      },
+      {
+        "command": "cargo test -p athena-gate --locked squash_with",
+        "result": "pass",
+        "note": "new tests pass with the fix; with the filter disabled the positive test failed on events[2].brier.reader"
+      }
+    ],
+    "open_issues": [
+      "I did not run the real PR #9 squash, so I did not confirm it for jobs f1x7 and knqc. The reproduction is the new test.",
+      "The time filter trusts the intervention's own `at`. A forged late `at` on an intervention is ignored for that score, but the re-score must still equal rescore() of the closing score.",
+      "Not changed, though listed as deliverables: crates/athena-score/src/lib.rs and crates/athena-cli/tests/lifecycle.rs. The existing hand_written test passes as is."
+    ],
+    "mistakes": [
+      "My first forged-rescore test used judge(), which never runs the score check, so it failed to detect forgery; I switched to also calling job_records_of."
+    ],
+    "learnings": [
+      "A job has one score.json path; a re-score overwrites the closing score, so a squash holds only the latest score per job.",
+      "expected_score recomputed the closing score from the whole tree, so it counted interventions made after the closing score.",
+      "landing_tests.rs judge() runs invariant::check, not jobs::check; jobs::check needs job_records_of."
+    ],
+    "desires": [
+      "The actual PR #9 squash, to confirm the two named jobs fail for this reason."
+    ]
+  }
+}
