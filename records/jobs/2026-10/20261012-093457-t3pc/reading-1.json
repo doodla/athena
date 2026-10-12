@@ -1,0 +1,168 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261012-093457-t3pc",
+  "n": 1,
+  "at": "2026-10-12T09:35:39.352605044Z",
+  "invocation_seq": 1,
+  "base_commit": "51d795c0795cec26337b8a40b9ec51597080d728",
+  "config_sha256": "a6116c38d15e6d5ad59834942e5123ea0be41f8ce5bd5f141a08f4790fdf09de",
+  "defaults_sha256": "34395568ed0684d5b19642d761d9d16e023f3263e4313e645b083d31b302e9bc",
+  "defaults_version": 1,
+  "title": "Let failed jobs be retried and carry their failure reason",
+  "summary": "`athena go` on a job closed as `failed` (such as 20261012-090901-9vwq, refused at admission) now bails with only 'already closed (failed)'. I read the request as making that state retryable and carrying the recorded failure reason into the error text and the status output. Other closed states stay terminal.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "The change is Rust code and Rust tests only."
+    },
+    {
+      "id": "tested",
+      "how": "A lifecycle test covers the retry and the carried reason; cargo test and clippy must pass."
+    },
+    {
+      "id": "small",
+      "how": "One focused change to `go` and the state/reason display."
+    },
+    {
+      "id": "lazy-requests",
+      "how": "Details were recovered from run.rs, store.rs and records.rs instead of asking."
+    },
+    {
+      "id": "verified",
+      "how": "Behavior is checked by running cargo test."
+    },
+    {
+      "id": "strangers",
+      "how": "Error messages, docs and CHANGELOG are written for an outside reader."
+    }
+  ],
+  "assumptions": [
+    "'Can't be tried again' means `athena go <job>` on a job closed as `failed` (here, by admission) bails with 'already closed (failed)'. It should become retryable.",
+    "'Its reason isn't carried' means the admission-refusal text is lost: the closed-job error and the status views don't show the outcome's reason, even though Outcome.reason holds it.",
+    "The fix covers any `failed` outcome, with admission failure as the main case. Rejected, landed, stale and the other closed states stay terminal, and only their messages gain the reason.",
+    "Retry re-dispatches under the same accepted reading, so no new reading is needed. The retry appends records and never rewrites existing ones.",
+    "The study capability itself (job 9vwq's request) is not rebuilt here."
+  ],
+  "question": "Should `athena go` retry a failed job directly, or should the fix only show the reason and point to `athena restart` or a new job? I assumed direct retry.",
+  "acceptance_criteria": [
+    {
+      "text": "In crates/athena-core/src/run.rs, `go` on a job whose outcome is `failed` no longer bails with only 'already closed (failed)'. It retries the job, or the error names the recorded outcome reason and the next command to run.",
+      "kind": "content"
+    },
+    {
+      "text": "Every 'already closed' message from `go` (failed, rejected, stale and the other closed states) includes the outcome's recorded reason.",
+      "kind": "content"
+    },
+    {
+      "text": "The reason for an admission refusal ('admission refused the change: ...') is stored in the job's outcome record and shown by the CLI status and show output, not only printed once during the run.",
+      "kind": "content"
+    },
+    {
+      "text": "A retry of a failed job keeps the earlier outcome, invocations and cost in the records and appends new ones. It creates no duplicate or misplaced record paths, and `athena check` still passes on the resulting history.",
+      "kind": "content"
+    },
+    {
+      "text": "A new test in crates/athena-cli/tests/lifecycle.rs makes a job fail at admission, then shows that `go` retries it (or reports the reason), and that the failure reason is visible. `cargo test` passes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`cargo fmt --check` and `cargo clippy` run clean, and the existing tests in crates/athena-cli/tests/lifecycle.rs still pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md and any docs that describe job states or `go` are updated to say that failed jobs can be retried and that the reason is carried.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-core/src/store.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-core/src/scoring.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "README.md",
+      "action": "modify",
+      "p": 0.3
+    }
+  ],
+  "out_of_scope": [
+    "Building the study capability that job 9vwq requested.",
+    "Changing admission rules themselves (why 9vwq was refused).",
+    "Making rejected, stale or landed jobs retryable.",
+    "Changes to athena.toml, defaults.toml, CI workflows or other governance files."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.55,
+      "p_verification_passes": 0.5,
+      "p_user_intervenes": 0.3,
+      "cost_usd": {
+        "p10": 0.4,
+        "p50": 0.9,
+        "p90": 2.2
+      },
+      "wall_time_s": {
+        "p10": 300.0,
+        "p50": 560.0,
+        "p90": 900.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.6846153846153846,
+      "p_verification_passes": 0.631578947368421,
+      "p_user_intervenes": 0.19999999999999998,
+      "cost_usd": {
+        "p10": 0.295247353959167,
+        "p50": 0.5906165,
+        "p90": 1.6469881970815274
+      },
+      "wall_time_s": {
+        "p10": 272.56795456520825,
+        "p50": 542.863351208,
+        "p90": 749.5981379188553
+      }
+    }
+  },
+  "departures": "Costs are above the reference. The retry semantics (a new dispatch for an already closed job, with record paths and scoring) touch the core run loop and the lifecycle tests, and the request is ambiguous."
+}
