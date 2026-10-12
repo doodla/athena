@@ -114,3 +114,13 @@ Athena's decision log, not here. Newest last.
   if it is slower, and record the choice here or in Athena's records.
 - Applied at once: the request to turn on rebase merging for PR #9 was withdrawn. PR #9 instead waits for
   Athena's squash-chain landing (D69) to be built, so its squash lands cleanly with no settings change.
+
+## OP-11. PR #9 lands by squash and its squash is excused like ee4b0dd (2026-10-12)
+
+- Decision: squash-merge PR #9, then add its squash commit to `[history] exempt` through one single-job
+  Athena PR, the remedy Sri chose for ee4b0dd (1A on https://claude.ai/artifact/CCDeJxGckn7svF5QNioWJs).
+- Why: a simulated squash of the branch still fails the history check (19 violations) after D69 was built.
+  The chain rule links only jobs recorded as `athena.candidate/2`, and most of PR #9's jobs predate it.
+  Scores re-derived after an intervention also do not reconcile inside a squash (to fix through Athena).
+  Rebase merging would need Sri to change a setting, which OP-10 rules out while another path exists.
+- Cost: main is red from the squash until the exemption lands, about one CI round.
