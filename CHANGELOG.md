@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `athena ask "try again on <job>"` now also retries a job that failed (for example one refused at admission,
+  which has no verification). Its recorded outcome reason is carried into the reader's "Earlier attempt"
+  section as a finding (redacted), and the section says whether the job failed or was rejected. Other
+  states (landed, stale, in flight) are still refused, now with a message saying only rejected or failed
+  jobs can be tried again.
+
 - `athena ask "try again on <job>"` retries a rejected job. The reader's brief gains an "Earlier attempt"
   section with that job's request and its final verification's findings (redacted); the new job's own
   request stays as typed. A job that is not rejected, or is unknown, is refused with an error naming it.

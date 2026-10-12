@@ -471,6 +471,45 @@ fn a_request_naming_a_job_carries_its_request_and_findings_to_the_reader() {
 }
 
 #[test]
+fn try_again_on_a_job_that_failed_at_admission_carries_the_refusal_reason() {
+    let fx = Fixture::new();
+    let mut scenario = Scenario::default();
+    scenario
+        .edits
+        .push(("rustfmt.toml".into(), Some("style = \"relaxed\"\n".into())));
+    let (script, readers) = recording_readers(scenario);
+    let athena = fx.athena(script);
+    let first = athena
+        .ask("add a greeting ORIGINAL-CANARY", &Lines::default())
+        .unwrap();
+    let failed = finished(
+        athena
+            .go(first.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(failed.state, OutcomeState::Failed);
+    assert!(failed.verification.is_none(), "admission refused it early");
+
+    athena
+        .ask(
+            &format!("try again on {}", first.job.as_str()),
+            &Lines::default(),
+        )
+        .unwrap();
+    let briefs = readers.lock().unwrap();
+    let brief = briefs.last().unwrap();
+    assert!(brief.contains("# Earlier attempt"), "{brief}");
+    assert!(brief.contains("which failed"), "{brief}");
+    assert!(
+        brief.contains("> add a greeting ORIGINAL-CANARY"),
+        "{brief}"
+    );
+    assert!(brief.contains("admission refused the change"), "{brief}");
+    assert!(brief.contains("governance"), "{brief}");
+    assert!(athena.check_history().unwrap().violations.is_empty());
+}
+
+#[test]
 fn try_again_on_a_landed_or_unknown_job_is_refused() {
     let fx = Fixture::new();
     let athena = fx.athena(Scenario::default().script());

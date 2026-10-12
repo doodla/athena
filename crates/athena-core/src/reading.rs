@@ -735,7 +735,8 @@ impl Athena {
 const RETRY_PREFIX: &str = "try again on ";
 
 /// Detects "try again on <job>" at the start of `request` and builds the earlier attempt from the
-/// rejected job's request and final verification. Returns `None` when the request is not that form.
+/// rejected or failed job's request, final verification and (for a failed or unverified job) outcome
+/// reason. Returns `None` when the request is not that form.
 /// The carried text goes through `redactor`.
 pub fn earlier_attempt(
     records: &Records,
@@ -748,18 +749,21 @@ pub fn earlier_attempt(
     let id = records.resolve(reference)?;
     let job = records.jobs.get(id.as_str()).expect("resolved");
     let state = job.state();
-    if state != JobState::Closed(OutcomeState::Rejected) {
+    if !matches!(
+        state,
+        JobState::Closed(OutcomeState::Rejected | OutcomeState::Failed)
+    ) {
         bail!(
-            "job {id} is {}; only a rejected job can be tried again",
+            "job {id} is {}; only a rejected or failed job can be tried again",
             state.name()
         );
     }
     if job.request.is_none() {
         bail!("job {id} is {} but has no request record", state.name());
     }
-    if job.verification.is_none() {
+    if job.verification.is_none() && job.outcome.is_none() {
         bail!(
-            "job {id} is {} but has no verification record",
+            "job {id} is {} but has no verification or outcome record",
             state.name()
         );
     }
@@ -869,11 +873,24 @@ fn carry(job: &JobRecords, redactor: &Redactor) -> Result<Option<EarlierAttempt>
             )
         }));
     }
+    // A job closed before verification has only its outcome reason to say why; a failed job's reason
+    // (for example an admission refusal) is carried even when it was verified.
+    let failed = job
+        .outcome
+        .as_ref()
+        .is_some_and(|o| o.state == OutcomeState::Failed);
+    if let Some(outcome) = &job.outcome
+        && (failed || job.verification.is_none())
+        && !outcome.reason.trim().is_empty()
+    {
+        texts.push(format!("outcome: {}", outcome.reason));
+    }
     redactor.redact_all(&mut texts)?;
     let request = texts.remove(0);
     Ok(Some(EarlierAttempt {
         job: job.id().as_str().to_string(),
         request,
+        failed,
         findings: texts,
     }))
 }
@@ -1024,6 +1041,102 @@ mod tests {
                 .iter()
                 .any(|f| f.contains("PASSING-OUTPUT"))
         );
+    }
+
+    fn outcome(
+        job: &JobRecords,
+        state: OutcomeState,
+        reason: &str,
+    ) -> athena_data::records::Outcome {
+        athena_data::records::Outcome {
+            job: job.id().clone(),
+            state,
+            reason: reason.into(),
+            at: jiff::Timestamp::UNIX_EPOCH,
+            totals: None,
+            branch: None,
+            base_commit: None,
+            candidate_commit: None,
+            after_blocked: false,
+            through_commit: None,
+        }
+    }
+
+    fn records_with(job: JobRecords) -> Records {
+        let mut records = Records::default();
+        records.jobs.insert(job.id().as_str().to_string(), job);
+        records
+    }
+
+    #[test]
+    fn a_failed_job_without_verification_can_be_tried_again_and_carries_its_reason() {
+        let redactor = Redactor::new(&athena_gate::builtin_config()).unwrap();
+        let mut job = job_with_checks(vec![]);
+        job.verification = None;
+        job.outcome = Some(outcome(
+            &job,
+            OutcomeState::Failed,
+            "admission refused the change: governance file changed",
+        ));
+        let id = job.id().as_str().to_string();
+        let records = records_with(job);
+        let attempt = earlier_attempt(&records, &format!("try again on {id}"), &redactor)
+            .unwrap()
+            .unwrap();
+        assert!(attempt.failed);
+        assert_eq!(attempt.request, "add a greeting");
+        assert_eq!(
+            attempt.findings,
+            ["outcome: admission refused the change: governance file changed"]
+        );
+    }
+
+    #[test]
+    fn a_carried_outcome_reason_is_redacted() {
+        let redactor = Redactor::new(&athena_gate::builtin_config()).unwrap();
+        let token = format!(
+            "{}{}",
+            ["gh", "p_"].concat(),
+            "Zq8rT2vK9mW4xN7bP3cH6jL1sD5fG0aYuE2i"
+        );
+        let mut job = job_with_checks(vec![]);
+        job.verification = None;
+        job.outcome = Some(outcome(&job, OutcomeState::Failed, &format!("key {token}")));
+        let carried = carry(&job, &redactor).unwrap().unwrap();
+        assert_eq!(carried.findings.len(), 1);
+        assert!(!carried.findings[0].contains(&token));
+        assert!(carried.findings[0].contains("[secret:github-pat]"));
+    }
+
+    #[test]
+    fn only_rejected_or_failed_jobs_can_be_tried_again() {
+        let redactor = Redactor::new(&athena_gate::builtin_config()).unwrap();
+        for state in [
+            OutcomeState::Landed,
+            OutcomeState::Stale,
+            OutcomeState::Abandoned,
+        ] {
+            let mut job = job_with_checks(vec![]);
+            job.outcome = Some(outcome(&job, state, "done"));
+            let id = job.id().as_str().to_string();
+            let error =
+                earlier_attempt(&records_with(job), &format!("try again on {id}"), &redactor)
+                    .unwrap_err()
+                    .to_string();
+            assert!(error.contains(state.as_str()), "{error}");
+            assert!(error.contains("only a rejected or failed job"), "{error}");
+        }
+        let open = job_with_checks(vec![]);
+        let id = open.id().as_str().to_string();
+        let error = earlier_attempt(
+            &records_with(open),
+            &format!("try again on {id}"),
+            &redactor,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("queued"), "{error}");
+        assert!(error.contains("only a rejected or failed job"), "{error}");
     }
 
     #[test]

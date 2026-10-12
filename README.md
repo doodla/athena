@@ -41,10 +41,11 @@ Enter, or athena go <job>
   landing                              → the change plus every record, one commit, fast-forwarded
 ```
 
-To retry a rejected job, ask `athena ask "try again on <job>"` (the full id or a unique suffix; the form is
+To retry a rejected or failed job, ask `athena ask "try again on <job>"` (the full id or a unique suffix; the form is
 matched case-insensitively at the start of the request). The reader then sees that job's request and its final
-verification's findings, redacted, in an "Earlier attempt" section. Jobs that are landed, in flight, or unknown
-are refused.
+verification's findings, redacted, in an "Earlier attempt" section. A failed job (for example one refused at
+admission, which has no verification) also has its recorded reason carried there. Jobs that are landed, stale,
+in flight, or unknown are refused.
 
 Any request that names a job by its full id (like `20261012-075824-1x28`) anywhere in its text also shows the
 reader that job's request and its final verification's findings, redacted, in a "Referenced jobs" section, whatever
