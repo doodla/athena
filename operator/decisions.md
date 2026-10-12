@@ -105,3 +105,12 @@ Athena's decision log, not here. Newest last.
   squash-merged PR #8 with six jobs (`ee4b0dd`) and `main` went red at 08:28. Answers from a decision
   sheet are recorded here as soon as they are read. The repair is on the sheet at
   https://claude.ai/artifact/CCDeJxGckn7svF5QNioWJs.
+
+## OP-10. The bar to reach Sri is high (2026-10-12)
+
+- Decision (Sri, in chat, 2026-10-12 ~18:25): "I want the bar to reach me higher." The operator contacts
+  Sri only for what nobody else can do: a setting only the repository owner can change, a change to the
+  requirements, or a call only the owner can make. When any working path exists without Sri, take it, even
+  if it is slower, and record the choice here or in Athena's records.
+- Applied at once: the request to turn on rebase merging for PR #9 was withdrawn. PR #9 instead waits for
+  Athena's squash-chain landing (D69) to be built, so its squash lands cleanly with no settings change.
