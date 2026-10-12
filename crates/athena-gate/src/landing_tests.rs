@@ -5,11 +5,12 @@ use crate::testutil::*;
 use crate::{Change, Judged, Rule, Violation, history, invariant, short};
 use athena_data::records::{
     AnyRecord, Build, Candidate, Criterion, CriterionKind, DefaultApplied, Deliverable,
-    DeliverableAction, DriverInfo, Forecast, Forecasts, Invocation, InvocationCaps,
-    InvocationContext, InvocationOutcome, ModelUsage, Outcome, OutcomeState, Quantiles, Reading,
-    Role, Tokens, Totals, Verdict, Verification,
+    DeliverableAction, DriverInfo, Forecast, Forecasts, Intervention, InterventionCategory,
+    InterventionSource, Invocation, InvocationCaps, InvocationContext, InvocationOutcome,
+    ModelUsage, Outcome, OutcomeState, Quantiles, Reading, Role, Tokens, Totals, Verdict,
+    Verification,
 };
-use athena_data::{JobId, Quantity, Unit};
+use athena_data::{JobId, Quantity, RecordId, Unit};
 use athena_git::Git;
 use athena_git::attrs::fingerprint;
 use std::collections::BTreeMap;
@@ -314,6 +315,72 @@ fn a_squash_merge_with_no_trailers_lands() {
     commit(&git, "Change a (#1)\n");
     assert_eq!(judge(&git, "HEAD"), vec![]);
     assert_eq!(history_of(&git), vec![]);
+}
+
+/// A squash that carries a landed job, an intervention on it, and the re-score `athena intervene --job`
+/// wrote. The closing score was made before the intervention, so it must not be recomputed with it.
+fn squash_with_intervention(forge: bool) -> Vec<Violation> {
+    let (dir, git) = owner_repo();
+    let base = git.head().unwrap().unwrap();
+    stage_landing(dir.path(), &git, &base, &HONEST);
+    git.run(["add", "-A"]).unwrap();
+    let landed_tree = git.write_index_tree().unwrap();
+    let closing = crate::jobs::expected_score(
+        &git,
+        &landed_tree,
+        &job_id(),
+        None,
+        ts("2026-10-10T15:08:30Z"),
+    )
+    .unwrap();
+    let cause = RecordId::parse("20261011-090000-abcd").unwrap();
+    let intervention = Intervention {
+        id: cause.clone(),
+        at: ts("2026-10-11T09:00:00Z"),
+        what: "Fixed the landed code by hand".into(),
+        why: "It was wrong".into(),
+        class_of_work: "code".into(),
+        category: InterventionCategory::CorrectedOutput,
+        job: Some(job_id()),
+        source: InterventionSource::User,
+        with_staged_changes: false,
+    };
+    let mut rescore = athena_score::rescore(&closing, cause, ts("2026-10-11T09:00:01Z"));
+    if forge {
+        for event in &mut rescore.events {
+            for b in event.brier.values_mut() {
+                *b = 0.0;
+            }
+        }
+    }
+    write_records(
+        dir.path(),
+        &[
+            AnyRecord::Score(Box::new(closing)),
+            AnyRecord::Intervention(intervention),
+            AnyRecord::Score(Box::new(rescore)),
+        ],
+    );
+    commit(&git, "Change a (#1)\n");
+    let mut found = judge(&git, "HEAD");
+    found.extend(job_records_of(&git, "HEAD"));
+    found
+}
+
+#[test]
+fn a_squash_with_an_intervention_and_its_rescore_lands() {
+    assert_eq!(squash_with_intervention(false), vec![]);
+}
+
+#[test]
+fn a_squash_with_a_forged_rescore_is_still_refused() {
+    let found = squash_with_intervention(true);
+    assert!(
+        found
+            .iter()
+            .any(|v| v.rule == Rule::JobRecords && v.detail.contains("does not follow")),
+        "{found:?}"
+    );
 }
 
 #[test]
