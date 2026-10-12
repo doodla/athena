@@ -450,3 +450,8 @@ Stopping: you're done when "How I'll judge it" passes. If you're blocked on ever
 ### 2026-10-12: Dumb context questions
 
 * Add a concept to Tina [Athena] called "dumb context questions," allowing it to ask easy self-contained questions along with examples and stuff to capture the user's taste as well as expectations. Of course maybe some sort of memory decay system. Some expectations are forever but others might just be relevant to a particular period or project or might have some sort of expiry, who knows.
+* Renamed by Sri, 2026-10-12: taste probes.
+
+### 2026-10-12: A persistent project tracker
+
+* I also want something persistent where I can track the project and Athena's reasoning. I know we use structured data so maybe we can do something with it
