@@ -455,3 +455,22 @@ Stopping: you're done when "How I'll judge it" passes. If you're blocked on ever
 ### 2026-10-12: A persistent project tracker
 
 * I also want something persistent where I can track the project and Athena's reasoning. I know we use structured data so maybe we can do something with it
+
+### 2026-10-12: Athena does what the operator should not have to
+
+* If you find yourself doing things that Athena should rather do, build that out as well. For example I feel like Athena should natively handle PRs.
+
+### 2026-10-12: Brownfield integration
+
+* Also it kind of feels like a smell that we have to track the whole history because if we want to add Athena to an existing codebase, that needs to be figured out and we can't have it blocking. At least make brownfield integration a first-class requirement and then let's see what happens.
+* Actually design it almost with stealth in mind because I feel like we shouldn't. Let's say if I'm contributing to a third-party repo and I'm making a PR, I can't dump a bunch of Athena stuff in there.
+
+### 2026-10-12: The brief as a structured contract
+
+* I also want to have some sort of structured system for the brief itself because essentially the brief is my requirements, right? We'd want to figure out some way to track changes, both builds as well as reviews, in some ways, back to the requirements, very, very cheaply, mind you.
+* I'm thinking Jev, if anything, because context efficiency and staying cheap are going to be important if we are to orchestrate and build out large amounts of work. This is a little rambly because it could be that my requirements are wrong, our expectations need to change, or we need to make compromises.
+* What is the sort of contract that Athena is maintaining with the user, or essentially the spec, right, because communication is lossy? I think I say something and you think you understand it a different way. I kind of want to use structured fields to at least surface that more easily. Essentially I think I'm saying that Athena should be a project management expert.
+
+### 2026-10-12: A tired user, and a home for Athena's artifacts
+
+* You also have to assume we already made the user lazy. Let's also make them tired so they might not always have context, which is what the project tracker would do: give that context, right? I'm thinking about having sort of artifacts. For example the decision sheet is one artifact. I'd like Athena to have a Chrome for these kinds of things.
