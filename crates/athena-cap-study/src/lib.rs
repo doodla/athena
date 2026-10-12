@@ -157,14 +157,25 @@ mod tests {
     }
 
     #[test]
-    fn the_verifier_never_writes_and_nothing_is_configured_yet() {
+    fn the_verifier_never_writes_and_grants_and_checks_come_from_the_config() {
         let jc = job_config();
         assert!(!Study.verifier_grant(&jc).writes);
         assert!(Study.producer_grant(&jc).writes);
-        // The capability is not in athena.toml, so no checks or commands come from it.
-        assert!(jc.config.capability(ID).is_none());
-        assert!(Study.checks(&jc).is_empty());
-        assert!(Study.producer_grant(&jc).commands.is_empty());
+        // The capability is configured in athena.toml, and its grants and checks come from there.
+        let section = jc.config.capability(ID).expect("[capabilities.study]");
+        assert_eq!(
+            Study.producer_grant(&jc).commands,
+            section.producer_commands
+        );
+        assert_eq!(
+            Study.verifier_grant(&jc).commands,
+            section.verifier_commands
+        );
+        assert!(!section.producer_commands.is_empty());
+        assert!(!section.verifier_commands.is_empty());
+        let names: Vec<String> = Study.checks(&jc).into_iter().map(|c| c.name).collect();
+        assert_eq!(names, ["fmt", "clippy", "test"]);
+        assert_eq!(Study.env(&jc), section.env);
     }
 
     #[test]

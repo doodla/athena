@@ -10,7 +10,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ### Added
 
 - The study capability is registered in the `athena` binary, so the reader can pick `study` and the core can
-  run it. It has no configured checks or commands yet; containment, the run step and publishing are not built.
+  run it. Containment, the run step and publishing are not built.
+- `athena.toml` gains a `[capabilities.study]` section with the same commands, environment and checks (fmt,
+  clippy, test) as the change capability, so a study job's grants and gates come from configuration. This is a
+  governance file change; the section governs later jobs only.
 
 ### Fixed
 
