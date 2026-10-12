@@ -325,10 +325,21 @@ pub fn verifier_brief(inputs: &VerifierInputs, inline_diff: bool) -> String {
     out
 }
 
+/// A rejected job that the user asked to try again: what it asked for and why it was rejected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EarlierAttempt {
+    pub job: String,
+    pub request: String,
+    /// The final verification's findings (and reasons), one per entry.
+    pub findings: Vec<String>,
+}
+
 /// Everything the reader's brief is built from.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReaderInputs {
     pub request: String,
+    /// The rejected job this request retries, when the user asked "try again on <job>".
+    pub earlier_attempt: Option<EarlierAttempt>,
     /// Earlier readings and the corrections or answers that followed each, oldest first.
     pub history: Vec<(Reading, Option<String>)>,
     pub reference: Forecast,
@@ -346,6 +357,27 @@ pub struct ReaderInputs {
 pub fn reader_brief(inputs: &ReaderInputs) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "# Request (verbatim)\n\n{}\n", quote(&inputs.request));
+    if let Some(attempt) = &inputs.earlier_attempt {
+        let _ = writeln!(
+            out,
+            "# Earlier attempt\n\nThe user asks to try again on job {}, which was rejected. Its request:\n\n{}\n",
+            attempt.job,
+            quote(&attempt.request)
+        );
+        if attempt.findings.is_empty() {
+            let _ = writeln!(out, "The verification recorded no findings.\n");
+        } else {
+            let _ = writeln!(out, "What the verification found:\n");
+            for finding in &attempt.findings {
+                let _ = writeln!(out, "{}", quote(finding));
+            }
+            out.push('\n');
+        }
+        let _ = writeln!(
+            out,
+            "Read the new request with this in mind; the new request, as typed, takes precedence.\n"
+        );
+    }
     if !inputs.history.is_empty() {
         let _ = writeln!(out, "# Earlier readings\n");
         for (reading, followed_by) in &inputs.history {
@@ -538,11 +570,10 @@ mod tests {
         assert!(!recorded.contains("0.97"));
     }
 
-    #[test]
-    fn reader_briefs_carry_corrections_and_the_reference() {
-        let r = reading();
-        let brief = reader_brief(&ReaderInputs {
+    fn reader_inputs(r: &Reading) -> ReaderInputs {
+        ReaderInputs {
             request: "add a changelog".into(),
+            earlier_attempt: None,
             history: vec![(r.clone(), Some("call it CHANGES.md".into()))],
             reference: r.forecasts.reference.clone(),
             reference_basis: "priors".into(),
@@ -551,7 +582,34 @@ mod tests {
             producer_default: "claude-haiku-5-5".into(),
             listing: vec!["README.md".into()],
             verifier_can_run: vec![("change".into(), vec!["cargo test".into()])],
+        }
+    }
+
+    #[test]
+    fn reader_briefs_carry_an_earlier_attempt_only_when_set() {
+        let mut inputs = reader_inputs(&reading());
+        assert!(!reader_brief(&inputs).contains("# Earlier attempt"));
+        inputs.earlier_attempt = Some(EarlierAttempt {
+            job: "20261010-153012-k7q2".into(),
+            request: "add a changelog file".into(),
+            findings: vec!["major: the file is empty".into()],
         });
+        let brief = reader_brief(&inputs);
+        assert!(brief.contains("# Earlier attempt"));
+        assert!(brief.contains("20261010-153012-k7q2"));
+        assert!(brief.contains("> add a changelog file"));
+        assert!(brief.contains("> major: the file is empty"));
+        assert!(
+            brief.contains("> add a changelog\n"),
+            "the new request stays as typed"
+        );
+    }
+
+    #[test]
+    fn reader_briefs_carry_corrections_and_the_reference() {
+        let r = reading();
+        let brief = reader_brief(&reader_inputs(&r));
+        assert!(!brief.contains("Earlier attempt"));
         assert!(brief.contains("> call it CHANGES.md"));
         assert!(
             brief.contains("change: cargo test"),

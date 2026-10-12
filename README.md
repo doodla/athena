@@ -41,6 +41,11 @@ Enter, or athena go <job>
   landing                              → the change plus every record, one commit, fast-forwarded
 ```
 
+To retry a rejected job, ask `athena ask "try again on <job>"` (the full id or a unique suffix; the form is
+matched case-insensitively at the start of the request). The reader then sees that job's request and its final
+verification's findings, redacted, in an "Earlier attempt" section. Jobs that are landed, in flight, or unknown
+are refused.
+
 Exit codes: 0 when the job landed, 2 when it did not (rejected, failed, stale, or blocked), 1 when Athena
 itself erred.
 

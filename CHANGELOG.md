@@ -7,6 +7,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- `athena ask "try again on <job>"` retries a rejected job. The reader's brief gains an "Earlier attempt"
+  section with that job's request and its final verification's findings (redacted); the new job's own
+  request stays as typed. A job that is not rejected, or is unknown, is refused with an error naming it.
+
 ### Changed
 
 - The governed-content invariant and `athena check --history` now accept a landing that was squash-merged

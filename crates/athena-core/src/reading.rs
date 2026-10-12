@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use athena_agent::AgentInvocation;
 use athena_agent::env::{EnvSpec, Side};
 use athena_agent::policy::Policy;
-use athena_context::briefs::{ReaderInputs, reader_brief, render_catalog};
+use athena_context::briefs::{EarlierAttempt, ReaderInputs, reader_brief, render_catalog};
 use athena_context::outputs::{
     CriterionKindOutput, DeliverableActionOutput, ReaderChoices, ReadingOutput, reading_schema,
 };
@@ -17,7 +17,7 @@ use athena_context::{CONTRACT, Component, Composed, READER_FRAME, compose};
 use athena_data::records::{
     AnyRecord, Correction, CorrectionKind, Criterion, CriterionKind, DefaultApplied, Deliverable,
     DeliverableAction, Forecast, Forecasts, Intervention, InterventionCategory, InterventionSource,
-    Invocation, Quantiles, Reading, Request, Role,
+    Invocation, OutcomeState, Quantiles, Reading, Request, Role,
 };
 use athena_data::{JobId, RecordId};
 use athena_gate::redact::Redactor;
@@ -182,6 +182,7 @@ impl Athena {
         records: &Records,
         job: &JobId,
         request: &Request,
+        attempt: Option<&EarlierAttempt>,
         history: &[(Reading, Option<String>)],
         n: u32,
         seq: u32,
@@ -206,6 +207,7 @@ impl Athena {
         let composed = reader_system_prompt(self, jc);
         let prompt = reader_brief(&ReaderInputs {
             request: request.text.clone(),
+            earlier_attempt: attempt.cloned(),
             history: history.to_vec(),
             reference: global_reference,
             reference_basis: basis,
@@ -544,8 +546,20 @@ impl Athena {
     ) -> Result<Proposal> {
         let job = request.job.clone();
         let redactor = self.redactor(&jc.config, Some(&job))?;
-        let (reading, invocation, error) =
-            self.read_for(jc, records, &job, request, &[], 1, 1, 0.0, &redactor, ui)?;
+        let attempt = earlier_attempt(records, &request.text, &redactor)?;
+        let (reading, invocation, error) = self.read_for(
+            jc,
+            records,
+            &job,
+            request,
+            attempt.as_ref(),
+            &[],
+            1,
+            1,
+            0.0,
+            &redactor,
+            ui,
+        )?;
         let mut files = Vec::new();
         if with_request {
             files.push(NewFile::record(&AnyRecord::Request(request.clone())));
@@ -669,11 +683,13 @@ impl Athena {
             .collect();
         let seq = job.next_seq();
         let spent = job.spent_usd();
+        let attempt = earlier_attempt(&records, &request.text, &redactor)?;
         let (reading, invocation, error) = self.read_for(
             &jc,
             &records,
             &job_id,
             &request,
+            attempt.as_ref(),
             &history,
             n + 1,
             seq,
@@ -706,6 +722,74 @@ impl Athena {
             commit,
         })
     }
+}
+
+const RETRY_PREFIX: &str = "try again on ";
+
+/// Detects "try again on <job>" at the start of `request` and builds the earlier attempt from the
+/// rejected job's request and final verification. Returns `None` when the request is not that form.
+/// The carried text goes through `redactor`.
+pub fn earlier_attempt(
+    records: &Records,
+    request: &str,
+    redactor: &Redactor,
+) -> Result<Option<EarlierAttempt>> {
+    let text = request.trim_start();
+    let Some(head) = text.get(..RETRY_PREFIX.len()) else {
+        return Ok(None);
+    };
+    if !head.eq_ignore_ascii_case(RETRY_PREFIX) {
+        return Ok(None);
+    }
+    let reference = text[RETRY_PREFIX.len()..]
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_end_matches(['.', ',', ';', ':', '!', '?']);
+    if reference.is_empty() {
+        bail!("say which job to try again on: 'try again on <job>'");
+    }
+    let id = records.resolve(reference)?;
+    let job = records.jobs.get(id.as_str()).expect("resolved");
+    let state = job.state();
+    if state != JobState::Closed(OutcomeState::Rejected) {
+        bail!(
+            "job {id} is {}; only a rejected job can be tried again",
+            state.name()
+        );
+    }
+    let Some(earlier) = &job.request else {
+        bail!("job {id} is {} but has no request record", state.name());
+    };
+    let Some(verification) = &job.verification else {
+        bail!(
+            "job {id} is {} but has no verification record",
+            state.name()
+        );
+    };
+    let mut texts = vec![earlier.text.clone()];
+    texts.extend(verification.findings.iter().map(|f| {
+        let location = f
+            .location
+            .as_deref()
+            .map_or(String::new(), |l| format!(" ({l})"));
+        format!(
+            "{}{location}: {} {}",
+            format!("{:?}", f.severity).to_lowercase(),
+            f.summary,
+            f.evidence
+        )
+        .trim_end()
+        .to_string()
+    }));
+    texts.extend(verification.reasons.iter().map(|r| format!("reason: {r}")));
+    redactor.redact_all(&mut texts)?;
+    let request = texts.remove(0);
+    Ok(Some(EarlierAttempt {
+        job: id.as_str().to_string(),
+        request,
+        findings: texts,
+    }))
 }
 
 /// The records of a job at the current commit.
