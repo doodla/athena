@@ -1,0 +1,125 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261012-211640-3x8m",
+  "base_commit": "01c41da2d83a7c034eefb043ebc4d7b7d03cffbf",
+  "base_fingerprint": "sha256:77f371e2369611f37774f9fecb8822c8afc1b572f1bce452be69a8379d0f538b",
+  "previous_job": "20261012-210319-g0a1",
+  "candidate_commit": "1f58ec77db9d54358abbc9b06923d87f5485b5b1",
+  "candidate_tree": "74a7068c91a2d3a325a572da27aa8d2b0a6125f0",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 14181
+    },
+    {
+      "path": "Cargo.lock",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 23804
+    },
+    {
+      "path": "athena.toml",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 7178
+    },
+    {
+      "path": "crates/athena-cap-study/Cargo.toml",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 554
+    },
+    {
+      "path": "crates/athena-cap-study/prompts/producer.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 1006
+    },
+    {
+      "path": "crates/athena-cap-study/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 7547
+    },
+    {
+      "path": "crates/athena-cap-study/src/source.rs",
+      "status": "added",
+      "mode": "100644",
+      "bytes": 12265
+    },
+    {
+      "path": "crates/athena-cli/src/wiring.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 7502
+    },
+    {
+      "path": "docs/architecture.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 6182
+    },
+    {
+      "path": "docs/decisions.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 108311
+    }
+  ],
+  "fingerprint": "sha256:f65457e7600937870071774eb101eb88def0ad62a084ca25c9d90b5cbce03964",
+  "violations": [],
+  "producer_report": {
+    "summary": "Study is now selectable and has a pinned-read module. The firstmate SHA itself is NOT recorded, because this producer had no network. `athena.toml` now has `[capabilities.study]`, so the reader's catalog offers `change` and `study`, and the reader schema's capability enum is [\"change\",\"study\",null]. `[capabilities.change]` is unchanged. The study verifier grant is read-only git (status, diff, log, show) plus `ls`. The study producer adds `rm` and `mv`, and no grant has a network command. The study source is recorded in `[capabilities.study.env]` as `ATHENA_STUDY_SOURCE_URL`, which is https://github.com/kunchenguid/firstmate. New `athena_cap_study::source` has `SourcePin`, which accepts only 40 lowercase hex characters, so short, abbreviated, mixed-case, branch-name or missing values are errors. `materialise` runs the git CLI itself (init, fetch of that one commit, detached checkout), checks `HEAD` equals the pin, and removes the write bits from the tree. `remove` restores write access and deletes the tree. I used the git CLI rather than a crate (buy-first); the pin is in the env table rather than a new config type, so `athena-data` is untouched. The study card, producer prompt, CHANGELOG, `docs/architecture.md` and new decision D75 (with alternatives) record the call, and say running firstmate stays out of scope. Tests use a local fixture repository, with no network.",
+    "files": [
+      "athena.toml",
+      "crates/athena-cap-study/src/lib.rs",
+      "crates/athena-cap-study/src/source.rs",
+      "crates/athena-cap-study/Cargo.toml",
+      "Cargo.lock",
+      "crates/athena-cli/src/wiring.rs",
+      "crates/athena-cap-study/prompts/producer.md",
+      "CHANGELOG.md",
+      "docs/decisions.md",
+      "docs/architecture.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "clean"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "clean"
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "all pass, including the new source tests, the catalog test, the budgets test, and the boundary scan in xtask"
+      }
+    ],
+    "open_issues": [
+      "Criterion 3 is not met. `ATHENA_STUDY_SOURCE_SHA` (firstmate's main head) is not recorded in `athena.toml` or in CHANGELOG.md, because I had no network. Until the user adds it, `SourcePin::from_config` returns a 'no ATHENA_STUDY_SOURCE_SHA' error, which is the intended refusal. A follow-up edit to `athena.toml` and CHANGELOG.md is needed.",
+      "Nothing in Athena's run flow calls `materialise` yet. The module and its tests exist; wiring it into the study run step is a later job.",
+      "Only the unit tests exercise the git fetch against a local fixture. Fetching a bare SHA from github.com depends on GitHub allowing it, and I did not verify that."
+    ],
+    "mistakes": [
+      "My first card and prompt additions broke the token budgets test. I shortened them, and the final run is green.",
+      "My first materialise test asserted that a write fails, which is false under root. I replaced it with a permission-bit check."
+    ],
+    "learnings": [
+      "`CapabilityConfig` has `deny_unknown_fields`, so a source table needs an `athena-data` change. The `env` table takes any string, so the pin lives there.",
+      "The reader budget test counts every registered capability's card, with 1800 tokens at ceil(bytes/3). The producer set budget is 1100 tokens. Both were nearly full, so card and prompt wording had to be trimmed.",
+      "Bash in this job allows only cargo, git status/diff/log/show, ls, rm, mv and chmod. Plain `cargo ... --locked` failed after the dependency edit until one `cargo check --offline` refreshed Cargo.lock.",
+      "The tools run as root, so a write to a read-only file succeeds. The test checks the permission bits instead.",
+      "athena-cap-study may not depend on athena-git (architecture direction rule), so `source` calls git with std::process::Command."
+    ],
+    "desires": [
+      "Network access (or a way to read firstmate's main head) to resolve the SHA.",
+      "A config type that allows a dedicated `[capabilities.study.source]` table."
+    ]
+  }
+}
