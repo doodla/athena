@@ -474,3 +474,13 @@ Stopping: you're done when "How I'll judge it" passes. If you're blocked on ever
 ### 2026-10-12: A tired user, and a home for Athena's artifacts
 
 * You also have to assume we already made the user lazy. Let's also make them tired so they might not always have context, which is what the project tracker would do: give that context, right? I'm thinking about having sort of artifacts. For example the decision sheet is one artifact. I'd like Athena to have a Chrome for these kinds of things.
+
+### 2026-10-12: The dashboard
+
+* For the dashboard, I'd like to see something with anatomy: https://github.com/wheresryan22/anatomy
+* + Jev
+
+### 2026-10-12: Chunking and parallel work
+
+* Do we chunk and parallelize today?
+* Yeah. Maybe we move the study up, or run it in parallel
