@@ -19,6 +19,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- The study capability M1 design (`docs/design/study-capability-m1.md`) now says how to confirm its
+  `BRIEF.md` line citations (by quoted passage, with no commit pinned). Citations were re-checked against
+  `BRIEF.md`; its cross-references all resolve. No code changed.
+
 - The governed-content invariant and `athena check --history` now accept a landing that was squash-merged
   or rebase-merged, as well as a merge commit. A landing is identified by the job records the commit adds,
   not by `Athena-*` trailers or by the prediction commit being an ancestor. "Prediction before work" is
