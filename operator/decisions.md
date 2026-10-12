@@ -93,3 +93,15 @@ Athena's decision log, not here. Newest last.
   first milestone; a stuck change gets one more attempt through Athena before any hand fix.
 - Why: Sri wants `main` to read as one intent per PR; zero approvals keeps the operator able to
   land work, with CI and Athena's independent verifier as the gate.
+
+## OP-9. One job per PR; a multi-job branch lands by rebase (2026-10-12)
+
+- Decision (Sri, decision sheet of 2026-10-12 06:08, https://claude.ai/artifact/UoSLkWzLWMLxUJX7zRp9v3):
+  future PRs carry one Athena job each, so a squash keeps one landing per commit on `main`. A branch
+  that already holds several jobs lands once by rebase merge, then the repository goes back to squash.
+- Why: `athena check --history` refuses a commit that closes more than one job, and every commit on
+  `main` must trace to the work that produced it (BRIEF A5). A squash of several jobs breaks both.
+- Lapse: the session that got this answer did not record it before restarting, so the next session
+  squash-merged PR #8 with six jobs (`ee4b0dd`) and `main` went red at 08:28. Answers from a decision
+  sheet are recorded here as soon as they are read. The repair is on the sheet at
+  https://claude.ai/artifact/CCDeJxGckn7svF5QNioWJs.
