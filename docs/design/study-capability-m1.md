@@ -1,9 +1,15 @@
 # The studying capability, milestone M1: design
 
-> **Status:** proposed. **Design only.** This document describes a capability that does not exist. No crate,
+> **Status:** proposed; [review 1](reviews/study-capability-m1-review-1.md) exists (approve with changes,
+> findings not yet answered). **Design only.** This document describes a capability that does not exist. No crate,
 > code, test, or configuration has been written for it, and nothing will be built until an independent
 > review of this document is complete ([§9](#9-review-gate)).
-> **Requirements source:** [`BRIEF.md`](../../BRIEF.md). Line numbers below refer to it as of this change.
+> **Requirements source:** [`BRIEF.md`](../../BRIEF.md). Line numbers below refer to the `BRIEF.md`
+> in the same tree as this document, not to a commit. To confirm them, open `BRIEF.md` at the cited line:
+> line 306 is the bullet beginning "M1. Work handling", line 395 is the third item of the milestone list
+> ("First milestone: one mechanism (M1 on firstmate)"), and lines 271–277 are the heading "Part 2" through the
+> bullet "Everything reusable lives in Athena's studying capability". If `BRIEF.md` has since changed, find
+> the passage by those quoted words.
 > **Style:** follows [`athena-v0.md`](athena-v0.md). Alternatives, tradeoffs, and reversal cost are in
 > [§6](#6-considered-alternatives) and [§7](#7-reversal-cost), in the shape of
 > [`docs/decisions.md`](../decisions.md).

@@ -296,11 +296,13 @@ impl Athena {
         let history: Vec<(Reading, Option<String>)> =
             job.readings.iter().map(|r| (r.clone(), None)).collect();
         let spent = job.spent_usd();
+        let attempt = crate::reading::earlier_attempt(records, &request.text, &redactor)?;
         let (reading, invocation, error) = self.read_for(
             jc,
             records,
             &id,
             &request,
+            attempt.as_ref(),
             &history,
             n + 1,
             job.next_seq(),

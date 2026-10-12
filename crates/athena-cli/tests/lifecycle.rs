@@ -9,7 +9,7 @@ use athena_core::run::GoResult;
 use athena_data::records::{AcceptedBy, AnyRecord, OutcomeState, Role, Verdict};
 use athena_gate::invariant::{PREDICTION, VERIFIED_CONTENT};
 use common::*;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 fn finished(result: GoResult) -> athena_core::run::Finished {
     match result {
@@ -209,6 +209,161 @@ fn a_failing_check_rejects_the_job_without_spending_a_verifier() {
     assert!(!calls.lock().unwrap().contains(&Role::Verifier));
     assert!(fx.file("README.md").is_some(), "nothing landed");
     assert!(athena.check_history().unwrap().violations.is_empty());
+}
+
+/// A script that also keeps every brief the reader was given.
+fn recording_readers(scenario: Scenario) -> (athena_agent::fake::Script, Arc<Mutex<Vec<String>>>) {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let inner = scenario.script();
+    let kept = seen.clone();
+    let script: athena_agent::fake::Script = Box::new(move |spec| {
+        if spec.role == Role::Reader {
+            kept.lock().unwrap().push(spec.user_prompt.clone());
+        }
+        inner(spec)
+    });
+    (script, seen)
+}
+
+#[test]
+fn try_again_on_a_rejected_job_carries_its_request_and_findings_to_the_reader() {
+    let fx = Fixture::new();
+    let mut scenario = Scenario::default();
+    scenario.verdict = serde_json::json!({
+        "verdict": "fail",
+        "criteria": [
+            { "criterion": "criterion 1", "met": false, "evidence": "missing", "commands": [] },
+            { "criterion": "criterion 2", "met": true, "evidence": "ran", "commands": ["cargo test"] }
+        ],
+        "findings": [{
+            "severity": "major",
+            "summary": "FINDING-CANARY the greeting is missing",
+            "evidence": "README.md has no greeting",
+            "location": "README.md"
+        }],
+        "request_reading_mismatch": null,
+        "summary": "The greeting is missing."
+    });
+    let (script, readers) = recording_readers(scenario);
+    let athena = fx.athena(script);
+    let first = athena
+        .ask("add a greeting ORIGINAL-CANARY", &Lines::default())
+        .unwrap();
+    let rejected = finished(
+        athena
+            .go(first.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(rejected.state, OutcomeState::Rejected);
+
+    let retry = athena
+        .ask(
+            &format!("Try again on {}, please", first.job.as_str()),
+            &Lines::default(),
+        )
+        .unwrap();
+    assert_ne!(retry.job, first.job);
+    let briefs = readers.lock().unwrap();
+    assert!(!briefs[0].contains("Earlier attempt"));
+    let brief = briefs.last().unwrap();
+    assert!(brief.contains("# Earlier attempt"));
+    assert!(brief.contains("> add a greeting ORIGINAL-CANARY"));
+    assert!(brief.contains("FINDING-CANARY the greeting is missing"));
+    assert!(
+        brief.contains(&format!("> Try again on {}, please", first.job.as_str())),
+        "the new request stays as typed"
+    );
+    assert!(athena.check_history().unwrap().violations.is_empty());
+}
+
+#[test]
+fn a_request_naming_a_job_carries_its_request_and_findings_to_the_reader() {
+    let fx = Fixture::new();
+    let mut scenario = Scenario::default();
+    scenario.verdict = serde_json::json!({
+        "verdict": "fail",
+        "criteria": [
+            { "criterion": "criterion 1", "met": false, "evidence": "missing", "commands": [] },
+            { "criterion": "criterion 2", "met": true, "evidence": "ran", "commands": ["cargo test"] }
+        ],
+        "findings": [{
+            "severity": "major",
+            "summary": "FINDING-CANARY the greeting is missing",
+            "evidence": "README.md has no greeting",
+            "location": "README.md"
+        }],
+        "request_reading_mismatch": null,
+        "summary": "The greeting is missing."
+    });
+    let (script, readers) = recording_readers(scenario);
+    let athena = fx.athena(script);
+    let first = athena
+        .ask("add a greeting ORIGINAL-CANARY", &Lines::default())
+        .unwrap();
+    finished(
+        athena
+            .go(first.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+
+    let text = format!("make it friendlier than in {} please", first.job.as_str());
+    let second = athena.ask(&text, &Lines::default()).unwrap();
+    assert_ne!(second.job, first.job);
+    let briefs = readers.lock().unwrap();
+    let brief = briefs.last().unwrap();
+    assert!(brief.contains("# Referenced jobs"));
+    assert!(brief.contains("> add a greeting ORIGINAL-CANARY"));
+    assert!(brief.contains("FINDING-CANARY the greeting is missing"));
+    assert!(!brief.contains("# Earlier attempt"));
+    assert!(
+        brief.contains(&format!("> {text}")),
+        "the new request stays as typed"
+    );
+    drop(briefs);
+
+    // An id that matches no job is ignored.
+    athena
+        .ask("see 19990101-000000-zzzz for context", &Lines::default())
+        .unwrap();
+    assert!(
+        !readers
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .contains("# Referenced jobs")
+    );
+}
+
+#[test]
+fn try_again_on_a_landed_or_unknown_job_is_refused() {
+    let fx = Fixture::new();
+    let athena = fx.athena(Scenario::default().script());
+    let first = athena.ask("add a greeting", &Lines::default()).unwrap();
+    let landed = finished(
+        athena
+            .go(first.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(landed.state, OutcomeState::Landed);
+    let head = fx.head();
+
+    let error = athena
+        .ask(
+            &format!("try again on {}", first.job.as_str()),
+            &Lines::default(),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains(first.job.as_str()), "{error}");
+    assert!(error.contains("landed"), "{error}");
+
+    let error = athena
+        .ask("try again on 19990101-000000-zzzz", &Lines::default())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("19990101-000000-zzzz"), "{error}");
+    assert_eq!(fx.head(), head, "a refused retry commits nothing");
 }
 
 #[test]
