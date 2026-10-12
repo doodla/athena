@@ -9,6 +9,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Decision D66 proposes a remedy for main's history check failing on a squash that carries several jobs:
+  stop squashing multi-job pull requests, and excuse the one existing commit with a `[history] exempt`
+  entry. It is a proposal only; no code or configuration changed.
+
 - `athena ask "try again on <job>"` now also retries a job that failed (for example one refused at admission,
   which has no verification). Its recorded outcome reason is carried into the reader's "Earlier attempt"
   section as a finding (redacted), and the section says whether the job failed or was rejected. Other

@@ -1402,3 +1402,52 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Provenance:** Inferred. The scope follows the design's order (§2, §8) and the request to build the
   capability again after an earlier attempt was not admitted; the earlier attempt's records are not
   available to this change, so why it failed is not known.
+
+## D66 · Proposal: remedy for the history check failing on the multi-job squash ee4b0dd
+
+- **Decision:** Proposed, awaiting the user's choice; nothing is implemented by this entry. `athena.toml`,
+  workflows, code, and tests are unchanged. Recommendation: **(c) stop squash-merging pull requests that
+  carry more than one job, and rewrite nothing**, with **(a) one `[history] exempt` entry for ee4b0dd** as
+  the way to turn main's check green once the user accepts that this commit's content is excused.
+  Implementation of either is a follow-up job.
+  - *Cause (read from code, not from the failing output, which this change did not have).* `landing` in
+    `crates/athena-gate/src/invariant.rs` (lines 253-259) collects the jobs whose closing records the commit
+    adds (`closing_jobs`) and refuses when there is more than one: "a commit adds closing records for more
+    than one job". Design §7.3 ("Merge, squash, and rebase merges", `docs/design/athena-v0.md`) describes a
+    squash as one commit that adds the code and every record of *the* job, checked as one landing. A squash
+    of PR #8 that carries several jobs' records is therefore refused. Even without that line, lines 340-350
+    require each job's `candidate.json` fingerprint and `verification.json` verified fingerprint to equal the
+    fingerprint of the whole landed tree; with several jobs, each verified only its own candidate, so at most
+    one could match. The history check walks every commit, so the failure stays on main until the commit is
+    excused or no longer judged.
+  - *Mechanism of (a).* `check` returns no violations for a commit in the tip's `[history] exempt` list
+    (`invariant.rs` lines 92-100). D60 requires a full 40-character id naming a commit already in history;
+    D61 reads the list from the tip, so an entry added now excuses ee4b0dd. The full id is not in the
+    snapshot this change was made from, so it must be read from `git log` on the real repository.
+- **Alternatives:**
+  - (a) Exempt ee4b0dd via `[history] exempt`. One line of configuration, no code. The commit's content then
+    skips the whole invariant, including "nothing reaches main unverified", for every job in it. The jobs'
+    own records remain in the tree and still get the per-record checks.
+  - (b) Teach `landing` to accept a commit that lands several jobs when each job's records are complete.
+    This needs a per-job content rule, because a combined tree cannot equal each job's fingerprint: for
+    example, verify each job's candidate as a patch against the parent and require the union to equal the
+    landed tree, plus an order rule between jobs. That is a new proof in the gate (design §7.3 and a new
+    decision, new tests in `crates/athena-gate/src/landing_tests.rs`), and it weakens "one verified
+    candidate is the landed content".
+  - (c) Stop squashing multi-job PRs: land them by merge commit or rebase merge (§7.3 says both are checked
+    per commit), or keep one job per PR. No history is rewritten, so ee4b0dd stays on main and still needs
+    (a) to pass; (c) alone prevents a repeat.
+  - (d) Rewrite main to split the squash. Rejected: out of scope, destructive, and breaks every clone.
+- **Tradeoff:** (a) is the cheapest and fully reversible but is a hole for one commit whose verification
+  cannot be checked by the gate; it applies to this one commit only (D60: a full id cannot cover a later
+  commit). (b) fixes the class of failure but is the largest change, in the part of the gate that guards
+  the main property, for a case the design chose not to support ("one commit... of the job"). (c) costs a
+  merge-strategy habit and a repository setting, and is enforced by nothing unless the host restricts
+  allowed merge methods. Choosing (c) with (a) leaves the invariant as strict as it is and fixes main now.
+- **Reversal cost:** (a) low: delete the list entry. (b) high: a new gate rule that later history depends
+  on. (c) low: a setting.
+- **Provenance:** Inferred. The user reported that main's history check has failed since PR #8 was
+  squash-merged as ee4b0dd with many job landings. The failing output and the full commit id were not
+  available to this change, so the cause is read from `invariant.rs`, design §7.3, D60, and D61, and the
+  existing squash tests in `crates/athena-gate/src/landing_tests.rs` (all single-job); no command was run
+  to reproduce the failure.
