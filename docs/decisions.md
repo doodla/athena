@@ -1381,3 +1381,24 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Provenance:** Stated for decisions 2, 3, 6 and the evidence rules: `BRIEF.md:110-111`, `BRIEF.md:298-299`,
   `BRIEF.md:320-321`. Inferred, as the designer's choice of the conservative option, for 4, 5, 7 and 8. The
   user asked for all eight to be decided without being asked again.
+
+## D65 · The study capability's first build is the validation core only
+
+- **Decision:** The first build of the studying capability is the crate `athena-cap-study`: the typed
+  `study.*/1` records, the `study.model/1` model, the eighteen validation rules of the design's §5.4 as pure
+  functions, a `Capability` impl with prompts, and a git-lookup trait with an in-memory fixture. Containment,
+  the run step, replay, the Pages explainer and publish step, and registration in the CLI wiring are deferred
+  to later jobs. The review-2 changes (R2-m1 to R2-m3) are applied to the design in the same change. The
+  `Capability` trait is unchanged; whether it fits a multi-step study job is left open until the run step is
+  built. The records are not yet part of `AnyRecord` or the gate.
+- **Alternatives:** (a) Build everything in the design in one job. (b) Build the crate with registration, so
+  `athena ask` can start a study. (c) Fold the rules into `athena-cap-change`.
+- **Tradeoff:** (a) is a large change that is hard to verify and mixes untrusted-code containment with pure
+  rules. (b) would let a study start before containment exists, against D64 decision 2. (c) is rejected in
+  the design's A1. The cost of this scope is that nothing runs yet: the rules are tested on fixtures, and
+  their fit to real studies is unmeasured.
+- **Reversal cost:** Low: a new crate with no dependents. Record shapes are the part that costs more to
+  change once studies exist; they gain a new schema version then.
+- **Provenance:** Inferred. The scope follows the design's order (§2, §8) and the request to build the
+  capability again after an earlier attempt was not admitted; the earlier attempt's records are not
+  available to this change, so why it failed is not known.

@@ -35,6 +35,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   the revision and approves with named changes (3 minor, 1 nit). The design's status line and §9 link to it.
   No code changed.
 
+- New crate `athena-cap-study`: the validation core of the study capability. It defines the typed
+  `study.*/1` records and the `study.model/1` work-handling model, implements the eighteen validation rules of
+  the design's §5.4 as pure functions (eight evidence rules that no waiver clears, ten model rules that only a
+  user-written waiver citing a user intervention clears), looks up git through a trait with an in-memory
+  fixture, and implements the `Capability` trait with its prompts. It is not registered in the CLI and runs no
+  studied system. The design gains the review-2 changes (R2-m1 to R2-m3). Scope call recorded as D65.
+
 ### Fixed
 
 - `athena ask "try again on <job>"` on a job that was itself a retry now shows the reader the original

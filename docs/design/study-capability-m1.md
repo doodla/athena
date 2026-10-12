@@ -4,8 +4,9 @@
 > finding is answered in [Appendix A](#appendix-a-response-to-review-1), and the eight decisions the review put
 > to the user are settled in the text and recorded as D64 in [`docs/decisions.md`](../decisions.md). The
 > revision was re-checked in [review 2](reviews/study-capability-m1-review-2.md) (approve with named changes:
-> three minor findings and a nit, to be answered before building; see [§9](#9-review-gate)). **Design only.** This document describes a capability that does not exist. No crate, code, test,
-> or configuration has been written for it, and nothing will be built until the re-check is complete.
+> three minor findings and a nit, to be answered before building; see [§9](#9-review-gate)). **Partly built.** The validation core (records, model, the §5.4 rules, and the `Capability` impl) is the
+> crate `athena-cap-study`, with review 2's three changes applied here (D65). Containment, the run step, replay, and
+> Pages publishing are not built.
 > **Requirements source:** [`BRIEF.md`](../../BRIEF.md). Line numbers below refer to the `BRIEF.md`
 > in the same tree as this document, not to a commit. To confirm them, open `BRIEF.md` at the cited line:
 > line 306 is the bullet beginning "M1. Work handling", line 395 is the third item of the milestone list
@@ -121,7 +122,7 @@ of this capability**, not a residual:
    - *Model spend:* v0's `[budget]` caps meter Athena's own agent calls, not the studied system's. The
      studied system's model calls are bounded by a credential with a provider-side spend limit, and the cost
      is read back from the provider and recorded as a `Quantity` with its provenance.
-   - *If the spend cap can be neither enforced nor observed, the run does not start* (the downgrade of
+   - *If the spend cap cannot be enforced before the run starts, the run does not start* (the downgrade of
      item 2). Cost recorded only after the fact is never accepted as the cap.
 
 ## 3. Evidence rules
@@ -193,7 +194,7 @@ typed at the boundary, with a `schema` field.
 | `study.scenario/1` | id; purpose; which model elements it is meant to exercise; scripted human side; the invocation that wrote it |
 | `study.model/1` | the work-handling model ([§5.1](#51-elements)); each element lists the claims that support it |
 | `study.rationale/1` | the rationale card of [§3.2](#32-rationale-cards), plus the claims it cites |
-| `study.finding/1` | kind: `divergence` (both claims), `waiver` (the rule, the user's reason text, and the user intervention that wrote it), `not-native` (a capture stream that had to be added), `no-observation` (a stream the system did not expose), `could-not-run` (the blocker), or `model-limit` (a case [§5.1](#51-elements) cannot express); severity |
+| `study.finding/1` | kind: `divergence` (both claims), `waiver` (the rule, the user's reason text, and the user intervention that wrote it), `not-native` (a capture stream that had to be added), `no-observation` (a stream the system did not expose), `could-not-run` (the blocker), or `model-limit` (a case [§5.1](#51-elements) cannot express), or `replay-difference` (a replay differs from its original capture; the subject is the two run ids); severity; and, for every kind, a `subject` (the element ids, claim ids, or run ids the finding covers) |
 | `study.gap/1` | a gap in the capability found during a study; the study; the fix; the earlier studies re-checked |
 | `study.validation/1` | the result of running every rule in [§5.4](#54-validation-rules): rule id, pass or fail, offending record ids |
 
