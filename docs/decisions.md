@@ -1605,3 +1605,22 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Provenance:** `BRIEF.md` addenda of 2026-10-12 (native PRs, brownfield, stealth); D10, D69,
   `docs/enforcement.md` rows M6, M7, M23, M30. Read from those files; no command was run. This replaces an
   earlier draft of the same design that failed only the boundary scan (M19) on its wording.
+
+## D73 · The producer brief lists the words the boundary scan rejects
+
+- **Decision:** Amends D62's brief. `producer_brief` gains a "Words you must not write" section before the
+  checks. It lists the scan's words and fragments, and says the scan is whole-word and case-insensitive and
+  covers singular, plural and hyphenated forms. `athena-context` owns the brief's list
+  (`briefs::boundary_words`, `briefs::boundary_fragments`), built from fragments so no tracked file contains
+  the terms. The scanner in `xtask/tests/policy.rs` keeps its own list; `athena-context` is a dev-dependency
+  of `xtask` only, so the documented graph (M21, which counts normal dependencies) is unchanged, and
+  `the_producer_brief_lists_exactly_the_scanners_terms` fails if the two lists differ. The scan is unchanged.
+- **Alternatives:** (a) Make the scanner read the brief's list: a larger change to a rule's mechanism.
+  (b) Write the list in `prompts/producer.md`: the scan would reject that file. (c) Leave producers to learn
+  from the failing check.
+- **Tradeoff:** Two copies of the list, tied by a test. The section costs about 150 tokens of producer
+  context, and it shows the producer the banned terms, which it must then avoid writing.
+- **Reversal cost:** Low.
+- **Provenance:** User report of repeated boundary-scan failures by producers, the latest in a design review.
+  Enforced by `producer_briefs_list_the_boundary_words_before_the_checks` and the test named above. The
+  token figure is an estimate.

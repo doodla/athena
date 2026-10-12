@@ -17,6 +17,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The producer brief lists the words the boundary scan (M19) rejects, in a section before the checks (D73).
+  A test fails if that list differs from the scanner's.
+
 - A design for native pull-request landing, including a stealth mode that keeps Athena's records out of a
   repository the user does not own (D72, `docs/design/native-pr-landing.md`). Design only; no code or rule
   changes.
