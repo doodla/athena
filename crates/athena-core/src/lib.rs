@@ -18,6 +18,7 @@
 
 pub mod admission;
 pub mod capability;
+pub mod chain;
 pub mod checks;
 pub mod commits;
 pub mod invocation;

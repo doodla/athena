@@ -77,7 +77,21 @@ fn a_request_lands_a_traceable_commit() {
         &head,
         &format!("{}/candidate.json", proposal.job.dir()),
     ) {
-        Some(AnyRecord::Candidate(c)) => c.base_commit.clone(),
+        Some(AnyRecord::Candidate2(c)) => {
+            // The core links the job to its base: the base's fingerprint, and no predecessor because
+            // no job had landed before this one.
+            assert_eq!(
+                c.base_fingerprint.as_deref(),
+                Some(
+                    athena_git::attrs::fingerprint(&fx.git, &c.base_commit, &c.base_commit)
+                        .unwrap()
+                        .as_str()
+                ),
+                "base_fingerprint is the base commit's fingerprint"
+            );
+            assert_eq!(c.previous_job, None, "no job had landed before");
+            c.base_commit.clone()
+        }
         other => panic!("unexpected {other:?}"),
     };
     assert_eq!(

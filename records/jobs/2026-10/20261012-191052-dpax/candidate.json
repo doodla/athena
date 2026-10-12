@@ -1,0 +1,131 @@
+{
+  "schema": "athena.candidate/1",
+  "job": "20261012-191052-dpax",
+  "base_commit": "02cbd695bd58e8d0e7164bc0c48e1987ac39a102",
+  "candidate_commit": "bd3b271ae2bb7f2deb2d4ef3a071ffae1f1b48ed",
+  "candidate_tree": "200ca434be1156db207b1bdec08fe4fff6c36ec8",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 10664
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 56743
+    },
+    {
+      "path": "crates/athena-core/src/chain.rs",
+      "status": "added",
+      "mode": "100644",
+      "bytes": 5308
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 4631
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 59365
+    },
+    {
+      "path": "crates/athena-core/src/store.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 10609
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 43527
+    },
+    {
+      "path": "crates/athena-gate/src/jobs.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 14622
+    },
+    {
+      "path": "crates/athena-gate/src/landing_tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 16242
+    },
+    {
+      "path": "docs/design/squash-chain-landing.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 32417
+    },
+    {
+      "path": "docs/records.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 12883
+    }
+  ],
+  "fingerprint": "sha256:e6d9e6d8884f0c2c36649240ad2a41accaf701e48a86d8d18a697d4ea3ca6966",
+  "violations": [],
+  "producer_report": {
+    "summary": "I added `athena.candidate/2` and made the core write it. Each new candidate now records `base_fingerprint` and `previous_job`. `cargo test --locked`, clippy with warnings denied, and `cargo fmt --all --check` all pass. Docs-only edits came after the test and clippy runs.\\n\\nThe gate's chain landing rule is untouched, so it still refuses a commit that lands more than one job.\\n\\n**Record.** `Candidate` in `records.rs` gains two optional fields, `base_fingerprint` and `previous_job`. `AnyRecord` gets a second variant, `Candidate2`, that shares the struct, and the schema-name table maps it to `athena.candidate/2`.\\n- `/1` records parse and serialize exactly as before, because the new fields are skipped when absent.\\n- `AnyRecord::parse` rejects a `/1` that carries either field.\\n- It also rejects a `/2` that lacks `base_fingerprint`.\\n\\n**Core.** A new `crates/athena-core/src/chain.rs` adds `latest_landed_job`. It walks the base's history, newest first. It returns the job named by the most recent commit that added an `outcome.json` or `outcome-landed.json` with state `landed`. Hand changes and records-only commits add no such outcome, so they are skipped. `run.rs` now sets `base_fingerprint` to `fingerprint(base, base)` and `previous_job` to that lookup, and writes the record as `/2`.\\n\\n**Consumers.** `store.rs` and `jobs.rs` accept both versions. The CLI lifecycle test now expects `Candidate2`, and the gate landing-test fixture got the two new fields. `scoring.rs`, `athena-score` and `athena-git` snapshot needed no change.\\n\\n**Tests.**\\n- `records.rs`: `/2` round-trips with and without `previous_job` (absent, not null), `/1` still parses, and the version/field rules are enforced.\\n- `chain.rs`: previous job absent when no job has landed or when the only outcome is `rejected`, and the latest landed job is found across a hand change and an `outcome-landed.json`.\\n- The CLI lifecycle test asserts `base_fingerprint` matches the base commit's recomputed fingerprint and `previous_job` is absent.\\n\\n**Docs.** `docs/records.md` documents `/2` and both fields. `CHANGELOG.md` has an entry saying the record and core half is done and the gate rule is next. A progress note at the top of the design doc says the same. D69 is not marked implemented, and nothing under `records/` or any governance file changed.",
+    "files": [
+      "crates/athena-data/src/records.rs",
+      "crates/athena-core/src/chain.rs",
+      "crates/athena-core/src/lib.rs",
+      "crates/athena-core/src/run.rs",
+      "crates/athena-core/src/store.rs",
+      "crates/athena-gate/src/jobs.rs",
+      "crates/athena-gate/src/landing_tests.rs",
+      "crates/athena-cli/tests/lifecycle.rs",
+      "docs/records.md",
+      "CHANGELOG.md",
+      "docs/design/squash-chain-landing.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "all crates, including the cli lifecycle and policy tests, after the code changes; docs were edited afterward"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "run before the docs edits"
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "run after all edits"
+      }
+    ],
+    "open_issues": [
+      "The gate does not read base_fingerprint or previous_job yet. The invariant.rs chain rule, the jobs.rs and history chain handling, enforcement.md rows, and marking D69 implemented are the next job.",
+      "When one commit lands several jobs (a squash of a chain), previous_job names the job whose id sorts last. The design does not specify this tie-break. I chose it so a chain's last job is found, and the gate job should confirm it.",
+      "The landed-job lookup walks the base's full history on every job, with one diff per commit. That is fine at today's size but could be slow on a very long history.",
+      "The prediction commit p is passed as both the tree and the rules commit to fingerprint(), per the design (a base is judged by its own rules). The lifecycle test recomputes it the same way and passes. There is no test in which a job lands before another job is based on it; the unit test in chain.rs covers the lookup but not a full two-job run.",
+      "I did not edit docs/design/athena-v0.md. Its line 575 and line 609 still say athena.candidate/1, and the brief did not list that file."
+    ],
+    "mistakes": [
+      "My first chain unit test used AnyRecord::parse on an outcome with null totals, which parse rejects. I fixed it by deserializing with serde_json in the helper.",
+      "I left a debug eprintln in chain.rs briefly, then removed it before the final runs."
+    ],
+    "learnings": [
+      "Candidate is deny_unknown_fields. I used one Candidate struct for both schemas, with two AnyRecord variants (Candidate = /1, Candidate2 = /2) that share it. The two new fields are Option with skip_serializing_if, so /1 serializes byte-for-byte as before. AnyRecord::parse enforces which version may carry which fields.",
+      "AnyRecord::parse refuses a request-job outcome without totals. The core's landed-job lookup therefore reads outcomes with plain serde_json instead of parse, because it needs only state and job.",
+      "Consumers of AnyRecord::Candidate used `_ =>` fallbacks, so they would have silently ignored /2. The compiler would not have caught that. I found them with grep.",
+      "athena-core already depends on athena-git, athena-data and tempfile, so the new unit tests need no new dependencies. The workspace policy test on dependency direction still passes.",
+      "scoring.rs, athena-score/src/lib.rs and athena-git/src/snapshot.rs only use the Candidate type or a SnapshotRepo variant and needed no change."
+    ],
+    "desires": [
+      "A way to grep from Bash for quick filtering of cargo output."
+    ]
+  }
+}

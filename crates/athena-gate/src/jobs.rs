@@ -61,7 +61,7 @@ impl JobFiles {
                 AnyRecord::Correction(c) => files.corrections.push(c),
                 AnyRecord::Job(j) => files.job = Some(*j),
                 AnyRecord::Invocation(i) => files.invocations.push((entry.path, *i)),
-                AnyRecord::Candidate(c) => files.candidate = Some(*c),
+                AnyRecord::Candidate(c) | AnyRecord::Candidate2(c) => files.candidate = Some(*c),
                 AnyRecord::Verification(v) => files.verification = Some(*v),
                 AnyRecord::Outcome(o) if o.after_blocked => files.later_outcome = Some(*o),
                 AnyRecord::Outcome(o) => files.outcome = Some(*o),

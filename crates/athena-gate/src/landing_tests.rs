@@ -168,6 +168,8 @@ fn candidate(fp: &str) -> Candidate {
     Candidate {
         job: job_id(),
         base_commit: "0".repeat(40),
+        base_fingerprint: None,
+        previous_job: None,
         candidate_commit: Some("c".repeat(40)),
         candidate_tree: None,
         changes: vec![],

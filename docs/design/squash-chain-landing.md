@@ -1,8 +1,10 @@
 # Squash-merge landing for a chain of verified jobs
 
-**Status:** proposed (D69). Nothing here is implemented. This change edits documentation only: no Rust code,
-no `athena.toml`, no workflows, no other governance file, and nothing under `records/`. The gate behaves
-exactly as before until the follow-up work below is built and accepted.
+**Status:** proposed (D69). The gate rule here is not implemented. **Progress note:** the record and core half
+of §5 item 1 is built: `athena.candidate/2` exists and the core writes `base_fingerprint` and `previous_job`
+(see `docs/records.md`). The gate's chain rule, the jobs and history changes, and the enforcement map are
+still to build, and the gate behaves exactly as before: it refuses a commit that lands more than one job.
+The text below is the original proposal and is otherwise unchanged.
 
 Claims are marked **(read)** when taken from the code or docs named beside them, and **(inferred)** when they
 follow from reading but were not run. No command was run to reproduce any failure.

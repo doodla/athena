@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- New `athena.candidate/2` record, and the core now writes it: `base_fingerprint` (the fingerprint of the base
+  commit's tree) and `previous_job` (the latest job landed in the base commit's history, absent if none).
+  `athena.candidate/1` still parses. This is the record and core half of the squash-chain landing design
+  (D69); the gate's chain landing rule, the jobs and history changes, and the "implemented" markings are the
+  next job, so the gate still refuses a commit that lands more than one job.
+
 - The squash-chain landing design answers its review 2 (Appendix B): the core derives `previous_job` as the
   latest landed job in the base commit's history, a partly landed chain with one job left is judged by the
   single-job rule and a landed predecessor (even `/1`) is found at the parent, the merge-commit message is
