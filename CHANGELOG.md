@@ -13,6 +13,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   section with that job's request and its final verification's findings (redacted); the new job's own
   request stays as typed. A job that is not rejected, or is unknown, is refused with an error naming it.
 
+- "Try again on <job>" and job references now also carry each failed check's name, command, exit code and
+  output tail (redacted, at most 1 KiB each, the end kept) in the reader's brief, after the findings and
+  reasons, so a retry can see why a check failed.
+
 - A request that names a job by its full id anywhere in its text now shows the reader that job's request and
   final verification findings (redacted, any job state) in a "Referenced jobs" section of the reader's brief.
   At most three jobs are carried, and an id matching no job is ignored. "try again on" is unchanged.

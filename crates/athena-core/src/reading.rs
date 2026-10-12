@@ -1,6 +1,7 @@
 //! `ask` and `correct`: the reader's reading, with forecasts, committed before any work (design §3.2–3.3).
 
 use crate::capability::{JobConfig, ToolGrant};
+use crate::checks::tail;
 use crate::commits::{NewFile, message};
 use crate::invocation::InvocationFacts;
 use crate::store::{JobRecords, JobState, Records};
@@ -830,7 +831,11 @@ fn original_request(records: &Records, job: &JobRecords) -> Option<String> {
     original
 }
 
-/// The job's request and final verification findings and reasons, redacted. `None` without a request.
+/// The most bytes of one failed check's output that are carried; the end of the output is kept.
+const CARRIED_CHECK_OUTPUT_BYTES: usize = 1024;
+
+/// The job's request, final verification findings and reasons, and each failed check's name, command,
+/// exit code and output tail, redacted. `None` without a request.
 fn carry(job: &JobRecords, redactor: &Redactor) -> Result<Option<EarlierAttempt>> {
     let Some(earlier) = &job.request else {
         return Ok(None);
@@ -852,6 +857,17 @@ fn carry(job: &JobRecords, redactor: &Redactor) -> Result<Option<EarlierAttempt>
             .to_string()
         }));
         texts.extend(verification.reasons.iter().map(|r| format!("reason: {r}")));
+        texts.extend(verification.checks.iter().filter(|c| !c.passed).map(|c| {
+            let exit = c.exit_code.map_or("no exit code".to_string(), |code| {
+                format!("exit code {code}")
+            });
+            format!(
+                "failed check {} (`{}`, {exit}), output:\n{}",
+                c.name,
+                c.command.join(" "),
+                tail(&c.output_tail, CARRIED_CHECK_OUTPUT_BYTES)
+            )
+        }));
     }
     redactor.redact_all(&mut texts)?;
     let request = texts.remove(0);
@@ -928,6 +944,94 @@ mod tests {
             Some("20261012-075010-86ja")
         );
         assert_eq!(retry_reference("add a greeting").unwrap(), None);
+    }
+
+    fn check(name: &str, passed: bool, output: &str) -> athena_data::records::CheckRun {
+        athena_data::records::CheckRun {
+            name: name.into(),
+            command: vec!["cargo".into(), name.into()],
+            exit_code: Some(if passed { 0 } else { 101 }),
+            passed,
+            tests_ran: None,
+            duration: athena_data::Quantity::measured(1.0, athena_data::Unit::Seconds, "clock"),
+            output_tail: output.into(),
+            note: None,
+        }
+    }
+
+    fn job_with_checks(checks: Vec<athena_data::records::CheckRun>) -> JobRecords {
+        let id = JobId::parse("20261012-084936-n1p0").unwrap();
+        JobRecords {
+            id: Some(id.clone()),
+            request: Some(athena_data::records::Request {
+                job: id.clone(),
+                text: "add a greeting".into(),
+                received_at: jiff::Timestamp::UNIX_EPOCH,
+                channel: "cli".into(),
+            }),
+            verification: Some(athena_data::records::Verification {
+                job: id,
+                candidate_commit: "0".repeat(40),
+                verified_fingerprint: "0".repeat(64),
+                tool_config_from_base: vec![],
+                checks,
+                check_cleanup: vec![],
+                verifier_invocation: None,
+                criteria: vec![],
+                findings: vec![],
+                request_reading_mismatch: None,
+                agent_verdict: None,
+                final_verdict: athena_data::records::Verdict::Fail,
+                reasons: vec!["a check failed".into()],
+                inputs: vec![],
+                summary: None,
+            }),
+            ..JobRecords::default()
+        }
+    }
+
+    #[test]
+    fn carry_adds_only_failed_checks_after_the_reasons_redacted_and_bounded() {
+        let redactor = Redactor::new(&athena_gate::builtin_config()).unwrap();
+        let token = format!(
+            "{}{}",
+            ["gh", "p_"].concat(),
+            "Zq8rT2vK9mW4xN7bP3cH6jL1sD5fG0aYuE2i"
+        );
+        let noisy = format!("HEAD-NOISE {}TAIL-CANARY", "x".repeat(5000));
+        let job = job_with_checks(vec![
+            check("fmt", true, "PASSING-OUTPUT"),
+            check("test", false, &format!("assertion failed\nkey {token}")),
+            check("clippy", false, &noisy),
+        ]);
+        let carried = carry(&job, &redactor).unwrap().unwrap();
+        assert_eq!(carried.findings.len(), 3, "{:?}", carried.findings);
+        assert_eq!(carried.findings[0], "reason: a check failed");
+        let test = &carried.findings[1];
+        assert!(test.contains("failed check test"), "{test}");
+        assert!(test.contains("cargo test"), "{test}");
+        assert!(test.contains("exit code 101"), "{test}");
+        assert!(test.contains("assertion failed"), "{test}");
+        assert!(!test.contains(&token), "{test}");
+        assert!(test.contains("[secret:github-pat]"), "{test}");
+        let clippy = &carried.findings[2];
+        assert!(clippy.contains("TAIL-CANARY"), "the end is kept");
+        assert!(!clippy.contains("HEAD-NOISE"), "the head is dropped");
+        assert!(clippy.len() < 1300, "{}", clippy.len());
+        assert!(
+            !carried
+                .findings
+                .iter()
+                .any(|f| f.contains("PASSING-OUTPUT"))
+        );
+    }
+
+    #[test]
+    fn carry_without_failed_checks_adds_nothing() {
+        let redactor = Redactor::new(&athena_gate::builtin_config()).unwrap();
+        let job = job_with_checks(vec![check("fmt", true, "PASSING-OUTPUT")]);
+        let carried = carry(&job, &redactor).unwrap().unwrap();
+        assert_eq!(carried.findings, ["reason: a check failed"]);
     }
 
     #[test]

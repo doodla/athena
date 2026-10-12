@@ -296,6 +296,43 @@ fn failing_verdict(canary: &str) -> serde_json::Value {
 }
 
 #[test]
+fn try_again_on_a_job_rejected_by_a_check_carries_the_failed_checks_output() {
+    let config = test_config()
+        .replace(
+            "run = [\"sh\", \"-c\", \"grep -q relaxed",
+            "run = [\"sh\", \"-c\", \"echo PASSING-CANARY; grep -q relaxed",
+        )
+        .replace(
+            "\"test -f README.md &&",
+            "\"test -f README.md || { echo FAILED-CHECK-CANARY; exit 1; }; test -f README.md &&",
+        );
+    let fx = Fixture::with_config(&config);
+    let mut scenario = Scenario::default();
+    scenario.edits = vec![("README.md".into(), None)];
+    let (script, readers) = recording_readers(scenario);
+    let athena = fx.athena(script);
+    let first = athena.ask("remove the readme", &Lines::default()).unwrap();
+    let rejected = finished(
+        athena
+            .go(first.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(rejected.state, OutcomeState::Rejected);
+
+    athena
+        .ask(
+            &format!("try again on {}", first.job.as_str()),
+            &Lines::default(),
+        )
+        .unwrap();
+    let briefs = readers.lock().unwrap();
+    let brief = briefs.last().unwrap();
+    assert!(brief.contains("failed check test"), "{brief}");
+    assert!(brief.contains("FAILED-CHECK-CANARY"), "{brief}");
+    assert!(!brief.contains("PASSING-CANARY"), "{brief}");
+}
+
+#[test]
 fn retrying_a_retry_carries_the_original_request_redacted() {
     let fx = Fixture::new();
     let mut first_scenario = Scenario::default();
