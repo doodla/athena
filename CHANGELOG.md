@@ -23,6 +23,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- Behavior-criterion evidence (D43) now matches a cited command against whole simple commands inside the
+  commands the verifier ran (split on `&&`, `||`, `;`, `|`, outside quotes, whitespace collapsed), so a
+  command run in a chain or piped to `tail` counts as seen (D63). A different argument, filter, or package,
+  or a command never run, is still unseen and leaves the criterion unmet.
+
 - The study capability M1 design (`docs/design/study-capability-m1.md`) now says how to confirm its
   `BRIEF.md` line citations (by quoted passage, with no commit pinned). Citations were re-checked against
   `BRIEF.md`; its cross-references all resolve. No code changed.

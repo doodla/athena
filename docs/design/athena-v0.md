@@ -792,8 +792,10 @@ The verifier judges the artifact, not the producer's account of it (D12):
 **Exercise, mechanically** (D43). The verifier may run, inside its snapshot: `cargo build`, `cargo test`,
 `cargo run`, `cargo clippy`, `cargo fmt --check`, and read-only git (`status`, `diff`, `log`, `show`). The
 allow-list lives in `athena.toml`, read from the base commit. A `behavior` criterion's evidence must list
-the exact commands that exercised it. The core extracts the commands the verifier actually ran from the
-stream of its tool calls, and a `behavior` criterion whose cited commands were not all run counts as
+the commands that exercised it. The core extracts the commands the verifier actually ran from the
+stream of its tool calls. A cited command counts as run when it equals a command the verifier ran, or one
+whole simple command inside a chained or piped one (split on `&&`, `||`, `;`, `|`, outside quotes; D63). A
+`behavior` criterion whose cited commands were not all run counts as
 **unmet**, with a finding added to say so. The capability's checks are necessary but not independent: they
 run tests the producer may have written. The verifier's own commands are its evidence.
 

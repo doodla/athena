@@ -1329,3 +1329,27 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Reversal cost:** Low.
 - **Provenance:** User report on job 20261012-073105-mj6d. Enforced by
   `producer_briefs_say_what_the_verifier_can_see`.
+
+## D63 · Cited commands match whole simple commands inside what the verifier ran
+
+- **Decision:** Amends D43. `judge` in `crates/athena-core/src/verify.rs` splits each command the verifier
+  ran, and each command it cites, into simple commands on `&&`, `||`, `;`, `|`, and newlines, never inside
+  quotes, trims and collapses whitespace outside quotes, and drops a trailing `2>&1`. A cited command is seen when each of its simple
+  commands equals a simple command the verifier ran. A different argument, filter, or package is still
+  unseen, and a command never run still makes a behavior criterion unmet with the finding "cited but not
+  seen running". Trailing filters such as `| tail -n 30` no longer hide the command before them.
+- **Alternatives:** (a) Keep exact whole-string matching and tell verifiers to cite the full line (the
+  prompt already says "exactly as you ran them"). (b) Match by prefix or substring. (c) Accept citations the
+  verifier did not run.
+- **Tradeoff:** (a) keeps failing verifiers that ran the command inside a chain or pipe and cited the piece.
+  (b) would accept `cargo test` as evidence for `cargo test --all`, or text inside a quoted argument. (c)
+  defeats D43. Splitting is a purpose-built splitter, not a shell parser: it can only make more citations
+  seen when their pieces are whole commands that ran, so an unusual quoting form errs toward unseen.
+- **Reversal cost:** Low: one function and its tests.
+- **Provenance:** Jobs 20261012-075010-86ja and 20261012-073105-mj6d were rejected on D43 findings even
+  though the producers' cited test commands (ending in `2>&1`, which the policy allows) were run. The job
+  records are not available to this change, so the cause is inferred from the code: exact whole-string
+  matching fails when the verifier ran the command chained or piped and cited a piece. D62 changed the
+  producer brief and so could not address a matcher on the verifier side. Enforced by
+  `cited_commands_match_whole_simple_commands_inside_what_ran` and
+  `cited_commands_with_other_arguments_or_never_run_stay_unseen`.

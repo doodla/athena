@@ -2,8 +2,9 @@
 //!
 //! The core computes the final verdict. It passes only if the agent says pass, every criterion is met, no
 //! finding is a blocker or major, and every check passed. Each `behavior` criterion must cite at least one
-//! command, and every cited command must be one the core saw the verifier run; otherwise the criterion
-//! counts as unmet, with a finding that says so (D43).
+//! command, and every cited command must be one the core saw the verifier run, either as a whole command or
+//! as one whole simple command inside a chained or piped one; otherwise the criterion counts as unmet, with a
+//! finding that says so (D43, D63).
 //!
 //! [`Verified`] has private fields and is constructed only here, only for a pass, so `land()` cannot be
 //! called with anything unverified.
@@ -94,6 +95,72 @@ fn athena_finding(severity: Severity, summary: String, evidence: String) -> Find
     }
 }
 
+/// Splits a command line into its whole simple commands on `&&`, `||`, `;`, `|`, and newlines, never inside
+/// quotes. A lone `&` (as in `2>&1`) is not a separator, and a trailing `2>&1` is dropped. Whitespace outside
+/// quotes is trimmed and collapsed.
+fn simple_commands(line: &str) -> Vec<String> {
+    let chars: Vec<char> = line.chars().collect();
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    let mut i = 0;
+    let mut flush = |cur: &mut String| {
+        let piece = cur.trim();
+        // Merging stderr into stdout changes no argument, so `cmd 2>&1` and `cmd` are the same command.
+        let piece = piece
+            .strip_suffix(" 2>&1")
+            .map_or(piece, |rest| rest.trim_end());
+        if !piece.is_empty() {
+            out.push(piece.to_string());
+        }
+        cur.clear();
+    };
+    while i < chars.len() {
+        let c = chars[i];
+        match quote {
+            Some(q) => {
+                cur.push(c);
+                if c == '\\' && q == '"' && i + 1 < chars.len() {
+                    i += 1;
+                    cur.push(chars[i]);
+                } else if c == q {
+                    quote = None;
+                }
+            }
+            None => match c {
+                '\'' | '"' => {
+                    quote = Some(c);
+                    cur.push(c);
+                }
+                '\\' if i + 1 < chars.len() => {
+                    cur.push(c);
+                    i += 1;
+                    cur.push(chars[i]);
+                }
+                ';' | '\n' | '|' => {
+                    if c == '|' && chars.get(i + 1) == Some(&'|') {
+                        i += 1;
+                    }
+                    flush(&mut cur);
+                }
+                '&' if chars.get(i + 1) == Some(&'&') => {
+                    i += 1;
+                    flush(&mut cur);
+                }
+                c if c.is_whitespace() => {
+                    if !cur.is_empty() && !cur.ends_with(' ') {
+                        cur.push(' ');
+                    }
+                }
+                _ => cur.push(c),
+            },
+        }
+        i += 1;
+    }
+    flush(&mut cur);
+    out
+}
+
 /// Computes the final verdict.
 pub fn judge(inputs: &VerdictInputs<'_>) -> Judgment {
     let mut findings = Vec::new();
@@ -101,7 +168,7 @@ pub fn judge(inputs: &VerdictInputs<'_>) -> Judgment {
     let ran: Vec<String> = inputs
         .commands_run
         .iter()
-        .map(|c| c.trim().to_string())
+        .flat_map(|c| simple_commands(c))
         .collect();
 
     for check in inputs.checks.iter().filter(|c| !c.passed) {
@@ -145,7 +212,13 @@ pub fn judge(inputs: &VerdictInputs<'_>) -> Judgment {
             .iter()
             .map(|c| c.trim().to_string())
             .collect();
-        let unseen: Vec<&String> = commands.iter().filter(|c| !ran.contains(c)).collect();
+        let unseen: Vec<&String> = commands
+            .iter()
+            .filter(|c| {
+                let pieces = simple_commands(c);
+                pieces.is_empty() || !pieces.iter().all(|p| ran.contains(p))
+            })
+            .collect();
         let commands_verified = match criterion.kind {
             CriterionKind::Behavior => !commands.is_empty() && unseen.is_empty(),
             CriterionKind::Content => unseen.is_empty(),
@@ -337,6 +410,64 @@ mod tests {
             verified(&j, "b", "c", "sha256:x").is_none(),
             "only a pass constructs Verified"
         );
+    }
+
+    fn passes_when_ran(cited: &str, ran: &str) -> bool {
+        let j = judge_with(
+            &output(vec![cited], vec![]),
+            &[ran.to_string()],
+            &[check(true)],
+        );
+        j.criteria[1].commands_verified && j.criteria[1].met
+    }
+
+    #[test]
+    fn cited_commands_match_whole_simple_commands_inside_what_ran() {
+        let t = "cargo test --locked -p athena-core verify";
+        assert!(passes_when_ran(t, t), "run alone");
+        assert!(
+            passes_when_ran(t, &format!("cargo build && {t}")),
+            "after &&"
+        );
+        assert!(
+            passes_when_ran(t, &format!("{t} 2>&1 | tail -n 30")),
+            "piped to tail"
+        );
+        assert!(
+            passes_when_ran(&format!("{t} 2>&1"), &format!("{t} 2>&1 | tail -n 30")),
+            "cited with its redirect"
+        );
+        assert!(
+            passes_when_ran(t, &format!("a; b || {t}")),
+            "after ; and ||"
+        );
+        assert!(
+            passes_when_ran("cargo  test   --locked", "  cargo test --locked  "),
+            "extra whitespace"
+        );
+    }
+
+    #[test]
+    fn cited_commands_with_other_arguments_or_never_run_stay_unseen() {
+        let ran = "cargo test --locked -p athena-core verify && cargo fmt --check";
+        assert!(!passes_when_ran(
+            "cargo test --locked -p athena-core other",
+            ran
+        ));
+        assert!(!passes_when_ran(
+            "cargo test --locked -p athena-agent verify",
+            ran
+        ));
+        assert!(!passes_when_ran("cargo clippy", ran), "never run");
+        assert!(
+            !passes_when_ran("cargo test --locked", ran),
+            "a prefix is not a command"
+        );
+        assert!(
+            !passes_when_ran("echo b", "echo 'a && echo b'"),
+            "never matches inside quotes"
+        );
+        assert!(!passes_when_ran("", ran), "an empty citation");
     }
 
     #[test]
