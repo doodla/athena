@@ -129,6 +129,8 @@ impl Fixture {
             },
             athena_bin: PathBuf::from("/bin/false"),
             nested: None,
+            // Tests never reach the network: this pinner only counts calls.
+            pinner: Box::new(athena_core::fake::CountingPinner::new(&"a".repeat(40))),
         }
     }
 

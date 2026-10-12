@@ -2,7 +2,7 @@
 //!
 //! This crate is the reusable validation core: the typed study records ([`records`], [`model`]) and the
 //! validation rules of design §5.4 ([`rules`]), plus the [`Capability`] impl with its prompts. It does not
-//! run any studied system, and it is not registered in the CLI wiring. Containment, the run step, replay,
+//! run any studied system. It is registered in the CLI wiring, so the reader can pick `study`. Containment, the run step, replay,
 //! and publishing are later jobs (see D65 in `docs/decisions.md`).
 
 pub mod model;
@@ -47,9 +47,9 @@ impl Capability for Study {
     fn card(&self) -> CapabilityCard {
         CapabilityCard {
             id: ID,
-            purpose: "study how an orchestration system works at one pinned commit, as claims that cite their sources and a work-handling model that code validates.",
-            when: "for a request to study, model, or explain a system's design or behavior from its repository.",
-            produces: "a validated study of typed records, or a rejection with the verifier's findings.",
+            purpose: "study how a system works at one pinned commit, as cited claims and a model that code validates.",
+            when: "for a request to study, model, or explain a system's design from its repository.",
+            produces: "a validated study of typed records, or a rejection with findings.",
         }
     }
 
@@ -102,6 +102,10 @@ impl Capability for Study {
 
     fn env(&self, config: &JobConfig) -> BTreeMap<String, String> {
         section(config).map(|c| c.env.clone()).unwrap_or_default()
+    }
+
+    fn pins_repo(&self) -> bool {
+        true
     }
 
     fn admit(&self, change: &ChangeList, _config: &JobConfig) -> Vec<PolicyViolation> {
@@ -157,14 +161,25 @@ mod tests {
     }
 
     #[test]
-    fn the_verifier_never_writes_and_nothing_is_configured_yet() {
+    fn the_verifier_never_writes_and_grants_and_checks_come_from_the_config() {
         let jc = job_config();
         assert!(!Study.verifier_grant(&jc).writes);
         assert!(Study.producer_grant(&jc).writes);
-        // The capability is not in athena.toml, so no checks or commands come from it.
-        assert!(jc.config.capability(ID).is_none());
-        assert!(Study.checks(&jc).is_empty());
-        assert!(Study.producer_grant(&jc).commands.is_empty());
+        // The capability is configured in athena.toml, and its grants and checks come from there.
+        let section = jc.config.capability(ID).expect("[capabilities.study]");
+        assert_eq!(
+            Study.producer_grant(&jc).commands,
+            section.producer_commands
+        );
+        assert_eq!(
+            Study.verifier_grant(&jc).commands,
+            section.verifier_commands
+        );
+        assert!(!section.producer_commands.is_empty());
+        assert!(!section.verifier_commands.is_empty());
+        let names: Vec<String> = Study.checks(&jc).into_iter().map(|c| c.name).collect();
+        assert_eq!(names, ["fmt", "clippy", "test"]);
+        assert_eq!(Study.env(&jc), section.env);
     }
 
     #[test]

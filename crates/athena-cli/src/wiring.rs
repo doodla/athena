@@ -9,6 +9,7 @@ use athena_agent::{
 };
 use athena_core::Athena;
 use athena_core::capability::Capability;
+use athena_core::pin::GitPinner;
 use athena_core::state::StateDir;
 use athena_data::records::{Build, DriverInfo};
 use athena_git::Git;
@@ -17,7 +18,24 @@ use std::sync::OnceLock;
 
 /// Every capability this build registers. Adding a kind of work means adding it here.
 pub fn capabilities() -> Vec<Box<dyn Capability>> {
-    vec![Box::new(athena_cap_change::Change)]
+    vec![
+        Box::new(athena_cap_change::Change),
+        Box::new(athena_cap_study::Study),
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registered_capabilities_include_change_and_study_without_duplicates() {
+        let ids: Vec<&str> = capabilities().iter().map(|c| c.id()).collect();
+        assert!(ids.contains(&"change"), "{ids:?}");
+        assert!(ids.contains(&"study"), "{ids:?}");
+        let unique: std::collections::BTreeSet<&&str> = ids.iter().collect();
+        assert_eq!(unique.len(), ids.len(), "duplicate ids: {ids:?}");
+    }
 }
 
 /// The running binary's version and source commit, embedded at build time (D45). A build that names no
@@ -123,6 +141,7 @@ pub fn open(cwd: &Path, writes: bool, announce: &dyn Fn(&str)) -> Result<Athena>
             build,
             athena_bin,
             nested: Some(outer),
+            pinner: Box::new(GitPinner),
         });
     }
     let state = StateDir::for_repository(&user.common_dir()?);
@@ -143,5 +162,6 @@ pub fn open(cwd: &Path, writes: bool, announce: &dyn Fn(&str)) -> Result<Athena>
         build,
         athena_bin,
         nested: nested_marker(),
+        pinner: Box::new(GitPinner),
     })
 }

@@ -81,6 +81,12 @@ pub struct CapabilityConfig {
     pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub checks: Vec<CheckConfig>,
+    /// For a capability that studies a repository: the URL the core pins before dispatch.
+    #[serde(default)]
+    pub repo_url: Option<String>,
+    /// For a capability that studies a repository: the branch, tag, or commit of `repo_url` to pin.
+    #[serde(default)]
+    pub repo_ref: Option<String>,
 }
 
 /// A deterministic check the core runs on the candidate.

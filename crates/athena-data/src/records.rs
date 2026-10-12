@@ -478,6 +478,20 @@ pub struct Job {
     pub cost: Option<Quantity>,
     pub tokens: Option<Quantity>,
     pub note: Option<String>,
+    /// The repository a study job reads, pinned by the core before dispatch. Absent for other work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin: Option<PinnedRepo>,
+}
+
+/// A repository ref resolved by the core to one commit: the URL and ref the configuration named, and the
+/// full 40-hex commit id they resolved to when the job was dispatched.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PinnedRepo {
+    pub url: String,
+    #[serde(rename = "ref")]
+    pub git_ref: String,
+    pub sha: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1297,6 +1311,7 @@ mod tests {
                 "resolved later from measured usage",
             )),
             note: None,
+            pin: None,
         };
         let record = AnyRecord::Job(Box::new(job));
         assert_eq!(record.canonical_path(), "records/jobs/bootstrap/job.json");

@@ -1644,3 +1644,41 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Provenance:** Cause found by reading `closing_jobs` and `chain_problem`; reproduced by the new tests in
   `landing_tests.rs` (a rejected job, its landed retry and a follow-up). Detail in
   `docs/design/squash-chain-landing.md` §4.6.
+
+## D75 · The core pins a study's repository ref to a commit, and mounts the tree read-only
+
+- **Decision:** A study reads a system "at one pinned commit", so the core, not an agent, picks it. The
+  `Capability` trait gains `pins_repo` (false by default; the study capability returns true). In `athena go`,
+  after the budget check and before the prediction commit, a pinning capability's `repo_url` and `repo_ref`
+  are read from its `[capabilities.<id>]` section of `athena.toml` at the base commit, and `Athena.pinner`
+  (a `Pinner`) resolves them to a full 40-hex commit id and checks the tree out under the job's directory.
+  A capability that pins but has no `repo_url` and `repo_ref`, a URL that carries credentials, a ref that
+  does not resolve, or a pinner answer that is not 40-hex stops `go` with an error before anything is
+  committed. The URL, ref and commit id go into the new optional `pin` field of the job record, which is
+  committed with the prediction; other jobs have no `pin`. The real `GitPinner` shells out to `git`
+  (`ls-remote`, a depth-1 fetch of the commit, `read-tree` and `checkout-index`), so no git library is
+  added. Before each agent runs, the tree is copied to `pinned-source/` in the producer's and the verifier's
+  working directories. Read-only is enforced by file permissions: every file and directory loses its write
+  bits, so a process that honors them cannot edit, add or remove anything in the mount. The agents' own
+  policy forbids writing there. It is not an operating-system mount, and a process with the owner's rights
+  could still `chmod` it. The mount is listed in the snapshot repository's `info/exclude`, so it never
+  appears in a candidate's change list. Removing a job's directories first restores write access
+  (`pin::remove_tree`). The repository is named only in configuration; no Rust source names one.
+- **Alternatives:** (a) Let the study producer run `git ls-remote` itself: the pin would be an agent's
+  claim, not the core's, and the verifier could not rely on it. (b) A git library: a large dependency for
+  two commands. (c) A bind or overlay mount: needs privileges and is not portable; permissions are enough
+  for the policy-abiding agents this guards against. (d) Pin in the reader or in the prediction commit's
+  text: the record field is typed and checked. (e) Pin for every capability: the change capability works on
+  the user's own repository, which `base_commit` already pins.
+- **Tradeoff:** Each study copies the tree twice (once per agent). The record format gains a field, which
+  older readers of `athena.job/1` with `deny_unknown_fields` reject, though jobs without a pin serialize
+  exactly as before. A pin failure (network, a missing ref) stops the job at `go`, leaving it proposed to
+  retry.
+- **Reversal cost:** Low to moderate. Remove the `pins_repo` call and `pin.rs`, the `Athena.pinner` field and
+  the config keys. Job records already written keep their `pin` field, which would then need to stay
+  accepted by the parser.
+- **Provenance:** Inferred from the study capability's design (`docs/design/study-capability-m1.md`) and
+  the code read in `run.rs`. Enforced by the dispatch tests in `run_pin_tests.rs` (one call, the commit in
+  the job record, the read-only mount seen by both agents, no call without a configured repository), the
+  change capability's test in `lifecycle.rs` (no call, no pin), and the real pinner's tests in `pin.rs`
+  (local `file://` repositories, no network).

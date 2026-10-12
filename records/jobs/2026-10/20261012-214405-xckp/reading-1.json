@@ -1,0 +1,213 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261012-214405-xckp",
+  "n": 1,
+  "at": "2026-10-12T21:44:42.289916743Z",
+  "invocation_seq": 1,
+  "base_commit": "331c90e4c115790bc56ded1fa91b2814748187cf",
+  "config_sha256": "66e5831b215d803b1acb9ff2013a15774103e9102ccf6d8fa545dde93fede09f",
+  "defaults_sha256": "34395568ed0684d5b19642d761d9d16e023f3263e4313e645b083d31b302e9bc",
+  "defaults_version": 1,
+  "title": "Make study fetch firstmate at a pinned SHA, readable by its agents",
+  "summary": "Study is already registered in the CLI wiring, so the remaining work is fetching firstmate at a pinned SHA. Add a core hook that runs at study job start, pins the source, and puts the tree inside the agents' confined, read-only working area. Cover the dispatch call with a test, and fix the retry's two findings: the unreadable source and the missing hook test.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "lazy-requests",
+      "how": "Recovered the pin location, the earlier blocker and the hook design from the repository and the rejection findings instead of asking for them."
+    },
+    {
+      "id": "mechanism",
+      "how": "A dispatch test enforces the hook call. The pin check errors on any SHA mismatch."
+    },
+    {
+      "id": "tested",
+      "how": "New tests for the hook at dispatch, the pin, and agent read access. Clippy and fmt stay clean."
+    },
+    {
+      "id": "small",
+      "how": "One focused change: the hook, the pin, and its config."
+    },
+    {
+      "id": "buy-first",
+      "how": "Use the existing athena-git wrapper and system git to fetch. No new fetch crate."
+    },
+    {
+      "id": "public",
+      "how": "Only a public repository URL and a SHA go into config."
+    }
+  ],
+  "assumptions": [
+    "Wiring already registers Study (crates/athena-cli/src/wiring.rs:22), so the reader's catalog should list it. The job only verifies that and does not rebuild it.",
+    "No pinned firstmate SHA is in the repository, so the SHA and URL go in athena.toml under [capabilities.study]. The producer must not invent a SHA, and the config value is the single source of truth.",
+    "Fetching runs in Athena's own process (git clone or fetch plus checkout of the exact SHA). Agents keep no network access.",
+    "The pinned tree is exposed to the producer and verifier inside their snapshot directory as a read-only path that is excluded from the candidate change list. This fixes the earlier blocker: the source sat at <job_dir>/source, outside the policy root.",
+    "The fetch is skipped or fails clearly when the pin is missing or the clone is unreachable. Tests use a local git repository as the source and never touch the network.",
+    "The study capability's cargo grants use offline mode (CARGO_NET_OFFLINE or --offline) if cargo is granted at all."
+  ],
+  "question": "What is the firstmate commit SHA to pin (the repository is https://github.com/kunchenguid/firstmate)? If you don't answer, the producer takes the SHA from a config value you supply later, and the job cannot choose one itself.",
+  "acceptance_criteria": [
+    {
+      "text": "athena_core::capability::Capability gains a default no-op job-start hook that returns a brief note and extra env. Study overrides it to pin its configured source. Change keeps the default behavior.",
+      "kind": "content"
+    },
+    {
+      "text": "run.rs calls the hook at job start, before the producer runs. The note appears in the producer and verifier briefs, and the env reaches the agents.",
+      "kind": "content"
+    },
+    {
+      "text": "The pinned source tree is materialized inside each agent's confined working directory (producer snapshot and verifier snapshot), read-only, and excluded from the candidate change list and admission. The path the brief names resolves inside the policy root.",
+      "kind": "content"
+    },
+    {
+      "text": "athena.toml gains a [capabilities.study] section with the firstmate URL and a full 40-hex pinned SHA, plus grants, and it is named in this criterion. Study cargo grants run offline.",
+      "kind": "content"
+    },
+    {
+      "text": "The study fetch verifies that the checked-out HEAD equals the pinned SHA and errors otherwise. A malformed or missing pin gives a clear error.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo test`. A dispatch-level test with a fake capability (in crates/athena-cli/tests/lifecycle.rs or athena-core tests) shows the hook ran, its note reached the brief and its env reached the agents. It fails if the run.rs call is removed.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`. A study test builds a local git repository, pins its SHA, and shows the tree is readable through the agent path policy (Read, Grep and Glob accepted) and absent from the change list.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test` and the reader catalog test. The catalog rendered for the reader lists both change and study, and the reader schema's capability enum includes study.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test`. All pass.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/capability.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-cap-study/src/lib.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-cap-study/Cargo.toml",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "athena.toml",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-agent/src/policy.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-cap-study/prompts/producer.md",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-cap-study/prompts/verifier.md",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-git/src/snapshot.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "Cargo.lock",
+      "action": "modify",
+      "p": 0.25
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.4
+    }
+  ],
+  "out_of_scope": [
+    "Studying firstmate, or any claim about what firstmate does.",
+    "Running firstmate, containment, replay, or publishing.",
+    "Hermes Agent or Athena itself as study sources.",
+    "Giving agents network access.",
+    "Changes to the change capability's behavior."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.6,
+      "p_verification_passes": 0.5,
+      "p_user_intervenes": 0.25,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.2,
+        "p90": 2.6
+      },
+      "wall_time_s": {
+        "p10": 420.0,
+        "p50": 800.0,
+        "p90": 1300.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.6950000000000001,
+      "p_verification_passes": 0.6896551724137931,
+      "p_user_intervenes": 0.13103448275862067,
+      "cost_usd": {
+        "p10": 0.3632530157475672,
+        "p50": 0.7301076,
+        "p90": 1.6469881970815277
+      },
+      "wall_time_s": {
+        "p10": 395.9230904774065,
+        "p50": 564.5772999060001,
+        "p90": 750.6287367075669
+      }
+    }
+  },
+  "departures": "Larger than the reference: it touches the core, the agent path policy, and config, and the previous attempt was rejected on a blocker. Cost, time and the verification pass rate are all set worse than the reference."
+}

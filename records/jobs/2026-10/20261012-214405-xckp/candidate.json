@@ -1,0 +1,184 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261012-214405-xckp",
+  "base_commit": "655a41c45d0d161898c9ebab69832664cb1dfe59",
+  "base_fingerprint": "sha256:77f371e2369611f37774f9fecb8822c8afc1b572f1bce452be69a8379d0f538b",
+  "previous_job": "20261012-210319-g0a1",
+  "candidate_commit": "3b2f8319ae5122fffd714d7f6dddf6a0ffc8920f",
+  "candidate_tree": "0b73b144736b969bb7e14893950e03387847d13f",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 13712
+    },
+    {
+      "path": "Cargo.lock",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 23833
+    },
+    {
+      "path": "athena.toml",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 6969
+    },
+    {
+      "path": "crates/athena-agent/src/policy.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 36522
+    },
+    {
+      "path": "crates/athena-cap-study/Cargo.toml",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 609
+    },
+    {
+      "path": "crates/athena-cap-study/prompts/producer.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 1003
+    },
+    {
+      "path": "crates/athena-cap-study/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 16573
+    },
+    {
+      "path": "crates/athena-cap-study/src/source.rs",
+      "status": "added",
+      "mode": "100644",
+      "bytes": 4349
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 63436
+    },
+    {
+      "path": "crates/athena-cli/tests/live.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 8109
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 32612
+    },
+    {
+      "path": "crates/athena-core/src/capability.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 5810
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 43656
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 60581
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 14654
+    },
+    {
+      "path": "crates/athena-git/src/snapshot.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 16170
+    },
+    {
+      "path": "docs/architecture.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 6133
+    },
+    {
+      "path": "docs/decisions.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 108807
+    }
+  ],
+  "fingerprint": "sha256:4f753678da02206009c23d660e24a90ae65509d738d82e87321a16aaaf00c6fa",
+  "violations": [],
+  "producer_report": {
+    "summary": "Study now pins firstmate's main to a full SHA at job start and gives both agents the pinned tree, read-only. fmt --check, clippy -D warnings and `cargo test --locked` all pass.\n\n- **Hook:** `Capability::on_job_start(&JobStart) -> Result<StartOutcome>` is new, with a no-op default. `StartOutcome` holds a note, extra env and read-only mounts. `change` keeps the default; `Study` overrides it.\n- **Dispatch:** `run.rs` calls the hook before the producer brief is written. An error stops dispatch and the job stays proposed. The note goes into the producer and verifier briefs under \"Job start\". The env is merged into the agent and check env. Each mount is copied into the producer snapshot and the verifier snapshot.\n- **Study fetch:** `athena-cap-study/src/source.rs` runs `git ls-remote` and requires exactly one full 40-hex answer. It then clones the branch, runs `checkout --detach <sha>`, and checks that HEAD equals the SHA. A missing url or branch, a failed resolution or a mismatch each gives a clear error. The SHA is recorded in the note (so in the committed `brief-producer.md`) and in `ATHENA_STUDY_SOURCE_SHA`.\n- **Mount:** `Snapshot::mount_read_only` copies the tree to `pinned-source/` inside the snapshot, skipping `.git`. It makes the files 0o444 and adds the path to the snapshot's `.git/info/exclude`, so the mount never shows up in the change list or admission. `Policy.read_only` (new) makes Edit, Write, and Bash `rm`/`mv`/`chmod`/redirects refuse writes there. Read, Grep and Glob accept it.\n- **Config:** `athena.toml` gains `[capabilities.study]` with `source_url` (firstmate), `source_branch = \"main\"`, cargo grants without `run`, and `CARGO_NET_OFFLINE=true` in its env. No SHA is stored.\n- **Tests added:**\n  - Dispatch: `the_job_start_hook_runs_before_the_producer_and_reaches_both_agents` uses a fake capability. It asserts the hook ran once before the producer, the note is in both agents' prompts and in the recorded brief, the env reached both, the mount was visible to both, and the candidate change list is only README.md. It fails if the `run.rs` call is removed.\n  - Catalog: `the_reader_is_offered_change_and_study` checks the catalog and the schema enum.\n  - Study (in `athena-cap-study`): the local-repo resolve/checkout/mismatch test, the missing-config and failed-resolution test, and the policy test (Read, Grep, Glob accepted; Write refused; mount absent from the change list).\n  - Policy: `read_only_paths_can_be_read_but_not_written`.\n  - Brief: a note-rendering assertion in `briefs.rs`.\n- **Docs:** D75 in `docs/decisions.md`, a CHANGELOG entry, the study producer prompt, and the `docs/architecture.md` dependency row (see below).",
+    "files": [
+      "athena.toml",
+      "Cargo.lock",
+      "CHANGELOG.md",
+      "docs/decisions.md",
+      "docs/architecture.md",
+      "crates/athena-core/src/capability.rs",
+      "crates/athena-core/src/run.rs",
+      "crates/athena-core/src/reading.rs",
+      "crates/athena-cap-study/Cargo.toml",
+      "crates/athena-cap-study/src/lib.rs",
+      "crates/athena-cap-study/src/source.rs",
+      "crates/athena-cap-study/prompts/producer.md",
+      "crates/athena-cli/tests/lifecycle.rs",
+      "crates/athena-cli/tests/live.rs",
+      "crates/athena-agent/src/policy.rs",
+      "crates/athena-git/src/snapshot.rs",
+      "crates/athena-context/src/briefs.rs",
+      "crates/athena-data/src/config.rs"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "All tests pass: 33 lifecycle tests including the two new ones, the study tests, the policy test, the budgets test and the xtask policy tests. The live tests are ignored by design."
+      }
+    ],
+    "open_issues": [
+      "Deliverables beyond the brief's list: `athena-data/src/config.rs` (new `source_url` and `source_branch` fields), `athena-git/src/snapshot.rs` (`mount_read_only`), `athena-context/src/briefs.rs` (`start_note` and the \"Job start\" section), `docs/architecture.md` (cap-study → git edge, required by the M21 test), `Cargo.lock` and `tests/live.rs` (one added field). None of these were in the expected list; each is required by the change.",
+      "The real clone from github.com was not run, because there is no network here. Resolution, checkout and the HEAD check are tested against a local repository, so the GitHub path is only exercised by the same code.",
+      "The clone is full-history for one branch, so it can be slow and large for a big repository. Fetching by SHA with a shallow clone was rejected, because the branch can move between resolve and fetch.",
+      "Mounted files are read-only by mode (0o444) and by policy. The directories stay writable so the snapshot can still be removed.",
+      "Study has no `[[capabilities.study.checks]]`, so a study job runs no deterministic checks. The study run step, containment and publishing remain out of scope, as the brief says."
+    ],
+    "mistakes": [
+      "I first appended a long sentence to the study producer prompt. That pushed the producer set to about 1165 tokens against a 1100 budget, and `cargo test` failed. I shortened it and trimmed other lines so the net change is below zero.",
+      "I tried grep and cat through Bash, which the policy denied. I switched to the Read, Grep and Glob tools."
+    ],
+    "learnings": [
+      "The `test_config()` fixture in `crates/athena-cli/tests/common/mod.rs` replaces everything between the first `[[capabilities.change.checks]]` and `[classes]` in athena.toml. `[capabilities.study]` sits in that range, so lifecycle fixtures drop it. The catalog test builds its fixture from the full athena.toml instead.",
+      "The reader catalog and schema enum only include capabilities that have a section in athena.toml, so adding `[capabilities.study]` is what makes the reader offer study.",
+      "`CapabilityConfig` uses `deny_unknown_fields`, so the url and branch needed new fields in `athena-data/src/config.rs`.",
+      "The study producer prompt sits exactly at the 1100-token budget in `crates/athena-cli/tests/budgets.rs`. Any addition to it must be paid for with removals, which I did.",
+      "xtask's M21 test requires every normal dependency edge between Athena crates to be listed in `docs/architecture.md`, so a new athena-git dependency in cap-study needs that doc edit.",
+      "Snapshot change lists come from `git add -A` in a temp index, which honors `.git/info/exclude`. That is why excluding a mount there removes it from the change list and from admission."
+    ],
+    "desires": [
+      "A way to run the lifecycle and live-clone path against a real GitHub URL with network access.",
+      "A listed fixture helper for building a throwaway origin repo, so each crate need not write its own `git()` helper."
+    ]
+  }
+}

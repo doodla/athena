@@ -98,4 +98,9 @@ pub trait Capability: Send + Sync {
     fn env(&self, config: &JobConfig) -> BTreeMap<String, String>;
     /// Capability-specific admission policy on the change list, beyond the core's own.
     fn admit(&self, change: &ChangeList, config: &JobConfig) -> Vec<PolicyViolation>;
+    /// Whether the core must pin a repository, from this capability's `repo_url` and `repo_ref`, before
+    /// dispatch and mount it read-only for both agents. Only a study does.
+    fn pins_repo(&self) -> bool {
+        false
+    }
 }

@@ -111,7 +111,8 @@ impl StateDir {
 
     /// Removes a closed job's snapshots and build directories, keeping nothing that matters.
     pub fn clean_job(&self, job: &JobId) {
-        let _ = std::fs::remove_dir_all(self.job_dir(job));
+        // A study's pinned mounts are read-only, so removal first restores write access.
+        let _ = crate::pin::remove_tree(&self.job_dir(job));
     }
 }
 

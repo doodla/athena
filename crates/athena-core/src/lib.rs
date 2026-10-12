@@ -14,19 +14,24 @@
 //! - [`admission`], [`toolconfig`], [`checks`], [`verify`], [`land`]: the verification protocol;
 //! - [`scoring`]: forecasts resolved and scored;
 //! - [`status`]: the state of the work, from the repository alone;
-//! - [`nested`]: Athena running inside one of its own jobs.
+//! - [`nested`]: Athena running inside one of its own jobs;
+//! - [`pin`]: a study's repository ref resolved to a commit by the core, and mounted read-only.
 
 pub mod admission;
 pub mod capability;
 pub mod chain;
 pub mod checks;
 pub mod commits;
+pub mod fake;
 pub mod invocation;
 pub mod land;
 pub mod manage;
 pub mod nested;
+pub mod pin;
 pub mod reading;
 pub mod run;
+#[cfg(test)]
+mod run_pin_tests;
 pub mod scoring;
 pub mod state;
 pub mod status;
@@ -67,6 +72,8 @@ pub struct Athena {
     pub athena_bin: PathBuf,
     /// Set in a nested run: the outer job's id.
     pub nested: Option<String>,
+    /// Resolves and checks out a study's repository ref; only capabilities that pin ever call it.
+    pub pinner: Box<dyn pin::Pinner>,
 }
 
 impl std::fmt::Debug for Athena {

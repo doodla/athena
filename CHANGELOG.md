@@ -7,6 +7,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- A study job's repository is pinned by the core (D75). Before the prediction commit, `athena go` resolves
+  the `repo_url` and `repo_ref` in `[capabilities.study]` to a full commit id through a `Pinner` (the real one
+  uses `git`), records URL, ref and commit in a new optional `pin` field of the job record, and mounts the
+  tree read-only (file permissions) at `pinned-source/` for the producer and the verifier. The change
+  capability never pins. `athena.toml` gains the two keys as a commented example; set them to run a study.
+- The study capability is registered in the `athena` binary, so the reader can pick `study` and the core can
+  run it. Containment, the run step and publishing are not built.
+- `athena.toml` gains a `[capabilities.study]` section with the same commands, environment and checks (fmt,
+  clippy, test) as the change capability, so a study job's grants and gates come from configuration. This is a
+  governance file change; the section governs later jobs only.
+
 ### Fixed
 
 - The squash check forms its chain from landed jobs only (D74). A rejected job whose records shipped in the

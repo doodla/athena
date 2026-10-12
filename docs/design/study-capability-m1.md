@@ -5,7 +5,7 @@
 > to the user are settled in the text and recorded as D64 in [`docs/decisions.md`](../decisions.md). The
 > revision was re-checked in [review 2](reviews/study-capability-m1-review-2.md) (approve with named changes:
 > three minor findings and a nit, to be answered before building; see [§9](#9-review-gate)). **Partly built.** The validation core (records, model, the §5.4 rules, and the `Capability` impl) is the
-> crate `athena-cap-study`, with review 2's three changes applied here (D65). Containment, the run step, replay, and
+> crate `athena-cap-study`, with review 2's three changes applied here (D65). The capability is registered in the CLI, with no configured checks. Containment, the run step, replay, and
 > Pages publishing are not built.
 > **Requirements source:** [`BRIEF.md`](../../BRIEF.md). Line numbers below refer to the `BRIEF.md`
 > in the same tree as this document, not to a commit. To confirm them, open `BRIEF.md` at the cited line:

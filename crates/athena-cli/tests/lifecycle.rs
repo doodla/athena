@@ -26,6 +26,28 @@ fn record_at(fx: &Fixture, rev: &str, path: &str) -> Option<AnyRecord> {
 }
 
 #[test]
+fn the_change_capability_never_pins() {
+    // A change job reads no studied repository: the pinner is never called and the job record has no pin.
+    let fx = Fixture::new();
+    let mut athena = fx.athena(Scenario::default().script());
+    let pinner = athena_core::fake::CountingPinner::new(&"b".repeat(40));
+    athena.pinner = Box::new(pinner.clone());
+    let ui = Lines::default();
+    let proposal = athena.ask("add a greeting to the readme", &ui).unwrap();
+    let f = finished(
+        athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &ui)
+            .unwrap(),
+    );
+    assert_eq!(f.state, OutcomeState::Landed, "{}", f.reason);
+    assert_eq!(pinner.count(), 0, "the change capability never pins");
+    match record_at(&fx, "HEAD", &format!("{}/job.json", proposal.job.dir())) {
+        Some(AnyRecord::Job(job)) => assert_eq!(job.pin, None),
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[test]
 fn a_request_lands_a_traceable_commit() {
     // M6/M7 (allows): a landing commit; a verified candidate lands. M11: a whole fake job leaves the
     // user's .git/config byte-identical. M14 (allows): completed invocations record measured usage.
