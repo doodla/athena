@@ -125,6 +125,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   choice of option (a) in D66, recorded as D67. Its content skips the invariant; its jobs' records still get
   the per-record checks. Stopping multi-job squashes (option c) is not yet adopted.
 
+- `[history] exempt` in `athena.toml` now excuses f2a8453, the squash of PR #9, so the history check no longer
+  judges that commit. Most of PR #9's jobs predate `athena.candidate/2`, so the chain landing rule (D69)
+  cannot link them. Recorded as D70, following D67 and D68.
+
 ## [0.1.0]
 
 The first version: the v0 walking skeleton. It takes one request, runs one job through a sub-agent,
