@@ -2,9 +2,9 @@
 
 > **Status:** revised after [review 1](reviews/study-capability-m1-review-1.md) (approve with changes). Every
 > finding is answered in [Appendix A](#appendix-a-response-to-review-1), and the eight decisions the review put
-> to the user are settled in the text and recorded as D64 in [`docs/decisions.md`](../decisions.md). **A re-check
-> of this revised design is required before building** ([§9](#9-review-gate)); the revision has not been
-> re-reviewed. **Design only.** This document describes a capability that does not exist. No crate, code, test,
+> to the user are settled in the text and recorded as D64 in [`docs/decisions.md`](../decisions.md). The
+> revision was re-checked in [review 2](reviews/study-capability-m1-review-2.md) (approve with named changes:
+> three minor findings and a nit, to be answered before building; see [§9](#9-review-gate)). **Design only.** This document describes a capability that does not exist. No crate, code, test,
 > or configuration has been written for it, and nothing will be built until the re-check is complete.
 > **Requirements source:** [`BRIEF.md`](../../BRIEF.md). Line numbers below refer to the `BRIEF.md`
 > in the same tree as this document, not to a commit. To confirm them, open `BRIEF.md` at the cited line:
@@ -421,8 +421,11 @@ before a build job is asked for.
 
 Review 1 is complete and its findings are answered in
 [Appendix A](#appendix-a-response-to-review-1). Because the answers changed the design's rules, model,
-and run step, **a re-check of this revised design (review 2) is required before building.** The re-check
-covers at least the changes marked in the appendix, and it follows the checks below.
+and run step, the revised design was re-checked in
+[review 2](reviews/study-capability-m1-review-2.md), which approves it with named changes: R2-m1 (the spend
+rule in [§2.1](#21-the-run-step-containment-redaction-and-caps)), R2-m2 and R2-m3 (fields and kinds of
+`study.finding/1` in [§4](#4-data-model)), and a wording nit in Appendix A. **Those are answered before a build
+job is asked for.** The re-check covered the changes marked in the appendix, and it followed the checks below.
 
 The review must check:
 

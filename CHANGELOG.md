@@ -30,6 +30,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   tied to the pin, containment and redaction join the run step, and the model gains guards decided by agents,
   unhandled failures, and retry changes. A re-check is required before building. No code changed.
 
+- Review 2 of the revised study capability M1 design
+  (`docs/design/reviews/study-capability-m1-review-2.md`): checks every review-1 finding and decision against
+  the revision and approves with named changes (3 minor, 1 nit). The design's status line and §9 link to it.
+  No code changed.
+
 ### Fixed
 
 - `athena ask "try again on <job>"` on a job that was itself a retry now shows the reader the original
