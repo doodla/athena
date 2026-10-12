@@ -446,3 +446,7 @@ Stopping: you're done when "How I'll judge it" passes. If you're blocked on ever
 
 * At the end, the user is working within Claude Code or their own harness, with Athena powering the experience via a plugin.
 * The first version should work with Claude Code.
+
+### 2026-10-12: Dumb context questions
+
+* Add a concept to Tina [Athena] called "dumb context questions," allowing it to ask easy self-contained questions along with examples and stuff to capture the user's taste as well as expectations. Of course maybe some sort of memory decay system. Some expectations are forever but others might just be relevant to a particular period or project or might have some sort of expiry, who knows.
