@@ -76,6 +76,26 @@ pub fn bootstrap_range(git: &Git, treeish: &str) -> Result<BootstrapRange> {
     }
 }
 
+/// Whether `change` is a commit on the `[history] exempt` list. The invariant and the job-records check
+/// both skip such a commit (D66, D67 and the decision that followed them): an exemption excuses the
+/// commit's content and the job records it adds, which are judged as part of the same landing.
+///
+/// The history check reads the exempt list from the tip's configuration, not the judged commit's
+/// parent's: an entry is added after the commit it excuses, so the parent's list never holds it.
+/// A per-commit check has no tip and uses the parent's list. An exemption names one commit in full
+/// (the configuration refuses anything shorter), and only a commit that existed before the entry was
+/// added (the content check), so it cannot cover a later one.
+pub fn is_exempt(change: &Change, judged: &Judged, history: Option<&HistoryState>) -> bool {
+    let exempt = match history {
+        Some(state) => &state.exempt,
+        None => &judged.config.history.exempt,
+    };
+    change
+        .commit
+        .as_deref()
+        .is_some_and(|id| exempt.iter().any(|e| e == id))
+}
+
 /// Checks the invariant for `change`. `history` is set during a history walk.
 pub fn check(
     git: &Git,
@@ -84,18 +104,7 @@ pub fn check(
     history: Option<&HistoryState>,
 ) -> Result<Vec<Violation>> {
     let commit = change.commit.as_deref();
-    // The history check reads the exempt list from the tip's configuration, not the judged commit's
-    // parent's: an entry is added after the commit it excuses, so the parent's list never holds it.
-    // A per-commit check has no tip and uses the parent's list. An exemption names one commit in full
-    // (the configuration refuses anything shorter), and only a commit that existed before the entry was
-    // added (the content check), so it cannot cover a later one.
-    let exempt = match history {
-        Some(state) => &state.exempt,
-        None => &judged.config.history.exempt,
-    };
-    if let Some(id) = commit
-        && exempt.iter().any(|e| e == id)
-    {
+    if is_exempt(change, judged, history) {
         return Ok(Vec::new());
     }
     let trailers = change.trailers(git)?;

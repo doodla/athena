@@ -211,6 +211,11 @@ pub fn check(
     judged: &Judged,
     history: Option<&HistoryState>,
 ) -> Result<Vec<Violation>> {
+    // An exempt commit is excused here too: its records arrived with the content the exemption excuses,
+    // and a landed outcome cannot be a valid landing of a commit the invariant does not judge.
+    if invariant::is_exempt(change, judged, history) {
+        return Ok(Vec::new());
+    }
     let commit = change.commit.as_deref();
     let mut violations = Vec::new();
     let fail = |path: &str, detail: String, repair: &str| {

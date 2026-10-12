@@ -1474,3 +1474,27 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   is as D66 records it, read from code and not reproduced. Enforced by the existing history check and the
   `[history] exempt` validation of D60 and D61. D60 also requires the named commit to be in history already;
   the user's report places ee4b0dd on main, but this change did not check that against the real repository.
+
+## D68 · An exemption also excuses the job records its commit adds
+
+- **Decision:** A commit on `[history] exempt` is skipped by the job-records check as well as by the
+  governed-content invariant. The records the exempt commit adds, such as a landed outcome and a score, are
+  not flagged. One helper, `invariant::is_exempt`, decides this for both checks, using the tip's list in a
+  history walk and the parent's list in a per-commit check. The exemption still covers only that one commit:
+  records added by a later commit are judged as before.
+- **Why:** D67 exempted the squash commit named there, but the history check kept reporting per-record
+  violations for the jobs whose records arrived in it: "outcome says landed, but this commit is not a valid
+  landing" and "score.json does not follow". Both come from the job-records check, which judges a landed
+  outcome by the invariant's landing rule and a score by the job's records in the same tree. A commit the
+  invariant excuses cannot satisfy either, so excusing the content but not its records left D67 ineffective.
+  This also corrects D67's statement that the jobs' records "still get the per-record checks".
+- **Alternatives:** Exempt only landed outcomes and keep the score check (the score would still be flagged,
+  since it cannot follow from records the gate never validated). Add a separate exempt list for records
+  (a second place to keep in step).
+- **Tradeoff:** The hole D67 accepts for one commit grows to the records it adds: for that commit nobody
+  checks that a landed outcome is a real landing or that a score follows from its records. The secrets and
+  content checks, and the tip's validation and reconciliation of every record, still run.
+- **Reversal:** Remove the early return in `jobs::check`; D67's entry then excuses content only. Cost: low.
+- **Provenance:** Follows D66 and D67. Tests in `crates/athena-gate/src/history.rs` show hand-written landed
+  outcome and score records pass in an exempt commit, are flagged in a non-exempt one, and are flagged in a
+  commit after the exempt one.

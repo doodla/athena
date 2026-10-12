@@ -9,6 +9,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A commit on `[history] exempt` now also excuses the job records it adds (D68, after D66 and D67): the
+  history check no longer reports a landed outcome or a score in that commit. Later commits are still judged.
+
 - Decision D66 proposes a remedy for main's history check failing on a squash that carries several jobs:
   stop squashing multi-job pull requests, and excuse the one existing commit with a `[history] exempt`
   entry. It is a proposal only; no code or configuration changed.
