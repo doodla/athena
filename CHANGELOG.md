@@ -21,6 +21,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   (`docs/design/reviews/study-capability-m1-review-1.md`): approve with changes, 7 major findings, answered
   checks 1–8 of the design's §9. The design's status line links to it. No code changed.
 
+### Fixed
+
+- `athena ask "try again on <job>"` on a job that was itself a retry now shows the reader the original
+  request (followed back through the chain of retries, redacted) plus the retried job's own findings. Before,
+  the brief carried only the retry phrase as the earlier request. A broken or cyclic chain falls back to the
+  last request reached. A bare "try again on" is refused with "say which job to try again on".
+
 ### Changed
 
 - Behavior-criterion evidence (D43) now matches a cited command against whole simple commands inside the

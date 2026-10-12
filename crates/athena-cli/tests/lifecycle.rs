@@ -276,6 +276,104 @@ fn try_again_on_a_rejected_job_carries_its_request_and_findings_to_the_reader() 
     assert!(athena.check_history().unwrap().violations.is_empty());
 }
 
+/// A failing verdict with one major finding whose summary is `canary`.
+fn failing_verdict(canary: &str) -> serde_json::Value {
+    serde_json::json!({
+        "verdict": "fail",
+        "criteria": [
+            { "criterion": "criterion 1", "met": false, "evidence": "missing", "commands": [] },
+            { "criterion": "criterion 2", "met": true, "evidence": "ran", "commands": ["cargo test"] }
+        ],
+        "findings": [{
+            "severity": "major",
+            "summary": canary,
+            "evidence": "README.md has no greeting",
+            "location": "README.md"
+        }],
+        "request_reading_mismatch": null,
+        "summary": "The greeting is missing."
+    })
+}
+
+#[test]
+fn retrying_a_retry_carries_the_original_request_redacted() {
+    let fx = Fixture::new();
+    let mut first_scenario = Scenario::default();
+    first_scenario.verdict = failing_verdict("FINDING-A-CANARY the greeting is missing");
+    let mut second_scenario = Scenario::default();
+    second_scenario.verdict = failing_verdict("FINDING-B-CANARY the greeting is still missing");
+    let first_script = first_scenario.script();
+    let second_script = second_scenario.script();
+    let verifier_calls = Arc::new(Mutex::new(0usize));
+    let readers = Arc::new(Mutex::new(Vec::new()));
+    let kept = readers.clone();
+    let script: athena_agent::fake::Script = Box::new(move |spec| {
+        if spec.role == Role::Reader {
+            kept.lock().unwrap().push(spec.user_prompt.clone());
+        }
+        if spec.role == Role::Verifier {
+            let mut calls = verifier_calls.lock().unwrap();
+            *calls += 1;
+            if *calls > 1 {
+                return second_script(spec);
+            }
+        }
+        first_script(spec)
+    });
+    let athena = fx.athena(script);
+
+    let a = athena
+        .ask("add a greeting ORIGINAL-CANARY", &Lines::default())
+        .unwrap();
+    let a_end = finished(
+        athena
+            .go(a.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(a_end.state, OutcomeState::Rejected);
+
+    let b = athena
+        .ask(
+            &format!("try again on {}", a.job.as_str()),
+            &Lines::default(),
+        )
+        .unwrap();
+    let b_end = finished(
+        athena
+            .go(b.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(b_end.state, OutcomeState::Rejected);
+
+    let c = athena
+        .ask(
+            &format!("try again on {}", b.job.as_str()),
+            &Lines::default(),
+        )
+        .unwrap();
+    assert_ne!(c.job, b.job);
+    let briefs = readers.lock().unwrap();
+    let brief = briefs.last().unwrap();
+    assert!(brief.contains("# Earlier attempt"));
+    assert!(
+        brief.contains("> add a greeting ORIGINAL-CANARY"),
+        "the original request is carried"
+    );
+    assert!(
+        !brief.contains(&format!("> try again on {}", a.job.as_str())),
+        "the retry phrase is not carried as the earlier request"
+    );
+    assert!(
+        brief.contains("FINDING-B-CANARY"),
+        "B's findings are carried"
+    );
+    assert!(
+        !brief.contains("FINDING-A-CANARY"),
+        "A's findings are not carried"
+    );
+    assert!(athena.check_history().unwrap().violations.is_empty());
+}
+
 #[test]
 fn a_request_naming_a_job_carries_its_request_and_findings_to_the_reader() {
     let fx = Fixture::new();

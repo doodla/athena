@@ -741,21 +741,9 @@ pub fn earlier_attempt(
     request: &str,
     redactor: &Redactor,
 ) -> Result<Option<EarlierAttempt>> {
-    let text = request.trim_start();
-    let Some(head) = text.get(..RETRY_PREFIX.len()) else {
+    let Some(reference) = retry_reference(request)? else {
         return Ok(None);
     };
-    if !head.eq_ignore_ascii_case(RETRY_PREFIX) {
-        return Ok(None);
-    }
-    let reference = text[RETRY_PREFIX.len()..]
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .trim_end_matches(['.', ',', ';', ':', '!', '?']);
-    if reference.is_empty() {
-        bail!("say which job to try again on: 'try again on <job>'");
-    }
     let id = records.resolve(reference)?;
     let job = records.jobs.get(id.as_str()).expect("resolved");
     let state = job.state();
@@ -774,7 +762,72 @@ pub fn earlier_attempt(
             state.name()
         );
     }
-    Ok(Some(carry(job, redactor)?.expect("has a request")))
+    let mut attempt = carry(job, redactor)?.expect("has a request");
+    // When the retried job was itself a retry, carry the original request instead of the retry phrase.
+    if let Some(original) = original_request(records, job) {
+        let mut texts = vec![original];
+        redactor.redact_all(&mut texts)?;
+        attempt.request = texts.remove(0);
+    }
+    Ok(Some(attempt))
+}
+
+/// The reference after "try again on " at the start of `request`; `None` when it is not that form.
+fn retry_reference(request: &str) -> Result<Option<&str>> {
+    let text = request.trim();
+    if text.eq_ignore_ascii_case(RETRY_PREFIX.trim_end()) {
+        bail!("say which job to try again on: 'try again on <job>'");
+    }
+    let Some(head) = text.get(..RETRY_PREFIX.len()) else {
+        return Ok(None);
+    };
+    if !head.eq_ignore_ascii_case(RETRY_PREFIX) {
+        return Ok(None);
+    }
+    let reference = text[RETRY_PREFIX.len()..]
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_end_matches(['.', ',', ';', ':', '!', '?']);
+    if reference.is_empty() {
+        bail!("say which job to try again on: 'try again on <job>'");
+    }
+    Ok(Some(reference))
+}
+
+/// The most retries followed back to an original request.
+const MAX_RETRY_DEPTH: usize = 16;
+
+/// Follows `job`'s "try again on <job>" request back to the first request that is not a retry.
+/// `None` when `job` is not a retry; when the chain breaks (unknown job, no request, a cycle, or too
+/// deep), the last request reached is returned. The text is not yet redacted.
+fn original_request(records: &Records, job: &JobRecords) -> Option<String> {
+    let mut current = job;
+    let mut seen = vec![current.id().as_str().to_string()];
+    let mut original = None;
+    for _ in 0..MAX_RETRY_DEPTH {
+        let text = &current.request.as_ref()?.text;
+        let Some(reference) = retry_reference(text).ok().flatten() else {
+            break;
+        };
+        let Some(next) = records
+            .resolve(reference)
+            .ok()
+            .and_then(|id| records.jobs.get(id.as_str()))
+        else {
+            break;
+        };
+        let Some(next_request) = &next.request else {
+            break;
+        };
+        if seen.iter().any(|s| s == next.id().as_str()) {
+            break;
+        }
+        seen.push(next.id().as_str().to_string());
+        original = Some(next_request.text.clone());
+        current = next;
+    }
+    original
 }
 
 /// The job's request and final verification findings and reasons, redacted. `None` without a request.
@@ -863,6 +916,19 @@ pub fn job_records(athena: &Athena, job_ref: &str) -> Result<(Records, JobRecord
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bare_try_again_on_is_refused_and_a_named_job_is_found() {
+        for bare in ["try again on", "Try again on   ", "try again on ."] {
+            let error = retry_reference(bare).unwrap_err().to_string();
+            assert!(error.contains("say which job"), "{bare:?}: {error}");
+        }
+        assert_eq!(
+            retry_reference("Try again on 20261012-075010-86ja, please").unwrap(),
+            Some("20261012-075010-86ja")
+        );
+        assert_eq!(retry_reference("add a greeting").unwrap(), None);
+    }
 
     #[test]
     fn job_ids_are_found_mid_sentence_and_only_when_whole() {
