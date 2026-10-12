@@ -950,7 +950,7 @@ invariant treats them alike, because it reads the records a commit adds and not 
 
 *Proposed, not in force:* a squash of a chain of several verified jobs is refused today (more than one
 closing job, and a whole-tree fingerprint mismatch). [`squash-chain-landing.md`](squash-chain-landing.md)
-and D69 propose a chain-aware rule; this section describes the gate as built until that is accepted and built.
+and D69 propose a chain-aware rule (order recorded in `candidate.json`; revised after review 1); this section describes the gate as built until that is accepted and built.
 
 The clause that matters is the one about trailers. **Trailers are hints, not evidence.** A squash drops or
 rewrites them, and anyone can type them. The job is identified from the records the commit adds. A trailer

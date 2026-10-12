@@ -9,6 +9,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The squash-chain landing design answers its review 1: the chain order is recorded (`previous_job`), the
+  schema is `athena.candidate/2`, chains that change classification rules or land on a merge commit are
+  refused, the security claim is narrowed to accidental mismatches, and a response appendix and a larger test
+  list are added. D69 is amended. Documentation only; still a proposal.
+
 - Design `docs/design/squash-chain-landing.md` and decision D69 propose how a squash merge of a chain of
   verified jobs can land without an exemption: a chain-aware landing rule linked by a new
   `base_fingerprint`. It is a proposal only; no code, configuration, or records changed.

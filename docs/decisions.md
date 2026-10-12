@@ -1503,14 +1503,17 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 
 - **Decision:** Proposed, awaiting the user's acceptance; nothing is implemented by this entry. Rust code,
   `athena.toml`, workflows, and records are unchanged. Recommendation: **option B** of
-  `docs/design/squash-chain-landing.md`. Each job's `candidate.json` gains `base_fingerprint`; `landing`
-  accepts one commit that adds the closing records of several jobs when they form one linear chain from the
-  parent's fingerprint to the landed tree's fingerprint (each job's base fingerprint equals the previous
-  job's candidate fingerprint), the last job's candidate and verified fingerprints equal the landed tree,
+  `docs/design/squash-chain-landing.md`. Each job's `candidate.json` (new schema `athena.candidate/2`, loaded
+  beside `/1`) gains `base_fingerprint` and `previous_job`; `landing`
+  accepts one commit that adds the closing records of several jobs when they form one linear chain, in the
+  recorded `previous_job` order, from the parent's fingerprint to the landed tree's fingerprint (each job's
+  base fingerprint equals the previous job's candidate fingerprint), the last job's candidate and verified fingerprints equal the landed tree,
   and every job passes the other per-job checks it passes today, including that its reading precedes its own
   work. A chain of one is today's rule. Implementation (the field, the gate change in
   `crates/athena-gate/src/invariant.rs`, tests in `landing_tests.rs`, and updates to design §7.3 and
-  `docs/enforcement.md`) is a follow-up job. D60-D68 stay in force.
+  `docs/enforcement.md`) is a follow-up job. A chain is refused if a job changes a path classification
+  rules file, or if the landing commit has more than one parent (assumed defaults after review 1, which the
+  user may change). D60-D68 stay in force.
 - **Alternatives:**
   - (A) Per-job patch composition proof: needs the intermediate commits' blobs, which a squash discards.
   - (C) Restrict merge methods (D66 (c)): the restriction the request asks to remove, enforced only by a
@@ -1518,14 +1521,15 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   - (D) A `[history] exempt` entry per squash (D60, D67, D68): skips the whole invariant for the commit and
     needs a follow-up commit each time.
   - (E) Check only the last job: ignores whether the earlier jobs' records belong to this tree.
-- **Tradeoff:** B keeps "nothing reaches main unverified" for the landed content (the last verifier judged
-  exactly the landed tree) and M23 (each job's reading precedes its own work), and needs no exemption. It
-  costs a schema change in `candidate.json`, a more complex `landing`, and it proves intermediate states
-  only by unsigned records agreeing, the same limit as §7.3's timestamp proof. Jobs landed before the field
-  exists cannot form a chain.
+- **Tradeoff:** B keeps "nothing reaches main unverified" in the sense that the landed content equals the
+  last job's verified fingerprint and each step names a passing verification; the last verifier did not
+  review the whole tree. Over option E it catches accidental mismatches, not forgery. It keeps M23 (each
+  job's reading precedes its own work) and needs no exemption. It costs a schema change in `candidate.json`,
+  a more complex `landing`, and it proves intermediate states only by unsigned records agreeing, the same
+  limit as §7.3's timestamp proof. Jobs landed before the fields exist cannot form a chain.
 - **Reversal:** Before implementation: reject or edit this entry and the design. After implementation: remove
-  the chain branch in `landing`, which restores the one-job-per-commit rule; the optional field in
-  `candidate.json` can stay. Cost: medium once chain squashes are on main, since history then depends on the
+  the chain branch in `landing`, which restores the one-job-per-commit rule; `athena.candidate/2` and its
+  fields can stay, since the gate keeps loading both versions. Cost: medium once chain squashes are on main, since history then depends on the
   rule (as D66 noted for (b)).
 - **Provenance:** Requested by the user ("adopters choose their own merge method"). Claims about `landing`
   (the more-than-one-job refusal and the whole-tree fingerprint equality), `Candidate` fields, and §7.3 are
