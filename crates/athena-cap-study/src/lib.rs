@@ -104,6 +104,10 @@ impl Capability for Study {
         section(config).map(|c| c.env.clone()).unwrap_or_default()
     }
 
+    fn pins_repo(&self) -> bool {
+        true
+    }
+
     fn admit(&self, change: &ChangeList, _config: &JobConfig) -> Vec<PolicyViolation> {
         change
             .paths()

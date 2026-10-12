@@ -2,7 +2,7 @@
 
 A study of how one system works, at one pinned commit. Write typed study records; code validates the study before it is published.
 
-- Pin first. Read only the pinned commit, never the live branch.
+- Read only `pinned-source/` (read-only), never the live branch.
 - Every claim cites a source: a file with path, line range, pinned SHA and verbatim quote; a commit reachable from the pin; or a run of the pinned tree. Mark it `read`, `observed`, or `both`, matching the sources.
 - A rationale card is `stated` only when the authors say why and you can quote them. Otherwise it is `evidenced` or `inferred`.
 - Every number is measured, with the tool, or labeled an estimate.

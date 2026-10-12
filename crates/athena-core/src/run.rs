@@ -7,6 +7,7 @@ use crate::checks::{CheckContext, run_check};
 use crate::commits::{NewFile, Refusal, message};
 use crate::invocation::InvocationFacts;
 use crate::land::{Plan, plan};
+use crate::pin::{is_full_sha, mount};
 use crate::reading::Proposal;
 use crate::scoring::{self, Happened, score, totals};
 use crate::store::{JobRecords, JobState, Records};
@@ -22,8 +23,8 @@ use athena_context::outputs::{ProducerOutput, VerdictOutput, producer_schema, ve
 use athena_context::{CONTRACT, Component, PRODUCER_FRAME, VERIFIER_FRAME, compose};
 use athena_data::records::{
     AcceptedBy, AnyRecord, Build, Candidate, Caps, ChangeEntry, ChangeStatus, CheckRun, Invocation,
-    InvocationOutcome, Job, JobKind, Outcome, OutcomeState, Owner, PolicyViolation, ProducerReport,
-    Reading, ReportedCheck, Role, Score, Totals, Verdict, Verification,
+    InvocationOutcome, Job, JobKind, Outcome, OutcomeState, Owner, PinnedRepo, PolicyViolation,
+    ProducerReport, Reading, ReportedCheck, Role, Score, Totals, Verdict, Verification,
 };
 use athena_data::{JobId, sha256_hex};
 use athena_gate::redact::Redactor;
@@ -31,6 +32,7 @@ use athena_git::attrs::fingerprint;
 use athena_git::index::{IndexEdit, TempIndex};
 use athena_git::snapshot::{Snapshot, SnapshotRepo};
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 use std::time::Instant;
 
 /// How `go` ended.
@@ -185,6 +187,9 @@ impl Athena {
         )?;
         let redactor = self.redactor(&jc.config, Some(&id))?;
 
+        // A study's repository is pinned by the core, here, before anything is committed or any agent runs.
+        let pinned = self.pin_repo(capability, &jc, &id)?;
+
         // The prediction commit: the accepted reading's job record and the producer brief, before any work.
         let producer_grant = capability.producer_grant(&jc);
         let checks = capability.checks(&jc);
@@ -245,6 +250,7 @@ impl Athena {
             cost: None,
             tokens: None,
             note: None,
+            pin: pinned.as_ref().map(|(record, _)| record.clone()),
         };
         let files = vec![
             NewFile::record(&AnyRecord::Job(Box::new(job_record.clone()))),
@@ -275,9 +281,50 @@ impl Athena {
             prediction: prediction.clone(),
             clock,
             ui,
+            pin_dir: pinned.map(|(_, dir)| dir),
         };
         let closing = self.produce_and_verify(&ctx, &brief, &accepted)?;
         self.close_dispatched(&ctx, closing)
+    }
+
+    /// For a capability that pins, resolves the configured repository ref to a commit and checks the tree
+    /// out under the job's directory. Nothing is pinned for other capabilities. A pinning capability whose
+    /// configuration names no repository, or a ref that does not resolve, stops the job before dispatch.
+    fn pin_repo(
+        &self,
+        capability: &dyn Capability,
+        jc: &JobConfig,
+        id: &JobId,
+    ) -> Result<Option<(PinnedRepo, PathBuf)>> {
+        if !capability.pins_repo() {
+            return Ok(None);
+        }
+        let section = jc.config.capability(capability.id());
+        let (Some(url), Some(git_ref)) = (
+            section.and_then(|c| c.repo_url.clone()),
+            section.and_then(|c| c.repo_ref.clone()),
+        ) else {
+            bail!(
+                "capability {} studies a repository, but athena.toml [capabilities.{}] sets no repo_url and repo_ref to pin",
+                capability.id(),
+                capability.id()
+            );
+        };
+        if let Some((_, rest)) = url.split_once("://")
+            && rest.split('/').next().is_some_and(|a| a.contains('@'))
+        {
+            bail!("repo_url must not carry credentials; it is recorded in the job record");
+        }
+        let dir = self.state.job_dir(id).join("pin");
+        crate::pin::remove_tree(&dir)?;
+        let sha = self
+            .pinner
+            .pin(&url, &git_ref, &dir)
+            .with_context(|| format!("pinning {git_ref} of {url}"))?;
+        if !is_full_sha(&sha) {
+            bail!("the pinner returned {sha:?}, which is not a full 40-hex commit id");
+        }
+        Ok(Some((PinnedRepo { url, git_ref, sha }, dir)))
     }
 
     fn reread_after_configuration_change(
@@ -346,6 +393,8 @@ struct RunContext<'a> {
     prediction: String,
     clock: Instant,
     ui: &'a dyn Ui,
+    /// The pinned tree's checkout, mounted read-only into both agents' working directories.
+    pin_dir: Option<PathBuf>,
 }
 
 impl RunContext<'_> {
@@ -379,9 +428,12 @@ impl Athena {
         // The producer, in a detached snapshot of the base with a one-commit repository of its own.
         let work = job_dir.join("work");
         if work.exists() {
-            std::fs::remove_dir_all(&work)?;
+            crate::pin::remove_tree(&work)?;
         }
         let snapshot = Snapshot::create(&self.git, &p, &p, &work, SnapshotRepo::Base)?;
+        if let Some(pin_dir) = &ctx.pin_dir {
+            mount(pin_dir, snapshot.dir())?;
+        }
         let grant = ctx.capability.producer_grant(jc);
         let composed = compose(&[
             CONTRACT.into(),
@@ -575,13 +627,13 @@ impl Athena {
             return Ok(closing);
         }
         closing.candidate = Some(candidate);
-        let _ = std::fs::remove_dir_all(&work);
+        let _ = crate::pin::remove_tree(&work);
 
         // The verifier's snapshot: its own two-commit repository, base then candidate, with the base's
         // check-tool configuration in the working tree.
         let verify_dir = job_dir.join("verify");
         if verify_dir.exists() {
-            std::fs::remove_dir_all(&verify_dir)?;
+            crate::pin::remove_tree(&verify_dir)?;
         }
         let vsnap = Snapshot::create(
             &self.git,
@@ -592,6 +644,9 @@ impl Athena {
                 candidate_commit: c.clone(),
             },
         )?;
+        if let Some(pin_dir) = &ctx.pin_dir {
+            mount(pin_dir, vsnap.dir())?;
+        }
         let tool_config_from_base = crate::toolconfig::apply_base_tool_config(&vsnap)?;
         let prepared = vsnap.work_tree_tree()?;
         let check_env = athena_agent::env::build(
@@ -850,7 +905,7 @@ impl Athena {
             inputs: inputs.names(),
             summary: verdict_output.as_ref().map(|v| v.summary.clone()),
         };
-        let _ = std::fs::remove_dir_all(&verify_dir);
+        let _ = crate::pin::remove_tree(&verify_dir);
         closing.happened.verification_passed = Some(judgment.final_verdict == Verdict::Pass);
         closing.happened.wall_time_execution_s = Some(ctx.clock.elapsed().as_secs_f64());
         closing.happened.state = Some(if judgment.final_verdict == Verdict::Pass {

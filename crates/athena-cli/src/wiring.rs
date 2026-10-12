@@ -9,6 +9,7 @@ use athena_agent::{
 };
 use athena_core::Athena;
 use athena_core::capability::Capability;
+use athena_core::pin::GitPinner;
 use athena_core::state::StateDir;
 use athena_data::records::{Build, DriverInfo};
 use athena_git::Git;
@@ -140,6 +141,7 @@ pub fn open(cwd: &Path, writes: bool, announce: &dyn Fn(&str)) -> Result<Athena>
             build,
             athena_bin,
             nested: Some(outer),
+            pinner: Box::new(GitPinner),
         });
     }
     let state = StateDir::for_repository(&user.common_dir()?);
@@ -160,5 +162,6 @@ pub fn open(cwd: &Path, writes: bool, announce: &dyn Fn(&str)) -> Result<Athena>
         build,
         athena_bin,
         nested: nested_marker(),
+        pinner: Box::new(GitPinner),
     })
 }
