@@ -17,6 +17,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A design for native pull-request landing, including a stealth mode that keeps Athena's records out of a
+  repository the user does not own (D72, `docs/design/native-pr-landing.md`). Design only; no code or rule
+  changes.
+
 - The gate lands a squash of a chain of verified jobs (D69, now accepted). A commit that adds the closing
   records of several jobs passes when their `athena.candidate/2` records form one chain: ordered by
   `previous_job`, the head starting from the parent's content, each job starting where the previous one ended,

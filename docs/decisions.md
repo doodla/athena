@@ -1587,3 +1587,21 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Provenance:** Cause found by reading `expected_score`, `score_records` and `rescore`; reproduced by the
   new tests in `landing_tests.rs`, which fail without the filter on `events[2].brier.reader` (the
   `user_intervenes` event). The two job ids named in the request were not examined.
+
+## D72 · Pull requests are landed natively; in a repository Athena does not own, its records stay outside it
+
+- **Decision:** Proposed, design only: `docs/design/native-pr-landing.md`. Athena would push a job's work
+  branch with a regular push on the user's explicit command, open the pull request through the user's
+  authenticated host client, and observe the merge; it would not merge on its own. Two modes: in a repository
+  the user owns, records travel in the pull request as now; in stealth mode the records stay in Athena's state
+  directory and the pull request holds only the change. The prose-only rule "Athena does not push" would be
+  replaced by "pushes only on command, only its own work branch, never non-fast-forward"; "published history
+  is never rewritten" stays. No rule changes until the build exists.
+- **Alternatives:** Keep landing local (fails the brief's native-PR addendum); call the host's web API with a
+  token Athena holds (new secret class); push records on a side ref (visible in the third-party repository);
+  keep records in a second repository (deferred).
+- **Tradeoff:** Stealth gives up the repository-side audit in CI, so the proof of verification is local only.
+- **Reversal:** Do not build it; nothing else depends on this document. Reversal cost: low.
+- **Provenance:** `BRIEF.md` addenda of 2026-10-12 (native PRs, brownfield, stealth); D10, D69,
+  `docs/enforcement.md` rows M6, M7, M23, M30. Read from those files; no command was run. This replaces an
+  earlier draft of the same design that failed only the boundary scan (M19) on its wording.

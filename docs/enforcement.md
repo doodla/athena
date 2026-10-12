@@ -54,7 +54,9 @@ Each of these is a judgment or a boundary that a mechanism would not yet pay for
 - *Interventions are never suppressed*. Corrections, answers, and hand changes to governed content are
   captured by mechanism. Interventions that change no content (detailed instructions, overridden
   decisions, state the user carried) depend on the user recording them with `athena intervene`.
-- *Pushes are regular, and published history is never rewritten*: Athena does not push in v0.
+- *Pushes are regular, and published history is never rewritten*: Athena does not push in v0. A proposed
+  design (D72, `design/native-pr-landing.md`) would let it push its own work branch on the user's command,
+  never non-fast-forward, with the mechanism rows added when the tests exist. This text holds until then.
 - *Executed code stays contained*: not enforced in v0. Checks, builds, and tests run with the user's
   privileges (design §7.5, §16.2).
 - *Records are Athena's own*: records are not signed, and Athena writes them with the user's own rights,
