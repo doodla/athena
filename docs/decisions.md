@@ -1624,3 +1624,23 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Provenance:** User report of repeated boundary-scan failures by producers, the latest in a design review.
   Enforced by `producer_briefs_list_the_boundary_words_before_the_checks` and the test named above. The
   token figure is an estimate.
+
+## D74 · Only landed jobs form a squash's chain
+
+- **Decision:** Amends D69. `closing_jobs` in the gate's landing check leaves out a job whose recorded
+  outcome in the commit's tree is not landed (rejected, blocked and never landed, failed, and so on). A
+  squash ships the records of a rejected try, but its work never reached the branch, so it is no link.
+  Counting it made the landed retry, whose `previous_job` names the rejected try, look like a fork ("both
+  follow"), and the retry's follow-up like an invalid landing. A chain head may now name a previous job
+  that is not in the chain if that job's recorded outcome is not landed; the head's `base_fingerprint`
+  must still equal the parent's content. A previous job that is absent, or has no outcome record, is still
+  "not linked". A job with no outcome record at all stays in the set and is refused by its landing check.
+  Landed jobs that really fork are still refused.
+- **Alternatives:** Require rejected jobs to chain (they do not: they never landed); ignore every
+  `previous_job` that is not in the commit (opens a hole for unlanded or invented work).
+- **Tradeoff:** A squash made only of a rejected job no longer reports a per-job reason; it is a commit
+  that lands no job, and fails as an ungoverned content change.
+- **Reversal:** Drop the `not_landed` filter and the extra head case. Reversal cost: low.
+- **Provenance:** Cause found by reading `closing_jobs` and `chain_problem`; reproduced by the new tests in
+  `landing_tests.rs` (a rejected job, its landed retry and a follow-up). Detail in
+  `docs/design/squash-chain-landing.md` §4.6.

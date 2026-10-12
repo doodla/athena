@@ -217,7 +217,12 @@ pub fn landing_job(
 
 /// The jobs whose closing records (`candidate.json`, `verification.json`, `outcome.json`, or
 /// `outcome-landed.json`) `judged` adds. A commit that adds none does not claim to land a job.
-fn closing_jobs(judged: &Judged) -> BTreeSet<JobId> {
+///
+/// A job whose recorded outcome in the commit's tree is not landed (rejected, blocked, or failed) is left
+/// out. A squash ships the records of such a job, but its work never reached the branch, so it is no link
+/// of the chain: counting it would make its landed retry, which names it as `previous_job`, look like a
+/// fork. A job with no outcome record at all stays in, so that the landing check can refuse it.
+fn closing_jobs(git: &Git, change: &Change, judged: &Judged) -> Result<BTreeSet<JobId>> {
     const CLOSING: [&str; 4] = [
         "candidate.json",
         "verification.json",
@@ -238,11 +243,21 @@ fn closing_jobs(judged: &Judged) -> BTreeSet<JobId> {
             && let Ok(job) = JobId::parse(id)
             && job.is_request()
             && d.path == format!("{}/{name}", job.dir())
+            && !not_landed(&JobFiles::load(git, &change.tree, &job)?)
         {
             jobs.insert(job);
         }
     }
-    jobs
+    Ok(jobs)
+}
+
+/// Whether `files` record an outcome and none of the recorded outcomes is landed.
+fn not_landed(files: &JobFiles) -> bool {
+    let outcomes: Vec<_> = [&files.outcome, &files.later_outcome]
+        .into_iter()
+        .flatten()
+        .collect();
+    !outcomes.is_empty() && outcomes.iter().all(|o| o.state != OutcomeState::Landed)
 }
 
 /// `Ok(jobs)` when the commit is a valid landing of `jobs` (case a): one job, or a chain of several that
@@ -268,7 +283,7 @@ fn landing(
     history: Option<&HistoryState>,
 ) -> Result<std::result::Result<BTreeSet<JobId>, Option<String>>> {
     let refuse = |reason: String| Ok(Err(Some(reason)));
-    let jobs = closing_jobs(judged);
+    let jobs = closing_jobs(git, change, judged)?;
     if jobs.is_empty() {
         return Ok(Err(None));
     }
@@ -396,14 +411,18 @@ fn chain_problem(
             previous.as_str()
         ))
     };
-    // The head has no previous job, or one that already landed on the parent.
+    // The head has no previous job, one that already landed on the parent, or one that did not land.
     let mut heads = Vec::new();
     for (job, c) in &candidates {
         match &c.previous_job {
             None => heads.push(job),
             Some(previous) if candidates.contains_key(previous) => {}
             Some(previous) => {
-                if landed_at(git, parent, previous, &parent_fp)? {
+                // A previous job that is recorded as not landed (a rejected try this job retries) is
+                // outside the chain; the head's base must still equal the parent's content.
+                if landed_at(git, parent, previous, &parent_fp)?
+                    || not_landed(&JobFiles::load(git, &change.tree, previous)?)
+                {
                     heads.push(job);
                 } else {
                     return Ok(not_linked(job, previous));

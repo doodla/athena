@@ -1,0 +1,84 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261012-204524-f34n",
+  "base_commit": "7e409779529a063eec6ead605f1d9117722876ca",
+  "base_fingerprint": "sha256:616d7d078cb78f8583f48e129128f1a4787528e83b6e24060d62207bb5d7a6d7",
+  "previous_job": "20261012-203446-bkk7",
+  "candidate_commit": "a078c637c6da682024101ac30c4db1304641e80d",
+  "candidate_tree": "2b74cb7796c191bf4dcd6e519c757e49be0f0da8",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 13036
+    },
+    {
+      "path": "crates/athena-gate/src/invariant.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 40761
+    },
+    {
+      "path": "crates/athena-gate/src/landing_tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 38478
+    },
+    {
+      "path": "docs/decisions.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 106324
+    },
+    {
+      "path": "docs/design/squash-chain-landing.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 33871
+    }
+  ],
+  "fingerprint": "sha256:9155825f966c0e3ccf298d7ff1c37076100c2c07b6919ec4732312a3faa755dc",
+  "violations": [],
+  "producer_report": {
+    "summary": "The squash chain is now built from landed jobs only. A rejected job whose records ship in the squash is no longer a link, so its landed retry no longer looks like a fork.\\n\\nIn `invariant.rs`:\\n- `closing_jobs` now takes `git` and `change` and returns a `Result`. It drops any job whose recorded `outcome.json` or `outcome-landed.json` in the commit tree exists and none is landed. A job with no outcome record stays in the set, so the per-job check still refuses it. A doc comment says why.\\n- `chain_problem` lets a chain head name a previous job outside the chain when that job's recorded outcome is not landed. Two other cases are still refused as 'not linked': a previous job that is absent, and one with no outcome record. The head's base must still equal the parent's content.\\n\\nTests in `landing_tests.rs`:\\n- New: a rejected job A, its landed retry B (previous_job = A) and a landed job C following B is accepted, and only B and C are reported as landed.\\n- New: two landed retries of the same rejected job are refused with 'both follow', and a fork of landed jobs is refused with 'both follow'.\\n- Changed: in `every_per_job_check_refuses_a_chain_when_a_middle_job_fails_it`, the blocked-outcome case now describes a job that is deliberately outside the chain, so I replaced it with a middle job that has no outcome record. That case is still refused with 'a landing commit adds'.\\n\\nDocs: decision D74 in `docs/decisions.md`, a bullet in §4.6 of `docs/design/squash-chain-landing.md`, and a CHANGELOG entry.\"",
+    "files": [
+      "crates/athena-gate/src/invariant.rs",
+      "crates/athena-gate/src/landing_tests.rs",
+      "docs/design/squash-chain-landing.md",
+      "docs/decisions.md",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test --locked -p athena-gate -p xtask",
+        "result": "pass",
+        "note": "Full workspace `cargo test --locked` passed earlier, before a test-only clippy fix. Gate and policy tests re-run after the fix and pass."
+      }
+    ],
+    "open_issues": [
+      "A squash holding only a rejected job no longer gets a per-job reason from the landing check. It now falls through to the generic 'governed content changed without a verified landing' message (recorded in D74).",
+      "Two landed retries of the same rejected job are still refused as 'both follow'. This is intended: they are real forks of landed jobs."
+    ],
+    "mistakes": [
+      "First edit left a duplicated brace in closing_jobs, which broke the build. Fixed on the next edit.",
+      "First draft of the second new test expected 'both start a chain'. The actual refusal is 'both follow'. I corrected the expectation after the test run."
+    ],
+    "learnings": [
+      "closing_jobs had no git access; it now takes git and the change so it can read each job's outcome from the commit tree.",
+      "Existing test every_per_job_check_refuses_a_chain_when_a_middle_job_fails_it asserted that a middle job with a Blocked outcome is refused with 'a landing commit adds'. Under the new rule that job is excluded from the chain, so I replaced that case with one where the outcome record is missing.",
+      "dyn Fn(usize,&mut Vec<_>) test hooks need closure wrappers if the helper takes a slice (clippy ptr_arg)."
+    ],
+    "desires": []
+  }
+}

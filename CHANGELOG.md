@@ -9,6 +9,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- The squash check forms its chain from landed jobs only (D74). A rejected job whose records shipped in the
+  squash was counted as a link, so its landed retry looked like a fork ("both follow") and later jobs like
+  invalid landings. A rejected job is now left out, and a chain head may name it as its previous job.
+  Landed jobs that fork are still refused.
 - The history check no longer refuses an intervention's re-score in a squash as not following from the job's
   records (D71). It recomputed the closing score from the whole squashed tree, so it counted interventions
   made after the closing score and resolved `user_intervenes` to true early; the recorded score differed in
