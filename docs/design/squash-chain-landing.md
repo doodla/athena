@@ -1,10 +1,17 @@
 # Squash-merge landing for a chain of verified jobs
 
-**Status:** proposed (D69). The gate rule here is not implemented. **Progress note:** the record and core half
-of §5 item 1 is built: `athena.candidate/2` exists and the core writes `base_fingerprint` and `previous_job`
-(see `docs/records.md`). The gate's chain rule, the jobs and history changes, and the enforcement map are
-still to build, and the gate behaves exactly as before: it refuses a commit that lands more than one job.
-The text below is the original proposal and is otherwise unchanged.
+**Status:** accepted and implemented (D69). **Progress note:** the record and core half of §5 item 1 is built
+(`athena.candidate/2`; the core writes `base_fingerprint` and `previous_job`; see `docs/records.md`), and so is
+the gate half: `landing` in `crates/athena-gate/src/invariant.rs` implements §4.2 with the refusal messages of
+§4.3; `landing_job` returns a set of jobs; `jobs::check` and the history walk handle every job of a chain; and
+the tests of §5 item 4 for the gate are in `landing_tests.rs`, `jobs.rs`, and `history.rs` (named in
+`docs/enforcement.md`, row M30). The `previous_job` derivation tests of §5 item 4 are in `athena-core`
+(`chain.rs`), not the gate. Where the build differs from the text below: the cases the messages of §4.3 do not
+cover use these (a commit whose diff changes a rules file: "the commit changes <path>, a path classification
+rules file, so the fingerprints of its jobs are not comparable; land the jobs one at a time"; two jobs that
+both start a chain: "jobs <a> and <b> both start a chain, so they do not form one chain"; a chain job whose
+verification verified other content than its candidate holds: "<dir>/verification.json verified <fp>, not the
+content <dir>/candidate.json holds"). The text below is the original proposal and is otherwise unchanged.
 
 Claims are marked **(read)** when taken from the code or docs named beside them, and **(inferred)** when they
 follow from reading but were not run. No command was run to reproduce any failure.

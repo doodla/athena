@@ -7,7 +7,8 @@
 //!   scorer Athena writes them with ([`athena_score::score_records`]), under the same rules;
 //! - a re-score must name an intervention that the same change adds and that names the same job;
 //! - a landed outcome (`outcome.json` or `outcome-landed.json`) comes only with a valid landing commit of
-//!   its own job (the governed-content invariant's case a);
+//!   its own job (the governed-content invariant's case a); a squash that lands a chain of jobs is a valid
+//!   landing of each of them;
 //! - an outcome after `blocked` (`outcome-landed.json`, `outcome-abandoned.json`) needs the job's
 //!   `blocked` outcome on the parent commit, or in the same commit when a squash folds the job into one.
 
@@ -20,6 +21,7 @@ use athena_data::records::{
 use athena_data::{JobId, RecordId};
 use athena_git::Git;
 use athena_score::JobFacts;
+use std::collections::BTreeSet;
 
 /// The records of one job in one tree. Files that do not parse, or that sit away from their canonical
 /// path, are left out: the content checks report them.
@@ -229,7 +231,8 @@ pub fn check(
             .iter()
             .any(|d| d.status == 'A' && d.path == path)
     };
-    let mut landed_job: Option<Option<JobId>> = None;
+    // The jobs this commit validly lands: one, or every job of a chain.
+    let mut landed_jobs: Option<BTreeSet<JobId>> = None;
     for d in judged
         .diff
         .iter()
@@ -328,10 +331,13 @@ pub fn check(
                     }
                 }
                 if outcome.state == OutcomeState::Landed {
-                    if landed_job.is_none() {
-                        landed_job = Some(invariant::landing_job(git, change, judged, history)?);
+                    if landed_jobs.is_none() {
+                        landed_jobs = Some(invariant::landing_job(git, change, judged, history)?);
                     }
-                    if landed_job.as_ref().and_then(Option::as_ref) != Some(&outcome.job) {
+                    if !landed_jobs
+                        .as_ref()
+                        .is_some_and(|jobs| jobs.contains(&outcome.job))
+                    {
                         violations.push(fail(
                             &d.path,
                             format!(
@@ -348,4 +354,41 @@ pub fn check(
         }
     }
     Ok(violations)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::landing_tests::{chain_repo, land_chain};
+
+    const STEP_1: &str = "pub fn a() { /* one */ }\n";
+    const STEP_2: &str = "pub fn a() { /* two */ }\n";
+
+    fn check_head(git: &Git) -> Vec<Violation> {
+        let id = git.rev_parse("HEAD").unwrap().unwrap();
+        let change = Change::of_commit(git, &id).unwrap();
+        let judged = Judged::new(git, &change).unwrap();
+        check(git, &change, &judged, None).unwrap()
+    }
+
+    #[test]
+    fn every_landed_outcome_of_a_chain_squash_is_accepted() {
+        let (dir, git, links) = chain_repo(&[STEP_1, STEP_2]);
+        land_chain(dir.path(), &git, &links, STEP_2, &|_, _| {});
+        assert_eq!(check_head(&git), vec![]);
+    }
+
+    #[test]
+    fn the_landed_outcomes_of_a_broken_chain_are_refused() {
+        let (dir, git, mut links) = chain_repo(&[STEP_1, STEP_2]);
+        links[1].base_fp = "e".repeat(64);
+        land_chain(dir.path(), &git, &links, STEP_2, &|_, _| {});
+        let found = check_head(&git);
+        assert_eq!(found.len(), 2, "one per landed outcome: {found:?}");
+        assert!(
+            found
+                .iter()
+                .all(|v| v.detail.contains("not a valid landing of that job"))
+        );
+    }
 }

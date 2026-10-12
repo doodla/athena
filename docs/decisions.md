@@ -1499,10 +1499,15 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   outcome and score records pass in an exempt commit, are flagged in a non-exempt one, and are flagged in a
   commit after the exempt one.
 
-## D69 · Proposal: a squash of a chain of verified jobs lands by a chain-aware landing rule
+## D69 · Accepted: a squash of a chain of verified jobs lands by a chain-aware landing rule
 
-- **Decision:** Proposed, awaiting the user's acceptance; nothing is implemented by this entry. Rust code,
-  `athena.toml`, workflows, and records are unchanged. Recommendation: **option B** of
+- **Status:** Accepted and implemented. The user asked for the gate rule ("now the gate rule for squash-chain
+  landing") after the record and core half was built. `landing` in `crates/athena-gate/src/invariant.rs` now
+  accepts a chain as described below; `landing_job` returns the set of jobs, `jobs::check` accepts every job
+  of the chain, and the history walk records every one. Tests are named in `docs/enforcement.md` (M30). No
+  `[history] exempt` entry, `athena.toml`, workflow, or record changed. The decision text below is the
+  original proposal, kept as the reasons for the rule.
+- **Decision:** (Written as a proposal; accepted as written.) **Option B** of
   `docs/design/squash-chain-landing.md`. Each job's `candidate.json` (new schema `athena.candidate/2`, loaded
   beside `/1`) gains `base_fingerprint` and `previous_job`; `landing` accepts one commit that adds the
   closing records of several jobs when they form one linear chain, in the recorded `previous_job` order,

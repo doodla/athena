@@ -74,7 +74,8 @@ pub fn check_history(git: &Git, tip: &str) -> Result<HistoryReport> {
             .violations
             .extend(jobs::check(git, &change, &judged, Some(&state))?);
         // A job has landed once a commit validly lands it, by its records and not by its trailers.
-        if let Some(job) = invariant::landing_job(git, &change, &judged, Some(&state))? {
+        // A commit that lands a chain of jobs lands every one of them.
+        for job in invariant::landing_job(git, &change, &judged, Some(&state))? {
             state.landed.insert(job.as_str().to_string());
         }
     }
@@ -116,6 +117,38 @@ mod tests {
         let report = check_history(&git, "HEAD").unwrap();
         assert_eq!(report.violations.len(), 1, "{:?}", report.violations);
         assert_eq!(report.violations[0].rule, Rule::Invariant);
+    }
+}
+
+#[cfg(test)]
+mod chain_tests {
+    use super::*;
+    use crate::landing_tests::{chain_repo, land_chain};
+    use crate::testutil::*;
+
+    const STEP_1: &str = "pub fn a() { /* one */ }\n";
+    const STEP_2: &str = "pub fn a() { /* two */ }\n";
+    const STEP_3: &str = "pub fn a() { /* three */ }\n";
+
+    #[test]
+    fn repeating_a_job_of_a_landed_chain_is_refused() {
+        let (dir, git, links) = chain_repo(&[STEP_1, STEP_2, STEP_3]);
+        land_chain(dir.path(), &git, &links, STEP_3, &|_, _| {});
+        assert_eq!(check_history(&git, "HEAD").unwrap().violations, vec![]);
+
+        // Undo the landing by hand, then land only the middle job again, by itself.
+        std::fs::remove_dir_all(dir.path().join("records")).unwrap();
+        write(dir.path(), &[("src/lib.rs", "pub fn a() {}\n")]);
+        commit(&git, "Undo\n\nAthena-Job: bootstrap\n");
+        let again = land_chain(dir.path(), &git, &links[1..2], STEP_2, &|_, _| {});
+        let report = check_history(&git, "HEAD").unwrap();
+        assert!(
+            report.violations.iter().any(|v| v.rule == Rule::Invariant
+                && v.commit.as_deref() == Some(&again[..12])
+                && v.detail.contains("already landed")),
+            "{:?}",
+            report.violations
+        );
     }
 }
 

@@ -944,14 +944,21 @@ invariant treats them alike, because it reads the records a commit adds and not 
 - A *merge commit* keeps its rule above. Its first-parent diff would also pass (a), since the records are in
   its tree.
 - A *squash merge* makes one commit with no `Athena-*` trailers, whose diff adds the code and every record of
-  the job at once. It is checked as a landing, with the parent being the base it was squashed onto.
+  the job, or of every job of a chain, at once. It is checked as a landing, with the parent being the base it
+  was squashed onto.
 - A *rebase merge* replays the PR's commits with new ids. The closing commit is checked as a landing against
   its new parent; the commit that added the reading is no longer an ancestor by id, and need not be.
 
-*Proposed, not in force:* a squash of a chain of several verified jobs is refused today (more than one
-closing job, and a whole-tree fingerprint mismatch). [`squash-chain-landing.md`](squash-chain-landing.md)
-and D69 propose a chain-aware rule (order recorded in `candidate.json`; revised after reviews 1 and 2);
-this section describes the gate as built until that is accepted and built.
+*A chain of jobs* (D69, [`squash-chain-landing.md`](squash-chain-landing.md)): a squash may add the closing
+records of several jobs. It lands if they form one chain. Each job's `athena.candidate/2` records
+`base_fingerprint` and `previous_job`; the order is `previous_job`, never the fingerprints (which may repeat).
+The head's base is the parent's fingerprint (or its predecessor landed on the parent), each job's base is the
+previous job's fingerprint, and the last job's candidate and verification hold the landed content. Every job
+passes every other landing check, including its own prediction before its own work. It is refused if a job
+changes a `.gitattributes`, if any job is `athena.candidate/1`, or on a commit with more than one parent. One
+job left from a partly landed chain is judged by the single-job rule. Only the last verifier's fingerprint
+equals the tree; earlier jobs are tied to it by the records' agreement, which catches accidental mismatches
+and not forgery.
 
 The clause that matters is the one about trailers. **Trailers are hints, not evidence.** A squash drops or
 rewrites them, and anyone can type them. The job is identified from the records the commit adds. A trailer

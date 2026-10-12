@@ -9,6 +9,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The gate lands a squash of a chain of verified jobs (D69, now accepted). A commit that adds the closing
+  records of several jobs passes when their `athena.candidate/2` records form one chain: ordered by
+  `previous_job`, the head starting from the parent's content, each job starting where the previous one ended,
+  and the last job holding the landed content. Every job still passes every per-job landing check. The
+  commit is refused if a job is `athena.candidate/1`, the chain forks or has a gap, a job changes a
+  `.gitattributes`, or the commit has more than one parent. `jobs::check` accepts every job of a chain, the
+  history walk records every one, and a single-job landing is as strict as before. `docs/enforcement.md`
+  (new row M30), design §7.3, and the squash-chain design are updated; no `[history] exempt` entry was added.
+
 - New `athena.candidate/2` record, and the core now writes it: `base_fingerprint` (the fingerprint of the base
   commit's tree) and `previous_job` (the latest job landed in the base commit's history, absent if none).
   `athena.candidate/1` still parses. This is the record and core half of the squash-chain landing design
