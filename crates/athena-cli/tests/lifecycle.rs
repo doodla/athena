@@ -277,6 +277,65 @@ fn try_again_on_a_rejected_job_carries_its_request_and_findings_to_the_reader() 
 }
 
 #[test]
+fn a_request_naming_a_job_carries_its_request_and_findings_to_the_reader() {
+    let fx = Fixture::new();
+    let mut scenario = Scenario::default();
+    scenario.verdict = serde_json::json!({
+        "verdict": "fail",
+        "criteria": [
+            { "criterion": "criterion 1", "met": false, "evidence": "missing", "commands": [] },
+            { "criterion": "criterion 2", "met": true, "evidence": "ran", "commands": ["cargo test"] }
+        ],
+        "findings": [{
+            "severity": "major",
+            "summary": "FINDING-CANARY the greeting is missing",
+            "evidence": "README.md has no greeting",
+            "location": "README.md"
+        }],
+        "request_reading_mismatch": null,
+        "summary": "The greeting is missing."
+    });
+    let (script, readers) = recording_readers(scenario);
+    let athena = fx.athena(script);
+    let first = athena
+        .ask("add a greeting ORIGINAL-CANARY", &Lines::default())
+        .unwrap();
+    finished(
+        athena
+            .go(first.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+
+    let text = format!("make it friendlier than in {} please", first.job.as_str());
+    let second = athena.ask(&text, &Lines::default()).unwrap();
+    assert_ne!(second.job, first.job);
+    let briefs = readers.lock().unwrap();
+    let brief = briefs.last().unwrap();
+    assert!(brief.contains("# Referenced jobs"));
+    assert!(brief.contains("> add a greeting ORIGINAL-CANARY"));
+    assert!(brief.contains("FINDING-CANARY the greeting is missing"));
+    assert!(!brief.contains("# Earlier attempt"));
+    assert!(
+        brief.contains(&format!("> {text}")),
+        "the new request stays as typed"
+    );
+    drop(briefs);
+
+    // An id that matches no job is ignored.
+    athena
+        .ask("see 19990101-000000-zzzz for context", &Lines::default())
+        .unwrap();
+    assert!(
+        !readers
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .contains("# Referenced jobs")
+    );
+}
+
+#[test]
 fn try_again_on_a_landed_or_unknown_job_is_refused() {
     let fx = Fixture::new();
     let athena = fx.athena(Scenario::default().script());

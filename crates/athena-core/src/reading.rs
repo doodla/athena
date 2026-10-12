@@ -205,9 +205,16 @@ impl Athena {
         let (global_reference, basis) =
             crate::scoring::reference(&jc.config.forecast.reference, "", records);
         let composed = reader_system_prompt(self, jc);
+        let referenced_jobs = referenced_jobs(
+            records,
+            &request.text,
+            attempt.map(|a| a.job.as_str()),
+            redactor,
+        )?;
         let prompt = reader_brief(&ReaderInputs {
             request: request.text.clone(),
             earlier_attempt: attempt.cloned(),
+            referenced_jobs,
             history: history.to_vec(),
             reference: global_reference,
             reference_basis: basis,
@@ -758,38 +765,90 @@ pub fn earlier_attempt(
             state.name()
         );
     }
-    let Some(earlier) = &job.request else {
+    if job.request.is_none() {
         bail!("job {id} is {} but has no request record", state.name());
-    };
-    let Some(verification) = &job.verification else {
+    }
+    if job.verification.is_none() {
         bail!(
             "job {id} is {} but has no verification record",
             state.name()
         );
+    }
+    Ok(Some(carry(job, redactor)?.expect("has a request")))
+}
+
+/// The job's request and final verification findings and reasons, redacted. `None` without a request.
+fn carry(job: &JobRecords, redactor: &Redactor) -> Result<Option<EarlierAttempt>> {
+    let Some(earlier) = &job.request else {
+        return Ok(None);
     };
     let mut texts = vec![earlier.text.clone()];
-    texts.extend(verification.findings.iter().map(|f| {
-        let location = f
-            .location
-            .as_deref()
-            .map_or(String::new(), |l| format!(" ({l})"));
-        format!(
-            "{}{location}: {} {}",
-            format!("{:?}", f.severity).to_lowercase(),
-            f.summary,
-            f.evidence
-        )
-        .trim_end()
-        .to_string()
-    }));
-    texts.extend(verification.reasons.iter().map(|r| format!("reason: {r}")));
+    if let Some(verification) = &job.verification {
+        texts.extend(verification.findings.iter().map(|f| {
+            let location = f
+                .location
+                .as_deref()
+                .map_or(String::new(), |l| format!(" ({l})"));
+            format!(
+                "{}{location}: {} {}",
+                format!("{:?}", f.severity).to_lowercase(),
+                f.summary,
+                f.evidence
+            )
+            .trim_end()
+            .to_string()
+        }));
+        texts.extend(verification.reasons.iter().map(|r| format!("reason: {r}")));
+    }
     redactor.redact_all(&mut texts)?;
     let request = texts.remove(0);
     Ok(Some(EarlierAttempt {
-        job: id.as_str().to_string(),
+        job: job.id().as_str().to_string(),
         request,
         findings: texts,
     }))
+}
+
+/// The most jobs a request may reference; more would bloat the reader brief.
+pub const MAX_REFERENCED_JOBS: usize = 3;
+
+/// Full job ids (`YYYYMMDD-HHMMSS-xxxx`) named anywhere in `text`, in order, without repeats.
+pub fn job_ids_in(text: &str) -> Vec<RecordId> {
+    let mut ids: Vec<RecordId> = Vec::new();
+    for word in text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-')) {
+        if let Ok(id) = RecordId::parse(word)
+            && !ids.contains(&id)
+        {
+            ids.push(id);
+        }
+    }
+    ids
+}
+
+/// The jobs a request names by full id, other than `skip` (the retried job): each one's request and
+/// final findings, redacted. Ids that match no job (or a job without a request) are ignored. At most
+/// [`MAX_REFERENCED_JOBS`] are carried.
+pub fn referenced_jobs(
+    records: &Records,
+    request: &str,
+    skip: Option<&str>,
+    redactor: &Redactor,
+) -> Result<Vec<EarlierAttempt>> {
+    let mut out = Vec::new();
+    for id in job_ids_in(request) {
+        if out.len() >= MAX_REFERENCED_JOBS {
+            break;
+        }
+        if skip == Some(id.as_str()) {
+            continue;
+        }
+        if let Some(job) = records.jobs.get(id.as_str())
+            && let Some(carried) = carry(job, redactor)?
+        {
+            out.push(carried);
+        }
+    }
+    Ok(out)
 }
 
 /// The records of a job at the current commit.
@@ -799,4 +858,20 @@ pub fn job_records(athena: &Athena, job_ref: &str) -> Result<(Records, JobRecord
     let id = records.resolve(job_ref)?;
     let job = records.jobs.get(id.as_str()).expect("resolved").clone();
     Ok((records, job))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn job_ids_are_found_mid_sentence_and_only_when_whole() {
+        let ids = job_ids_in(
+            "compare with 20261012-075824-1x28, (and 20261011-000000-abcd.) but not 20261012-075824-1x28 again",
+        );
+        let names: Vec<&str> = ids.iter().map(|i| i.as_str()).collect();
+        assert_eq!(names, ["20261012-075824-1x28", "20261011-000000-abcd"]);
+        assert!(job_ids_in("add 1x28 and 2026-10-12 and latest").is_empty());
+        assert!(job_ids_in("x120261012-075824-1x28 or 20261012-075824-1x28z").is_empty());
+    }
 }

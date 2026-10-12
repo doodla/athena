@@ -46,6 +46,11 @@ matched case-insensitively at the start of the request). The reader then sees th
 verification's findings, redacted, in an "Earlier attempt" section. Jobs that are landed, in flight, or unknown
 are refused.
 
+Any request that names a job by its full id (like `20261012-075824-1x28`) anywhere in its text also shows the
+reader that job's request and its final verification's findings, redacted, in a "Referenced jobs" section, whatever
+the job's state. At most three jobs are carried; an id that matches no job is ignored. Unique suffixes are resolved
+only in the "try again on" form.
+
 Exit codes: 0 when the job landed, 2 when it did not (rejected, failed, stale, or blocked), 1 when Athena
 itself erred.
 
