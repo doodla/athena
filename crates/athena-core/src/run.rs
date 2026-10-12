@@ -2,6 +2,7 @@
 
 use crate::admission::{AdmissionInput, Changed, admit, is_governance};
 use crate::capability::{Capability, ChangeList, JobConfig};
+use crate::chain::latest_landed_job;
 use crate::checks::{CheckContext, run_check};
 use crate::commits::{NewFile, Refusal, message};
 use crate::invocation::InvocationFacts;
@@ -453,9 +454,15 @@ impl Athena {
 
         // The candidate: the snapshot's change list, applied to the base's full tree in the user's repository.
         let changes = snapshot.change_list()?;
+        // The chain links (athena.candidate/2): the base's own fingerprint, under its own rules, and the
+        // latest job landed in the base's history.
+        let base_fingerprint = fingerprint(&self.git, &p, &p)?;
+        let previous_job = latest_landed_job(&self.git, &p)?;
         let mut candidate = Candidate {
             job: id.clone(),
             base_commit: p.clone(),
+            base_fingerprint: Some(base_fingerprint),
+            previous_job,
             candidate_commit: None,
             candidate_tree: None,
             changes: Vec::new(),
@@ -950,7 +957,7 @@ impl Athena {
         if let Some(candidate) = &closing.candidate {
             closing
                 .files
-                .push(NewFile::record(&AnyRecord::Candidate(Box::new(
+                .push(NewFile::record(&AnyRecord::Candidate2(Box::new(
                     candidate.clone(),
                 ))));
         }

@@ -1353,3 +1353,195 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   producer brief and so could not address a matcher on the verifier side. Enforced by
   `cited_commands_match_whole_simple_commands_inside_what_ran` and
   `cited_commands_with_other_arguments_or_never_run_stay_unseen`.
+
+## D64 · The study capability M1 design: eight decisions after review 1
+
+- **Decision:** In [`docs/design/study-capability-m1.md`](design/study-capability-m1.md):
+  1. Evidence rules (and the quote, pin, and card-completeness rules) are non-waivable; model rules are
+     waivable only by a user-written reason that cites a user intervention, shown on the page.
+  2. Containment of the run step is part of the capability, and no run starts without a boundary; the
+     fallback is an explicit read-only downgrade.
+  3. A per-run cap is enforced before the run (Athena's kill switch plus a provider-side spend limit on
+     the credential); cost recorded afterwards is never the cap.
+  4. The four judgment rules become structural checks (`contradicts` link, `quote` field, provenance-only
+     `authors-say` field, typed `Quantity`); the rest are listed as verifier duties.
+  5. The model gains model-decided guards, unhandled failures, retry changes, and no-answer rules; parallel
+     regions and fan-out are named limits of M1.
+  6. Every `BRIEF.md:298` stream is listed per run as native, added, or absent; absences are findings.
+  7. The Pages design is a required part of M1 and is written and reviewed before the build job.
+  8. "Typed records now, export to a checker later" is recorded as alternative A2-D.
+- **Alternatives:** The other option in each of the review's eight questions: allow waivers of evidence
+  rules with a reason; defer containment and study only trusted systems; accept cost recorded after the
+  fact; relabel all judgment rules as verifier duties; extend the model for parallel regions and fan-out
+  now; require every stream; write the Pages design after the build; leave A2 as it was.
+- **Tradeoff:** Each choice is the more conservative option where `BRIEF.md` does not settle it, at the cost
+  of more build work before a first study (containment, redaction, a spend limit) and a narrower first
+  model. The design needs a re-check (review 2) before building.
+- **Reversal cost:** Low now, because only the design changes. See the design's §7 for costs after a build.
+- **Provenance:** Stated for decisions 2, 3, 6 and the evidence rules: `BRIEF.md:110-111`, `BRIEF.md:298-299`,
+  `BRIEF.md:320-321`. Inferred, as the designer's choice of the conservative option, for 4, 5, 7 and 8. The
+  user asked for all eight to be decided without being asked again.
+
+## D65 · The study capability's first build is the validation core only
+
+- **Decision:** The first build of the studying capability is the crate `athena-cap-study`: the typed
+  `study.*/1` records, the `study.model/1` model, the eighteen validation rules of the design's §5.4 as pure
+  functions, a `Capability` impl with prompts, and a git-lookup trait with an in-memory fixture. Containment,
+  the run step, replay, the Pages explainer and publish step, and registration in the CLI wiring are deferred
+  to later jobs. The review-2 changes (R2-m1 to R2-m3) are applied to the design in the same change. The
+  `Capability` trait is unchanged; whether it fits a multi-step study job is left open until the run step is
+  built. The records are not yet part of `AnyRecord` or the gate.
+- **Alternatives:** (a) Build everything in the design in one job. (b) Build the crate with registration, so
+  `athena ask` can start a study. (c) Fold the rules into `athena-cap-change`.
+- **Tradeoff:** (a) is a large change that is hard to verify and mixes untrusted-code containment with pure
+  rules. (b) would let a study start before containment exists, against D64 decision 2. (c) is rejected in
+  the design's A1. The cost of this scope is that nothing runs yet: the rules are tested on fixtures, and
+  their fit to real studies is unmeasured.
+- **Reversal cost:** Low: a new crate with no dependents. Record shapes are the part that costs more to
+  change once studies exist; they gain a new schema version then.
+- **Provenance:** Inferred. The scope follows the design's order (§2, §8) and the request to build the
+  capability again after an earlier attempt was not admitted; the earlier attempt's records are not
+  available to this change, so why it failed is not known.
+
+## D66 · Proposal: remedy for the history check failing on the multi-job squash ee4b0dd
+
+- **Decision:** Proposed, awaiting the user's choice; nothing is implemented by this entry. `athena.toml`,
+  workflows, code, and tests are unchanged. Recommendation: **(c) stop squash-merging pull requests that
+  carry more than one job, and rewrite nothing**, with **(a) one `[history] exempt` entry for ee4b0dd** as
+  the way to turn main's check green once the user accepts that this commit's content is excused.
+  Implementation of either is a follow-up job.
+  - *Cause (read from code, not from the failing output, which this change did not have).* `landing` in
+    `crates/athena-gate/src/invariant.rs` (lines 253-259) collects the jobs whose closing records the commit
+    adds (`closing_jobs`) and refuses when there is more than one: "a commit adds closing records for more
+    than one job". Design §7.3 ("Merge, squash, and rebase merges", `docs/design/athena-v0.md`) describes a
+    squash as one commit that adds the code and every record of *the* job, checked as one landing. A squash
+    of PR #8 that carries several jobs' records is therefore refused. Even without that line, lines 340-350
+    require each job's `candidate.json` fingerprint and `verification.json` verified fingerprint to equal the
+    fingerprint of the whole landed tree; with several jobs, each verified only its own candidate, so at most
+    one could match. The history check walks every commit, so the failure stays on main until the commit is
+    excused or no longer judged.
+  - *Mechanism of (a).* `check` returns no violations for a commit in the tip's `[history] exempt` list
+    (`invariant.rs` lines 92-100). D60 requires a full 40-character id naming a commit already in history;
+    D61 reads the list from the tip, so an entry added now excuses ee4b0dd. The full id is not in the
+    snapshot this change was made from, so it must be read from `git log` on the real repository.
+- **Alternatives:**
+  - (a) Exempt ee4b0dd via `[history] exempt`. One line of configuration, no code. The commit's content then
+    skips the whole invariant, including "nothing reaches main unverified", for every job in it. The jobs'
+    own records remain in the tree and still get the per-record checks.
+  - (b) Teach `landing` to accept a commit that lands several jobs when each job's records are complete.
+    This needs a per-job content rule, because a combined tree cannot equal each job's fingerprint: for
+    example, verify each job's candidate as a patch against the parent and require the union to equal the
+    landed tree, plus an order rule between jobs. That is a new proof in the gate (design §7.3 and a new
+    decision, new tests in `crates/athena-gate/src/landing_tests.rs`), and it weakens "one verified
+    candidate is the landed content".
+  - (c) Stop squashing multi-job PRs: land them by merge commit or rebase merge (§7.3 says both are checked
+    per commit), or keep one job per PR. No history is rewritten, so ee4b0dd stays on main and still needs
+    (a) to pass; (c) alone prevents a repeat.
+  - (d) Rewrite main to split the squash. Rejected: out of scope, destructive, and breaks every clone.
+- **Tradeoff:** (a) is the cheapest and fully reversible but is a hole for one commit whose verification
+  cannot be checked by the gate; it applies to this one commit only (D60: a full id cannot cover a later
+  commit). (b) fixes the class of failure but is the largest change, in the part of the gate that guards
+  the main property, for a case the design chose not to support ("one commit... of the job"). (c) costs a
+  merge-strategy habit and a repository setting, and is enforced by nothing unless the host restricts
+  allowed merge methods. Choosing (c) with (a) leaves the invariant as strict as it is and fixes main now.
+- **Reversal cost:** (a) low: delete the list entry. (b) high: a new gate rule that later history depends
+  on. (c) low: a setting.
+- **Provenance:** Inferred. The user reported that main's history check has failed since PR #8 was
+  squash-merged as ee4b0dd with many job landings. The failing output and the full commit id were not
+  available to this change, so the cause is read from `invariant.rs`, design §7.3, D60, and D61, and the
+  existing squash tests in `crates/athena-gate/src/landing_tests.rs` (all single-job); no command was run
+  to reproduce the failure.
+
+## D67 · The user chose option (a) of D66: ee4b0dd is exempt from the history check
+
+- **Decision:** Resolves D66. The user chose (a): the squash commit ee4b0dd1aa6fcd81289dc988d0f7bd38fd7a40ef
+  (PR #8) is added to `[history] exempt` in `athena.toml`, the full 40-character id. Its content is excused
+  from the governed-content invariant, and its jobs' own records still get the per-record checks. The entry
+  is one line in `athena.toml`, with a comment that gives this reason. No code, tests, or workflows change.
+  - Option (c), stop squash-merging multi-job pull requests, is **not yet adopted**. Nothing enforces it,
+    and it is a repository setting, so it needs a separate decision and a follow-up.
+  - Options (b) and (d) of D66 are not chosen and stay open.
+- **Alternatives:** (b) Teach `landing` to accept a multi-job commit, a new gate rule. (c) Stop squashing
+  multi-job pull requests. (d) Rewrite main to split the squash.
+- **Tradeoff:** The exemption is the cheapest and fully reversible choice. Its cost is a hole in the
+  invariant for one commit: "nothing reaches main unverified" is not checked for ee4b0dd. D60 limits the hole
+  to that commit, since a full id cannot cover a later one, so any later multi-job squash needs its own entry
+  or a different merge method.
+- **Reversal:** Delete the `ee4b0dd1aa6fcd81289dc988d0f7bd38fd7a40ef` entry and its comment from
+  `[history] exempt` in `athena.toml`. The history check then judges ee4b0dd again and fails on main until
+  that is resolved by (b), (c), or (d). Reversal cost: low.
+- **Provenance:** User decision on D66, given as "(a)". The full id is the one the user supplied. The cause
+  is as D66 records it, read from code and not reproduced. Enforced by the existing history check and the
+  `[history] exempt` validation of D60 and D61. D60 also requires the named commit to be in history already;
+  the user's report places ee4b0dd on main, but this change did not check that against the real repository.
+
+## D68 · An exemption also excuses the job records its commit adds
+
+- **Decision:** A commit on `[history] exempt` is skipped by the job-records check as well as by the
+  governed-content invariant. The records the exempt commit adds, such as a landed outcome and a score, are
+  not flagged. One helper, `invariant::is_exempt`, decides this for both checks, using the tip's list in a
+  history walk and the parent's list in a per-commit check. The exemption still covers only that one commit:
+  records added by a later commit are judged as before.
+- **Why:** D67 exempted the squash commit named there, but the history check kept reporting per-record
+  violations for the jobs whose records arrived in it: "outcome says landed, but this commit is not a valid
+  landing" and "score.json does not follow". Both come from the job-records check, which judges a landed
+  outcome by the invariant's landing rule and a score by the job's records in the same tree. A commit the
+  invariant excuses cannot satisfy either, so excusing the content but not its records left D67 ineffective.
+  This also corrects D67's statement that the jobs' records "still get the per-record checks".
+- **Alternatives:** Exempt only landed outcomes and keep the score check (the score would still be flagged,
+  since it cannot follow from records the gate never validated). Add a separate exempt list for records
+  (a second place to keep in step).
+- **Tradeoff:** The hole D67 accepts for one commit grows to the records it adds: for that commit nobody
+  checks that a landed outcome is a real landing or that a score follows from its records. The secrets and
+  content checks, and the tip's validation and reconciliation of every record, still run.
+- **Reversal:** Remove the early return in `jobs::check`; D67's entry then excuses content only. Cost: low.
+- **Provenance:** Follows D66 and D67. Tests in `crates/athena-gate/src/history.rs` show hand-written landed
+  outcome and score records pass in an exempt commit, are flagged in a non-exempt one, and are flagged in a
+  commit after the exempt one.
+
+## D69 · Accepted: a squash of a chain of verified jobs lands by a chain-aware landing rule
+
+- **Status:** Accepted and implemented. The user asked for the gate rule ("now the gate rule for squash-chain
+  landing") after the record and core half was built. `landing` in `crates/athena-gate/src/invariant.rs` now
+  accepts a chain as described below; `landing_job` returns the set of jobs, `jobs::check` accepts every job
+  of the chain, and the history walk records every one. Tests are named in `docs/enforcement.md` (M30). No
+  `[history] exempt` entry, `athena.toml`, workflow, or record changed. The decision text below is the
+  original proposal, kept as the reasons for the rule.
+- **Decision:** (Written as a proposal; accepted as written.) **Option B** of
+  `docs/design/squash-chain-landing.md`. Each job's `candidate.json` (new schema `athena.candidate/2`, loaded
+  beside `/1`) gains `base_fingerprint` and `previous_job`; `landing` accepts one commit that adds the
+  closing records of several jobs when they form one linear chain, in the recorded `previous_job` order,
+  from the parent's fingerprint to the landed tree's fingerprint (each job's base fingerprint equals the
+  previous job's candidate fingerprint), the last job's candidate and verified fingerprints equal the
+  landed tree, and every job passes the other per-job checks it passes today, including that its reading
+  precedes its own work. A chain of one is today's rule. Implementation (the fields, the gate change in
+  `crates/athena-gate/src/invariant.rs`, tests in `landing_tests.rs`, and updates to design §7.3 and
+  `docs/enforcement.md`) is a follow-up job. A chain is refused if a job changes a path classification
+  rules file, or if the landing commit has more than one parent (assumed defaults after review 1, which the
+  user may change). After review 2: the core derives `previous_job` as the latest landed job in the base
+  commit's history (absent if none; also an assumption the user may change); one job left from a partly
+  landed chain is judged by the single-job rule; a landed predecessor, including a `/1` one, is found by
+  loading its records at the parent; for a merge commit the existing merge message is shown. D60-D68 stay in
+  force.
+- **Alternatives:**
+  - (A) Per-job patch composition proof: needs the intermediate commits' blobs, which a squash discards.
+  - (C) Restrict merge methods (D66 (c)): the restriction the request asks to remove, enforced only by a
+    host setting.
+  - (D) A `[history] exempt` entry per squash (D60, D67, D68): skips the whole invariant for the commit and
+    needs a follow-up commit each time.
+  - (E) Check only the last job: ignores whether the earlier jobs' records belong to this tree.
+- **Tradeoff:** B keeps "nothing reaches main unverified" in the sense that the landed content equals the
+  last job's verified fingerprint and each step names a passing verification; the last verifier did not
+  review the whole tree. Over option E it catches accidental mismatches, not forgery. It keeps M23 (each
+  job's reading precedes its own work) and needs no exemption. It costs a schema change in `candidate.json`,
+  a more complex `landing`, and it proves intermediate states only by unsigned records agreeing, the same
+  limit as §7.3's timestamp proof. Jobs landed before the fields exist cannot form a chain.
+- **Reversal:** Before implementation: reject or edit this entry and the design. After implementation: remove
+  the chain branch in `landing`, which restores the one-job-per-commit rule; `athena.candidate/2` and its
+  fields can stay, since the gate keeps loading both versions. Cost: medium once chain squashes are on
+  main, since history then depends on the rule (as D66 noted for (b)).
+- **Provenance:** Requested by the user ("adopters choose their own merge method"). Claims about `landing`
+  (the more-than-one-job refusal and the whole-tree fingerprint equality), `Candidate` fields, and §7.3 are
+  read from `invariant.rs`, `crates/athena-data/src/records.rs`, and the design. The security argument and
+  where the core writes the candidate are inferred; no command was run to reproduce a failure or to try the
+  rule.

@@ -1,6 +1,7 @@
 //! `ask` and `correct`: the reader's reading, with forecasts, committed before any work (design §3.2–3.3).
 
 use crate::capability::{JobConfig, ToolGrant};
+use crate::checks::tail;
 use crate::commits::{NewFile, message};
 use crate::invocation::InvocationFacts;
 use crate::store::{JobRecords, JobState, Records};
@@ -734,14 +735,54 @@ impl Athena {
 const RETRY_PREFIX: &str = "try again on ";
 
 /// Detects "try again on <job>" at the start of `request` and builds the earlier attempt from the
-/// rejected job's request and final verification. Returns `None` when the request is not that form.
+/// rejected or failed job's request, final verification and (for a failed or unverified job) outcome
+/// reason. Returns `None` when the request is not that form.
 /// The carried text goes through `redactor`.
 pub fn earlier_attempt(
     records: &Records,
     request: &str,
     redactor: &Redactor,
 ) -> Result<Option<EarlierAttempt>> {
-    let text = request.trim_start();
+    let Some(reference) = retry_reference(request)? else {
+        return Ok(None);
+    };
+    let id = records.resolve(reference)?;
+    let job = records.jobs.get(id.as_str()).expect("resolved");
+    let state = job.state();
+    if !matches!(
+        state,
+        JobState::Closed(OutcomeState::Rejected | OutcomeState::Failed)
+    ) {
+        bail!(
+            "job {id} is {}; only a rejected or failed job can be tried again",
+            state.name()
+        );
+    }
+    if job.request.is_none() {
+        bail!("job {id} is {} but has no request record", state.name());
+    }
+    if job.verification.is_none() && job.outcome.is_none() {
+        bail!(
+            "job {id} is {} but has no verification or outcome record",
+            state.name()
+        );
+    }
+    let mut attempt = carry(job, redactor)?.expect("has a request");
+    // When the retried job was itself a retry, carry the original request instead of the retry phrase.
+    if let Some(original) = original_request(records, job) {
+        let mut texts = vec![original];
+        redactor.redact_all(&mut texts)?;
+        attempt.request = texts.remove(0);
+    }
+    Ok(Some(attempt))
+}
+
+/// The reference after "try again on " at the start of `request`; `None` when it is not that form.
+fn retry_reference(request: &str) -> Result<Option<&str>> {
+    let text = request.trim();
+    if text.eq_ignore_ascii_case(RETRY_PREFIX.trim_end()) {
+        bail!("say which job to try again on: 'try again on <job>'");
+    }
     let Some(head) = text.get(..RETRY_PREFIX.len()) else {
         return Ok(None);
     };
@@ -756,28 +797,49 @@ pub fn earlier_attempt(
     if reference.is_empty() {
         bail!("say which job to try again on: 'try again on <job>'");
     }
-    let id = records.resolve(reference)?;
-    let job = records.jobs.get(id.as_str()).expect("resolved");
-    let state = job.state();
-    if state != JobState::Closed(OutcomeState::Rejected) {
-        bail!(
-            "job {id} is {}; only a rejected job can be tried again",
-            state.name()
-        );
-    }
-    if job.request.is_none() {
-        bail!("job {id} is {} but has no request record", state.name());
-    }
-    if job.verification.is_none() {
-        bail!(
-            "job {id} is {} but has no verification record",
-            state.name()
-        );
-    }
-    Ok(Some(carry(job, redactor)?.expect("has a request")))
+    Ok(Some(reference))
 }
 
-/// The job's request and final verification findings and reasons, redacted. `None` without a request.
+/// The most retries followed back to an original request.
+const MAX_RETRY_DEPTH: usize = 16;
+
+/// Follows `job`'s "try again on <job>" request back to the first request that is not a retry.
+/// `None` when `job` is not a retry; when the chain breaks (unknown job, no request, a cycle, or too
+/// deep), the last request reached is returned. The text is not yet redacted.
+fn original_request(records: &Records, job: &JobRecords) -> Option<String> {
+    let mut current = job;
+    let mut seen = vec![current.id().as_str().to_string()];
+    let mut original = None;
+    for _ in 0..MAX_RETRY_DEPTH {
+        let text = &current.request.as_ref()?.text;
+        let Some(reference) = retry_reference(text).ok().flatten() else {
+            break;
+        };
+        let Some(next) = records
+            .resolve(reference)
+            .ok()
+            .and_then(|id| records.jobs.get(id.as_str()))
+        else {
+            break;
+        };
+        let Some(next_request) = &next.request else {
+            break;
+        };
+        if seen.iter().any(|s| s == next.id().as_str()) {
+            break;
+        }
+        seen.push(next.id().as_str().to_string());
+        original = Some(next_request.text.clone());
+        current = next;
+    }
+    original
+}
+
+/// The most bytes of one failed check's output that are carried; the end of the output is kept.
+const CARRIED_CHECK_OUTPUT_BYTES: usize = 1024;
+
+/// The job's request, final verification findings and reasons, and each failed check's name, command,
+/// exit code and output tail, redacted. `None` without a request.
 fn carry(job: &JobRecords, redactor: &Redactor) -> Result<Option<EarlierAttempt>> {
     let Some(earlier) = &job.request else {
         return Ok(None);
@@ -799,12 +861,36 @@ fn carry(job: &JobRecords, redactor: &Redactor) -> Result<Option<EarlierAttempt>
             .to_string()
         }));
         texts.extend(verification.reasons.iter().map(|r| format!("reason: {r}")));
+        texts.extend(verification.checks.iter().filter(|c| !c.passed).map(|c| {
+            let exit = c.exit_code.map_or("no exit code".to_string(), |code| {
+                format!("exit code {code}")
+            });
+            format!(
+                "failed check {} (`{}`, {exit}), output:\n{}",
+                c.name,
+                c.command.join(" "),
+                tail(&c.output_tail, CARRIED_CHECK_OUTPUT_BYTES)
+            )
+        }));
+    }
+    // A job closed before verification has only its outcome reason to say why; a failed job's reason
+    // (for example an admission refusal) is carried even when it was verified.
+    let failed = job
+        .outcome
+        .as_ref()
+        .is_some_and(|o| o.state == OutcomeState::Failed);
+    if let Some(outcome) = &job.outcome
+        && (failed || job.verification.is_none())
+        && !outcome.reason.trim().is_empty()
+    {
+        texts.push(format!("outcome: {}", outcome.reason));
     }
     redactor.redact_all(&mut texts)?;
     let request = texts.remove(0);
     Ok(Some(EarlierAttempt {
         job: job.id().as_str().to_string(),
         request,
+        failed,
         findings: texts,
     }))
 }
@@ -863,6 +949,203 @@ pub fn job_records(athena: &Athena, job_ref: &str) -> Result<(Records, JobRecord
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bare_try_again_on_is_refused_and_a_named_job_is_found() {
+        for bare in ["try again on", "Try again on   ", "try again on ."] {
+            let error = retry_reference(bare).unwrap_err().to_string();
+            assert!(error.contains("say which job"), "{bare:?}: {error}");
+        }
+        assert_eq!(
+            retry_reference("Try again on 20261012-075010-86ja, please").unwrap(),
+            Some("20261012-075010-86ja")
+        );
+        assert_eq!(retry_reference("add a greeting").unwrap(), None);
+    }
+
+    fn check(name: &str, passed: bool, output: &str) -> athena_data::records::CheckRun {
+        athena_data::records::CheckRun {
+            name: name.into(),
+            command: vec!["cargo".into(), name.into()],
+            exit_code: Some(if passed { 0 } else { 101 }),
+            passed,
+            tests_ran: None,
+            duration: athena_data::Quantity::measured(1.0, athena_data::Unit::Seconds, "clock"),
+            output_tail: output.into(),
+            note: None,
+        }
+    }
+
+    fn job_with_checks(checks: Vec<athena_data::records::CheckRun>) -> JobRecords {
+        let id = JobId::parse("20261012-084936-n1p0").unwrap();
+        JobRecords {
+            id: Some(id.clone()),
+            request: Some(athena_data::records::Request {
+                job: id.clone(),
+                text: "add a greeting".into(),
+                received_at: jiff::Timestamp::UNIX_EPOCH,
+                channel: "cli".into(),
+            }),
+            verification: Some(athena_data::records::Verification {
+                job: id,
+                candidate_commit: "0".repeat(40),
+                verified_fingerprint: "0".repeat(64),
+                tool_config_from_base: vec![],
+                checks,
+                check_cleanup: vec![],
+                verifier_invocation: None,
+                criteria: vec![],
+                findings: vec![],
+                request_reading_mismatch: None,
+                agent_verdict: None,
+                final_verdict: athena_data::records::Verdict::Fail,
+                reasons: vec!["a check failed".into()],
+                inputs: vec![],
+                summary: None,
+            }),
+            ..JobRecords::default()
+        }
+    }
+
+    #[test]
+    fn carry_adds_only_failed_checks_after_the_reasons_redacted_and_bounded() {
+        let redactor = Redactor::new(&athena_gate::builtin_config()).unwrap();
+        let token = format!(
+            "{}{}",
+            ["gh", "p_"].concat(),
+            "Zq8rT2vK9mW4xN7bP3cH6jL1sD5fG0aYuE2i"
+        );
+        let noisy = format!("HEAD-NOISE {}TAIL-CANARY", "x".repeat(5000));
+        let job = job_with_checks(vec![
+            check("fmt", true, "PASSING-OUTPUT"),
+            check("test", false, &format!("assertion failed\nkey {token}")),
+            check("clippy", false, &noisy),
+        ]);
+        let carried = carry(&job, &redactor).unwrap().unwrap();
+        assert_eq!(carried.findings.len(), 3, "{:?}", carried.findings);
+        assert_eq!(carried.findings[0], "reason: a check failed");
+        let test = &carried.findings[1];
+        assert!(test.contains("failed check test"), "{test}");
+        assert!(test.contains("cargo test"), "{test}");
+        assert!(test.contains("exit code 101"), "{test}");
+        assert!(test.contains("assertion failed"), "{test}");
+        assert!(!test.contains(&token), "{test}");
+        assert!(test.contains("[secret:github-pat]"), "{test}");
+        let clippy = &carried.findings[2];
+        assert!(clippy.contains("TAIL-CANARY"), "the end is kept");
+        assert!(!clippy.contains("HEAD-NOISE"), "the head is dropped");
+        assert!(clippy.len() < 1300, "{}", clippy.len());
+        assert!(
+            !carried
+                .findings
+                .iter()
+                .any(|f| f.contains("PASSING-OUTPUT"))
+        );
+    }
+
+    fn outcome(
+        job: &JobRecords,
+        state: OutcomeState,
+        reason: &str,
+    ) -> athena_data::records::Outcome {
+        athena_data::records::Outcome {
+            job: job.id().clone(),
+            state,
+            reason: reason.into(),
+            at: jiff::Timestamp::UNIX_EPOCH,
+            totals: None,
+            branch: None,
+            base_commit: None,
+            candidate_commit: None,
+            after_blocked: false,
+            through_commit: None,
+        }
+    }
+
+    fn records_with(job: JobRecords) -> Records {
+        let mut records = Records::default();
+        records.jobs.insert(job.id().as_str().to_string(), job);
+        records
+    }
+
+    #[test]
+    fn a_failed_job_without_verification_can_be_tried_again_and_carries_its_reason() {
+        let redactor = Redactor::new(&athena_gate::builtin_config()).unwrap();
+        let mut job = job_with_checks(vec![]);
+        job.verification = None;
+        job.outcome = Some(outcome(
+            &job,
+            OutcomeState::Failed,
+            "admission refused the change: governance file changed",
+        ));
+        let id = job.id().as_str().to_string();
+        let records = records_with(job);
+        let attempt = earlier_attempt(&records, &format!("try again on {id}"), &redactor)
+            .unwrap()
+            .unwrap();
+        assert!(attempt.failed);
+        assert_eq!(attempt.request, "add a greeting");
+        assert_eq!(
+            attempt.findings,
+            ["outcome: admission refused the change: governance file changed"]
+        );
+    }
+
+    #[test]
+    fn a_carried_outcome_reason_is_redacted() {
+        let redactor = Redactor::new(&athena_gate::builtin_config()).unwrap();
+        let token = format!(
+            "{}{}",
+            ["gh", "p_"].concat(),
+            "Zq8rT2vK9mW4xN7bP3cH6jL1sD5fG0aYuE2i"
+        );
+        let mut job = job_with_checks(vec![]);
+        job.verification = None;
+        job.outcome = Some(outcome(&job, OutcomeState::Failed, &format!("key {token}")));
+        let carried = carry(&job, &redactor).unwrap().unwrap();
+        assert_eq!(carried.findings.len(), 1);
+        assert!(!carried.findings[0].contains(&token));
+        assert!(carried.findings[0].contains("[secret:github-pat]"));
+    }
+
+    #[test]
+    fn only_rejected_or_failed_jobs_can_be_tried_again() {
+        let redactor = Redactor::new(&athena_gate::builtin_config()).unwrap();
+        for state in [
+            OutcomeState::Landed,
+            OutcomeState::Stale,
+            OutcomeState::Abandoned,
+        ] {
+            let mut job = job_with_checks(vec![]);
+            job.outcome = Some(outcome(&job, state, "done"));
+            let id = job.id().as_str().to_string();
+            let error =
+                earlier_attempt(&records_with(job), &format!("try again on {id}"), &redactor)
+                    .unwrap_err()
+                    .to_string();
+            assert!(error.contains(state.as_str()), "{error}");
+            assert!(error.contains("only a rejected or failed job"), "{error}");
+        }
+        let open = job_with_checks(vec![]);
+        let id = open.id().as_str().to_string();
+        let error = earlier_attempt(
+            &records_with(open),
+            &format!("try again on {id}"),
+            &redactor,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("queued"), "{error}");
+        assert!(error.contains("only a rejected or failed job"), "{error}");
+    }
+
+    #[test]
+    fn carry_without_failed_checks_adds_nothing() {
+        let redactor = Redactor::new(&athena_gate::builtin_config()).unwrap();
+        let job = job_with_checks(vec![check("fmt", true, "PASSING-OUTPUT")]);
+        let carried = carry(&job, &redactor).unwrap().unwrap();
+        assert_eq!(carried.findings, ["reason: a check failed"]);
+    }
 
     #[test]
     fn job_ids_are_found_mid_sentence_and_only_when_whole() {

@@ -2,7 +2,9 @@
 
 This page is the map of the code. The design and its reasons are in
 [`design/athena-v0.md`](design/athena-v0.md), and every significant choice is in
-[`decisions.md`](decisions.md).
+[`decisions.md`](decisions.md). The landing gate's rule for squash merges of a chain of jobs (D69) is in
+[`design/squash-chain-landing.md`](design/squash-chain-landing.md); the gate implements it in
+`crates/athena-gate/src/invariant.rs`.
 
 ## The shape
 
@@ -49,6 +51,7 @@ depends on another, and `athena-data` and `athena-git` are leaves.
 | `athena-agent` | The driver interface, the Claude Code driver, the fake driver, agent environments, stream-json usage capture, process groups, the kill switch, and the tool policy behind the hook | data |
 | `athena-core` | The job lifecycle, the `Capability` trait, admission, tool configuration from the base, checks, the final verdict, landing, records commits, scoring, status, nested runs | data, score, git, gate, context, agent |
 | `athena-cap-change` | v0's one capability: a focused, independently verified change | core, data, context |
+| `athena-cap-study` | The studying capability's reusable core: typed study records, the work-handling model, and the validation rules that gate a study. Not yet registered in the CLI | core, data, context |
 | `athena-cli` | The `athena` binary: commands, the interactive prompt, displays, the git and tool hook entry points | core, cap-change, data, gate, agent, git |
 | `xtask` | Setup and CI tasks, and the repository-policy tests | data |
 

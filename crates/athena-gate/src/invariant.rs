@@ -15,7 +15,9 @@
 //!   final verdict is pass, the verifier invocation the verification names is recorded, succeeded, used
 //!   the job's verifier model, and reconciles, as do the outcome's totals; and the job has not landed
 //!   before: its landed outcome is not on the parent, and (in a history walk) no earlier commit validly
-//!   landed it. Trailers are only hints that must agree: an `Athena-Verified-Content` that is not X's
+//!   landed it. A squash may carry the jobs of a chain (D69): then each job passes all of this except that
+//!   only the last holds X's fingerprint, and the jobs' `athena.candidate/2` records must link the parent's
+//!   content to X's (see `chain_problem`). Trailers are only hints that must agree: an `Athena-Verified-Content` that is not X's
 //!   fingerprint, or an `Athena-Job` naming another request job, refuses the landing; `Athena-Prediction`
 //!   is ignored;
 //! - (b) a declared intervention: `Athena-Intervention: <id>`, and X adds that intervention record;
@@ -30,7 +32,7 @@ use athena_data::records::{AnyRecord, Invocation, InvocationOutcome, OutcomeStat
 use athena_data::{JobId, RecordId};
 use athena_git::Git;
 use athena_git::attrs::fingerprint;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const JOB: &str = "Athena-Job";
 pub const INTERVENTION: &str = "Athena-Intervention";
@@ -76,6 +78,26 @@ pub fn bootstrap_range(git: &Git, treeish: &str) -> Result<BootstrapRange> {
     }
 }
 
+/// Whether `change` is a commit on the `[history] exempt` list. The invariant and the job-records check
+/// both skip such a commit (D66, D67 and the decision that followed them): an exemption excuses the
+/// commit's content and the job records it adds, which are judged as part of the same landing.
+///
+/// The history check reads the exempt list from the tip's configuration, not the judged commit's
+/// parent's: an entry is added after the commit it excuses, so the parent's list never holds it.
+/// A per-commit check has no tip and uses the parent's list. An exemption names one commit in full
+/// (the configuration refuses anything shorter), and only a commit that existed before the entry was
+/// added (the content check), so it cannot cover a later one.
+pub fn is_exempt(change: &Change, judged: &Judged, history: Option<&HistoryState>) -> bool {
+    let exempt = match history {
+        Some(state) => &state.exempt,
+        None => &judged.config.history.exempt,
+    };
+    change
+        .commit
+        .as_deref()
+        .is_some_and(|id| exempt.iter().any(|e| e == id))
+}
+
 /// Checks the invariant for `change`. `history` is set during a history walk.
 pub fn check(
     git: &Git,
@@ -84,18 +106,7 @@ pub fn check(
     history: Option<&HistoryState>,
 ) -> Result<Vec<Violation>> {
     let commit = change.commit.as_deref();
-    // The history check reads the exempt list from the tip's configuration, not the judged commit's
-    // parent's: an entry is added after the commit it excuses, so the parent's list never holds it.
-    // A per-commit check has no tip and uses the parent's list. An exemption names one commit in full
-    // (the configuration refuses anything shorter), and only a commit that existed before the entry was
-    // added (the content check), so it cannot cover a later one.
-    let exempt = match history {
-        Some(state) => &state.exempt,
-        None => &judged.config.history.exempt,
-    };
-    if let Some(id) = commit
-        && exempt.iter().any(|e| e == id)
-    {
+    if is_exempt(change, judged, history) {
         return Ok(Vec::new());
     }
     let trailers = change.trailers(git)?;
@@ -191,16 +202,17 @@ pub fn check(
     ))
 }
 
-/// The job a commit validly lands (case a), if it is a landing commit at all.
+/// The jobs a commit validly lands (case a): one job, or every job of a chain. Empty when the commit is
+/// not a valid landing.
 pub fn landing_job(
     git: &Git,
     change: &Change,
     judged: &Judged,
     history: Option<&HistoryState>,
-) -> Result<Option<JobId>> {
+) -> Result<BTreeSet<JobId>> {
     let trailers = change.trailers(git)?;
     let fp = fingerprint(git, &change.tree, &judged.rules)?;
-    Ok(landing(git, change, judged, &trailers, &fp, history)?.ok())
+    Ok(landing(git, change, judged, &trailers, &fp, history)?.unwrap_or_default())
 }
 
 /// The jobs whose closing records (`candidate.json`, `verification.json`, `outcome.json`, or
@@ -233,14 +245,20 @@ fn closing_jobs(judged: &Judged) -> BTreeSet<JobId> {
     jobs
 }
 
-/// `Ok(job)` when the commit is a valid landing of `job` (case a); `Err(Some(reason))` when it claims to
-/// be one but is not; `Err(None)` when it does not claim to be one.
+/// `Ok(jobs)` when the commit is a valid landing of `jobs` (case a): one job, or a chain of several that
+/// a squash folded into one commit (design D69); `Err(Some(reason))` when it claims to be one but is not;
+/// `Err(None)` when it does not claim to be one.
 ///
-/// The job is identified by the closing records the commit adds, never by trailers; the proof that it was
-/// read before the work is in the landed records (see [`prediction_problem`]); and ancestry is not used,
-/// so a squash or rebase merge, which leaves no ancestor to point at, lands the same way a merge does.
-/// Trailers are hints that must agree with the records: a verified-content value that is not the landed
-/// content, or an `Athena-Job` that names another request job, refuses the landing.
+/// The jobs are identified by the closing records the commit adds, never by trailers; the proof that each
+/// was read before its work is in the landed records (see [`prediction_problem`]); and ancestry is not
+/// used, so a squash or rebase merge, which leaves no ancestor to point at, lands the same way a merge
+/// does. Trailers are hints that must agree with the records: a verified-content value that is not the
+/// landed content, or an `Athena-Job` that names a request job the commit does not land, refuses the
+/// landing.
+///
+/// One job is judged by [`job_problem`] against the landed content, as it always was. Several jobs must
+/// first form one chain ([`chain_problem`]); then every job passes [`job_problem`], and only the last has
+/// to hold the landed content.
 fn landing(
     git: &Git,
     change: &Change,
@@ -248,14 +266,11 @@ fn landing(
     trailers: &[(String, String)],
     fp: &str,
     history: Option<&HistoryState>,
-) -> Result<std::result::Result<JobId, Option<String>>> {
+) -> Result<std::result::Result<BTreeSet<JobId>, Option<String>>> {
     let refuse = |reason: String| Ok(Err(Some(reason)));
-    let mut jobs = closing_jobs(judged).into_iter();
-    let Some(job) = jobs.next() else {
+    let jobs = closing_jobs(judged);
+    if jobs.is_empty() {
         return Ok(Err(None));
-    };
-    if jobs.next().is_some() {
-        return refuse("a commit adds closing records for more than one job".into());
     }
     for claimed in trailer_values(trailers, VERIFIED_CONTENT) {
         if claimed != fp {
@@ -267,23 +282,223 @@ fn landing(
     for named in trailer_values(trailers, JOB) {
         if let Ok(named) = JobId::parse(named)
             && named.is_request()
-            && named != job
+            && !jobs.contains(&named)
         {
-            return refuse(format!(
-                "the Athena-Job trailer names {}, but the commit adds the records of {}",
-                named.as_str(),
-                job.as_str()
-            ));
+            return refuse(match jobs.iter().next() {
+                Some(only) if jobs.len() == 1 => format!(
+                    "the Athena-Job trailer names {}, but the commit adds the records of {}",
+                    named.as_str(),
+                    only.as_str()
+                ),
+                _ => format!(
+                    "the Athena-Job trailer names {}, which is not one of the jobs whose records the commit adds",
+                    named.as_str()
+                ),
+            });
         }
     }
     let Some(parent) = change.parents.first() else {
         return refuse("a root commit cannot land a job".into());
     };
+    if jobs.len() == 1 {
+        let job = jobs.iter().next().expect("one job");
+        return match job_problem(git, change, judged, parent, job, Some(fp), history)? {
+            Some(reason) => refuse(reason),
+            None => Ok(Ok(jobs)),
+        };
+    }
+    let order = match chain_problem(git, change, judged, parent, &jobs, fp)? {
+        Ok(order) => order,
+        Err(reason) => return refuse(reason),
+    };
+    for job in &order {
+        // Only the last job has to hold the landed content; the link checks tie the others to it.
+        let landed = (order.last() == Some(job)).then_some(fp);
+        if let Some(reason) = job_problem(git, change, judged, parent, job, landed, history)? {
+            return refuse(reason);
+        }
+    }
+    Ok(Ok(jobs))
+}
+
+/// Whether `path` is a file that classifies paths (a `.gitattributes`).
+fn is_rules_file(path: &str) -> bool {
+    path.rsplit('/').next() == Some(".gitattributes")
+}
+
+/// Why `jobs`, the several jobs a commit adds closing records for, do not form one chain from the parent's
+/// content to the landed content `fp`; otherwise the jobs in chain order (design D69, §4.2 steps 2-5).
+///
+/// The order comes from the `previous_job` each `athena.candidate/2` records, never from the fingerprints,
+/// which may repeat. Every fingerprint in a chain is computed under the parent's rules, so a chain that
+/// changes a rules file is refused.
+fn chain_problem(
+    git: &Git,
+    change: &Change,
+    judged: &Judged,
+    parent: &str,
+    jobs: &BTreeSet<JobId>,
+    fp: &str,
+) -> Result<std::result::Result<Vec<JobId>, String>> {
+    if change.parents.len() > 1 {
+        return Ok(Err(
+            "a chain landing is refused on a commit with more than one parent".into(),
+        ));
+    }
+    let mut candidates = BTreeMap::new();
+    for job in jobs {
+        match JobFiles::load(git, &change.tree, job)?.candidate {
+            Some(c) if c.base_fingerprint.is_some() => {
+                candidates.insert(job.clone(), c);
+            }
+            _ => {
+                return Ok(Err(format!(
+                    "a chain landing needs athena.candidate/2 in {}/candidate.json",
+                    job.dir()
+                )));
+            }
+        }
+    }
+    for (job, c) in &candidates {
+        if c.changes.iter().any(|e| is_rules_file(&e.path)) {
+            return Ok(Err(format!(
+                "job {} changes a path classification rules file, so its fingerprints are not comparable; land it alone",
+                job.as_str()
+            )));
+        }
+    }
+    if let Some(d) = judged.diff.iter().find(|d| is_rules_file(&d.path)) {
+        return Ok(Err(format!(
+            "the commit changes {}, a path classification rules file, so the fingerprints of its jobs are not comparable; land the jobs one at a time",
+            d.path
+        )));
+    }
+
+    let parent_fp = fingerprint(git, parent, &judged.rules)?;
+    // The job that follows each job, and the first sign of a fork.
+    let mut followers: BTreeMap<&JobId, &JobId> = BTreeMap::new();
+    for (job, c) in &candidates {
+        if let Some(previous) = &c.previous_job
+            && let Some(other) = followers.insert(previous, job)
+        {
+            return Ok(Err(format!(
+                "jobs {} and {} both follow {}, so they do not form one chain",
+                other.as_str(),
+                job.as_str(),
+                previous.as_str()
+            )));
+        }
+    }
+    let not_linked = |job: &JobId, previous: &JobId| {
+        Err(format!(
+            "job {} is not linked to the others: its previous job {} is not in this commit",
+            job.as_str(),
+            previous.as_str()
+        ))
+    };
+    // The head has no previous job, or one that already landed on the parent.
+    let mut heads = Vec::new();
+    for (job, c) in &candidates {
+        match &c.previous_job {
+            None => heads.push(job),
+            Some(previous) if candidates.contains_key(previous) => {}
+            Some(previous) => {
+                if landed_at(git, parent, previous, &parent_fp)? {
+                    heads.push(job);
+                } else {
+                    return Ok(not_linked(job, previous));
+                }
+            }
+        }
+    }
+    let no_head = || {
+        Err(format!(
+            "no job in the commit starts from the parent's content {parent_fp}"
+        ))
+    };
+    let head = match heads.as_slice() {
+        [] => return Ok(no_head()),
+        [head] => *head,
+        [first, second, ..] => {
+            return Ok(Err(format!(
+                "jobs {} and {} both start a chain, so they do not form one chain",
+                first.as_str(),
+                second.as_str()
+            )));
+        }
+    };
+    if candidates[head].base_fingerprint.as_deref() != Some(parent_fp.as_str()) {
+        return Ok(no_head());
+    }
+
+    let mut order = vec![head.clone()];
+    while let Some(next) = followers.get(&&order[order.len() - 1]) {
+        order.push((*next).clone());
+    }
+    if let Some((job, previous)) = candidates
+        .iter()
+        .find(|(job, _)| !order.contains(job))
+        .and_then(|(job, c)| c.previous_job.as_ref().map(|p| (job, p)))
+    {
+        return Ok(not_linked(job, previous));
+    }
+    for pair in order.windows(2) {
+        let (earlier, later) = (&candidates[&pair[0]], &candidates[&pair[1]]);
+        if later.base_fingerprint != earlier.fingerprint {
+            return Ok(Err(format!(
+                "job {} starts from {} but its previous job {} ended at {}",
+                pair[1].as_str(),
+                later.base_fingerprint.as_deref().unwrap_or("nothing"),
+                pair[0].as_str(),
+                earlier.fingerprint.as_deref().unwrap_or("nothing")
+            )));
+        }
+    }
+    let last = &order[order.len() - 1];
+    if candidates[last].fingerprint.as_deref() != Some(fp) {
+        return Ok(Err(format!(
+            "the last job {} holds {}, not the landed content {fp}",
+            last.as_str(),
+            candidates[last].fingerprint.as_deref().unwrap_or("nothing")
+        )));
+    }
+    Ok(Ok(order))
+}
+
+/// Whether `job` landed on `treeish` with content `fingerprint`: its closing records are there, and its
+/// candidate holds that fingerprint. A `/1` candidate counts; only its fingerprint is read.
+fn landed_at(git: &Git, treeish: &str, job: &JobId, fingerprint: &str) -> Result<bool> {
+    let files = JobFiles::load(git, treeish, job)?;
+    let landed = [&files.outcome, &files.later_outcome]
+        .into_iter()
+        .flatten()
+        .any(|o| o.state == OutcomeState::Landed);
+    Ok(landed
+        && files.verification.is_some()
+        && files
+            .candidate
+            .is_some_and(|c| c.fingerprint.as_deref() == Some(fingerprint)))
+}
+
+/// Why `job`, one of the jobs `change` lands, is not validly landed by it, if it is not. `landed` is the
+/// content the job's candidate and verification must hold: the landed content for a single job and for the
+/// last job of a chain. For an earlier job of a chain it is `None`, and the job only has to hold what it
+/// verified (the chain's links tie that to the next job).
+fn job_problem(
+    git: &Git,
+    change: &Change,
+    judged: &Judged,
+    parent: &str,
+    job: &JobId,
+    landed: Option<&str>,
+    history: Option<&HistoryState>,
+) -> Result<Option<String>> {
+    let refuse = |reason: String| Ok(Some(reason));
     let dir = job.dir();
 
     // The job was read and dispatched, and the reading came before the work, as its records show.
-    let before = JobFiles::load(git, parent, &job)?;
-    let after = JobFiles::load(git, &change.tree, &job)?;
+    let before = JobFiles::load(git, parent, job)?;
+    let after = JobFiles::load(git, &change.tree, job)?;
     let Some(dispatched) = &after.job else {
         return refuse(format!(
             "{dir}/job.json is not in the landed tree, so no dispatched job lands here"
@@ -292,7 +507,7 @@ fn landing(
     let Some(n) = dispatched.accepted_reading else {
         return refuse(format!("{dir}/job.json names no accepted reading"));
     };
-    if let Some(problem) = prediction_problem(&after, &job, n) {
+    if let Some(problem) = prediction_problem(&after, job, n) {
         return refuse(problem);
     }
 
@@ -337,14 +552,21 @@ fn landing(
             "{dir} lacks the candidate, verification, or outcome record a landing needs"
         ));
     };
-    if candidate.fingerprint.as_deref() != Some(fp) {
+    if let Some(fp) = landed {
+        if candidate.fingerprint.as_deref() != Some(fp) {
+            return refuse(format!(
+                "{dir}/candidate.json does not hold the landed content {fp}"
+            ));
+        }
+        if verified.verified_fingerprint != fp {
+            return refuse(format!(
+                "{dir}/verification.json verified {}, not the landed content {fp}",
+                verified.verified_fingerprint
+            ));
+        }
+    } else if candidate.fingerprint.as_deref() != Some(verified.verified_fingerprint.as_str()) {
         return refuse(format!(
-            "{dir}/candidate.json does not hold the landed content {fp}"
-        ));
-    }
-    if verified.verified_fingerprint != fp {
-        return refuse(format!(
-            "{dir}/verification.json verified {}, not the landed content {fp}",
+            "{dir}/verification.json verified {}, not the content {dir}/candidate.json holds",
             verified.verified_fingerprint
         ));
     }
@@ -394,7 +616,7 @@ fn landing(
     if landed_before || walked {
         return refuse(format!("job {} has already landed", job.as_str()));
     }
-    Ok(Ok(job))
+    Ok(None)
 }
 
 /// Why the records of a landed job do not show that its accepted reading `n` came before the work, if

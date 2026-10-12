@@ -77,7 +77,21 @@ fn a_request_lands_a_traceable_commit() {
         &head,
         &format!("{}/candidate.json", proposal.job.dir()),
     ) {
-        Some(AnyRecord::Candidate(c)) => c.base_commit.clone(),
+        Some(AnyRecord::Candidate2(c)) => {
+            // The core links the job to its base: the base's fingerprint, and no predecessor because
+            // no job had landed before this one.
+            assert_eq!(
+                c.base_fingerprint.as_deref(),
+                Some(
+                    athena_git::attrs::fingerprint(&fx.git, &c.base_commit, &c.base_commit)
+                        .unwrap()
+                        .as_str()
+                ),
+                "base_fingerprint is the base commit's fingerprint"
+            );
+            assert_eq!(c.previous_job, None, "no job had landed before");
+            c.base_commit.clone()
+        }
         other => panic!("unexpected {other:?}"),
     };
     assert_eq!(
@@ -276,6 +290,141 @@ fn try_again_on_a_rejected_job_carries_its_request_and_findings_to_the_reader() 
     assert!(athena.check_history().unwrap().violations.is_empty());
 }
 
+/// A failing verdict with one major finding whose summary is `canary`.
+fn failing_verdict(canary: &str) -> serde_json::Value {
+    serde_json::json!({
+        "verdict": "fail",
+        "criteria": [
+            { "criterion": "criterion 1", "met": false, "evidence": "missing", "commands": [] },
+            { "criterion": "criterion 2", "met": true, "evidence": "ran", "commands": ["cargo test"] }
+        ],
+        "findings": [{
+            "severity": "major",
+            "summary": canary,
+            "evidence": "README.md has no greeting",
+            "location": "README.md"
+        }],
+        "request_reading_mismatch": null,
+        "summary": "The greeting is missing."
+    })
+}
+
+#[test]
+fn try_again_on_a_job_rejected_by_a_check_carries_the_failed_checks_output() {
+    let config = test_config()
+        .replace(
+            "run = [\"sh\", \"-c\", \"grep -q relaxed",
+            "run = [\"sh\", \"-c\", \"echo PASSING-CANARY; grep -q relaxed",
+        )
+        .replace(
+            "\"test -f README.md &&",
+            "\"test -f README.md || { echo FAILED-CHECK-CANARY; exit 1; }; test -f README.md &&",
+        );
+    let fx = Fixture::with_config(&config);
+    let mut scenario = Scenario::default();
+    scenario.edits = vec![("README.md".into(), None)];
+    let (script, readers) = recording_readers(scenario);
+    let athena = fx.athena(script);
+    let first = athena.ask("remove the readme", &Lines::default()).unwrap();
+    let rejected = finished(
+        athena
+            .go(first.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(rejected.state, OutcomeState::Rejected);
+
+    athena
+        .ask(
+            &format!("try again on {}", first.job.as_str()),
+            &Lines::default(),
+        )
+        .unwrap();
+    let briefs = readers.lock().unwrap();
+    let brief = briefs.last().unwrap();
+    assert!(brief.contains("failed check test"), "{brief}");
+    assert!(brief.contains("FAILED-CHECK-CANARY"), "{brief}");
+    assert!(!brief.contains("PASSING-CANARY"), "{brief}");
+}
+
+#[test]
+fn retrying_a_retry_carries_the_original_request_redacted() {
+    let fx = Fixture::new();
+    let mut first_scenario = Scenario::default();
+    first_scenario.verdict = failing_verdict("FINDING-A-CANARY the greeting is missing");
+    let mut second_scenario = Scenario::default();
+    second_scenario.verdict = failing_verdict("FINDING-B-CANARY the greeting is still missing");
+    let first_script = first_scenario.script();
+    let second_script = second_scenario.script();
+    let verifier_calls = Arc::new(Mutex::new(0usize));
+    let readers = Arc::new(Mutex::new(Vec::new()));
+    let kept = readers.clone();
+    let script: athena_agent::fake::Script = Box::new(move |spec| {
+        if spec.role == Role::Reader {
+            kept.lock().unwrap().push(spec.user_prompt.clone());
+        }
+        if spec.role == Role::Verifier {
+            let mut calls = verifier_calls.lock().unwrap();
+            *calls += 1;
+            if *calls > 1 {
+                return second_script(spec);
+            }
+        }
+        first_script(spec)
+    });
+    let athena = fx.athena(script);
+
+    let a = athena
+        .ask("add a greeting ORIGINAL-CANARY", &Lines::default())
+        .unwrap();
+    let a_end = finished(
+        athena
+            .go(a.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(a_end.state, OutcomeState::Rejected);
+
+    let b = athena
+        .ask(
+            &format!("try again on {}", a.job.as_str()),
+            &Lines::default(),
+        )
+        .unwrap();
+    let b_end = finished(
+        athena
+            .go(b.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(b_end.state, OutcomeState::Rejected);
+
+    let c = athena
+        .ask(
+            &format!("try again on {}", b.job.as_str()),
+            &Lines::default(),
+        )
+        .unwrap();
+    assert_ne!(c.job, b.job);
+    let briefs = readers.lock().unwrap();
+    let brief = briefs.last().unwrap();
+    assert!(brief.contains("# Earlier attempt"));
+    assert!(
+        brief.contains("> add a greeting ORIGINAL-CANARY"),
+        "the original request is carried"
+    );
+    assert!(
+        !brief.contains(&format!("> try again on {}", a.job.as_str())),
+        "the retry phrase is not carried as the earlier request"
+    );
+    assert!(
+        brief.contains("FINDING-B-CANARY"),
+        "B's findings are carried"
+    );
+    assert!(
+        !brief.contains("FINDING-A-CANARY"),
+        "A's findings are not carried"
+    );
+    assert!(athena.check_history().unwrap().violations.is_empty());
+}
+
 #[test]
 fn a_request_naming_a_job_carries_its_request_and_findings_to_the_reader() {
     let fx = Fixture::new();
@@ -333,6 +482,45 @@ fn a_request_naming_a_job_carries_its_request_and_findings_to_the_reader() {
             .unwrap()
             .contains("# Referenced jobs")
     );
+}
+
+#[test]
+fn try_again_on_a_job_that_failed_at_admission_carries_the_refusal_reason() {
+    let fx = Fixture::new();
+    let mut scenario = Scenario::default();
+    scenario
+        .edits
+        .push(("rustfmt.toml".into(), Some("style = \"relaxed\"\n".into())));
+    let (script, readers) = recording_readers(scenario);
+    let athena = fx.athena(script);
+    let first = athena
+        .ask("add a greeting ORIGINAL-CANARY", &Lines::default())
+        .unwrap();
+    let failed = finished(
+        athena
+            .go(first.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(failed.state, OutcomeState::Failed);
+    assert!(failed.verification.is_none(), "admission refused it early");
+
+    athena
+        .ask(
+            &format!("try again on {}", first.job.as_str()),
+            &Lines::default(),
+        )
+        .unwrap();
+    let briefs = readers.lock().unwrap();
+    let brief = briefs.last().unwrap();
+    assert!(brief.contains("# Earlier attempt"), "{brief}");
+    assert!(brief.contains("which failed"), "{brief}");
+    assert!(
+        brief.contains("> add a greeting ORIGINAL-CANARY"),
+        "{brief}"
+    );
+    assert!(brief.contains("admission refused the change"), "{brief}");
+    assert!(brief.contains("governance"), "{brief}");
+    assert!(athena.check_history().unwrap().violations.is_empty());
 }
 
 #[test]

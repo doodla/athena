@@ -576,12 +576,23 @@ pub struct ProducerReport {
     pub desires: Vec<String>,
 }
 
-/// `athena.candidate/1`: the producer's change, as the core captured and admitted it.
+/// `athena.candidate/1` and `athena.candidate/2`: the producer's change, as the core captured and admitted
+/// it. Both schemas share this type; the envelope's tag says which one a record is.
+///
+/// `/2` adds `base_fingerprint` and `previous_job`, which link a job to the one before it in a chain of
+/// jobs. A `/1` record has neither field ([`AnyRecord::parse`] refuses a `/1` that has one, and a `/2` that
+/// lacks `base_fingerprint`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Candidate {
     pub job: JobId,
     pub base_commit: String,
+    /// `/2` only: the fingerprint of the base commit's tree, under the base commit's own rules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_fingerprint: Option<String>,
+    /// `/2` only: the latest job landed in the base commit's history; absent if there is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_job: Option<JobId>,
     pub candidate_commit: Option<String>,
     pub candidate_tree: Option<String>,
     pub changes: Vec<ChangeEntry>,
@@ -809,6 +820,8 @@ pub enum AnyRecord {
     Invocation(Box<Invocation>),
     #[serde(rename = "athena.candidate/1")]
     Candidate(Box<Candidate>),
+    #[serde(rename = "athena.candidate/2")]
+    Candidate2(Box<Candidate>),
     #[serde(rename = "athena.verification/1")]
     Verification(Box<Verification>),
     #[serde(rename = "athena.outcome/1")]
@@ -849,6 +862,17 @@ impl AnyRecord {
         };
         match &record {
             AnyRecord::Reading(r) => r.validate().map_err(invalid)?,
+            AnyRecord::Candidate(c) if c.base_fingerprint.is_some() || c.previous_job.is_some() => {
+                return Err(invalid(
+                    "athena.candidate/1 has no base_fingerprint or previous_job; use athena.candidate/2"
+                        .into(),
+                ));
+            }
+            AnyRecord::Candidate2(c) if c.base_fingerprint.is_none() => {
+                return Err(invalid(
+                    "athena.candidate/2 records the base_fingerprint".into(),
+                ));
+            }
             AnyRecord::Intervention(i) if i.what.trim().is_empty() || i.why.trim().is_empty() => {
                 return Err(invalid("an intervention needs what and why".into()));
             }
@@ -884,7 +908,9 @@ impl AnyRecord {
                     r.role.as_str()
                 )
             }
-            AnyRecord::Candidate(r) => format!("{}/candidate.json", r.job.dir()),
+            AnyRecord::Candidate(r) | AnyRecord::Candidate2(r) => {
+                format!("{}/candidate.json", r.job.dir())
+            }
             AnyRecord::Verification(r) => format!("{}/verification.json", r.job.dir()),
             AnyRecord::Outcome(r) if r.after_blocked => {
                 format!("{}/outcome-{}.json", r.job.dir(), r.state.as_str())
@@ -912,6 +938,7 @@ impl AnyRecord {
             AnyRecord::Job(_) => "athena.job/1",
             AnyRecord::Invocation(_) => "athena.invocation/1",
             AnyRecord::Candidate(_) => "athena.candidate/1",
+            AnyRecord::Candidate2(_) => "athena.candidate/2",
             AnyRecord::Verification(_) => "athena.verification/1",
             AnyRecord::Outcome(_) => "athena.outcome/1",
             AnyRecord::Score(_) => "athena.score/1",
@@ -1048,6 +1075,66 @@ mod tests {
         assert!(text.contains("\"schema\": \"athena.reading/1\""));
         let back = AnyRecord::parse("x", text.as_bytes()).unwrap();
         assert_eq!(back, record);
+    }
+
+    fn sample_candidate() -> Candidate {
+        Candidate {
+            job: job(),
+            base_commit: "0".repeat(40),
+            base_fingerprint: None,
+            previous_job: None,
+            candidate_commit: None,
+            candidate_tree: None,
+            changes: vec![],
+            fingerprint: None,
+            violations: vec![],
+            producer_report: None,
+        }
+    }
+
+    #[test]
+    fn candidate_2_round_trips_with_and_without_a_previous_job() {
+        let mut c = sample_candidate();
+        c.base_fingerprint = Some("f".repeat(64));
+        let none = AnyRecord::Candidate2(Box::new(c.clone()));
+        let text = none.to_json();
+        assert!(text.contains("\"schema\": \"athena.candidate/2\""));
+        assert!(text.contains("base_fingerprint"));
+        assert!(!text.contains("previous_job"), "absent, not null: {text}");
+        assert_eq!(AnyRecord::parse("x", text.as_bytes()).unwrap(), none);
+        assert_eq!(none.schema(), "athena.candidate/2");
+
+        c.previous_job = Some(JobId::parse("20261009-101010-abcd").unwrap());
+        let some = AnyRecord::Candidate2(Box::new(c));
+        let text = some.to_json();
+        assert!(text.contains("\"previous_job\": \"20261009-101010-abcd\""));
+        assert_eq!(AnyRecord::parse("x", text.as_bytes()).unwrap(), some);
+    }
+
+    #[test]
+    fn candidate_1_still_parses_and_keeps_its_shape() {
+        let record = AnyRecord::Candidate(Box::new(sample_candidate()));
+        let text = record.to_json();
+        assert!(text.contains("\"schema\": \"athena.candidate/1\""));
+        assert!(!text.contains("base_fingerprint") && !text.contains("previous_job"));
+        assert_eq!(AnyRecord::parse("x", text.as_bytes()).unwrap(), record);
+    }
+
+    #[test]
+    fn candidate_versions_keep_to_their_fields() {
+        // A /2 without the base fingerprint, and a /1 with a /2 field, are both invalid.
+        let no_fp = AnyRecord::Candidate2(Box::new(sample_candidate())).to_json();
+        assert!(matches!(
+            AnyRecord::parse("x", no_fp.as_bytes()),
+            Err(RecordError::Invalid { .. })
+        ));
+        let mut c = sample_candidate();
+        c.previous_job = Some(JobId::parse("20261009-101010-abcd").unwrap());
+        let v1 = AnyRecord::Candidate(Box::new(c)).to_json();
+        assert!(matches!(
+            AnyRecord::parse("x", v1.as_bytes()),
+            Err(RecordError::Invalid { .. })
+        ));
     }
 
     #[test]

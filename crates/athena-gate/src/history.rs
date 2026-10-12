@@ -74,7 +74,8 @@ pub fn check_history(git: &Git, tip: &str) -> Result<HistoryReport> {
             .violations
             .extend(jobs::check(git, &change, &judged, Some(&state))?);
         // A job has landed once a commit validly lands it, by its records and not by its trailers.
-        if let Some(job) = invariant::landing_job(git, &change, &judged, Some(&state))? {
+        // A commit that lands a chain of jobs lands every one of them.
+        for job in invariant::landing_job(git, &change, &judged, Some(&state))? {
             state.landed.insert(job.as_str().to_string());
         }
     }
@@ -116,6 +117,38 @@ mod tests {
         let report = check_history(&git, "HEAD").unwrap();
         assert_eq!(report.violations.len(), 1, "{:?}", report.violations);
         assert_eq!(report.violations[0].rule, Rule::Invariant);
+    }
+}
+
+#[cfg(test)]
+mod chain_tests {
+    use super::*;
+    use crate::landing_tests::{chain_repo, land_chain};
+    use crate::testutil::*;
+
+    const STEP_1: &str = "pub fn a() { /* one */ }\n";
+    const STEP_2: &str = "pub fn a() { /* two */ }\n";
+    const STEP_3: &str = "pub fn a() { /* three */ }\n";
+
+    #[test]
+    fn repeating_a_job_of_a_landed_chain_is_refused() {
+        let (dir, git, links) = chain_repo(&[STEP_1, STEP_2, STEP_3]);
+        land_chain(dir.path(), &git, &links, STEP_3, &|_, _| {});
+        assert_eq!(check_history(&git, "HEAD").unwrap().violations, vec![]);
+
+        // Undo the landing by hand, then land only the middle job again, by itself.
+        std::fs::remove_dir_all(dir.path().join("records")).unwrap();
+        write(dir.path(), &[("src/lib.rs", "pub fn a() {}\n")]);
+        commit(&git, "Undo\n\nAthena-Job: bootstrap\n");
+        let again = land_chain(dir.path(), &git, &links[1..2], STEP_2, &|_, _| {});
+        let report = check_history(&git, "HEAD").unwrap();
+        assert!(
+            report.violations.iter().any(|v| v.rule == Rule::Invariant
+                && v.commit.as_deref() == Some(&again[..12])
+                && v.detail.contains("already landed")),
+            "{:?}",
+            report.violations
+        );
     }
 }
 
@@ -236,6 +269,132 @@ mod exemption_tests {
         let report = check_history(&git, "HEAD").unwrap();
         assert!(
             flagged(&report, &exemption, Rule::Configuration),
+            "{:?}",
+            report.violations
+        );
+    }
+
+    /// A landed outcome and a hand-written score for the job `id`, as `(path, content)` pairs. Neither
+    /// follows from any landing, so the job-records check flags both unless the commit is exempt.
+    fn hand_written_job_records(id: &str) -> Vec<(String, String)> {
+        let dir = format!("records/jobs/2026-10/{id}");
+        use athena_data::quantity::{Quantity, Unit};
+        let cost = Quantity::measured(0.0, Unit::Usd, "hand written");
+        let outcome = serde_json::to_string_pretty(&serde_json::json!({
+            "schema": "athena.outcome/1",
+            "job": id,
+            "state": "landed",
+            "reason": "hand written",
+            "at": "2026-10-10T18:00:00Z",
+            "totals": {
+                "cost_all": cost,
+                "cost_execution": cost,
+                "wall_time_execution": null,
+                "tokens": {},
+                "invocations": 0
+            },
+            "branch": null,
+            "base_commit": null,
+            "candidate_commit": null,
+            "after_blocked": false,
+            "through_commit": null
+        }))
+        .unwrap()
+            + "\n";
+        let score = format!(
+            "{{\n  \"schema\": \"athena.score/1\",\n  \"job\": \"{id}\",\n  \"at\": \"2026-10-10T18:00:00Z\",\n  \"rules\": \"{}\",\n  \"cause\": null,\n  \"events\": [],\n  \"deliverables\": {{\"terms\": [], \"sum\": 1.5}},\n  \"quantities\": [],\n  \"models\": null\n}}\n",
+            athena_score::RULES
+        );
+        vec![
+            (format!("{dir}/outcome.json"), outcome),
+            (format!("{dir}/score.json"), score),
+        ]
+    }
+
+    fn add_records(dir: &std::path::Path, git: &Git, id: &str) -> String {
+        let records = hand_written_job_records(id);
+        let files: Vec<(&str, &str)> = records
+            .iter()
+            .map(|(p, c)| (p.as_str(), c.as_str()))
+            .collect();
+        write(dir, &files);
+        commit(git, &format!("add records\n\nAthena-Record: {id}\n"))
+    }
+
+    const JOB_A: &str = "20261010-170000-aaaa";
+    const JOB_B: &str = "20261010-171000-bbbb";
+
+    #[test]
+    fn an_exemption_also_excuses_the_job_records_the_commit_adds() {
+        // Records that arrive in an exempt commit are not flagged, though they are not a valid landing.
+        let builtin = crate::builtin_config();
+        let (dir, git) = repo(&[
+            (
+                "athena.toml",
+                &config_exempting(&[&builtin.history.exempt[0]]),
+            ),
+            ("README.md", "hello\n"),
+        ]);
+        let records = add_records(dir.path(), &git, JOB_A);
+        write(
+            dir.path(),
+            &[
+                (
+                    "athena.toml",
+                    &config_exempting(&[&builtin.history.exempt[0], &records]),
+                ),
+                (
+                    "records/interventions/2026-10/20261010-160000-abcd.json",
+                    EXEMPTION_RECORD,
+                ),
+            ],
+        );
+        commit(
+            &git,
+            "Exempt a commit\n\nAthena-Intervention: 20261010-160000-abcd\n",
+        );
+        let report = check_history(&git, "HEAD").unwrap();
+        assert!(
+            !report
+                .violations
+                .iter()
+                .any(|v| v.rule == Rule::JobRecords && v.commit.as_deref() == Some(&records[..12])),
+            "{:?}",
+            report.violations
+        );
+
+        // A commit after the exempt one is not excused, and neither are the same records without an
+        // exemption.
+        let later = add_records(dir.path(), &git, JOB_B);
+        let report = check_history(&git, "HEAD").unwrap();
+        assert!(
+            flagged(&report, &later, Rule::JobRecords),
+            "{:?}",
+            report.violations
+        );
+        assert!(!flagged(&report, &records, Rule::JobRecords));
+    }
+
+    #[test]
+    fn the_same_records_in_a_non_exempt_commit_are_flagged() {
+        let (dir, git) = repo(&[("README.md", "hello\n")]);
+        let records = add_records(dir.path(), &git, JOB_A);
+        let report = check_history(&git, "HEAD").unwrap();
+        let details: Vec<&str> = report
+            .violations
+            .iter()
+            .filter(|v| v.rule == Rule::JobRecords && v.commit.as_deref() == Some(&records[..12]))
+            .map(|v| v.detail.as_str())
+            .collect();
+        assert!(
+            details
+                .iter()
+                .any(|d| d.contains("this commit is not a valid landing")),
+            "{:?}",
+            report.violations
+        );
+        assert!(
+            details.iter().any(|d| d.contains("does not follow")),
             "{:?}",
             report.violations
         );
