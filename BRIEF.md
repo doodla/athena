@@ -456,7 +456,7 @@ Stopping: you're done when "How I'll judge it" passes. If you're blocked on ever
 
 * I also want something persistent where I can track the project and Athena's reasoning. I know we use structured data so maybe we can do something with it
 
-### 2026-10-12: Athena does what the operator should not have to
+### 2026-10-12: Athena does the work its user should not have to
 
 * If you find yourself doing things that Athena should rather do, build that out as well. For example I feel like Athena should natively handle PRs.
 
