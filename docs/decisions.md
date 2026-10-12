@@ -1311,3 +1311,21 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Provenance:** Acceptance review 3, probe 4: an entry added after the fact had no effect. Evidenced by
   `an_exemption_added_later_excuses_the_commit_it_names` and
   `an_exemption_does_not_cover_a_later_commit_or_one_not_in_history`.
+
+## D62 · The producer brief says what the verifier can see
+
+- **Decision:** Amends D43. `producer_brief` in `crates/athena-context/src/briefs.rs` gains a "What the
+  verifier sees" section: the verifier sees only the candidate diff in a fresh snapshot; evidence must cite
+  commands it can run itself, and the producer's own `git status` and `git diff` runs do not count; commit
+  hashes made during verification do not exist in the real history, so none may be pinned or cited in code,
+  docs, or design-revision text. D43's rule in `crates/athena-core/src/verify.rs` is unchanged.
+- **Alternatives:** (a) Loosen D43 for evidence the producer reports. (b) Leave the guidance out and rely on
+  the verifier's rejection.
+- **Tradeoff:** (a) lets a verifier pass on evidence it never saw. (b) was the cause: the producer's brief
+  never said what the verifier sees, so the design revision (job 20261012-073105-mj6d) failed twice, once
+  citing `git status` and `git diff` runs the verifier never saw (D43), and once pinning BRIEF.md to a commit
+  that exists only in the synthetic verification history. The section costs about 100 tokens of producer
+  context.
+- **Reversal cost:** Low.
+- **Provenance:** User report on job 20261012-073105-mj6d. Enforced by
+  `producer_briefs_say_what_the_verifier_can_see`.

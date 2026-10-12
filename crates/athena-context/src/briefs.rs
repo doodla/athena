@@ -202,12 +202,21 @@ pub fn producer_brief(inputs: &ProducerInputs) -> String {
         "\n## Working directory\n\nA snapshot of the base commit's files, with a one-commit git repository of its own. \
          records/, the owner's private files, and history are absent by design. Your edits become the candidate.\n"
     );
+    let _ = writeln!(out, "## What the verifier sees\n\n{VERIFIER_VISIBILITY}\n");
     let _ = writeln!(
         out,
         "## Report\n\nEnd with the producer report as your structured output."
     );
     out
 }
+
+/// Producer guidance on what the verifier can see (D43). Without it, a producer cites its own
+/// `git status` or `git diff` runs as evidence, or pins a document to a commit made only for verification.
+const VERIFIER_VISIBILITY: &str = "The verifier sees only the candidate diff, in a fresh snapshot. \
+It does not see your commands, output, or reasoning. Evidence for a behavior criterion must cite commands \
+the verifier can run itself in that snapshot; your own git status and git diff runs do not count as evidence. \
+Commit hashes made during verification do not exist in the real history, so never pin or cite a commit hash \
+in code, docs, or design-revision text (BRIEF.md included); describe the content instead.";
 
 /// What the core shows the verifier of the candidate: built from git, never from the producer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -540,6 +549,24 @@ mod tests {
                 "the producer brief must not contain {forecast}"
             );
         }
+    }
+
+    #[test]
+    fn producer_briefs_say_what_the_verifier_can_see() {
+        let accepted = AcceptedReading::new(&reading(), &defaults(), |_| false);
+        let brief = producer_brief(&ProducerInputs {
+            job: "20261010-153012-k7q2".into(),
+            request: "add a changelog".into(),
+            reading: accepted,
+            checks: vec![],
+            commands: vec![],
+        });
+        assert!(brief.contains("## What the verifier sees"));
+        assert!(brief.contains("only the candidate diff, in a fresh snapshot"));
+        assert!(brief.contains("commands the verifier can run itself"));
+        assert!(brief.contains("git status and git diff runs do not count"));
+        assert!(brief.contains("do not exist in the real history"));
+        assert!(brief.contains("never pin or cite a commit hash"));
     }
 
     #[test]
