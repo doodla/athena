@@ -74,10 +74,13 @@ Athena's decision log, not here. Newest last.
   terse items; an at-a-glance table (number, decision, recommended option, a dropdown for Sri's
   choice); then one small options table per decision (option, cost or risk in a few words, the
   recommendation bold and first); and a one-line session record. No explanatory paragraphs.
-- Mobile first: Sri reads on a phone, so no tables wider than two short columns. Each decision is a
-  heading, a "Your choice" dropdown line, and one bullet per option ("A (recommended): what. Cost.").
+- Mobile first: Sri reads on a phone. A decision sheet is an HTML artifact of cards, not a doc:
+  a "Do now" card of tick buttons, then one card per decision with full-width option buttons (letter,
+  what, cost in a few words, a "Recommended" chip). Taps save to the artifact's `db` capability
+  (`answers/<decision>`, `todos/<id>`), which the operator reads with ArtifactData. No tables, no
+  dropdowns. The template is the page at https://claude.ai/artifact/UoSLkWzLWMLxUJX7zRp9v3.
 - Why: Sri asked for better structure, then said the structured version had too much text, then
-  that the table layout was unfriendly on mobile.
+  that tables and dropdowns were unfriendly on mobile (use cards and buttons).
 
 ## OP-8. Work lands on `main` by squash, through auto-merge (2026-10-11)
 
