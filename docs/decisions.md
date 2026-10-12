@@ -1451,3 +1451,26 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   available to this change, so the cause is read from `invariant.rs`, design §7.3, D60, and D61, and the
   existing squash tests in `crates/athena-gate/src/landing_tests.rs` (all single-job); no command was run
   to reproduce the failure.
+
+## D67 · The user chose option (a) of D66: ee4b0dd is exempt from the history check
+
+- **Decision:** Resolves D66. The user chose (a): the squash commit ee4b0dd1aa6fcd81289dc988d0f7bd38fd7a40ef
+  (PR #8) is added to `[history] exempt` in `athena.toml`, the full 40-character id. Its content is excused
+  from the governed-content invariant, and its jobs' own records still get the per-record checks. The entry
+  is one line in `athena.toml`, with a comment that gives this reason. No code, tests, or workflows change.
+  - Option (c), stop squash-merging multi-job pull requests, is **not yet adopted**. Nothing enforces it,
+    and it is a repository setting, so it needs a separate decision and a follow-up.
+  - Options (b) and (d) of D66 are not chosen and stay open.
+- **Alternatives:** (b) Teach `landing` to accept a multi-job commit, a new gate rule. (c) Stop squashing
+  multi-job pull requests. (d) Rewrite main to split the squash.
+- **Tradeoff:** The exemption is the cheapest and fully reversible choice. Its cost is a hole in the
+  invariant for one commit: "nothing reaches main unverified" is not checked for ee4b0dd. D60 limits the hole
+  to that commit, since a full id cannot cover a later one, so any later multi-job squash needs its own entry
+  or a different merge method.
+- **Reversal:** Delete the `ee4b0dd1aa6fcd81289dc988d0f7bd38fd7a40ef` entry and its comment from
+  `[history] exempt` in `athena.toml`. The history check then judges ee4b0dd again and fails on main until
+  that is resolved by (b), (c), or (d). Reversal cost: low.
+- **Provenance:** User decision on D66, given as "(a)". The full id is the one the user supplied. The cause
+  is as D66 records it, read from code and not reproduced. Enforced by the existing history check and the
+  `[history] exempt` validation of D60 and D61. D60 also requires the named commit to be in history already;
+  the user's report places ee4b0dd on main, but this change did not check that against the real repository.

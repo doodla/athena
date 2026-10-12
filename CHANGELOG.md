@@ -83,6 +83,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   never hold such an entry. An entry still must be a full commit id already in history, so it cannot cover
   a later commit. Per-commit checks are unchanged.
 
+- `[history] exempt` in `athena.toml` now excuses the squash commit ee4b0dd, which carried several jobs'
+  landings and fails the landing check, so the history check no longer judges that commit's content. This is the user's
+  choice of option (a) in D66, recorded as D67. Its content skips the invariant; its jobs' records still get
+  the per-record checks. Stopping multi-job squashes (option c) is not yet adopted.
+
 ## [0.1.0]
 
 The first version: the v0 walking skeleton. It takes one request, runs one job through a sub-agent,
