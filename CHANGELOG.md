@@ -13,6 +13,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   section with that job's request and its final verification's findings (redacted); the new job's own
   request stays as typed. A job that is not rejected, or is unknown, is refused with an error naming it.
 
+- Independent review 1 of the study capability M1 design
+  (`docs/design/reviews/study-capability-m1-review-1.md`): approve with changes, 7 major findings, answered
+  checks 1–8 of the design's §9. The design's status line links to it. No code changed.
+
 ### Changed
 
 - The governed-content invariant and `athena check --history` now accept a landing that was squash-merged

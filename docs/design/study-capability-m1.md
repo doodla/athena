@@ -1,6 +1,7 @@
 # The studying capability, milestone M1: design
 
-> **Status:** proposed. **Design only.** This document describes a capability that does not exist. No crate,
+> **Status:** proposed; [review 1](reviews/study-capability-m1-review-1.md) exists (approve with changes,
+> findings not yet answered). **Design only.** This document describes a capability that does not exist. No crate,
 > code, test, or configuration has been written for it, and nothing will be built until an independent
 > review of this document is complete ([§9](#9-review-gate)).
 > **Requirements source:** [`BRIEF.md`](../../BRIEF.md). Line numbers below refer to it as of this change.
