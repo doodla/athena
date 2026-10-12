@@ -7,7 +7,7 @@ map cannot drift from the code. Live tests call real models and are opt-in (`#[i
 runs in `cargo test`.
 
 Not enforced yet: landing a squash of a chain of several verified jobs. The gate refuses it today; a
-proposed chain-aware rule that would accept it (revised after review 1; it refuses chains that change
+proposed chain-aware rule that would accept it (revised after reviews 1 and 2; it refuses chains that change
 classification rules or land on merge commits) is in `design/squash-chain-landing.md` (D69). Rows M23 and
 the landing rule below describe the gate as built.
 

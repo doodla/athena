@@ -107,7 +107,7 @@ earlier jobs' contribution checkable for consistency by a chain of fingerprints 
 - **Schema choice (R1-m3): `athena.candidate/2`.** `Candidate` is `deny_unknown_fields` and is
   `athena.candidate/1` **(read, `records.rs`)**. An optional field under `/1` would make an old gate fail on
   a new record with an unhelpful parse error; a `/2` fails by a named schema. So the build adds
-  `athena.candidate/2` with the two fields below, and `RecordSet::load` accepts `/1` and `/2`. A `/1`
+  `athena.candidate/2` with the two fields below, and `RecordSet::load` (in `athena-gate`) accepts `/1` and `/2`. A `/1`
   candidate is a complete job on its own and can land alone as today, but cannot be a member of a chain.
   D69's reversal text is amended to match.
 - New fields in `candidate.json` `/2`:
@@ -120,9 +120,28 @@ earlier jobs' contribution checkable for consistency by a chain of fingerprints 
   job's base has the same rules as P. The gate therefore **refuses a chain in which any job changes a
   classification rules file** (see 4.2 step 3 and 4.3). Under that refusal all fingerprints in the chain
   are computed under identical rules and are comparable with F.
-- Where the core writes them: the core already holds the base commit when it writes `base_commit` and
-  `fingerprint`; `fingerprint(base, base)` is available there. The exact place is **(inferred)** and the
-  build job must locate it first (R1-m3).
+- Where the core writes them: the core holds the base commit `p` when it builds the `Candidate`
+  (`crates/athena-core/src/run.rs` 456-465, with `base_commit: p.clone()` and `fingerprint: None`
+  **(read, review 2)**); `fingerprint(base, base)` is available there.
+- **Where `previous_job` comes from (R2-M1).** The core derives it; the user supplies nothing. The core
+  looks at the base commit's own history (the commit and its ancestors) and takes the **latest landed job**:
+  the job named by the most recent commit that added a landed outcome (`outcome.json` with a landed status,
+  or `outcome-landed.json`), found with the same reading of records the history walk uses
+  (`history.rs` 77-78). Consequences:
+  - *After a hand change (an intervention) or a records-only commit:* these add no landed outcome, so they
+    are skipped and the latest landed job before them is still the predecessor. The chain is not reset. If
+    the hand change altered governed content, the next job's `base_fingerprint` will not equal that
+    predecessor's `fingerprint`, and the gate refuses the chain at the link check, which is correct: the
+    link is not unbroken.
+  - *With an unlanded predecessor* (job 2 is based on job 1's candidate commit and job 1 has not landed): job
+    1's records are not a landed outcome in the base's history, so the core does not name it. `previous_job`
+    is then the earlier landed job, or absent. A squash holding both jobs would then show two heads or a
+    broken link and be refused. Refusing is safe; the adopter lands job 1 first or the chain is rebuilt.
+  - *When no landed job is found,* `previous_job` is **not written** (the field is absent) and the job is
+    the first of a chain.
+  This rule is a **stated assumption the user may change**, e.g. to "the user names the predecessor" or "the
+  job whose landing commit is exactly the base commit". It is **(inferred)**; no command was run, and the
+  build job confirms the history read before writing code.
 - The chain link is: for a job Ji with `previous_job` = Ji-1, `Ji.base_fingerprint == Ji-1.fingerprint`. The
   first job has no `previous_job`, and its `base_fingerprint` equals the fingerprint of the squash commit's
   first parent. The last job's `fingerprint` equals the fingerprint of the squash commit's tree.
@@ -135,14 +154,16 @@ Let X be the commit, P its first parent, R the rules of P, and F = fingerprint(X
 closing jobs X adds (`closing_jobs`). If `jobs` is empty, nothing changes. Otherwise:
 
 1. If `jobs` has one member, run today's rule unchanged (this includes the fingerprint equality at lines
-   349-359). A chain of one is not special.
+   349-359). A chain of one is not special. This also covers a partly landed chain where only one job is
+   left (R2-m2): the job is judged by the single-job rule and is not refused for a stale base, since the
+   fingerprint equality with F already proves the content. The head rule is not applied to it.
 2. If it has more than one: refuse if X has more than one parent (decision 3 in Appendix A). Otherwise load
    each job's files from X's tree and require each `candidate.json` to be `athena.candidate/2`.
 3. Refuse if any job's `changes` list names a classification rules file (a `.gitattributes`), or if the
    diff from P to X touches one. (R1-M3; the `changes` field name is **(inferred)** from the records the
    design relied on above and the build job confirms it.)
 4. Order the jobs by `previous_job`, not by fingerprint (R1-M1). Exactly one job is the head: it has no
-   `previous_job`, or its `previous_job` is a job already landed on P (see 4.6, partly landed chains). Its
+   `previous_job`, or its `previous_job` is a job already landed on P (found as in 4.6, partly landed chains). Its
    `base_fingerprint` must equal fingerprint(P; R). Each other job names a `previous_job` that
    is a member of `jobs`, and no two jobs name the same one. Following the names from the head must use
    every job exactly once: no fork, no cycle, no job left over, no predecessor outside `jobs`. Then for each
@@ -165,7 +186,8 @@ closing jobs X adds (`closing_jobs`). If `jobs` is empty, nothing changes. Other
 
 Each is returned through the existing `refuse`, which reports a violation on the commit:
 
-- `a chain landing is refused on a commit with more than one parent` (step 2)
+- `a chain landing is refused on a commit with more than one parent` (step 2; `landing` produces it, but
+  for a merge commit `check` shows the existing merge message instead, see §4.6)
 - `a chain landing needs athena.candidate/2 in <dir>/candidate.json` (step 2)
 - `job <x> changes a path classification rules file, so its fingerprints are not comparable; land it alone`
   (step 3)
@@ -210,28 +232,49 @@ precede the *previous* job's work: each job predicts its own work.
 - *Parent moved.* If other governed changes reached the base branch after the chain began, the head's
   `base_fingerprint` no longer equals the parent's fingerprint and the squash is refused ("no job starts from
   the parent's content"). That is correct: the squash would not equal the chain's final content anyway. The
-  adopter rebases the chain, which makes the jobs stale (design §7.3 landing algorithm).
+  adopter rebases the chain, which makes the jobs stale (design §7.3 landing algorithm). A change to a
+  classification rules file on the base branch between the head's base and P has the same effect (R2-n1):
+  fingerprints use each base's own rules, so the head's `base_fingerprint` can differ from
+  fingerprint(P; R) for the same content, and the chain is refused with the same message. Refusing is the
+  safe direction. **(inferred)** from `fingerprint` in `attrs.rs`; the case was not constructed.
 - *Records-only commits in the pull request* do not change the governed fingerprint and do not break links.
 - *A job that blocked then landed* (`outcome-landed.json`) is handled by step 6, as today.
 - *Rebase merge* keeps today's single-job commits and never reaches the chain path.
 - *Merge commit (R1-m2).* `check` calls `landing` for a merge commit whose content equals no parent
   **(read, `invariant.rs` 126-134)**, so a merge commit whose first-parent diff adds several jobs' records
   would reach the chain path. Decided: chain landing is **refused on a commit with more than one parent**
-  (step 2). Such a merge lands only if each job is its own commit, as today.
-- *Partly landed chain (R1-m4).* If J1 landed alone and J2, J3 arrive in a squash, the squash adds two
-  jobs and J2 is the head: it has `previous_job` = J1, which is not in `jobs`. Decided: this is refused by
-  step 4's "no predecessor outside `jobs`" unless J1 is the parent's own landed job. Therefore the head rule
-  is: a job whose `previous_job` is absent, or names a job already landed on P (its records are in P's
-  tree and its fingerprint equals fingerprint(P; R)), is the head, and its `base_fingerprint` must equal
-  fingerprint(P; R). The opposite case (a squash adds J1 and J2 where J1's records were already on the
-  parent) is not a member of `jobs`, since `closing_jobs` counts status `A` only **(read)**; J2 then
-  is the head by the same rule if J1's result is P's content, and is refused otherwise. Both cases get tests.
+  (step 2). Such a merge lands only if each job is its own commit, as today. The refusal's behaviour is
+  right, but for a merge commit `check` uses only whether `landing` returned `Ok` and then reports "a merge
+  introduces governed content that neither parent has" (`invariant.rs` 126-138 **(read, review 2)**). So the
+  message of §4.3 for this case is **not shown**; the existing merge message is what the user sees (R2-m1).
+  Passing `landing`'s reason through on the merge path is a possible change to `check` and is not made here.
+- *Partly landed chain (R1-m4, R2-m2).* If J1 landed alone and J2, J3 arrive in a squash, `closing_jobs`
+  counts status `A` only, so J1 is not in `jobs`; the squash adds J2 and J3. A squash that leaves one job
+  is judged by step 1 (the single-job rule). With two or more left, J2 is the head: its `previous_job` is J1,
+  which is not in `jobs`. The head rule is: a job whose `previous_job` is absent, or names a job already
+  landed on P, is the head, and its `base_fingerprint` must equal fingerprint(P; R). **How the gate finds
+  a landed predecessor at P:** it loads that id's `JobFiles` from P's tree, as `landing` loads `before` at
+  line 294, and requires the closing records to be present there and the predecessor's `candidate.json`
+  `fingerprint` to equal fingerprint(P; R). If the predecessor's records are not at P, the head is refused
+  as "not linked". **A `/1` predecessor is accepted:** only its `fingerprint` is read, and the head's own
+  `/2` record carries the `base_fingerprint`; the "a `/1` cannot be a member of a chain" rule applies to
+  members of `jobs`, not to a predecessor already landed. The two orders in the earlier text are one case,
+  so there are tests for (a) one job left, judged by the single-job rule, and (b) two or more left with a
+  landed predecessor.
 
 ## 5. Follow-up work (not done here)
 
-1. `crates/athena-data`: add `athena.candidate/2` with `base_fingerprint` and `previous_job`; `RecordSet::load`
-   accepts `/1` and `/2`; update `docs/records.md`.
-2. `crates/athena-core`: write both fields when the candidate is built (locate the place first).
+1. `crates/athena-data` `records.rs`: add `athena.candidate/2` with `base_fingerprint` and `previous_job`.
+   The schema name is chosen by the tagged enum `AnyRecord` (`#[serde(tag = "schema")]`, lines 796-824),
+   which has `athena.candidate/1` as its only candidate variant, so add a `/2` variant or a shared type,
+   and add `/2` to the schema-name table (line 914). Update `docs/records.md`.
+   `RecordSet::load` is in `crates/athena-gate/src/records.rs` (27-56), not `athena-data`; it parses through
+   `check_record_file`, so it accepts `/1` and `/2` once `AnyRecord` does. Every consumer that matches
+   `AnyRecord::Candidate` must handle `/2`: `crates/athena-core/src/run.rs` (950-956, where it is written),
+   `crates/athena-core/src/store.rs` (145), and `crates/athena-gate/src/jobs.rs` (64). The list came from a
+   search by review 2 and may be incomplete; the build job searches again.
+2. `crates/athena-core` `run.rs` (456-465): write `base_fingerprint` and `previous_job` (derived as in §4.1)
+   when the candidate is built, as `/2`; update `store.rs` (145) and the write at 950-956 for the new variant.
 3. `crates/athena-gate/src/invariant.rs`: replace the single-job refusal in `landing` with the chain check
    of §4.2; factor the per-job checks so they can run per job. `landing_job` must return a set of jobs.
    `crates/athena-gate/src/jobs.rs` `jobs::check` (lines 330-344 in the base commit) calls `landing_job` and
@@ -247,7 +290,12 @@ precede the *previous* job's work: each job predicts its own work.
      changes no governed content lands (R1-M1);
    - a job that changes a `.gitattributes` file refuses the chain (R1-M3);
    - a chain on a commit with two parents is refused (R1-m2);
-   - a partly landed chain, both orders of §4.6 (R1-m4);
+   - a partly landed chain (R1-m4, R2-m2): one job left (judged by the single-job rule), and two or more
+     left with a landed predecessor, including one whose predecessor is a `/1` candidate;
+   - `previous_job` derivation (R2-M1): after a hand change, after a records-only commit, with an unlanded
+     predecessor, and with none found (field absent);
+   - a merge commit whose first-parent diff adds several jobs is refused, and the test asserts the message
+     `check` actually shows (R2-m1);
    - one refusal test per per-job check, each run against a **middle** job while the first and last are
      clean: no accepted reading or `job.json` missing, a reading written after that job's work, a failing
      verdict, candidate commits that differ, a failed or wrong-model verifier invocation, unreconciled usage,
@@ -265,6 +313,11 @@ rewrites this document, amends D69 (the schema choice and the tradeoff wording),
 updates the pointers in `docs/design/athena-v0.md` and `docs/enforcement.md`. It modifies no Rust code,
 `athena.toml`, workflow, or other governance file, and nothing under `records/`. The review file is
 unchanged. D60-D68 stay in force; D69 supersedes none of them until it is accepted.
+
+The revision answering [review 2](reviews/squash-chain-landing-review-2.md) edits §4.1, §4.2 step 1, §4.3,
+§4.6, §5 and this section, adds Appendix B, and amends D69, the changelog, and the pointers in
+`docs/design/athena-v0.md` and `docs/enforcement.md`. It changes no code or test; the build is a separate
+later job. The review file is unchanged.
 
 ## Appendix A: response to review 1
 
@@ -295,3 +348,19 @@ may change before the build job, and none is implemented.
 | 1 | Chain order: recorded or derived? (R1-M1) | **Recorded**: `previous_job` in `candidate.json`. | Derived order fails when fingerprints repeat; a recorded id has no such case. The cost is one more field in a schema change already needed. |
 | 2 | Chain that changes path classification rules (R1-M3) | **Refused**, with a named message. | Smallest rule that keeps every fingerprint comparable. The cost is that such jobs land one at a time. |
 | 3 | Chain landing on merge commits (R1-m2) | **Refused** on a commit with more than one parent. | Avoids an untested path in the gate's most sensitive rule; a merge commit still lands job by job. |
+
+## Appendix B: response to review 2
+
+Every finding of [review 2](reviews/squash-chain-landing-review-2.md) is listed with its disposition. Each
+answer was checked against the code lines the review cites; the review's line numbers were read, not
+re-measured by a tool. The review file is unchanged. Review 2 found no new decision for the user, but the
+rule in R2-M1 is a stated assumption the user may change.
+
+| Finding | Disposition | Where |
+|---|---|---|
+| **R2-M1** Nothing says where `previous_job` comes from | **Accepted.** The core derives it as the latest landed job in the base commit's history. A hand change or records-only commit does not reset it; an unlanded predecessor is not named, so such a chain is refused; when none is found the field is absent. Stated as an assumption the user may change. | [§4.1](#41-records-that-link-a-chain), [§5](#5-follow-up-work-not-done-here) items 2 and 4 |
+| **R2-m1** Merge-commit refusal message never shown | **Accepted** (note option): for a merge commit the user sees the existing merge message; `landing`'s reason is not passed through. §4.3 and §4.6 say so, and the test asserts the message actually shown. | [§4.3](#43-refusal-messages), [§4.6](#46-other-cases), [§5](#5-follow-up-work-not-done-here) item 4 |
+| **R2-m2** Partly landed cases are one; one path skips the head rule | **Accepted.** One remaining job is judged by the single-job rule (no stale-base refusal). With more left, the landed predecessor is found by loading its `JobFiles` at P and matching its fingerprint to fingerprint(P; R). A `/1` predecessor is accepted. The two cases are merged into two tests. | [§4.2](#42-the-check-exactly) step 1, [§4.6](#46-other-cases), [§5](#5-follow-up-work-not-done-here) item 4 |
+| **R2-m3** Schema work in the wrong crate and understated | **Accepted.** `RecordSet::load` is placed in `athena-gate`; `AnyRecord`, the schema-name table, and the consumers (`run.rs`, `store.rs`, `jobs.rs`) are named. | [§4.1](#41-records-that-link-a-chain), [§5](#5-follow-up-work-not-done-here) items 1 and 2 |
+| **R2-n1** Rules change on the base branch refused without naming it | **Accepted.** §4.6 now names a rules change as a cause of the "parent moved" refusal. | [§4.6](#46-other-cases) |
+| **R2-n2** Uneven line wrapping | **Accepted.** The cited lines of D69 and of the v0 design are rewrapped to the surrounding width. | `docs/decisions.md` D69, `docs/design/athena-v0.md` |

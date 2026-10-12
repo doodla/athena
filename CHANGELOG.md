@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The squash-chain landing design answers its review 2 (Appendix B): the core derives `previous_job` as the
+  latest landed job in the base commit's history, a partly landed chain with one job left is judged by the
+  single-job rule and a landed predecessor (even `/1`) is found at the parent, the merge-commit message is
+  documented, and the schema work names `AnyRecord`, the schema-name table, and its consumers. D69 is amended
+  and stays proposed. Documentation only; the build is a later job.
+
 - Review 2 of the squash-chain landing design (`docs/design/reviews/squash-chain-landing-review-2.md`)
   confirms the answers to review 1 and reports one major and three minor findings, chiefly that the design does
   not say where `previous_job` comes from. Documentation only; the design is unchanged.
