@@ -10,7 +10,7 @@
 //! - the nested-run marker, `ATHENA_NESTED=<job>`;
 //! - `ATHENA_STATE_DIR` inside the job's own directory, so an Athena that an agent or a check runs keeps
 //!   its state (kill switch, locks, scratch repositories) there and never in the user's (D56);
-//! - the capability's environment, with `{job_dir}` and `{side}` filled in. A build directory outside the
+//! - the capability's environment, with `{job_dir}`, `{side}` and `{athena_home}` filled in. A build directory outside the
 //!   job's own directory is refused, so one job's checks never run another job's build (D46).
 
 use crate::NESTED_ENV;
@@ -97,13 +97,24 @@ pub fn build(
         spec.job_dir.join(NESTED_STATE_DIR).display().to_string(),
     );
     for (key, template) in spec.capability_env {
-        let value = template
-            .replace("{job_dir}", &spec.job_dir.display().to_string())
-            .replace("{side}", spec.side.as_str());
+        let value = expand(
+            template,
+            spec.job_dir,
+            spec.side,
+            &athena_data::paths::athena_home(),
+        );
         env.insert(key.clone(), value);
     }
     check_build_dirs(&env, spec.job_dir)?;
     Ok(env)
+}
+
+/// Fills in `{job_dir}`, `{side}` and `{athena_home}` in one environment value.
+pub fn expand(template: &str, job_dir: &Path, side: Side, athena_home: &Path) -> String {
+    template
+        .replace("{job_dir}", &job_dir.display().to_string())
+        .replace("{side}", side.as_str())
+        .replace("{athena_home}", &athena_home.display().to_string())
 }
 
 /// Refuses an environment whose build directory is not inside the job's own directory (M26).
@@ -202,6 +213,42 @@ mod tests {
             env["CARGO_TARGET_DIR"],
             "/state/jobs/20261010-153012-k7q2/target/produce"
         );
+    }
+
+    #[test]
+    fn athena_home_is_filled_in_beside_the_other_placeholders() {
+        let out = expand(
+            "{athena_home}/tools/sccache/1.0.0/bin/sccache",
+            Path::new("/state/jobs/j"),
+            Side::Verify,
+            Path::new("/h/athena"),
+        );
+        assert_eq!(out, "/h/athena/tools/sccache/1.0.0/bin/sccache");
+        let out = expand(
+            "{job_dir}/{side}/{athena_home}",
+            Path::new("/state/jobs/j"),
+            Side::Produce,
+            Path::new("/h/athena"),
+        );
+        assert_eq!(out, "/state/jobs/j/produce//h/athena");
+        // Through `build`, no placeholder is left behind.
+        let agents = agents();
+        let capability_env =
+            BTreeMap::from([("RUSTC_WRAPPER".to_string(), "{athena_home}/x".to_string())]);
+        let env = build(
+            &EnvSpec {
+                agents: &agents,
+                job: "j",
+                job_dir: Path::new("/state/jobs/j"),
+                snapshot: Path::new("/state/jobs/j/work"),
+                side: Side::Produce,
+                capability_env: &capability_env,
+            },
+            parent_env,
+        )
+        .unwrap();
+        assert!(!env["RUSTC_WRAPPER"].contains('{'));
+        assert!(env["RUSTC_WRAPPER"].ends_with("/x"));
     }
 
     #[test]

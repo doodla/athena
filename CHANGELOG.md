@@ -9,6 +9,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Optional sccache support in configuration and setup (D79). `[tools.sccache]` in `athena.toml` may hold a
+  `version` and nothing else; it is absent today, so every existing `athena.toml` still parses. When it is
+  present, `cargo run -p xtask -- setup` runs `cargo install --locked --version <v>` into
+  `<athena_home>/tools/sccache/<v>`, skips that when the binary is already there, and stops with a message
+  if the install fails. Environment values in a capability's `env` may use `{athena_home}`, and
+  `paths::sccache_binary` derives the binary path from the one pinned version. `athena.toml` itself is not
+  changed in this entry: it sets no pin and no `RUSTC_WRAPPER`, and a later job does that. Unit tests cover
+  these; no real sccache install was run.
 - Checks can be skipped for prose-only changes. A check in `athena.toml` may carry `skip_when_only`, a list
   of path patterns (`dir/`, `*.ext` at any depth, or an exact path). The runner skips the check, with a
   "not run" note in its record, only when the change is not empty and every changed path matches. Absent

@@ -63,6 +63,22 @@ pub fn tool_path(tool: &str, version: &str) -> PathBuf {
         .join(tool)
 }
 
+/// The install root of a pinned sccache (the `--root` given to `cargo install`).
+pub fn sccache_root(home: &Path, version: &str) -> PathBuf {
+    home.join("tools").join("sccache").join(version)
+}
+
+/// The sccache binary for the one pinned version, under the given install directory. Setup installs to
+/// this path and the wrapper setting derives from it, so the two cannot name different versions.
+pub fn sccache_binary_in(home: &Path, version: &str) -> PathBuf {
+    sccache_root(home, version).join("bin").join("sccache")
+}
+
+/// The sccache binary for the pinned version under this machine's install directory.
+pub fn sccache_binary(version: &str) -> PathBuf {
+    sccache_binary_in(&athena_home(), version)
+}
+
 /// The platform key used in tool pins, such as `linux_x64`.
 pub fn platform_key() -> Option<&'static str> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
@@ -82,6 +98,19 @@ mod tests {
     fn tool_paths_are_versioned() {
         let path = tool_path("gitleaks", "8.30.1");
         assert!(path.ends_with("tools/gitleaks/8.30.1/gitleaks"));
+    }
+
+    #[test]
+    fn the_sccache_binary_derives_from_the_one_pinned_version() {
+        let home = Path::new("/h/athena");
+        let binary = sccache_binary_in(home, "0.10.0");
+        assert_eq!(
+            binary,
+            Path::new("/h/athena/tools/sccache/0.10.0/bin/sccache")
+        );
+        // The binary lies under the install root that `cargo install --root` receives.
+        assert!(binary.starts_with(sccache_root(home, "0.10.0")));
+        assert_ne!(binary, sccache_binary_in(home, "0.11.0"));
     }
 
     #[test]

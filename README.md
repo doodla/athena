@@ -19,7 +19,9 @@ athena ask "add a changelog"      # shows the reading and predictions; Enter run
 `./setup.sh` is idempotent and pinned: it reads every version from `athena.toml` and `rust-toolchain.toml`
 (rustup-init, which runs before any Rust can, is pinned in `setup.sh` itself), checks downloads against pinned
 SHA-256 sums, and reads credentials only to report whether Claude Code can
-authenticate. It never stores them. It needs git 2.40 or later, a C linker, curl, and either Claude Code
+authenticate. It never stores them. When `athena.toml` pins a `[tools.sccache]` version, setup also builds
+it with `cargo install --locked` into the install directory (no digest; this can take minutes); with no pin
+it skips that step. It needs git 2.40 or later, a C linker, curl, and either Claude Code
 2.1.296 or npm to install it. `./setup.sh --ci` stops after building Athena.
 
 `athena --version` prints the package version and the commit the binary was built from, for example
