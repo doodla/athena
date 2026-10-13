@@ -23,6 +23,19 @@ pub struct Config {
     pub history: History,
     pub records: RecordsConfig,
     pub personal_data: PersonalData,
+    /// Pull-request landing. Absent from `athena.toml` means every setting is off.
+    #[serde(default)]
+    pub landing: Landing,
+}
+
+/// `[landing]`: how `athena land --pr` treats the merge.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Landing {
+    /// When true, Athena asks the host to merge a pull request over the REST API once its checks are green.
+    /// When false (the default), it stops at an open, green pull request and the merge is made elsewhere.
+    #[serde(default)]
+    pub merge_via_rest: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -460,6 +473,17 @@ pub(crate) mod tests {
             assert_eq!(env["CARGO_TARGET_DIR"], "{job_dir}/target/{side}");
             assert_eq!(env["CARGO_TERM_COLOR"], "never");
         }
+    }
+
+    #[test]
+    fn rest_merge_is_off_unless_the_config_turns_it_on() {
+        // athena.toml has no [landing] table, and the setting still reads as off.
+        assert!(!REPO_CONFIG.contains("[landing]"));
+        assert!(!Config::parse(REPO_CONFIG).unwrap().landing.merge_via_rest);
+        let on = format!("{REPO_CONFIG}\n[landing]\nmerge_via_rest = true\n");
+        assert!(Config::parse(&on).unwrap().landing.merge_via_rest);
+        let empty = format!("{REPO_CONFIG}\n[landing]\n");
+        assert!(!Config::parse(&empty).unwrap().landing.merge_via_rest);
     }
 
     #[test]

@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `athena land <job> --pr` (`athena-core::gh`): pushes the job's branch (through the push guard, never forced),
+  opens a pull request, waits for green checks and stores the link in the job's state directory. The host
+  client runs only `gh api` with REST paths. The new setting `[landing] merge_via_rest` (off when absent)
+  decides whether Athena asks the host to merge once the checks are green; with it off the command stops at an
+  open pull request, and running it again after the merge finds the merge by pull request number and lands the
+  job on a matching fingerprint, or marks it `merged-unverified`. Red or pending checks never trigger a merge.
 - `athena-core::pr`, slice 1 of native pull-request landing (D86): a pull request link store in the job's state
   directory, a push guard (the job's own branch only, fast-forward only, no force option), and a
   merged-content check that finds the merge by pull request number and returns "merged but not verified" when

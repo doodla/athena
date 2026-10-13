@@ -54,6 +54,16 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Push a verified job's branch, open a pull request, and wait for green checks. The merge is requested
+    /// only when athena.toml sets `[landing] merge_via_rest = true`; run it again to see a merge.
+    Land {
+        job: String,
+        /// Land through a pull request.
+        #[arg(long, required = true)]
+        pr: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Close a job that will not run or finish.
     Close {
         job: String,
@@ -195,6 +205,16 @@ fn proposal_json(p: &Proposal) -> serde_json::Value {
 
 fn finished_code(state: OutcomeState) -> u8 {
     if state == OutcomeState::Landed { 0 } else { 2 }
+}
+
+/// 0 when the job landed or its pull request is open with green checks; 2 otherwise.
+fn land_pr_code(report: &athena_core::gh::PrReport) -> u8 {
+    use athena_core::gh::Checks;
+    use athena_core::pr::LinkState;
+    match (report.link.state, report.checks) {
+        (LinkState::Landed, _) | (LinkState::Open, Some(Checks::Green)) => 0,
+        _ => 2,
+    }
 }
 
 fn go_and_report(athena: &Athena, job: &str, accepted_by: AcceptedBy, json: bool) -> Result<u8> {
@@ -339,6 +359,21 @@ fn run(cli: Cli) -> Result<u8> {
         Command::Go { job, json } => {
             let athena = open(true)?;
             go_and_report(&athena, &job, AcceptedBy::User, json)
+        }
+        Command::Land { job, pr: _, json } => {
+            let athena = open(true)?;
+            let report = athena.land_pr(
+                &job,
+                &athena_core::gh::GhCli,
+                wiring::checks_poll(&std::thread::sleep),
+                &Terminal,
+            )?;
+            if json {
+                print_json(&report)?;
+            } else {
+                print!("{}", display::land_pr(&report));
+            }
+            Ok(land_pr_code(&report))
         }
         Command::Close { job, why, json } => {
             let athena = open(true)?;

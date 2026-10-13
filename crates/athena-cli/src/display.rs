@@ -176,6 +176,40 @@ pub fn queued(job: &str, commit: &str) -> String {
     )
 }
 
+/// What `land --pr` prints.
+pub fn land_pr(report: &athena_core::gh::PrReport) -> String {
+    use athena_core::gh::Checks;
+    use athena_core::pr::LinkState;
+    let link = &report.link;
+    let mut out = format!(
+        "pull request  #{} on {}/{}\n",
+        link.pr_number, link.host, link.repository
+    );
+    let merged = link.merged_commit.as_deref().unwrap_or("?");
+    let line = match (link.state, report.checks) {
+        (LinkState::Landed, _) => {
+            format!("landed        merged as {merged}; the merged content is the verified content\n")
+        }
+        (LinkState::MergedUnverified, _) => format!(
+            "merged-unverified  merged as {merged}, but its content is not the verified content; the job is not landed. Re-verify it on the new tip as a new job\n"
+        ),
+        (LinkState::Open, Some(Checks::Green)) if report.merge_requested => {
+            "open          merge requested, not yet seen merged\n".to_string()
+        }
+        (LinkState::Open, Some(Checks::Green)) => format!(
+            "open          checks are green; merge it on the host, then run `athena land {} --pr` again to land it\n",
+            link.job
+        ),
+        (LinkState::Open, Some(Checks::Red)) => "open          a check failed; nothing was merged\n".to_string(),
+        (LinkState::Open, _) => {
+            "open          checks are not finished; nothing was merged. Run the command again later\n"
+                .to_string()
+        }
+    };
+    out.push_str(&line);
+    out
+}
+
 /// What a non-interactive `ask` or `correct` prints after the reading.
 pub fn follow_up(p: &Proposal) -> String {
     let id = p.job.as_str();
