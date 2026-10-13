@@ -477,13 +477,18 @@ pub(crate) mod tests {
 
     #[test]
     fn rest_merge_is_off_unless_the_config_turns_it_on() {
-        // athena.toml has no [landing] table, and the setting still reads as off.
-        assert!(!REPO_CONFIG.contains("[landing]"));
-        assert!(!Config::parse(REPO_CONFIG).unwrap().landing.merge_via_rest);
-        let on = format!("{REPO_CONFIG}\n[landing]\nmerge_via_rest = true\n");
+        // The default is tested on a config with no landing table: everything before it in athena.toml.
+        let (stripped, _) = REPO_CONFIG
+            .split_once("[landing]")
+            .expect("athena.toml has a landing table");
+        assert!(!stripped.contains("merge_via_rest"));
+        assert!(!Config::parse(stripped).unwrap().landing.merge_via_rest);
+        let on = format!("{stripped}\n[landing]\nmerge_via_rest = true\n");
         assert!(Config::parse(&on).unwrap().landing.merge_via_rest);
-        let empty = format!("{REPO_CONFIG}\n[landing]\n");
+        let empty = format!("{stripped}\n[landing]\n");
         assert!(!Config::parse(&empty).unwrap().landing.merge_via_rest);
+        // This repository turns the merge on.
+        assert!(Config::parse(REPO_CONFIG).unwrap().landing.merge_via_rest);
     }
 
     #[test]
