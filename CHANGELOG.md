@@ -16,6 +16,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   capability never pins. `athena.toml` gains the two keys as a commented example; set them to run a study.
 - The study capability is registered in the `athena` binary, so the reader can pick `study` and the core can
   run it. Containment, the run step and publishing are not built.
+- `athena.toml` sets `repo_url` and `repo_ref` in `[capabilities.study]` to the firstmate repository on
+  `main`, the first study instance (D77). The pin tests' `config()` helper strips any existing keys before
+  adding its own. This is a governance file change; it governs later jobs only.
 - `athena.toml` gains a `[capabilities.study]` section with the same commands, environment and checks (fmt,
   clippy, test) as the change capability, so a study job's grants and gates come from configuration. This is a
   governance file change; the section governs later jobs only.
