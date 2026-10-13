@@ -20,6 +20,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   merged-content check that finds the merge by pull request number and returns "merged but not verified" when
   the fingerprint differs. A library only: no command and no host calls yet.
 
+### Fixed
+
+- Trying again on a failed job that was itself a retry now carries the accepted corrections of every job in
+  the retry chain (oldest first, redacted) into the reader brief, as it does for a rejected job.
+
 ### Changed
 
 - The native pull-request landing design is revised again for review 3, findings N1-N4 (D86): the exact

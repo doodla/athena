@@ -768,11 +768,21 @@ pub fn earlier_attempt(
         );
     }
     let mut attempt = carry(job, redactor)?.expect("has a request");
-    // When the retried job was itself a retry, carry the original request instead of the retry phrase.
-    if let Some(original) = original_request(records, job) {
-        let mut texts = vec![original];
+    // When the retried job was itself a retry, carry the original request instead of the retry phrase,
+    // and the corrections given to the jobs it retried (oldest first) ahead of its own.
+    let earlier = earlier_jobs(records, job);
+    if let Some(original) = earlier.last() {
+        let mut texts = vec![original.request.as_ref().expect("checked").text.clone()];
+        let inherited: Vec<&str> = earlier
+            .iter()
+            .rev()
+            .flat_map(|j| j.corrections.iter().map(|c| c.text.as_str()))
+            .collect();
+        texts.extend(inherited.iter().map(|t| t.to_string()));
         redactor.redact_all(&mut texts)?;
         attempt.request = texts.remove(0);
+        texts.append(&mut attempt.corrections);
+        attempt.corrections = texts;
     }
     Ok(Some(attempt))
 }
@@ -803,16 +813,18 @@ fn retry_reference(request: &str) -> Result<Option<&str>> {
 /// The most retries followed back to an original request.
 const MAX_RETRY_DEPTH: usize = 16;
 
-/// Follows `job`'s "try again on <job>" request back to the first request that is not a retry.
-/// `None` when `job` is not a retry; when the chain breaks (unknown job, no request, a cycle, or too
-/// deep), the last request reached is returned. The text is not yet redacted.
-fn original_request(records: &Records, job: &JobRecords) -> Option<String> {
+/// The jobs `job` is a retry of, nearest first, back to the first request that is not a retry. Empty
+/// when `job` is not a retry; when the chain breaks (unknown job, no request, a cycle, or too deep),
+/// the jobs reached so far are returned.
+fn earlier_jobs<'a>(records: &'a Records, job: &'a JobRecords) -> Vec<&'a JobRecords> {
     let mut current = job;
     let mut seen = vec![current.id().as_str().to_string()];
-    let mut original = None;
+    let mut chain = Vec::new();
     for _ in 0..MAX_RETRY_DEPTH {
-        let text = &current.request.as_ref()?.text;
-        let Some(reference) = retry_reference(text).ok().flatten() else {
+        let Some(request) = current.request.as_ref() else {
+            break;
+        };
+        let Some(reference) = retry_reference(&request.text).ok().flatten() else {
             break;
         };
         let Some(next) = records
@@ -822,17 +834,14 @@ fn original_request(records: &Records, job: &JobRecords) -> Option<String> {
         else {
             break;
         };
-        let Some(next_request) = &next.request else {
-            break;
-        };
-        if seen.iter().any(|s| s == next.id().as_str()) {
+        if next.request.is_none() || seen.iter().any(|s| s == next.id().as_str()) {
             break;
         }
         seen.push(next.id().as_str().to_string());
-        original = Some(next_request.text.clone());
+        chain.push(next);
         current = next;
     }
-    original
+    chain
 }
 
 /// The most bytes of one failed check's output that are carried; the end of the output is kept.
@@ -1315,6 +1324,92 @@ mod tests {
             Some("Print a greeting.")
         );
         assert_eq!(attempt.corrections, ["keep it short"]);
+    }
+
+    #[test]
+    fn a_failed_job_carries_its_corrections_in_order_and_redacted() {
+        let redactor = Redactor::new(&athena_gate::builtin_config()).unwrap();
+        let token = format!(
+            "{}{}",
+            ["gh", "p_"].concat(),
+            "Zq8rT2vK9mW4xN7bP3cH6jL1sD5fG0aYuE2i"
+        );
+        let mut job = job_with_checks(vec![]);
+        job.readings = vec![final_reading(&job)];
+        job.corrections = vec![
+            correction(&job, "merge only when opted in", CorrectionKind::Correction),
+            correction(&job, &format!("key {token}"), CorrectionKind::Answer),
+        ];
+        job.outcome = Some(outcome(&job, OutcomeState::Failed, "failed"));
+        let id = job.id().as_str().to_string();
+        let attempt = earlier_attempt(&records_with(job), &format!("try again on {id}"), &redactor)
+            .unwrap()
+            .unwrap();
+        assert!(attempt.failed);
+        assert_eq!(
+            attempt.reading_summary.as_deref(),
+            Some("Print a greeting.")
+        );
+        assert_eq!(attempt.corrections.len(), 2);
+        assert_eq!(attempt.corrections[0], "merge only when opted in");
+        assert!(!attempt.corrections[1].contains(&token));
+        assert!(attempt.corrections[1].contains("[secret:github-pat]"));
+    }
+
+    #[test]
+    fn a_failed_job_without_a_verification_carries_its_corrections() {
+        let redactor = Redactor::new(&athena_gate::builtin_config()).unwrap();
+        let mut job = job_with_checks(vec![]);
+        job.verification = None;
+        job.readings = vec![final_reading(&job)];
+        job.corrections = vec![correction(
+            &job,
+            "keep it short",
+            CorrectionKind::Correction,
+        )];
+        job.outcome = Some(outcome(&job, OutcomeState::Failed, "admission refused"));
+        let id = job.id().as_str().to_string();
+        let attempt = earlier_attempt(&records_with(job), &format!("try again on {id}"), &redactor)
+            .unwrap()
+            .unwrap();
+        assert_eq!(attempt.corrections, ["keep it short"]);
+        assert_eq!(attempt.findings, ["outcome: admission refused"]);
+    }
+
+    #[test]
+    fn a_failed_retry_carries_the_corrections_of_the_jobs_it_retried() {
+        let redactor = Redactor::new(&athena_gate::builtin_config()).unwrap();
+        let mut first = job_with_checks(vec![]);
+        first.readings = vec![final_reading(&first)];
+        first.corrections = vec![correction(
+            &first,
+            "merge only when opted in",
+            CorrectionKind::Correction,
+        )];
+        first.outcome = Some(outcome(&first, OutcomeState::Failed, "failed"));
+        let first_id = first.id().as_str().to_string();
+        let mut second = job_with_checks(vec![]);
+        let second_id = JobId::parse("20261012-090000-b2b2").unwrap();
+        second.id = Some(second_id.clone());
+        second.request.as_mut().unwrap().job = second_id.clone();
+        second.request.as_mut().unwrap().text = format!("try again on {first_id}");
+        second.readings = vec![final_reading(&second)];
+        second.corrections = vec![correction(&second, "keep it short", CorrectionKind::Answer)];
+        second.outcome = Some(outcome(&second, OutcomeState::Failed, "failed"));
+        let mut records = records_with(first);
+        records.jobs.insert(second_id.as_str().to_string(), second);
+        let attempt = earlier_attempt(
+            &records,
+            &format!("try again on {}", second_id.as_str()),
+            &redactor,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(attempt.request, "add a greeting");
+        assert_eq!(
+            attempt.corrections,
+            ["merge only when opted in", "keep it short"]
+        );
     }
 
     #[test]
