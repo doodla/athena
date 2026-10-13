@@ -78,8 +78,19 @@ pub struct NewPr<'a> {
     pub base: &'a str,
 }
 
+/// The parts of a pull request that are known before the host names the base branch.
+#[derive(Debug, Clone, Copy)]
+pub struct PrDraft<'a> {
+    pub title: &'a str,
+    pub body: &'a str,
+    /// The branch that holds the change.
+    pub head: &'a str,
+}
+
 /// What the host can be asked, besides where a merge landed ([`Host`]).
 pub trait PrHost: Host {
+    /// The repository's default branch on the host: the base every pull request is opened against.
+    fn default_branch(&self) -> Result<String>;
     /// Opens a pull request and returns its number.
     fn open_pr(&self, pr: &NewPr) -> Result<u64>;
     /// The state of the checks on a commit.
@@ -183,6 +194,14 @@ impl Host for GhClient<'_> {
 }
 
 impl PrHost for GhClient<'_> {
+    fn default_branch(&self) -> Result<String> {
+        let repo = self.api("GET", &format!("repos/{}", self.repository), &[])?;
+        match repo["default_branch"].as_str() {
+            Some(name) if !name.is_empty() => Ok(name.to_string()),
+            _ => bail!("the host's reply for the repository names no default branch"),
+        }
+    }
+
     fn open_pr(&self, pr: &NewPr) -> Result<u64> {
         let created = self.api(
             "POST",
@@ -277,6 +296,17 @@ pub fn work_branch(job: &JobId) -> String {
     format!("athena/{}", job.as_str())
 }
 
+/// The commit pushed as the work branch: the verified candidate with the job's records on top. The records
+/// (verification, outcome and the rest) are committed on the local branch, not on the candidate. Governed
+/// content, and so the fingerprint, stays the candidate's, and the result descends from the candidate.
+pub fn work_commit(git: &Git, candidate: &str, local_head: &str, job: &JobId) -> Result<String> {
+    let message = format!(
+        "Athena job {}: records for the verified candidate\n",
+        job.as_str()
+    );
+    Ok(git.commit_with_records(candidate, local_head, &message, git.signs_commits()?)?)
+}
+
 /// How long to wait for the checks.
 pub struct Poll<'a> {
     /// How many times to ask, at least once.
@@ -300,10 +330,12 @@ pub struct LandPr<'a> {
     pub job: &'a JobId,
     /// The branch the caller asks to push; the guard allows only [`work_branch`].
     pub branch: &'a str,
-    /// The verified candidate commit, pushed as the pull request's head.
-    pub candidate: &'a str,
+    /// Makes the commit to push as the pull request's head: the verified candidate plus the job's records
+    /// (see [`work_commit`]). Called only when a branch is about to be published.
+    pub work_commit: &'a dyn Fn() -> Result<String>,
     pub verified_fingerprint: &'a str,
-    pub pr: NewPr<'a>,
+    /// The pull request's text. Its base is the host's default branch, read when the request is opened.
+    pub pr: PrDraft<'a>,
     pub host_name: &'a str,
     pub repository: &'a str,
     /// The `[landing] merge_via_rest` setting.
@@ -320,7 +352,6 @@ impl std::fmt::Debug for LandPr<'_> {
         f.debug_struct("LandPr")
             .field("job", &self.job)
             .field("branch", &self.branch)
-            .field("candidate", &self.candidate)
             .field("repository", &self.repository)
             .field("merge_via_rest", &self.merge_via_rest)
             .finish_non_exhaustive()
@@ -349,7 +380,7 @@ pub fn land_pr(job: &LandPr) -> Result<PrReport> {
     let mut merge_requested = false;
     observe_merge(job.host, job.content, &mut link, job.verified_fingerprint)?;
     if link.state == LinkState::Open {
-        let seen = wait_for_checks(job)?;
+        let seen = wait_for_checks(job, &link.head)?;
         checks = Some(seen);
         // The merge gate: the setting is on and every check is green. Nothing else reaches the host's
         // merge endpoint.
@@ -369,23 +400,30 @@ pub fn land_pr(job: &LandPr) -> Result<PrReport> {
 
 fn publish(job: &LandPr) -> Result<PrLink> {
     let allowed = work_branch(job.job);
+    let commit = (job.work_commit)()?;
     let remote_head = job.remote.remote_head(job.branch)?;
     check_push(
         job.ancestry,
         &PushRequest {
             allowed_branch: &allowed,
             branch: job.branch,
-            local_head: job.candidate,
+            local_head: &commit,
             remote_head: remote_head.as_deref(),
         },
     )?;
-    job.remote.push(job.branch, job.candidate)?;
-    let pr_number = job.host.open_pr(&job.pr)?;
+    let base = job.host.default_branch()?;
+    job.remote.push(job.branch, &commit)?;
+    let pr_number = job.host.open_pr(&NewPr {
+        title: job.pr.title,
+        body: job.pr.body,
+        head: job.pr.head,
+        base: &base,
+    })?;
     let link = PrLink {
         pr_number,
         host: job.host_name.to_string(),
         repository: job.repository.to_string(),
-        head: job.candidate.to_string(),
+        head: commit,
         job: job.job.as_str().to_string(),
         state: LinkState::Open,
         merged_commit: None,
@@ -394,11 +432,11 @@ fn publish(job: &LandPr) -> Result<PrLink> {
     Ok(link)
 }
 
-fn wait_for_checks(job: &LandPr) -> Result<Checks> {
+fn wait_for_checks(job: &LandPr, head: &str) -> Result<Checks> {
     let attempts = job.poll.attempts.max(1);
     let mut seen = Checks::Pending;
     for n in 0..attempts {
-        seen = job.host.checks(job.candidate)?;
+        seen = job.host.checks(head)?;
         if seen != Checks::Pending {
             break;
         }
@@ -441,10 +479,6 @@ impl Athena {
         let remote_name = "origin";
         let url = self.git.run(["remote", "get-url", remote_name])?;
         let (host_name, repository) = parse_remote(&url)?;
-        let base = self
-            .git
-            .current_branch()?
-            .context("a pull request needs a branch to merge into; HEAD is detached")?;
         let config = athena_gate::config_at(&self.git, Some(&head))?;
         let branch = work_branch(&id);
         let title = job.title();
@@ -469,13 +503,12 @@ impl Athena {
             state: &self.state,
             job: &id,
             branch: &branch,
-            candidate: &verification.candidate_commit,
+            work_commit: &|| work_commit(&self.git, &verification.candidate_commit, &head, &id),
             verified_fingerprint: &verification.verified_fingerprint,
-            pr: NewPr {
+            pr: PrDraft {
                 title: &title,
                 body: &body,
                 head: &branch,
-                base: &base,
             },
             host_name: &host_name,
             repository: &repository,
@@ -508,7 +541,9 @@ mod tests {
         fn gh(&self, args: &[String]) -> Result<String> {
             self.calls.borrow_mut().push(args.to_vec());
             let path = args.iter().find(|a| a.starts_with("repos/")).unwrap();
-            Ok(if path.ends_with("/pulls") {
+            Ok(if path == "repos/example/project" {
+                r#"{"default_branch": "trunk"}"#.to_string()
+            } else if path.ends_with("/pulls") {
                 r#"{"number": 7}"#.to_string()
             } else if path.contains("/pulls/") && !path.ends_with("/merge") {
                 r#"{"merged": true, "merge_commit_sha": "m1"}"#.to_string()
@@ -636,6 +671,10 @@ mod tests {
         merges: Cell<u32>,
         check_reads: Cell<u32>,
         asked: RefCell<Vec<u64>>,
+        /// The bases pull requests were opened against.
+        bases: RefCell<Vec<String>>,
+        /// The commits whose checks were read.
+        checked: RefCell<Vec<String>>,
     }
     impl FakeHost {
         fn new(checks: Checks) -> Self {
@@ -647,6 +686,8 @@ mod tests {
                 merges: Cell::new(0),
                 check_reads: Cell::new(0),
                 asked: RefCell::new(vec![]),
+                bases: RefCell::new(vec![]),
+                checked: RefCell::new(vec![]),
             }
         }
     }
@@ -657,12 +698,17 @@ mod tests {
         }
     }
     impl PrHost for FakeHost {
-        fn open_pr(&self, _: &NewPr) -> Result<u64> {
+        fn default_branch(&self) -> Result<String> {
+            Ok("trunk".to_string())
+        }
+        fn open_pr(&self, pr: &NewPr) -> Result<u64> {
             self.opened.set(self.opened.get() + 1);
+            self.bases.borrow_mut().push(pr.base.to_string());
             Ok(42)
         }
-        fn checks(&self, _: &str) -> Result<Checks> {
+        fn checks(&self, commit: &str) -> Result<Checks> {
             self.check_reads.set(self.check_reads.get() + 1);
+            self.checked.borrow_mut().push(commit.to_string());
             Ok(self.checks)
         }
         fn merge(&self, _: u64, _: &str) -> Result<()> {
@@ -706,13 +752,12 @@ mod tests {
                 state: &state,
                 job: &self.job,
                 branch,
-                candidate: "cand1",
+                work_commit: &|| Ok("cand1".to_string()),
                 verified_fingerprint: "verified",
-                pr: NewPr {
+                pr: PrDraft {
                     title: "t",
                     body: "b",
                     head: "athena/bootstrap",
-                    base: "main",
                 },
                 host_name: HOST,
                 repository: "example/project",
@@ -813,6 +858,119 @@ mod tests {
     }
 
     #[test]
+    fn the_client_reads_the_default_branch_from_the_repository() {
+        let runner = FakeRunner {
+            calls: RefCell::new(vec![]),
+        };
+        let client = GhClient {
+            runner: &runner,
+            repository: "example/project".into(),
+        };
+        assert_eq!(client.default_branch().unwrap(), "trunk");
+        let calls = runner.calls.borrow();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0][..4],
+            ["api", "--method", "GET", "repos/example/project"]
+        );
+    }
+
+    #[test]
+    fn the_pull_request_targets_the_host_default_branch_and_the_work_commit() {
+        let rig = Rig::new();
+        let host = FakeHost::new(Checks::Green);
+        let state = StateDir::new(rig.dir.path().to_path_buf());
+        let nap = |_: Duration| {};
+        let report = land_pr(&LandPr {
+            state: &state,
+            job: &rig.job,
+            branch: "athena/bootstrap",
+            work_commit: &|| Ok("work1".to_string()),
+            verified_fingerprint: "verified",
+            pr: PrDraft {
+                title: "t",
+                body: "b",
+                head: "athena/bootstrap",
+            },
+            host_name: HOST,
+            repository: "example/project",
+            merge_via_rest: false,
+            poll: Poll {
+                attempts: 1,
+                delay: Duration::ZERO,
+                sleep: &nap,
+            },
+            ancestry: &Anc(true),
+            remote: &rig.remote,
+            host: &host,
+            content: &rig.content,
+        })
+        .unwrap();
+        // The base is what the host reports, whatever the local branch is called.
+        assert_eq!(*host.bases.borrow(), vec!["trunk".to_string()]);
+        // The pushed commit, the stored head and the checked commit are all the work commit.
+        assert_eq!(
+            *rig.remote.pushes.borrow(),
+            vec![("athena/bootstrap".to_string(), "work1".to_string())]
+        );
+        assert_eq!(report.link.head, "work1");
+        assert_eq!(*host.checked.borrow(), vec!["work1".to_string()]);
+    }
+
+    #[test]
+    fn the_work_commit_carries_the_records_on_top_of_the_candidate() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = Git::isolated(dir.path());
+        let write = |files: &[(&str, &str)]| {
+            for (path, text) in files {
+                let full = dir.path().join(path);
+                std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+                std::fs::write(full, text).unwrap();
+            }
+            git.run(["add", "-A"]).unwrap();
+            git.run(["commit", "-q", "-m", "step"]).unwrap();
+            git.head().unwrap().unwrap()
+        };
+        git.run(["init", "-q", "-b", "main"]).unwrap();
+        let base = write(&[("a.txt", "a")]);
+        git.run(["checkout", "-q", "-b", "cand"]).unwrap();
+        let candidate = write(&[("a.txt", "changed")]);
+        git.run(["checkout", "-q", "main"]).unwrap();
+        let head = write(&[
+            ("records/jobs/bootstrap/verification.json", "{}"),
+            ("records/jobs/bootstrap/outcome.json", "{}"),
+        ]);
+
+        let job = JobId::parse("bootstrap").unwrap();
+        let work = work_commit(&git, &candidate, &head, &job).unwrap();
+        assert_ne!(work, candidate);
+        assert!(git.is_ancestor(&candidate, &work).unwrap());
+        let paths: Vec<String> = git
+            .ls_tree(&work)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.path)
+            .collect();
+        assert_eq!(
+            paths,
+            vec![
+                "a.txt",
+                "records/jobs/bootstrap/outcome.json",
+                "records/jobs/bootstrap/verification.json"
+            ]
+        );
+        assert_eq!(git.show_file(&work, "a.txt").unwrap().unwrap(), b"changed");
+        let content = GitContent {
+            git: &git,
+            rules_commit: &base,
+        };
+        assert_eq!(
+            content.fingerprint_of(&work).unwrap(),
+            content.fingerprint_of(&candidate).unwrap()
+        );
+    }
+
+    #[test]
     fn a_push_the_guard_refuses_opens_nothing() {
         // Another branch.
         let rig = Rig::new();
@@ -831,13 +989,12 @@ mod tests {
             state: &state,
             job: &rig.job,
             branch: "athena/bootstrap",
-            candidate: "cand1",
+            work_commit: &|| Ok("cand1".to_string()),
             verified_fingerprint: "verified",
-            pr: NewPr {
+            pr: PrDraft {
                 title: "t",
                 body: "b",
                 head: "athena/bootstrap",
-                base: "main",
             },
             host_name: HOST,
             repository: "example/project",

@@ -1,0 +1,84 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261013-150709-b67z",
+  "base_commit": "9d0449dce7eb5e93d90c5531410ff30bff7519cc",
+  "base_fingerprint": "sha256:5b55b1abed0e6b97a2ebc000cb61d61239309d2931fa3bceb015a52244ed1cbd",
+  "previous_job": "20261013-143902-vbdn",
+  "candidate_commit": "dd50c2bbee4c438abb469642d75f8de33779857c",
+  "candidate_tree": "7c15b75fe8cabb40dc0edd2f6b249849c48931a4",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 22389
+    },
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 36950
+    },
+    {
+      "path": "crates/athena-git/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 30529
+    },
+    {
+      "path": "docs/design/native-pr-landing.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 33357
+    }
+  ],
+  "fingerprint": "sha256:b16eb0a705e9537cd67e4b3faf05b2eabb907aa2ae4ea527745918e0f840cc3c",
+  "violations": [],
+  "producer_report": {
+    "summary": "I fixed both `athena land --pr` bugs and added tests for each. The full test run, clippy with warnings denied, and `cargo fmt --check` all pass.\\n\\n**Base branch.** `PrHost` now has `default_branch()`. It reads `default_branch` from `gh api repos/{owner}/{repo}`. `land_pr` asks the host for it just before opening the PR and uses it as `NewPr.base`. `Athena::land_pr` no longer calls `current_branch`, so a detached HEAD or a local-only branch can't affect the base or cause an error. To make this work, `LandPr.pr` is now a `PrDraft` (title, body, head), and the base is filled in when the PR is opened.\\n\\n**Work branch contents.** I added `Git::commit_with_records` in `athena-git`. It builds a commit on top of the candidate whose tree is the candidate's tree with `records/` replaced by the `records/` from local HEAD. The new `gh::work_commit` wraps that helper. The fingerprint ignores `records/`, so it stays equal to the verified one, and the new commit descends from the candidate, so the push guard still holds. `LandPr.candidate` is replaced by a `work_commit` closure. It runs only when a branch is about to be published, so a rerun that finds a stored PR link doesn't create a new commit. The pushed commit, `link.head`, the merge guard sha and the checks lookup all use this new commit.\\n\\n**Merge gate.** Unchanged: merging still needs `merge_via_rest` on and green checks.\\n\\n**Tests added:**\\n- The client reads the default branch (`trunk`).\\n- The flow opens the PR against `trunk` and pushes, stores and checks the work commit.\\n- The work commit in a real git repository contains the records files and the candidate's code, descends from the candidate, and has the same fingerprint.\\n- The `athena-git` helper has its own test.\\n\\nI also updated the design doc (steps 2 and 3 of §5.1) and the changelog. I did not need to change `pr.rs` or `land.rs`, though both were listed as deliverables.",
+    "files": [
+      "crates/athena-core/src/gh.rs",
+      "crates/athena-git/src/lib.rs",
+      "docs/design/native-pr-landing.md",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "run before the doc edits; no Rust changed after"
+      },
+      {
+        "command": "cargo test --locked --no-fail-fast -q",
+        "result": "pass",
+        "note": "whole workspace, including the three new tests"
+      },
+      {
+        "command": "cargo test --locked -p athena-core -p athena-git",
+        "result": "pass",
+        "note": "gh:: tests and the athena-git test pass"
+      }
+    ],
+    "open_issues": [
+      "The default branch is read, and the work commit built, only when a new PR is published. A rerun that finds a stored link does neither, so it needs no network call for the base.",
+      "pr.rs and land.rs are listed as deliverables but needed no change.",
+      "Nothing exercises GhCli or a real push end to end. The tests use fakes for the host and remote, plus a real git repository for the work-commit construction."
+    ],
+    "mistakes": [
+      "My first attempt to edit with a heredoc script was denied by policy; I redid the edits one by one. No effect on the result."
+    ],
+    "learnings": [
+      "Records are ordinary files under records/ in the local HEAD tree, and the fingerprint ignores records/, so a records-only commit on top of the candidate keeps the verified fingerprint.",
+      "Bash here allows no heredocs, python or grep; edits go through the Edit tool.",
+      "athena-git's testutil module is pub(crate), so athena-core tests build their own repositories."
+    ],
+    "desires": [
+      "A way to edit files with a script (python or sed) would have saved many single-edit calls."
+    ]
+  }
+}

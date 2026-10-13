@@ -133,8 +133,12 @@ directory is stealth.
 2. **Publish.** `athena land --pr` **(design; the name is not fixed)** pushes that branch to the user's
    remote, or to the user's fork when the user cannot push to the target, with a regular push. Athena never
    forces a push. If the remote branch already exists and is not an ancestor of the local one, the command
-   stops and says so (R4).
-3. **Open.** Athena opens a pull request with the host client. In owned mode the body is generated from the
+   stops and says so (R4). In owned mode the pushed commit is the verified candidate plus one commit on top
+   that adds the job's `records/` from the local branch (verification, outcome and the rest), so merging the
+   pull request lands what `athena check --history` expects. Governed content is the candidate's, so the
+   fingerprint is unchanged and the push guard's ancestry test holds.
+3. **Open.** Athena opens a pull request with the host client. Its base is the repository's default branch as
+   the host reports it (`default_branch` from `repos/{owner}/{repo}`), never the local branch. In owned mode the body is generated from the
    job: the request, the criteria, the verifier's findings, and the job id. In stealth mode the body **keeps**
    a plain description of the change and why it was made, written in the user's voice, and **drops** the job
    id, the criteria and findings as Athena produces them, any link to a record file, and any Athena
