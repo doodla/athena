@@ -72,3 +72,10 @@ Other facts found on the way:
 - Needed: Sri may add a ruleset on `main` that requires pull requests and the CI checks.
 - Workaround: work reaches `main` only through pull requests merged after CI passes, by tooling
   that checks the CI result before merging, and CI re-verifies `main` after every merge.
+
+## GitHub CLI in this environment (2026-10-13, session `cse_01JssKRxSbTrgBtgw5KedvFz`)
+
+- `gh` 2.89.0 is installed and authenticated through the proxy for the REST API: `gh api repos/doodla/athena/pulls?state=closed&per_page=1` works.
+- GraphQL is refused (HTTP 403, "GitHub GraphQL is not available"), so `gh pr create`, `gh pr merge` and `gh pr list` fail. Auto-merge,
+  review threads and ready-for-review go through the proxy's REST routes under `/repos/{owner}/{repo}/pulls/{n}/ccr/`.
+- Consequence: Athena's host client must work with REST calls only (`gh api`), which is also portable to any `gh` user.
