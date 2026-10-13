@@ -7,6 +7,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- `docs/design/parallel-jobs.md` is revised to answer review 1 (F1-F8): jobs run as one child process each,
+  each lands through its own pull request by squash with the local branch rebuilt after each landing, a job
+  whose base is behind is stale until re-verified on request, duplicate refs are rejected up front, the
+  worst-case spend is printed, and shared append-only files are written only by a docs job that runs alone.
+  Design only; the build is a later job.
+
 ### Added
 
 - `athena land --pr` works on repositories that allow only squash merges (D88, which supersedes the
