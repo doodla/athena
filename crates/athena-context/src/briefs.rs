@@ -955,6 +955,27 @@ mod tests {
     }
 
     #[test]
+    fn reader_briefs_list_the_corrections_of_a_failed_earlier_attempt() {
+        let mut inputs = reader_inputs(&reading());
+        inputs.earlier_attempt = Some(EarlierAttempt {
+            job: "20261010-153012-k7q2".into(),
+            request: "add a changelog file".into(),
+            failed: true,
+            findings: vec!["outcome: admission refused".into()],
+            corrections: vec!["merge only when opted in".into(), "keep it short".into()],
+            ..Default::default()
+        });
+        let brief = reader_brief(&inputs);
+        assert!(brief.contains("which failed"), "{brief}");
+        let heading = brief
+            .find("The corrections and answers the user gave")
+            .unwrap();
+        let first = brief.find("> merge only when opted in").unwrap();
+        let second = brief.find("> keep it short").unwrap();
+        assert!(heading < first && first < second, "{brief}");
+    }
+
+    #[test]
     fn reader_briefs_carry_referenced_jobs_only_when_set() {
         let mut inputs = reader_inputs(&reading());
         assert!(!reader_brief(&inputs).contains("# Referenced jobs"));
