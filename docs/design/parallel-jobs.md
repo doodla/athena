@@ -1,7 +1,8 @@
 # Running independent jobs in parallel
 
-**Status:** proposed. Design only: no code is built by this document. **The independent review is pending**;
-nothing here is accepted until it is done.
+**Status:** proposed, reviewed: accept with changes (`docs/design/reviews/parallel-jobs-review-1.md`). Design
+only: no code is built by this document. The review's changes are listed in the response at the end of
+section 10 and are **not yet applied to the text above it**; where they differ, the review governs.
 
 Claims are marked **(read)** when taken from the file named beside them, and **(design)** when they are
 proposals. No command was run to reproduce any behavior; every **(read)** claim comes from reading source.
@@ -279,11 +280,11 @@ unknown before the producer runs. The landing step is the only point with the fa
 
 ## 10. Build plan
 
-Each item is a separate later job. **The independent review is pending and is the first item.**
+Each item is a separate later job.
 
-1. **Review job (pending).** An independent reviewer reads this document and the code it cites and writes
-   `docs/design/reviews/parallel-jobs-review-1.md`, deciding the open questions below. The response to the
-   review is then added here.
+1. **Review job (done).** An independent reviewer read this document and the code it cites and wrote
+   `docs/design/reviews/parallel-jobs-review-1.md`, deciding the open questions below. Verdict: accept with
+   changes. The response is at the end of this section.
 2. **Spike job.** Check whether `Athena`, the drivers and the registry can be shared across threads; report
    the result. Decides threads versus processes (question 1). May be folded into step 3 if the review finds
    it clearly yes.
@@ -296,6 +297,18 @@ Each item is a separate later job. **The independent review is pending and is th
 5. **Docs job.** README and CHANGELOG, and a `docs/decisions.md` entry. They are not part of this design job.
 6. **Later job, separate from all of the above:** per-job branch and pull request landing (section 8), after
    native pull-request landing is built.
+
+### Response to review 1
+
+Accepted. The review's decisions on the seven questions in section 11 stand. In short: processes by default
+(question 1); `plan` sends a job to stale whenever governed content moved, so parallel change jobs mostly go
+stale after the first (question 2); no run-level cap yet (3); `--all` is `proposed` and `blocked` (4); default
+2 with a ceiling of 4 (5); reject duplicate jobs up front (6); keep the exit-code precedence (7).
+
+The text above is left as written except for the status line and item 1. Before the spike and pool jobs
+start, a later design job applies these changes: rewrite section 7 and question 2 (finding F1); make
+processes the recommendation in 4.1 (F2); add a "shared append-only files" section with the serialize-and-
+docs-last rules and the collision test (F3); correct the line references (F7).
 
 ## 11. Open questions for the reviewer
 
