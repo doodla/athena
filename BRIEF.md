@@ -494,3 +494,7 @@ Stopping: you're done when "How I'll judge it" passes. If you're blocked on ever
 ### 2026-10-13: Athena owns acceleration
 
 * I think we should also give Athena the mandate to accelerate and then track and feed timings back into the system. It can figure out observability on its own almost, I feel.
+
+### 2026-10-13: Root causes
+
+* Have Athena favor fixing root causes
