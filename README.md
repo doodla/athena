@@ -46,7 +46,9 @@ Enter, or athena go <job>
 
 To retry a rejected or failed job, ask `athena ask "try again on <job>"` (the full id or a unique suffix; the form is
 matched case-insensitively at the start of the request). The reader then sees that job's request and its final
-verification's findings, redacted, in an "Earlier attempt" section. A failed job (for example one refused at
+verification's findings, redacted, in an "Earlier attempt" section. That section also shows the job's final
+reading (summary, acceptance criteria, deliverables) and the corrections and answers the user gave, and it says the
+attempt's changes were discarded, so the retry starts from the base. A failed job (for example one refused at
 admission, which has no verification) also has its recorded reason carried there. Jobs that are landed, stale,
 in flight, or unknown are refused.
 

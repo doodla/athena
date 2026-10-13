@@ -14,6 +14,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A retry now carries more into the reader's "Earlier attempt" section: the retried job's final reading
+  (summary, acceptance criteria, deliverables), the corrections and answers the user gave to it, and a
+  sentence saying the attempt's changes were discarded and are not in the repository the reader sees. All of it
+  is redacted. A job with no reading or no corrections omits those parts. A retry of a retry still carries the
+  original request (D82).
 - A requirements map (`docs/design/requirements-map.md`). It lists each `BRIEF.md` requirement the repository
   answers, with a pointer to the file and line that answers it, and marks the ones that are only partly
   covered. Line numbers refer to files in the same tree, so they are right only for the tree that holds

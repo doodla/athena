@@ -887,11 +887,44 @@ fn carry(job: &JobRecords, redactor: &Redactor) -> Result<Option<EarlierAttempt>
     }
     redactor.redact_all(&mut texts)?;
     let request = texts.remove(0);
+    // The final reading and the user's corrections and answers, redacted like the rest.
+    let final_reading = job.latest_reading();
+    let criteria = final_reading.map_or(0, |r| r.acceptance_criteria.len());
+    let mut extra: Vec<String> = Vec::new();
+    if let Some(reading) = final_reading {
+        extra.push(reading.summary.clone());
+        extra.extend(reading.acceptance_criteria.iter().map(|c| {
+            let kind = match c.kind {
+                CriterionKind::Content => "content",
+                CriterionKind::Behavior => "behavior",
+            };
+            format!("[{kind}] {}", c.text)
+        }));
+        extra.extend(reading.deliverables.iter().map(|d| {
+            let action = match d.action {
+                DeliverableAction::Create => "create",
+                DeliverableAction::Modify => "modify",
+                DeliverableAction::Delete => "delete",
+            };
+            format!("{action} {}", d.path)
+        }));
+    }
+    let lead = extra.len();
+    extra.extend(job.corrections.iter().map(|c| c.text.clone()));
+    redactor.redact_all(&mut extra)?;
+    let corrections = extra.split_off(lead);
+    let mut extra = extra.into_iter();
+    let reading_summary = final_reading.and_then(|_| extra.next());
+    let reading_criteria: Vec<String> = extra.by_ref().take(criteria).collect();
     Ok(Some(EarlierAttempt {
         job: job.id().as_str().to_string(),
         request,
         failed,
         findings: texts,
+        reading_summary,
+        reading_criteria,
+        reading_deliverables: extra.collect(),
+        corrections,
     }))
 }
 
@@ -1137,6 +1170,151 @@ mod tests {
         .to_string();
         assert!(error.contains("queued"), "{error}");
         assert!(error.contains("only a rejected or failed job"), "{error}");
+    }
+
+    fn final_reading(job: &JobRecords) -> Reading {
+        let forecast = Forecast {
+            p_reading_accepted: 0.8,
+            p_verification_passes: 0.7,
+            p_user_intervenes: 0.1,
+            cost_usd: Quantiles::new(0.2, 0.5, 1.5).unwrap(),
+            wall_time_s: Quantiles::new(100.0, 300.0, 900.0).unwrap(),
+        };
+        Reading {
+            job: job.id().clone(),
+            n: 1,
+            at: jiff::Timestamp::UNIX_EPOCH,
+            invocation_seq: 1,
+            base_commit: "a".repeat(40),
+            config_sha256: "b".repeat(64),
+            defaults_sha256: "c".repeat(64),
+            defaults_version: 1,
+            title: "Add a greeting".into(),
+            summary: "Print a greeting.".into(),
+            class_of_work: "feature".into(),
+            capability: Some("change".into()),
+            decline_reason: None,
+            producer_model: "producer".into(),
+            verifier_model: "verifier".into(),
+            defaults_applied: vec![],
+            assumptions: vec![],
+            question: None,
+            acceptance_criteria: vec![
+                Criterion {
+                    text: "greeting.rs exists".into(),
+                    kind: CriterionKind::Content,
+                },
+                Criterion {
+                    text: "cargo test passes".into(),
+                    kind: CriterionKind::Behavior,
+                },
+            ],
+            deliverables: vec![Deliverable {
+                path: "greeting.rs".into(),
+                action: DeliverableAction::Create,
+                p: 0.9,
+            }],
+            out_of_scope: vec![],
+            forecasts: Forecasts {
+                reader: forecast.clone(),
+                reference: forecast,
+            },
+            departures: None,
+        }
+    }
+
+    fn correction(job: &JobRecords, text: &str, kind: CorrectionKind) -> Correction {
+        Correction {
+            job: job.id().clone(),
+            n: 1,
+            at: jiff::Timestamp::UNIX_EPOCH,
+            kind,
+            text: text.into(),
+            intervention: RecordId::parse("20261012-090000-abcd").unwrap(),
+        }
+    }
+
+    #[test]
+    fn a_retry_carries_the_final_reading_and_the_corrections_redacted() {
+        let redactor = Redactor::new(&athena_gate::builtin_config()).unwrap();
+        let token = format!(
+            "{}{}",
+            ["gh", "p_"].concat(),
+            "Zq8rT2vK9mW4xN7bP3cH6jL1sD5fG0aYuE2i"
+        );
+        let mut job = job_with_checks(vec![]);
+        job.readings = vec![final_reading(&job)];
+        job.corrections = vec![
+            correction(&job, "name it greeting.rs", CorrectionKind::Correction),
+            correction(&job, &format!("yes, key {token}"), CorrectionKind::Answer),
+        ];
+        job.outcome = Some(outcome(&job, OutcomeState::Rejected, "rejected"));
+        let id = job.id().as_str().to_string();
+        let attempt = earlier_attempt(&records_with(job), &format!("try again on {id}"), &redactor)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            attempt.reading_summary.as_deref(),
+            Some("Print a greeting.")
+        );
+        assert_eq!(
+            attempt.reading_criteria,
+            [
+                "[content] greeting.rs exists",
+                "[behavior] cargo test passes"
+            ]
+        );
+        assert_eq!(attempt.reading_deliverables, ["create greeting.rs"]);
+        assert_eq!(attempt.corrections.len(), 2);
+        assert_eq!(attempt.corrections[0], "name it greeting.rs");
+        assert!(!attempt.corrections[1].contains(&token));
+        assert!(attempt.corrections[1].contains("[secret:github-pat]"));
+    }
+
+    #[test]
+    fn a_job_without_a_reading_or_corrections_carries_none() {
+        let redactor = Redactor::new(&athena_gate::builtin_config()).unwrap();
+        let carried = carry(&job_with_checks(vec![]), &redactor).unwrap().unwrap();
+        assert_eq!(carried.reading_summary, None);
+        assert!(carried.reading_criteria.is_empty());
+        assert!(carried.reading_deliverables.is_empty());
+        assert!(carried.corrections.is_empty());
+    }
+
+    #[test]
+    fn a_retry_of_a_retry_keeps_the_original_request_and_the_retried_jobs_reading() {
+        let redactor = Redactor::new(&athena_gate::builtin_config()).unwrap();
+        let mut first = job_with_checks(vec![]);
+        first.outcome = Some(outcome(&first, OutcomeState::Rejected, "rejected"));
+        let first_id = first.id().as_str().to_string();
+        let mut second = job_with_checks(vec![]);
+        let second_id = JobId::parse("20261012-090000-b2b2").unwrap();
+        second.id = Some(second_id.clone());
+        second.request.as_mut().unwrap().job = second_id.clone();
+        second.request.as_mut().unwrap().text = format!("try again on {first_id}");
+        second.readings = vec![final_reading(&second)];
+        second.corrections = vec![correction(
+            &second,
+            "keep it short",
+            CorrectionKind::Correction,
+        )];
+        second.outcome = Some(outcome(&second, OutcomeState::Rejected, "rejected"));
+        let mut records = records_with(first);
+        records.jobs.insert(second_id.as_str().to_string(), second);
+        let attempt = earlier_attempt(
+            &records,
+            &format!("try again on {}", second_id.as_str()),
+            &redactor,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(attempt.job, second_id.as_str());
+        assert_eq!(attempt.request, "add a greeting");
+        assert_eq!(
+            attempt.reading_summary.as_deref(),
+            Some("Print a greeting.")
+        );
+        assert_eq!(attempt.corrections, ["keep it short"]);
     }
 
     #[test]
