@@ -1,0 +1,130 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261013-050804-e6cj",
+  "base_commit": "84a0ffb70d9762244ac732241a77320764f294d8",
+  "base_fingerprint": "sha256:e36523500b015b6116602aeed7ec2c5329a8eafbbfcbb95aec0297037ce4050e",
+  "previous_job": "20261013-042933-hzrp",
+  "candidate_commit": "b0c28375462d60c59d3af48a0146d1aece44af69",
+  "candidate_tree": "095d86d1874305660cbbddfea053ea3daf36a6a5",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 15906
+    },
+    {
+      "path": "athena.toml",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 8301
+    },
+    {
+      "path": "crates/athena-cap-change/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 8006
+    },
+    {
+      "path": "crates/athena-cap-study/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 6485
+    },
+    {
+      "path": "crates/athena-core/src/capability.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 5804
+    },
+    {
+      "path": "crates/athena-core/src/checks.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 9794
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 62198
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 14342
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 18604
+    },
+    {
+      "path": "docs/decisions.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 117062
+    },
+    {
+      "path": "docs/enforcement.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 18100
+    }
+  ],
+  "fingerprint": "sha256:e21c8a20093f5605d02a91e9468bf0cb73e51d936e0d95d20d6b7015160ce210",
+  "violations": [],
+  "producer_report": {
+    "summary": "Checks are now skipped only when every changed path is on a configured 'cannot affect' list, and anything unlisted runs the check.\\n\\n`athena.toml` has one top-level `[path_sets]` table. It defines `prose` as `docs/**`, `README.md`, `CHANGELOG.md` and `BRIEF.md`. A check names sets in `skip_when_only`. The `fmt` and `clippy` checks of both the change and study capabilities use `prose`.\\n\\nThe `test` check names no set, so it always runs. The policy tests read every tracked file (the boundary scan) and also read `docs/non-rust-files.md`, `docs/architecture.md` and `docs/enforcement.md`. No markdown change is provably inert for them. The prompts under `crates/*/prompts` are compiled in, so they are not in `prose` either.\\n\\nThe code changes are:\\n- **Config:** `athena-data` config parsing validates patterns. Only `dir/**`, `*.ext` and exact paths are accepted. It also rejects a check that names an unknown set.\\n- **Skip decision:** `CheckSpec::from_config` resolves the sets, and `CheckSpec::can_skip` makes the skip decision. A check with no sets, an empty change list, or any unlisted path always runs. Both capabilities use `from_config`.\\n- **Run loop:** it evaluates `can_skip` on the job's `ChangeList::paths`. A skipped check is recorded as a passed `CheckRun` with the note 'not run: no changed path can affect it'. The nested-run skip is unchanged.\\n\\nThe new tests are:\\n- **Skip decision:** `the_skip_decision_is_safe_by_default` in `athena-cap-change` runs against the real `athena.toml`. It covers `studies/**`, `.json`, Cargo files, `.rs`, the docs the tests read, empty input, and a check with no set.\\n- **Config validation:** two tests, `path_patterns_have_three_forms` and `bad_path_sets_are_rejected`, in `athena-data`.\\n- **Run loop:** two tests in `run_pin_tests.rs`. A docs-only job skips `fmt` and `clippy` and still runs `test`. A `studies/*.json`-only job runs all three checks.\\n\\nThe docs changes are decision D79 in `docs/decisions.md`, an `M31` row in `docs/enforcement.md`, and a CHANGELOG line. D79 names `athena.toml` as a governance deliverable.\"",
+    "files": [
+      "athena.toml",
+      "crates/athena-data/src/config.rs",
+      "crates/athena-core/src/capability.rs",
+      "crates/athena-core/src/run.rs",
+      "crates/athena-core/src/checks.rs",
+      "crates/athena-core/src/run_pin_tests.rs",
+      "crates/athena-cap-change/src/lib.rs",
+      "crates/athena-cap-study/src/lib.rs",
+      "docs/decisions.md",
+      "docs/enforcement.md",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "All suites pass, including the two new run-loop tests in athena-core and the policy tests."
+      }
+    ],
+    "open_issues": [
+      "The test check never skips, so a docs-only job still runs cargo test. Skipping it needs the boundary scan and docs-reading tests split out, which is out of scope.",
+      "athena.toml is a governance file, so the new config governs later jobs only.",
+      "crates/athena-cli/tests/common/mod.rs, a listed deliverable, was not changed because it needed no change."
+    ],
+    "mistakes": [
+      "My first config validation test inserted a duplicate TOML key, so it failed on a parse error instead of the case it meant to test. I fixed it by replacing the existing line.",
+      "I put backticks around config key names in the new enforcement.md row, and the policy test rejected them as missing test names. I removed the backticks."
+    ],
+    "learnings": [
+      "xtask/tests/policy.rs reads every tracked file for the boundary scan (records/ and LICENSE excepted), so no markdown change is provably inert for cargo test. The test check therefore names no skip set.",
+      "The same policy test treats any backticked snake_case word in an enforcement.md row starting '| M' as a test name that must exist, so config keys cannot be backticked there.",
+      "The prompts under crates/*/prompts are compiled in with include_str!, so they are not inert for clippy.",
+      "athena-cli tests/common/mod.rs slices athena.toml between the first change check and [classes], replacing the checks. The new path_sets table sits before that range and survives, so that file needed no change."
+    ],
+    "desires": [
+      "A way to list which tracked files each test reads, to confirm the test check's skip set is complete."
+    ]
+  }
+}
