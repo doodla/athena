@@ -52,7 +52,9 @@ impl DefaultsModel {
         self.defaults.iter().find(|d| d.id == id)
     }
 
-    /// The compact text the reader loads: one line per default.
+    /// The compact text the reader loads: one line per default, showing only the first
+    /// sentence of each statement. Producer and verifier briefs use the full statement
+    /// through [`DefaultsModel::get`].
     pub fn render(&self) -> String {
         let mut out = format!(
             "# The user's default expectations (version {})\n\n",
@@ -63,10 +65,20 @@ impl DefaultsModel {
                 "- {} [{}]: {}\n",
                 d.id,
                 d.applies_to.join(", "),
-                d.statement
+                first_sentence(&d.statement)
             ));
         }
         out
+    }
+}
+
+/// The text up to and including the first sentence end: a period followed by whitespace,
+/// or the final period. Statements without such a break are returned whole.
+fn first_sentence(statement: &str) -> &str {
+    let text = statement.trim();
+    match text.find(". ") {
+        Some(i) => &text[..=i],
+        None => text,
     }
 }
 
@@ -82,6 +94,44 @@ mod tests {
         assert!(model.version >= 1);
         assert!(model.get("strangers").is_some());
         assert!(model.render().contains("- rust ["));
+    }
+
+    #[test]
+    fn render_shows_only_the_first_sentence() {
+        let text = r#"
+version = 1
+[[default]]
+id = "multi"
+statement = "First rule. Second detail. Third detail."
+applies_to = ["*"]
+source = "s"
+[[default]]
+id = "semi"
+statement = "One rule; with a clause, and another clause."
+applies_to = ["code"]
+source = "s"
+"#;
+        let model = DefaultsModel::parse(text).unwrap();
+        let out = model.render();
+        assert!(out.contains("- multi [*]: First rule.\n"));
+        assert!(!out.contains("Second detail"));
+        assert!(out.contains("- semi [code]: One rule; with a clause, and another clause.\n"));
+        assert!(
+            model
+                .get("multi")
+                .unwrap()
+                .statement
+                .contains("Third detail")
+        );
+    }
+
+    #[test]
+    fn root_cause_default_leads_with_the_core_rule() {
+        let model = DefaultsModel::parse(REPO_DEFAULTS).unwrap();
+        assert!(model.get("root-cause").unwrap().statement.contains(". "));
+        assert!(model.render().contains(
+            "- root-cause [*]: Fix the root cause, not the symptom or the one instance that surfaced.\n"
+        ));
     }
 
     #[test]
