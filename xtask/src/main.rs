@@ -138,7 +138,10 @@ fn setup(flags: &Flags) -> Result<()> {
     step("3. gitleaks");
     install_gitleaks(&config)?;
 
-    step("4. Athena");
+    step("4. sccache");
+    install_sccache(&config)?;
+
+    step("5. Athena");
     let binary = build_and_adopt(&root, flags)?;
 
     if flags.ci {
@@ -146,13 +149,13 @@ fn setup(flags: &Flags) -> Result<()> {
         return Ok(());
     }
 
-    step("5. Git hooks");
+    step("6. Git hooks");
     install_hooks(&root, &binary, flags.force)?;
 
-    step("6. Claude Code");
+    step("7. Claude Code");
     let claude = ensure_claude(&config)?;
 
-    step("7. Credentials");
+    step("8. Credentials");
     check_credentials(&claude);
 
     step("Ready");
@@ -249,6 +252,51 @@ fn install_gitleaks(config: &Config) -> Result<()> {
         bail!("the gitleaks archive has no gitleaks binary");
     }
     println!("installed gitleaks {} at {}", pin.version, target.display());
+    Ok(())
+}
+
+/// Installs the pinned sccache with `cargo install --locked`, when `athena.toml` pins one. The install root
+/// is `tools/sccache/<version>` in the install directory, so there is no archive and no digest to keep.
+fn install_sccache(config: &Config) -> Result<()> {
+    let Some(pin) = &config.tools.sccache else {
+        println!("no sccache pinned in athena.toml; skipping");
+        return Ok(());
+    };
+    install_sccache_at(&paths::athena_home(), &pin.version, run)
+}
+
+/// The install step with the command runner injected, so tests need no network.
+fn install_sccache_at(
+    home: &Path,
+    version: &str,
+    runner: impl FnOnce(&mut Command) -> Result<()>,
+) -> Result<()> {
+    let binary = paths::sccache_binary_in(home, version);
+    if binary.is_file() {
+        println!(
+            "sccache {version} already installed at {}",
+            binary.display()
+        );
+        return Ok(());
+    }
+    let root = paths::sccache_root(home, version);
+    println!("building sccache {version} with cargo install --locked (this can take minutes)");
+    runner(
+        Command::new("cargo")
+            .args(["install", "--locked", "--version", version, "--root"])
+            .arg(&root)
+            .arg("sccache"),
+    )
+    .with_context(|| {
+        format!("installing sccache {version} failed; fix the error above, or remove [tools.sccache] from athena.toml to go without it")
+    })?;
+    if !binary.is_file() {
+        bail!(
+            "cargo install reported success but {} is missing",
+            binary.display()
+        );
+    }
+    println!("installed sccache {version} at {}", binary.display());
     Ok(())
 }
 
@@ -495,6 +543,28 @@ mod tests {
         assert!(refuse_inside_a_job(Some("20261010-153012-k7q2".into())).is_err());
         assert!(refuse_inside_a_job(Some("".into())).is_ok());
         assert!(refuse_inside_a_job(None).is_ok());
+    }
+
+    #[test]
+    fn sccache_install_skips_when_present_and_fails_clearly() {
+        let home = tempfile::tempdir().unwrap();
+        let binary = paths::sccache_binary_in(home.path(), "9.9.9");
+        // Failure of the install is reported with the version named.
+        let err = install_sccache_at(home.path(), "9.9.9", |_| bail!("boom")).unwrap_err();
+        assert!(format!("{err:#}").contains("installing sccache 9.9.9 failed"));
+        // Success without the binary is also an error.
+        assert!(install_sccache_at(home.path(), "9.9.9", |_| Ok(())).is_err());
+        // The install command targets the versioned root.
+        let mut seen = String::new();
+        let _ = install_sccache_at(home.path(), "9.9.9", |cmd| {
+            seen = format!("{cmd:?}");
+            Ok(())
+        });
+        assert!(seen.contains("--locked") && seen.contains("tools/sccache/9.9.9"));
+        // Already installed: the runner is never called.
+        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        std::fs::write(&binary, "").unwrap();
+        install_sccache_at(home.path(), "9.9.9", |_| bail!("must not run")).unwrap();
     }
 
     #[test]

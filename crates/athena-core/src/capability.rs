@@ -96,7 +96,7 @@ pub trait Capability: Send + Sync {
     fn verifier_grant(&self, config: &JobConfig) -> ToolGrant;
     /// Deterministic checks the core runs on the candidate before the verifier agent.
     fn checks(&self, config: &JobConfig) -> Vec<CheckSpec>;
-    /// The environment templates for agents and checks (`{job_dir}` and `{side}` are filled in).
+    /// The environment templates for agents and checks (`{job_dir}`, `{side}` and `{athena_home}` are filled in).
     fn env(&self, config: &JobConfig) -> BTreeMap<String, String>;
     /// Capability-specific admission policy on the change list, beyond the core's own.
     fn admit(&self, change: &ChangeList, config: &JobConfig) -> Vec<PolicyViolation>;

@@ -76,7 +76,7 @@ pub struct CapabilityConfig {
     pub producer_commands: BTreeMap<String, Vec<String>>,
     /// Program → allowed first arguments for the verifier's Bash.
     pub verifier_commands: BTreeMap<String, Vec<String>>,
-    /// Environment for agents and checks; values may use `{job_dir}` and `{side}`.
+    /// Environment for agents and checks; values may use `{job_dir}`, `{side}` and `{athena_home}`.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
     #[serde(default)]
@@ -171,6 +171,16 @@ pub struct SecretAllow {
 #[serde(deny_unknown_fields)]
 pub struct Tools {
     pub gitleaks: ToolPin,
+    /// The compiler cache, when the repository pins one. Absent means setup installs none.
+    #[serde(default)]
+    pub sccache: Option<CratePin>,
+}
+
+/// A tool built by `cargo install --locked` at one pinned version; there are no archive digests to keep.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CratePin {
+    pub version: String,
 }
 
 /// A pinned tool: its version and the SHA-256 of its release archive per platform.
@@ -418,6 +428,24 @@ pub(crate) mod tests {
             test.skip_when_only,
             Some(vec!["docs/".to_string(), "*.json".to_string()])
         );
+    }
+
+    #[test]
+    fn sccache_pin_is_optional_and_holds_only_a_version() {
+        // Without the pin (today's athena.toml) the config parses and no sccache is configured.
+        assert_eq!(Config::parse(REPO_CONFIG).unwrap().tools.sccache, None);
+        // With it, the version is read.
+        let text = format!("{REPO_CONFIG}\n[tools.sccache]\nversion = \"0.10.0\"\n");
+        let config = Config::parse(&text).unwrap();
+        assert_eq!(
+            config.tools.sccache,
+            Some(CratePin {
+                version: "0.10.0".into()
+            })
+        );
+        // A digest table is not part of the pin.
+        let text = format!("{REPO_CONFIG}\n[tools.sccache]\nversion = \"0.10.0\"\nsha256 = {{}}\n");
+        assert!(matches!(Config::parse(&text), Err(ConfigError::Parse(_))));
     }
 
     #[test]

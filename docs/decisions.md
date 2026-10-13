@@ -1017,7 +1017,8 @@ amend earlier entries without rewriting them. All of these entries belong to the
     modification times. Review 2's R14 showed a job's `cargo test` recompiling nothing and running the
     other job's tests.
   - (c) keys outputs by content and would be safe and fast, but it is a new dependency. It is left out until
-    cold builds are shown to dominate job time or cost.
+    cold builds are shown to dominate job time or cost. (Superseded by D79: the sccache exclusion no longer
+    holds; per-job target directories stay.)
 - **Reversal cost:** Low.
 - **Provenance:** User decision after review 2 (N1): correctness over speed. Evidenced: review 2's R14.
 
@@ -1745,3 +1746,29 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Reversal cost:** Low. Delete `studies/firstmate-work-handling/`, its tests, and the inventory row.
 - **Provenance:** Read from the pinned tree; every citation is checked by the tests above, which fail on a
   wrong path, line range, SHA or quote.
+
+## D79 · sccache is pinned by version and built by `cargo install --locked`; adoption in `athena.toml` follows
+
+- **Decision:** This supersedes D46's exclusion of sccache (D46's per-job target directories are unchanged).
+  - `[tools.sccache]` is an optional table of `athena.toml` holding only `version`. Absent, nothing changes.
+  - When present, setup runs `cargo install --locked --version <v> --root <athena_home>/tools/sccache/<v>
+    sccache`, skips it if `tools/sccache/<v>/bin/sccache` exists, and stops with a message if the install
+    fails.
+  - A capability's `env` values may use `{athena_home}`. `paths::sccache_binary` derives the binary path
+    from the one pinned version, and a test checks that the install root and the binary share it.
+  - `athena.toml` is not changed here: the installed gate cannot parse a field it does not know, so the
+    configuration adopts the pin, `RUSTC_WRAPPER` and `SCCACHE_DIR` in a later job, after this build is
+    adopted.
+- **Alternatives:**
+  - (a) Release tarballs with a SHA-256 per platform, as gitleaks has. Faster to install, but each digest
+    must be fetched from upstream and checked in; no digest is guessed or placeholder-filled here.
+  - (b) `cargo install --locked` (chosen). No digests; cargo's lockfile pins the dependencies.
+  - (c) No cache, as D46 left it. Nothing to maintain, and every job compiles cold.
+- **Tradeoff:** The first setup compiles sccache from source, which takes minutes (estimate, not measured
+  here) and needs a working toolchain and network. The crate's published checksums are verified by cargo,
+  but Athena pins no archive digest of its own. The speedup is not measured in this change, because nothing
+  yet uses the wrapper.
+- **Reversal cost:** Low. Remove the table, the setup step, and the placeholder.
+- **Provenance:** User request after the first attempt at this change failed. Inferred: that the
+  no-digest path avoids repeating that failure. Enforced by tests in `config.rs`, `paths.rs`, `env.rs`
+  and `xtask/src/main.rs`.

@@ -1,0 +1,168 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261013-062226-zmb3",
+  "n": 2,
+  "at": "2026-10-13T06:23:37.886448971Z",
+  "invocation_seq": 2,
+  "base_commit": "8067adb3d2e7f18f7529bbc0666cb0fa779c35dd",
+  "config_sha256": "46d9162d4972d6789bcfd5c744f3acb2c4c3baebcc12904ac29481610d0b8059",
+  "defaults_sha256": "34395568ed0684d5b19642d761d9d16e023f3263e4313e645b083d31b302e9bc",
+  "defaults_version": 1,
+  "title": "Add sccache support to config and setup; wire athena.toml later",
+  "summary": "First of two landings for warm builds: add an optional sccache pin to the config schema, install it in setup with `cargo install --locked` (no hand-copied digests), and support an {athena_home} placeholder in env values. athena.toml is not touched, because the installed gate cannot parse a new field in the same commit; a follow-up job adopts the build and then sets RUSTC_WRAPPER.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "buy-first",
+      "how": "Use the maintained sccache crate instead of building a cache."
+    },
+    {
+      "id": "tested",
+      "how": "Config, placeholder, and path tests; cargo test and clippy must pass."
+    },
+    {
+      "id": "evidence",
+      "how": "No claim that a digest was copied from upstream; decision record cites what was measured or labels estimates."
+    },
+    {
+      "id": "small",
+      "how": "Only code and setup in this landing; athena.toml deferred."
+    },
+    {
+      "id": "mechanism",
+      "how": "A test enforces that the wrapper path derives from the single pinned version."
+    },
+    {
+      "id": "rust",
+      "how": "Installation logic stays in xtask Rust code, not shell."
+    }
+  ],
+  "assumptions": [
+    "Per the user's reply, this job lands code and setup only; athena.toml is a later job after the new build is adopted.",
+    "sccache is installed with `cargo install --locked --version <v> --root <athena_home>/tools/sccache/<v>`, so no digests are needed; the user did not choose between this and tarballs, and the no-digest path avoids repeating the placeholder failure.",
+    "The new config field is optional (serde default), so the current athena.toml and the installed gate keep parsing.",
+    "Setup installs sccache only when the pin is present, so setup stays green with today's athena.toml.",
+    "The env placeholder expansion (currently {job_dir} and {side}) lives in crates/athena-core/src/invocation.rs and needs an {athena_home} addition."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "crates/athena-data/src/config.rs adds an optional `sccache` entry to Tools holding only a version (no sha256 table), defaulting to absent, so the existing athena.toml still parses.",
+      "kind": "content"
+    },
+    {
+      "text": "athena.toml, defaults.toml, and other governance files are unchanged; no all-zero or placeholder digest is added anywhere.",
+      "kind": "content"
+    },
+    {
+      "text": "xtask/src/main.rs setup installs the pinned sccache (when configured) before building Athena, skips it if already installed at tools/sccache/<version>, and fails with a clear message if the install fails.",
+      "kind": "content"
+    },
+    {
+      "text": "Env value expansion supports an {athena_home} placeholder, and paths.rs derives the sccache binary path from the single pinned version.",
+      "kind": "content"
+    },
+    {
+      "text": "docs/decisions.md has a new decision with alternatives (tarball with digests, cargo install, no cache) and tradeoffs, marks D46's sccache exclusion superseded, and states that athena.toml adoption follows in a later job; CHANGELOG.md has an entry that claims nothing unverified.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo test --locked`: new tests pass, covering parsing with and without the sccache pin, {athena_home} expansion, and the sccache path derivation.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo clippy --all-targets --locked -- -D warnings` and `cargo fmt --all --check`: both pass.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "xtask/src/main.rs",
+      "action": "modify",
+      "p": 0.93
+    },
+    {
+      "path": "crates/athena-data/src/paths.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-core/src/invocation.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "setup.sh",
+      "action": "modify",
+      "p": 0.1
+    },
+    {
+      "path": "README.md",
+      "action": "modify",
+      "p": 0.15
+    },
+    {
+      "path": "athena.toml",
+      "action": "modify",
+      "p": 0.05
+    }
+  ],
+  "out_of_scope": [
+    "Editing athena.toml to set RUSTC_WRAPPER, SCCACHE_DIR, or the sccache pin (follow-up job after the build is adopted).",
+    "Release-tarball installation with sha256 digests.",
+    "Changing per-job CARGO_TARGET_DIR isolation.",
+    "Changing CI workflows or toolchain configuration."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.65,
+      "p_user_intervenes": 0.15,
+      "cost_usd": {
+        "p10": 0.4,
+        "p50": 1.0,
+        "p90": 2.4
+      },
+      "wall_time_s": {
+        "p10": 420.0,
+        "p50": 780.0,
+        "p90": 1300.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.696,
+      "p_verification_passes": 0.6944444444444444,
+      "p_user_intervenes": 0.10555555555555556,
+      "cost_usd": {
+        "p10": 0.40801162544447445,
+        "p50": 0.7643511123277312,
+        "p90": 1.8376818093493617
+      },
+      "wall_time_s": {
+        "p10": 412.71616328009685,
+        "p50": 603.0085094579536,
+        "p90": 886.8523929664144
+      }
+    }
+  },
+  "departures": "Cost and time are a bit higher than the reference: the change spans config, xtask, placeholder expansion, tests, and a decision record, and cargo install is not run by checks."
+}

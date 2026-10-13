@@ -1,0 +1,177 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261013-060728-kgp3",
+  "n": 2,
+  "at": "2026-10-13T06:08:22.658848213Z",
+  "invocation_seq": 2,
+  "base_commit": "954501635a9e7891a08ffd716f0b2ea1cef4d88f",
+  "config_sha256": "46d9162d4972d6789bcfd5c744f3acb2c4c3baebcc12904ac29481610d0b8059",
+  "defaults_sha256": "34395568ed0684d5b19642d761d9d16e023f3263e4313e645b083d31b302e9bc",
+  "defaults_version": 1,
+  "title": "Add pinned sccache for warm builds while keeping per-job target dirs",
+  "summary": "Add sccache (pinned, checksummed install via xtask setup like gitleaks) with RUSTC_WRAPPER, a shared SCCACHE_DIR, and CARGO_INCREMENTAL=0 in athena.toml, keeping per-job CARGO_TARGET_DIR. Record a decision amending D46 and update the design text that says every job builds cold.",
+  "class_of_work": "build",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "buy-first",
+      "how": "Adopt sccache rather than building a cache; record the call."
+    },
+    {
+      "id": "tested",
+      "how": "Add tests for the pin parsing and env; cargo test and clippy must pass."
+    },
+    {
+      "id": "mechanism",
+      "how": "Pinned checksum enforced in code; build-dir check retained."
+    },
+    {
+      "id": "evidence",
+      "how": "Decision cites D46 and any speedup is labeled an estimate unless measured."
+    },
+    {
+      "id": "rust",
+      "how": "Installation logic goes in xtask Rust; setup.sh stays a minimal shim."
+    }
+  ],
+  "assumptions": [
+    "sccache is installed to the same tool path scheme as gitleaks, and RUSTC_WRAPPER can reference it by a path or PATH entry that jobs receive.",
+    "Checksums for the pinned sccache release are taken from the official release assets; the producer cannot verify them offline, so they are labeled as copied from upstream.",
+    "The shared SCCACHE_DIR sits under the athena state directory, outside job dirs.",
+    "setup.sh itself may need no change if xtask setup does the install; the user's wording 'setup.sh must install it' is met via the handoff."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "athena.toml [capabilities.change.env] keeps CARGO_TARGET_DIR = {job_dir}/target/{side}, and adds RUSTC_WRAPPER pointing at the pinned sccache, a shared SCCACHE_DIR outside any job directory, and CARGO_INCREMENTAL=0; athena.toml is named as changed.",
+      "kind": "content"
+    },
+    {
+      "text": "athena.toml [tools] gains an sccache pin (version plus per-platform sha256 checksums), shaped like the gitleaks pin, and config.rs parses it.",
+      "kind": "content"
+    },
+    {
+      "text": "xtask setup installs sccache from the pinned release archive, refuses on checksum mismatch, is idempotent, and is a numbered step like gitleaks. setup.sh and xtask changes are listed in the summary.",
+      "kind": "content"
+    },
+    {
+      "text": "docs/decisions.md gains a decision amending D46: content-addressed cache keeps isolation, alternatives (shared target dirs, seeded target copy), buy-first call, CARGO_INCREMENTAL=0 rationale.",
+      "kind": "content"
+    },
+    {
+      "text": "Design text claiming every job builds cold (§10.4, M26, risk table) is updated; any env pass-through needed is added.",
+      "kind": "content"
+    },
+    {
+      "text": "check_build_dirs still refuses a CARGO_TARGET_DIR outside the job directory; no per-job build directory is shared.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo test` from the repo root: all tests pass, including env.rs, config parsing of athena.toml, and xtask tests (new tests cover the sccache pin and checksum logic).",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo clippy --all-targets --locked -- -D warnings` and `cargo fmt --all --check`: both clean.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "athena.toml",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "xtask/src/main.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "docs/design/athena-v0.md",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-agent/src/env.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "setup.sh",
+      "action": "modify",
+      "p": 0.25
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "README.md",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "Cargo.toml",
+      "action": "modify",
+      "p": 0.15
+    },
+    {
+      "path": "Cargo.lock",
+      "action": "modify",
+      "p": 0.15
+    }
+  ],
+  "out_of_scope": [
+    "Sharing or persisting CARGO_TARGET_DIR across jobs",
+    "Changing job isolation, sandboxing, or the check_build_dirs rule",
+    "Measuring or tuning cache size and eviction",
+    "Changes to records/ or the owner's files"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.75,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.18,
+      "cost_usd": {
+        "p10": 0.4,
+        "p50": 1.0,
+        "p90": 2.4
+      },
+      "wall_time_s": {
+        "p10": 350.0,
+        "p50": 700.0,
+        "p90": 1200.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.6848484848484848,
+      "p_verification_passes": 0.6811594202898551,
+      "p_user_intervenes": 0.1565217391304348,
+      "cost_usd": {
+        "p10": 0.2329853376733983,
+        "p50": 0.6810374,
+        "p90": 1.7537139366159853
+      },
+      "wall_time_s": {
+        "p10": 263.96306592662125,
+        "p50": 539.8880646620003,
+        "p90": 838.7524265122912
+      }
+    }
+  },
+  "departures": "Larger than the reference: the change touches config schema, xtask installer with checksums, athena.toml, and design docs."
+}
