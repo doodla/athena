@@ -30,8 +30,9 @@ Nothing here is implemented by this change.
      measured. Outcome (D84): the cause could not be reproduced, because no job could run
      `sccache --show-stats`, so no hit count was measured and the wiring was reverted. To retry, measure
      hits and misses first, then look at per-job path differences in keys.
-  2. *Parallel jobs.* Get the independent review of the parallel-jobs design (`docs/design/parallel-jobs.md`),
-     then build concurrent jobs. Jobs that both edit the shared `CHANGELOG.md` and `docs/decisions.md`
+  2. *Parallel jobs.* The independent review of the parallel-jobs design (`docs/design/parallel-jobs.md`) is
+     done: accept with changes (`docs/design/reviews/parallel-jobs-review-1.md`). Apply its changes, then
+     build concurrent jobs. Jobs that both edit the shared `CHANGELOG.md` and `docs/decisions.md`
      collide, so the design must say how those collisions are avoided or resolved, and test it.
   3. *Native pull-request landing,* from `docs/design/native-pr-landing.md`, including a mode that leaves no
      Athena files in a third-party repository.
