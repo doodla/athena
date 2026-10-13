@@ -631,7 +631,7 @@ amend earlier entries without rewriting them. All of these entries belong to the
 ## D26 · The defaults model is a versioned TOML file, read from the base commit
 
 - **Decision:**
-  - `defaults.toml` holds eleven defaults, each with an id, a statement, scope, and its source in `BRIEF.md`.
+  - `defaults.toml` held eleven defaults when this was written (twelve now, after `root-cause`), each with an id, a statement, scope, and its source in `BRIEF.md`.
   - The reader loads all of them, within its set budget, and names the defaults that apply. Only those reach
     the briefs.
   - The file is a governance file: changing it is a job that lists it as a deliverable.
@@ -1974,10 +1974,17 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 ## D90 · Repeats become proposed, versioned defaults: Jev matches in shadow, code decides, the user reviews
 
 - **Decision:** Proposed, design only (`docs/design/defaults-loop.md`); nothing is built.
-  - Jev gives match probabilities of an intervention or correction against each default, clusters
-    paraphrases, and drafts statement text. Code decides the threshold, the number of distinct jobs that
-    makes a candidate, id uniqueness, the version bump (one per accepted job) and validation through
-    `DefaultsModel::parse`, and it writes the proposal record.
+  - Jev only answers typed questions through `POST /v1/evaluate`: match probabilities of an intervention
+    against each default, the assignment of a record to a cluster or failure class (or a pairwise yes/no),
+    and the kind of prevention. A language model drafts the statement, `applies_to` and title. Code decides
+    the thresholds, the number of distinct jobs that makes a candidate, id uniqueness, the version bump (one
+    per accepted job) and validation through `DefaultsModel::parse`, and it writes the proposal record.
+  - Introspection is a first-class step: every correction, intervention, rejection and failure triggers an
+    introspection that Athena runs and records (what happened, failure class and earlier cases, cause beyond
+    the instance, prevention, proposed next request). Athena code outside the agent snapshot reads past
+    records and passes a filtered summary; a retry starts from the record; the defaults loop consumes it.
+  - The case for the loop is unproved until `records/` is read; no build starts unless at least N distinct
+    jobs show a repeat a default would cover.
   - A proposal has an id, a statement, `applies_to`, a version bump and `sources` citing records. It is
     review-only: Athena never edits `defaults.toml`. The user accepts by asking for a job that lists
     `defaults.toml` as a deliverable (D26).
@@ -1995,3 +2002,7 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   checked against `records/`, which was not readable when this was written (reported); D89 and D25 show
   two of them in the repository (read). The numbers in the promotion criteria are estimates. No independent
   review of the design is recorded yet.
+- **Revised** (review 1, F1-F5 and the Medium and Low items; BRIEF.md addendum "Introspection on every
+  correction"): Jev's role narrowed to typed questions, R2 relabelled a counter-example, the evaluate route and
+  signals added, the reader budget restated, introspection added. The introspection cases come from the job
+  request and are reported, not checked against records.

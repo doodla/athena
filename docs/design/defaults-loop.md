@@ -1,177 +1,342 @@
-# The defaults-learning loop: repeats become proposed, versioned defaults
+# The defaults-learning loop: introspection on every correction, and repeats become proposed, versioned defaults
 
-**Status:** proposed (D90). This document builds nothing. It changes no Rust, no tests and no `defaults.toml`.
-A later job reviews it; nothing is built before that review (the `designed` default). Paths are relative to
-the repository root. The reader is someone who knows what `defaults.toml` is (D26) and what an intervention
-record is (`docs/records.md`) but has not seen the jobs that motivated this.
+**Status:** proposed (D90), revised after review 1 (`docs/design/reviews/defaults-loop-review-1.md`) and extended
+with introspection as a first-class step (`BRIEF.md`, addendum "2026-10-13: Introspection on every correction").
+This document builds nothing. It changes no Rust, no tests and no `defaults.toml`. A later job reviews it;
+nothing is built before that review (the `designed` default). Paths are relative to the repository root. The
+reader is someone who knows what `defaults.toml` is (D26) and what an intervention record is
+(`docs/records.md`) but has not seen the jobs that motivated this.
 
 Claims are marked **(read)** when taken from a file named beside them, **(design)** when they are proposals,
-**(reported)** when they come from the job request and were not checked here, and **(estimate)** for numbers
-that nobody measured.
+**(reported)** when they come from the job request, the user's probes or the review and were not checked here,
+and **(estimate)** for numbers that nobody measured. Jobs are cited by job id and pull requests by number; no
+person is named.
 
 ## 1. The problem
 
 `defaults.toml` is Athena's model of what its user expects without saying so. It has 12 entries today
-**(read: `defaults.toml`, counted)**; D26 said eleven when it was written, and `root-cause` was added since
-**(read: `docs/decisions.md` D26)**. The seed entries each cite `BRIEF.md`. Nothing yet turns what the user
-repeatedly has to say back into an entry. The roadmap names the gap: RM-4 "feed scored mispredictions back into
-`defaults.toml`" and RM-3 "close the intervention loop" (`docs/design/roadmap.md`) **(read)**.
+**(read: `defaults.toml`, counted)**. D26 says "eleven"; that text was written before `root-cause` was added and
+is corrected in the same change as this revision **(read: `docs/decisions.md` D26)**. The seed entries each cite
+`BRIEF.md`. Nothing yet turns what the user repeatedly has to say back into an entry. The roadmap names the gap
+in RM-4, "feed scored mispredictions back into `defaults.toml`" **(read: `docs/design/roadmap.md`)**. RM-3,
+"Close the intervention loop", is the nearby item: it is about a trend per class of work, an audit step and a
+link to an improvement job, not about defaults **(read: same file)**. This design supplies the part of RM-3 that
+turns a correction into a diagnosis (§3) and the part of RM-4 that turns repeated diagnoses into defaults.
 
 When the user corrects a reading, answers a question, or fixes something by hand, Athena records an
 intervention (D27) **(read)**. The record carries `what`, `why`, `class_of_work`, a `category` (one of eight,
 such as `corrected-output` or `overrode-decision`), the job, and a source
-**(read: `crates/athena-data/src/records.rs`, `Intervention`, `InterventionCategory`)**. Today a person has to
-notice that the same thing happened again and then write a defaults change. The change request asks to "close
-the defaults loop: use Jev to match interventions and corrections against the defaults model, so repeats
-become new, versioned defaults" **(reported: the job request)**.
+**(read: `crates/athena-data/src/records.rs`, `Intervention`, `InterventionCategory`)**. A correction record
+carries the intervention recorded for it **(read: `docs/records.md`)**. Today a person has to notice that the
+same thing happened again and then write a defaults change, and each retry after a failure starts from the user
+rewriting the request. The change request asks to "close the defaults loop: use Jev to match interventions and
+corrections against the defaults model, so repeats become new, versioned defaults" **(reported)**, and the
+brief's addendum asks that every correction be followed by introspection by Athena itself **(read: `BRIEF.md`)**.
 
-## 2. Evidence: four repeats
+## 2. Evidence: four repeats, and what they do and do not prove
 
 **Access caveat.** The `records/` tree is not part of the snapshot this document was written from. The
-intervention and correction records behind the four repeats could not be opened, so their record ids are not
-cited below, and the "x4" counts come from the job request **(reported)**. Where the repository itself shows
-the repeat, that is cited **(read)**. The job that builds this design must list the actual record ids for each
-repeat and replace every **(reported)** mark below with them, or say which it could not find.
+records behind the repeats could not be opened, so their record ids are not cited, and the counts come from the
+job request **(reported)**. Where the repository itself shows the repeat, that is cited **(read)**.
 
-| # | Repeat | Count | Evidence |
-|---|--------|-------|----------|
-| R1 | A change reading's scope criteria excluded `CHANGELOG.md`, so the verifier saw a changed file outside scope | x4 **(reported)** | D89 is the repair made in code: change readings now always list `CHANGELOG.md`, and the verifier brief says the deliverables list is the one statement of scope **(read: `docs/decisions.md` D89)**. D89 rejected adding a `changelog` entry to `defaults.toml` because "the defaults model is the user's, not changed here" **(read)**. That is the loop this design supplies. |
-| R2 | The reader's always-loaded set went over its token budget and blocked the job | x4 **(reported)** | The reader budget is 1,800 tokens, measured live, and over-budget sets are refused **(read: D25; `crates/athena-context/src/lib.rs` message "over its budget")**. D89 records that adding a changelog line to `reader.md` "put the reader prompt over its 1800-token budget" **(read)**. Only that one instance is visible here. |
-| R3 | One job bundled design, review and build | x1 visible **(reported for the rest)** | The request names the repeat. The nearest written rules are `small` ("prefer one focused change") and `designed` ("reviewed before they are built") **(read: `defaults.toml`)**. No record of an instance is visible here, so the count of this repeat is **unverified**. |
-| R4 | A new config field and its first use landed in one commit | not visible **(reported)** | The request names the repeat. No written default covers it. No record of an instance is visible here, so the count is **unverified**. |
+| # | Repeat | Count | What it is |
+|---|--------|-------|------------|
+| R1 | A change reading's scope criteria excluded `CHANGELOG.md`, so the verifier saw a changed file outside scope | x4 **(reported)** | **Closed in code by D89.** Change readings now always list `CHANGELOG.md`, and the verifier brief says the deliverables list is the one statement of scope **(read: D89)**. R1 cannot recur as it did. It is a test case for matching (a correction that should land on "none" or at most `small`), not proof that the loop is needed. |
+| R2 | The reader's always-loaded set went over its token budget and blocked the job | x4 **(reported)** | **A counter-example, not a defaults repeat.** The reader budget is 1,800 tokens, measured live, and over-budget sets are refused by code **(read: D25; `crates/athena-context/src/lib.rs`, "over its budget")**. D89 records one instance **(read)**. The fault is caught by a check, so a default such as "keep prompts under budget" would restate a rule the code enforces and cost reader tokens. R2 is labelled "none" in the labeled set (§10.2). Its other lesson, that four retries each patched the last finding, belongs to introspection (§3, case C2). |
+| R3 | One job bundled design, review and build | x1 visible **(reported for the rest)** | The nearest written rules are `small` and `designed` **(read: `defaults.toml`)**. No instance is visible here: **unverified**. Test case for "close to `small`, not covered by it" (an amend, §7.2). |
+| R4 | A new config field and its first use landed in one commit | not visible **(reported)** | Matches no entry. No instance is visible here: **unverified**. Test case for a new id. |
 
-What the four show, in terms of the loop:
+**The case for the loop is unproved.** Of the four, one is closed in code (R1), one is not a defaults repeat
+(R2), and two have no visible instance (R3, R4). The review makes the same point **(read: review 1, F2)**.
 
-- R1 and R2 are repeats the existing defaults did not cover. Each was fixed in code or prose, once, after
-  several corrections. A proposal would have named the gap sooner.
-- R3 partly matches an existing entry (`small`). It is the test case for the matching step: Jev should say
-  "close to `small`, not covered by it", and the proposal should amend rather than duplicate (§5.2).
-- R4 matches no entry. It is the test case for a new id.
+**Gate before any build.** The building job's first task is to read `records/` and list the actual record ids
+for each repeat. If fewer than **N distinct jobs** (N as in §7.2) show a repeat that a default would cover, the
+loop is not built, and this design is closed with that finding. The step that needs no such evidence is
+introspection (§3): it has value when a single failure is diagnosed, and it produces the evidence the gate
+reads.
 
-## 3. The loop in one view
+## 3. Introspection: the first-class step
+
+The brief's addendum: the user corrected a body of work and the question is how Athena does what that
+correction did, itself **(read: `BRIEF.md`, 2026-10-13 addendum)**. This section is the design for that.
+
+### 3.1 Trigger
+
+Athena runs an introspection after each of these, with no request from the user **(design)**:
+
+| Event | Source in today's records |
+|---|---|
+| **Correction** of a reading or an answer to a reader question | intervention `corrected-output` or `answered-question` (D27) **(read)** |
+| **Intervention** of any other category (a hand change, an overridden decision) | intervention record, other categories **(read)** |
+| **Rejection** of a result, a proposal (§8) or a plan by the user | a rejected outcome; a new record kind is added when built |
+| **Failure**: a job fails, a check fails or never finishes, a budget refuses a set | job outcome and check results |
+
+An introspection is recorded even if the user never asks for a retry. A failed introspection (spend cap, model
+error) is recorded as failed and never blocks or delays the job; it is itself a failure and is not
+introspected again.
+
+### 3.2 The record
+
+`athena.introspection/1` **(design)**, one per triggering event, linked to the intervention record of that event
+by id (the intervention remains the single counted unit, §7.1):
+
+| Field | Meaning | Written by |
+|---|---|---|
+| `what_happened` | What the event was, in plain words, with job ids | language model, from stored fields |
+| `failure_class` | One id from the class registry (§3.4) or `new` with a proposed name | typed decision (Jev, §3.4) |
+| `earlier_cases` | Ids of earlier events in the same class, with job ids | **code** (§3.3); the model may not add ids |
+| `cause` | The cause beyond this instance: why the system allowed it, not what was wrong this time | language model |
+| `prevention_kind` | `default`, `code-check` or `design-change` | typed decision |
+| `prevention` | What exactly would have prevented it: the default text, the check and where it runs, or the design change | language model |
+| `proposed_request` | A complete next request, ready to submit | language model |
+| `evidence` | Models that answered, probabilities, confidence (§6), cost and tokens | code |
+| `status` | `recorded`, `failed`, or `acted-on` with the job that did | code |
+
+The rule behind `cause`: a retry that patches only the last finding is the failure this step exists to stop
+(case C2). The model is asked "what would have stopped this class, not this instance", and a record whose
+`cause` restates `what_happened` is flagged by code (equal text after normalising) and rated as failed.
+
+### 3.3 Who reads past records, and what is passed on
+
+The introspection needs earlier cases, which live in `records/`. The agent snapshot has no `records/` by design.
+Two ways to give it that history:
+
+1. **A filtered view inside the agent snapshot.** A copy of selected past records is placed in the agent's
+   working directory.
+2. **Athena code outside the agent snapshot reads `records/` and passes on a filtered summary.**
+
+**Chosen: 2 (design).** Reasons: the snapshot rule that records stay out is kept whole (a view is a hole in
+it, and a rule with exceptions is no longer checkable); the agent cannot be made to quote a record it never
+received; code can verify every cited id; and what crosses the boundary is a small, typed thing that can be
+tested. Cost: the code that selects earlier cases must be right, since the agent cannot look further.
+
+The reading code is a function of Athena itself, run before the agent is invoked. Exactly what it does:
+
+- **Reads** the stored fields of intervention, correction and introspection records: `what`, `why`,
+  `class_of_work`, `category`, job id, date, and for introspections the `failure_class` and `cause`.
+- **Never reads** model transcripts, diffs, or files from other jobs.
+- **Selects** earlier cases in two steps: code narrows by `class_of_work` and `category`, then a Jev choice
+  question assigns the event to a class (§3.4); the earlier cases are the records already in that class.
+- **Passes to the introspecting agent** (only this): the event's stored fields; the class registry entry chosen
+  (id, one-line description); and for each earlier case up to a cap of **5 (estimate)**, its record id, job id,
+  date and the one-line `what`. No other record text.
+- **Passes onward** from the finished record, to the retry's reading: `proposed_request`, the `failure_class`
+  and `cause`, and the earlier-case ids. The retry's agents do not get `records/` either; they get the
+  reading's text, which already carries those fields. To the defaults loop (§4): the class, `cause`,
+  `prevention_kind`, `prevention` and the event's intervention id, not `what_happened`.
+- **Verifies** on return: every id in `earlier_cases` exists and is in the class; any id not on the list passed
+  in is dropped and logged, not repaired.
+
+### 3.4 Class matching is a typed decision for Jev
+
+Matching a new case to an earlier class is "which of these, and how likely", the shape Jev is for. Code builds one
+`choice` question per event for `POST /v1/evaluate` (§6): `state` is the event's stored fields; options are the
+ids in the **class registry** plus `new`; each criterion is the class's one-line description. Code reads the
+top probability and the confidence as in §6.2. When the answer is `new` (or below threshold), a language model
+proposes a name and description; code assigns the id and adds the class to the registry as `proposed`; the user
+may rename or merge classes at review. The registry is a record store, not a file Athena edits in the
+repository. Choosing `prevention_kind` among its three values is also a `choice` question for Jev; writing the
+prose is not.
+
+### 3.5 Retries start from the record
+
+When the user asks for a retry of a failed or rejected job, the new reading is seeded with the
+introspection's `proposed_request`, shown to the user as a draft with the cause and earlier cases beside it. The
+user can accept, edit or discard it; the original request is not rewritten by hand. Athena never submits the
+retry itself **(design)**. If the previous introspection for the same class names a prevention already tried,
+the reading shows that too, so a retry that would repeat a patch is visible as one.
+
+### 3.6 Cases reported by the user today
+
+These come from the job request and were not checked against records here, so each is **(reported)**. The class
+names are the proposed starting registry; the prevention is what this design says would have stopped the class.
+
+| Case | Jobs | Class (proposed) | Cause beyond the instance | Would have prevented it |
+|---|---|---|---|---|
+| C1. `CHANGELOG.md` excluded by the scope criteria | 8qkc, m1bs | scope omits a file the repository requires | the scope was derived from criteria wording, not from repository rules | **code check**: done, D89 **(read)** |
+| C2. Reader budget failed four jobs in a row; each retry patched the last finding | 69gf, t1y6, 3p3y, jk8v | repeated budget overrun / retry patches the symptom | the always-loaded set has no headroom, and the retry started from the last finding, not from a cause | **code check**: measure the set against the live counter before the job runs (the counter exists, D25 **(read)**), plus **introspection**: the retry starts from the cause record (§3.5) |
+| C3. "Checks not finished" on #47, with no diagnosis of a hung CI | #47 | failure reported without diagnosis | an unfinished check is recorded as a state, with no step that asks why | **code check**: when checks are unfinished past a deadline, capture the run's state and record a diagnosis; the cause of that hang is not known here |
+| C4. A Haiku producer handed in untested work | 69gf | untested work from a weak producer tier | the `tested` default exists **(read)** but nothing in code enforces it for a tier | **code check** (the verifier requires a test for code changes) and a **design change** (tier choice by class of work) |
+| C5. A plan to edit the owner-only `BRIEF.md` | 16zf | plan touches a file the user owns | the plan was not checked against the list of owner-only files | **code check**: refuse a plan that names an owner-only path as a deliverable; I did not check whether a guard exists today |
+| C6. Plans bundling design and build | not named | job bundles design and build (R3) | `small` and `designed` exist **(read)** but a plan is not tested against them | **default** amended (`small`/`designed`) plus a **code check** that a plan lists only one of design or build |
+| C7. Jev's interface assumed instead of checked | this design | external interface assumed | no step requires the interface to be read or probed before it is designed against | **default** ("check an interface you did not write before designing against it") and **review**; here review 1 caught it |
+
+Reading the table: C1, C2, C4, C5 are prevented by code, not defaults; only C6 and C7 point to defaults. That is
+the answer to the question the loop asks, and it is why `prevention_kind` is a field: the defaults loop (§4)
+consumes the `default` ones, and the others are listed to the user as proposed code or design changes (§9). The
+root-cause default covers all seven: a fix at the place the fault arises, not the instance.
+
+## 4. The loop in one view
 
 ```
- intervention / correction record  (athena.intervention/1, plus reading corrections)
+ event: correction / intervention / rejection / failure
         |
         v
- [1] Jev: P(record matches default d) for each d in defaults.toml, plus P(none)       <- model
+ [0] Athena: introspection record (§3). Code reads past records and passes a filtered summary.
         |
         v
- [2] code: threshold. At or above: "matched" (counts as a violation of d).
-           Below: goes to the unmatched pool.                                          <- deterministic
+ [1] Jev: P(introspection or intervention matches default d), per d plus none          <- typed
         |
         v
- [3] Jev: cluster the unmatched pool and the matched-but-repeated records; say which
-     records say the same thing                                                         <- model
+ [2] code: threshold on top probability. At or above: "matched". Below: unmatched pool. <- deterministic
+        |
+        v
+ [3] Jev: assign each record to a candidate cluster, or "new" (or a pairwise yes/no)    <- typed
         |
         v
  [4] code: a cluster of at least N distinct jobs becomes a candidate                    <- deterministic
         |
         v
- [5] Jev: draft a statement, scope and a short title for the candidate                  <- model
+ [5] language model: draft statement, applies_to and title for the candidate            <- not Jev
         |
         v
- [6] code: choose the id, check it is unique, compute the version bump, build the
-     candidate file text, validate with DefaultsModel::parse, write the proposal        <- deterministic
+ [6] code: id, uniqueness, version bump, candidate file text, DefaultsModel::parse,
+     write the proposal                                                                 <- deterministic
         |
         v
  [7] user reviews the proposal; Athena never edits defaults.toml itself                 <- user
 ```
 
-The rule behind the split: Jev answers questions that have the shape "which of these, and how likely". Code
-makes every decision that has a rule, and every write.
+The rule behind the split: Jev answers questions with the shape "which of these, and how likely" (a choice
+among supplied options, or yes/no). A language model writes prose. Code makes every decision that has a rule
+and every write.
 
-## 4. What Jev decides and what code decides
+## 5. What Jev, a language model and code decide
 
 Jev (`typesafe-ai/jev`, through the gateway) returns choices, scores and probabilities, with a 32K context
-**(read: `BRIEF.md` lines 25 and 144)**. A probe answered a typed forecast question in about 0.75 s at about
-$0.000012 per call **(read: `docs/design/athena-v0.md` E12, one probe; not re-measured)**. The whole defaults
-list rendered by `DefaultsModel::render()` is one line per default and fits in that context with room to spare
-(**estimate:** under 1,500 tokens for 12 entries, from the reader budget of 1,800 that holds the whole model
-plus the reader prompt; D25).
+**(read: `BRIEF.md` lines 25 and 144)**. It is "a decision model, not a language model" **(reported: the
+gateway's refusal on the chat route, §6)**. A probe answered a typed forecast question in about 0.75 s at about
+$0.000012 per call **(read: `docs/design/athena-v0.md` E12, one probe, route not recorded; not re-measured)**.
+The rendered defaults list carries the id, scope and first sentence of each entry (§8.3); its size is measured
+before it is relied on (**estimate:** under 1,500 tokens for 12 entries, derived from the reader budget of 1,800
+that holds the model plus the reader prompt; D25).
 
 | Decision | Who | Why |
 |---|---|---|
-| Probability that a record matches default `d`, for each `d`, and for "none" | **Jev** | A typed question over text; the probability is what the threshold reads. |
-| Which records say the same thing (clustering, paraphrase) | **Jev** | Two corrections worded differently are one repeat. A string match would miss R1 worded four ways. |
-| Draft statement, scope (`applies_to`) and title for a new or amended default | **Jev** | Drafting prose from several records. The draft is text for review, not a decision. |
-| The match threshold | **code** | A number in `athena.toml`, set from calibration (§8). |
-| How many distinct jobs make a candidate (N) | **code** | A number in `athena.toml`. Repeats inside one job count once. |
-| Whether the id is unique and well formed | **code** | Jev's suggested id is only a suggestion. Code derives a kebab-case id from the title and refuses any id already in the model or in a pending proposal; `DefaultsModel::parse` also rejects duplicates **(read: `DefaultsError::Duplicate`)**. |
-| Version bump | **code** | The model has one integer `version` **(read: `DefaultsModel`)**. A proposal bumps it by one, computed against the base commit's value. Jev never writes a version. |
-| Whether the source records exist | **code** | Every cited record id must exist at the base commit, belong to the cluster, and be an intervention or correction. |
-| Validity of the resulting file | **code** | Code builds the full candidate `defaults.toml` text and calls `DefaultsModel::parse`: unknown fields, duplicate ids, and empty statement or source all fail **(read: `crates/athena-data/src/defaults.rs`)**. |
-| Writing the proposal record | **code** | Only code writes. Jev's output is parsed against a typed schema; anything that does not parse is dropped and logged, never repaired. |
+| Which class an event belongs to (§3.4); `prevention_kind` | **Jev** (`choice`) | Typed question over text. |
+| Probability that a record matches default `d`, for each `d` and for "none" | **Jev** (`choice`) | The top probability is what the threshold reads. |
+| Which candidate cluster a record joins, or "new" | **Jev** (`choice`), or a pairwise `boolean` | Assignment, not free clustering. Pairs grow with the square of the pool, so assignment is the practical form. Cluster membership then depends on arrival order; the order is stored and the shadow run (§10) tests the effect. |
+| Introspection prose: `what_happened`, `cause`, `prevention`, `proposed_request` | **language model** | Writing. Jev cannot. |
+| Draft statement, `applies_to` and title of a candidate | **language model** (the stronger shadow model or the producer tier) | Writing. Its output is text for review, not a decision. |
+| Match threshold, escalation threshold, N | **code** | Numbers in `athena.toml`, set from calibration (§10). |
+| Earlier cases for an event, and the validity of every cited id | **code** | §3.3. |
+| Whether the id is unique and well formed | **code** | Code derives a kebab-case id from the title and refuses any id already in the model or a pending proposal; `DefaultsModel::parse` also rejects duplicates **(read: `DefaultsError::Duplicate`)**. |
+| Version bump | **code** | One integer `version` **(read: `DefaultsModel`)**; a proposal bumps it by one against the base commit's value. |
+| Validity of the resulting file | **code** | Code builds the full candidate text and calls `DefaultsModel::parse`: unknown fields, duplicate ids, empty statement or source all fail **(read: `crates/athena-data/src/defaults.rs`)**. |
+| Writing any record | **code** | Model output is parsed against a typed schema; anything that does not parse is dropped and logged, never repaired. |
 
-Two safeguards follow from this split:
+Jev's input is built only from stored fields: `what`, `why`, `class_of_work`, `category`, the text of a reading
+correction, and, for introspections, `failure_class` and `cause`. It never sees outcomes or scores (the rule D31
+set for Jev's forecasts, which keeps every match computable again from records alone) **(read: D31)**.
 
-- **Jev never sees a decision it could make unaccountable.** Its probabilities are recorded beside the
-  threshold, so a wrong proposal can be traced to one number.
-- **Low Jev confidence escalates, it does not guess.** A record whose best match is between a lower and the
-  upper threshold goes to a stronger model, as the brief asks ("use Jev's probabilities to escalate
-  low-confidence calls", `BRIEF.md` line 217) **(read)**. In shadow mode (§8) that stronger model also runs on
-  everything, to be the comparison.
+## 6. How Jev is reached: `POST /v1/evaluate`
 
-Jev's input is built only from stored fields: `what`, `why`, `class_of_work`, `category`, and the text of a
-reading correction. It never sees outcomes or scores. This is the rule D31 set for Jev's forecasts, and it
-keeps every match computable again from records alone **(read: D31)**.
+All of this section is **(reported)** from the user's probes of the gateway and the review; none of it was
+reproduced here, and the building job checks each point against a live call before the client is written.
 
-## 5. Matching, clustering and candidates
+**Route.** `POST https://ai-gateway.vercel.sh/v1/evaluate`. The general chat route (`/v1/chat/completions`)
+refuses Jev. A Jev client that meets this refusal treats it as a **build error** (the client was pointed at the
+wrong route), never as a transient fault to retry.
 
-### 5.1 Matching
+**Request fields.**
 
-For each new record, Jev gets the record's stored fields and the rendered defaults (id, scope, first
-sentence), and returns a probability for each id and for "none". Code applies the threshold `t_match`. A
-record at or above it is *matched* to the highest-probability id. A match is not a proposal: it is a count
-against an existing default.
+| Field | Content |
+|---|---|
+| `model` | `typesafe-ai/jev` |
+| `state` | The text the question is about: the record's stored fields |
+| `questions` | A map from a key to one question: `type` (`boolean` or `choice`), `instructions`, and `criteria`, a map from each option to its description |
 
-Matching also serves a second purpose that needs no new default: a default matched often is one the briefs are
-not getting across. The report (`athena status`, §6) lists match counts per default.
+**Response fields.** The chosen option; a probability per option; a confidence. One probe returned `none` at
+0.06, a top option at 0.90 and a confidence of 0.87 with 409 input and 59 output tokens, for five short options.
+The probe offered a `changelog` option that is not in `defaults.toml`, so it shows that Jev can pick a supplied
+label and nothing about discovery **(reported; read: review 1, §4)**.
 
-### 5.2 Clustering
+**Cost and tokens** are read from the response and stored; they are never estimated by the client. (The cost
+figure in the probe report was garbled, so no per-call cost is taken from it here.)
 
-Unmatched records, plus records matched to the same default more than a few times, are clustered by Jev. Code
-reads the clusters and counts distinct jobs, not records. A cluster of at least N jobs becomes a candidate.
-N is a design choice, not a measurement. The proposed start is **N = 3 (estimate)**, below the four-fold
-repeats in §2; calibration (§8) can move it.
+**Fake Jev.** The test double in the build order (§12) follows this shape exactly: the same route, the same
+request fields, the same response fields, and a refusal on the chat route that produces the build error. A
+fake that returns anything else would let a wrong client pass.
 
-A candidate is one of two kinds:
+### 6.1 The two signals
 
-- **add:** no existing default is a good match. A new id.
-- **amend:** the cluster matches an existing default at moderate probability, and the draft widens or
-  sharpens that statement. The id is kept. R3 is expected to take this form against `small`.
+- **Top probability** `p_top`: the probability of the chosen option. It controls **matching**: at or above
+  `t_match`, the record is matched to that option (a default, a class, or a cluster); below it, to the unmatched
+  pool or to "new".
+- **Confidence** `c`: the number the gateway returns beside the probabilities. It controls **escalation** only:
+  below `t_conf`, the question is asked again of a stronger model (§6.2). The probe returned 0.90 and 0.87, so
+  they differ; what `c` measures is not known, so `t_conf` is set from calibration (§10), not guessed.
+- Both are stored with every answer.
 
-### 5.3 Drafting
+### 6.2 Escalation: an explicit second call (design)
 
-For each candidate Jev drafts the statement in the voice of the existing entries (one or two sentences), and
-`applies_to` from the repo's classes of work. Code checks `applies_to` values against the classes seen in the
-cluster's records plus `*`, and refuses a statement that is empty or longer than the length budget (§6).
+The gateway can run a fallback model below a confidence threshold (`providerOptions.gateway.models` with
+`when.confidenceBelow`, **reported**). Two options:
 
-## 6. The proposal format
+| Option | For | Against |
+|---|---|---|
+| Gateway fallback | Small client; one call | It runs only below the threshold, so the shadow comparison on everything still needs a second call. Whether the response says the fallback ran and which model answered was not reported, so the stored answer might be mislabelled as Jev's. |
+| **Explicit second call by Athena (chosen)** | One mechanism serves escalation and shadow comparison; the answering model is known and stored | A second code path and a second client |
 
-A proposal is a record, not an edit to `defaults.toml`. It is written like other records (`docs/records.md`)
-and its schema is added when it is built. Name: `athena.defaults-proposal/1` **(design)**.
+Chosen: the explicit second call. Every answer stored in `evidence` names the model that gave it, so a stronger
+model's answer is never recorded as Jev's. If the building job finds that the response labels the fallback
+model reliably, this choice may be revisited; the cost is a client change.
+
+## 7. Matching, clustering and candidates
+
+### 7.1 What is counted
+
+The **intervention record** (`athena.intervention/1`) is the single counted unit. A correction record carries
+its intervention **(read: `docs/records.md`)**, so counting both would count a correction twice; the correction's
+text is read as part of its intervention and is not a separate input. An introspection links to its event's
+intervention and is read as an extension of it. An intervention of category `answered-question` is an answer to
+the reader's question, not a repeated expectation; it stays in the labeled set as its own stratum and does not
+count toward N **(design)**. Events with no intervention record (a failure, a rejection) get one when the
+introspection is recorded, so the unit is uniform.
+
+### 7.2 Matching and clustering
+
+For each new unit, Jev gets its stored fields and the rendered defaults (id, scope, first sentence) and returns
+a probability for each id and for "none". Code applies `t_match`. A matched record counts against an existing
+default; a default matched often is one the briefs are not getting across, and `athena status` lists the counts.
+
+Unmatched records, and records matched repeatedly to one default, are assigned to clusters by Jev (assignment or
+pairwise, §5). Code counts distinct jobs, not records. A cluster of at least N jobs becomes a candidate. **N = 3
+(estimate)**, a design choice, movable by calibration.
+
+A candidate is **add** (no good match; a new id) or **amend** (a moderate match to an existing default; the
+draft widens or sharpens it and keeps the id). Introspections whose `prevention_kind` is `code-check` or
+`design-change` do not become candidates; they are listed (§9).
+
+### 7.3 Drafting
+
+A language model drafts the statement in the voice of the existing entries (one or two sentences), `applies_to`
+from the repository's classes of work, and a short title. Code checks `applies_to` against the classes in the
+cluster's records plus `*`, and refuses a statement that is empty or over the length cap (§8.3).
+
+## 8. The proposal format
+
+A proposal is a record, not an edit to `defaults.toml` (`docs/records.md`). Name: `athena.defaults-proposal/1`
+**(design)**.
+
+### 8.1 Fields
 
 | Field | Meaning |
 |---|---|
 | `id` | The default's id: new for `add`, existing for `amend`. Unique among the model and pending proposals (code-checked). |
 | `kind` | `add` or `amend`. |
 | `statement` | The full statement text that would appear in `defaults.toml`. For `amend`, the whole new statement; the prior one is shown beside it. |
-| `applies_to` | The scope list, as in `defaults.toml`; `*` means every class. |
+| `applies_to` | The scope list; `*` means every class. |
 | `version` | `{ from, to }`: the base commit's model version and `from + 1`. |
-| `sources` | The record ids of the cluster (at least N distinct jobs), each with its job id. These become the `source` text of the entry when accepted. |
-| `evidence` | Jev's match probabilities for each source record, the threshold used, and which model produced the cluster and the draft. |
+| `sources` | The intervention ids of the cluster (at least N distinct jobs), each with its job id, and the introspection ids that reached the same `cause`. These become the `source` text of the entry when accepted. |
+| `evidence` | For each source: the probabilities and confidence of each Jev answer, the thresholds used, and **the model that gave each answer** (Jev, the stronger model, or a drafting model). |
 | `status` | `pending`, `accepted` (with the job that applied it), `rejected` (with the user's reason), or `withdrawn`. |
 | `candidate_sha256` | Hash of the full candidate `defaults.toml` that passed `DefaultsModel::parse`. |
 
-Code enforces a statement budget: a proposed statement may not be longer than the longest statement now in the
-model. This is because the model is loaded inside the reader's token budget, and R2 shows what an overrun
-costs (D25) **(read)**. Each added entry costs reader tokens, so a proposal states its rendered size
-(**estimate:** ⌈bytes/3.0⌉, the CI tripwire estimate in D25) and refuses to be written if the reader set would
-go over 1,800 tokens.
+### 8.2 Example
 
-**Example (illustrative draft for R4; not accepted, not in `defaults.toml`, source ids are placeholders because
-the real records were not readable):**
+Illustrative draft for R4; not accepted, not in `defaults.toml`, source ids are placeholders because the real
+records were not readable:
 
 ```toml
 # proposal: defaults-proposal/1
@@ -188,141 +353,172 @@ sources = [
 status = "pending"
 ```
 
-The example's version follows the base file: `defaults.toml` has `version = 1` today **(read)**. The model's
-version is a count of accepted changes, not of entries (the file has 12 entries at version 1).
+The example's version follows the base file: `defaults.toml` has `version = 1` **(read)**. The version counts
+accepted changes, not entries. If several proposals are accepted together they land in one job and bump the
+version once; `to` is recomputed by code at acceptance, never trusted from the proposal.
 
-If several proposals are accepted together, they land in one job and bump the version once for that job;
-`to` is recomputed by code at acceptance, never trusted from the proposal.
+### 8.3 The reader budget
 
-## 7. How a proposal reaches the user, and why Athena never edits `defaults.toml`
+The earlier draft capped a statement's length by the reader budget. That protected the wrong thing: the reader
+loads `DefaultsModel::render()`, which carries one line per default with the **id, the scope and the first
+sentence** of the statement **(read: `defaults.rs`, `render`)**. So:
 
-`defaults.toml` is a governance file: changing it is a job that lists it as a deliverable, and each change
-cites the evidence that pulled it in (D26; header of `defaults.toml`) **(read)**. This design keeps that rule
-whole. Proposals are review-only.
+- **For the reader, the cost of an entry is its id, scope and first sentence, and the entry count.** The rest of
+  the statement costs the reader nothing. The proposal states its rendered size (**estimate:** ⌈bytes/3.0⌉, the
+  tripwire estimate in D25) and is refused if the reader set would go over 1,800 tokens.
+- **The full statement lands in the producer and verifier briefs**, through `get()`, for the defaults the
+  reader selected **(read: `defaults.rs`)**. Those sets have budgets of 1,100 and 1,300
+  **(read: `crates/athena-context/src/lib.rs` lines 158-159)**. Whether defaults count against them was not
+  read; the building job reads it. A statement-length cap stays, set from that finding, and protects those sets.
+- **Gate on the 1,500-token estimate.** Before any entry is added or the figure is relied on, a test calls
+  `render()` and measures the result with the live counter (D25: the live measurement is the authority). The
+  build does not proceed on the estimate alone.
 
-1. **Generation.** After a job closes, or on a command, code runs the loop (§3) over records not yet seen.
-   Output is proposal records, nothing else. No path in the loop opens `defaults.toml` for writing; a test
-   when built should assert the loop's code has no such call **(design)**.
-2. **Surfacing.** `athena status` lists pending proposals: id, kind, statement, source count, and the version
-   bump. It shows, for each, the source records and Jev's probabilities. A proposal is never injected into a
-   brief: the reader and the briefs see only the accepted model at the base commit (D26).
-3. **Decision.** The user reads the proposal and chooses. To accept, the user asks for a job in the ordinary
-   way ("apply defaults proposal X"). That reading lists `defaults.toml` as a deliverable, the producer makes
-   the edit, and the verifier checks: the id and statement equal the proposal, the version is the base
-   version plus one, and `DefaultsModel::parse` accepts the file. To reject, the user records `rejected` with a
-   reason; code does not propose the same cluster again unless it grows by N more jobs.
-4. **Landing.** It lands like any job. The accepted entry's `source` cites the proposal's records, so every
-   learned default is as traceable as the seed ones are to `BRIEF.md`.
+## 9. How a proposal reaches the user, and why Athena never edits `defaults.toml`
 
-Reasons for the rule: a wrong default quietly shapes every future brief; the model is the user's, not
-Athena's (D89 says so in terms); and a loop that edits its own rulebook cannot be told apart from drift.
+`defaults.toml` is a governance file: changing it is a job that lists it as a deliverable, and each change cites
+the evidence that pulled it in (D26; header of `defaults.toml`) **(read)**. This design keeps that rule whole.
 
-## 8. Calibration before trust
+1. **Generation.** After a job closes, or on a command, code runs the loop (§4) over records not yet seen.
+   Output is records and proposals, nothing else. No path in the loop opens `defaults.toml` for writing; a test
+   when built asserts the loop's code has no such call **(design)**.
+2. **Surfacing.** `athena status` lists pending proposals: id, kind, statement, source count and version bump,
+   with source records and probabilities. It also lists, apart, introspections whose prevention is a code check
+   or design change, with their classes and counts, as proposed work for the user to request. A proposal is
+   never injected into a brief: briefs see only the accepted model at the base commit (D26).
+3. **Decision.** To accept, the user asks for a job in the ordinary way ("apply defaults proposal X"). That
+   reading lists `defaults.toml` as a deliverable, the producer makes the edit, and the verifier checks: id and
+   statement equal the proposal, the version is the base plus one, and `DefaultsModel::parse` accepts the file.
+   To reject, the user records `rejected` with a reason (itself an event that triggers an introspection, §3.1);
+   code does not propose the same cluster again unless it grows by N more jobs.
+4. **Landing.** It lands like any job. The accepted entry's `source` cites the proposal's records.
 
-Jev is not part of v0 (D31) **(read)**. D31 left it out because it would add an HTTPS client, a credential, a
-driver and its fake, and refusal handling, and because its forecasts could be computed retroactively from the
-reading records. Its path back was named: "the first calibration review, or the first typed decision in the
-flow" (`docs/design/athena-v0.md` §14) **(read)**. This design is that typed decision. It does not reverse D31
-for any other use. D90 narrows D31 to: Jev may be added, in shadow only, for this loop, and nothing
-below runs live until the promotion criteria hold.
+Reasons: a wrong default quietly shapes every future brief; the model is the user's, not Athena's (D89 says so
+in terms); and a loop that edits its own rulebook cannot be told apart from drift.
 
-### 8.1 Shadow mode
+## 10. Calibration before trust
 
-- Jev runs on every new intervention and correction. Its match probabilities, clusters and drafts are
-  recorded. They produce no proposal the user sees as live, and change no count in `athena status` that the
-  user relies on.
-- A stronger model runs the same typed questions on the same inputs (the brief: "shadow new decision types
-  against a stronger model", `BRIEF.md` line 217) **(read)**.
+Jev is not part of v0 (D31) **(read)**. D31 left it out for an HTTPS client, a credential, a driver and its fake,
+and refusal handling, and because its forecasts could be computed retroactively. Its path back was "the first
+calibration review, or the first typed decision in the flow" (`docs/design/athena-v0.md` §14) **(read)**. This
+design is that typed decision. D90 narrows D31: Jev may be added, in shadow only, for the typed decisions here
+(class assignment, default matching, cluster assignment, `prevention_kind`), and nothing runs live until the
+promotion criteria hold. Introspection prose, which a language model writes, is not gated on Jev; it is
+reviewed as part of the introspection record and scored in §10.3.
+
+### 10.1 Shadow mode
+
+- Jev runs on every new unit. Its answers are recorded. They produce no proposal the user sees as live and
+  change no count in `athena status` that the user relies on.
+- A stronger model answers the same typed questions on the same inputs (`BRIEF.md` line 217) **(read)**.
 - Shadow runs have a spend cap, like every invocation (D28) **(read)**.
 
-### 8.2 The labeled set
+### 10.2 The labeled set
 
-- **Source:** all intervention and correction records now in `records/`, plus reading corrections, labeled
-  retroactively under D31's rule: Jev's input is built only from stored fields. The number of such records is
-  not known here because `records/` is not visible **(unknown; the building job counts it and states it)**.
-- **Labels:** for each record, the user, or a stronger model whose labels the user spot-checks, names the
-  default it matches or "none", and groups repeats. Who labeled which record is stored.
-- **Must include** the four repeats in §2 and, for each, records that look similar but are not repeats.
-- **Split:** by time. Records up to a cut date calibrate the threshold and N; later records test. No tuning on
+- **Source:** all intervention and correction records now in `records/`, counted once each (§7.1), plus
+  reading corrections. Labels follow D31's rule: Jev's input is built only from stored fields. The count is not
+  known here **(unknown; the building job counts it and states it)**.
+- **Labels:** for each unit, the user, or a stronger model whose labels the user spot-checks, names the default
+  it matches or "none", the failure class, and groups repeats. Who labeled which is stored.
+- **Must include** R1 to R4 and the cases in §3.6, with R2 labelled "none", and for each, records that look
+  similar but are not repeats.
+- **Split:** by time. Records up to a cut date calibrate the thresholds and N; later records test. No tuning on
   the test part.
-- **Label hygiene:** labels are written before Jev's output is read, so Jev is not anchoring them.
+- **Label hygiene:** labels are written before Jev's output is read.
 
-### 8.3 Scoring
+### 10.3 Scoring
 
 - **Matching:** the Brier score of Jev's probability vector against the label, with two references: always
-  predicting "none", and a plain word-overlap matcher that needs no model. The same shape as athena's
-  existing forecasters, where "the reference is what makes a vague forecaster show zero skill"
-  (`docs/design/athena-v0.md`, near line 1208) **(read)**. Skill is the Brier improvement over the better
-  reference.
-- **Top-1 accuracy** on the matched-or-not decision, and the share of "none" labels that Jev calls matched
-  (the false-match rate), because a false match hides a gap.
-- **Clustering:** whether each labeled repeat group lands in one cluster, and whether any cluster mixes
-  groups.
-- **Drafts:** a person (or the stronger model, spot-checked) rates whether the draft statement says what the
-  cluster's records say. Scored as pass or fail per draft.
-- **Cost and latency** per decision, tracked like any other tier (`BRIEF.md` line 217) **(read)**.
+  predicting "none", and a plain word-overlap matcher. As in athena's forecasters, where "the reference is what
+  makes a vague forecaster show zero skill" (`docs/design/athena-v0.md`, near line 1208) **(read)**. Skill is the
+  Brier improvement over the better reference.
+- **Top-1 accuracy** on matched-or-not, and the false-match rate on "none" labels, because a false match hides
+  a gap.
+- **Class and cluster assignment:** whether each labeled group lands in one class or cluster, and whether any
+  mixes groups; the effect of arrival order.
+- **Confidence:** whether `c` predicts error better than `p_top` does, which fixes `t_conf` (§6.1).
+- **Prose:** a person (or the stronger model, spot-checked) rates each introspection's `cause` and each draft:
+  pass if it says something beyond the instance (introspection) or says what the sources say (draft).
+- **Cost and latency** per decision, read from responses (§6) **(read: `BRIEF.md` line 217)**.
 
-### 8.4 Promotion criteria
+### 10.4 Promotion criteria
 
-Jev's proposals become visible in `athena status` as live (still review-only) when all hold. The numbers are
-starting points to be set at review and are **estimates**, not measurements:
+Jev's proposals become visible in `athena status` as live (still review-only) when all hold. Numbers are
+starting points to be set at review and are **estimates** unless computed.
 
-1. Matching skill is above zero against both references on the test part, and the lower bound of the skill is
-   above zero. The labeled set has at least **30 records (estimate)** with at least 5 distinct defaults or
-   "none" outcomes represented.
-2. All four repeats in §2 form one cluster each in shadow, with no cluster that mixes them. If the real
-   records cannot be found for R3 or R4, they are scored on what exists and the result says so.
+1. **Matching skill is above zero on the test part, with the test part sized for it.** A lower bound on mean
+   skill needs the test size *n* to satisfy *n* > (1.96·sd / mean)², where mean and sd are the per-record Brier
+   improvement over the better reference. Assuming a mean improvement of 0.10 and sd of 0.30 (**both
+   estimates**), *n* > (1.96·0.3/0.1)² ≈ 34.6, so **35 test records**; at sd 0.5 it is ≈ 96. With a time split
+   that keeps about a third for testing (estimate), the labeled set would need about 100 records or more. Only
+   four repeats are named today, so unless the building job finds a labeled set of that size, **the interval
+   is dropped**: the user judges the skill from the raw Brier scores and the per-record table, and the report
+   says that no bound was computed. If the test part reaches the computed size, the interval is used.
+2. R1 to R4 and the cases of §3.6 each land in one class or cluster in shadow, with none mixed (R2 as "none").
+   Records not found are scored on what exists, and the result says so.
 3. The false-match rate on "none" labels is under **10% (estimate)**.
-4. No proposal in shadow cites a record id that does not exist (this is already a code check, so it must be
-   zero), and every draft passes `DefaultsModel::parse` in the candidate file.
-5. At least **90% (estimate)** of drafts are rated as faithful to their sources.
+4. No proposal in shadow cites a record id that does not exist (a code check, so zero), and every draft passes
+   `DefaultsModel::parse` in the candidate file.
+5. At least **90% (estimate)** of drafts and introspection causes are rated faithful and beyond the instance.
 6. The user reviews the shadow report and agrees.
 
-**Demotion:** if a live window's agreement with the stronger model drops, or the user rejects proposals for
-the reason "Jev misread the records" twice in a row, Jev returns to shadow. These counts are estimates.
+**Demotion:** if agreement with the stronger model drops, or the user rejects proposals for the reason "Jev
+misread the records" twice in a row, Jev returns to shadow (counts are estimates).
 
-Until promotion, the loop's only live part is the deterministic path from a person-written proposal request
-to the same record format, so the review path (§7) can be built and used first.
+Until promotion, the live parts are the deterministic path from a person-written proposal request to the same
+record format (so the review path, §9, is built first) and introspection records written by a language model
+with a person-visible review.
 
-## 9. Alternatives considered
+## 11. Alternatives considered
 
-1. **A person notices repeats and writes the change (status quo).** Costs no code. It is the loop that
-   missed R1 four times before D89 repaired it in code (reported count; D89 read).
-2. **Rules instead of a model: keyword and category counts.** Cheap and deterministic. It fails on
-   paraphrase and needs a person to write the keywords; it is kept as the reference in §8.3, not as the
-   decision-maker.
-3. **A stronger model for everything, no Jev.** Likely the most accurate matcher. It costs more per record
-   (**estimate:** one to two orders of magnitude over Jev's cost per call in E12, not measured), and the brief
-   asks for Jev on typed decisions.
-4. **Jev decides everything, including the threshold and writing the file.** Rejected: it removes the review,
-   and Jev does not verify its own output. The split in §4 is the reply.
-5. **Jev proposes, and Athena applies accepted proposals itself.** Rejected: this makes Athena edit the user's
-   model (§7). The accept step is a job instead.
-6. **Auto-land low-risk defaults.** Out of scope for this change, and rejected for the same reason.
-7. **Put learned defaults in a separate file Athena owns.** This avoids editing `defaults.toml`, but splits
-   the model in two; briefs and the reader would load two sources, and the version would have no single
+1. **A person notices repeats and writes the change (status quo).** No code. It is the loop that missed R1
+   four times before D89 repaired it in code (reported count; D89 read).
+2. **Rules instead of a model: keyword and category counts.** Cheap, but fails on paraphrase; kept as the
+   reference in §10.3.
+3. **A stronger model for everything, no Jev.** Likely the most accurate matcher; it costs more per record
+   (**estimate:** one to two orders of magnitude over E12's per-call cost, not measured), and the brief asks for
+   Jev on typed decisions.
+4. **Jev decides everything, including clustering and drafting.** Rejected: an evaluate call can only choose
+   among options or answer yes/no (review 1, F1). It cannot draft prose.
+5. **Jev proposes, Athena applies accepted proposals itself.** Rejected: Athena would edit the user's model (§9).
+6. **Auto-land low-risk defaults.** Out of scope, rejected for the same reason.
+7. **A separate Athena-owned defaults file.** Splits the model in two; the version would have no single
    meaning. Rejected.
-8. **Count records, not jobs, for N.** Rejected: one job with four corrections is one episode, not four.
-9. **Skip shadow mode, since Jev's output is only review text.** Rejected: a plausible but wrong proposal
-   costs the user's attention, and a plausible but wrong accepted default costs every later brief.
-10. **Do this inside the dashboard (RM-12).** Later; the dashboard needs the records and the proposal format
-    first.
+8. **Count records, not jobs, for N.** Rejected: one job with four corrections is one episode.
+9. **Skip shadow mode.** Rejected: a wrong accepted default costs every later brief.
+10. **Dashboard first (RM-12).** Later.
+11. **Records reader for introspection: a filtered view in the agent snapshot.** Rejected for Athena code outside
+    it (§3.3): a view breaks the "records stay out" rule, and the agent could cite what code cannot verify.
+12. **Introspection only when the user asks.** Rejected: the user's correction is the costly moment, and asking
+    makes the user do the work the step exists to remove. The cost of always running it is bounded by the spend
+    cap and by the rule that it never blocks a job.
+13. **Gateway fallback for escalation.** Weighed in §6.2; the explicit second call is chosen.
+14. **Introspection as free prose with no class.** Rejected: without a class there are no earlier cases, and the
+    defaults loop has nothing to count.
 
-## 10. What is left open
+## 12. Build order, if accepted
 
-- The real record ids and counts for R1 to R4 (§2). This is the first task of the building job.
-- Where the loop is triggered: after each job close, or on a command. This design prefers a command first,
-  with the close trigger after promotion.
-- Whether an `amend` should be allowed to shrink a statement. Starting rule: no; shrinking is a hand change.
-- Whether the draft model should see accepted and rejected proposals as examples. Not decided; it changes
-  what shadow mode must hold out.
-- Whether classes of work (`applies_to` values) need a registry so code can check them exactly. Today they
-  are free text in `defaults.toml`.
-- A separate independent review of this design is still to be done; none is recorded.
+0. **Gate (§2):** read `records/`, list record ids for R1 to R4 and the §3.6 cases, and stop if fewer than N
+   distinct jobs show a repeat a default would cover. Introspection (steps 1 and 2) goes ahead on its own value.
+1. Add the introspection record, the class registry, the records-reading code (§3.3) and a person-visible
+   review of the output, with a language model for the prose and no Jev.
+2. Add retry-from-record (§3.5).
+3. Add the proposal record and validation, `athena status` surfacing and the apply-as-a-job check (§9).
+4. Measure `render()` with the live counter (§8.3) and read how the producer and verifier sets budget defaults.
+5. Write the fake Jev to the shape in §6, then the Jev client; check each reported fact in §6 against a live call.
+6. Build the labeled set and scoring (§10.2, §10.3) with the fake, then run in shadow; review; promote under
+   §10.4.
 
-## 11. Build order, if accepted
+## 13. What is left open
 
-1. Add the proposal record and its validation, and a person-written proposal command (no Jev).
-2. Add `athena status` surfacing and the apply-as-a-job check (§7).
-3. Build the labeled set and the scoring (§8.2, §8.3) with a fake Jev, then the Jev client.
-4. Run in shadow; review; promote under §8.4.
+- The real record ids and counts for R1 to R4 and the §3.6 cases (the gate, §2).
+- Where the loop is triggered: after each job close, or on a command. A command first, close trigger after
+  promotion. Introspection is triggered by the event itself (§3.1).
+- Whether an `amend` may shrink a statement. Starting rule: no.
+- Whether the draft model should see accepted and rejected proposals as examples; it changes what shadow must
+  hold out.
+- Whether classes of work (`applies_to` values) need a registry so code can check them exactly.
+- What the gateway's confidence measures, and whether a fallback answer is labelled (§6).
+- How a rejection is recorded when it is not a proposal (a plan, a result): a new record kind, not designed here.
+- Whether the class registry should be merged by Jev pairwise questions; not decided.
+- A separate independent review of this revision is still to be done; none is recorded.
