@@ -502,3 +502,8 @@ Stopping: you're done when "How I'll judge it" passes. If you're blocked on ever
 ### 2026-10-13: Introspection on every correction
 
 * You know how you corrected all of this and did all this work? The idea is: how do we get Athena to do this? Every time you do a correction, do some introspection as well.
+
+### 2026-10-13: Decision sets, and knowing when a decision is not working
+
+* I also want some way to classify, organize, and apply decision sets almost. How do you organize all these decisions?
+* As well as indications that the current thing isn't working. Can't confidently be wrong
