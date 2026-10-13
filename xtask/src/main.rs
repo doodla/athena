@@ -139,7 +139,13 @@ fn setup(flags: &Flags) -> Result<()> {
     install_gitleaks(&config)?;
 
     step("4. sccache");
-    install_sccache(&config)?;
+    if skip_sccache(flags.ci) {
+        println!(
+            "--ci: skipping sccache; CI sets no RUSTC_WRAPPER, so it would only add build time"
+        );
+    } else {
+        install_sccache(&config)?;
+    }
 
     step("5. Athena");
     let binary = build_and_adopt(&root, flags)?;
@@ -253,6 +259,11 @@ fn install_gitleaks(config: &Config) -> Result<()> {
     }
     println!("installed gitleaks {} at {}", pin.version, target.display());
     Ok(())
+}
+
+/// Whether setup leaves sccache out: CI never uses it, and compiling it roughly doubles the CI time.
+fn skip_sccache(ci: bool) -> bool {
+    ci
 }
 
 /// Installs the pinned sccache with `cargo install --locked`, when `athena.toml` pins one. The install root
@@ -543,6 +554,12 @@ mod tests {
         assert!(refuse_inside_a_job(Some("20261010-153012-k7q2".into())).is_err());
         assert!(refuse_inside_a_job(Some("".into())).is_ok());
         assert!(refuse_inside_a_job(None).is_ok());
+    }
+
+    #[test]
+    fn ci_skips_sccache_and_normal_setup_does_not() {
+        assert!(skip_sccache(true));
+        assert!(!skip_sccache(false));
     }
 
     #[test]
