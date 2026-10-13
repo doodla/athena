@@ -1719,3 +1719,29 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Reversal cost:** Low. Comment the two keys out again; the helper still works.
 - **Provenance:** User request, retrying a job whose pin tests failed on duplicate keys. Enforced by both
   tests in `run_pin_tests.rs`, run against the real `athena.toml`.
+
+## D78 · The first study is kept as records, and a kept test validates it against the pinned tree
+
+- **Decision:** `studies/firstmate-work-handling/` holds the M1 study of firstmate's work handling as typed
+  records: `pin.json`, `claims.json`, `rationales.json`, `model.json`, `findings.json`, and
+  `validation.json`. The pin is the full commit id the user gave; `pinned-source/` carries no git metadata,
+  so the id was taken from the request and not re-derived. Tests in `rules.rs` read the records, answer the
+  rules' git questions from the files of `pinned-source/` (a `MountedTree` that serves only that commit), and
+  assert that every rule passes, that `validation.json` equals what the rules return, that a wrong SHA or a
+  changed quote or line range is flagged, that no placeholder pin appears, that every claim text starts with
+  `[mechanism]` or `[prose-only]`, and that a guard of `none` is never marked as evaluated by code. Where
+  `pinned-source/` is absent (a plain checkout), the two tree-bound tests return early. The study read the
+  tree only: no run, so its failure and retry edges carry a `could-not-run` finding, and a `model-limit`
+  finding records that `guard_evaluated_by` has no value for "nobody", so `agent` stands in for a guard of
+  `none`. `findings.json` is a sixth record file because the rules need findings and the study has no other
+  place for them.
+- **Alternatives:** Mark claims `observed` by running firstmate: no recorded boundary for a run was given.
+  Add a "none" value to `EvaluatedBy`: a schema change outside this job. Read the tree through `git`: the
+  mount has no history.
+- **Tradeoff:** The tests need the mount to prove anything, and a plain checkout skips them. The enforcement
+  tag lives in the claim text because `study.claim/1` has no field for it. The model is small: five states
+  and eight transitions, chosen to cover dispatch, capacity, delivery, teardown and relaunch, not all of
+  firstmate.
+- **Reversal cost:** Low. Delete `studies/firstmate-work-handling/`, its tests, and the inventory row.
+- **Provenance:** Read from the pinned tree; every citation is checked by the tests above, which fail on a
+  wrong path, line range, SHA or quote.

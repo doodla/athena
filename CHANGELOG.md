@@ -9,6 +9,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The first study, `studies/firstmate-work-handling/` (D78): firstmate's work handling at the commit the user
+  pinned, as typed records (pin, claims, rationales, model, findings, validation). Every claim carries the
+  full pinned SHA, a path and line range, and a verbatim quote, and is tagged `[mechanism]` or
+  `[prose-only]`. Kept tests in `athena-cap-study` validate the study against the mounted `pinned-source/`
+  tree, including the wrong-SHA and quote-mismatch rules; `docs/non-rust-files.md` lists the JSON files.
 - A study job's repository is pinned by the core (D75). Before the prediction commit, `athena go` resolves
   the `repo_url` and `repo_ref` in `[capabilities.study]` to a full commit id through a `Pinner` (the real one
   uses `git`), records URL, ref and commit in a new optional `pin` field of the job record, and mounts the

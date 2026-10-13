@@ -15,6 +15,7 @@ Athena's, and are not checked.
 | `.gitignore`, `.gitattributes` | git's own formats |
 | `athena.toml`, `defaults.toml` | configuration and the defaults model: data, not code |
 | `records/**` | machine-written JSON records, plus verbatim inputs such as the bootstrap brief |
+| `studies/**` | typed study records (pin, claims, rationales, model, findings, validation): data that a kept test reads and validates against the pinned source tree |
 | `*.md` | documentation, and prompt text compiled into the binary (prose, not code) |
 | `LICENSE` | license text |
 
