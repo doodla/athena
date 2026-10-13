@@ -2006,3 +2006,26 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   correction"): Jev's role narrowed to typed questions, R2 relabelled a counter-example, the evaluate route and
   signals added, the reader budget restated, introspection added. The introspection cases come from the job
   request and are reported, not checked against records.
+
+## D91 · Decisions are typed, grouped into sets by scope, and carry assumptions and failure signals
+
+- **Decision:** Proposed, design only (`docs/design/decision-sets.md`); nothing is built. Every decision gets
+  typed fields: kind (requirement, expectation, design, process), scope (classes of work, paths, phase:
+  reading, producing, verifying, landing), status (active, proposed, superseded by a named decision), source and
+  enforcement (code check, brief, prose only). Sets are computed from scope, and a job's active decisions are
+  applied to each role's brief within its token budget, as defaults are now; defaults are the `expectation`
+  kind. Each decision states its assumptions and observable signals (rejections, interventions, corrections,
+  check failures, host errors). Code watches the signals in records; a signal that fires puts the decision under
+  review, marked in briefs, and Athena never retires or edits a decision itself. Jev may answer two more typed
+  questions (set membership, signal match), in shadow only; code matching works without it. This extends D90's
+  narrowing of D31 and leaves D31 standing otherwise.
+- **Alternatives:** a flat log with a status column; stored set files; all decisions in `defaults.toml`;
+  automatic supersession; Jev for all membership; signals as free prose; assumptions without signals; rewriting
+  D01-D90. Each is weighed in the design, section 7.
+- **Tradeoff:** Each decision costs a short header and, for the ones that matter, assumptions and signals to
+  write. In return a decision like D87 (which assumed merge commits were allowed and was refused with HTTP 405)
+  is flagged on its first failure instead of staying applied.
+- **Reversal cost:** Low while only the design exists; docs.
+- **Provenance:** stated: `BRIEF.md` addendum "2026-10-13: Decision sets, and knowing when a decision is not
+  working". The D87 refusal is reported in the job request and not re-run; D87 and D88 are read. No independent
+  review is recorded yet.

@@ -9,6 +9,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Decision-sets design (`docs/design/decision-sets.md`, D91): typed decision fields (kind, scope, status,
+  source, enforcement), sets computed by scope and applied to role briefs within their token budgets, per-decision
+  assumptions and failure signals that put a decision under review, the D87 merge refusal as the worked example,
+  the fit with the defaults loop and Jev, and a migration plan. Design only; nothing is built.
 - Every change reading now lists `CHANGELOG.md` as a deliverable, added in code by `ensure_changelog` in
   `athena-core`'s `reading.rs` together with a `changelog` default that cites BRIEF.md's "tagged releases and a
   changelog". Nothing is added when the file is already listed or when the reading is a study or a decline. The

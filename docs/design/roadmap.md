@@ -84,6 +84,8 @@ Nothing here is implemented by this change.
 - **What:** feed scored mispredictions back into `defaults.toml`, the estimates and the routing (the
   repeat-to-proposal part is designed in `docs/design/defaults-loop.md`, D90: Jev matches records to
   defaults in shadow, code validates, and proposals are review-only); record
+  organize decisions into typed sets applied to briefs, each with assumptions and failure signals that put it
+  under review (designed in `docs/design/decision-sets.md`, D91); record
   evidence-backed pushback exchanges; add taste probes with expiry; add decision-sheet artifacts for a tired
   user; propose the next big task when the study ends.
 - **Done when:** a misprediction changes a defaults entry through a verified job that cites the score, and
