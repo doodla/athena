@@ -379,20 +379,43 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn skip_when_only_is_optional_and_parsed_when_present() {
-        // The repository's own file has no such key yet; every check then always runs.
+    fn skip_when_only_is_set_on_fmt_and_clippy_only() {
+        // M31 (allows): the repository skips fmt and clippy for prose; the test check never skips.
         let config = Config::parse(REPO_CONFIG).unwrap();
         let change = config.capability("change").unwrap();
-        assert!(change.checks.iter().all(|c| c.skip_when_only.is_none()));
+        let skip = |name: &str| {
+            change
+                .checks
+                .iter()
+                .find(|c| c.name == name)
+                .unwrap()
+                .skip_when_only
+                .clone()
+        };
+        let prose = Some(vec!["docs/".to_string(), "*.md".to_string()]);
+        assert_eq!(skip("fmt"), prose);
+        assert_eq!(skip("clippy"), prose);
+        assert_eq!(skip("test"), None);
+    }
+
+    #[test]
+    fn skip_when_only_is_optional_and_parsed_when_present() {
+        // M31 (blocks nothing): a key on a check that has none is parsed into its patterns.
         let text = REPO_CONFIG.replacen(
-            "[[capabilities.change.checks]]\n",
-            "[[capabilities.change.checks]]\nskip_when_only = [\"docs/\", \"*.json\"]\n",
+            "[[capabilities.change.checks]]\nname = \"test\"\n",
+            "[[capabilities.change.checks]]\nname = \"test\"\nskip_when_only = [\"docs/\", \"*.json\"]\n",
             1,
         );
         let config = Config::parse(&text).unwrap();
-        let first = &config.capability("change").unwrap().checks[0];
+        let test = config
+            .capability("change")
+            .unwrap()
+            .checks
+            .iter()
+            .find(|c| c.name == "test")
+            .unwrap();
         assert_eq!(
-            first.skip_when_only,
+            test.skip_when_only,
             Some(vec!["docs/".to_string(), "*.json".to_string()])
         );
     }
