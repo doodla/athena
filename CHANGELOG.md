@@ -9,6 +9,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A design for a requirements map, the living strategy view (A1) and a roadmap
+  (D81, `docs/design/requirements-map.md`). It maps every `BRIEF.md` requirement and addendum to a defined
+  status, an owning design and the work that served it, specifies a strategy view derived from typed records,
+  and orders the queued work with reasons. Design only; no code, configuration or records changed.
 - Warm builds with sccache (D80). `athena.toml` now pins `[tools.sccache]` at `0.10.0`, and the change and
   study capabilities set `RUSTC_WRAPPER` to `{athena_home}/tools/sccache/0.10.0/bin/sccache`, `SCCACHE_DIR` to
   `{athena_home}/sccache` and `CARGO_INCREMENTAL` to `0`. `CARGO_TARGET_DIR` and `CARGO_TERM_COLOR` are

@@ -4,7 +4,8 @@ This page is the map of the code. The design and its reasons are in
 [`design/athena-v0.md`](design/athena-v0.md), and every significant choice is in
 [`decisions.md`](decisions.md). The landing gate's rule for squash merges of a chain of jobs (D69) is in
 [`design/squash-chain-landing.md`](design/squash-chain-landing.md); the gate implements it in
-`crates/athena-gate/src/invariant.rs`.
+`crates/athena-gate/src/invariant.rs`. Which requirement each design serves, and what is built against it, is
+in the requirements map, [`design/requirements-map.md`](design/requirements-map.md) (D81, proposed).
 
 ## The shape
 

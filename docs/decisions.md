@@ -1789,3 +1789,25 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   speedup is not measured here.
 - **Reversal cost:** Low. Remove the pin and the three env keys from each capability.
 - **Provenance:** User request, following D79. Enforced by the tests in `config.rs`.
+
+## D81 · A hand-kept requirements map, and a strategy view derived from typed records
+
+- **Decision:** Proposed, design only: `docs/design/requirements-map.md`.
+  - The map is a Markdown table with one row per `BRIEF.md` requirement and addendum, giving a status (five
+    defined values), the owning design or `none yet`, and the serving work, cited by decision, changelog
+    entry or design because job records are not in the tree.
+  - The strategy view (A1) would be rendered on demand from typed `athena.strategy/1` records and the map,
+    never edited by hand, with its staleness shown in its own header.
+  - The roadmap orders the queued work with the reason for each dependency, and names what is not scheduled.
+  - The map's update rule is prose-only until a policy test checks that every requirement has a row, every
+    cited design exists and every status is defined.
+- **Alternatives:** (a) Generate the map from records: no job carries a requirement field yet. (b) Put it in
+  `BRIEF.md` or the `README`. (c) One record per requirement. (d) A hand-written strategy document. (e) A
+  scheduled job that regenerates the view. (f) Percent-complete figures.
+- **Tradeoff:** A hand-kept table can drift from the facts, and statuses rest on one reader's judgment until
+  the policy test and a requirement field on readings exist. In return it is readable now and needs no code.
+- **Reversal cost:** Low. Nothing reads the document and no rule depends on it.
+- **Provenance:** `BRIEF.md` A1 and the addenda of 2026-10-12 (tracker, brief as a contract). Read from the
+  changelog, this log and the status lines of the designs; no command was run. D35 is the precedent for
+  deriving a view rather than keeping one. Inferred: the five status words and the 10-job staleness threshold,
+  which is an estimate.
