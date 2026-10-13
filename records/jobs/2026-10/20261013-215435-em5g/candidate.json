@@ -1,0 +1,76 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261013-215435-em5g",
+  "base_commit": "4708ce498bcf34fa067b6ba37c4e6892da5b7ada",
+  "base_fingerprint": "sha256:11c8680638d4bc22a931e98f113d1f05fe62c70f0fc22154ed73d47a7bab7d0c",
+  "previous_job": "20261013-210357-vwx5",
+  "candidate_commit": "9a77dfc9241e8feb961cdfc06e0a3af76c1f9076",
+  "candidate_tree": "d5aeee2024d6a73a4a7a1d7848db8a5716b86bb4",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 27706
+    },
+    {
+      "path": "crates/athena-gate/src/secrets.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 14973
+    },
+    {
+      "path": "crates/athena-git/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 46130
+    },
+    {
+      "path": "xtask/tests/policy.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 15613
+    }
+  ],
+  "fingerprint": "sha256:9ccca4b2aabd4ff44b961eedbd566c17a3e7497ed27c668f75c9f7544a6ea5d6",
+  "violations": [],
+  "producer_report": {
+    "summary": "Root cause: each place that piped input to a child wrote all of stdin before reading stdout. Once the child's output passed the 64 KB pipe buffer, both sides blocked. I added `athena_git::output_with_stdin(&mut Command, Option<&[u8]>) -> io::Result<Output>`. It writes stdin on a scoped thread while the main thread collects stdout and stderr. A BrokenPipe on the write is ignored, because the child's exit status is the real signal. Any other write error is returned after the child has been waited for. `Git::exit` and the gitleaks runner (`secrets.rs`) now call it. The xtask `policy.rs` `git()` helper gets the same thread-and-drain fix locally. xtask can't depend on athena-git because of the dependency-graph policy test, so I left `xtask/Cargo.toml`, `Cargo.lock` and `docs/architecture.md` unchanged. Two new athena-git tests cover the fix. One pipes 3 MB through `cat`. The other writes 3 MB to a child that exits without reading and checks there is no error or hang. A \"Fixed\" entry is added to CHANGELOG.md.",
+    "files": [
+      "crates/athena-git/src/lib.rs",
+      "crates/athena-gate/src/secrets.rs",
+      "xtask/tests/policy.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo fmt --all",
+        "result": "pass",
+        "note": "I ran the formatter, not `--check`. It reformatted in place and printed nothing."
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "The first run failed on `unnecessary_lazy_evaluations`. I fixed it and the re-run was clean."
+      },
+      {
+        "command": "cargo test --locked -q",
+        "result": "pass",
+        "note": "Every suite passed, including the xtask policy tests, which completed instead of hanging. I did not read the full verbose output of the earlier `cargo test --locked` run, only this quiet re-run."
+      }
+    ],
+    "open_issues": [
+      "The brief lists `xtask/Cargo.toml`, `Cargo.lock` and `docs/architecture.md` as deliverables, but I changed none of them. Using the shared helper from xtask would need an xtask to athena-git edge. That would break the policy test and need an architecture doc change. If the owner wants that edge, it is a separate decision.",
+      "I did not run `cargo fmt --all --check` as a separate command. I ran `cargo fmt --all`, which formats in place."
+    ],
+    "mistakes": [
+      "My first helper used `unwrap_or_else(|_| Ok(()))`, which clippy rejected. I changed it to `unwrap_or(Ok(()))`.",
+      "I tried to read the saved verbose test output outside the working directory. The policy hook denied it, so I re-ran the tests with `-q` instead."
+    ],
+    "learnings": [
+      "`xtask` has no dependency on `athena-git`, and the policy test pins the dependency graph, so it needs its own local helper.",
+      "`GateError` converts from `io::Error`, so the runner needed no new error variant."
+    ],
+    "desires": []
+  }
+}

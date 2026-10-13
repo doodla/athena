@@ -7,6 +7,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+- Piping input to a child process no longer deadlocks once the child's output outgrows the pipe buffer. Writing
+  all of stdin before reading stdout blocked both sides; `athena_git::output_with_stdin` now writes stdin on its
+  own thread while output is drained, and `Git::exit` and the gitleaks runner use it. The repository-policy test
+  helper in `xtask` does the same locally, since `xtask` may not depend on `athena-git`. A broken pipe from a
+  child that exits early is tolerated.
+
 ### Changed
 
 - Review 2 of the revised parallel-jobs design (`docs/design/reviews/parallel-jobs-review-2.md`) confirms the

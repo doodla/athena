@@ -20,7 +20,7 @@ use athena_data::config::SecretAllow;
 use athena_git::Git;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 /// One finding, as gitleaks reports it (only the fields Athena uses; author and email are never read).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -147,25 +147,9 @@ impl Gitleaks {
     fn run(&self, mut cmd: Command, stdin: Option<&[u8]>) -> Result<Vec<Finding>> {
         let report = self.dir.path().join("report.json");
         let _ = std::fs::remove_file(&report);
-        cmd.stdin(if stdin.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-        let mut child = cmd.spawn().map_err(|e| {
-            GateError::Gitleaks(format!("could not start {}: {e}", self.bin.display()))
+        let out = athena_git::output_with_stdin(&mut cmd, stdin).map_err(|e| {
+            GateError::Gitleaks(format!("could not run {}: {e}", self.bin.display()))
         })?;
-        if let Some(input) = stdin {
-            use std::io::Write;
-            child
-                .stdin
-                .take()
-                .expect("stdin was piped")
-                .write_all(input)?;
-        }
-        let out = child.wait_with_output()?;
         if !out.status.success() {
             return Err(GateError::Gitleaks(format!(
                 "exit {:?}: {}",
