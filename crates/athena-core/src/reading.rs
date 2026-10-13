@@ -85,6 +85,35 @@ fn normalize_path(path: &str) -> Option<String> {
     Some(trimmed.to_string())
 }
 
+/// The path every change reading must list, so that the deliverables list is the one statement of scope.
+const CHANGELOG_PATH: &str = "CHANGELOG.md";
+
+/// Adds `CHANGELOG.md` to a change reading's deliverables, with a `changelog` default that cites BRIEF.md.
+/// Nothing is added when the file is already listed, or when the reading is not a change.
+pub(crate) fn ensure_changelog(reading: &mut Reading) {
+    if reading.capability.as_deref() != Some("change") {
+        return;
+    }
+    if !reading
+        .deliverables
+        .iter()
+        .any(|d| d.path == CHANGELOG_PATH)
+    {
+        reading.deliverables.push(Deliverable {
+            path: CHANGELOG_PATH.into(),
+            action: DeliverableAction::Modify,
+            p: 0.9,
+        });
+    }
+    if !reading.defaults_applied.iter().any(|d| d.id == "changelog") {
+        reading.defaults_applied.push(DefaultApplied {
+            id: "changelog".into(),
+            how: "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+                .into(),
+        });
+    }
+}
+
 impl Athena {
     /// Builds the invocation spec common to every role.
     #[allow(clippy::too_many_arguments)]
@@ -457,6 +486,8 @@ impl Athena {
             forecasts: Forecasts { reader, reference },
             departures: opt(&text[4]),
         };
+        let mut reading = reading;
+        ensure_changelog(&mut reading);
         reading.validate().map_err(anyhow::Error::msg)?;
         if reading.capability.is_some() && reading.acceptance_criteria.is_empty() {
             bail!("a reading needs at least one acceptance criterion");
@@ -1230,6 +1261,71 @@ mod tests {
             },
             departures: None,
         }
+    }
+
+    fn change_reading() -> Reading {
+        let job = job_with_checks(vec![]);
+        final_reading(&job)
+    }
+
+    #[test]
+    fn a_change_reading_gains_the_changelog_deliverable_and_default() {
+        let mut reading = change_reading();
+        ensure_changelog(&mut reading);
+        let changelog: Vec<_> = reading
+            .deliverables
+            .iter()
+            .filter(|d| d.path == "CHANGELOG.md")
+            .collect();
+        assert_eq!(changelog.len(), 1);
+        assert_eq!(changelog[0].action, DeliverableAction::Modify);
+        let defaults: Vec<_> = reading
+            .defaults_applied
+            .iter()
+            .filter(|d| d.id == "changelog")
+            .collect();
+        assert_eq!(defaults.len(), 1);
+        assert!(defaults[0].how.contains("BRIEF.md"));
+        assert!(defaults[0].how.contains("tagged releases and a changelog"));
+    }
+
+    #[test]
+    fn ensure_changelog_adds_nothing_twice() {
+        let mut reading = change_reading();
+        ensure_changelog(&mut reading);
+        let once = reading.clone();
+        ensure_changelog(&mut reading);
+        assert_eq!(reading, once);
+
+        let mut listed = change_reading();
+        listed.deliverables.push(Deliverable {
+            path: "CHANGELOG.md".into(),
+            action: DeliverableAction::Modify,
+            p: 0.5,
+        });
+        listed.defaults_applied.push(DefaultApplied {
+            id: "changelog".into(),
+            how: "the reader's own words".into(),
+        });
+        let before = listed.clone();
+        ensure_changelog(&mut listed);
+        assert_eq!(listed, before);
+    }
+
+    #[test]
+    fn ensure_changelog_leaves_study_and_declined_readings_alone() {
+        let mut study = change_reading();
+        study.capability = Some("study".into());
+        let before = study.clone();
+        ensure_changelog(&mut study);
+        assert_eq!(study, before);
+
+        let mut declined = change_reading();
+        declined.capability = None;
+        declined.decline_reason = Some("not possible".into());
+        let before = declined.clone();
+        ensure_changelog(&mut declined);
+        assert_eq!(declined, before);
     }
 
     fn correction(job: &JobRecords, text: &str, kind: CorrectionKind) -> Correction {

@@ -366,6 +366,11 @@ pub fn verifier_brief(inputs: &VerifierInputs, inline_diff: bool) -> String {
     );
     let _ = writeln!(out, "## Request (verbatim)\n\n{}\n", quote(&inputs.request));
     reading_sections(&mut out, &inputs.reading);
+    let _ = writeln!(
+        out,
+        "## Scope\n\nThe expected deliverables list is the one statement of scope. A changed file that is not on that \
+         list is the scope finding, judged against the list and not against the wording of a criterion.\n"
+    );
     pin_section(&mut out, inputs.pin.as_ref());
     let c = &inputs.candidate;
     let _ = writeln!(
@@ -774,6 +779,31 @@ mod tests {
         let brief = producer_brief(&producer_inputs(None));
         assert!(!brief.contains("## Pinned source"));
         assert!(!brief.contains("sha:"));
+    }
+
+    #[test]
+    fn verifier_briefs_state_that_the_deliverables_list_is_the_scope() {
+        let inputs = VerifierInputs {
+            job: "20261010-153012-k7q2".into(),
+            request: "change the demo".into(),
+            reading: AcceptedReading::new(&reading(), &defaults(), |_| false),
+            candidate: CandidateView {
+                base: "1".repeat(40),
+                candidate: "2".repeat(40),
+                stat: String::new(),
+                diff: String::new(),
+            },
+            checks: vec![],
+            commands: vec![],
+            tool_config_from_base: vec![],
+            pin: None,
+        };
+        let brief = verifier_brief(&inputs, true);
+        assert!(brief.contains("## Scope"));
+        assert!(brief.contains("A changed file that is not on that list is the scope finding"));
+        assert!(
+            brief.contains("judged against the list and not against the wording of a criterion")
+        );
     }
 
     #[test]
