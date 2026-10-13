@@ -76,7 +76,9 @@ itself erred.
 **Merge strategy.** Pull requests may be landed on your main branch by merge commit, squash merge, or
 rebase merge; `athena check --history` accepts all three. It identifies a landing from the job records the
 commit adds, and proves the prediction came before the work from those records, so it does not depend on
-`Athena-*` trailers or on commit ancestry.
+`Athena-*` trailers or on commit ancestry. When `athena land --pr` asks the host to merge, it requests a
+method the repository allows (merge commit, else squash, else rebase); after a squash it rebuilds your local
+branch on the squash commit, keeping later landed jobs and records, so the next pull request opens clean.
 
 Wherever a command takes `<job>`, it accepts a full id, a unique suffix, or `latest`. Every command except
 `stop` and `start` takes `--json`, so an agent can drive Athena through a shell as well as a person can.

@@ -1,0 +1,136 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261013-192158-x22e",
+  "base_commit": "24b09f42b23cffdb1e590a3d61830f263ecf7147",
+  "base_fingerprint": "sha256:168ff63873bff8ca31b2c8991eb6dc8d7dbb2c943884bf05d65228fc83e1874d",
+  "previous_job": "20261013-171935-hjw7",
+  "candidate_commit": "5faf7eafc40d3c1aab34e4d613c6b1f5aa96538b",
+  "candidate_tree": "c4ceace2f50758700b4ca2f979d2dd589440a022",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 25031
+    },
+    {
+      "path": "README.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 10096
+    },
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 60818
+    },
+    {
+      "path": "crates/athena-core/src/land.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 15407
+    },
+    {
+      "path": "crates/athena-gate/src/landing_tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 39921
+    },
+    {
+      "path": "crates/athena-git/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 44376
+    },
+    {
+      "path": "docs/architecture.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 6403
+    },
+    {
+      "path": "docs/decisions.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 131783
+    },
+    {
+      "path": "docs/design/athena-v0.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 148896
+    },
+    {
+      "path": "docs/design/native-pr-landing.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 41490
+    }
+  ],
+  "fingerprint": "sha256:49230babe5832d886fcd4900cafb16b01facb39f6cedad052db94b477ba5eed8",
+  "violations": [],
+  "producer_report": {
+    "summary": "`athena land --pr` now works on squash-only repositories. Root cause: a squash makes a commit that does not descend from the branch's commits, so after one job lands the local branch no longer sits on main and the next PR conflicts. (1) The REST merge reads allow_merge_commit, allow_squash_merge and allow_rebase_merge from GET repos/{owner}/{repo} and requests the first allowed method in the order merge, squash, rebase. With only squash allowed it sends merge_method=squash plus commit_title and commit_message. With none allowed it fails with an error naming the three flags and sends no merge request. The message comes from the job's landed commit (Git::squash_text): subject as title, rest as body, trailers in the last paragraph, and the merge is refused unless there is exactly one Athena-Job. (2) After the PR is seen merged and the merged content is verified, Athena::land_pr calls resync_onto_merge. It replays the commits after the job's landed commit onto the merged commit (Git::replay), then moves the branch with `git reset --keep`. A conflict is an error and leaves the branch unchanged. If the merged commit is already in the branch, or the job's landed commit is not, nothing happens. (3) Added D88 in docs/decisions.md superseding D87. It cites Sri's choice and states the host's flags (squash true, merge commit false, rebase false), taken from the request and not re-read from the host. D87 is marked superseded. Rewrote native-pr-landing.md §5.2a to describe method discovery, the squash message and the resync. Updated the matching paragraph in athena-v0.md §7.3, plus CHANGELOG.md, README.md and docs/architecture.md.",
+    "files": [
+      "crates/athena-core/src/gh.rs",
+      "crates/athena-core/src/land.rs",
+      "crates/athena-git/src/lib.rs",
+      "crates/athena-gate/src/landing_tests.rs",
+      "docs/decisions.md",
+      "docs/design/native-pr-landing.md",
+      "docs/design/athena-v0.md",
+      "CHANGELOG.md",
+      "README.md",
+      "docs/architecture.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "Run after all code edits; only docs changed afterwards."
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "All suites pass, including the new tests. Re-run after the doc edits."
+      },
+      {
+        "command": "cargo test -p athena-core --locked",
+        "result": "pass",
+        "note": "Criterion 1 tests in gh.rs: the client reads the three flags, a squash-only host gets merge_method=squash with commit_title and commit_message, none allowed fails and sends no PUT. Criterion 3 test in land.rs: after_a_squash_the_branch_is_rebuilt_on_it_and_the_next_pull_request_is_clean."
+      },
+      {
+        "command": "cargo test -p athena-gate --locked a_squash_whose_message_is_built_from_the_landed_commit_passes_the_history_check",
+        "result": "pass",
+        "note": "Criterion 2. Also covered by the full cargo test run. I did not run this filter on its own."
+      }
+    ],
+    "open_issues": [
+      "Not observed: whether GitHub appends text to a commit_message supplied through the merge API, or adds a PR number to commit_title. No call was made to the host. The docs say so, and the landing rule does not depend on trailers.",
+      "The resync rewrites the branch's commits after the landed job: their ids change and the author becomes whoever runs the command. Documented in D88's tradeoff.",
+      "The resync is exercised through resync_tip and Git::replay on real repositories, but Athena::resync_onto_merge and the land_pr wiring have no end-to-end test. crates/athena-cli/tests/lifecycle.rs, crates/athena-core/src/pr.rs, chain.rs, jobs.rs and invariant.rs were not changed.",
+      "Not done: the brief lists lifecycle.rs, pr.rs, chain.rs, jobs.rs and invariant.rs as expected deliverables. I changed none of them because no change there was needed."
+    ],
+    "mistakes": [
+      "My first resync test built the simulated squash from the landed commit's tree only, so it lacked main's own commit. Fixed by building the squash tree with merge_tree.",
+      "The first gh.rs test update asserted the repo-path prefix with a trailing slash. The new repository GET has no slash, so I relaxed the check."
+    ],
+    "learnings": [
+      "Bash is limited to cargo, git, ls and similar, so no tail or grep on cargo output. Use `cargo test -q` to keep output short.",
+      "athena-git has no dependency on other Athena crates and is tested with real temporary repositories (Git::isolated, testutil). The gate crate cannot depend on core, so the message builder lives in athena-git.",
+      "The gate already accepts squashes by records alone, via landing_tests.rs helpers (stage_landing, judge, history_of). The squash history check therefore only needed a message-builder test, not a gate change.",
+      "The only Athena-Job trailer a squash needs is the one on the job's landed commit; Git::trailers (git interpret-trailers) reads only the last paragraph, so counting there proves the placement.",
+      "The boundary scan avoids the word for the guarded push flag by splitting a string constant in athena-git. I kept the docs and code free of the banned words."
+    ],
+    "desires": [
+      "Permission to read the saved tool-output file so a long cargo failure can be searched.",
+      "A way to run a single test in the CLI crate end to end with a fake gh program, to cover the full land --pr resync path."
+    ]
+  }
+}

@@ -19,7 +19,7 @@ use crate::{Athena, Ui};
 use anyhow::{Context, Result, bail};
 use athena_data::JobId;
 use athena_data::records::Verdict;
-use athena_git::Git;
+use athena_git::{CommitText, Git};
 use serde::Serialize;
 use serde_json::Value;
 use std::process::{Command, Stdio};
@@ -95,8 +95,72 @@ pub trait PrHost: Host {
     fn open_pr(&self, pr: &NewPr) -> Result<u64>;
     /// The state of the checks on a commit.
     fn checks(&self, commit: &str) -> Result<Checks>;
-    /// Asks the host to merge the pull request, guarded by the head commit it was opened with.
-    fn merge(&self, number: u64, head: &str) -> Result<()>;
+    /// Asks the host to merge the pull request, guarded by the head commit it was opened with, by a merge
+    /// method the repository allows (see [`MergeMethods::choose`]). `text` is the message a squash carries.
+    fn merge(&self, number: u64, head: &str, text: &CommitText) -> Result<()>;
+}
+
+/// A way the host can merge a pull request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeMethod {
+    /// A merge commit.
+    Merge,
+    /// One new commit on the base branch holding the whole change.
+    Squash,
+    /// The branch's commits replayed on the base branch.
+    Rebase,
+}
+
+impl MergeMethod {
+    /// The name the host's merge endpoint takes.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MergeMethod::Merge => "merge",
+            MergeMethod::Squash => "squash",
+            MergeMethod::Rebase => "rebase",
+        }
+    }
+}
+
+/// The merge methods a repository allows, as the host reports them
+/// (`allow_merge_commit`, `allow_squash_merge`, `allow_rebase_merge`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MergeMethods {
+    pub merge: bool,
+    pub squash: bool,
+    pub rebase: bool,
+}
+
+impl MergeMethods {
+    /// Reads the three flags from the repository reply. A flag the host does not report counts as not allowed.
+    pub fn from_repository(repo: &Value) -> MergeMethods {
+        let flag = |name: &str| repo[name].as_bool() == Some(true);
+        MergeMethods {
+            merge: flag("allow_merge_commit"),
+            squash: flag("allow_squash_merge"),
+            rebase: flag("allow_rebase_merge"),
+        }
+    }
+
+    /// The method to request: a merge commit when allowed (it keeps the branch's commits as ancestors), else a
+    /// squash, else a rebase. When none is allowed it is an error that names what the host reported.
+    pub fn choose(&self) -> Result<MergeMethod> {
+        if self.merge {
+            Ok(MergeMethod::Merge)
+        } else if self.squash {
+            Ok(MergeMethod::Squash)
+        } else if self.rebase {
+            Ok(MergeMethod::Rebase)
+        } else {
+            bail!(
+                "the host allows no merge method for this repository (allow_merge_commit {}, \
+                 allow_squash_merge {}, allow_rebase_merge {}); allow one in the repository settings",
+                self.merge,
+                self.squash,
+                self.rebase
+            )
+        }
+    }
 }
 
 /// The remote git repository the branch is pushed to.
@@ -241,11 +305,19 @@ impl PrHost for GhClient<'_> {
         Ok(classify_checks(&runs, &status))
     }
 
-    fn merge(&self, number: u64, head: &str) -> Result<()> {
+    fn merge(&self, number: u64, head: &str, text: &CommitText) -> Result<()> {
+        let repo = self.api("GET", &format!("repos/{}", self.repository), &[])?;
+        let method = MergeMethods::from_repository(&repo).choose()?;
+        let mut fields = vec![("sha", head), ("merge_method", method.as_str())];
+        if method == MergeMethod::Squash {
+            // The squash message is built by Athena, so the job's trailers stay in its last paragraph.
+            fields.push(("commit_title", text.title.as_str()));
+            fields.push(("commit_message", text.body.as_str()));
+        }
         self.api(
             "PUT",
             &self.repo_path(&format!("pulls/{number}/merge")),
-            &[("sha", head), ("merge_method", "merge")],
+            &fields,
         )?;
         Ok(())
     }
@@ -356,6 +428,8 @@ pub struct LandPr<'a> {
     pub verified_fingerprint: &'a str,
     /// The pull request's text. Its base is the host's default branch, read when the request is opened.
     pub pr: PrDraft<'a>,
+    /// The message a squash merge carries: the job's title, and its trailers in the last paragraph.
+    pub squash: &'a CommitText,
     pub host_name: &'a str,
     pub repository: &'a str,
     /// The `[landing] merge_via_rest` setting.
@@ -408,7 +482,7 @@ pub fn land_pr(job: &LandPr) -> Result<PrReport> {
         // The merge gate: the setting is on and every check is green. Nothing else reaches the host's
         // merge endpoint.
         if job.merge_via_rest && seen == Checks::Green {
-            job.host.merge(link.pr_number, &link.head)?;
+            job.host.merge(link.pr_number, &link.head, job.squash)?;
             merge_requested = true;
             observe_merge(job.host, job.content, &mut link, job.verified_fingerprint)?;
         }
@@ -573,8 +647,9 @@ impl Athena {
             git: &self.git,
             name: remote_name,
         };
-        let report = match landed_commit(&self.git, &head, &id, &verification.verified_fingerprint)
-        {
+        let landed = landed_commit(&self.git, &head, &id, &verification.verified_fingerprint);
+        let landed_id = landed.as_ref().ok().cloned();
+        let report = match landed {
             Ok(landed) => land_pr(&LandPr {
                 state: &self.state,
                 job: &id,
@@ -586,6 +661,7 @@ impl Athena {
                     body: &body,
                     head: &branch,
                 },
+                squash: &self.git.squash_text(&landed)?,
                 host_name: &host_name,
                 repository: &repository,
                 merge_via_rest: config.landing.merge_via_rest,
@@ -612,6 +688,13 @@ impl Athena {
             "pull request #{} on {}/{}: {:?}",
             report.link.pr_number, report.link.host, report.link.repository, report.link.state
         ));
+        // A merge the host made without the branch's commits (a squash or a rebase) leaves the local branch
+        // beside main; bring it onto the merged commit so the next pull request opens clean.
+        if report.link.state == LinkState::Landed
+            && let (Some(landed), Some(merged)) = (&landed_id, &report.link.merged_commit)
+        {
+            self.resync_onto_merge(landed, merged, ui)?;
+        }
         Ok(report)
     }
 }
@@ -623,15 +706,38 @@ mod tests {
     use std::cell::{Cell, RefCell};
     use std::collections::BTreeMap;
 
+    /// The repository reply of a host that allows every merge method.
+    const ALL_METHODS: &str = r#"{"default_branch": "trunk", "allow_merge_commit": true,
+        "allow_squash_merge": true, "allow_rebase_merge": true}"#;
+    /// The repository reply of a host that allows only squash merges.
+    const SQUASH_ONLY: &str = r#"{"default_branch": "trunk", "allow_merge_commit": false,
+        "allow_squash_merge": true, "allow_rebase_merge": false}"#;
+
     struct FakeRunner {
         calls: RefCell<Vec<Vec<String>>>,
+        /// What `GET repos/example/project` answers.
+        repo: &'static str,
+    }
+    impl FakeRunner {
+        fn new(repo: &'static str) -> Self {
+            FakeRunner {
+                calls: RefCell::new(vec![]),
+                repo,
+            }
+        }
+    }
+    fn text() -> CommitText {
+        CommitText {
+            title: "Change a".into(),
+            body: "Body.\n\nAthena-Job: bootstrap\n".into(),
+        }
     }
     impl Runner for FakeRunner {
         fn gh(&self, args: &[String]) -> Result<String> {
             self.calls.borrow_mut().push(args.to_vec());
             let path = args.iter().find(|a| a.starts_with("repos/")).unwrap();
             Ok(if path == "repos/example/project" {
-                r#"{"default_branch": "trunk"}"#.to_string()
+                self.repo.to_string()
             } else if path.ends_with("/pulls") {
                 r#"{"number": 7}"#.to_string()
             } else if path.contains("/pulls/") && !path.ends_with("/merge") {
@@ -648,9 +754,7 @@ mod tests {
 
     #[test]
     fn the_client_runs_only_gh_api_with_rest_paths() {
-        let runner = FakeRunner {
-            calls: RefCell::new(vec![]),
-        };
+        let runner = FakeRunner::new(ALL_METHODS);
         let client = GhClient {
             runner: &runner,
             repository: "example/project".into(),
@@ -663,7 +767,7 @@ mod tests {
         };
         assert_eq!(client.open_pr(&pr).unwrap(), 7);
         assert_eq!(client.checks("abc").unwrap(), Checks::Green);
-        client.merge(7, "abc").unwrap();
+        client.merge(7, "abc", &text()).unwrap();
         let link = PrLink {
             pr_number: 7,
             host: HOST.into(),
@@ -676,17 +780,97 @@ mod tests {
         assert_eq!(client.merged_commit(&link).unwrap(), Some("m1".into()));
 
         let calls = runner.calls.borrow();
-        assert_eq!(calls.len(), 5);
+        // open, checks (two reads), the repository's methods, the merge, the merged lookup.
+        assert_eq!(calls.len(), 6);
         for args in calls.iter() {
             assert_eq!(args[0], "api", "{args:?}");
             assert_eq!(args[1], "--method");
-            assert!(args[3].starts_with("repos/example/project/"), "{args:?}");
+            assert!(args[3].starts_with("repos/example/project"), "{args:?}");
             assert!(!args.iter().any(|a| a == "pr" || a == "--auto"), "{args:?}");
         }
         assert_eq!(calls[0][3], "repos/example/project/pulls");
         assert_eq!(calls[0][2], "POST");
-        assert_eq!(calls[3][2], "PUT");
-        assert_eq!(calls[3][3], "repos/example/project/pulls/7/merge");
+        assert_eq!(calls[3][3], "repos/example/project");
+        assert_eq!(calls[4][2], "PUT");
+        assert_eq!(calls[4][3], "repos/example/project/pulls/7/merge");
+        // A merge commit is allowed, so it is requested, with no message of ours.
+        assert!(calls[4].contains(&"merge_method=merge".to_string()));
+        assert!(!calls[4].iter().any(|a| a.starts_with("commit_")));
+    }
+
+    /// The arguments of the merge request a client makes against a repository reply.
+    fn merge_request(repo: &'static str) -> Result<Vec<String>> {
+        let runner = FakeRunner::new(repo);
+        let client = GhClient {
+            runner: &runner,
+            repository: "example/project".into(),
+        };
+        client.merge(7, "abc", &text())?;
+        let calls = runner.calls.borrow();
+        Ok(calls.last().unwrap().clone())
+    }
+
+    #[test]
+    fn with_only_squash_allowed_the_merge_asks_for_a_squash_carrying_the_jobs_trailers() {
+        let args = merge_request(SQUASH_ONLY).unwrap();
+        assert_eq!(args[2], "PUT");
+        for wanted in [
+            "sha=abc",
+            "merge_method=squash",
+            "commit_title=Change a",
+            "commit_message=Body.\n\nAthena-Job: bootstrap\n",
+        ] {
+            assert!(args.contains(&wanted.to_string()), "{wanted:?} in {args:?}");
+        }
+        assert!(!args.contains(&"merge_method=merge".to_string()));
+    }
+
+    #[test]
+    fn the_merge_method_is_chosen_from_what_the_host_allows() {
+        let flags = |merge, squash, rebase| MergeMethods {
+            merge,
+            squash,
+            rebase,
+        };
+        assert_eq!(
+            flags(true, true, true).choose().unwrap(),
+            MergeMethod::Merge
+        );
+        assert_eq!(
+            flags(false, true, true).choose().unwrap(),
+            MergeMethod::Squash
+        );
+        assert_eq!(
+            flags(false, false, true).choose().unwrap(),
+            MergeMethod::Rebase
+        );
+        assert_eq!(
+            MergeMethods::from_repository(&json!({
+                "allow_merge_commit": false, "allow_squash_merge": true, "allow_rebase_merge": false
+            })),
+            flags(false, true, false)
+        );
+        // A flag the host leaves out is not allowed.
+        assert_eq!(
+            MergeMethods::from_repository(&json!({})),
+            flags(false, false, false)
+        );
+    }
+
+    #[test]
+    fn with_no_merge_method_allowed_the_merge_fails_clearly_and_sends_nothing() {
+        let none = r#"{"default_branch": "trunk", "allow_merge_commit": false,
+            "allow_squash_merge": false, "allow_rebase_merge": false}"#;
+        let runner = FakeRunner::new(none);
+        let client = GhClient {
+            runner: &runner,
+            repository: "example/project".into(),
+        };
+        let err = client.merge(7, "abc", &text()).unwrap_err().to_string();
+        assert!(err.contains("allows no merge method"), "{err}");
+        assert!(err.contains("allow_squash_merge false"), "{err}");
+        // Only the read of the repository happened; no PUT.
+        assert_eq!(runner.calls.borrow().len(), 1);
     }
 
     #[test]
@@ -810,7 +994,7 @@ mod tests {
             self.checked.borrow_mut().push(commit.to_string());
             Ok(self.checks)
         }
-        fn merge(&self, _: u64, _: &str) -> Result<()> {
+        fn merge(&self, _: u64, _: &str, _: &CommitText) -> Result<()> {
             self.merges.set(self.merges.get() + 1);
             *self.merged.borrow_mut() = Some(self.merge_makes.to_string());
             Ok(())
@@ -869,6 +1053,7 @@ mod tests {
                     body: "b",
                     head: "athena/bootstrap",
                 },
+                squash: &text(),
                 host_name: HOST,
                 repository: "example/project",
                 merge_via_rest,
@@ -969,9 +1154,7 @@ mod tests {
 
     #[test]
     fn the_client_reads_the_default_branch_from_the_repository() {
-        let runner = FakeRunner {
-            calls: RefCell::new(vec![]),
-        };
+        let runner = FakeRunner::new(ALL_METHODS);
         let client = GhClient {
             runner: &runner,
             repository: "example/project".into(),
@@ -1002,6 +1185,7 @@ mod tests {
                 body: "b",
                 head: "athena/bootstrap",
             },
+            squash: &text(),
             host_name: HOST,
             repository: "example/project",
             merge_via_rest: false,
@@ -1328,6 +1512,7 @@ mod tests {
                     body: "b",
                     head: branch,
                 },
+                squash: &text(),
                 host_name: HOST,
                 repository: "example/project",
                 merge_via_rest: false,
@@ -1398,6 +1583,7 @@ mod tests {
                 body: "b",
                 head: "athena/bootstrap",
             },
+            squash: &text(),
             host_name: HOST,
             repository: "example/project",
             merge_via_rest: true,

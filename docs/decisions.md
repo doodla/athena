@@ -1898,6 +1898,7 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 
 ## D87 · Merge commits are the landing shape for pull requests; `land --pr` reruns after the merge
 
+- **Superseded by D88** for the landing shape (merge commits only). The two rerun fixes below stand.
 - **Decision:** Pull requests land as merge commits. The opt-in REST merge already requests `merge`
   (unchanged), and the design (`docs/design/native-pr-landing.md` §5.2a, `docs/design/athena-v0.md` §7.3) now
   says a user who merges by hand should pick a merge commit. The gate still accepts squash and rebase merges
@@ -1915,3 +1916,36 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   PR #39 broke ancestry, and the next pull request conflicted. A simulated history of two merge-commit landings
   passed `athena check --history` with 0 violations. The new tests are in `crates/athena-core/src/pr.rs`,
   `crates/athena-core/src/gh.rs` and `crates/athena-git/src/lib.rs`.
+
+## D88 · The merge method follows the repository; a squash is followed by a resync of the local branch
+
+- **Decision:** Supersedes D87's "pull requests land as merge commits". Sri, the repository owner, chose to
+  make Athena work on squash-only repositories rather than enable merge commits on this one, so that it works
+  on any user's repository. This repository's host reports `allow_squash_merge` true, `allow_merge_commit`
+  false and `allow_rebase_merge` false. Three changes (`docs/design/native-pr-landing.md` §5.2a):
+  (1) the REST merge reads those three flags from `GET repos/{owner}/{repo}` and requests the first allowed
+  method in the order merge, squash, rebase (so a repository that allows merge commits behaves as before), and
+  fails with a clear error when none is allowed; a squash carries `commit_title` and `commit_message` built
+  from the job's landed commit, with the trailers in the last paragraph and exactly one `Athena-Job`
+  (`Git::squash_text`); (2) once the merge is seen and the merged content is verified, Athena rebuilds the
+  local branch on the merged commit by replaying the commits after the job's landed commit, so later landed
+  jobs, records and hand work are kept and the next `athena land --pr` opens a clean pull request
+  (`Athena::resync_onto_merge`, `Git::replay`); (3) the docs no longer say pull requests always land as merge
+  commits. D87's two rerun fixes (fetch the merged commit; ask the host before requiring the landed commit)
+  stand.
+- **Alternatives:** Enable merge commits on this repository (rejected by Sri: Athena would then work only on
+  repositories that allow them); keep squash and rebuild the landed commit by hand after each job, as for PR
+  #40 (the failure this removes); exempt the squash from the history check (weakens the check); rewrite the
+  pushed work branch (Athena never forces a push beyond its own branch).
+- **Tradeoff:** The resync rewrites the local branch's unpushed commits after the landed job: their ids change
+  and their authors become the person running the command. A later commit that conflicts with the squash stops
+  the resync with an error and leaves the branch as it was (the user rebuilds by hand, as before). The squash
+  text is Athena's; whether the host appends its own text to a supplied message was not observed here, and the
+  landing rule does not depend on trailers (M30).
+- **Reversal cost:** Low. One host read, one message builder and one replay; docs.
+- **Provenance:** Sri's choice, given in the request for this job; the flags are the host's report quoted in
+  that request, not re-read here. The failure is PR #40, which needed a hand rebuild (reported, not re-run).
+  Tests: `crates/athena-core/src/gh.rs` (method choice, squash-only request, none allowed),
+  `crates/athena-core/src/land.rs` (resync on a real temporary repository),
+  `crates/athena-git/src/lib.rs` (`replay`, `squash_text`, `reset_keep`) and
+  `crates/athena-gate/src/landing_tests.rs` (history check passes on a squash built from that message).

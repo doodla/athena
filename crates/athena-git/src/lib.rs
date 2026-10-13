@@ -66,6 +66,14 @@ pub struct Git {
     args: Vec<String>,
 }
 
+/// The title and body of a commit message, as a host takes them for a squash merge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitText {
+    pub title: String,
+    /// Everything after the title; the trailers are its last paragraph.
+    pub body: String,
+}
+
 /// One entry of `git ls-tree -r`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TreeEntry {
@@ -600,6 +608,73 @@ impl Git {
         })
     }
 
+    /// Moves the current branch and the work tree to `commit`, which need not descend from the branch. Local
+    /// edits are kept (`reset --keep`); if one conflicts with the move, git refuses and the reason is returned.
+    pub fn reset_keep(&self, commit: &str) -> Result<std::result::Result<(), String>> {
+        let exit = self.exit(["reset", "--keep", "--quiet", commit], None, &[])?;
+        Ok(match exit.code {
+            Some(0) => Ok(()),
+            _ => Err(exit.stderr),
+        })
+    }
+
+    /// The text a squash merge of `commit` should carry: its subject as the title, and the rest of its
+    /// message as the body. The trailers stay in the body's last paragraph, and the message must hold exactly
+    /// one `Athena-Job` trailer there, so a squash on the base branch names one job.
+    pub fn squash_text(&self, commit: &str) -> Result<CommitText> {
+        let message = self.message(commit)?;
+        let message = message.trim();
+        let (title, rest) = message.split_once('\n').unwrap_or((message, ""));
+        let jobs = self
+            .trailers(message)?
+            .iter()
+            .filter(|(key, _)| key == "Athena-Job")
+            .count();
+        if jobs != 1 {
+            return Err(GitError::Refused(format!(
+                "commit {commit} has {jobs} Athena-Job trailers in its last paragraph; a squash message needs exactly one"
+            )));
+        }
+        Ok(CommitText {
+            title: title.trim().to_string(),
+            body: format!("{}\n", rest.trim()),
+        })
+    }
+
+    /// Rebuilds the commits in `from..to` (first-parent chain, oldest first) on top of `onto`, one new commit
+    /// per old commit that changes something, with the old message. Each change is carried by a three-way merge
+    /// from the old commit's first parent, so a merge commit is rebuilt as the single change it made. Nothing
+    /// is moved: the new tip is returned, and `onto` itself when there is nothing to carry. A change that
+    /// cannot be carried without a conflict is an error and nothing is left behind but unreferenced objects.
+    pub fn replay(&self, onto: &str, from: &str, to: &str, sign: bool) -> Result<String> {
+        let commits = self.run([
+            "rev-list",
+            "--reverse",
+            "--first-parent",
+            &format!("{from}..{to}"),
+        ])?;
+        let mut tip = onto.to_string();
+        for commit in commits.lines() {
+            let parent = self
+                .parents(commit)?
+                .into_iter()
+                .next()
+                .ok_or_else(|| GitError::Refused(format!("commit {commit} has no parent")))?;
+            let Some(tree) = self.merge_tree(&parent, &tip, commit)? else {
+                let subject = self.run(["log", "-1", "--format=%s", commit])?;
+                return Err(GitError::Refused(format!(
+                    "commit {commit} (\"{}\") conflicts with {onto}",
+                    subject.trim()
+                )));
+            };
+            if tree == self.tree_of(&tip)? {
+                continue;
+            }
+            tip = self.commit_tree(&tree, &[&tip], &self.message(commit)?, sign)?;
+        }
+        Ok(tip)
+    }
+
     /// Writes the current index as a tree (used by the commit-msg hook) and returns its id.
     pub fn write_index_tree(&self) -> Result<String> {
         Ok(self.run(["write-tree"])?.trim().to_string())
@@ -996,5 +1071,110 @@ mod tests {
         write_files(dir.path(), &[("a.txt", "theirs\n")]);
         let theirs = commit_all(&git, "theirs");
         assert_eq!(git.merge_tree(&base, &ours, &theirs).unwrap(), None);
+    }
+
+    #[test]
+    fn a_squash_text_splits_the_title_and_keeps_one_job_trailer_last() {
+        let (dir, git) = repo_with(&[("a.txt", "a\n")]);
+        write_files(dir.path(), &[("a.txt", "b\n")]);
+        let ok = commit_all(
+            &git,
+            "Change a\n\nWhy it changed.\n\nAthena-Job: j1\nAthena-Verified-Content: fp\n",
+        );
+        let text = git.squash_text(&ok).unwrap();
+        assert_eq!(text.title, "Change a");
+        assert_eq!(
+            text.body,
+            "Why it changed.\n\nAthena-Job: j1\nAthena-Verified-Content: fp\n"
+        );
+        // Joined the way a host joins them, the trailers parse and name one job.
+        let joined = format!("{}\n\n{}", text.title, text.body);
+        let trailers = git.trailers(&joined).unwrap();
+        assert_eq!(
+            trailers.iter().filter(|(k, _)| k == "Athena-Job").count(),
+            1
+        );
+
+        write_files(dir.path(), &[("a.txt", "c\n")]);
+        let none = commit_all(&git, "No trailers\n");
+        assert!(git.squash_text(&none).is_err());
+        write_files(dir.path(), &[("a.txt", "d\n")]);
+        let two = commit_all(&git, "Two\n\nAthena-Job: j1\nAthena-Job: j2\n");
+        assert!(git.squash_text(&two).is_err());
+    }
+
+    #[test]
+    fn replay_carries_later_commits_onto_a_squash_and_keeps_their_messages() {
+        let (dir, git) = repo_with(&[("a.txt", "a\n"), ("keep.txt", "k\n")]);
+        let base = git.head().unwrap().unwrap();
+        write_files(dir.path(), &[("a.txt", "job a\n")]);
+        let landed = commit_all(&git, "Job a\n\nAthena-Job: ja\n");
+        write_files(dir.path(), &[("b.txt", "job b\n")]);
+        commit_all(&git, "Job b\n\nAthena-Job: jb\n");
+        write_files(dir.path(), &[("records/x.json", "{}\n")]);
+        let tip = commit_all(&git, "Records\n\nAthena-Job: jb\n");
+        // The host's squash of the first job, on a main that also moved on.
+        git.run(["checkout", "-q", "-b", "main2", &base]).unwrap();
+        write_files(dir.path(), &[("other.txt", "o\n")]);
+        let moved = commit_all(&git, "Somebody else\n");
+        let squash_tree = git.tree_of(&landed).unwrap();
+        let squash = git
+            .commit_tree(&squash_tree, &[&moved], "Job a\n", false)
+            .unwrap();
+
+        let new_tip = git.replay(&squash, &landed, &tip, false).unwrap();
+        assert_ne!(new_tip, tip);
+        assert!(git.is_ancestor(&squash, &new_tip).unwrap());
+        let log = git
+            .run(["log", "--format=%s", &format!("{squash}..{new_tip}")])
+            .unwrap();
+        assert_eq!(log.lines().collect::<Vec<_>>(), ["Records", "Job b"]);
+        // The content: the later work on top of the squash.
+        let show = |path: &str| git.show_file(&new_tip, path).unwrap();
+        assert_eq!(show("b.txt").unwrap(), b"job b\n");
+        assert_eq!(show("records/x.json").unwrap(), b"{}\n");
+        assert_eq!(show("a.txt").unwrap(), b"job a\n");
+        // Nothing to carry: the squash itself.
+        assert_eq!(
+            git.replay(&squash, &landed, &landed, false).unwrap(),
+            squash
+        );
+    }
+
+    #[test]
+    fn replay_reports_a_conflict_and_changes_nothing() {
+        let (dir, git) = repo_with(&[("a.txt", "a\n")]);
+        let base = git.head().unwrap().unwrap();
+        write_files(dir.path(), &[("a.txt", "one\n")]);
+        let landed = commit_all(&git, "One");
+        write_files(dir.path(), &[("a.txt", "two\n")]);
+        let tip = commit_all(&git, "Two");
+        git.run(["checkout", "-q", "-b", "side", &base]).unwrap();
+        write_files(dir.path(), &[("a.txt", "different\n")]);
+        let onto = commit_all(&git, "Different");
+        let err = git.replay(&onto, &landed, &tip, false).unwrap_err();
+        assert!(err.to_string().contains("conflicts"), "{err}");
+        assert_eq!(git.head().unwrap().unwrap(), onto);
+    }
+
+    #[test]
+    fn reset_keep_moves_the_branch_and_keeps_unrelated_local_edits() {
+        let (dir, git) = repo_with(&[("a.txt", "a\n"), ("local.txt", "l\n")]);
+        let base = git.head().unwrap().unwrap();
+        write_files(dir.path(), &[("a.txt", "b\n")]);
+        let next = commit_all(&git, "next");
+        git.run(["checkout", "-q", "-b", "other", &base]).unwrap();
+        write_files(dir.path(), &[("local.txt", "edited\n")]);
+        assert_eq!(git.reset_keep(&next).unwrap(), Ok(()));
+        assert_eq!(git.head().unwrap().unwrap(), next);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("local.txt")).unwrap(),
+            "edited\n"
+        );
+        // An edit to a file the move changes is refused, and the branch stays.
+        git.run(["reset", "-q", "--hard", &base]).unwrap();
+        write_files(dir.path(), &[("a.txt", "mine\n")]);
+        assert!(git.reset_keep(&next).unwrap().is_err());
+        assert_eq!(git.head().unwrap().unwrap(), base);
     }
 }

@@ -4,7 +4,10 @@ This page is the map of the code. The design and its reasons are in
 [`design/athena-v0.md`](design/athena-v0.md), and every significant choice is in
 [`decisions.md`](decisions.md). The landing gate's rule for squash merges of a chain of jobs (D69) is in
 [`design/squash-chain-landing.md`](design/squash-chain-landing.md); the gate implements it in
-`crates/athena-gate/src/invariant.rs`.
+`crates/athena-gate/src/invariant.rs`. How `athena land --pr` picks the host's merge method, writes the squash
+message and rebuilds the local branch after a squash (D88) is in
+[`design/native-pr-landing.md`](design/native-pr-landing.md) §5.2a; the code is in
+`crates/athena-core/src/gh.rs`, `crates/athena-core/src/land.rs` and `crates/athena-git/src/lib.rs`.
 
 ## The shape
 

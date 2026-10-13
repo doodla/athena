@@ -9,6 +9,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `athena land --pr` works on repositories that allow only squash merges (D88, which supersedes the
+  merge-commit decision of D87 at the owner's, Sri's, choice). The REST merge reads `allow_merge_commit`,
+  `allow_squash_merge` and `allow_rebase_merge` from the host and requests the first allowed method in the
+  order merge, squash, rebase; with none allowed it fails with an error naming the flags. A squash carries a
+  message built from the job's landed commit: its title, and the trailers in the last paragraph with exactly
+  one `Athena-Job`, so `athena check --history` passes on main. After a squash (or rebase) is seen merged,
+  Athena rebuilds the local branch on the merged commit by replaying the commits after the job's landed
+  commit (`Git::replay`, `Athena::resync_onto_merge`), so later landed jobs, records and hand work are kept
+  and the next pull request opens clean. A conflict stops the rebuild and leaves the branch unchanged.
 - A `root-cause` default in `defaults.toml`: fix the fault where it originates, name an out-of-scope cause
   and propose the fix, and describe the root cause in the change. The reader now sees a compact rendering of
   the defaults (the first sentence of each statement); producer and verifier briefs still get the full text.
@@ -30,7 +39,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   the object only, no branch or ref moves). When the job's pull request link exists, the host is asked about
   the merge before the landed commit is required on the current branch, so a merged job is confirmed even if
   its landed commit is not on this branch. A job with no link and no landed commit still reports `not landed
-  on this branch`. Merge commits are recorded as the landing shape for pull requests (D87).
+  on this branch`. (D87 also recorded merge commits as the landing shape; D88 replaces that.)
 - `athena land --pr` now pushes the job's locally landed commit (the one with the `Athena-Job` trailer and
   the records) instead of the bare candidate or a synthetic records commit, and says so and pushes nothing
   when the job is not landed locally. A rerun on an open pull request whose stored head differs replaces

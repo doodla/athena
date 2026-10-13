@@ -317,6 +317,41 @@ fn a_squash_merge_with_no_trailers_lands() {
     assert_eq!(history_of(&git), vec![]);
 }
 
+#[test]
+fn a_squash_whose_message_is_built_from_the_landed_commit_passes_the_history_check() {
+    let (dir, git) = owner_repo();
+    let base = git.head().unwrap().unwrap();
+    let fp = stage_landing(dir.path(), &git, &base, &HONEST);
+    let landed = commit(
+        &git,
+        &format!(
+            "Change a\n\nWhy a changed.\n\nAthena-Job: {JOB}\nAthena-Verified-Content: {fp}\n"
+        ),
+    );
+    // The text the host is asked to use for the squash, and the squash it makes: one commit on the base.
+    let text = git.squash_text(&landed).unwrap();
+    let message = format!("{}\n\n{}", text.title, text.body);
+    let squash = git
+        .commit_tree(&git.tree_of(&landed).unwrap(), &[&base], &message, false)
+        .unwrap();
+    git.run(["reset", "-q", "--hard", &squash]).unwrap();
+
+    // The trailers are the last paragraph and name exactly one job.
+    let trailers = git.trailers(&git.message(&squash).unwrap()).unwrap();
+    assert_eq!(
+        trailers
+            .iter()
+            .filter(|(key, _)| key == "Athena-Job")
+            .collect::<Vec<_>>(),
+        [&("Athena-Job".to_string(), JOB.to_string())]
+    );
+    assert!(trailers.contains(&("Athena-Verified-Content".to_string(), fp)));
+    assert!(git.message(&squash).unwrap().starts_with("Change a\n\n"));
+    assert_eq!(judge(&git, "HEAD"), vec![]);
+    assert_eq!(history_of(&git), vec![]);
+    assert_eq!(git.parents(&squash).unwrap(), [base]);
+}
+
 /// A squash that carries a landed job, an intervention on it, and the re-score `athena intervene --job`
 /// wrote. The closing score was made before the intervention, so it must not be recomputed with it.
 fn squash_with_intervention(forge: bool) -> Vec<Violation> {
