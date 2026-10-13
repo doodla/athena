@@ -38,6 +38,15 @@ mod tests {
     }
 }
 
+/// How long `athena land --pr` waits for a pull request's checks: thirty looks, twenty seconds apart.
+pub fn checks_poll(sleep: &dyn Fn(std::time::Duration)) -> athena_core::gh::Poll<'_> {
+    athena_core::gh::Poll {
+        attempts: 30,
+        delay: std::time::Duration::from_secs(20),
+        sleep,
+    }
+}
+
 /// The running binary's version and source commit, embedded at build time (D45). A build that names no
 /// commit counts as dirty.
 pub fn build_info() -> Build {

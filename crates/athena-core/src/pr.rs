@@ -229,6 +229,22 @@ pub fn apply_outcome(link: &mut PrLink, outcome: &MergeOutcome) {
     }
 }
 
+/// Looks at the pull request once: finds the merge by the stored number, checks the merged content, and
+/// records the outcome on `link`. A link that is no longer open is left as it is.
+pub fn observe_merge(
+    host: &dyn Host,
+    content: &dyn Content,
+    link: &mut PrLink,
+    verified_fingerprint: &str,
+) -> Result<MergeOutcome> {
+    if link.state != LinkState::Open {
+        return Ok(MergeOutcome::NotMerged);
+    }
+    let outcome = check_merged(host, content, link, verified_fingerprint)?;
+    apply_outcome(link, &outcome);
+    Ok(outcome)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

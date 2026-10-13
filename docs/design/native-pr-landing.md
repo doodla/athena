@@ -5,7 +5,19 @@ F1-F8; revision recorded in D85); re-reviewed in review 3 (`design/reviews/nativ
 verdict accept with changes) and revised again for its findings N1-N4 (D86). Paths in this document are
 relative to `docs/` unless they start with `docs/`, `crates/` or are a bare file at the repository root.
 This document builds nothing; slice 1 of the build (owned mode core: `crates/athena-core/src/pr.rs`) follows
-it, and the command, the host calls and stealth mode are later slices.
+it. Slice 2 (`athena land <job> --pr`, `crates/athena-core/src/gh.rs`) adds the command and the host calls in
+owned mode, described below; stealth mode is a later slice.
+
+**Slice 2 as built.** The host client runs only `gh api` with REST paths (`repos/{owner}/{repo}/pulls`,
+`commits/{sha}/check-runs`, `commits/{sha}/status`, `pulls/{n}/merge`); no `gh pr` subcommand and no
+query-language endpoint is used. The command pushes the job's branch `athena/<job>` through `check_push`,
+opens the pull request, stores the link, and reads the checks (red, pending or green; no report at all counts
+as pending). The merge call is made only when the user's opt-in setting `[landing] merge_via_rest` is true; it
+is off when absent, and `athena.toml` does not set it. It is also made only when the checks are green. With
+it off, the command stops at an open, green pull request; the user merges on the host, and running the
+command again finds the merge by the stored number and runs the merged-content check (landed, or
+`merged-unverified`). This is the answer to open question 3 for this slice: Athena merges only when asked to
+by that setting. Tests with a fake host are in `crates/athena-core/src/gh.rs`.
 
 **Revision note (after review 3).** N1: the merged-content check compares fingerprints and a refused merge
 has a named state (§5.4). N2: the pull request number lives in the state directory in both modes (§5.1 step 3).
@@ -362,7 +374,8 @@ sign-off rules, review norms), which the user's instructions govern; designing t
 | Merged content equals the verified fingerprint before Athena reports "landed" (F4) | yes: pre-report check, both modes; test needed (two disjoint-file pull requests from one base: the second is not reported as landed) | the merge itself, which the host performs |
 | The merge is found by stored pull request number (F6) | yes: lookup test needed, in both modes, with no trailer on the merged commit | host answers correctly |
 | Records in stealth mode stay append-only and valid | yes: M4, M5 over the local store | |
-| Merge is the user's decision | | prose-only: Athena does not call a merge |
+| The merge request is made only with `merge_via_rest` on (off by default) and green checks | yes: `with_the_setting_off_no_merge_is_requested_and_the_pull_request_stays_open_and_green`, `with_the_setting_on_and_green_checks_the_rest_merge_is_requested_and_the_job_lands`, `red_or_pending_checks_never_trigger_a_merge_even_with_the_setting_on` in `crates/athena-core/src/gh.rs` | |
+| Merge is the user's decision | yes by default (the setting is off); the user may opt in | the merge itself, which the host performs |
 | Remote host behaves as expected | | prose-only |
 
 New rows would be numbered in `docs/enforcement.md` when the tests exist (M24 requires every named test to

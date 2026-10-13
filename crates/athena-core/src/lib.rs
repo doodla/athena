@@ -16,6 +16,8 @@
 //! - [`status`]: the state of the work, from the repository alone;
 //! - [`nested`]: Athena running inside one of its own jobs;
 //! - [`pr`]: pull-request landing in owned mode: the link store, the push guard, the merged-content check;
+//! - [`gh`]: `athena land --pr`: push the job's branch, open the pull request, wait for green checks, and merge
+//!   over REST only when the opt-in setting is on;
 //! - [`pin`]: a study's repository ref resolved to a commit by the core, and mounted read-only.
 
 pub mod admission;
@@ -24,6 +26,7 @@ pub mod chain;
 pub mod checks;
 pub mod commits;
 pub mod fake;
+pub mod gh;
 pub mod invocation;
 pub mod land;
 pub mod manage;
