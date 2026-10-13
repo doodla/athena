@@ -1,0 +1,108 @@
+{
+  "schema": "study.model/1",
+  "study_id": "firstmate-work-handling",
+  "states": [
+    {"id": "queued", "kind": "initial", "claims": ["c1", "c2"]},
+    {"id": "in-flight", "kind": "active", "claims": ["c1", "c22"]},
+    {"id": "ready", "kind": "waiting", "claims": ["c10", "c11"]},
+    {"id": "close-pending", "kind": "waiting", "claims": ["c14"]},
+    {"id": "done", "kind": "terminal-success", "claims": ["c13"]}
+  ],
+  "counters": [
+    {"id": "places-held", "start": 0, "changed_by": ["t1", "t3"], "claims": ["c3"]}
+  ],
+  "transitions": [
+    {
+      "id": "t1", "from": "queued", "to": "in-flight",
+      "trigger": "the agent runs the spawn script for an item it judged ready", "trigger_evaluated_by": "agent",
+      "guard": "item unheld and unblocked; places-held below the declared capacity when one is declared; an isolated worktree resolved", "guard_evaluated_by": "code",
+      "guard_counters": ["places-held"], "actor": "agent", "failure": null, "retry": null,
+      "claims": ["c1", "c2", "c3", "c21", "c22"]
+    },
+    {
+      "id": "t2", "from": "queued", "to": "queued",
+      "trigger": "the spawn script finds every capacity place held", "trigger_evaluated_by": "code",
+      "guard": "places-held at or above the declared capacity", "guard_evaluated_by": "code",
+      "guard_counters": ["places-held"], "actor": "process", "failure": "capacity full (exit 75)",
+      "retry": {
+        "bound": null, "bound_absent_claims": ["c9"], "backoff": null,
+        "changes": ["places-held falls when another worker records its ready PR or is cleaned up"],
+        "claims": ["c9"]
+      },
+      "claims": ["c3", "c4", "c9"]
+    },
+    {
+      "id": "t3", "from": "in-flight", "to": "ready",
+      "trigger": "the worker reports a PR or a ready branch", "trigger_evaluated_by": "agent",
+      "guard": "the named head is reachable outside the worker's disposable copy", "guard_evaluated_by": "code",
+      "guard_counters": [], "actor": "agent", "failure": null, "retry": null,
+      "claims": ["c10", "c11"]
+    },
+    {
+      "id": "t4", "from": "ready", "to": "done",
+      "trigger": "the merge lands and the agent runs the teardown script", "trigger_evaluated_by": "agent",
+      "guard": "worktree clean and committed work landed", "guard_evaluated_by": "code",
+      "guard_counters": [], "actor": "process", "failure": null, "retry": null,
+      "claims": ["c12", "c13"]
+    },
+    {
+      "id": "t5", "from": "ready", "to": "close-pending",
+      "trigger": "the backlog close fails during teardown", "trigger_evaluated_by": "code",
+      "guard": "none", "guard_evaluated_by": "agent",
+      "guard_counters": [], "actor": "process", "failure": "backlog close fails",
+      "retry": null,
+      "claims": ["c14"]
+    },
+    {
+      "id": "t6", "from": "close-pending", "to": "done",
+      "trigger": "the next session start replays the pending-close record", "trigger_evaluated_by": "code",
+      "guard": "the pending-close record passes the shared validator", "guard_evaluated_by": "code",
+      "guard_counters": [], "actor": "process", "failure": null, "retry": null,
+      "claims": ["c15"]
+    },
+    {
+      "id": "t7", "from": "close-pending", "to": "close-pending",
+      "trigger": "a replay of the pending close ends incomplete", "trigger_evaluated_by": "code",
+      "guard": "none", "guard_evaluated_by": "agent",
+      "guard_counters": [], "actor": "process", "failure": "replayed close incomplete",
+      "retry": {
+        "bound": null, "bound_absent_claims": ["c14"], "backoff": null,
+        "changes": ["nothing"],
+        "claims": ["c14", "c16"]
+      },
+      "claims": ["c14", "c16"]
+    },
+    {
+      "id": "t8", "from": "in-flight", "to": "in-flight",
+      "trigger": "a stale wake shows the worker stopped, looping or unresponsive", "trigger_evaluated_by": "agent",
+      "guard": "none", "guard_evaluated_by": "agent",
+      "guard_counters": [], "actor": "agent", "failure": "worker stale",
+      "retry": {
+        "bound": null, "bound_absent_claims": ["c20"], "backoff": null,
+        "changes": ["the running agent is replaced in the same worktree", "a progress note is appended to the instructions"],
+        "claims": ["c18", "c19", "c20"]
+      },
+      "claims": ["c17", "c18"]
+    }
+  ],
+  "unhandled": {
+    "failures": [
+      {"name": "no session start ever follows a failed close, so the pending close is never replayed", "claims": ["c14", "c15"]}
+    ],
+    "claims": ["c14", "c15"]
+  },
+  "concurrency": {
+    "shared_resources": ["the project's pool of worktrees", "one home's backlog and task records"],
+    "serialized_by": ["one project lock per machine-local firstmate tree, taken for allocation and return"],
+    "limit": null,
+    "on_conflict": "lock contention: the spawn exits 1 and does not wait; capacity full: the spawn exits 75 and the item stays queued",
+    "claims": ["c3", "c5", "c7", "c8"]
+  },
+  "touchpoints": [
+    {
+      "id": "h1", "at": "ready",
+      "no_answer": "none found: the cited text sets no deadline or default for a captain who does not answer",
+      "claims": ["c11"]
+    }
+  ]
+}

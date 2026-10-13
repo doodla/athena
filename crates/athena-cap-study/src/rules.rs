@@ -1391,4 +1391,235 @@ pub(crate) mod tests {
         assert!(!f.repo.reachable(OTHER, PIN));
         assert!(f.repo.file_lines(PIN, "nope").is_none());
     }
+
+    // ---- the firstmate work-handling study, checked against the real pinned tree ------------------------
+
+    use serde::de::DeserializeOwned;
+    use std::path::{Component, Path, PathBuf};
+
+    const STUDY_SHA: &str = "6407052f4c521e39401ce2305dfa45d201249827";
+    const STUDY_FILES: [&str; 6] = [
+        "pin.json",
+        "claims.json",
+        "rationales.json",
+        "model.json",
+        "findings.json",
+        "validation.json",
+    ];
+
+    /// The tree mounted at `pinned-source/`, answering git questions for the one commit it holds.
+    #[derive(Debug)]
+    struct MountedTree {
+        sha: String,
+        root: PathBuf,
+    }
+
+    impl GitLookup for MountedTree {
+        fn file_lines(&self, sha: &str, path: &str) -> Option<Vec<String>> {
+            let plain = Path::new(path)
+                .components()
+                .all(|c| matches!(c, Component::Normal(_)));
+            if sha != self.sha || !plain {
+                return None;
+            }
+            let text = std::fs::read_to_string(self.root.join(path)).ok()?;
+            Some(text.lines().map(String::from).collect())
+        }
+
+        fn reachable(&self, commit: &str, from: &str) -> bool {
+            commit == from && from == self.sha
+        }
+    }
+
+    fn study_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../studies/firstmate-work-handling")
+    }
+
+    fn load<T: DeserializeOwned>(name: &str) -> T {
+        let text = std::fs::read_to_string(study_dir().join(name)).expect("a study file");
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("{name}: {e}"))
+    }
+
+    /// The mounted tree, or `None` where `pinned-source/` is absent (a plain checkout has no mount).
+    fn mounted_tree() -> Option<MountedTree> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../pinned-source");
+        root.is_dir().then(|| MountedTree {
+            sha: STUDY_SHA.into(),
+            root,
+        })
+    }
+
+    /// The study's records, owned.
+    #[derive(Clone)]
+    struct Loaded {
+        pin: Pin,
+        claims: Vec<Claim>,
+        rationales: Vec<Rationale>,
+        model: Model,
+        findings: Vec<Finding>,
+    }
+
+    impl Loaded {
+        fn read() -> Loaded {
+            Loaded {
+                pin: load("pin.json"),
+                claims: load("claims.json"),
+                rationales: load("rationales.json"),
+                model: load("model.json"),
+                findings: load("findings.json"),
+            }
+        }
+
+        fn violations(&self, tree: &MountedTree, rule: &str) -> Vec<String> {
+            let none = BTreeSet::new();
+            let study = Study {
+                pin: &self.pin,
+                claims: &self.claims,
+                runs: &[],
+                rationales: &self.rationales,
+                model: &self.model,
+                findings: &self.findings,
+                user_interventions: &none,
+                template_voice: &[Provenance::Stated],
+                git: tree,
+            };
+            let rule = RULES.iter().find(|r| r.id == rule).expect("a known rule");
+            (rule.check)(&study)
+                .into_iter()
+                .flat_map(|v| v.ids)
+                .collect()
+        }
+
+        fn validate(&self, tree: &MountedTree) -> Validation {
+            let none = BTreeSet::new();
+            validate(&Study {
+                pin: &self.pin,
+                claims: &self.claims,
+                runs: &[],
+                rationales: &self.rationales,
+                model: &self.model,
+                findings: &self.findings,
+                user_interventions: &none,
+                template_voice: &[Provenance::Stated],
+                git: tree,
+            })
+        }
+    }
+
+    #[test]
+    fn the_firstmate_study_passes_every_rule_against_the_pinned_tree() {
+        let Some(tree) = mounted_tree() else {
+            eprintln!("pinned-source/ is absent; the study is not checked against a tree here");
+            return;
+        };
+        let study = Loaded::read();
+        let computed = study.validate(&tree);
+        assert!(
+            computed.passed(),
+            "{:?}",
+            computed
+                .results
+                .iter()
+                .filter(|r| !r.pass)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(computed.results.len(), RULES.len());
+        // The recorded validation is what the rules answer now.
+        let recorded: Validation = load("validation.json");
+        assert_eq!(recorded, computed);
+        // The citations were really checked: the study has file sources, all with quotes.
+        let sources: Vec<&Source> = study
+            .claims
+            .iter()
+            .flat_map(|c| &c.sources)
+            .chain(study.rationales.iter().flat_map(|r| &r.sources))
+            .collect();
+        assert!(sources.len() > 20);
+        assert!(sources.iter().all(|s| s.kind == SourceKind::File));
+    }
+
+    #[test]
+    fn a_wrong_sha_or_a_changed_quote_fails_the_firstmate_study() {
+        let Some(tree) = mounted_tree() else {
+            return;
+        };
+        let study = Loaded::read();
+        assert!(study.violations(&tree, "wrong-sha").is_empty());
+        assert!(study.violations(&tree, "quote-mismatch").is_empty());
+
+        let mut other_sha = study.clone();
+        other_sha.claims[0].sources[0].sha = Some(OTHER.into());
+        assert_eq!(other_sha.violations(&tree, "wrong-sha"), ["c1"]);
+
+        let mut other_pin = study.clone();
+        other_pin.pin.sha = OTHER.into();
+        assert!(
+            other_pin
+                .violations(&tree, "wrong-sha")
+                .contains(&"c1".to_string())
+        );
+        assert!(
+            other_pin
+                .violations(&tree, "bad-citation")
+                .contains(&"c1".to_string())
+        );
+
+        let mut other_quote = study.clone();
+        other_quote.claims[0].sources[0].quote = Some("text that is not in the file".into());
+        assert_eq!(other_quote.violations(&tree, "quote-mismatch"), ["c1"]);
+
+        let mut other_card_quote = study.clone();
+        other_card_quote.rationales[0].sources[0].quote = Some("text that is not there".into());
+        assert_eq!(
+            other_card_quote.violations(&tree, "quote-mismatch"),
+            ["ra1"]
+        );
+
+        let mut other_lines = study;
+        other_lines.claims[0].sources[0].end_line = Some(999_999);
+        assert_eq!(other_lines.violations(&tree, "bad-citation"), ["c1"]);
+    }
+
+    #[test]
+    fn the_firstmate_study_carries_the_pin_and_tags_every_claim() {
+        let study = Loaded::read();
+        assert_eq!(study.pin.sha, STUDY_SHA);
+        assert_eq!(study.pin.sha.len(), 40);
+        for name in STUDY_FILES {
+            let text = std::fs::read_to_string(study_dir().join(name)).unwrap();
+            assert!(!text.contains("UNRESOLVED"), "{name}: a placeholder pin");
+            assert!(!text.to_lowercase().contains("not examined"), "{name}");
+        }
+        for source in study
+            .claims
+            .iter()
+            .flat_map(|c| &c.sources)
+            .chain(study.rationales.iter().flat_map(|r| &r.sources))
+        {
+            assert_eq!(source.sha.as_deref(), Some(STUDY_SHA));
+        }
+        for claim in &study.claims {
+            assert!(
+                claim.text.starts_with("[mechanism] ") || claim.text.starts_with("[prose-only] "),
+                "{}: enforcement is not tagged",
+                claim.id
+            );
+        }
+    }
+
+    #[test]
+    fn a_guard_of_none_is_never_said_to_be_evaluated_by_code() {
+        let study = Loaded::read();
+        let unguarded: Vec<&crate::model::Transition> = study
+            .model
+            .transitions
+            .iter()
+            .filter(|t| t.guard.as_deref() == Some("none"))
+            .collect();
+        assert!(!unguarded.is_empty());
+        for t in unguarded {
+            assert_ne!(t.guard_evaluated_by, EvaluatedBy::Code, "{}", t.id);
+            assert!(t.guard_counters.is_empty(), "{}", t.id);
+        }
+    }
 }
