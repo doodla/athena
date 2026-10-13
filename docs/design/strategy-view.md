@@ -127,5 +127,7 @@ independent jobs in parallel, and keeps the project's state readable.
 
 ## What to do next
 
-See the [roadmap](roadmap.md). Its first three steps need no new subsystem: they make the project's state and
-the intervention loop visible from the records Athena already writes.
+See the [roadmap](roadmap.md). Its first step, RM-0, follows the brief's 2026-10-13 addendum that Athena owns
+acceleration (`BRIEF.md:494-496`): the build cache, concurrent jobs, native pull-request landing and timings.
+The firstmate study (RM-6) runs alongside it. The next three steps, RM-1 to RM-3, need no new subsystem: they
+make the project's state and the intervention loop visible from the records Athena already writes.

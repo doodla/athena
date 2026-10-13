@@ -1820,3 +1820,17 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Reversal cost:** Low. Remove the fields and the rendering block.
 - **Provenance:** User request to retry a job whose retry lost its reading and corrections. Enforced by tests in
   `briefs.rs` and `reading.rs`.
+
+## D83 · The roadmap puts acceleration first, with the firstmate study alongside
+
+- **Decision:** `docs/design/roadmap.md` gains a first step, RM-0, for acceleration, and RM-6 (the firstmate
+  study) is marked as running alongside it.
+  - RM-0 holds the sccache hit rate, concurrent jobs (including collisions on `CHANGELOG.md` and
+    `docs/decisions.md`), native pull-request landing, and timings fed back, each with a "done when" test.
+  - The rows of the old RM-8 and AD-11 moved into RM-0; RM-8 no longer exists and other step numbers are kept.
+- **Alternatives:** (a) Renumber all steps: breaks references. (b) Keep the old order: the brief's addendum of
+  2026-10-13 (`BRIEF.md:494-496`) makes acceleration Athena's mandate. (c) New RM-0 (chosen).
+- **Tradeoff:** The sccache "0 hits" figure is the user's report and is not measured in the repository. The
+  roadmap stays a proposal and implements nothing.
+- **Reversal cost:** Low. Docs only.
+- **Provenance:** User request after the 2026-10-13 addendum. No test enforces it.

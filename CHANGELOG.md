@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- The roadmap (`docs/design/roadmap.md`) is reordered so acceleration comes first (D83). A new step RM-0
+  follows the 2026-10-13 addendum "Athena owns acceleration" (`BRIEF.md:494-496`) and covers the sccache
+  cache (the user reports 0 hits; not measured here), concurrent jobs including collisions on `CHANGELOG.md`
+  and `docs/decisions.md`, native pull-request landing, and timings fed back. The old RM-8 rows and AD-11 moved
+  into it, and RM-8 no longer exists. The firstmate study (RM-6) is stated to run alongside RM-0. The strategy
+  view and requirements map point to the new order. Docs only; no code changed.
 - `./setup.sh --ci` no longer builds sccache. CI sets no `RUSTC_WRAPPER`, so the build only added minutes to
   each CI job. Setup without `--ci` still installs the pinned sccache (D81).
 
