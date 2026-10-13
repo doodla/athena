@@ -1682,3 +1682,25 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   the job record, the read-only mount seen by both agents, no call without a configured repository), the
   change capability's test in `lifecycle.rs` (no call, no pin), and the real pinner's tests in `pin.rs`
   (local `file://` repositories, no network).
+
+## D76 · The squash of PR #14, 5a73478, is exempt from the history check
+
+- **Decision:** At the user's request, the squash commit 5a734782e76daac9b12bd8833c97a73927c8cf94 (PR #14) is
+  added to `[history] exempt` in `athena.toml`, as a full 40-character id, with a comment that gives the
+  reason: the commit changes `records/` but names no job. Following D60, D67, D68, and D70, the commit's
+  content skips the governed-content invariant and the job-records check. No code, test, or workflow
+  changes.
+- **Alternatives:**
+  - Add the job records that PR #14 is missing, so the commit names its work: those records were not
+    available to this change, and writing them after the fact is outside this job.
+  - Teach the gate to link records that name no job: a new gate rule, not chosen.
+  - Rewrite main to drop or reshape the squash (D66 option d): destructive; rejected there.
+- **Tradeoff:** The cheapest and fully reversible choice. Its cost is a hole in the invariant for this one
+  commit: records that the history check cannot tie to a job are accepted for 5a73478 without that check.
+  D60 limits the hole to that commit, since a full id cannot cover a later one.
+- **Reversal:** Delete the `5a734782e76daac9b12bd8833c97a73927c8cf94` entry and its comment from
+  `[history] exempt` in `athena.toml`. The history check then judges 5a73478 again. Reversal cost: low.
+- **Provenance:** User request. The full id is the one the user supplied; this change did not check that it
+  names a commit in history, which D60 requires. The producer's snapshot has no git history, so the check
+  could not run here. The reason is the user's statement, not verified against the commit's content.
+  Enforced by the existing history check and the `[history] exempt` validation of D60 and D61.
