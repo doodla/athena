@@ -1803,3 +1803,20 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Reversal cost:** Low. Remove the flag check in step 4.
 - **Provenance:** User request: PR CI rose from about 4 to about 9 minutes (the user's figures) after D79
   and D80. Enforced by a test in `xtask/src/main.rs`.
+
+## D82 · A retry carries the earlier reading, the user's corrections, and a discard notice
+
+- **Decision:** The reader's "Earlier attempt" section also shows the retried job's final reading (summary,
+  acceptance criteria, deliverables), the corrections and answers the user gave to its readings, and says that
+  the attempt's changes were discarded and are not in the repository the reader sees.
+  - `EarlierAttempt` gains the fields; `carry` in `reading.rs` fills them, redacted like the other carried text.
+  - The carried request is still the original request when the retried job was itself a retry.
+  - A job with no reading or no corrections renders without those headings.
+- **Alternatives:** (a) Keep carrying only the request and findings: a retry then loses the scope the user
+  agreed on. (b) Carry every reading: longer briefs, and earlier readings were superseded. (c) Final reading and
+  all corrections (chosen).
+- **Tradeoff:** The reader brief grows by one reading and the correction lines. Referenced jobs fill the same
+  fields but are rendered as before.
+- **Reversal cost:** Low. Remove the fields and the rendering block.
+- **Provenance:** User request to retry a job whose retry lost its reading and corrections. Enforced by tests in
+  `briefs.rs` and `reading.rs`.
