@@ -1,0 +1,127 @@
+# Roadmap
+
+Ordered next steps for every row of the [requirements map](requirements-map.md) that is partial or not
+covered, grouped into steps. The [strategy view](strategy-view.md) shows the goals the steps serve.
+
+**How the order was chosen.** Cheap steps that make state and evidence visible come first, because the brief
+says improvement work is pulled by evidence (OM-9) and later steps need that evidence. Then the user model,
+then enforcement, then the study and site in the order the brief requires (OR-1), then the larger designs and
+the optional pieces. The order is a proposal for the user to correct, not a commitment: Athena owns the
+method, and each step would be designed, reviewed and verified like any other change.
+
+Each step lists the row IDs it closes and a "done when" test that a reader can run or read. All 104 partial
+and uncovered rows appear in exactly one step (13 steps). Nothing here is implemented by this change.
+
+## RM-1 Make the project's state readable from the records
+
+- **Rows:** AD-3, AD-10, A1-2, AD-6, OM-11.
+- **What:** extend the derived view (`athena status`) with a requirement-to-job trace: a record that links a
+  landed job to the map rows it answered, and a view that shows each row's status from those links. Add
+  state reconstruction of a job at a past point from its records.
+- **Done when:** a tired reader can see, from the repository alone, which rows each job moved and what stays
+  open, and the strategy view's counts can be regenerated rather than counted by hand.
+
+## RM-2 Record the operating facts that have no record yet
+
+- **Rows:** OM-1, OM-10, OM-12, OM-15, EN-1, EN-2, EN-3, EN-4, EN-6, A11-2, AD-11.
+- **What:** a preflight record; a record of the active session; a record for a failed session start; a
+  from-clean setup verification at each restart; the effort split between the study and Athena; restart
+  cadence and resumption cost as measured values; invocation timings reported per class of work.
+- **Done when:** each of these facts has a record type or view, a test that it is refused when malformed, and
+  a row in `docs/enforcement.md` or an entry in its *Prose-only in v0* list.
+
+## RM-3 Close the intervention loop
+
+- **Rows:** OM-5, OM-6, OM-7, OM-8, OM-9.
+- **What:** an intervention trend per class of work; an audit step that looks for interventions the log
+  missed; a link from each intervention to the improvement job it caused.
+- **Done when:** `athena status` shows the trend per class, and an audit job's record lists what it checked
+  and found.
+
+## RM-4 Close the user-model loop
+
+- **Rows:** A1-1, A1-3, A1-4, A2-1, A2-4, AD-2, AD-7.
+- **What:** feed scored mispredictions back into `defaults.toml`, the estimates and the routing; record
+  evidence-backed pushback exchanges; add taste probes with expiry; add decision-sheet artifacts for a tired
+  user; propose the next big task when the study ends.
+- **Done when:** a misprediction changes a defaults entry through a verified job that cites the score, and
+  a probe answer carries an expiry that the model respects.
+
+## RM-5 Complete enforcement and verification
+
+- **Rows:** A3-1, A5-6, A7-1, A7-2, A7-4, A7-5, A8-1, A8-3, SD-4, SD-7, SD-8, JG-4.
+- **What:** add enforcement-map rows for the addenda's rules; measure mechanism overhead; track verification
+  false positives and escapes; add a highest-tier rule for high-stakes conclusions; check licenses of studied
+  systems; test that an injected instruction in untrusted text is ignored; record version adoption and
+  rollback; check total spend against caps over a whole run.
+- **Done when:** each rule in the operating model and Part 1 is a row in `docs/enforcement.md` or is listed
+  as prose-only with a reason, and every new row names tests that exist.
+
+## RM-6 Finish the firstmate work-handling study at full quality
+
+- **Rows:** A3-2, EN-7, S1-1, S1-3, S4-1, S5-1, S5-2.
+- **What:** register the validation rules for use by the user, finish the mechanism end to end with
+  rationale cards and observed evidence, record any downgrade explicitly, and record what Athena borrowed,
+  adapted or rejected.
+- **Done when:** the study passes its validation and an independent verifier, with every claim marked read or
+  observed and every rationale card carrying provenance.
+
+## RM-7 Ship the first slice of the site and publish it
+
+- **Rows:** D1-1, D1-2, D1-3, D2-1, D2-2, D2-3, D2-4, D2-5, D2-6, A4-4, EN-8, OR-1.
+- **What:** a site that publishes the firstmate mechanism from data, builds from committed pinned setup, runs
+  locally with one command, works on a phone, and keeps an Iris spend ledger that is checked before every
+  generation. Add a second release and an adopter guide that uses the study as the worked example.
+- **Done when:** the published site passes the user-facing checks at phone and desktop sizes, and the
+  Iris ledger refuses a generation that would pass the $15 cap.
+
+## RM-8 Build the proposed designs for pull requests, brownfield use and parallel jobs
+
+- **Rows:** A4-3, A5-3, A5-4, A5-5, SD-6, AD-4, AD-5, AD-9.
+- **What:** get the independent review of the parallel-jobs design, then build native pull-request landing
+  (including a mode that leaves no Athena files in a third-party repository) and concurrent jobs, with
+  the mechanism rows added when the tests exist.
+- **Done when:** a verified job opens its own pull request on the user's command, never pushes
+  non-fast-forward, and two independent jobs run at once without touching each other's records.
+
+## RM-9 Efficiency, learning and delegation
+
+- **Rows:** A6-3, A6-4, A9-1, A9-2, A10-1, A12-1, A12-2, A12-3, A13-1, A13-2, A13-3.
+- **What:** revise routing from recorded cost per verified result and record the revision; add Jev as a
+  shadow decision-maker with a calibration record; register automations with measured savings; define
+  specialist roles with cost and yield; version skills in the repo; measure tokens per class of work; track
+  learning curves; train the always-loaded contract from verbatim evidence within its budget; test a cold
+  agent against the repository.
+- **Done when:** one routing change is recorded with its before and after numbers, and a cold agent extends
+  the work using only the repository.
+
+## RM-10 Study Hermes and Athena, then compare
+
+- **Rows:** S1-2, S1-4, S1-5, S2-1, S2-2, S2-3, S3-1, S3-2, S3-3, S3-4, S3-5, S4-2, S4-3, S4-4, S6-1, S7-1,
+  S7-2.
+- **What:** build the lab (caps, kill switch, observability, repeatable runs), run Hermes and then Athena
+  with fresh contexts, tag Athena before studying it, log and fix every gap in the capability, keep the
+  critique ledger, and compare the three mechanism by mechanism.
+- **Done when:** each instance has the mechanisms M1 to M7 with cited, marked claims, and the comparison and
+  its closing essay exist.
+
+## RM-11 Final report and the brief's own tests
+
+- **Rows:** D3-1, JG-1, JG-2, JG-3.
+- **What:** the final report on the site; the cold-reader quiz for each instance; re-execution of two runs per
+  instance from recorded configurations; the live-site suite.
+- **Done when:** each of these has a passing verification record.
+
+## RM-12 Plugin and dashboard
+
+- **Rows:** AD-1, AD-8.
+- **What:** package Athena as a Claude Code plugin first, and build the dashboard with anatomy and Jev.
+- **Done when:** a user in Claude Code reaches `ask`, `go` and `status` through the plugin with no change to
+  the core.
+
+## RM-13 Keep the standards honest
+
+- **Rows:** SD-1, SD-2, SD-5.
+- **What:** these are judgments. Add a verifier severity check that each significant design has a recorded
+  independent review, and that each new doc names its reader; revisit each milestone.
+- **Done when:** a design without a review is a finding the verifier reports.

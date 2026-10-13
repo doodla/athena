@@ -120,6 +120,7 @@ documented in [`docs/records.md`](docs/records.md). Open work, including request
 | [`docs/decisions.md`](docs/decisions.md) | every significant decision, with alternatives, tradeoffs, and provenance |
 | [`docs/enforcement.md`](docs/enforcement.md) | every rule, its mechanism, and the tests that show what it blocks and allows |
 | [`docs/non-rust-files.md`](docs/non-rust-files.md) | why each non-Rust file exists |
+| [`docs/design/requirements-map.md`](docs/design/requirements-map.md) | every `BRIEF.md` requirement, marked covered, partial or not covered, with where it is answered; its [strategy view](docs/design/strategy-view.md) groups the rows by goal and its [roadmap](docs/design/roadmap.md) orders the next steps |
 
 ## Attribution
 
