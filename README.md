@@ -65,7 +65,7 @@ itself erred.
 | `athena ask "<request>" [--yes \| --later]` | Read a request; on a terminal, Enter runs it, a typed line corrects it, `q` leaves it proposed. `--later` only queues the request, with no model call |
 | `athena correct <job> "<line>"` | Correct the latest reading, or answer its question, and read again |
 | `athena go <job>` | Run a proposed job, read a queued one, or retry the landing of a blocked one |
-| `athena land <job> --pr` | Push the verified job's branch, open a pull request with `gh api`, and wait for green checks. It stops at an open, green pull request unless `[landing] merge_via_rest = true` is set (off when absent). Run it again after the merge to land the job (exit 0 when landed, or open with green checks; 2 otherwise) |
+| `athena land <job> --pr` | Push the job's locally landed commit as its branch (a rerun on an open pull request replaces the branch with one atomic conditional push, never a plain force), open a pull request with `gh api`, and wait for green checks. It stops at an open, green pull request unless `[landing] merge_via_rest = true` is set (off when absent). Run it again after the merge to land the job (exit 0 when landed, or open with green checks; 2 otherwise) |
 | `athena close <job> --why "..."` | Close a job that will not run or finish |
 | `athena status [<job>] [--json]` | The state of the work, or one job's full trace |
 | `athena intervene "<what>" --why ... --class ... --category ... [--job <job>] [--with-staged]` | Record something you did beyond what a lazy user would; `--with-staged` commits your staged hand changes with it |

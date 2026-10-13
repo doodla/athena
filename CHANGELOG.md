@@ -22,6 +22,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- `athena land --pr` now pushes the job's locally landed commit (the one with the `Athena-Job` trailer and
+  the records) instead of the bare candidate or a synthetic records commit, and says so and pushes nothing
+  when the job is not landed locally. A rerun on an open pull request whose stored head differs replaces
+  `athena/<job>` with one atomic conditional-force `git push` (`Git::push_if_remote_at`) that holds only if
+  the remote still has the head Athena just read; the pull request is reused and the stored head updated.
+  A remote head missing, unknown locally, or an ancestry check that errors is reported and nothing is pushed;
+  no other branch can be replaced. The design is in `docs/design/native-pr-landing.md`.
 - `athena land --pr` opens the pull request against the repository's default branch as the host reports it,
   not the local branch (a local branch missing on the remote made the host answer HTTP 422, and a detached
   HEAD stopped the command). The pushed `athena/<job>` branch is now the verified candidate plus a commit

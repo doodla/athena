@@ -11,8 +11,8 @@
 //! fingerprint, and `merged-unverified` otherwise. The merged commit is never found by reading trailers.
 
 use crate::pr::{
-    Ancestry, Content, GitContent, Host, LinkState, PrLink, PushRequest, check_push, load_link,
-    observe_merge, store_link,
+    Ancestry, Content, GitContent, Host, LinkState, PrLink, PushRequest, ReplaceRequest,
+    check_push, check_replace, load_link, observe_merge, store_link,
 };
 use crate::state::StateDir;
 use crate::{Athena, Ui};
@@ -105,6 +105,9 @@ pub trait Remote {
     fn remote_head(&self, branch: &str) -> Result<Option<String>>;
     /// A regular push of `commit` to `branch`. There is no force option.
     fn push(&self, branch: &str, commit: &str) -> Result<()>;
+    /// Replaces `branch` with `commit` in one atomic push that succeeds only if the remote branch still holds
+    /// `expected`. If the remote moved since `expected` was read, the push fails and the remote is unchanged.
+    fn replace(&self, branch: &str, commit: &str, expected: &str) -> Result<()>;
 }
 
 /// [`Remote`] over a named git remote.
@@ -133,6 +136,12 @@ impl Remote for GitRemote<'_> {
         self.git
             .run(["push", self.name, &format!("{commit}:refs/heads/{branch}")])?;
         Ok(())
+    }
+
+    fn replace(&self, branch: &str, commit: &str, expected: &str) -> Result<()> {
+        Ok(self
+            .git
+            .push_if_remote_at(self.name, branch, commit, expected)?)
     }
 }
 
@@ -296,15 +305,27 @@ pub fn work_branch(job: &JobId) -> String {
     format!("athena/{}", job.as_str())
 }
 
-/// The commit pushed as the work branch: the verified candidate with the job's records on top. The records
-/// (verification, outcome and the rest) are committed on the local branch, not on the candidate. Governed
-/// content, and so the fingerprint, stays the candidate's, and the result descends from the candidate.
-pub fn work_commit(git: &Git, candidate: &str, local_head: &str, job: &JobId) -> Result<String> {
-    let message = format!(
-        "Athena job {}: records for the verified candidate\n",
-        job.as_str()
-    );
-    Ok(git.commit_with_records(candidate, local_head, &message, git.signs_commits()?)?)
+/// The commit pushed as the work branch: the job's locally landed commit. It is found from the job's landing
+/// record: the newest commit reachable from `head` that carries the job's `Athena-Job` trailer and the
+/// verified content's `Athena-Verified-Content` trailer. It holds the verified change, the trailers and the
+/// records. A job that is not landed locally has no such commit, and that is an error: nothing is pushed.
+pub fn landed_commit(git: &Git, head: &str, job: &JobId, fingerprint: &str) -> Result<String> {
+    let candidates = git.log_grep(head, &format!("^Athena-Verified-Content: {fingerprint}$"))?;
+    for commit in candidates {
+        let trailers = git.trailers(&git.message(&commit)?)?;
+        let for_job = trailers
+            .iter()
+            .any(|(k, v)| k == "Athena-Job" && v == job.as_str());
+        let verified = trailers
+            .iter()
+            .any(|(k, v)| k == "Athena-Verified-Content" && v == fingerprint);
+        if for_job && verified {
+            return Ok(commit);
+        }
+    }
+    bail!(
+        "job {job} is not landed on this branch, so there is no landed commit to push; run `athena go {job}` first"
+    )
 }
 
 /// How long to wait for the checks.
@@ -330,9 +351,8 @@ pub struct LandPr<'a> {
     pub job: &'a JobId,
     /// The branch the caller asks to push; the guard allows only [`work_branch`].
     pub branch: &'a str,
-    /// Makes the commit to push as the pull request's head: the verified candidate plus the job's records
-    /// (see [`work_commit`]). Called only when a branch is about to be published.
-    pub work_commit: &'a dyn Fn() -> Result<String>,
+    /// The commit to push as the pull request's head: the job's locally landed commit (see [`landed_commit`]).
+    pub commit: &'a str,
     pub verified_fingerprint: &'a str,
     /// The pull request's text. Its base is the host's default branch, read when the request is opened.
     pub pr: PrDraft<'a>,
@@ -379,6 +399,9 @@ pub fn land_pr(job: &LandPr) -> Result<PrReport> {
     let mut checks = None;
     let mut merge_requested = false;
     observe_merge(job.host, job.content, &mut link, job.verified_fingerprint)?;
+    if link.state == LinkState::Open && link.head != job.commit {
+        replace_head(job, &mut link)?;
+    }
     if link.state == LinkState::Open {
         let seen = wait_for_checks(job, &link.head)?;
         checks = Some(seen);
@@ -398,9 +421,33 @@ pub fn land_pr(job: &LandPr) -> Result<PrReport> {
     })
 }
 
+/// An open pull request whose stored head is not the commit to push: moves the job's own branch to that
+/// commit with one atomic push that is conditional on the remote head just observed, keeps the pull request,
+/// and updates the stored head. A remote head that is missing, unknown locally, or whose ancestry check fails
+/// is an error and nothing is pushed.
+fn replace_head(job: &LandPr, link: &mut PrLink) -> Result<()> {
+    let allowed = work_branch(job.job);
+    let remote_head = job.remote.remote_head(job.branch)?;
+    check_replace(
+        job.ancestry,
+        &ReplaceRequest {
+            allowed_branch: &allowed,
+            branch: job.branch,
+            local_head: job.commit,
+            remote_head: remote_head.as_deref(),
+        },
+    )?;
+    let expected = remote_head.expect("check_replace accepts only an observed remote head");
+    if expected != job.commit {
+        job.remote.replace(job.branch, job.commit, &expected)?;
+    }
+    link.head = job.commit.to_string();
+    store_link(job.state, job.job, link)
+}
+
 fn publish(job: &LandPr) -> Result<PrLink> {
     let allowed = work_branch(job.job);
-    let commit = (job.work_commit)()?;
+    let commit = job.commit.to_string();
     let remote_head = job.remote.remote_head(job.branch)?;
     check_push(
         job.ancestry,
@@ -499,11 +546,12 @@ impl Athena {
             git: &self.git,
             name: remote_name,
         };
+        let landed = landed_commit(&self.git, &head, &id, &verification.verified_fingerprint)?;
         let report = land_pr(&LandPr {
             state: &self.state,
             job: &id,
             branch: &branch,
-            work_commit: &|| work_commit(&self.git, &verification.candidate_commit, &head, &id),
+            commit: &landed,
             verified_fingerprint: &verification.verified_fingerprint,
             pr: PrDraft {
                 title: &title,
@@ -648,10 +696,20 @@ mod tests {
     struct FakeRemote {
         head: Option<String>,
         pushes: RefCell<Vec<(String, String)>>,
+        /// (branch, commit, expected) of each replacement.
+        replaces: RefCell<Vec<(String, String, String)>>,
     }
     impl Remote for FakeRemote {
         fn remote_head(&self, _: &str) -> Result<Option<String>> {
             Ok(self.head.clone())
+        }
+        fn replace(&self, branch: &str, commit: &str, expected: &str) -> Result<()> {
+            self.replaces.borrow_mut().push((
+                branch.to_string(),
+                commit.to_string(),
+                expected.to_string(),
+            ));
+            Ok(())
         }
         fn push(&self, branch: &str, commit: &str) -> Result<()> {
             self.pushes
@@ -746,13 +804,24 @@ mod tests {
         }
 
         fn run(&self, host: &FakeHost, merge_via_rest: bool, branch: &str) -> Result<PrReport> {
+            self.run_with(host, merge_via_rest, branch, "cand1", &Anc(true))
+        }
+
+        fn run_with(
+            &self,
+            host: &FakeHost,
+            merge_via_rest: bool,
+            branch: &str,
+            commit: &str,
+            ancestry: &dyn Ancestry,
+        ) -> Result<PrReport> {
             let state = StateDir::new(self.dir.path().to_path_buf());
             let nap = |_: Duration| {};
             land_pr(&LandPr {
                 state: &state,
                 job: &self.job,
                 branch,
-                work_commit: &|| Ok("cand1".to_string()),
+                commit,
                 verified_fingerprint: "verified",
                 pr: PrDraft {
                     title: "t",
@@ -767,7 +836,7 @@ mod tests {
                     delay: Duration::from_secs(1),
                     sleep: &nap,
                 },
-                ancestry: &Anc(true),
+                ancestry,
                 remote: &self.remote,
                 host,
                 content: &self.content,
@@ -885,7 +954,7 @@ mod tests {
             state: &state,
             job: &rig.job,
             branch: "athena/bootstrap",
-            work_commit: &|| Ok("work1".to_string()),
+            commit: "work1",
             verified_fingerprint: "verified",
             pr: PrDraft {
                 title: "t",
@@ -918,56 +987,265 @@ mod tests {
     }
 
     #[test]
-    fn the_work_commit_carries_the_records_on_top_of_the_candidate() {
+    fn the_landed_commit_is_found_by_the_job_and_verified_content_trailers() {
         let dir = tempfile::tempdir().unwrap();
         let git = Git::isolated(dir.path());
-        let write = |files: &[(&str, &str)]| {
-            for (path, text) in files {
-                let full = dir.path().join(path);
-                std::fs::create_dir_all(full.parent().unwrap()).unwrap();
-                std::fs::write(full, text).unwrap();
-            }
+        let write = |text: &str, message: &str| {
+            std::fs::write(dir.path().join("a.txt"), text).unwrap();
             git.run(["add", "-A"]).unwrap();
-            git.run(["commit", "-q", "-m", "step"]).unwrap();
+            git.run(["commit", "-q", "-m", message]).unwrap();
             git.head().unwrap().unwrap()
         };
         git.run(["init", "-q", "-b", "main"]).unwrap();
-        let base = write(&[("a.txt", "a")]);
-        git.run(["checkout", "-q", "-b", "cand"]).unwrap();
-        let candidate = write(&[("a.txt", "changed")]);
-        git.run(["checkout", "-q", "main"]).unwrap();
-        let head = write(&[
-            ("records/jobs/bootstrap/verification.json", "{}"),
-            ("records/jobs/bootstrap/outcome.json", "{}"),
-        ]);
-
+        write("a", "base");
         let job = JobId::parse("bootstrap").unwrap();
-        let work = work_commit(&git, &candidate, &head, &job).unwrap();
-        assert_ne!(work, candidate);
-        assert!(git.is_ancestor(&candidate, &work).unwrap());
-        let paths: Vec<String> = git
-            .ls_tree(&work)
-            .unwrap()
-            .into_iter()
-            .map(|e| e.path)
-            .collect();
-        assert_eq!(
-            paths,
-            vec![
-                "a.txt",
-                "records/jobs/bootstrap/outcome.json",
-                "records/jobs/bootstrap/verification.json"
-            ]
+        // Not landed yet: an error, not a fallback.
+        assert!(landed_commit(&git, "HEAD", &job, "fp1").is_err());
+        write("b", "Read\n\nAthena-Job: bootstrap\n");
+        write(
+            "c",
+            "Other job\n\nAthena-Job: other\nAthena-Verified-Content: fp1\n",
         );
-        assert_eq!(git.show_file(&work, "a.txt").unwrap().unwrap(), b"changed");
-        let content = GitContent {
-            git: &git,
-            rules_commit: &base,
+        assert!(landed_commit(&git, "HEAD", &job, "fp1").is_err());
+        let landed = write(
+            "d",
+            "Change\n\nAthena-Job: bootstrap\nAthena-Verified-Content: fp1\n",
+        );
+        write("e", "records\n\nAthena-Job: bootstrap\n");
+        assert_eq!(landed_commit(&git, "HEAD", &job, "fp1").unwrap(), landed);
+        assert!(landed_commit(&git, "HEAD", &job, "fp2").is_err());
+    }
+
+    #[test]
+    fn a_new_branch_is_published_at_the_landed_commit() {
+        let rig = Rig::new();
+        let host = FakeHost::new(Checks::Green);
+        let report = rig
+            .run_with(&host, false, "athena/bootstrap", "landed1", &Anc(true))
+            .unwrap();
+        assert_eq!(
+            *rig.remote.pushes.borrow(),
+            vec![("athena/bootstrap".to_string(), "landed1".to_string())]
+        );
+        assert!(rig.remote.replaces.borrow().is_empty());
+        assert_eq!(report.link.head, "landed1");
+    }
+
+    #[test]
+    fn a_rerun_replaces_a_bare_candidate_head_with_the_landed_commit_and_reuses_the_pull_request() {
+        let mut rig = Rig::new();
+        let host = FakeHost::new(Checks::Green);
+        rig.run(&host, false, "athena/bootstrap").unwrap();
+        assert_eq!(rig.stored().head, "cand1");
+        // The remote still holds the bare candidate pushed earlier.
+        rig.remote.head = Some("cand1".into());
+        let report = rig
+            .run_with(&host, false, "athena/bootstrap", "landed1", &Anc(false))
+            .unwrap();
+        assert_eq!(
+            *rig.remote.replaces.borrow(),
+            vec![(
+                "athena/bootstrap".to_string(),
+                "landed1".to_string(),
+                "cand1".to_string()
+            )]
+        );
+        assert_eq!(rig.remote.pushes.borrow().len(), 1, "no plain push again");
+        assert_eq!(host.opened.get(), 1, "no second pull request");
+        assert_eq!(report.link.pr_number, 42);
+        assert_eq!(report.link.head, "landed1");
+        assert_eq!(rig.stored().head, "landed1");
+        assert_eq!(*host.checked.borrow().last().unwrap(), "landed1");
+    }
+
+    #[test]
+    fn a_rerun_at_the_same_commit_pushes_nothing() {
+        let mut rig = Rig::new();
+        let host = FakeHost::new(Checks::Green);
+        rig.run(&host, false, "athena/bootstrap").unwrap();
+        rig.remote.head = Some("cand1".into());
+        rig.run(&host, false, "athena/bootstrap").unwrap();
+        assert!(rig.remote.replaces.borrow().is_empty());
+        assert_eq!(rig.remote.pushes.borrow().len(), 1);
+    }
+
+    /// Opens a pull request at `cand1`, then reruns for `landed1` and returns the error.
+    fn rerun_error(
+        remote_head: Option<&str>,
+        branch: &str,
+        ancestry: &dyn Ancestry,
+    ) -> (Rig, anyhow::Error) {
+        let mut rig = Rig::new();
+        let host = FakeHost::new(Checks::Green);
+        rig.run(&host, false, "athena/bootstrap").unwrap();
+        rig.remote.head = remote_head.map(str::to_string);
+        let err = rig
+            .run_with(&host, false, branch, "landed1", ancestry)
+            .unwrap_err();
+        assert_eq!(host.opened.get(), 1);
+        (rig, err)
+    }
+
+    #[test]
+    fn an_ancestry_error_on_the_replace_path_pushes_nothing() {
+        struct Broken;
+        impl Ancestry for Broken {
+            fn is_ancestor(&self, _: &str, _: &str) -> Result<bool> {
+                bail!("merge-base blew up")
+            }
+        }
+        let (rig, err) = rerun_error(Some("cand1"), "athena/bootstrap", &Broken);
+        assert!(format!("{err:#}").contains("merge-base blew up"));
+        assert!(rig.remote.replaces.borrow().is_empty());
+        assert_eq!(rig.remote.pushes.borrow().len(), 1);
+        assert_eq!(rig.stored().head, "cand1");
+    }
+
+    #[test]
+    fn a_remote_head_unknown_locally_pushes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = Git::isolated(dir.path());
+        git.run(["init", "-q", "-b", "main"]).unwrap();
+        git.run(["commit", "-q", "--allow-empty", "-m", "base"])
+            .unwrap();
+        let unknown = "0123456789abcdef0123456789abcdef01234567";
+        let (rig, err) = rerun_error(Some(unknown), "athena/bootstrap", &git);
+        assert!(format!("{err:#}").contains(unknown));
+        assert!(rig.remote.replaces.borrow().is_empty());
+        // A remote branch that cannot be read at all is also an error.
+        let (rig, _) = rerun_error(None, "athena/bootstrap", &Anc(true));
+        assert!(rig.remote.replaces.borrow().is_empty());
+    }
+
+    #[test]
+    fn the_replace_path_is_refused_for_any_other_branch() {
+        let (rig, err) = rerun_error(Some("cand1"), "main", &Anc(true));
+        assert!(err.downcast_ref::<crate::pr::PushRefusal>().is_some());
+        assert!(rig.remote.replaces.borrow().is_empty());
+        assert_eq!(rig.remote.pushes.borrow().len(), 1);
+    }
+
+    /// A real remote whose branch moves right after Athena reads it.
+    struct Racy<'a> {
+        inner: GitRemote<'a>,
+        moved_to: &'a str,
+    }
+    impl Remote for Racy<'_> {
+        fn remote_head(&self, branch: &str) -> Result<Option<String>> {
+            let seen = self.inner.remote_head(branch)?;
+            self.inner.push(branch, self.moved_to)?;
+            Ok(seen)
+        }
+        fn push(&self, branch: &str, commit: &str) -> Result<()> {
+            self.inner.push(branch, commit)
+        }
+        fn replace(&self, branch: &str, commit: &str, expected: &str) -> Result<()> {
+            self.inner.replace(branch, commit, expected)
+        }
+    }
+
+    #[test]
+    fn the_replacement_is_atomic_and_a_remote_that_moved_is_reported_and_left_alone() {
+        let bare_dir = tempfile::tempdir().unwrap();
+        let bare = Git::isolated(bare_dir.path());
+        bare.run(["init", "-q", "--bare", "-b", "main"]).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let git = Git::isolated(dir.path());
+        git.run(["init", "-q", "-b", "main"]).unwrap();
+        let step = |text: &str| {
+            std::fs::write(dir.path().join("a.txt"), text).unwrap();
+            git.run(["add", "-A"]).unwrap();
+            git.run(["commit", "-q", "-m", text]).unwrap();
+            git.head().unwrap().unwrap()
         };
+        let base = step("base");
+        let candidate = step("candidate");
+        let moved = step("moved");
+        git.run(["checkout", "-q", "-b", "landed", &base]).unwrap();
+        let landed = step("landed");
+        git.run(["remote", "add", "origin", bare_dir.path().to_str().unwrap()])
+            .unwrap();
+        let branch = "athena/bootstrap";
+        git.run([
+            "push",
+            "-q",
+            "origin",
+            &format!("{candidate}:refs/heads/{branch}"),
+        ])
+        .unwrap();
+
+        let rig = Rig::new();
+        let state = StateDir::new(rig.dir.path().to_path_buf());
+        crate::pr::store_link(
+            &state,
+            &rig.job,
+            &PrLink {
+                pr_number: 42,
+                host: HOST.into(),
+                repository: "example/project".into(),
+                head: candidate.clone(),
+                job: "bootstrap".into(),
+                state: LinkState::Open,
+                merged_commit: None,
+            },
+        )
+        .unwrap();
+        let host = FakeHost::new(Checks::Green);
+        let nap = |_: Duration| {};
+        let run = |remote: &dyn Remote| {
+            land_pr(&LandPr {
+                state: &state,
+                job: &rig.job,
+                branch,
+                commit: &landed,
+                verified_fingerprint: "verified",
+                pr: PrDraft {
+                    title: "t",
+                    body: "b",
+                    head: branch,
+                },
+                host_name: HOST,
+                repository: "example/project",
+                merge_via_rest: false,
+                poll: Poll {
+                    attempts: 1,
+                    delay: Duration::ZERO,
+                    sleep: &nap,
+                },
+                ancestry: &git,
+                remote,
+                host: &host,
+                content: &rig.content,
+            })
+        };
+        let plain = GitRemote {
+            git: &git,
+            name: "origin",
+        };
+
+        // The remote moves after it is read: the push is rejected, reported, and changes nothing.
+        let racy = Racy {
+            inner: GitRemote {
+                git: &git,
+                name: "origin",
+            },
+            moved_to: &moved,
+        };
+        assert!(run(&racy).is_err());
+        let held = bare.rev_parse(&format!("refs/heads/{branch}")).unwrap();
+        assert_eq!(held.as_deref(), Some(moved.as_str()));
         assert_eq!(
-            content.fingerprint_of(&work).unwrap(),
-            content.fingerprint_of(&candidate).unwrap()
+            load_link(&state, &rig.job).unwrap().unwrap().head,
+            candidate
         );
+
+        // Nothing moves it: the branch becomes the landed commit, on the same pull request.
+        let report = run(&plain).unwrap();
+        let held = bare.rev_parse(&format!("refs/heads/{branch}")).unwrap();
+        assert_eq!(held.as_deref(), Some(landed.as_str()));
+        assert_eq!(report.link.pr_number, 42);
+        assert_eq!(report.link.head, landed);
+        assert_eq!(host.opened.get(), 0);
     }
 
     #[test]
@@ -989,7 +1267,7 @@ mod tests {
             state: &state,
             job: &rig.job,
             branch: "athena/bootstrap",
-            work_commit: &|| Ok("cand1".to_string()),
+            commit: "cand1",
             verified_fingerprint: "verified",
             pr: PrDraft {
                 title: "t",

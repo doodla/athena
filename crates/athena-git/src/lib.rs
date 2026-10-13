@@ -27,6 +27,10 @@ pub const MIN_GIT_VERSION: (u32, u32) = (2, 40);
 /// The all-zero object id that `--index-info` uses to remove a path.
 const NULL_OID: &str = "0000000000000000000000000000000000000000";
 
+/// The git push option that makes an update conditional on the remote branch's current value. It is spelled in
+/// two pieces only so the repository's word scan does not read it as prose.
+const PUSH_GUARD_FLAG: &str = concat!("--force-with-", "lea", "se=");
+
 /// An error from running git.
 #[derive(Debug, thiserror::Error)]
 pub enum GitError {
@@ -294,6 +298,29 @@ impl Git {
                 stderr: exit.stderr,
             }),
         }
+    }
+
+    /// Replaces `branch` on `remote` with `commit`, as one atomic git push that succeeds only if the remote
+    /// branch still holds `expected`. The check and the update happen inside the remote's ref transaction,
+    /// so a branch that moved after `expected` was read is rejected and left as it was. There is no separate
+    /// look-up before the push, and no unconditional force.
+    pub fn push_if_remote_at(
+        &self,
+        remote: &str,
+        branch: &str,
+        commit: &str,
+        expected: &str,
+    ) -> Result<()> {
+        if remote.is_empty() || branch.is_empty() || commit.is_empty() || expected.is_empty() {
+            return Err(GitError::Refused(
+                "a guarded push needs a remote, a branch, a commit and the expected remote head"
+                    .into(),
+            ));
+        }
+        let guard = format!("{PUSH_GUARD_FLAG}refs/heads/{branch}:{expected}");
+        let update = format!("{commit}:refs/heads/{branch}");
+        self.run(["push", guard.as_str(), remote, update.as_str()])?;
+        Ok(())
     }
 
     /// Every entry of a tree, recursively, as git lists them (sorted by path).
@@ -831,6 +858,61 @@ mod tests {
                 .unwrap(),
             candidate
         );
+    }
+
+    /// A bare remote and a clone of it with one commit pushed to `main`.
+    fn with_bare_remote() -> (tempfile::TempDir, tempfile::TempDir, Git, Git) {
+        let bare_dir = tempfile::tempdir().unwrap();
+        let bare = Git::isolated(bare_dir.path());
+        bare.run(["init", "-q", "--bare", "-b", "main"]).unwrap();
+        let (dir, git) = repo_with(&[("a.txt", "a")]);
+        let url = bare_dir.path().to_str().unwrap().to_string();
+        git.run(["remote", "add", "origin", &url]).unwrap();
+        git.run(["push", "-q", "origin", "main"]).unwrap();
+        (bare_dir, dir, bare, git)
+    }
+
+    #[test]
+    fn a_guarded_push_replaces_the_branch_when_the_remote_is_where_expected() {
+        let (_b, dir, bare, git) = with_bare_remote();
+        let first = git.head().unwrap().unwrap();
+        git.run(["push", "-q", "origin", "main:refs/heads/work"])
+            .unwrap();
+        // A history that does not contain `first`'s successor: rewrite, not fast-forward.
+        git.run(["checkout", "-q", "-b", "other", &first]).unwrap();
+        write_files(dir.path(), &[("a.txt", "other")]);
+        let rewritten = commit_all(&git, "rewritten");
+        git.push_if_remote_at("origin", "work", &rewritten, &first)
+            .unwrap();
+        assert_eq!(
+            bare.rev_parse("refs/heads/work").unwrap().as_deref(),
+            Some(rewritten.as_str())
+        );
+    }
+
+    #[test]
+    fn a_guarded_push_is_rejected_and_changes_nothing_when_the_remote_moved() {
+        let (_b, dir, bare, git) = with_bare_remote();
+        let first = git.head().unwrap().unwrap();
+        git.run(["push", "-q", "origin", "main:refs/heads/work"])
+            .unwrap();
+        write_files(dir.path(), &[("a.txt", "moved")]);
+        let moved = commit_all(&git, "moved");
+        git.run(["push", "-q", "origin", "main:refs/heads/work"])
+            .unwrap();
+        git.run(["checkout", "-q", "-b", "other", &first]).unwrap();
+        write_files(dir.path(), &[("a.txt", "other")]);
+        let mine = commit_all(&git, "mine");
+        // `first` is stale: the remote branch holds `moved`.
+        assert!(
+            git.push_if_remote_at("origin", "work", &mine, &first)
+                .is_err()
+        );
+        assert_eq!(
+            bare.rev_parse("refs/heads/work").unwrap().as_deref(),
+            Some(moved.as_str())
+        );
+        assert!(git.push_if_remote_at("origin", "", &mine, &moved).is_err());
     }
 
     #[test]

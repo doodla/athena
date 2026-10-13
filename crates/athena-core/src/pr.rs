@@ -149,6 +149,48 @@ pub fn check_push(git: &dyn Ancestry, request: &PushRequest) -> Result<(), PushR
     Ok(())
 }
 
+/// A replacement of the job's own branch head that Athena is about to make.
+#[derive(Debug, Clone, Copy)]
+pub struct ReplaceRequest<'a> {
+    /// The only branch Athena may replace for this job: its work branch.
+    pub allowed_branch: &'a str,
+    /// The branch the caller wants to replace.
+    pub branch: &'a str,
+    /// The commit that will become the branch head.
+    pub local_head: &'a str,
+    /// The commit the remote branch holds now, as just observed, or `None` when it could not be read.
+    pub remote_head: Option<&'a str>,
+}
+
+/// The guard for replacing a branch head. `Ok` only for the job's own branch, with a remote head that was
+/// observed and that the local object store knows. Any other case is an error and nothing is pushed:
+/// a remote head git cannot place locally, or an ancestry check that fails, is reported, never forced over.
+/// The ancestry answer itself does not matter (the job's own branch may be rewritten), but it must be
+/// answerable, because an unanswerable one means the remote head is not understood.
+pub fn check_replace(git: &dyn Ancestry, request: &ReplaceRequest) -> Result<()> {
+    if request.branch != request.allowed_branch || request.branch.is_empty() {
+        return Err(PushRefusal::WrongBranch {
+            wanted: request.branch.to_string(),
+            allowed: request.allowed_branch.to_string(),
+        }
+        .into());
+    }
+    let Some(remote) = request.remote_head else {
+        anyhow::bail!(
+            "the remote has no branch {:?} to replace; nothing was pushed",
+            request.branch
+        );
+    };
+    git.is_ancestor(remote, request.local_head)
+        .with_context(|| {
+            format!(
+                "cannot tell how the remote head {remote} relates to {}; nothing was pushed",
+                request.local_head
+            )
+        })?;
+    Ok(())
+}
+
 /// What the host says about a pull request, asked by number.
 pub trait Host {
     /// The commit the pull request was merged as (merge commit, squash or rebase), or `None` if it is not
@@ -339,6 +381,31 @@ mod tests {
             ..ok
         };
         assert!(check_push(&git, &unknown).is_err());
+    }
+
+    struct Failing;
+    impl Ancestry for Failing {
+        fn is_ancestor(&self, _: &str, _: &str) -> Result<bool> {
+            anyhow::bail!("ancestry failed")
+        }
+    }
+
+    #[test]
+    fn the_replace_guard_allows_only_the_own_branch_and_an_understood_remote_head() {
+        let ask = |branch, remote| ReplaceRequest {
+            allowed_branch: "work/x",
+            branch,
+            local_head: "new",
+            remote_head: remote,
+        };
+        assert!(check_replace(&Fixed(false), &ask("work/x", Some("old"))).is_ok());
+        assert!(check_replace(&Fixed(true), &ask("work/x", Some("old"))).is_ok());
+        let wrong = check_replace(&Fixed(true), &ask("main", Some("old"))).unwrap_err();
+        assert!(wrong.downcast_ref::<PushRefusal>().is_some());
+        assert!(check_replace(&Fixed(true), &ask("", Some("old"))).is_err());
+        assert!(check_replace(&Fixed(true), &ask("work/x", None)).is_err());
+        let failed = check_replace(&Failing, &ask("work/x", Some("old"))).unwrap_err();
+        assert!(format!("{failed:#}").contains("ancestry failed"));
     }
 
     struct FakeHost {
