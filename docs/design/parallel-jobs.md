@@ -1,8 +1,9 @@
 # Running independent jobs in parallel
 
-**Status:** proposed, revised after review 1 (`docs/design/reviews/parallel-jobs-review-1.md`, findings F1-F8);
-review of this revision pending. Design only: no code is built by this document. Every finding is answered in
-the text; the table below maps each one to its section. The revision does not mark itself accepted.
+**Status:** proposed, revised after review 1 (`docs/design/reviews/parallel-jobs-review-1.md`, findings F1-F8)
+and again after review 2 (`docs/design/reviews/parallel-jobs-review-2.md`, findings N1-N6); review of this
+revision pending. Design only: no code is built by this document. Every finding is answered in the text; the
+tables map each one to its section. The revision does not mark itself accepted.
 
 | Finding | Answered in |
 |---|---|
@@ -14,6 +15,12 @@ the text; the table below maps each one to its section. The revision does not ma
 | F6 worst-case spend | section 5.2 |
 | F7 line references | section 3 (references after native landing) |
 | F8 `reread` in the multi-job path | section 6.2 |
+| N1 launcher queue does not match local landing | sections 7 (point 2), 8 (point 2) |
+| N2 rules 1 and 2 conflict with current job writing | section 9 |
+| N3 telling `locked`, `refused`, `error`, `reread` apart | sections 4.2, 5.3, 6.2 |
+| N4 exit code of an open pull request | section 6.3 |
+| N5 `--all` buys work expected to go stale | sections 6.1, 7 |
+| N6 field holding declared paths | section 9 (rule 3) |
 
 Claims are marked **(read)** when taken from the file named beside them, and **(design)** when they are
 proposals. Numbers marked **estimate** were not measured. No command was run to reproduce any behavior; every
@@ -149,26 +156,34 @@ change the choice without changing the rest.
 **Launcher** (the `athena go a b c` or `athena go --all` process) **(design)**:
 1. Resolve every ref to a job id, reject duplicates (6.1), refuse if the kill switch is on (5.1), and print the
    worst-case spend (5.2).
-2. Start at most `N` children at once. Each child is the same binary run as `athena go <id>` with `--json`, with
-   standard input closed and output piped, so `prompt_loop` is never entered (`main.rs` lines 225-226).
-   The launcher uses the id, not the ref, so every child resolves the same job.
+2. Start at most `N` children at once. Each child is the same binary run as `athena go <id>` with `--json` and
+   a child-only flag, `--child-report` (name not fixed), with standard input closed and output piped, so
+   `prompt_loop` is never entered (`main.rs` lines 225-226). The launcher uses the id, not the ref, so every
+   child resolves the same job.
 3. Read each child's standard output into memory (or a file under `jobs/<id>/`) while it runs, so a full pipe
    never stalls it. Standard error carries progress lines and is replayed after the run.
-4. On each child's exit, map its status: exit 0 is `landed`; exit 2 is a non-landing outcome whose state and
-   reason come from the child's JSON; exit 1 is `error` with the child's standard error as the reason; death by
-   a signal, or output that is not the expected JSON, is `error` ("child ended abnormally").
+4. On each child's exit, read the `result` field of the JSON object the child printed (6.2), not the message
+   text. In the code, the kill-switch refusal and the lock refusal are plain errors that `main` prints as
+   `error: ...` and turns into exit 1 (`run.rs` lines 111 and 116-118, `main.rs` lines 176-182), with
+   nothing to tell them from other errors, and a `reread` exits 2 like a finished job that did not land
+   **(read)**. So with `--child-report` the child catches those two refusals and prints
+   `{"job", "result": "refused"}` or `{"job", "result": "locked"}`, any other error as
+   `{"job", "result": "error", "reason"}`, and a reread as the `reread` object of 6.2; exit codes stay as
+   today. The single-job command never sets the flag, so P4 holds. Death by a signal, or output that is not
+   one such object, is `error` ("child ended abnormally"). Exit 0 with a finished object is `landed`; exit 2
+   with one is the state named in it.
 5. As a slot frees, check the kill switch and start the next queued job. Wait for every started child before
    exiting.
 6. Choose the exit code by the rule in 6.3.
 
-**Kill switch.** `athena stop` terminates every registered process group and blocks new work **(read)**. Each
-child registers its own agent process groups through the existing registry, so `stop` reaches them without help
-from the launcher. The launcher's part is only to start nothing new: it asks `refuse_if_stopped` before each
-spawn and does not cache the answer. A child that starts after the switch is turned on refuses itself at
-`run.rs` line 111 and exits 1 with the usual message; the launcher reports that job as `refused (kill switch)`
-when its message says so. A child ended by `stop` is recorded as interrupted by the existing paths. If the
-launcher itself is killed, running children are not orphaned for long: they are in the registry and `stop`
-ends them.
+**Kill switch.** `athena stop` terminates every registered process group and blocks new work **(read)**.
+Each child registers its own agent process groups through the existing registry, so `stop` reaches them
+without help from the launcher. The launcher's part is only to start nothing new: it asks
+`refuse_if_stopped` before each spawn and does not cache the answer. A child that starts after the switch
+is turned on refuses itself at `run.rs` line 111, exits 1 and reports `result: refused` (step 4), which
+the launcher shows as `refused (kill switch)`. A child ended by `stop` is recorded as interrupted by the
+existing paths. If the launcher itself is killed, running children are not orphaned for long: they are in
+the registry and `stop` ends them.
 
 ### 4.3 The worker bound
 
@@ -192,8 +207,8 @@ No new lock kind is added.
 - **Lock order.** A process takes its job lock, and may then take the repository lock; no path takes them in
   the other order. Review 1 confirmed this for `manage.rs` (lines 80 and 370) and `commits.rs` (line 138), and I
   found the same two `try_lock_job` callers in `run.rs` and `manage.rs` plus a third in `gh.rs` line 611
-  (`athena land --pr`) **(read)**; `gh.rs` was not read to confirm it takes the repository lock only after its
-  job lock, which the build job must check.
+  (`athena land --pr`) **(read)**. Review 2 read `gh.rs` and confirmed it takes the repository lock only
+  after its job lock (question 9).
 
 ## 5. Kill switch, budgets and failure isolation
 
@@ -227,13 +242,16 @@ Each job's result is one of these, reported for that job alone **(design)**:
 
 | Result | Meaning | Source |
 |---|---|---|
-| `landed`, `rejected`, `failed`, `stale`, `blocked` | the job's outcome state | child exit 0 or 2 and its JSON |
+| `landed`, `rejected`, `failed`, `stale`, `blocked` | the job's outcome state | child exit 0 or 2 and its `state` |
 | `merged-unverified` | the pull request merged but the content check failed | `native-pr-landing.md` §5.4 |
 | `pr-open` | a pull request is open and not merged | section 8 |
-| `reread` | a queued job was read again and needs the user | `GoResult::Reread` |
-| `locked` | another athena process outside this run holds the job lock | the `bail!` at `run.rs` line 117 |
-| `refused` | kill switch on | `refuse_if_stopped` |
-| `error` | Athena erred, or the child died abnormally | child exit 1 or a signal |
+| `reread` | a queued job was read again and needs the user | child `result: reread` (`GoResult::Reread`) |
+| `locked` | another athena process outside this run holds the job lock | child `result: locked` (`run.rs` line 117) |
+| `refused` | kill switch on | child `result: refused` (`refuse_if_stopped`) |
+| `error` | Athena erred, or the child died abnormally | child `result: error`, or a signal |
+
+The `result` field of the child's report (4.2 step 4) is what tells the last four rows apart; message text is
+never parsed.
 
 - A child's error, panic or crash is a result for that job. The launcher never propagates it to siblings.
 - A failing job's own records are written by the existing code. The launcher adds nothing to records.
@@ -257,6 +275,12 @@ Each job's result is one of these, reported for that job alone **(design)**:
   are not included, because `go` on a queued job only re-reads it and may need an answer; `declined`,
   `dispatched` and closed jobs are not included because `go` refuses them **(read, the `match job.state()` at
   `run.rs` lines 120-157)**. This settles question 4. `--all` also applies the serialization rule of section 9.
+- **Default for two or more change jobs (N5).** A job that ends stale has still spent its producer and
+  verifier budgets, because `plan` runs only at landing (`land_or_block`). So when a run holds two or more
+  change jobs (`--all` included), the launcher prints the expected-stale warning of section 7 with its
+  cost: every job but the first to land may be paid in full and still land nothing. On a terminal it then
+  asks for confirmation; without a terminal it starts nothing unless `--yes` is given (name not fixed).
+  Limiting parallelism to jobs with non-overlapping `Reading.deliverables` is left to the build job.
 - `--jobs N` bounds the workers. `--json` prints one JSON array.
 
 ### 6.2 Output
@@ -267,9 +291,13 @@ Each job's result is one of these, reported for that job alone **(design)**:
 - **No prompts in the multi-job path (F8, settled).** A `reread` job prints the usual follow-up text and ends
   with exit code 2. Because `--all` excludes `queued` jobs, `reread` arises only for a job named explicitly;
   that is accepted as is.
-- `--json`: an array of objects with the single-job fields (`job`, `state`, `reason`, `prediction_commit`,
-  `closing_commit`, `landed_commit`, `totals`, `score`) **(read, `go_and_report`)**, plus a `result` field for
-  `locked`, `refused`, `pr-open`, `merged-unverified` and `error`.
+- `--json`: an array with one object per job, each carrying a `result` field (the names of 5.3) that says
+  how to read the rest. A finished job has the single-job fields (`job`, `state`, `reason`,
+  `prediction_commit`, `closing_commit`, `landed_commit`, `totals`, `score`) **(read, `go_and_report`)**. A
+  `reread` job has different fields, `job`, `commit`, `reading`, `reader_error` and `spent_usd`, and **no
+  `state`** **(read, `proposal_json`, `main.rs` lines 196-204)**; `result: reread` is how it is recognised.
+  `locked`, `refused` and `error` carry `job` and, for `error`, `reason`; `pr-open` and `merged-unverified`
+  add the pull request address.
 
 ### 6.3 Exit codes (question 7, settled)
 
@@ -277,6 +305,10 @@ Each job's result is one of these, reported for that job alone **(design)**:
 - Several jobs: **1** if any result is `error`; else **2** if any job did not land (including `reread`,
   `locked`, `refused`, `pr-open`, `merged-unverified`); else **0**. This keeps the single-job precedence, so a
   script sees "Athena itself erred" before "a job did not land".
+- **`pr-open` differs on purpose (N4).** `athena land --pr` run alone returns 0 for an open pull request
+  with green checks (`land_pr_code`, `main.rs` lines 210-218) **(read)**. In a multi-job run the same state
+  counts as "did not land" and gives 2, because the run's question is whether each job landed, and a script
+  that reads 0 may assume every change is in. The result line says `pr-open`, so the cause is visible.
 
 ## 7. Jobs that conflict, and a job whose base is behind the new HEAD (F1)
 
@@ -287,19 +319,28 @@ the job's governed fingerprint differs and `plan` returns `Stale` (lines 65-74),
 files are disjoint** (review 1 F1; **read** at `land.rs`). Question 2 is answered: it goes stale. With N change
 jobs from one base, at most one lands without re-verification (an estimate from reading, not measured).
 
-**How jobs land instead.** Each job lands through its own pull request by squash, and after each landing Athena
-rebuilds the local branch on the merged commit (`docs/design/native-pr-landing.md` §5.2a, **read**; summarized in
-section 3). The parallel pool builds on that and does not redesign it:
+**How jobs land instead.** Each job lands locally in its child, then through its own pull request by squash,
+and after a merge Athena rebuilds the local branch on the merged commit (`docs/design/native-pr-landing.md`
+§5.2a, **read**; summarized in section 3). The parallel pool builds on that and does not redesign it:
 
 1. The slow phases (reading excepted) run in parallel in separate child processes.
-2. **Landings go through one at a time** **(design)**. A job that is ready takes its place in a landing queue.
-   The job at the front lands through its pull request (`land --pr`: publish, wait for checks, merge by squash,
-   merged-content check) and then the local branch is rebuilt on the merged commit. Only then does the next job
-   in the queue check its base. The rebuild is finished before the next landing check reads `HEAD`, so no job
-   is checked against a branch that is about to move. The pull request wait does not hold the repository lock;
-   the queue is held in the launcher, not in a file lock.
-3. **A job whose base is behind the new HEAD.** When the job's turn comes, its base is the commit it was
-   dispatched on, which is behind the rebuilt `HEAD`. Then:
+2. **Local landing stays in the child, ordered by the repository lock** **(design)**. Each child runs `go`
+   as today: produce, verify, then `land_or_block`, which reads `HEAD` and advances the branch under the
+   repository lock (`run.rs` lines 1178-1182) **(read)**. The order of local landings is the order in which
+   children finish and win that lock. The launcher does not queue them and no new lock is added. `go` never
+   calls `land --pr` (`main.rs`, `gh.rs` line 600) **(read)**, so the pull request is a second phase:
+   - With a `--pr` flag on the multi-job command (name not fixed), the launcher runs
+     `athena land <id> --pr` for each job that landed locally, one at a time, in the order they landed.
+     Without the flag, the user runs it later. The launcher learns that a pull request merged from that
+     command's result, not from the child of `go`.
+   - A job's result while its pull request waits is `landed` locally and then `pr-open`; it becomes `landed`
+     (final) when `land --pr` sees the merge and the merged-content check passes. With `merge_via_rest`
+     off (section 8 point 3) that happens after the run, so the run reports `pr-open`.
+   - After a squash is seen merged, `resync_onto_merge` rebuilds the local branch on the merged commit and
+     replays later local commits on top (`native-pr-landing.md` §5.2a). That keeps jobs that landed
+     locally in the meantime, so the rebuild needs no ordering with other children's local landings.
+3. **A job whose base is behind the new HEAD.** When a later child reaches `land_or_block`, its base is the
+   commit it was dispatched on, which is behind the `HEAD` that the first landing moved. Then:
    - If only records moved, `plan` replays it as today.
    - If governed content moved, it is **stale**: the result line says so with `plan`'s reason, and nothing
      lands. Athena does not rebase or merge it, and does not re-verify it by itself.
@@ -315,8 +356,9 @@ section 3). The parallel pool builds on that and does not redesign it:
 
 **Consequence for use.** Parallelism pays for jobs that touch different governed content only in the produce
 and verify overlap, and for jobs that change no governed content; for ordinary change jobs the user should
-expect a stale result for most siblings of the first to land, and should group jobs accordingly. The launcher
-prints that warning when two or more change jobs are in a run (design; wording not fixed). The chained case
+expect a stale result for most siblings of the first to land, and should group jobs accordingly. A stale
+job has still spent its producer and verifier budgets (N5). The launcher prints that warning, with that
+cost, when two or more change jobs are in a run (design; wording not fixed; see 6.1). The chained case
 (job 2 built on job 1's landed state) is not parallel work; run chained jobs in order.
 
 ## 8. Landing each parallel job as its own pull request
@@ -328,8 +370,12 @@ This section is no longer a future mode: it is the landing path. It uses the shi
    Putting several parallel jobs in one pull request is not proposed.
 2. **What is pushed.** In owned mode the pushed commit is the job's locally landed commit, found from its
    trailers (`native-pr-landing.md` §5.1 step 2, **read**). So the job's local landing (`land_or_block`) still
-   happens first, under the repository lock, and the pull request is cut from that. This is why landings are
-   serialized in section 7: two jobs cannot both advance the local branch from the same base.
+   happens first, inside the child, under the repository lock, and the pull request is cut from that. Local
+   landings are ordered by that lock, not by the launcher (section 7 point 2): two children cannot both
+   advance the local branch from the same base, because the second one's `plan` sees the moved `HEAD`. The
+   launcher (with `--pr`) or the user then runs `land --pr` for each landed job, one at a time. A pull
+   request cut after an earlier job landed locally but has not yet merged also carries that earlier
+   commit; this is part of question 8.
    *Open for the build:* building the pull request from a per-job work branch without advancing the shared
    branch (step 1 of §5.1 there, "a local work branch whose name is derived from the job id") would let the
    check against the target happen on the host only. That is a change to the shipped mechanism, so it is
@@ -356,22 +402,31 @@ both took the next decision number, and a hand-merged squash was refused by the 
 that **several jobs write the same shared file from the same base without knowing about each other**; the
 rules below move the write to one place instead of fixing each collision.
 
+**When the rules apply (N2).** Rules 1 and 2 take effect with the build job, once the docs job exists and
+the people who write jobs know them. Today change jobs routinely list a `CHANGELOG.md` entry in their
+acceptance criteria, and admission does not reject such a job (`admission.rs`, the part read). Until the
+build, **rule 3 is the working rule**: jobs that name the same file are serialized, so most early runs
+will serialize them.
+
 **Rules (design):**
 
 1. **Who writes them.** Code, test and design jobs do **not** edit `CHANGELOG.md`, `docs/decisions.md` or
    `README.md`. Those files are written by a **docs job that runs alone, after the jobs it describes have
    landed**. This extends the build plan's existing "docs job last" (section 10) into a rule. A job whose
    change needs a changelog line states it in its report; the docs job writes it.
-2. **Number allocation.** Only the docs job allocates a decision number, and it does so at write time: it takes
-   the next number after the highest in `docs/decisions.md` **at its own base**, which (because it runs alone,
-   after the rebuild of section 7) is the current tip. Two jobs therefore cannot take the same number: only one
-   writer exists at a time. A job that needs to refer to its own decision before the docs job runs uses a
-   placeholder in prose, such as "the decision recorded by the docs job", never a number.
-3. **Serialization by declared path.** A job's brief names the shared files it will edit. The pool does not run
-   two jobs concurrently if their briefs name the same append-only file; `--all` partitions the jobs by that
+2. **Number allocation.** Only the docs job allocates a decision number, and it does so at write time: it
+   takes the next number after the highest in `docs/decisions.md` **at its own base**, which (because it
+   runs alone, after the jobs it describes have landed) is the current tip. Two jobs therefore cannot take
+   the same number: only one writer exists at a time. A job that needs to refer to its own decision before
+   the docs job runs uses a placeholder in prose, such as "the decision recorded by the docs job", never a
+   number.
+3. **Serialization by declared path.** The declared paths are the `path` of each entry in
+   `Reading.deliverables` (built in `reading.rs`, used in `admission.rs`). The pool does not run two jobs
+   concurrently if their deliverables name the same append-only file; `--all` partitions the jobs by that
    list and runs the groups' members in sequence (each landing before the next starts), while other jobs
-   proceed in parallel. The rule applies to the file list in the brief, which is a **hint**: the true diff is
-   unknown before the producer runs (alternative F, section 12).
+   proceed in parallel. A job with no reading yet (a `queued` job named explicitly) has no list: it is not
+   serialized, and the landing check decides. The list is a **hint**: the true diff is unknown before the
+   producer runs (alternative F, section 12), and admission only checks the list for governance changes.
 4. **Landing check is the authority.** If a job touches a shared file it did not declare, nothing is lost: the
    second job's governed fingerprint no longer matches, so it is stale (section 7), or `merged-unverified` if
    the host merged it. The files are never merged by hand into unverified content: `plan` refuses to land when
@@ -409,8 +464,8 @@ Each item is a separate later job.
    shared branch), and confirm that the user-requested re-verify of a stale job (`native-pr-landing.md` §5.7)
    exists or is built. These come before the pool, because the pool's value depends on them (F1).
 4. **Implementation: launcher and CLI.** `go` with several jobs and `--all`, `--jobs`, the process model of 4.2,
-   duplicate rejection, the worst-case spend line, the landing queue, per-job result lines, exit codes, and the
-   settings in `athena.toml` and `docs/` they need.
+   duplicate rejection, the worst-case spend line, the second-phase `land --pr` run, the child report of 4.2,
+   per-job result lines, exit codes, and the settings in `athena.toml` and `docs/` they need.
 5. **Tests.** Tests that fail without the change: two jobs run at the same time as separate processes; the bound
    is respected; one job's failure, one child killed by a signal and one lock conflict leave the others
    finishing; the kill switch turned on mid-run starts no further job; duplicate refs are rejected before any
@@ -418,10 +473,13 @@ Each item is a separate later job.
    codes are unchanged; and the collision test of section 9.
 6. **Docs job, alone and last.** README, CHANGELOG and a `docs/decisions.md` entry, under the rules of section 9.
 
-### Response to review 1
+### Response to reviews 1 and 2
 
-Accepted, and applied in this revision. The review's decisions on its seven questions are applied as
-section 11 shows.
+Review 1 is accepted and applied; its decisions on its seven questions are applied as section 11 shows.
+Review 2 (verdict: accept with changes) is applied in this revision: N1 first (sections 7 and 8), then N2
+to N6 as the table at the top maps them. Its not-checked item stays open for the build job:
+`registry().reap()` runs at the start of every `go` (`run.rs` line 112), and several children will now
+call it at once.
 
 ## 11. Open questions, settled or carried forward
 
@@ -441,9 +499,10 @@ Question numbers are those of the first version; review 1 section 3 decided them
    advancing the shared local branch first (section 8, step 2)? *Decision stated:* not in the first build; the
    first build uses the shipped mechanism, with landings queued one at a time. Revisit after the first real
    run shows how many jobs end stale (to be measured, not estimated).
-9. **New, carried forward.** Does `athena land --pr` take the repository lock only after its job lock
-   (`gh.rs` line 611)? *Decision stated:* the build job checks this before the pool starts, because the
-   lock-order argument of 4.4 depends on it.
+9. **New.** Does `athena land --pr` take the repository lock only after its job lock (`gh.rs` line 611)?
+   Settled by review 2 section 2 (read): it holds the job lock through the function and
+   `resync_onto_merge` takes the repository lock later (`land.rs` line 113), so the order of 4.4 holds.
+   The build job may re-check.
 
 ## 12. Alternatives considered
 

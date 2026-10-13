@@ -12,7 +12,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - Review 2 of the revised parallel-jobs design (`docs/design/reviews/parallel-jobs-review-2.md`) confirms the
   answers to review 1's F1-F8 as resolved against the source and the native pull-request landing design, and
   finds one High problem (the launcher's landing queue does not match the children's local landing) and five
-  smaller ones. Verdict: accept with changes. The design itself is not edited.
+  smaller ones. Verdict: accept with changes. The review does not edit the design; the next entry records the
+  revision that answers it.
+- `docs/design/parallel-jobs.md` is revised again to answer review 2 (N1-N6), N1 first: local landing stays in
+  each child process and is ordered by the repository lock, and `land --pr` becomes a second phase run per
+  landed job, so the earlier launcher landing queue and the claim that a rebuild precedes the next landing
+  check are removed. Section 9 rules 1 and 2 take effect with the build, and serializing jobs that name the
+  same file is the working rule until then. Children report `locked`, `refused`, `error` and `reread` in a
+  `result` field instead of the launcher parsing message text, and the `--json` text now gives the `reread`
+  fields. An open pull request gives exit 2 in a multi-job run, on purpose. The `--all` default warns of the
+  cost of likely-stale jobs and asks for confirmation, and declared paths are read from
+  `Reading.deliverables`. Design only; the build is a later job.
 - `docs/design/parallel-jobs.md` is revised to answer review 1 (F1-F8): jobs run as one child process each,
   each lands through its own pull request by squash with the local branch rebuilt after each landing, a job
   whose base is behind is stale until re-verified on request, duplicate refs are rejected up front, the
