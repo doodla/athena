@@ -76,7 +76,14 @@ impl Capability for PinningStudy {
 
 /// `athena.toml` with the study section naming a repository to pin (or not).
 fn config(with_repo: bool) -> String {
-    let base = include_str!("../../../athena.toml");
+    let raw = include_str!("../../../athena.toml");
+    let base: String = raw
+        .split_inclusive('\n')
+        .filter(|line| {
+            let key = line.trim_start();
+            !(key.starts_with("repo_url") || key.starts_with("repo_ref"))
+        })
+        .collect();
     let header = "[capabilities.study]\n";
     assert!(base.contains(header));
     let repo = if with_repo {

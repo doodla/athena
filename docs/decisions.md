@@ -1704,3 +1704,18 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   names a commit in history, which D60 requires. The producer's snapshot has no git history, so the check
   could not run here. The reason is the user's statement, not verified against the commit's content.
   Enforced by the existing history check and the `[history] exempt` validation of D60 and D61.
+
+## D77 · Firstmate on main is the first configured study repository
+
+- **Decision:** `[capabilities.study]` in `athena.toml` sets `repo_url` to
+  `https://github.com/kunchenguid/firstmate.git` and `repo_ref` to `main`, so a study job can start (D75).
+  The pin tests' `config()` helper in `run_pin_tests.rs` now drops any `repo_url` and `repo_ref` lines from
+  the real `athena.toml` before it adds its own (or none), so duplicate TOML keys cannot occur. Running the
+  study itself is a later job.
+- **Alternatives:** Keep the keys commented out and pass them per job: a study would refuse to start until
+  someone edits the file. Give the tests their own config text: they would stop checking the real file.
+- **Tradeoff:** Every study job reads firstmate until the keys change. The helper matches lines by key
+  prefix, so a future key beginning with `repo_url` or `repo_ref` would also be dropped.
+- **Reversal cost:** Low. Comment the two keys out again; the helper still works.
+- **Provenance:** User request, retrying a job whose pin tests failed on duplicate keys. Enforced by both
+  tests in `run_pin_tests.rs`, run against the real `athena.toml`.
