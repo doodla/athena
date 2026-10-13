@@ -29,13 +29,20 @@ fn git(args: &[&str], stdin: Option<&str>) -> String {
         .stdout(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(stdin.unwrap_or("").as_bytes())
-        .unwrap();
-    let out = child.wait_with_output().unwrap();
+    // `xtask` may not depend on `athena-git` (architecture policy), so this mirrors
+    // `athena_git::output_with_stdin`: write stdin on its own thread while stdout is drained, or both
+    // sides block once the output passes the pipe buffer.
+    let mut pipe = child.stdin.take().unwrap();
+    let input = stdin.unwrap_or("").as_bytes();
+    let out = std::thread::scope(|scope| {
+        let writer = scope.spawn(move || {
+            // A broken pipe means git stopped reading; its exit status is checked below.
+            let _ = pipe.write_all(input);
+        });
+        let out = child.wait_with_output().unwrap();
+        writer.join().unwrap();
+        out
+    });
     assert!(out.status.success(), "git {args:?} failed");
     String::from_utf8(out.stdout).unwrap()
 }

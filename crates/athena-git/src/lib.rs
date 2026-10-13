@@ -31,6 +31,43 @@ const NULL_OID: &str = "0000000000000000000000000000000000000000";
 /// two pieces only so the repository's word scan does not read it as prose.
 const PUSH_GUARD_FLAG: &str = concat!("--force-with-", "lea", "se=");
 
+/// Runs `cmd` to completion with `stdin` as its input (or no input) and collects stdout and stderr.
+///
+/// The input is written on its own thread while the output is drained, so a child that answers before it
+/// has read everything (as `git check-attr --stdin` does) cannot block both sides on full pipes. A broken
+/// pipe on the write is ignored: the child closed its input early, and its exit status says why. Any other
+/// write error is returned after the child has been waited for.
+///
+/// Spawn errors are returned as they are, so callers can word them for their own context.
+pub fn output_with_stdin(
+    cmd: &mut Command,
+    stdin: Option<&[u8]>,
+) -> std::io::Result<std::process::Output> {
+    cmd.stdin(if stdin.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    })
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+    let mut child = cmd.spawn()?;
+    let mut handle = child.stdin.take();
+    let (output, written) = std::thread::scope(|scope| {
+        let writer = scope.spawn(move || match (handle.take(), stdin) {
+            (Some(mut pipe), Some(input)) => pipe.write_all(input),
+            _ => Ok(()),
+        });
+        let output = child.wait_with_output();
+        let written = writer.join().unwrap_or(Ok(()));
+        (output, written)
+    });
+    let output = output?;
+    match written {
+        Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => Err(e),
+        _ => Ok(output),
+    }
+}
+
 /// An error from running git.
 #[derive(Debug, thiserror::Error)]
 pub enum GitError {
@@ -204,18 +241,7 @@ impl Git {
         for (k, v) in env {
             cmd.env(k, v);
         }
-        cmd.stdin(if stdin.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        });
-        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-        let mut child = cmd.spawn()?;
-        if let Some(input) = stdin {
-            let mut handle = child.stdin.take().expect("stdin was piped");
-            handle.write_all(input)?;
-        }
-        let output = child.wait_with_output()?;
+        let output = output_with_stdin(&mut cmd, stdin)?;
         let summary = args
             .iter()
             .take(3)
@@ -884,6 +910,23 @@ pub(crate) mod testutil {
 mod tests {
     use super::testutil::*;
     use super::*;
+
+    #[test]
+    fn piping_over_a_megabyte_through_an_echoing_child_does_not_deadlock() {
+        let input = vec![b'x'; 3 * 1024 * 1024];
+        let output = output_with_stdin(&mut Command::new("cat"), Some(&input)).unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout.len(), input.len());
+    }
+
+    #[test]
+    fn a_child_that_exits_without_reading_is_not_an_error() {
+        let input = vec![b'x'; 3 * 1024 * 1024];
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "exit 3"]);
+        let output = output_with_stdin(&mut cmd, Some(&input)).unwrap();
+        assert_eq!(output.status.code(), Some(3));
+    }
 
     #[test]
     fn git_is_recent_enough() {
