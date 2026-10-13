@@ -9,6 +9,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- Review 2 of the revised parallel-jobs design (`docs/design/reviews/parallel-jobs-review-2.md`) confirms the
+  answers to review 1's F1-F8 as resolved against the source and the native pull-request landing design, and
+  finds one High problem (the launcher's landing queue does not match the children's local landing) and five
+  smaller ones. Verdict: accept with changes. The design itself is not edited.
 - `docs/design/parallel-jobs.md` is revised to answer review 1 (F1-F8): jobs run as one child process each,
   each lands through its own pull request by squash with the local branch rebuilt after each landing, a job
   whose base is behind is stale until re-verified on request, duplicate refs are rejected up front, the
