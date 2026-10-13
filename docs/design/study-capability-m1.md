@@ -59,6 +59,12 @@ The capability must make four things true of every study it produces:
    inferred, and inferred rationale is never shown as stated (`BRIEF.md:321`).
 4. **Checkable as data.** The work-handling model is data that code can validate, not prose.
 
+The pin is also in the agents' briefs. The core resolves it once, and the producer and verifier briefs of a
+job that pins a repository carry a "Pinned source" section with the url, ref and full SHA taken from the job
+record, so the producer cites the real values and never a placeholder. The briefs' rule against citing
+commit hashes bars only hashes made during verification; the pinned instance's url, ref and SHA from the
+brief are cited as given. A job that pins nothing has no such section.
+
 ## 2. The M1 method
 
 One study run goes through five steps. Code owns the sequencing, as in v0 ([`athena-v0.md`](athena-v0.md)

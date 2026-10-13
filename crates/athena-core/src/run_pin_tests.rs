@@ -261,6 +261,13 @@ fn a_study_pins_once_records_the_commit_and_mounts_it_read_only_for_both_agents(
     assert_eq!(record(&dispatch).pin.as_ref(), Some(&expected));
     assert_eq!(record("HEAD").pin.as_ref(), Some(&expected));
 
+    // The producer brief committed with the dispatch carries the resolved pin, not a placeholder.
+    let brief_path = format!("{}/brief-producer.md", proposal.job.dir());
+    let brief = String::from_utf8(git.show_file(&dispatch, &brief_path).unwrap().unwrap()).unwrap();
+    assert!(brief.contains("## Pinned source"));
+    assert!(brief.contains(URL));
+    assert!(brief.contains(&format!("sha: {FAKE_SHA}")));
+
     // Both agents found the read-only mount in their working directory.
     let seen = seen.lock().unwrap().clone();
     assert_eq!(

@@ -210,6 +210,7 @@ impl Athena {
                 })
                 .collect(),
             commands: athena_agent::policy::describe_commands(&producer_grant.commands),
+            pin: pinned.as_ref().map(|(record, _)| record.clone()),
         });
         let dispatched_at = crate::now();
         let clock = Instant::now();
@@ -752,6 +753,7 @@ impl Athena {
                 .collect(),
             commands: athena_agent::policy::describe_commands(&verifier_grant.commands),
             tool_config_from_base: tool_config_from_base.clone(),
+            pin: ctx.job.job.as_ref().and_then(|j| j.pin.clone()),
         };
         let mut verifier_invocation = None;
         let mut verdict_output: Option<VerdictOutput> = None;
