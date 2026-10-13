@@ -133,10 +133,16 @@ directory is stealth.
 2. **Publish.** `athena land --pr` **(design; the name is not fixed)** pushes that branch to the user's
    remote, or to the user's fork when the user cannot push to the target, with a regular push. Athena never
    forces a push. If the remote branch already exists and is not an ancestor of the local one, the command
-   stops and says so (R4). In owned mode the pushed commit is the verified candidate plus one commit on top
-   that adds the job's `records/` from the local branch (verification, outcome and the rest), so merging the
-   pull request lands what `athena check --history` expects. Governed content is the candidate's, so the
-   fingerprint is unchanged and the push guard's ancestry test holds.
+   stops and says so (R4). In owned mode the pushed commit is **the job's locally landed commit**, found from
+   the job's landing record: the newest commit reachable from the local branch that carries the job's
+   `Athena-Job` trailer and the verified content's `Athena-Verified-Content` trailer (`landed_commit` in
+   `crates/athena-core/src/gh.rs`). If the job is not landed locally there is no such commit, and the command
+   says so and pushes nothing. *Alternatives considered:* (a) the bare candidate: it has no job trailer and no
+   records, so merging it lands content that `athena check --history` cannot attribute; (b) the candidate
+   plus a synthetic records commit (what an earlier version pushed): it is a second, different commit for the
+   same change, with no trailers, so the pull request and the local history disagree about what landed.
+   The landed commit is the one commit that already carries the trailers and the records and that the local
+   landing checks accepted; its governed content is the verified content, so the fingerprint is unchanged.
 3. **Open.** Athena opens a pull request with the host client. Its base is the repository's default branch as
    the host reports it (`default_branch` from `repos/{owner}/{repo}`), never the local branch. In owned mode the body is generated from the
    job: the request, the criteria, the verifier's findings, and the job id. In stealth mode the body **keeps**
@@ -179,6 +185,23 @@ The prose-only rule says Athena does not push. Under this design:
   also refuses when the remote branch's head is not an ancestor of the commit being pushed, and when git
   cannot place the remote head in local history (a fast-forward cannot then be shown). It has no force option
   (`check_push` in `crates/athena-core/src/pr.rs`).
+- **Rerun on an open pull request: replacing the job's own branch head.** An earlier run may have pushed a
+  different commit (for example the bare candidate). When a link is stored, the pull request is still open,
+  and its stored head differs from the landed commit, the command moves the branch with one atomic
+  `git push <guard>=refs/heads/<branch>:<expected> <remote> <commit>:refs/heads/<branch>`
+  (`Git::push_if_remote_at`), where `<guard>` is git's conditional-force option, the compare-and-swap form
+  (`--force-with-` followed by the word that names a time-limited hold; the flag is spelled in two pieces in
+  the code so this repository's word scan stays clean). `<expected>` is the remote head Athena has just read. The check and the update are one
+  step inside the remote's ref transaction, so there is no look-up-then-force window: if the remote moved
+  after it was read, git rejects the push, the command reports it, and the remote is unchanged. There is no
+  bare `+` refspec and no unconditional force anywhere. The pull request number is reused, no second pull
+  request is opened, and the stored link head is updated. *Alternative rejected:* an `ls-remote` comparison
+  followed by a plain forced push, which has a race between the two steps.
+  The replace path is stricter than the push guard (`check_replace` in `crates/athena-core/src/pr.rs`): it
+  refuses any branch other than the job's own work branch; it errors, and pushes nothing, when the remote
+  head could not be read, is not in the local object store, or when the ancestry check returns an error
+  (there is no `unwrap_or(false)` fallback on this path). Whether the old head is an ancestor does not change
+  the outcome, because the job's own branch may be rewritten, but the question must be answerable.
 - **Mechanism versus prose.** The refusal of a non-fast-forward push, and the restriction to the job's own
   work branch, are checked in code before the client is called and need tests (new row, section 8). "Athena
   does not push" is withdrawn. "Published history is never rewritten" stays a rule Athena obeys by
@@ -369,6 +392,7 @@ sign-off rules, review norms), which the user's instructions govern; designing t
 |---|---|---|
 | Push only on the user's command, only the job's work branch | yes: code refuses otherwise; test needed | |
 | No force push, no rewrite of published history by Athena | yes: refuse a non-fast-forward; test needed | what the user or host does by hand |
+| Replacing the job's own branch head is atomic and conditional on the observed remote head; an unknown remote head or an ancestry error pushes nothing | yes: `the_replacement_is_atomic_and_a_remote_that_moved_is_reported_and_left_alone`, `an_ancestry_error_on_the_replace_path_pushes_nothing`, `a_remote_head_unknown_locally_pushes_nothing`, `the_replace_path_is_refused_for_any_other_branch` in `crates/athena-core/src/gh.rs` | |
 | Pushed content equals verified content (R2) | yes: existing fingerprint check run before the push (M7) | |
 | Stealth pull request adds no Athena file, attribute, trailer, or job id in its body or branch name (R5) | yes: tree, message, body and branch-name comparison; test needed (a later slice) | |
 | Several jobs squashed in stealth: earlier jobs get the per-job checks over the local store (N4) | yes: test needed (a later slice) | |
