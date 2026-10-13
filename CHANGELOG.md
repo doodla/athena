@@ -57,6 +57,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- This repository's `athena.toml` now sets `[landing] merge_via_rest = true`, so `athena land --pr` asks the
+  host to merge once the checks are green. The default in code stays off; the test for it now runs on a
+  config with the landing table removed and separately asserts that this repository turns the merge on.
 - The native pull-request landing design is revised again for review 3, findings N1-N4 (D86): the exact
   merged-content comparison and the `merged-unverified` state, the link kept in the state directory in both
   modes, the stealth body, branch name and leak check, and the per-job checks for a stealth squash.
