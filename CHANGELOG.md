@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Checks can be skipped for prose-only changes. A check in `athena.toml` may carry `skip_when_only`, a list
+  of path patterns (`dir/`, `*.ext` at any depth, or an exact path). The runner skips the check, with a
+  "not run" note in its record, only when the change is not empty and every changed path matches. Absent
+  means the check always runs (row M31 of `docs/enforcement.md`). This change does not set the key in
+  `athena.toml`: the gate judges a commit with the parent's parser, so enabling it is a separate
+  follow-up job after this one lands.
 - Study briefs carry the pin Athena resolved. The producer and verifier briefs of a job that pins a
   repository gain a "Pinned source" section with the url, ref and full SHA from the job record; other
   briefs are unchanged. The producer brief's rule against citing commit hashes now bars only hashes made

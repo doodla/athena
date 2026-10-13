@@ -94,6 +94,7 @@ impl Capability for Study {
                         name: k.name.clone(),
                         run: k.run.clone(),
                         kind: k.kind,
+                        skip_when_only: k.skip_when_only.clone(),
                     })
                     .collect()
             })

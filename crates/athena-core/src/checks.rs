@@ -3,7 +3,8 @@
 //! Checks run in the verifier's snapshot, with the agent environment, the capability's environment, and
 //! the nested-run marker, each in its own process group under the kill switch and a deadline. A check of
 //! kind `test` fails if it ran zero tests, counted from the test harness's own summary lines, even when
-//! its exit status is 0. Output tails are capped at 4 KiB and redacted.
+//! its exit status is 0. Output tails are capped at 4 KiB and redacted. A check that names
+//! `skip_when_only` patterns is skipped, with a note in its record, when every changed path matches one.
 
 use crate::capability::CheckSpec;
 use anyhow::Result;
@@ -48,6 +49,52 @@ pub fn tail(text: &str, max: usize) -> String {
         start += 1;
     }
     format!("…{}", &text[start..])
+}
+
+/// Whether `path` matches one skip pattern. A pattern ending in `/` matches every path under that
+/// directory; a pattern starting with `*.` matches any path ending in the rest, at any depth (`*.json`
+/// matches `a.json` and `studies/x/a.json`); any other pattern matches exactly that path.
+pub fn path_matches(pattern: &str, path: &str) -> bool {
+    if pattern.ends_with('/') {
+        path.starts_with(pattern)
+    } else if let Some(suffix) = pattern.strip_prefix('*') {
+        suffix.starts_with('.') && suffix.len() > 1 && path.ends_with(suffix)
+    } else {
+        pattern == path
+    }
+}
+
+/// The note to record when a check is skipped, or `None` when it must run. A check is skipped only when
+/// it names `skip_when_only` patterns and the change list is not empty and every changed path matches at
+/// least one pattern. An absent or empty pattern list, an empty change list, or any other path runs it.
+pub fn skip_note(spec: &CheckSpec, changed: &[String]) -> Option<String> {
+    let patterns = spec.skip_when_only.as_ref()?;
+    if patterns.is_empty() || changed.is_empty() {
+        return None;
+    }
+    changed
+        .iter()
+        .all(|p| patterns.iter().any(|pat| path_matches(pat, p)))
+        .then(|| {
+            format!(
+                "not run: every changed path matches skip_when_only ({})",
+                patterns.join(", ")
+            )
+        })
+}
+
+/// The record of a check that was skipped. It counts as passed and carries the note.
+pub fn skipped_run(spec: &CheckSpec, note: String) -> CheckRun {
+    CheckRun {
+        name: spec.name.clone(),
+        command: spec.run.clone(),
+        exit_code: None,
+        passed: true,
+        tests_ran: None,
+        duration: Quantity::measured(0.0, Unit::Seconds, "not run"),
+        output_tail: String::new(),
+        note: Some(note),
+    }
 }
 
 /// Where a check runs, and under what limits.
@@ -189,6 +236,7 @@ mod tests {
                 "echo 'test result: ok. 0 passed; 0 failed; 0 ignored'".into(),
             ],
             kind: CheckKind::Test,
+            skip_when_only: None,
         };
         let run = run_check(&empty, &ctx).unwrap();
         assert_eq!(run.exit_code, Some(0));
@@ -203,6 +251,7 @@ mod tests {
                 "echo 'test result: ok. 3 passed; 0 failed; 0 ignored'".into(),
             ],
             kind: CheckKind::Test,
+            skip_when_only: None,
         };
         assert!(run_check(&real, &ctx).unwrap().passed);
     }
@@ -233,6 +282,7 @@ mod tests {
                     .into(),
             ],
             kind: CheckKind::Test,
+            skip_when_only: None,
         };
         let run = run_check(&noisy, &ctx).unwrap();
         assert_eq!(run.tests_ran, Some(200));
@@ -258,9 +308,75 @@ mod tests {
             name: "slow".into(),
             run: vec!["sleep".into(), "30".into()],
             kind: CheckKind::Command,
+            skip_when_only: None,
         };
         let run = run_check(&slow, &ctx).unwrap();
         assert!(!run.passed);
         assert!(run.note.unwrap().contains("deadline"));
+    }
+
+    fn spec_skipping(patterns: Option<&[&str]>) -> CheckSpec {
+        CheckSpec {
+            name: "test".into(),
+            run: vec!["true".into()],
+            kind: CheckKind::Command,
+            skip_when_only: patterns.map(|p| p.iter().map(|s| s.to_string()).collect()),
+        }
+    }
+
+    fn paths(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn path_patterns_match_by_directory_suffix_or_exact_path() {
+        assert!(path_matches("docs/", "docs/a.md"));
+        assert!(path_matches("docs/", "docs/x/b.md"));
+        assert!(!path_matches("docs/", "docsx/a.md"));
+        assert!(path_matches("*.json", "a.json"));
+        assert!(path_matches("*.json", "studies/x/y/a.json"));
+        assert!(!path_matches("*.json", "a.jsonl"));
+        assert!(!path_matches("*", "anything"));
+        assert!(path_matches("CHANGELOG.md", "CHANGELOG.md"));
+        assert!(!path_matches("CHANGELOG.md", "docs/CHANGELOG.md"));
+    }
+
+    #[test]
+    fn a_check_without_a_skip_list_always_runs() {
+        assert_eq!(
+            skip_note(&spec_skipping(None), &paths(&["docs/a.md"])),
+            None
+        );
+        assert_eq!(
+            skip_note(&spec_skipping(Some(&[])), &paths(&["docs/a.md"])),
+            None
+        );
+    }
+
+    #[test]
+    fn a_docs_only_change_skips_and_says_so() {
+        let spec = spec_skipping(Some(&["docs/", "*.md"]));
+        let note = skip_note(&spec, &paths(&["docs/a.md", "README.md"])).unwrap();
+        assert!(note.contains("not run"));
+        let run = skipped_run(&spec, note);
+        assert!(run.passed);
+        assert!(run.note.is_some());
+    }
+
+    #[test]
+    fn a_studies_json_only_change_runs_every_check() {
+        // With no skip list configured, nothing is skipped, whatever the change.
+        let change = paths(&["studies/x/claims.json"]);
+        assert_eq!(skip_note(&spec_skipping(None), &change), None);
+        // With a list that names only docs, the same change still runs.
+        assert_eq!(skip_note(&spec_skipping(Some(&["docs/"])), &change), None);
+    }
+
+    #[test]
+    fn an_empty_or_mixed_change_runs_the_check() {
+        let spec = spec_skipping(Some(&["docs/", "*.json"]));
+        assert_eq!(skip_note(&spec, &[]), None);
+        assert_eq!(skip_note(&spec, &paths(&["docs/a.md", "src/lib.rs"])), None);
+        assert!(skip_note(&spec, &paths(&["docs/a.md", "x/b.json"])).is_some());
     }
 }
