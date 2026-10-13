@@ -9,6 +9,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- The native pull-request landing design (`docs/design/native-pr-landing.md`) is revised to answer review 2,
+  findings F1-F8 (D85): a landed job is found from records and a stored pull request number, not from
+  trailers; one pull request per job; a pre-report merged-content check; no model `Co-Authored-By` in stealth
+  mode; four new open questions with the assumptions taken. Docs only; the roadmap is not edited.
 - sccache is removed from `athena.toml` (D84, reversing D80). The user reported 0 hits over 4 jobs; the cause
   could not be reproduced because the producer cannot run `sccache --show-stats`, so no hit count was
   measured. The `[tools.sccache]` pin and the `RUSTC_WRAPPER`, `SCCACHE_DIR` and `CARGO_INCREMENTAL` keys are
