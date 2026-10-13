@@ -1970,3 +1970,28 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Provenance:** stated: BRIEF.md line 337, "Standalone, with tagged releases and a changelog". The scope
   rule is the designer's reasoning (inferred). Tests: `crates/athena-core/src/reading.rs`
   (`ensure_changelog`) and `crates/athena-context/src/briefs.rs` (scope section).
+
+## D90 · Repeats become proposed, versioned defaults: Jev matches in shadow, code decides, the user reviews
+
+- **Decision:** Proposed, design only (`docs/design/defaults-loop.md`); nothing is built.
+  - Jev gives match probabilities of an intervention or correction against each default, clusters
+    paraphrases, and drafts statement text. Code decides the threshold, the number of distinct jobs that
+    makes a candidate, id uniqueness, the version bump (one per accepted job) and validation through
+    `DefaultsModel::parse`, and it writes the proposal record.
+  - A proposal has an id, a statement, `applies_to`, a version bump and `sources` citing records. It is
+    review-only: Athena never edits `defaults.toml`. The user accepts by asking for a job that lists
+    `defaults.toml` as a deliverable (D26).
+  - Jev runs in shadow against a stronger model on a labeled set from past records, is scored against two
+    references, and is promoted only on stated criteria.
+  - This narrows D31: Jev may be added, in shadow, for this one use. D31 stands for everything else.
+- **Alternatives:** keep noticing repeats by hand; rules without a model; a stronger model only; Jev or
+  Athena applying changes itself; a separate Athena-owned defaults file; counting records instead of jobs.
+  Each is weighed in the design, section 9.
+- **Tradeoff:** A shadow period costs spend and a labeled set before any live use. In return, a wrong
+  proposal cannot reach a brief, and D89's finding (the defaults model is the user's) is kept.
+- **Reversal cost:** Low while only the design exists; docs.
+- **Provenance:** stated: the request to close the defaults loop with Jev; `BRIEF.md` line 217 (shadow new
+  decision types against a stronger model). The four repeats come from the job request and were not
+  checked against `records/`, which was not readable when this was written (reported); D89 and D25 show
+  two of them in the repository (read). The numbers in the promotion criteria are estimates. No independent
+  review of the design is recorded yet.

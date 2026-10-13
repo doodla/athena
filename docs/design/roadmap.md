@@ -81,7 +81,9 @@ Nothing here is implemented by this change.
 ## RM-4 Close the user-model loop
 
 - **Rows:** A1-1, A1-3, A1-4, A2-1, A2-4, AD-2, AD-7.
-- **What:** feed scored mispredictions back into `defaults.toml`, the estimates and the routing; record
+- **What:** feed scored mispredictions back into `defaults.toml`, the estimates and the routing (the
+  repeat-to-proposal part is designed in `docs/design/defaults-loop.md`, D90: Jev matches records to
+  defaults in shadow, code validates, and proposals are review-only); record
   evidence-backed pushback exchanges; add taste probes with expiry; add decision-sheet artifacts for a tired
   user; propose the next big task when the study ends.
 - **Done when:** a misprediction changes a defaults entry through a verified job that cites the score, and
@@ -120,7 +122,8 @@ Nothing here is implemented by this change.
 
 - **Rows:** A6-3, A6-4, A9-1, A9-2, A10-1, A12-1, A12-2, A12-3, A13-1, A13-2, A13-3.
 - **What:** revise routing from recorded cost per verified result and record the revision; add Jev as a
-  shadow decision-maker with a calibration record; register automations with measured savings; define
+  shadow decision-maker with a calibration record (its first use is the defaults loop,
+  `docs/design/defaults-loop.md` §8); register automations with measured savings; define
   specialist roles with cost and yield; version skills in the repo; measure tokens per class of work; track
   learning curves; train the always-loaded contract from verbatim evidence within its budget; test a cold
   agent against the repository.
