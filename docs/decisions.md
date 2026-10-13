@@ -1758,7 +1758,7 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
     from the one pinned version, and a test checks that the install root and the binary share it.
   - `athena.toml` is not changed here: the installed gate cannot parse a field it does not know, so the
     configuration adopts the pin, `RUSTC_WRAPPER` and `SCCACHE_DIR` in a later job, after this build is
-    adopted.
+    adopted. (Done in D80.)
 - **Alternatives:**
   - (a) Release tarballs with a SHA-256 per platform, as gitleaks has. Faster to install, but each digest
     must be fetched from upstream and checked in; no digest is guessed or placeholder-filled here.
@@ -1772,3 +1772,20 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Provenance:** User request after the first attempt at this change failed. Inferred: that the
   no-digest path avoids repeating that failure. Enforced by tests in `config.rs`, `paths.rs`, `env.rs`
   and `xtask/src/main.rs`.
+
+## D80 · `athena.toml` adopts the pinned sccache for the change and study capabilities
+
+- **Decision:** This completes the step D79 deferred.
+  - `athena.toml` gains `[tools.sccache]` with `version = "0.10.0"` and no other field.
+  - The change and study `env` tables each set `RUSTC_WRAPPER` to
+    `{athena_home}/tools/sccache/0.10.0/bin/sccache`, `SCCACHE_DIR` to `{athena_home}/sccache`, and
+    `CARGO_INCREMENTAL` to `0` (sccache does not cache incremental compilation).
+  - `CARGO_TARGET_DIR` and `CARGO_TERM_COLOR` are unchanged, so D46's per-job target directories stand.
+  - A test in `config.rs` checks that the wrapper path uses the pinned version in both capabilities.
+- **Alternatives:** (a) Pin without setting the wrapper: nothing would use the cache. (b) Wire only the
+  change capability: a study would compile cold. (c) Chosen: both.
+- **Tradeoff:** The wrapper path is written out in two places beside the pin, so a version bump edits three
+  lines; the test fails if they disagree. If the binary is not installed, builds fail until setup is run. The
+  speedup is not measured here.
+- **Reversal cost:** Low. Remove the pin and the three env keys from each capability.
+- **Provenance:** User request, following D79. Enforced by the tests in `config.rs`.
