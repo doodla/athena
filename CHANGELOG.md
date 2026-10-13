@@ -9,6 +9,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- sccache is removed from `athena.toml` (D84, reversing D80). The user reported 0 hits over 4 jobs; the cause
+  could not be reproduced because the producer cannot run `sccache --show-stats`, so no hit count was
+  measured. The `[tools.sccache]` pin and the `RUSTC_WRAPPER`, `SCCACHE_DIR` and `CARGO_INCREMENTAL` keys are
+  gone from the change and study capabilities; builds are cold again. Optional pin support in setup stays.
+  Tests in `config.rs` pin the absence.
 - The roadmap (`docs/design/roadmap.md`) is reordered so acceleration comes first (D83). A new step RM-0
   follows the 2026-10-13 addendum "Athena owns acceleration" (`BRIEF.md:494-496`) and covers the sccache
   cache (the user reports 0 hits; not measured here), concurrent jobs including collisions on `CHANGELOG.md`

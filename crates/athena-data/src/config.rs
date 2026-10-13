@@ -433,33 +433,30 @@ pub(crate) mod tests {
     #[test]
     fn sccache_pin_is_optional_and_holds_only_a_version() {
         const PIN: &str = "[tools.sccache]\nversion = \"0.10.0\"\n";
-        // athena.toml pins it, and the version is read.
-        assert!(REPO_CONFIG.contains(PIN));
-        let config = Config::parse(REPO_CONFIG).unwrap();
+        // athena.toml pins none (D84), so no sccache is configured.
+        assert!(!REPO_CONFIG.contains("[tools.sccache]"));
+        assert_eq!(Config::parse(REPO_CONFIG).unwrap().tools.sccache, None);
+        // The table is still accepted, and the version is read.
+        let text = format!("{REPO_CONFIG}\n{PIN}");
         assert_eq!(
-            config.tools.sccache,
+            Config::parse(&text).unwrap().tools.sccache,
             Some(CratePin {
                 version: "0.10.0".into()
             })
         );
-        // Without the table the config still parses and no sccache is configured.
-        let text = REPO_CONFIG.replacen(PIN, "", 1);
-        assert_eq!(Config::parse(&text).unwrap().tools.sccache, None);
         // A digest table is not part of the pin.
-        let text = REPO_CONFIG.replacen(PIN, &format!("{PIN}sha256 = {{}}\n"), 1);
+        let text = format!("{REPO_CONFIG}\n{PIN}sha256 = {{}}\n");
         assert!(matches!(Config::parse(&text), Err(ConfigError::Parse(_))));
     }
 
     #[test]
-    fn both_envs_wire_the_pinned_sccache() {
+    fn neither_env_wires_a_compiler_cache() {
         let config = Config::parse(REPO_CONFIG).unwrap();
-        let version = config.tools.sccache.unwrap().version;
-        let wrapper = format!("{{athena_home}}/tools/sccache/{version}/bin/sccache");
         for id in ["change", "study"] {
             let env = &config.capabilities[id].env;
-            assert_eq!(env["RUSTC_WRAPPER"], wrapper);
-            assert!(env["SCCACHE_DIR"].starts_with("{athena_home}/"));
-            assert_eq!(env["CARGO_INCREMENTAL"], "0");
+            for key in ["RUSTC_WRAPPER", "SCCACHE_DIR", "CARGO_INCREMENTAL"] {
+                assert!(!env.contains_key(key), "{id} sets {key}");
+            }
             assert_eq!(env["CARGO_TARGET_DIR"], "{job_dir}/target/{side}");
             assert_eq!(env["CARGO_TERM_COLOR"], "never");
         }

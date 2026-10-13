@@ -27,8 +27,9 @@ Nothing here is implemented by this change.
 - **What:**
   1. *Build cache.* The user reports that sccache shows 0 cache hits (a user report, not measured in this
      repository). D80 turned sccache on for the change and study capabilities, and the speedup was never
-     measured. Diagnose why nothing hits (for example the wrapper not applied, a per-job `CARGO_TARGET_DIR`
-     or path difference changing keys, or `CARGO_INCREMENTAL`), fix it, and record hits and misses.
+     measured. Outcome (D84): the cause could not be reproduced, because no job could run
+     `sccache --show-stats`, so no hit count was measured and the wiring was reverted. To retry, measure
+     hits and misses first, then look at per-job path differences in keys.
   2. *Parallel jobs.* Get the independent review of the parallel-jobs design (`docs/design/parallel-jobs.md`),
      then build concurrent jobs. Jobs that both edit the shared `CHANGELOG.md` and `docs/decisions.md`
      collide, so the design must say how those collisions are avoided or resolved, and test it.
