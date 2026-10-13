@@ -477,6 +477,42 @@ impl Git {
         Ok(String::from_utf8_lossy(&out).trim().to_string())
     }
 
+    /// A commit on top of `base` whose tree is `base`'s with everything under `records/` replaced by the
+    /// `records/` of `records_from`. Governed content, and so the fingerprint, is that of `base`. When the
+    /// trees come out equal, `base` itself is returned and no commit is made.
+    pub fn commit_with_records(
+        &self,
+        base: &str,
+        records_from: &str,
+        message: &str,
+        sign: bool,
+    ) -> Result<String> {
+        let is_record = |e: &TreeEntry| e.path.starts_with(attrs::RECORDS_PREFIX);
+        let index = index::TempIndex::from_tree(self, base)?;
+        let mut edits: Vec<index::IndexEdit> = self
+            .ls_tree(base)?
+            .into_iter()
+            .filter(is_record)
+            .map(|e| index::IndexEdit::Remove { path: e.path })
+            .collect();
+        edits.extend(
+            self.ls_tree(records_from)?
+                .into_iter()
+                .filter(is_record)
+                .map(|e| index::IndexEdit::Put {
+                    mode: e.mode,
+                    oid: e.oid,
+                    path: e.path,
+                }),
+        );
+        index.apply(&edits)?;
+        let tree = index.write_tree()?;
+        if tree == self.tree_of(base)? {
+            return Ok(base.to_string());
+        }
+        self.commit_tree(&tree, &[base], message, sign)
+    }
+
     /// Three-way merges `theirs` into `ours` from `base` without touching any work tree.
     /// Returns the merged tree, or `None` on a conflict.
     pub fn merge_tree(&self, base: &str, ours: &str, theirs: &str) -> Result<Option<String>> {
@@ -734,6 +770,66 @@ mod tests {
         assert!(
             (major, minor) >= MIN_GIT_VERSION,
             "git {major}.{minor} is older than 2.40"
+        );
+    }
+
+    #[test]
+    fn commit_with_records_adds_the_records_on_top_of_the_base() {
+        let (dir, git) = repo_with(&[("a.txt", "a")]);
+        let init = git.head().unwrap().unwrap();
+        // The candidate: changed code, no records.
+        git.run(["checkout", "-q", "-b", "cand"]).unwrap();
+        write_files(dir.path(), &[("a.txt", "changed")]);
+        let candidate = commit_all(&git, "candidate");
+        // The local branch: other code, and records.
+        git.run(["checkout", "-q", "main"]).unwrap();
+        write_files(
+            dir.path(),
+            &[
+                ("a.txt", "elsewhere"),
+                ("records/jobs/x/outcome.json", "{}"),
+                ("records/jobs/x/verification.json", "{}"),
+            ],
+        );
+        commit_all(&git, "records");
+        let head = git.head().unwrap().unwrap();
+        assert_ne!(init, head);
+
+        let work = git
+            .commit_with_records(&candidate, &head, "work", false)
+            .unwrap();
+        assert_ne!(work, candidate);
+        assert_eq!(git.parents(&work).unwrap(), vec![candidate.clone()]);
+        assert!(git.is_ancestor(&candidate, &work).unwrap());
+        let files: Vec<(String, Vec<u8>)> = git
+            .ls_tree(&work)
+            .unwrap()
+            .into_iter()
+            .map(|e| {
+                let blob = git.cat_blob(&e.oid).unwrap();
+                (e.path, blob)
+            })
+            .collect();
+        let paths: Vec<&str> = files.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                "a.txt",
+                "records/jobs/x/outcome.json",
+                "records/jobs/x/verification.json"
+            ]
+        );
+        assert_eq!(files[0].1, b"changed", "code is the candidate's");
+        let rules = &init;
+        assert_eq!(
+            attrs::fingerprint(&git, &work, rules).unwrap(),
+            attrs::fingerprint(&git, &candidate, rules).unwrap()
+        );
+        // Nothing to add: the base comes back unchanged.
+        assert_eq!(
+            git.commit_with_records(&candidate, &candidate, "work", false)
+                .unwrap(),
+            candidate
         );
     }
 

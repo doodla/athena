@@ -22,6 +22,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- `athena land --pr` opens the pull request against the repository's default branch as the host reports it,
+  not the local branch (a local branch missing on the remote made the host answer HTTP 422, and a detached
+  HEAD stopped the command). The pushed `athena/<job>` branch is now the verified candidate plus a commit
+  that adds the job's records from the local history, so merging it lands the verification and outcome too.
+  The checks are read on, and the link stores, that pushed commit. The merge opt-in is unchanged.
 - Trying again on a failed job that was itself a retry now carries the accepted corrections of every job in
   the retry chain (oldest first, redacted) into the reader brief, as it does for a rejected job.
 
