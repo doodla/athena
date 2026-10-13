@@ -7,7 +7,9 @@ status is a judgment from reading the cited files, and a row says where to look.
 Two views are built on the rows:
 
 - [`strategy-view.md`](strategy-view.md) groups the rows by goal and shows the coverage of each goal.
-- [`roadmap.md`](roadmap.md) orders the next steps for every partial and uncovered row, linked to row IDs.
+- [`roadmap.md`](roadmap.md) orders the next steps for every partial and uncovered row, linked to row IDs. It
+  puts acceleration (row AD-11 and the pull-request and parallel-jobs rows) first, with the firstmate study
+  alongside.
 
 ## Wording
 

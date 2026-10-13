@@ -3,14 +3,50 @@
 Ordered next steps for every row of the [requirements map](requirements-map.md) that is partial or not
 covered, grouped into steps. The [strategy view](strategy-view.md) shows the goals the steps serve.
 
-**How the order was chosen.** Cheap steps that make state and evidence visible come first, because the brief
-says improvement work is pulled by evidence (OM-9) and later steps need that evidence. Then the user model,
-then enforcement, then the study and site in the order the brief requires (OR-1), then the larger designs and
-the optional pieces. The order is a proposal for the user to correct, not a commitment: Athena owns the
-method, and each step would be designed, reviewed and verified like any other change.
+**How the order was chosen.** Acceleration comes first. The brief's addendum of 2026-10-13, "Athena owns
+acceleration" (`BRIEF.md:494-496`), gives Athena the mandate to accelerate and to track timings and feed them
+back into the system, so every later step is cheaper and quicker to do once RM-0 lands. RM-0 gathers the speed
+work: the build cache, concurrent jobs, native pull-request landing and timings. The firstmate study (RM-6)
+runs alongside RM-0, not after it: the brief requires the study to reach full quality (OR-1), it needs no
+change to the core, and RM-0 does not wait on it. After those, cheap steps that make state and evidence
+visible, because the brief says improvement work is pulled by evidence (OM-9) and later steps need that
+evidence. Then the user model, then enforcement, then the site, then the optional pieces. The order is a
+proposal for the user to correct, not a commitment: Athena owns the method, and each step would be designed,
+reviewed and verified like any other change.
 
 Each step lists the row IDs it closes and a "done when" test that a reader can run or read. All 104 partial
-and uncovered rows appear in exactly one step (13 steps). Nothing here is implemented by this change.
+and uncovered rows appear in exactly one step (13 steps: RM-0 to RM-7 and RM-9 to RM-13). The earlier RM-8
+no longer exists as a step: its eight rows and AD-11 moved into RM-0, and the other numbers did not change.
+Nothing here is implemented by this change.
+
+## RM-0 Accelerate Athena: build cache, concurrent jobs, pull-request landing, timings
+
+- **Rows:** A4-3, A5-3, A5-4, A5-5, SD-6, AD-4, AD-5, AD-9, AD-11.
+- **Source:** `BRIEF.md:494-496`, the 2026-10-13 addendum "Athena owns acceleration". This step runs alongside
+  RM-6 (the firstmate study), which neither waits for it nor blocks it.
+- **What:**
+  1. *Build cache.* The user reports that sccache shows 0 cache hits (a user report, not measured in this
+     repository). D80 turned sccache on for the change and study capabilities, and the speedup was never
+     measured. Diagnose why nothing hits (for example the wrapper not applied, a per-job `CARGO_TARGET_DIR`
+     or path difference changing keys, or `CARGO_INCREMENTAL`), fix it, and record hits and misses.
+  2. *Parallel jobs.* Get the independent review of the parallel-jobs design (`docs/design/parallel-jobs.md`),
+     then build concurrent jobs. Jobs that both edit the shared `CHANGELOG.md` and `docs/decisions.md`
+     collide, so the design must say how those collisions are avoided or resolved, and test it.
+  3. *Native pull-request landing,* from `docs/design/native-pr-landing.md`, including a mode that leaves no
+     Athena files in a third-party repository.
+  4. *Timings fed back.* Report invocation and job wall time per class of work, and use them to change
+     routing, ordering or the cache, so a recorded timing leads to a recorded change (AD-11).
+  Mechanism rows are added to `docs/enforcement.md` when the tests exist.
+- **Done when:**
+  1. *Build cache:* a second build of an unchanged tree in a new job reports a nonzero sccache hit count, and
+     a test or recorded measurement shows the count.
+  2. *Parallel jobs:* two independent jobs run at once without touching each other's records, and two jobs
+     that both add an entry to `CHANGELOG.md` and `docs/decisions.md` both land, or the second is refused
+     with a named message and no lost text.
+  3. *Pull-request landing:* a verified job opens its own pull request on the user's command and never pushes
+     non-fast-forward.
+  4. *Timings:* `athena status` or a record shows wall time per class of work, and one change that cites a
+     timing is recorded with its before and after numbers.
 
 ## RM-1 Make the project's state readable from the records
 
@@ -23,10 +59,10 @@ and uncovered rows appear in exactly one step (13 steps). Nothing here is implem
 
 ## RM-2 Record the operating facts that have no record yet
 
-- **Rows:** OM-1, OM-10, OM-12, OM-15, EN-1, EN-2, EN-3, EN-4, EN-6, A11-2, AD-11.
+- **Rows:** OM-1, OM-10, OM-12, OM-15, EN-1, EN-2, EN-3, EN-4, EN-6, A11-2.
 - **What:** a preflight record; a record of the active session; a record for a failed session start; a
   from-clean setup verification at each restart; the effort split between the study and Athena; restart
-  cadence and resumption cost as measured values; invocation timings reported per class of work.
+  cadence and resumption cost as measured values. Invocation timings per class of work moved to RM-0.
 - **Done when:** each of these facts has a record type or view, a test that it is refused when malformed, and
   a row in `docs/enforcement.md` or an entry in its *Prose-only in v0* list.
 
@@ -60,6 +96,7 @@ and uncovered rows appear in exactly one step (13 steps). Nothing here is implem
 ## RM-6 Finish the firstmate work-handling study at full quality
 
 - **Rows:** A3-2, EN-7, S1-1, S1-3, S4-1, S5-1, S5-2.
+- **Order:** runs alongside RM-0, not after it.
 - **What:** register the validation rules for use by the user, finish the mechanism end to end with
   rationale cards and observed evidence, record any downgrade explicitly, and record what Athena borrowed,
   adapted or rejected.
@@ -74,15 +111,6 @@ and uncovered rows appear in exactly one step (13 steps). Nothing here is implem
   generation. Add a second release and an adopter guide that uses the study as the worked example.
 - **Done when:** the published site passes the user-facing checks at phone and desktop sizes, and the
   Iris ledger refuses a generation that would pass the $15 cap.
-
-## RM-8 Build the proposed designs for pull requests, brownfield use and parallel jobs
-
-- **Rows:** A4-3, A5-3, A5-4, A5-5, SD-6, AD-4, AD-5, AD-9.
-- **What:** get the independent review of the parallel-jobs design, then build native pull-request landing
-  (including a mode that leaves no Athena files in a third-party repository) and concurrent jobs, with
-  the mechanism rows added when the tests exist.
-- **Done when:** a verified job opens its own pull request on the user's command, never pushes
-  non-fast-forward, and two independent jobs run at once without touching each other's records.
 
 ## RM-9 Efficiency, learning and delegation
 
