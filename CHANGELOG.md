@@ -31,6 +31,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   made after the closing score and resolved `user_intervenes` to true early; the recorded score differed in
   that event's `outcome`, `provisional` and `brier`. It now counts only interventions made at or before the
   score's own time. A forged re-score is still refused.
+- The history check exempts the squash of PR #14, 5a73478, as decided in D76. It changes `records/` but names
+  no job; the exemption is a configuration entry in `athena.toml`, with no code change.
 
 ### Added
 
