@@ -31,9 +31,11 @@ Nothing here is implemented by this change.
      `sccache --show-stats`, so no hit count was measured and the wiring was reverted. To retry, measure
      hits and misses first, then look at per-job path differences in keys.
   2. *Parallel jobs.* The independent review of the parallel-jobs design (`docs/design/parallel-jobs.md`) is
-     done: accept with changes (`docs/design/reviews/parallel-jobs-review-1.md`). Apply its changes, then
-     build concurrent jobs. Jobs that both edit the shared `CHANGELOG.md` and `docs/decisions.md`
-     collide, so the design must say how those collisions are avoided or resolved, and test it.
+     done: accept with changes (`docs/design/reviews/parallel-jobs-review-1.md`). The design is revised to
+     answer findings F1-F8 (one process per job, landing through per-job pull requests, rules for shared
+     append-only files) and awaits a second review; then build concurrent jobs. Jobs that both edit the
+     shared `CHANGELOG.md` and `docs/decisions.md` collide; the revised design's section 9 says how that is
+     avoided, and the build must test it.
   3. *Native pull-request landing,* from `docs/design/native-pr-landing.md`, including a mode that leaves no
      Athena files in a third-party repository.
   4. *Timings fed back.* Report invocation and job wall time per class of work, and use them to change
