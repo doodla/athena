@@ -260,6 +260,25 @@ impl Git {
         )
     }
 
+    /// Makes the commit `oid` present in the object store by fetching it from `remote` when it is missing.
+    /// It fetches the object only: no branch, tag or other ref moves and `FETCH_HEAD` is not written.
+    /// Returns whether the commit is present afterwards.
+    pub fn ensure_commit(&self, remote: &str, oid: &str) -> Result<bool> {
+        if self.rev_parse(oid)?.is_some() {
+            return Ok(true);
+        }
+        self.run([
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            "--no-write-fetch-head",
+            "--refmap=",
+            remote,
+            oid,
+        ])?;
+        Ok(self.rev_parse(oid)?.is_some())
+    }
+
     /// The tree id of a commit or tree.
     pub fn tree_of(&self, treeish: &str) -> Result<String> {
         Ok(self
@@ -798,6 +817,28 @@ mod tests {
             (major, minor) >= MIN_GIT_VERSION,
             "git {major}.{minor} is older than 2.40"
         );
+    }
+
+    #[test]
+    fn ensure_commit_fetches_a_missing_commit_without_moving_any_ref() {
+        let (_origin_dir, origin) = repo_with(&[("a.txt", "a")]);
+        let wanted = origin.head().unwrap().unwrap();
+        let (_local_dir, local) = repo_with(&[("b.txt", "b")]);
+        let local_head = local.head().unwrap().unwrap();
+        let origin_path = origin.dir().to_str().unwrap().to_string();
+        local
+            .run(["remote", "add", "origin", &origin_path])
+            .unwrap();
+        assert_eq!(local.rev_parse(&wanted).unwrap(), None);
+        let refs_before = local.run(["for-each-ref"]).unwrap();
+
+        assert!(local.ensure_commit("origin", &wanted).unwrap());
+        assert_eq!(local.rev_parse(&wanted).unwrap(), Some(wanted.clone()));
+        assert!(local.tree_of(&wanted).is_ok());
+        assert_eq!(local.run(["for-each-ref"]).unwrap(), refs_before);
+        assert_eq!(local.head().unwrap().unwrap(), local_head);
+        // Already present: nothing to fetch.
+        assert!(local.ensure_commit("origin", &local_head).unwrap());
     }
 
     #[test]
