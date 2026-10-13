@@ -1857,3 +1857,21 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Reversal cost:** Low. Restore the pin and the three env keys per capability, and update the tests.
 - **Provenance:** User request RM-0 item 1, with the revert fallback allowed. Enforced by tests in
   `config.rs`.
+
+## D85 · The native pull-request landing design answers review 2
+
+- **Decision:** Amends D72; design text only, no rule changes. `docs/design/native-pr-landing.md` now says: a
+  landed job is identified from records and a stored pull request number, never from the trailers of a host
+  merge (review 2 F1, F6); one pull request per job, with a squash of several relying on M30 and its limits
+  (F2); per-job pull requests are what it supplies for the parallel pool, and re-verification is only on the
+  user's request (F3); a pre-report check that merged content equals the verified fingerprint, and stealth's
+  lack of audit, are recorded (F4); stealth writes no model `Co-Authored-By` unless asked (F5); cited
+  references were re-checked (F7); the four user questions of review 2 are in §9 with the assumption taken
+  (F8).
+- **Alternatives:** Design pull requests that hold several jobs (larger; left for a later design); re-verify
+  stale jobs automatically (spends budget unasked); leave the open questions out (the review asked for them).
+- **Tradeoff:** The smaller option was taken for each question the user has not answered, so the user may
+  reverse any of them in §9. The roadmap order is not edited here.
+- **Reversal cost:** Low. Docs only.
+- **Provenance:** `docs/design/reviews/native-pr-landing-review-2.md`. The user's observations E1 and E2 are
+  reported and were not reproduced. No command was run to reproduce any behavior.
