@@ -6,7 +6,7 @@
 //! criteria, not toward a forecast, and the verifier judges the artifact, not anyone's expectations.
 
 use athena_data::DefaultsModel;
-use athena_data::records::{CriterionKind, DeliverableAction, Forecast, Reading};
+use athena_data::records::{CriterionKind, DeliverableAction, Forecast, PinnedRepo, Reading};
 use std::fmt::Write;
 
 /// The largest diff the verifier's brief inlines; a larger one is read with `git diff HEAD~1`.
@@ -179,6 +179,23 @@ pub struct ProducerInputs {
     pub reading: AcceptedReading,
     pub checks: Vec<CheckView>,
     pub commands: Vec<String>,
+    /// The repository Athena pinned for a study, when the capability pins one.
+    pub pin: Option<PinnedRepo>,
+}
+
+/// The "Pinned source" section: the pin Athena resolved, shown only when there is one. The SHA is the one
+/// Athena resolved, so it is cited as given; the hash rule bars only hashes made during verification.
+fn pin_section(out: &mut String, pin: Option<&PinnedRepo>) {
+    if let Some(pin) = pin {
+        let _ = writeln!(
+            out,
+            "## Pinned source\n\nAthena resolved the studied repository to one commit before this job began:\n\n\
+             - url: {}\n- ref: {}\n- sha: {}\n\n\
+             Cite this url, ref and full SHA exactly as given; they are real, not placeholders. The tree is \
+             mounted read-only in your working directory.\n",
+            pin.url, pin.git_ref, pin.sha
+        );
+    }
 }
 
 /// The producer brief (design §7.1), stored verbatim as `brief-producer.md`.
@@ -187,6 +204,7 @@ pub fn producer_brief(inputs: &ProducerInputs) -> String {
     let _ = writeln!(out, "# Job {}: {}\n", inputs.job, inputs.reading.title);
     let _ = writeln!(out, "## Request (verbatim)\n\n{}\n", quote(&inputs.request));
     reading_sections(&mut out, &inputs.reading);
+    pin_section(&mut out, inputs.pin.as_ref());
     let _ = writeln!(out, "{}", banned_words_section());
     let _ = writeln!(out, "## Checks Athena will run\n");
     for check in &inputs.checks {
@@ -280,7 +298,9 @@ const VERIFIER_VISIBILITY: &str = "The verifier sees only the candidate diff, in
 It does not see your commands, output, or reasoning. Evidence for a behavior criterion must cite commands \
 the verifier can run itself in that snapshot; your own git status and git diff runs do not count as evidence. \
 Commit hashes made during verification do not exist in the real history, so never pin or cite a commit hash \
-in code, docs, or design-revision text (BRIEF.md included); describe the content instead.";
+made during verification in code, docs, or design-revision text (BRIEF.md included); describe the content \
+instead. The one exception is the pinned instance: when the brief has a \"Pinned source\" section, cite its \
+url, ref and SHA as given.";
 
 /// What the core shows the verifier of the candidate: built from git, never from the producer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -314,6 +334,8 @@ pub struct VerifierInputs {
     pub commands: Vec<String>,
     /// Tool-configuration files whose base versions are in the working tree for this verification.
     pub tool_config_from_base: Vec<String>,
+    /// The repository Athena pinned for a study, when the capability pins one.
+    pub pin: Option<PinnedRepo>,
 }
 
 impl VerifierInputs {
@@ -344,6 +366,7 @@ pub fn verifier_brief(inputs: &VerifierInputs, inline_diff: bool) -> String {
     );
     let _ = writeln!(out, "## Request (verbatim)\n\n{}\n", quote(&inputs.request));
     reading_sections(&mut out, &inputs.reading);
+    pin_section(&mut out, inputs.pin.as_ref());
     let c = &inputs.candidate;
     let _ = writeln!(
         out,
@@ -638,6 +661,7 @@ mod tests {
                 command: "cargo test --locked".into(),
             }],
             commands: vec!["cargo test".into()],
+            pin: None,
         });
         assert!(brief.contains("## Acceptance criteria"));
         assert!(brief.contains("1. [content] CHANGELOG.md exists"));
@@ -661,13 +685,78 @@ mod tests {
             reading: accepted,
             checks: vec![],
             commands: vec![],
+            pin: None,
         });
         assert!(brief.contains("## What the verifier sees"));
         assert!(brief.contains("only the candidate diff, in a fresh snapshot"));
         assert!(brief.contains("commands the verifier can run itself"));
         assert!(brief.contains("git status and git diff runs do not count"));
         assert!(brief.contains("do not exist in the real history"));
-        assert!(brief.contains("never pin or cite a commit hash"));
+        assert!(brief.contains("never pin or cite a commit hash made during verification"));
+        assert!(brief.contains("cite its url, ref and SHA as given"));
+    }
+
+    fn pin() -> PinnedRepo {
+        PinnedRepo {
+            url: "https://example.com/demo.git".into(),
+            git_ref: "main".into(),
+            sha: "0123456789abcdef0123456789abcdef01234567".into(),
+        }
+    }
+
+    fn producer_inputs(pin: Option<PinnedRepo>) -> ProducerInputs {
+        ProducerInputs {
+            job: "20261010-153012-k7q2".into(),
+            request: "study the demo".into(),
+            reading: AcceptedReading::new(&reading(), &defaults(), |_| false),
+            checks: vec![],
+            commands: vec![],
+            pin,
+        }
+    }
+
+    #[test]
+    fn producer_briefs_carry_the_pin_with_the_exemption_when_set() {
+        let brief = producer_brief(&producer_inputs(Some(pin())));
+        let section = brief.find("## Pinned source").expect("a pin section");
+        assert!(section < brief.find("## Checks Athena will run").unwrap());
+        assert!(brief.contains("https://example.com/demo.git"));
+        assert!(brief.contains("ref: main"));
+        assert!(brief.contains("sha: 0123456789abcdef0123456789abcdef01234567"));
+        assert!(brief.contains("cite its url, ref and SHA as given"));
+    }
+
+    #[test]
+    fn producer_briefs_without_a_pin_have_no_pin_section() {
+        let brief = producer_brief(&producer_inputs(None));
+        assert!(!brief.contains("## Pinned source"));
+        assert!(!brief.contains("sha:"));
+    }
+
+    #[test]
+    fn verifier_briefs_carry_the_pin_only_when_set() {
+        let mut inputs = VerifierInputs {
+            job: "20261010-153012-k7q2".into(),
+            request: "study the demo".into(),
+            reading: AcceptedReading::new(&reading(), &defaults(), |_| false),
+            candidate: CandidateView {
+                base: "1".repeat(40),
+                candidate: "2".repeat(40),
+                stat: String::new(),
+                diff: String::new(),
+            },
+            checks: vec![],
+            commands: vec![],
+            tool_config_from_base: vec![],
+            pin: Some(pin()),
+        };
+        let brief = verifier_brief(&inputs, true);
+        assert!(brief.contains("## Pinned source"));
+        assert!(brief.contains("https://example.com/demo.git"));
+        assert!(brief.contains("ref: main"));
+        assert!(brief.contains("sha: 0123456789abcdef0123456789abcdef01234567"));
+        inputs.pin = None;
+        assert!(!verifier_brief(&inputs, true).contains("## Pinned source"));
     }
 
     #[test]
@@ -678,6 +767,7 @@ mod tests {
             reading: AcceptedReading::new(&reading(), &defaults(), |_| false),
             checks: vec![],
             commands: vec![],
+            pin: None,
         });
         let words = boundary_words();
         assert_eq!(words.len(), 17);
@@ -709,6 +799,7 @@ mod tests {
             }],
             commands: vec!["cargo test".into()],
             tool_config_from_base: vec![],
+            pin: None,
         };
         assert!(verifier_brief(&inputs, true).contains("+# Changelog"));
         let recorded = verifier_brief(&inputs, false);

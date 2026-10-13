@@ -9,6 +9,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Study briefs carry the pin Athena resolved. The producer and verifier briefs of a job that pins a
+  repository gain a "Pinned source" section with the url, ref and full SHA from the job record; other
+  briefs are unchanged. The producer brief's rule against citing commit hashes now bars only hashes made
+  during verification and says to cite the pinned instance as given.
 - The first study, `studies/firstmate-work-handling/` (D78): firstmate's work handling at the commit the user
   pinned, as typed records (pin, claims, rationales, model, findings, validation). Every claim carries the
   full pinned SHA, a path and line range, and a verbatim quote, and is tagged `[mechanism]` or

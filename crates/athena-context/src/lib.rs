@@ -8,6 +8,8 @@
 //! - each role's whole always-loaded set has a fixed token budget, checked by a byte estimator as a
 //!   tripwire, with live measurement as the authority;
 //! - briefs carry the job-specific part, built deterministically from records ([`briefs`]);
+//! - a study's producer and verifier briefs also carry the pin Athena resolved (url, ref, full SHA) in a
+//!   "Pinned source" section, shown only when the job pinned a repository;
 //! - the three roles' structured outputs are typed, and their JSON Schemas are generated from the types
 //!   ([`outputs`]);
 //! - the verifier's inputs are a type with no channel for anything the producer said ([`briefs::VerifierInputs`]).
