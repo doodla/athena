@@ -9,7 +9,7 @@ it. Slice 2 (`athena land <job> --pr`, `crates/athena-core/src/gh.rs`) adds the 
 owned mode, described below; stealth mode is a later slice.
 
 **Slice 2 as built.** The host client runs only `gh api` with REST paths (`repos/{owner}/{repo}/pulls`,
-`commits/{sha}/check-runs`, `commits/{sha}/status`, `pulls/{n}/merge`); no `gh pr` subcommand and no
+`commits/{sha}/check-runs`, `commits/{sha}/status`, `pulls/{n}/merge`, and `repos/{owner}/{repo}` for the allowed merge methods, §5.2a); no `gh pr` subcommand and no
 query-language endpoint is used. The command pushes the job's branch `athena/<job>` through `check_push`,
 opens the pull request, stores the link, and reads the checks (red, pending or green; no report at all counts
 as pending). The merge call is made only when the user's opt-in setting `[landing] merge_via_rest` is true; it
@@ -209,16 +209,58 @@ The prose-only rule says Athena does not push. Under this design:
   by hand, and the host's branch protection (when the user has it) is what stops that.
 - Until the build exists, the prose-only list keeps its current text. This document changes no rule.
 
-### 5.2a The landing shape for pull requests is the merge commit (D87)
+### 5.2a The merge method follows the repository; a squash is followed by a resync (D88, supersedes D87)
 
-Merge commits are the landing shape for pull requests: the opt-in REST merge requests `merge`, and a user who
-merges by hand should choose "Create a merge commit". **Squash merges break ancestry.** A squash makes a new
-commit that is not a descendant of the branch's commits, so the work branch stays unmerged as far as git can
-tell, and the next pull request cut from it conflicts with the squashed content. This happened when PR #39 was
-squash-merged: the next pull request conflicted. A merge commit keeps the branch commits as ancestors, and a
-simulated history of two merge-commit landings passes `athena check --history` with 0 violations (see D87 in
-`docs/decisions.md` for the evidence and its limits). The gate still accepts a squash by the chain rule
-(M30); this section changes the recommended shape, not what the gate accepts.
+D87 made the merge commit the landing shape for pull requests. D88 replaces that: Athena works on any user's
+repository, including one that allows only squash merges, which is the owner's choice for this repository
+(the owner, Sri, chose squash-only support over enabling merge commits). Pull requests no longer always land
+as merge commits. Three parts follow.
+
+**Method discovery.** Before the REST merge call, the host client reads `GET repos/{owner}/{repo}` and takes
+`allow_merge_commit`, `allow_squash_merge` and `allow_rebase_merge` (`MergeMethods` in
+`crates/athena-core/src/gh.rs`). It requests the first allowed method in the order merge, squash, rebase. A
+merge commit comes first because it keeps the branch commits as ancestors, so a repository that allows it
+behaves as before. A flag the host does not report counts as not allowed. When none is allowed the merge fails
+with an error that names the three flags, and nothing is sent. This repository reports `allow_squash_merge`
+true and the other two false, so Athena sends `merge_method=squash`.
+
+**The squash message.** A squash builds its message from the host's template unless told otherwise, and the
+host may add text after the trailers (E1, reported), which moves them out of the last paragraph where git reads
+them. So Athena supplies the message: `commit_title` and `commit_message` in the merge call, taken from the
+job's locally landed commit (`Git::squash_text`). The title is that commit's subject, the body is the rest, and
+the trailers are the last paragraph. The text must hold exactly one `Athena-Job` trailer in that paragraph or
+the merge is not attempted. Whether the host adds its own text to a message supplied this way was not observed
+(no call to the host was made while writing this); the landing rule does not depend on the trailers (§5.3), so a
+host that adds text neither fails a valid landing nor lets a wrong one pass. A test builds a squash from that
+text on a real local repository and shows `athena check --history` passes on it
+(`a_squash_whose_message_is_built_from_the_landed_commit_passes_the_history_check` in
+`crates/athena-gate/src/landing_tests.rs`).
+
+**The resync after a squash.** **A squash breaks ancestry.** It makes a new commit that is not a descendant of
+the branch's commits, so the local branch still holds the job's landed commit, main holds the squash, and git
+sees them as unrelated work. The next pull request cut from the branch carries the old landed commit and
+conflicts with the squash when a later job edited the same lines (this was PR #40, which needed a hand rebuild).
+So when the pull request is seen merged and the merged content is verified, Athena rebuilds the local branch
+(`Athena::resync_onto_merge`, `resync_tip` in `crates/athena-core/src/land.rs`, `Git::replay`):
+
+1. If the merged commit is already part of the branch (a merge commit that was pulled, or a resync already
+   done), or the job's landed commit is not on the branch, nothing happens.
+2. Otherwise the commits after the job's landed commit (later landed jobs, their records, hand work) are
+   replayed, oldest first on the first-parent chain, on top of the merged commit. Each is carried by a
+   three-way merge from its own parent, keeps its message, and is skipped if the branch already has its change.
+3. A conflict is an error: the branch does not move, and nothing is lost. The old tip stays in the reflog.
+4. The branch and work tree move with `git reset --keep`, so local edits that do not collide are kept and one
+   that does collide stops the move.
+
+The job's landed commit itself is not replayed: the squash holds its content. The next `athena land --pr` finds
+the squash as the job's landed commit (it carries the same trailers), and the next job's pull request branch
+descends from the squash, so it merges with main without conflict. A test on a real temporary repository shows
+the conflict before the resync and a clean merge after it, with later jobs, records and hand work kept
+(`after_a_squash_the_branch_is_rebuilt_on_it_and_the_next_pull_request_is_clean`). The resync rebuilds commits,
+so their ids change and their authors become the person running the command; that cost is accepted. The same
+step serves a rebase merge, whose commits also do not descend from the branch's. The gate accepts all three
+shapes (M30); this section changes which one Athena requests and how it repairs the branch after one, not what
+the gate accepts.
 
 A rerun of `athena land --pr` after the merge has two properties that serve this shape. It fetches the merged
 commit from `origin` (the object only; no branch or ref moves) before fingerprinting it, since the host made
