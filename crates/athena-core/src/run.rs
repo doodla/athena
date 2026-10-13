@@ -666,6 +666,11 @@ impl Athena {
         let mut check_runs: Vec<CheckRun> = Vec::new();
         let mut cleanup: Vec<String> = Vec::new();
         let check_started = Instant::now();
+        let changed_for_skip: Vec<String> = closing
+            .candidate
+            .as_ref()
+            .map(|c| c.changes.iter().map(|e| e.path.clone()).collect())
+            .unwrap_or_default();
         for spec in ctx.capability.checks(jc) {
             if self.nested.is_some() {
                 check_runs.push(CheckRun {
@@ -684,6 +689,10 @@ impl Athena {
                         "not run: a nested run skips checks; the outer job runs its own".into(),
                     ),
                 });
+                continue;
+            }
+            if let Some(note) = crate::checks::skip_note(&spec, &changed_for_skip) {
+                check_runs.push(crate::checks::skipped_run(&spec, note));
                 continue;
             }
             self.refuse_if_stopped()?;

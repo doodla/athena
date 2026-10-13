@@ -97,6 +97,13 @@ pub struct CheckConfig {
     pub run: Vec<String>,
     #[serde(default)]
     pub kind: CheckKind,
+    /// Path patterns that let the check be skipped. When set and every changed path matches at least one
+    /// pattern, the check does not run and the run records a note. Absent means the check always runs.
+    /// A pattern ending in `/` matches every path under that directory; a pattern starting with `*.`
+    /// matches any path ending in the rest (`*.json` matches `a.json` and `x/y/a.json`); any other
+    /// pattern matches exactly one path.
+    #[serde(default)]
+    pub skip_when_only: Option<Vec<String>>,
 }
 
 /// What a check's success means.
@@ -369,6 +376,25 @@ pub(crate) mod tests {
     fn default_configuration_loads() {
         // M9 (allows): the default configuration, whose verifier is outside the producer set, loads.
         assert!(Config::parse(REPO_CONFIG).is_ok());
+    }
+
+    #[test]
+    fn skip_when_only_is_optional_and_parsed_when_present() {
+        // The repository's own file has no such key yet; every check then always runs.
+        let config = Config::parse(REPO_CONFIG).unwrap();
+        let change = config.capability("change").unwrap();
+        assert!(change.checks.iter().all(|c| c.skip_when_only.is_none()));
+        let text = REPO_CONFIG.replacen(
+            "[[capabilities.change.checks]]\n",
+            "[[capabilities.change.checks]]\nskip_when_only = [\"docs/\", \"*.json\"]\n",
+            1,
+        );
+        let config = Config::parse(&text).unwrap();
+        let first = &config.capability("change").unwrap().checks[0];
+        assert_eq!(
+            first.skip_when_only,
+            Some(vec!["docs/".to_string(), "*.json".to_string()])
+        );
     }
 
     #[test]

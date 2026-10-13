@@ -66,6 +66,8 @@ pub struct CheckSpec {
     pub name: String,
     pub run: Vec<String>,
     pub kind: CheckKind,
+    /// Path patterns that let the check be skipped; `None` means it always runs (see `checks::skip_note`).
+    pub skip_when_only: Option<Vec<String>>,
 }
 
 /// The producer's change as the core captured it: one entry per path, with modes and blob ids.

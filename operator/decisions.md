@@ -124,3 +124,16 @@ Athena's decision log, not here. Newest last.
   Scores re-derived after an intervention also do not reconcile inside a squash (to fix through Athena).
   Rebase merging would need Sri to change a setting, which OP-10 rules out while another path exists.
 - Cost: main is red from the squash until the exemption lands, about one CI round.
+
+## OP-12. The operator owns ordering and drives Athena toward accelerating itself (2026-10-13)
+
+- Decision (Sri, in chat, 2026-10-13 ~04:55): "I want you to figure out ordering. In the end my goal is to get to
+  what I've described in the brief. I'm okay to meander a bit but what I want is for Athena itself to accelerate."
+  The operator owns the driving session: picks the order of work, runs it through Athena, tests hypotheses with
+  measurements, and keeps tweaking Athena through Athena, until Athena can hold the ordering itself.
+- How: each step states a hypothesis and a predicted time and cost; the result is measured against it. The
+  ordering lives in Athena's roadmap once it exists (requirements map and strategy view are the next design), not
+  in this file or the handoff.
+- Also from the same chat: PRs that add records without landing a job are merged by hand with a squash message
+  whose last paragraph names the job (`Athena-Job:`); a squash may name only one landed job. GitHub's auto-merge
+  appends a co-author paragraph that hides those trailers. This lasts until native PR landing is built.
