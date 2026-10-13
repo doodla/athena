@@ -1834,3 +1834,26 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   roadmap stays a proposal and implements nothing.
 - **Reversal cost:** Low. Docs only.
 - **Provenance:** User request after the 2026-10-13 addendum. No test enforces it.
+
+## D84 · The sccache wiring is removed from `athena.toml`; the cause of 0 hits was not reproduced
+
+- **Decision:** This reverses D80. D79's optional `[tools.sccache]` support in code and setup stays.
+  - `athena.toml` loses `[tools.sccache]` and, in both the change and study `env` tables, `RUSTC_WRAPPER`,
+    `SCCACHE_DIR` and `CARGO_INCREMENTAL`. D46's per-job `CARGO_TARGET_DIR` and `CARGO_TERM_COLOR` stay.
+  - Tests in `config.rs` pin the absence: no pin in `athena.toml`, none of the three keys in either `env`
+    table, and the optional pin table still parses.
+  - **Diagnosis status: not reproduced.** The producer for this job may run only cargo build, check, test,
+    clippy, fmt, run, metadata, tree and doc, so it could not run `sccache --show-stats` before or after a
+    build. No stats were collected, and the user's figures (0 hits, 644+ misses, test check about 165 to 190
+    seconds) are reports, not measurements.
+  - What the reading of the code supports, as hypotheses only: misses (not build failures) mean the wrapper
+    ran, so the binary was installed. A per-job `CARGO_TARGET_DIR` and per-job snapshot paths put different
+    absolute paths in the arguments of workspace crates, which can change their keys; the cause for registry
+    crates was not identified.
+- **Alternatives:** (a) Keep the wiring and measure later: every job pays for a wrapper process that, as
+  reported, never hits. (b) Change D46's per-job target directories to share paths: out of scope and a larger
+  design change. (c) Remove the wiring (chosen) until someone can run `sccache --show-stats` and see hits.
+- **Tradeoff:** Builds are cold again, as before D80. Re-adding the cache needs a measured cause first.
+- **Reversal cost:** Low. Restore the pin and the three env keys per capability, and update the tests.
+- **Provenance:** User request RM-0 item 1, with the revert fallback allowed. Enforced by tests in
+  `config.rs`.
