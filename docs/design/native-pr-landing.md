@@ -1,7 +1,16 @@
 # Native pull-request landing, including repositories Athena does not own
 
 **Status:** proposed (D72); revised after review 2 (`design/reviews/native-pr-landing-review-2.md`, findings
-F1-F8; revision recorded in D85). Design only: no code is built by this document. Not yet re-reviewed.
+F1-F8; revision recorded in D85); re-reviewed in review 3 (`design/reviews/native-pr-landing-review-3.md`,
+verdict accept with changes) and revised again for its findings N1-N4 (D86). Paths in this document are
+relative to `docs/` unless they start with `docs/`, `crates/` or are a bare file at the repository root.
+This document builds nothing; slice 1 of the build (owned mode core: `crates/athena-core/src/pr.rs`) follows
+it, and the command, the host calls and stealth mode are later slices.
+
+**Revision note (after review 3).** N1: the merged-content check compares fingerprints and a refused merge
+has a named state (§5.4). N2: the pull request number lives in the state directory in both modes (§5.1 step 3).
+N3: the stealth body, leak check and branch name (§5.1 step 3, §5.2, §5.4). N4: the per-job checks for a
+stealth squash of several jobs (§5.6). N5: wording (§5.1 step 5).
 
 Claims are marked **(read)** when taken from the file named beside them, **(design)** when they are
 proposals, and **(reported)** when they come from a user's observation that was not reproduced. No command
@@ -113,17 +122,23 @@ directory is stealth.
    remote, or to the user's fork when the user cannot push to the target, with a regular push. Athena never
    forces a push. If the remote branch already exists and is not an ancestor of the local one, the command
    stops and says so (R4).
-3. **Open.** Athena opens a pull request with the host client. The body is generated from the job: the
-   request, the criteria, the verifier's findings, and the job id. In stealth mode it contains no link to a
-   record file. Athena stores the **pull request number** (with the host, the repository and the pushed head
-   commit id) next to the job id: in owned mode in the job's records, in stealth mode in the state directory.
-   Both modes store it, because step 5 looks the merge up by it.
+3. **Open.** Athena opens a pull request with the host client. In owned mode the body is generated from the
+   job: the request, the criteria, the verifier's findings, and the job id. In stealth mode the body **keeps**
+   a plain description of the change and why it was made, written in the user's voice, and **drops** the job
+   id, the criteria and findings as Athena produces them, any link to a record file, and any Athena
+   vocabulary (job, verifier, forecast, record). Athena stores the **pull request number** (with the host,
+   the repository and the pushed head commit id) next to the job id **in the state directory, in both
+   modes**, in a link file under the job's directory (`pr-link.json`). It is not a record: the repository's
+   records schema does not change. Reason (review 3 N2): the number and the pushed head exist only after the
+   push, so they cannot be in the closing records the pull request itself carries, and a later record would
+   need its own path through the gate (M4, M5). Step 5 looks the merge up by the stored number.
 4. **Wait.** Athena reads the pull request's check status through the client. It does not merge on its own
    authority: the merge is the user's, or the host's auto-merge setting the user chose.
 5. **Merge observed.** Athena asks the host for the pull request by its stored number and reads the merged
    commit id from the answer (merge commit, squash or rebase). **A landed job is identified from records,
    never from the trailers of the merged commit**: Athena does not parse trailers, and does not search the
-   base branch's log for the job id, to find the merge. The pull request number gives the merged commit; the
+   base branch's log for the job id, to find the merge. (The core's retry path does search the log for a
+   blocked closing commit of its own; §5.3 says why that differs.) The pull request number gives the merged commit; the
    records give the job. It then reconciles: in owned mode it checks the landing rule of M7 or M30 against the
    new base-branch tip (the gate already decides from the closing records the commit adds, and treats
    trailers only as hints that must agree **(read, `crates/athena-gate/src/invariant.rs` 267-272)**); in
@@ -141,6 +156,13 @@ The prose-only rule says Athena does not push. Under this design:
   created, only as a regular push.
 - **Unchanged:** published history is never rewritten. A push that is not a fast-forward of the remote branch
   is refused; Athena has no force option.
+- **How "the job's own branch" is checked.** The push guard takes the one branch name allowed for the job and
+  the branch the caller wants to push, and refuses unless they are equal. In owned mode the allowed name is
+  the work branch derived from the job id. In stealth mode it is the neutral name chosen for the job (§5.4),
+  stored in the link file, so the guard compares against what Athena chose, not against a pattern. The guard
+  also refuses when the remote branch's head is not an ancestor of the commit being pushed, and when git
+  cannot place the remote head in local history (a fast-forward cannot then be shown). It has no force option
+  (`check_push` in `crates/athena-core/src/pr.rs`).
 - **Mechanism versus prose.** The refusal of a non-fast-forward push, and the restriction to the job's own
   work branch, are checked in code before the client is called and need tests (new row, section 8). "Athena
   does not push" is withdrawn. "Published history is never rewritten" stays a rule Athena obeys by
@@ -206,13 +228,33 @@ In stealth mode **(design)**:
   verified fingerprint (review 2 F4). In owned mode the history check detects this after the fact, not
   before. In stealth mode **nothing detects it**: there is no audit. The only guard is the pre-report check
   below, which runs on the user's machine when Athena observes the merge, and so cannot stop the merge.
-- **Merged-content check (design).** Before Athena reports a job as landed, it fetches the merged commit
-  and compares its tree (or, for a pull request whose base moved, the diff the pull request brought) with
-  the verified fingerprint. A mismatch is reported as "merged content is not the verified content", the
-  job is not recorded as landed, and the user is told. This check applies in both modes.
+- **Merged-content check (design; review 3 N1).** Before Athena reports a job as landed, it asks the host for
+  the merged commit id by the stored pull request number, and computes the **governed-content fingerprint of
+  the merged commit's tree**, under the rules at the job's base commit, exactly as the landing check does
+  for the candidate (`fingerprint` in `crates/athena-git/src/attrs.rs`, **read**: a SHA-256 over the
+  governed entries, so `records/` and owner-private paths do not count). It compares that value with the
+  verified fingerprint. There is no diff branch: a diff cannot be compared with a fingerprint without a second
+  definition, so a merge from a moved base is judged the same way as any other. Equal: the job is landed.
+  Different: the merged content is not the verified content. This applies in both modes. The fingerprint
+  equals the verified one only when the merged governed content is byte-identical, so a clean merge of
+  disjoint files from a moved base **is refused** by this check; that is the common parallel case, not an
+  edge case (§5.7).
+- **The refused state (N1).** A job whose pull request merged but failed the check is in the named state
+  **`merged-unverified`** in its link file. It is never recorded as landed, and the merge is not undone
+  (Athena does not rewrite published history). The user is told the merged commit id and both
+  fingerprints. The user leaves the state by asking Athena to re-verify the job on the new tip, which starts
+  a new, budgeted job carrying the original request (§5.7 point 3); the new job lands by its own pull
+  request. If the user decides the merged content is acceptable, that is the user's call; nothing marks the
+  job landed on the user's word alone in this slice.
 - **Leak checks.** Before opening the pull request in stealth mode, Athena compares the pushed tree to the
-  base tree and refuses if any path or message line would add an Athena-specific file, attribute or trailer
-  **(design)**. A `Co-Authored-By` line that Athena itself wrote (for the model) counts as a leak. A
+  base tree and refuses if any path, **pull request body line**, or message line would add an Athena-specific
+  file, attribute, trailer, job id or Athena vocabulary **(design; review 3 N3)**. The body is checked with
+  the same rules as the commit message, including the criteria and findings text if any were meant to be
+  included.
+- **Neutral branch name.** In stealth mode Athena pushes a branch with a **neutral name**: a short name from
+  the change, with no job id (for example `fix-parser-crash`), chosen when the link is created and stored in
+  the link file. The push guard (§5.2) allows exactly that name. A name check (no job id, no Athena
+  vocabulary) runs with the leak check. A `Co-Authored-By` line that Athena itself wrote (for the model) counts as a leak. A
   `Co-authored-by` paragraph that the **host** adds when it builds a squash message is the host's, appears
   only after the pull request is merged, and is never a leak failure; the check runs on what Athena pushes
   and on the message it drafts, not on the merged commit. This is a mechanism; its tests are listed in
@@ -244,7 +286,16 @@ squashing it. That case relies on the chain rule (M30) with its limits:
   guarantees that, and E2 (reported) says a squash message names only one job.
 - **Stealth bookkeeping.** One merged commit id is stored next to several job ids (§5.4): the state
   directory's link is many-to-one, not one-to-one. Athena's content check (§5.4) applies to the last job's
-  fingerprint, as the gate's does.
+  fingerprint, as the gate's does (**read**, `invariant.rs` 274-276: only the last has to hold the landed
+  content).
+- **Earlier jobs in stealth (review 3 N4).** The owned-mode gate runs every earlier job through its per-job
+  checks; stealth has no gate over history, so Athena runs them over the local store before it records
+  several jobs as landed: (1) each job's records are present, valid and append-only (M4, M5); (2) each
+  job's verdict was a pass and its recorded fingerprint belongs to its own candidate; (3) the prediction
+  precedes the outcome by the recorded times (M23); (4) the jobs form a chain, each job's `previous_job`
+  being the one before it; (5) the secret scan of each job's candidate (M1, M2, M22). If any earlier job fails,
+  none is recorded as landed and the user is told which. This is a promise of the design; the stealth
+  consistency checks are a later slice.
 - **Inherited gap.** The squash-chain design's second review (R2-M1) found that nothing said where
   `previous_job` comes from. That design now says the core derives it as the latest landed job in the base
   commit's history, and leaves it absent when none is found, so an unlanded predecessor makes the chain be
@@ -269,6 +320,11 @@ A job whose base is no longer the target's tip proceeds as follows **(design; as
    gives content nobody verified, so that check will often refuse; the user is told why.
 3. Otherwise, **on the user's request only**, Athena re-verifies: it starts a new job on the new tip, carrying
    the stale job's request, with its own budget and its own prediction. Nothing is re-verified automatically.
+   The same step takes a job out of `merged-unverified` (§5.4).
+
+Plainly: because the merged-content check compares fingerprints, per-job pull requests let the host merge
+independent jobs in any order, but most such merges from a moved base will not be reported as landed by
+Athena until the job is re-verified on the new tip.
 
 The roadmap lists the parallel pool before this design (`docs/design/roadmap.md`, RM-0). Review 2 and the
 parallel-jobs review ask for the opposite order. **The roadmap order is to be changed in a separate job;
@@ -281,8 +337,8 @@ this document does not edit it.**
 - **Credentials.** The host client holds the credential. Athena must keep the client's output out of
   records, since it can contain tokens or addresses (M1, M22). Redaction applies as for agent text.
 - **Stealth leaks.** A branch name, a pull request body or a commit message can reveal the tool. Section 5.4
-  covers messages and files; the branch name should be neutral (design: a short name from the change, not
-  the job id).
+  covers messages and files; the branch name is neutral (§5.4: a short name from the change, not
+  the job id), and the push guard allows exactly that name.
 - **Local store loss.** In stealth mode the only proof of verification is local. Losing the machine loses
   it. Alternative E is the answer if that matters.
 
@@ -298,7 +354,9 @@ sign-off rules, review norms), which the user's instructions govern; designing t
 | Push only on the user's command, only the job's work branch | yes: code refuses otherwise; test needed | |
 | No force push, no rewrite of published history by Athena | yes: refuse a non-fast-forward; test needed | what the user or host does by hand |
 | Pushed content equals verified content (R2) | yes: existing fingerprint check run before the push (M7) | |
-| Stealth pull request adds no Athena file, attribute or trailer (R5) | yes: tree-and-message comparison; test needed | the branch name's neutrality, until a check exists |
+| Stealth pull request adds no Athena file, attribute, trailer, or job id in its body or branch name (R5) | yes: tree, message, body and branch-name comparison; test needed (a later slice) | |
+| Several jobs squashed in stealth: earlier jobs get the per-job checks over the local store (N4) | yes: test needed (a later slice) | |
+| A merged job that fails the content check is `merged-unverified`, never landed (N1) | yes: `disjoint_file_merges_are_merged_but_not_verified` in `crates/athena-core/src/pr.rs` | |
 | Stealth pull request writes no Athena `Co-Authored-By` for the model | yes: part of the leak check; test needed, including a case where only the host's merge adds a `Co-authored-by` paragraph (not a failure) | |
 | A landed job is identified from records, never from trailers (F1) | yes: test needed with a hand-built commit whose message ends in a `Co-authored-by` paragraph after the Athena trailers; the landing check must still decide from the records and give the same answer as without that paragraph | |
 | Merged content equals the verified fingerprint before Athena reports "landed" (F4) | yes: pre-report check, both modes; test needed (two disjoint-file pull requests from one base: the second is not reported as landed) | the merge itself, which the host performs |

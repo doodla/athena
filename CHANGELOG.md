@@ -7,8 +7,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- `athena-core::pr`, slice 1 of native pull-request landing (D86): a pull request link store in the job's state
+  directory, a push guard (the job's own branch only, fast-forward only, no force option), and a
+  merged-content check that finds the merge by pull request number and returns "merged but not verified" when
+  the fingerprint differs. A library only: no command and no host calls yet.
+
 ### Changed
 
+- The native pull-request landing design is revised again for review 3, findings N1-N4 (D86): the exact
+  merged-content comparison and the `merged-unverified` state, the link kept in the state directory in both
+  modes, the stealth body, branch name and leak check, and the per-job checks for a stealth squash.
 - The native pull-request landing design (`docs/design/native-pr-landing.md`) is revised to answer review 2,
   findings F1-F8 (D85): a landed job is found from records and a stored pull request number, not from
   trailers; one pull request per job; a pre-report merged-content check; no model `Co-Authored-By` in stealth

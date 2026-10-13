@@ -1875,3 +1875,23 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Reversal cost:** Low. Docs only.
 - **Provenance:** `docs/design/reviews/native-pr-landing-review-2.md`. The user's observations E1 and E2 are
   reported and were not reproduced. No command was run to reproduce any behavior.
+
+## D86 · Native pull-request landing: review 3 answered, and slice 1 (owned-mode core) built
+
+- **Decision:** Amends D72 and D85. The design now says: the merged-content check compares the governed-content
+  fingerprint of the merged commit with the verified one, a refused merge is in the named state
+  `merged-unverified`, and the user leaves it by re-verifying on the new tip as a new job (N1); the pull request
+  number, host, repository and pushed head live in the state directory in both modes, and the records schema
+  does not change (N2); the stealth body drops the job id and Athena vocabulary, the leak check covers the body,
+  stealth pushes a neutral branch name, and the push guard compares against the name Athena chose (N3); a
+  stealth squash of several jobs runs the per-job checks over the local store (N4). Slice 1 adds
+  `crates/athena-core/src/pr.rs`: the link store, the push guard (own branch only, fast-forward only, no force
+  option) and the merged-content check (found by number, never by trailers). Nothing calls it yet.
+- **Alternatives:** Compare a diff instead of a fingerprint (needs a second definition; rejected); add a
+  record for the number in owned mode (a path through the gate for a value known only after the push;
+  rejected); build the command in the same job (too large; later slices).
+- **Tradeoff:** Most merges from a moved base are refused until re-verified, so parallel jobs land in the
+  host before they land in Athena's accounting. The link file sits in the job's state directory, which
+  `clean_job` removes; the later command slice must keep it until the merge is observed.
+- **Reversal cost:** Low. One new module with no callers; docs.
+- **Provenance:** `docs/design/reviews/native-pr-landing-review-3.md`, findings N1-N4. Tests in `pr.rs`.

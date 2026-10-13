@@ -57,7 +57,9 @@ Each of these is a judgment or a boundary that a mechanism would not yet pay for
   decisions, state the user carried) depend on the user recording them with `athena intervene`.
 - *Pushes are regular, and published history is never rewritten*: Athena does not push in v0. A proposed
   design (D72, `design/native-pr-landing.md`) would let it push its own work branch on the user's command,
-  never non-fast-forward, with the mechanism rows added when the tests exist. This text holds until then.
+  never non-fast-forward, with the mechanism rows added when the tests exist. The push guard now exists as a
+  library function (`check_push` in `crates/athena-core/src/pr.rs`, with tests) but no command calls it, so
+  Athena still does not push; this text holds until the command exists.
 - *Executed code stays contained*: not enforced in v0. Checks, builds, and tests run with the user's
   privileges (design §7.5, §16.2).
 - *Records are Athena's own*: records are not signed, and Athena writes them with the user's own rights,

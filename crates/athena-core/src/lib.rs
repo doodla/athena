@@ -15,6 +15,7 @@
 //! - [`scoring`]: forecasts resolved and scored;
 //! - [`status`]: the state of the work, from the repository alone;
 //! - [`nested`]: Athena running inside one of its own jobs;
+//! - [`pr`]: pull-request landing in owned mode: the link store, the push guard, the merged-content check;
 //! - [`pin`]: a study's repository ref resolved to a commit by the core, and mounted read-only.
 
 pub mod admission;
@@ -28,6 +29,7 @@ pub mod land;
 pub mod manage;
 pub mod nested;
 pub mod pin;
+pub mod pr;
 pub mod reading;
 pub mod run;
 #[cfg(test)]

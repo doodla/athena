@@ -1,0 +1,99 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261013-133003-prk6",
+  "base_commit": "2ade5a5dddbef5f290600273ae97e68c3d137c48",
+  "base_fingerprint": "sha256:0c27d3756f214a131332226b0e8cdaa796a0b23ae20072cdf5a6a99b9b5a5f19",
+  "previous_job": "20261013-131511-k58n",
+  "candidate_commit": "df4d400a53c47fe0b4006004e36edca925307956",
+  "candidate_tree": "68430f8d261d2efb7208ad7a85218ce5cf4de809",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 20988
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 5044
+    },
+    {
+      "path": "crates/athena-core/src/pr.rs",
+      "status": "added",
+      "mode": "100644",
+      "bytes": 16453
+    },
+    {
+      "path": "docs/decisions.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 126896
+    },
+    {
+      "path": "docs/design/native-pr-landing.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 31282
+    },
+    {
+      "path": "docs/enforcement.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 18807
+    }
+  ],
+  "fingerprint": "sha256:531974c25f92e8759bc628d233b0c0dbc57bd96431ecdbec742f5ecc6eec5c2a",
+  "violations": [],
+  "producer_report": {
+    "summary": "Slice 1 is built. The design is amended for review 3's N1-N4, and a new tested library module, `crates/athena-core/src/pr.rs`, covers owned mode. Nothing calls the module yet: there is no command, no `gh` call and no stealth code. fmt, clippy and the full test run are clean.\n\nDesign changes (`docs/design/native-pr-landing.md`):\n- **Status:** the line no longer says \"Not yet re-reviewed\". It cites review 3, and a revision note lists N1-N5.\n- **N1:** the merged-content check computes the governed-content fingerprint of the merged commit and compares it with the verified fingerprint. I dropped the diff branch. A merged-but-refused job is in the named state `merged-unverified`. The user leaves that state by re-verifying the job on the new tip as a new job.\n- **N2:** the PR number, host, repository and pushed head live in a link file in the job's state directory, in both modes. The records schema does not change.\n- **N3:** the stealth body keeps a plain description of the change and drops the job id and Athena vocabulary. The leak check covers the body and the branch name. Stealth pushes a neutral branch name. The push guard compares the pushed branch with the one name Athena chose and stored.\n- **N4:** a stealth squash of several jobs runs five per-job checks over the local store: record validity, verdict and fingerprint, prediction order, chain, and secret scan.\n- **N5:** a one-line wording fix in step 5, plus a note on path style.\n- **Enforcement table:** the §8 enforcement table gains three rows.\n\nModule (`pr.rs`, registered in `lib.rs`):\n- **Link store:** `PrLink`, `store_link` and `load_link`, under the job's state directory (`pr-link.json`), outside `records/`. The link also carries a state (`Open`, `Landed`, `MergedUnverified`) and the merged commit id.\n- **Push guard:** `check_push` refuses any branch other than the allowed one. It also refuses a remote head that is not an ancestor of the pushed commit, including one git does not know. It has no force option.\n- **Merged-content check:** `check_merged` takes a `Host` trait and a `Content` trait. It finds the merge by the stored PR number and never reads the merged commit's message. It returns `NotMerged`, `Verified`, or `MergedButNotVerified`. `apply_outcome` sets the link's state from the result.\n\nOther docs: D86 in `docs/decisions.md`, a CHANGELOG entry, and a short update to the push row in `docs/enforcement.md`.\n\nI did not touch `store.rs`, `paths.rs` or `roadmap.md`, which the deliverables list names. The module needed none of them, and changing the roadmap order is out of scope.",
+    "files": [
+      "crates/athena-core/src/pr.rs",
+      "crates/athena-core/src/lib.rs",
+      "docs/design/native-pr-landing.md",
+      "docs/decisions.md",
+      "docs/enforcement.md",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "ran before the final fmt; no code changed after"
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "ran with -q, the same tests. All suites passed, including the 5 new pr:: tests."
+      }
+    ],
+    "open_issues": [
+      "clean_job deletes the link file with the job directory. The later command slice must keep the link until the merge is observed, or move it elsewhere. D86 records this.",
+      "The verified fingerprint is passed in by the caller. Nothing yet loads it from the job's records.",
+      "The neutral branch name is stored by the design, but the code does not generate it; that is for the stealth slice.",
+      "The design's claim that the neutral branch name is checked for job ids and Athena vocabulary is a later-slice mechanism with no test yet.",
+      "The records/ and state layout were not read in depth, so the link file's home (the job_dir) is a choice. store.rs and paths.rs did not need changes."
+    ],
+    "mistakes": [
+      "The first test draft called commit_tree with three arguments and did not compile. I fixed it.",
+      "GitContent first lacked a Debug derive, which the workspace lint warns about. I fixed it."
+    ],
+    "learnings": [
+      "The fingerprint (athena_git::attrs::fingerprint) is a SHA-256 over governed paths under the rules at a given commit, not a raw tree id. Merged-content equality must use it, because records/ differs in owned mode.",
+      "StateDir::clean_job removes the whole job directory, so a link file there is deleted at cleanup.",
+      "Git::commit_tree takes a fourth bool argument (sign).",
+      "The test utilities in athena-git (`testutil`) are `pub(crate)` and `cfg(test)`, so core tests build their own repositories.",
+      "Docs that name `/home/...` style paths or the listed boundary words fail the scan; I avoided them."
+    ],
+    "desires": [
+      "A way to read the full output of a large cargo test run. The saved output was outside the working directory, so I could not search it and re-ran with -q instead.",
+      "A shared git test-utility crate, so core tests do not each rebuild their own repository helpers."
+    ]
+  }
+}
