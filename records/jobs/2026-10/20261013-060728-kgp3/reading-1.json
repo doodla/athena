@@ -1,0 +1,159 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261013-060728-kgp3",
+  "n": 1,
+  "at": "2026-10-13T06:07:52.366429221Z",
+  "invocation_seq": 1,
+  "base_commit": "6e349e1ba9aa9b459d3eed8a68fc199f37474207",
+  "config_sha256": "46d9162d4972d6789bcfd5c744f3acb2c4c3baebcc12904ac29481610d0b8059",
+  "defaults_sha256": "34395568ed0684d5b19642d761d9d16e023f3263e4313e645b083d31b302e9bc",
+  "defaults_version": 1,
+  "title": "Warm job builds with a shared sccache, keeping per-job target dirs",
+  "summary": "Keep D46's per-job CARGO_TARGET_DIR (so cargo freshness never crosses jobs) but add sccache, the content-addressed compiler cache D46 named as alternative (c), via RUSTC_WRAPPER and a shared SCCACHE_DIR in athena.toml. Record the call as a new decision that amends D46 and update the design text that says every job builds cold.",
+  "class_of_work": "config",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "buy-first",
+      "how": "Use sccache rather than building a custom cache."
+    },
+    {
+      "id": "mechanism",
+      "how": "Isolation stays enforced by check_build_dirs; the cache is safe because it is content-keyed."
+    },
+    {
+      "id": "evidence",
+      "how": "The new decision cites D46 and review 2's R14, and labels speed gains as estimates."
+    },
+    {
+      "id": "tested",
+      "how": "cargo test, clippy and fmt must stay clean."
+    },
+    {
+      "id": "small",
+      "how": "Config and decision record first; code edits only if pass-through requires them."
+    }
+  ],
+  "assumptions": [
+    "Adopting sccache (D46's alternative c) is the intended route, since the user wants warm builds and isolation and D46 said it was deferred until cold builds dominate; the user's ~165s figure meets that condition.",
+    "The cache location is shared by all jobs on the machine, e.g. a directory under the Athena state dir or a path from the user's environment, passed through to agents.",
+    "sccache is installed by setup or by the user; if it is absent, builds must still work (cold) rather than fail, so the wrapper must degrade gracefully or setup must install and check it.",
+    "The speedup cannot be measured by the verifier's allowed commands, so the change claims it only as an estimate."
+  ],
+  "question": "Is sccache (with a cache shared across jobs) acceptable, given it is a new external tool that must be installed?",
+  "acceptance_criteria": [
+    {
+      "text": "athena.toml [capabilities.change.env] still sets CARGO_TARGET_DIR to {job_dir}/target/{side}, and adds RUSTC_WRAPPER=sccache plus a SCCACHE_DIR shared across jobs (outside any job directory); athena.toml is named as changed.",
+      "kind": "content"
+    },
+    {
+      "text": "docs/decisions.md gains a new decision that amends D46: it records why a content-addressed cache keeps isolation (outputs keyed by content, not mtimes, so R14 cannot recur), the alternatives (persistent shared target dirs, seeding a target copy), and the buy-first call for sccache.",
+      "kind": "content"
+    },
+    {
+      "text": "Any environment pass-through needed (e.g. SCCACHE_DIR in env_pass_if_set) is added, and the design text claiming nothing is shared and every job builds cold (§10.4, M26, risk table) is updated to match.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo test` from the repository root: all tests pass, including env.rs tests that parse athena.toml and the check that build dirs lie inside the job directory, and xtask policy tests.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo clippy --all-targets --locked -- -D warnings` and `cargo fmt --all --check`: both clean.",
+      "kind": "behavior"
+    },
+    {
+      "text": "No per-job build directory is made shared: check_build_dirs still refuses a CARGO_TARGET_DIR outside the job's directory.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "athena.toml",
+      "action": "modify",
+      "p": 0.92
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.92
+    },
+    {
+      "path": "docs/design/athena-v0.md",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "setup.sh",
+      "action": "modify",
+      "p": 0.35
+    },
+    {
+      "path": "crates/athena-agent/src/env.rs",
+      "action": "modify",
+      "p": 0.35
+    },
+    {
+      "path": "xtask/src/main.rs",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "README.md",
+      "action": "modify",
+      "p": 0.15
+    },
+    {
+      "path": "crates/athena-cap-change/prompts/producer.md",
+      "action": "modify",
+      "p": 0.1
+    }
+  ],
+  "out_of_scope": [
+    "Sharing CARGO_TARGET_DIR across jobs",
+    "Changing check commands or timeouts",
+    "Changing the study capability's behavior beyond mirroring env if appropriate",
+    "Measuring wall-time gains in CI"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.6,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.2,
+      "cost_usd": {
+        "p10": 0.3,
+        "p50": 0.85,
+        "p90": 2.0
+      },
+      "wall_time_s": {
+        "p10": 300.0,
+        "p50": 620.0,
+        "p90": 1000.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7111111111111111,
+      "p_verification_passes": 0.6428571428571429,
+      "p_user_intervenes": 0.2714285714285714,
+      "cost_usd": {
+        "p10": 0.007793121453098537,
+        "p50": 0.2229877510692861,
+        "p90": 0.45583293439698863
+      },
+      "wall_time_s": {
+        "p10": 107.81326273693898,
+        "p50": 481.8670403727948,
+        "p90": 776.2890232989473
+      }
+    }
+  },
+  "departures": "Slightly lower acceptance and pass odds: it reverses a user decision (D46), adds an external tool, and the speedup cannot be verified with the allowed commands."
+}
