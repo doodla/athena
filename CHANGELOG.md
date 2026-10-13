@@ -14,6 +14,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A requirements map (`docs/design/requirements-map.md`). It lists each `BRIEF.md` requirement the repository
+  answers, with a pointer to the file and line that answers it, and marks the ones that are only partly
+  covered. Line numbers refer to files in the same tree, so they are right only for the tree that holds
+  the map. No code changed.
 - Warm builds with sccache (D80). `athena.toml` now pins `[tools.sccache]` at `0.10.0`, and the change and
   study capabilities set `RUSTC_WRAPPER` to `{athena_home}/tools/sccache/0.10.0/bin/sccache`, `SCCACHE_DIR` to
   `{athena_home}/sccache` and `CARGO_INCREMENTAL` to `0`. `CARGO_TARGET_DIR` and `CARGO_TERM_COLOR` are
