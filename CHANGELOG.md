@@ -22,6 +22,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- `athena land --pr` run again after the merge no longer fails with `not a tree object` until a manual
+  `git fetch`: the merged-content check fetches the merged commit from `origin` first (`Git::ensure_commit`;
+  the object only, no branch or ref moves). When the job's pull request link exists, the host is asked about
+  the merge before the landed commit is required on the current branch, so a merged job is confirmed even if
+  its landed commit is not on this branch. A job with no link and no landed commit still reports `not landed
+  on this branch`. Merge commits are recorded as the landing shape for pull requests (D87).
 - `athena land --pr` now pushes the job's locally landed commit (the one with the `Athena-Job` trailer and
   the records) instead of the bare candidate or a synthetic records commit, and says so and pushes nothing
   when the job is not landed locally. A rerun on an open pull request whose stored head differs replaces

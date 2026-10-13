@@ -1895,3 +1895,23 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   `clean_job` removes; the later command slice must keep it until the merge is observed.
 - **Reversal cost:** Low. One new module with no callers; docs.
 - **Provenance:** `docs/design/reviews/native-pr-landing-review-3.md`, findings N1-N4. Tests in `pr.rs`.
+
+## D87 · Merge commits are the landing shape for pull requests; `land --pr` reruns after the merge
+
+- **Decision:** Pull requests land as merge commits. The opt-in REST merge already requests `merge`
+  (unchanged), and the design (`docs/design/native-pr-landing.md` §5.2a, `docs/design/athena-v0.md` §7.3) now
+  says a user who merges by hand should pick a merge commit. The gate still accepts squash and rebase merges
+  (D69, M30); nothing is exempted from the history check. Two fixes to the rerun of `athena land --pr` ride
+  with it: the merged-content check fetches the merged commit from `origin` (object only, no ref moves,
+  `Git::ensure_commit`) before fingerprinting it, and when the job's pull request link exists the host is asked
+  about the merge before the landed commit is required on the local branch (`gh::confirm_existing_merge`).
+- **Alternatives:** Keep squash and rely on the chain rule (rejected: it breaks ancestry, below); exempt the
+  squash commit from the history check (rejected: weakens the check); move the work branch after a squash
+  (rewrites history).
+- **Tradeoff:** The history shows each job's commits and a merge commit per pull request, so it is longer than
+  a squashed history. The recommendation cannot stop a user from squashing on the host.
+- **Reversal cost:** Low. Docs, plus two small code paths.
+- **Provenance:** Evidence reported by the user from landing PRs #39 and #40, not re-run here. Squash-merging
+  PR #39 broke ancestry, and the next pull request conflicted. A simulated history of two merge-commit landings
+  passed `athena check --history` with 0 violations. The new tests are in `crates/athena-core/src/pr.rs`,
+  `crates/athena-core/src/gh.rs` and `crates/athena-git/src/lib.rs`.

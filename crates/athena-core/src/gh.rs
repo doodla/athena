@@ -421,6 +421,32 @@ pub fn land_pr(job: &LandPr) -> Result<PrReport> {
     })
 }
 
+/// For a job whose landed commit is not on the current branch: when the job's pull request link already
+/// exists, asks the host whether it merged and runs the merged-content check. Returns the report when the
+/// link is no longer open (landed, or merged but not verified), and stores it. Returns `None` when there is
+/// no link or the pull request is still open, so the caller keeps its "not landed" error. Nothing is pushed.
+pub fn confirm_existing_merge(
+    state: &StateDir,
+    job: &JobId,
+    host: &dyn Host,
+    content: &dyn Content,
+    verified_fingerprint: &str,
+) -> Result<Option<PrReport>> {
+    let Some(mut link) = load_link(state, job)? else {
+        return Ok(None);
+    };
+    observe_merge(host, content, &mut link, verified_fingerprint)?;
+    if link.state == LinkState::Open {
+        return Ok(None);
+    }
+    store_link(state, job, &link)?;
+    Ok(Some(PrReport {
+        link,
+        checks: None,
+        merge_requested: false,
+    }))
+}
+
 /// An open pull request whose stored head is not the commit to push: moves the job's own branch to that
 /// commit with one atomic push that is conditional on the remote head just observed, keeps the pull request,
 /// and updates the stored head. A remote head that is missing, unknown locally, or whose ancestry check fails
@@ -537,6 +563,7 @@ impl Athena {
         let content = GitContent {
             git: &self.git,
             rules_commit: &candidate.base_commit,
+            remote: remote_name,
         };
         let client = GhClient {
             runner,
@@ -546,27 +573,41 @@ impl Athena {
             git: &self.git,
             name: remote_name,
         };
-        let landed = landed_commit(&self.git, &head, &id, &verification.verified_fingerprint)?;
-        let report = land_pr(&LandPr {
-            state: &self.state,
-            job: &id,
-            branch: &branch,
-            commit: &landed,
-            verified_fingerprint: &verification.verified_fingerprint,
-            pr: PrDraft {
-                title: &title,
-                body: &body,
-                head: &branch,
+        let report = match landed_commit(&self.git, &head, &id, &verification.verified_fingerprint)
+        {
+            Ok(landed) => land_pr(&LandPr {
+                state: &self.state,
+                job: &id,
+                branch: &branch,
+                commit: &landed,
+                verified_fingerprint: &verification.verified_fingerprint,
+                pr: PrDraft {
+                    title: &title,
+                    body: &body,
+                    head: &branch,
+                },
+                host_name: &host_name,
+                repository: &repository,
+                merge_via_rest: config.landing.merge_via_rest,
+                poll,
+                ancestry: &self.git,
+                remote: &remote,
+                host: &client,
+                content: &content,
+            }),
+            // The landed commit is not on this branch. If the job's pull request already exists, the host
+            // may have merged it, and that confirms the landing without the local commit.
+            Err(not_landed) => match confirm_existing_merge(
+                &self.state,
+                &id,
+                &client,
+                &content,
+                &verification.verified_fingerprint,
+            )? {
+                Some(report) => Ok(report),
+                None => Err(not_landed),
             },
-            host_name: &host_name,
-            repository: &repository,
-            merge_via_rest: config.landing.merge_via_rest,
-            poll,
-            ancestry: &self.git,
-            remote: &remote,
-            host: &client,
-            content: &content,
-        })?;
+        }?;
         ui.line(&format!(
             "pull request #{} on {}/{}: {:?}",
             report.link.pr_number, report.link.host, report.link.repository, report.link.state
@@ -1014,6 +1055,89 @@ mod tests {
         write("e", "records\n\nAthena-Job: bootstrap\n");
         assert_eq!(landed_commit(&git, "HEAD", &job, "fp1").unwrap(), landed);
         assert!(landed_commit(&git, "HEAD", &job, "fp2").is_err());
+    }
+
+    /// A repository whose branch has no landed commit for the job.
+    fn unlanded_repo() -> (tempfile::TempDir, Git) {
+        let dir = tempfile::tempdir().unwrap();
+        let git = Git::isolated(dir.path());
+        git.run(["init", "-q", "-b", "main"]).unwrap();
+        std::fs::write(dir.path().join("a.txt"), "a").unwrap();
+        git.run(["add", "-A"]).unwrap();
+        git.run(["commit", "-q", "-m", "base"]).unwrap();
+        (dir, git)
+    }
+
+    #[test]
+    fn a_merged_pull_request_confirms_the_landing_though_the_landed_commit_is_off_this_branch() {
+        let rig = Rig::new();
+        let host = FakeHost::new(Checks::Green);
+        // The first run opens the pull request and stores an open link.
+        rig.run(&host, false, "athena/bootstrap").unwrap();
+        assert_eq!(rig.stored().state, LinkState::Open);
+        // The landed commit is not reachable from this branch.
+        let (_dir, git) = unlanded_repo();
+        assert!(
+            landed_commit(&git, "HEAD", &rig.job, "verified")
+                .unwrap_err()
+                .to_string()
+                .contains("not landed on this branch")
+        );
+        // The host reports the merge.
+        *host.merged.borrow_mut() = Some("merged1".into());
+        let state = StateDir::new(rig.dir.path().to_path_buf());
+        let report =
+            confirm_existing_merge(&state, &rig.job, &host, &rig.content, "verified").unwrap();
+        let report = report.expect("the merge confirms the landing");
+        assert_eq!(report.link.state, LinkState::Landed);
+        assert_eq!(report.link.merged_commit.as_deref(), Some("merged1"));
+        assert_eq!(rig.stored().state, LinkState::Landed);
+        assert_eq!(host.asked.borrow().last(), Some(&42));
+        // Nothing was pushed or opened, and no merge was requested.
+        assert_eq!(rig.remote.pushes.borrow().len(), 1);
+        assert!(rig.remote.replaces.borrow().is_empty());
+        assert_eq!(host.opened.get(), 1);
+        assert_eq!(host.merges.get(), 0);
+    }
+
+    #[test]
+    fn a_merge_of_other_content_is_reported_as_merged_unverified_without_the_landed_commit() {
+        let rig = Rig::new();
+        let host = FakeHost::new(Checks::Green);
+        rig.run(&host, false, "athena/bootstrap").unwrap();
+        *host.merged.borrow_mut() = Some("other".into());
+        let state = StateDir::new(rig.dir.path().to_path_buf());
+        let report = confirm_existing_merge(&state, &rig.job, &host, &rig.content, "verified")
+            .unwrap()
+            .unwrap();
+        assert_eq!(report.link.state, LinkState::MergedUnverified);
+        assert_eq!(rig.stored().state, LinkState::MergedUnverified);
+    }
+
+    #[test]
+    fn an_open_pull_request_or_no_link_keeps_the_not_landed_error() {
+        let rig = Rig::new();
+        let host = FakeHost::new(Checks::Green);
+        let state = StateDir::new(rig.dir.path().to_path_buf());
+        // No stored link: the host is not asked, and the caller's error stands.
+        assert!(
+            confirm_existing_merge(&state, &rig.job, &host, &rig.content, "verified")
+                .unwrap()
+                .is_none()
+        );
+        assert!(host.asked.borrow().is_empty());
+        let (_dir, git) = unlanded_repo();
+        let err = landed_commit(&git, "HEAD", &rig.job, "verified").unwrap_err();
+        assert!(err.to_string().contains("not landed on this branch"));
+
+        // A stored link whose pull request is not merged: still no landing.
+        rig.run(&host, false, "athena/bootstrap").unwrap();
+        assert!(
+            confirm_existing_merge(&state, &rig.job, &host, &rig.content, "verified")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(rig.stored().state, LinkState::Open);
     }
 
     #[test]

@@ -949,6 +949,10 @@ invariant treats them alike, because it reads the records a commit adds and not 
 - A *rebase merge* replays the PR's commits with new ids. The closing commit is checked as a landing against
   its new parent; the commit that added the reading is no longer an ancestor by id, and need not be.
 
+For pull requests, the recommended shape is the merge commit (D87,
+[`native-pr-landing.md`](native-pr-landing.md) §5.2a): a squash breaks ancestry, so the next pull request cut
+from the work branch conflicts. The gate still accepts all three, as above.
+
 *A chain of jobs* (D69, [`squash-chain-landing.md`](squash-chain-landing.md)): a squash may add the closing
 records of several jobs. It lands if they form one chain. Each job's `athena.candidate/2` records
 `base_fingerprint` and `previous_job`; the order is `previous_job`, never the fingerprints (which may repeat).

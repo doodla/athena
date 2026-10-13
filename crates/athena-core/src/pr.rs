@@ -204,15 +204,20 @@ pub trait Content {
 }
 
 /// [`Content`] over a real repository: the fingerprint of a commit under the rules at `rules_commit`
-/// (the job's base).
+/// (the job's base). A commit missing locally is fetched from `remote` first.
 #[derive(Debug)]
 pub struct GitContent<'a> {
     pub git: &'a Git,
     pub rules_commit: &'a str,
+    /// The remote to fetch a missing commit from.
+    pub remote: &'a str,
 }
 
 impl Content for GitContent<'_> {
     fn fingerprint_of(&self, commit: &str) -> Result<String> {
+        // The host made the merged commit, so it may not be in the local object store yet. Fetch the
+        // object (no ref moves) before reading its tree.
+        self.git.ensure_commit(self.remote, commit)?;
         Ok(fingerprint(self.git, commit, self.rules_commit)?)
     }
 }
@@ -470,6 +475,7 @@ mod tests {
         let content = GitContent {
             git: &git,
             rules_commit: &p,
+            remote: "origin",
         };
         let outcome = check_merged(&host, &content, &link("j"), &verified).unwrap();
         assert_eq!(outcome, MergeOutcome::Verified { commit: merged });
@@ -483,6 +489,45 @@ mod tests {
             check_merged(&none, &content, &link("j"), &verified).unwrap(),
             MergeOutcome::NotMerged
         );
+    }
+
+    #[test]
+    fn a_merged_commit_missing_locally_is_fetched_before_it_is_fingerprinted() {
+        // The host merged the pull request after the local clone last fetched, so the merged commit is on
+        // the remote only.
+        let (origin_dir, origin) = repo();
+        let p = origin.head().unwrap().unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let clone_path = parent.path().join("clone");
+        Git::isolated(parent.path())
+            .run([
+                "clone",
+                "-q",
+                origin_dir.path().to_str().unwrap(),
+                clone_path.to_str().unwrap(),
+            ])
+            .unwrap();
+        let local = Git::isolated(&clone_path);
+        let merged = commit_file(
+            &origin,
+            origin_dir.path(),
+            "a.txt",
+            "changed\n",
+            "Merge pull request #42",
+        );
+        assert_eq!(local.rev_parse(&merged).unwrap(), None);
+        let refs_before = local.run(["for-each-ref"]).unwrap();
+
+        let content = GitContent {
+            git: &local,
+            rules_commit: &p,
+            remote: "origin",
+        };
+        let got = content.fingerprint_of(&merged).unwrap();
+        assert_eq!(got, fingerprint(&origin, &merged, &p).unwrap());
+        // Only the object arrived: no ref moved.
+        assert_eq!(local.run(["for-each-ref"]).unwrap(), refs_before);
+        assert_eq!(local.head().unwrap().unwrap(), p);
     }
 
     #[test]
@@ -511,6 +556,7 @@ mod tests {
         let content = GitContent {
             git: &git,
             rules_commit: &p,
+            remote: "origin",
         };
         let mut l = link("j");
         let outcome = check_merged(&host, &content, &l, &verified_b).unwrap();

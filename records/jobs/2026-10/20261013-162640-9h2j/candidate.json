@@ -1,0 +1,106 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261013-162640-9h2j",
+  "base_commit": "948c4ce93884f45236db3df41dcbed021dbe4787",
+  "base_fingerprint": "sha256:461e95653c545369c167d3c715fd55d7f9edadabdb8fe6a6b97ba67ef79e3b75",
+  "previous_job": "20261013-154735-te8h",
+  "candidate_commit": "d5deb7dca5dc36fe9eca3a5a8d58cc9c1f8ff8e5",
+  "candidate_tree": "0e72d7daf36f2f1272abd8189948b042e3b0deef",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 23751
+    },
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 53290
+    },
+    {
+      "path": "crates/athena-core/src/pr.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 21842
+    },
+    {
+      "path": "crates/athena-git/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 36049
+    },
+    {
+      "path": "docs/decisions.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 128642
+    },
+    {
+      "path": "docs/design/athena-v0.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 148833
+    },
+    {
+      "path": "docs/design/native-pr-landing.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 37775
+    }
+  ],
+  "fingerprint": "sha256:6ac8af347e60db634dfab8a99365ce9506dfaa68d289a1916f73963154195eaa",
+  "violations": [],
+  "producer_report": {
+    "summary": "`athena land --pr` now fetches the merged commit before fingerprinting it. On a rerun with an existing PR link, it asks the host about the merge before requiring the landed commit on the local branch. Merge commits are recorded as the PR landing shape. I ran fmt, clippy, workspace tests, and `-p athena-core -p athena-git` tests, and all passed. No tool call reported a failure, but I couldn't read the saved workspace test output, so I didn't see the per-crate counts.\n\n(1) **Fetch.** I added `Git::ensure_commit(remote, oid)` in athena-git. If the commit is missing locally, it runs `git fetch --quiet --no-tags --no-write-fetch-head --refmap= <remote> <oid>`, which fetches the object only. `GitContent` has a new `remote` field, and `fingerprint_of` calls `ensure_commit` first. `Athena::land_pr` passes `origin`.\n\n(2) **Host check first.** I added `gh::confirm_existing_merge`. `Athena::land_pr` calls it when `landed_commit` fails. If a link exists and the host reports a merge, it runs the merged-content check and stores the result. That gives `Landed` or `MergedUnverified`, with nothing pushed. With no link, or a PR still open, the original \"not landed on this branch\" error is returned.\n\n(3) **Docs.**\n- New section 5.2a in `docs/design/native-pr-landing.md`: merge commits are the landing shape, and squash merges break ancestry.\n- A short pointer in `docs/design/athena-v0.md` section 7.3.\n- Decision D87 in `docs/decisions.md`, after D86. It cites the #39 squash conflict and the two-merge-commit `athena check --history` run with 0 violations, both marked as the user's reported evidence that I did not re-run.\n- A CHANGELOG entry.\n\n**Tests.**\n- `pr.rs`: `a_merged_commit_missing_locally_is_fetched_before_it_is_fingerprinted` uses an origin repo and a real clone, and checks that no ref moves.\n- `athena-git`: `ensure_commit_fetches_a_missing_commit_without_moving_any_ref`.\n- `gh.rs`:\n  - `a_merged_pull_request_confirms_the_landing_though_the_landed_commit_is_off_this_branch`\n  - `a_merge_of_other_content_is_reported_as_merged_unverified_without_the_landed_commit`\n  - `an_open_pull_request_or_no_link_keeps_the_not_landed_error`",
+    "files": [
+      "crates/athena-git/src/lib.rs",
+      "crates/athena-core/src/pr.rs",
+      "crates/athena-core/src/gh.rs",
+      "docs/decisions.md",
+      "docs/design/native-pr-landing.md",
+      "docs/design/athena-v0.md",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test -p athena-core -p athena-git --locked",
+        "result": "pass",
+        "note": "72 and 19 tests passed, including the new ones"
+      },
+      {
+        "command": "cargo test --workspace --locked",
+        "result": "pass",
+        "note": "No error was reported. The output was too large for the tool and I could not read the saved file, so I did not see per-crate counts."
+      }
+    ],
+    "open_issues": [
+      "`Athena::land_pr` as a whole has no test. The fallback is tested through `confirm_existing_merge`, because the repo has no harness for the full method.",
+      "I did not change `crates/athena-cli/src/display.rs`, although it is listed as a deliverable. Its output already covers the landed and merged-unverified states, so nothing needed to change.",
+      "The #39 conflict and the 0-violation `athena check --history` run are the user's reported evidence. I did not re-run them.",
+      "`Git::ensure_commit` fetches by object id, so the host must allow it. A GitHub merge commit on a ref is reachable, so this should work, but I tested only over a local path."
+    ],
+    "mistakes": [
+      "I left a malformed half-edit of the `land_pr` match in `gh.rs` for one step. I completed it in the next edit and `cargo fmt` fixed the indentation."
+    ],
+    "learnings": [
+      "`GitContent` was built in only three places (two tests in `pr.rs`, one in `gh.rs`), so adding a field was cheap.",
+      "`Git::isolated` works with `git clone` and `git fetch` over local paths, so a real second repository test is possible.",
+      "Bash here allows no `tail` or pipes, and files outside the working directory can't be read, so large cargo output can't be post-processed."
+    ],
+    "desires": [
+      "A fixture for `Athena::land_pr` with a fake runner and a seeded records store, so the full method can be tested end to end."
+    ]
+  }
+}

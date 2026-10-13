@@ -209,6 +209,24 @@ The prose-only rule says Athena does not push. Under this design:
   by hand, and the host's branch protection (when the user has it) is what stops that.
 - Until the build exists, the prose-only list keeps its current text. This document changes no rule.
 
+### 5.2a The landing shape for pull requests is the merge commit (D87)
+
+Merge commits are the landing shape for pull requests: the opt-in REST merge requests `merge`, and a user who
+merges by hand should choose "Create a merge commit". **Squash merges break ancestry.** A squash makes a new
+commit that is not a descendant of the branch's commits, so the work branch stays unmerged as far as git can
+tell, and the next pull request cut from it conflicts with the squashed content. This happened when PR #39 was
+squash-merged: the next pull request conflicted. A merge commit keeps the branch commits as ancestors, and a
+simulated history of two merge-commit landings passes `athena check --history` with 0 violations (see D87 in
+`docs/decisions.md` for the evidence and its limits). The gate still accepts a squash by the chain rule
+(M30); this section changes the recommended shape, not what the gate accepts.
+
+A rerun of `athena land --pr` after the merge has two properties that serve this shape. It fetches the merged
+commit from `origin` (the object only; no branch or ref moves) before fingerprinting it, since the host made
+that commit and the local store may not have it. And when the job's pull request link already exists, it asks
+the host first whether the pull request merged; if so, the merged-content check decides the outcome even when
+the job's landed commit is not on the current local branch. A job that has no link and is not landed on the
+branch still stops with "not landed on this branch".
+
 ### 5.3 Records, trailers and checks in a pull request (owned mode)
 
 - **M6 (governed content changes only through a verified landing).** The work branch is built by the same
