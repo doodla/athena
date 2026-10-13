@@ -9,6 +9,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Warm builds with sccache (D80). `athena.toml` now pins `[tools.sccache]` at `0.10.0`, and the change and
+  study capabilities set `RUSTC_WRAPPER` to `{athena_home}/tools/sccache/0.10.0/bin/sccache`, `SCCACHE_DIR` to
+  `{athena_home}/sccache` and `CARGO_INCREMENTAL` to `0`. `CARGO_TARGET_DIR` and `CARGO_TERM_COLOR` are
+  unchanged. This is the step D79 deferred. The `config.rs` tests that assumed no pin now read the pin from
+  `athena.toml` and strip it to test the optional case. The speedup is not measured.
 - Optional sccache support in configuration and setup (D79). `[tools.sccache]` in `athena.toml` may hold a
   `version` and nothing else; it is absent today, so every existing `athena.toml` still parses. When it is
   present, `cargo run -p xtask -- setup` runs `cargo install --locked --version <v>` into

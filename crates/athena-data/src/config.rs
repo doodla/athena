@@ -432,20 +432,37 @@ pub(crate) mod tests {
 
     #[test]
     fn sccache_pin_is_optional_and_holds_only_a_version() {
-        // Without the pin (today's athena.toml) the config parses and no sccache is configured.
-        assert_eq!(Config::parse(REPO_CONFIG).unwrap().tools.sccache, None);
-        // With it, the version is read.
-        let text = format!("{REPO_CONFIG}\n[tools.sccache]\nversion = \"0.10.0\"\n");
-        let config = Config::parse(&text).unwrap();
+        const PIN: &str = "[tools.sccache]\nversion = \"0.10.0\"\n";
+        // athena.toml pins it, and the version is read.
+        assert!(REPO_CONFIG.contains(PIN));
+        let config = Config::parse(REPO_CONFIG).unwrap();
         assert_eq!(
             config.tools.sccache,
             Some(CratePin {
                 version: "0.10.0".into()
             })
         );
+        // Without the table the config still parses and no sccache is configured.
+        let text = REPO_CONFIG.replacen(PIN, "", 1);
+        assert_eq!(Config::parse(&text).unwrap().tools.sccache, None);
         // A digest table is not part of the pin.
-        let text = format!("{REPO_CONFIG}\n[tools.sccache]\nversion = \"0.10.0\"\nsha256 = {{}}\n");
+        let text = REPO_CONFIG.replacen(PIN, &format!("{PIN}sha256 = {{}}\n"), 1);
         assert!(matches!(Config::parse(&text), Err(ConfigError::Parse(_))));
+    }
+
+    #[test]
+    fn both_envs_wire_the_pinned_sccache() {
+        let config = Config::parse(REPO_CONFIG).unwrap();
+        let version = config.tools.sccache.unwrap().version;
+        let wrapper = format!("{{athena_home}}/tools/sccache/{version}/bin/sccache");
+        for id in ["change", "study"] {
+            let env = &config.capabilities[id].env;
+            assert_eq!(env["RUSTC_WRAPPER"], wrapper);
+            assert!(env["SCCACHE_DIR"].starts_with("{athena_home}/"));
+            assert_eq!(env["CARGO_INCREMENTAL"], "0");
+            assert_eq!(env["CARGO_TARGET_DIR"], "{job_dir}/target/{side}");
+            assert_eq!(env["CARGO_TERM_COLOR"], "never");
+        }
     }
 
     #[test]
