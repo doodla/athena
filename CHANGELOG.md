@@ -9,6 +9,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A `root-cause` default in `defaults.toml`: fix the fault where it originates, name an out-of-scope cause
+  and propose the fix, and describe the root cause in the change. The reader now sees a compact rendering of
+  the defaults (the first sentence of each statement); producer and verifier briefs still get the full text.
 - `athena land <job> --pr` (`athena-core::gh`): pushes the job's branch (through the push guard, never forced),
   opens a pull request, waits for green checks and stores the link in the job's state directory. The host
   client runs only `gh api` with REST paths. The new setting `[landing] merge_via_rest` (off when absent)
