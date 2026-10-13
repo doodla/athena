@@ -7,6 +7,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- Every change reading now lists `CHANGELOG.md` as a deliverable, added in code by `ensure_changelog` in
+  `athena-core`'s `reading.rs` together with a `changelog` default that cites BRIEF.md's "tagged releases and a
+  changelog". Nothing is added when the file is already listed or when the reading is a study or a decline. The
+  verifier brief gains a scope section: the deliverables list is the single statement of scope, and a changed file
+  outside it is the scope finding, judged against the list and not against how a criterion is worded. No text of
+  the acceptance criteria is matched.
+
 ### Fixed
 
 - Piping input to a child process no longer deadlocks once the child's output outgrows the pipe buffer. Writing

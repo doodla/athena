@@ -1,0 +1,105 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261013-221358-r2d0",
+  "base_commit": "7b2f632d9fa01ea604c691a309ac0182bcc9dc0b",
+  "base_fingerprint": "sha256:9ccca4b2aabd4ff44b961eedbd566c17a3e7497ed27c668f75c9f7544a6ea5d6",
+  "previous_job": "20261013-215435-em5g",
+  "candidate_commit": "982e84d5a0ea9cabf64d41c38888f7bffaabea6c",
+  "candidate_tree": "b664074d8f9f2d41fa926694d184da80b96ef687",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 28652
+    },
+    {
+      "path": "crates/athena-context/prompts/reader.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 2453
+    },
+    {
+      "path": "crates/athena-core/src/admission.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 10362
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 63190
+    },
+    {
+      "path": "crates/athena-data/src/defaults.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 5092
+    },
+    {
+      "path": "defaults.toml",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 3171
+    },
+    {
+      "path": "docs/decisions.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 133869
+    }
+  ],
+  "fingerprint": "sha256:1464ef9b7309e226f6b2f3dd95c275369e9fe8da11e44a9f1619f7ac1641d650",
+  "violations": [],
+  "producer_report": {
+    "summary": "Root cause: nothing checked that a reading agreed with itself. A criterion saying only some files change could disagree with the deliverables list, or exclude CHANGELOG.md. The producer followed one and the verifier enforced the other.\n\n- **Check.** I added `check_scope_consistency` in `crates/athena-core/src/reading.rs`. It rejects a reading when a file-scope criterion names files but omits a deliverable. It also rejects one where the criterion allows a file that isn't a deliverable, or leaves out CHANGELOG.md while that file is a deliverable. Each error names the file. It is a heuristic over the criterion text, not a full parse.\n- **Where it runs.** `build_reading` calls it right after `reading.validate()`, once the deliverables are normalized, so a contradictory reading fails before it is recorded or shown. `admit()` in `admission.rs` calls it again on the accepted reading and records a `reading-scope` violation.\n- **Default and prompt.** `defaults.toml` gains a `changelog` default for code, tests, docs, config, build and prompts. I left the defaults version at 1, since adding `root-cause` earlier didn't bump it. `reader.md` now says to list CHANGELOG.md and keep file-scope criteria consistent with the deliverables.\n- **Budget.** The longer reader prompt went over the 1800-token reader budget in the budgets test. I shortened other lines in `reader.md` to fit.\n- **Docs and tests.** CHANGELOG.md and `docs/decisions.md` (new entry D89) are updated. I added tests for all four required cases (consistent scope accepted, omitted deliverable rejected, CHANGELOG.md excluded while listed rejected, no scope criterion accepted). I also added tests for a file allowed outside the deliverables and for the new default.\n- **Checks.** `cargo test --locked` exited successfully, but its output was too long to read in full. I confirmed the key suites by re-running them on their own. Clippy with warnings denied and `cargo fmt --all --check` are clean.",
+    "files": [
+      "crates/athena-core/src/reading.rs",
+      "crates/athena-core/src/admission.rs",
+      "defaults.toml",
+      "crates/athena-context/prompts/reader.md",
+      "crates/athena-data/src/defaults.rs",
+      "CHANGELOG.md",
+      "docs/decisions.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "Exit status was success; the output was too long to read in full. The budgets and xtask policy suites were re-run on their own and pass, as did all athena-core tests earlier."
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      }
+    ],
+    "open_issues": [
+      "The check is a heuristic. A scope criterion worded without 'only', 'exclusively' or 'no other file', or a file named with an unusual negation, is not caught.",
+      "The records.rs and briefs.rs deliverables were not needed, so I did not change them. The change did not touch the record schema or the brief rendering.",
+      "The reader prompt edits shortened some existing lines, such as the forecast and governance text, to stay under the budget. Review them for lost meaning.",
+      "Nothing in code requires CHANGELOG.md to be a deliverable for the listed classes. That part relies on the default and the prompt, as the reading assumed."
+    ],
+    "mistakes": [
+      "My first reader.md additions pushed the reader set over its token budget. I trimmed wording in several existing lines to fit.",
+      "My first scope detection missed criteria that start with 'Only src/a.rs changes'. Two of my own tests caught it, and I added a check for sentences that begin with 'only'."
+    ],
+    "learnings": [
+      "The reader prompt set has a hard budget of 1800 tokens (ceil(bytes/3)) in crates/athena-cli/tests/budgets.rs. Adding prompt lines or defaults means shortening other text.",
+      "Defaults render only the first sentence of each statement, so a default's first sentence is what costs reader budget.",
+      "defaults.toml was not version-bumped when root-cause was added, so the convention is no bump for added entries. I left the version at 1.",
+      "Admission violations are built with violation(rule, path, detail), and a violation with no path is allowed.",
+      "The next decision number was D89."
+    ],
+    "desires": [
+      "A way to read a saved long tool-output file. The Grep hook denied a path outside the working directory, so I confirmed results by re-running narrower test commands.",
+      "The reader token budget and its headroom stated up front."
+    ]
+  }
+}

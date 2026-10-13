@@ -1949,3 +1949,24 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   `crates/athena-core/src/land.rs` (resync on a real temporary repository),
   `crates/athena-git/src/lib.rs` (`replay`, `squash_text`, `reset_keep`) and
   `crates/athena-gate/src/landing_tests.rs` (history check passes on a squash built from that message).
+
+## D89 · The deliverables list is the single statement of scope, and change readings always list CHANGELOG.md
+
+- **Decision:** `ensure_changelog` (`crates/athena-core/src/reading.rs`) runs on every reading built from the
+  reader's output. For a reading whose capability is `change`, it adds `CHANGELOG.md` (modify) to the
+  deliverables and a `changelog` entry to `defaults_applied` citing BRIEF.md's "tagged releases and a
+  changelog", unless each is already there. Study and declined readings are left alone. The verifier brief gains
+  a scope section: the expected deliverables list is the one statement of scope, and a changed file outside it
+  is the scope finding, judged against the list and not against how a criterion is worded. The rule reads no
+  acceptance-criterion text.
+- **Alternatives:** Tell the reader to list the changelog in `reader.md` (rejected: it put the reader prompt
+  over its 1800-token budget, and a prompt line is not enforced); add a `changelog` entry to `defaults.toml`
+  (rejected: the defaults model is the user's, not changed here); infer scope from the wording of criteria
+  (rejected: heuristics differ between readings and cause both false findings and misses).
+- **Tradeoff:** Every change reading lists `CHANGELOG.md`, including a change that has nothing to record; the
+  `changelog` default shows "(not in the defaults model)" as its statement in briefs, since the entry is written
+  by code.
+- **Reversal cost:** Low. One function, one call and one brief section; tests.
+- **Provenance:** stated: BRIEF.md line 337, "Standalone, with tagged releases and a changelog". The scope
+  rule is the designer's reasoning (inferred). Tests: `crates/athena-core/src/reading.rs`
+  (`ensure_changelog`) and `crates/athena-context/src/briefs.rs` (scope section).
