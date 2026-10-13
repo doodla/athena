@@ -490,3 +490,7 @@ Stopping: you're done when "How I'll judge it" passes. If you're blocked on ever
 * I want one of the first-class things to be that you are able to reconstruct the state of any job, given reasonable assumptions that you're in a repo with kit [git] and stuff. If you think about it, work on something is not done instantly. It's done over maybe multiple sessions. You iterate, you iterate, you iterate, and you finally come to something. Then you get code reviewed and there's the whole process there.
 * After the whole thing is done you have the starting state, you have the ending state, and you have a bunch of data from the middle. I have this idea of doing either structured retros or constructing state at different points or I don't know. Research needs to be done on this data to figure out what needs to be extracted from the user earlier. Maybe in general it's good questions that generate good defaults or better assumptions that we need to bake in as world understanding.
 * You have a lot of data here across maybe 3 to 5 sessions of a lot of iteration.
+
+### 2026-10-13: Athena owns acceleration
+
+* I think we should also give Athena the mandate to accelerate and then track and feed timings back into the system. It can figure out observability on its own almost, I feel.
