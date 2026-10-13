@@ -26,6 +26,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- The defaults-loop design (`docs/design/defaults-loop.md`) is revised to apply review 1: Jev only answers
+  typed questions and a language model drafts, R2 is a counter-example and the loop is gated on records, the
+  `POST /v1/evaluate` shape and the probability and confidence signals are defined, the reader budget counts
+  the first sentence and entry count, and the promotion criterion computes its test size. Introspection on
+  every correction, intervention, rejection and failure is added as a first-class step, with Athena code
+  reading past records and passing a filtered summary. D90 and D26's count are updated to match. Design only.
 - Review 2 of the revised parallel-jobs design (`docs/design/reviews/parallel-jobs-review-2.md`) confirms the
   answers to review 1's F1-F8 as resolved against the source and the native pull-request landing design, and
   finds one High problem (the launcher's landing queue does not match the children's local landing) and five
