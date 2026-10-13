@@ -19,10 +19,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   sentence saying the attempt's changes were discarded and are not in the repository the reader sees. All of it
   is redacted. A job with no reading or no corrections omits those parts. A retry of a retry still carries the
   original request (D82).
-- A requirements map (`docs/design/requirements-map.md`). It lists each `BRIEF.md` requirement the repository
-  answers, with a pointer to the file and line that answers it, and marks the ones that are only partly
-  covered. Line numbers refer to files in the same tree, so they are right only for the tree that holds
-  the map. No code changed.
+- A requirements map (`docs/design/requirements-map.md`), a strategy view (`docs/design/strategy-view.md`)
+  and a roadmap (`docs/design/roadmap.md`). The map has a row, with an ID, for every requirement in
+  `BRIEF.md` (124 rows) and marks each covered, partial or not covered. Each row either quotes the brief or
+  paraphrases it, as the map's *Wording* section says. Only `BRIEF.md`, which this work does not edit, is
+  cited by line; every file edited together with the map is cited by heading or quote, so no citation can
+  drift. The strategy view groups the rows into eight goals with their coverage, and the roadmap orders the
+  next steps for the partial and uncovered rows, each linked to row IDs. No code changed.
 - Warm builds with sccache (D80). `athena.toml` now pins `[tools.sccache]` at `0.10.0`, and the change and
   study capabilities set `RUSTC_WRAPPER` to `{athena_home}/tools/sccache/0.10.0/bin/sccache`, `SCCACHE_DIR` to
   `{athena_home}/sccache` and `CARGO_INCREMENTAL` to `0`. `CARGO_TARGET_DIR` and `CARGO_TERM_COLOR` are
