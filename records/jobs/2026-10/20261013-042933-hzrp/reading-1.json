@@ -1,0 +1,193 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261013-042933-hzrp",
+  "n": 1,
+  "at": "2026-10-13T04:37:47.357175663Z",
+  "invocation_seq": 1,
+  "base_commit": "281b18a768bc986d7d636eec5bb6ae57229e1a4e",
+  "config_sha256": "7153a738ca06a316424075f3528edfec6b05548c350032f4567f1a3574aa3b4b",
+  "defaults_sha256": "34395568ed0684d5b19642d761d9d16e023f3263e4313e645b083d31b302e9bc",
+  "defaults_version": 1,
+  "title": "Add a command that runs independent queued jobs in parallel",
+  "summary": "Today `athena go` runs one job per invocation, and queued jobs (`ask --later`) must be read and run by hand one after another. I read the request as: let one command (`athena go` with several jobs, or `--all`) run independent jobs concurrently, with a bounded worker count, reusing the existing per-job and repository locks.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "lazy-requests",
+      "how": "Recovered the intended shape from the CLI, run.rs locks, and design §5.5 and the deferred-work table instead of asking."
+    },
+    {
+      "id": "small",
+      "how": "One focused change: a multi-job go with a bounded worker count, no scheduler."
+    },
+    {
+      "id": "tested",
+      "how": "New tests with fake agents for concurrency, landing, and stale cases; clippy and fmt clean."
+    },
+    {
+      "id": "rust",
+      "how": "Pure Rust with std threads; no new non-Rust files."
+    },
+    {
+      "id": "buy-first",
+      "how": "Prefer std::thread::scope; add a crate only if clearly needed, and record the call."
+    },
+    {
+      "id": "designed",
+      "how": "The design doc and decision log are updated with alternatives."
+    },
+    {
+      "id": "verified",
+      "how": "Behavior is verified by cargo test with the fake agent, which exercises the parallel path."
+    }
+  ],
+  "assumptions": [
+    "'Independent' means jobs in different states of the same repository that share no dependencies; Athena has no dependency model in v0, so the user chooses which jobs go together.",
+    "Parallelism is within one process using threads, built on the existing safety: per-job locks (try_lock_job), the repository lock for fast-forward landing, and per-job snapshots (design §5.5).",
+    "A job that goes stale because another landed first is reported as stale, not automatically re-verified; the design lists an automatic re-verify scheduler as deferred.",
+    "A concurrency limit defaults to a small number; the spend limits and kill switch apply unchanged.",
+    "The shape is `athena go <job>... [--jobs N]` plus `--all` for every queued/proposed job; the single-job behavior and exit codes stay the same.",
+    "Athena and its dependencies can be shared across threads; if not, the minimal fix is in scope."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "`cargo test` passes, including a new test that runs at least two fake-agent jobs through the parallel path and shows both reach a terminal state, with overlapping run intervals or a barrier proving concurrency.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`cargo clippy --all-targets -- -D warnings` is clean and `cargo fmt --check` passes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test shows that two parallel jobs that touch different files both land with records intact, and two that conflict leave the later one stale or blocked, never merged silently.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`cargo run -p athena-cli -- go --help` documents the multi-job / parallel option and the concurrency limit.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Single-job `athena go <job>` keeps its output and exit codes (0 landed, 2 not landed, 1 error); the multi-job result reports one line per job and exits 2 if any did not land.",
+      "kind": "content"
+    },
+    {
+      "text": "A job already locked by another process is reported for that job without aborting the others.",
+      "kind": "content"
+    },
+    {
+      "text": "The kill switch and per-job budgets are applied to every parallel job; the code path honors refuse_if_stopped.",
+      "kind": "content"
+    },
+    {
+      "text": "Design doc (command table, §5.5, deferred-work table), README, and CHANGELOG describe the new behavior; a decision entry records the choice and alternatives (threads vs. separate processes).",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/parallel.rs",
+      "action": "create",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/state.rs",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "docs/design/athena-v0.md",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "README.md",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-core/Cargo.toml",
+      "action": "modify",
+      "p": 0.1
+    }
+  ],
+  "out_of_scope": [
+    "An automatic scheduler or merge queue that re-verifies stale jobs.",
+    "Job decomposition, dependencies, or chunking a request into several jobs.",
+    "Detached execution (`go --detach`).",
+    "Changes to governance files such as athena.toml, defaults.toml, or CI workflows.",
+    "Moving the study capability earlier."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.55,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.25,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.3,
+        "p90": 3.2
+      },
+      "wall_time_s": {
+        "p10": 420.0,
+        "p50": 900.0,
+        "p90": 1700.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.676595744680851,
+      "p_verification_passes": 0.696969696969697,
+      "p_user_intervenes": 0.11515151515151514,
+      "cost_usd": {
+        "p10": 0.3915874509738061,
+        "p50": 0.7862853000000001,
+        "p90": 1.84782000840312
+      },
+      "wall_time_s": {
+        "p10": 406.9887048738435,
+        "p50": 580.7958807990002,
+        "p90": 847.6058285459268
+      }
+    }
+  },
+  "departures": "Higher cost and longer wall time than the reference: concurrency in the core run path plus tests and design docs is larger than a typical job, and the request is ambiguous about the shape, which lowers acceptance."
+}
