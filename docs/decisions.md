@@ -1790,7 +1790,21 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Reversal cost:** Low. Remove the pin and the three env keys from each capability.
 - **Provenance:** User request, following D79. Enforced by the tests in `config.rs`.
 
-## D81 · A hand-kept requirements map, and a strategy view derived from typed records
+## D81 · `setup --ci` skips the sccache install
+
+- **Decision:** Setup step 4 prints a skip message and does not call the sccache install when `--ci` is set.
+  - The choice is the pure function `skip_sccache(ci)` in `xtask/src/main.rs`, covered by a unit test.
+  - Setup without `--ci` still installs the pinned sccache. `athena.toml`, the `[tools.sccache]` pin and the
+    CI workflow are unchanged.
+- **Alternatives:** (a) Cache the sccache build in CI: adds workflow changes and cache upkeep. (b) Drop the
+  pin: the change and study capabilities would lose their cache. (c) Skip under `--ci` (chosen).
+- **Tradeoff:** CI never exercises the sccache install path; only the unit tests do. CI sets no
+  `RUSTC_WRAPPER`, so nothing in CI needs the binary.
+- **Reversal cost:** Low. Remove the flag check in step 4.
+- **Provenance:** User request: PR CI rose from about 4 to about 9 minutes (the user's figures) after D79
+  and D80. Enforced by a test in `xtask/src/main.rs`.
+
+## D82 · A hand-kept requirements map, and a strategy view derived from typed records
 
 - **Decision:** Proposed, design only: `docs/design/requirements-map.md`.
   - The map is a Markdown table with one row per `BRIEF.md` requirement and addendum, giving a status (five

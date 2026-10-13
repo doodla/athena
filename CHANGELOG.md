@@ -7,10 +7,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- `./setup.sh --ci` no longer builds sccache. CI sets no `RUSTC_WRAPPER`, so the build only added minutes to
+  each CI job. Setup without `--ci` still installs the pinned sccache (D81).
+
 ### Added
 
 - A design for a requirements map, the living strategy view (A1) and a roadmap
-  (D81, `docs/design/requirements-map.md`). It maps every `BRIEF.md` requirement and addendum to a defined
+  (D82, `docs/design/requirements-map.md`). It maps every `BRIEF.md` requirement and addendum to a defined
   status, an owning design and the work that served it, specifies a strategy view derived from typed records,
   and orders the queued work with reasons. Design only; no code, configuration or records changed.
 - Warm builds with sccache (D80). `athena.toml` now pins `[tools.sccache]` at `0.10.0`, and the change and
