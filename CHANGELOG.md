@@ -9,6 +9,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- Candidate admission now parses a changed `athena.toml` and `defaults.toml` with the gate's own parsers
+  (`Config::parse`, `DefaultsModel::parse`). A file with an unknown field fails the job with a
+  `configuration` finding before the landing commit is built, instead of only at landing. Tests cover an
+  unknown field in each file, parsing files, and a candidate that touches neither.
 - The producer must run the full `cargo test --locked` before it finishes, for every change including docs,
   TOML and data-only ones (D95). Policy and config tests read tracked non-Rust files, so such a change can
   fail them. The producer frame says so and no longer says the producer "may" run the checks. In code,
