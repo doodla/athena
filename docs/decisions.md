@@ -2006,6 +2006,9 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   correction"): Jev's role narrowed to typed questions, R2 relabelled a counter-example, the evaluate route and
   signals added, the reader budget restated, introspection added. The introspection cases come from the job
   request and are reported, not checked against records.
+- **Note, added after review 1 of the pair (D90 and D91):** the "Alternatives" line above cites "the design,
+  section 9". After the revision the alternatives are in `docs/design/defaults-loop.md` section 11. The line above
+  is left as written; this note is the correction.
 
 ## D91 · Decisions are typed, grouped into sets by scope, and carry assumptions and failure signals
 
@@ -2027,5 +2030,13 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   is flagged on its first failure instead of staying applied.
 - **Reversal cost:** Low while only the design exists; docs.
 - **Provenance:** stated: `BRIEF.md` addendum "2026-10-13: Decision sets, and knowing when a decision is not
-  working". The D87 refusal is reported in the job request and not re-run; D87 and D88 are read. No independent
-  review is recorded yet.
+  working". The D87 refusal is reported in the job request and not re-run; D87 and D88 are read. Review 1
+  (`docs/design/reviews/decision-sets-review-1.md`) gave accept with changes.
+- **Revised** (review 1, section 6): the reader gets sets only through code-side narrowing with a cap, and a
+  runtime per-job set-size check is a build item (refusal of an over-budget static set is a test, not a job-time
+  check); a default's assumptions and signals are stored in a separate typed record keyed by the default's id; a
+  host-error record with a status field is written by the client and landing is a watcher trigger; one evidence
+  rule (one event puts a decision under review, three distinct jobs add a default); D87's example enforcement is
+  `brief`; the class vocabulary is closed and landing is a phase; the under-review state is a hashed brief
+  component; set membership is one boolean per decision, thresholded on the probability of the true option.
+  Alternatives 9 and 10 were added to the design. No review of the revision is recorded yet.
