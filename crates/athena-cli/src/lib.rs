@@ -2,6 +2,7 @@
 //! command line and calls into these and the core.
 
 pub mod backtest;
+pub mod decisions;
 pub mod display;
 pub mod hooks;
 pub mod wiring;

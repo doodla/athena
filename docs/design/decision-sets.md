@@ -444,6 +444,18 @@ superseded by an inactive one, and every `code-check` decision names a test that
 1. Measure rendered sets with the live counter and `render()` alone (defaults do not count against the producer and
    verifier budgets today, §3).
 2. Typed decision view and the supersession parse (§6, steps 2-3), with a user-confirmed list. No briefs change.
+   **Built** in `crates/athena-cli/src/decisions.rs`: one read-only view per entry heading of `docs/decisions.md`
+   (id, `status` active or superseded, `superseded_by`, `amended_by`), derived from the parse plus the confirmed
+   list; the log's prose is untouched. Only these four fields are derived; `kind`, `phase`, `paths` and
+   `enforcement` per entry are a separate job. **The confirmed list** is `docs/decision-links.toml`: one `[[link]]`
+   per phrase the parse finds, with its line, the older and newer entry id, and the confirmed status
+   (`superseded` or `amended`). The list, not the log's wording, decides the status: D11 by D39 (line 322, the one
+   hit the user has confirmed by name) and D87 by D88 are `amended`, D46 by D79 is `superseded`, and the prose-only
+   hits from D48 on are `amended`. The other hits are the parse's own reading, listed for the user to confirm.
+   `athena backtest` condition (a) now compares the parsed hits with this list in both directions (a hit missing
+   from the list, or listed and not found, is a finding) and no longer holds a hard-coded pair list. Conditions
+   (b) to (d) are unchanged. The parse reads the first id only of "Amends D39's exemption list and D06" (line
+   1287), so D06 is not a hit there.
 3. Set selection by code for the reader (cap K), producer, verifier and truncation record (§3), **with the runtime
    per-job set-size check and its test**.
 4. The host-error record written by the client (§4), landing as a watcher trigger, the watcher with exact matching,

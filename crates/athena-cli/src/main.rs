@@ -127,7 +127,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Read-only backtest of decisions D87 and D88 over `docs/decisions.md` and `records/`; exit 2 on a finding.
+    /// Read-only backtest of decisions D87 and D88 over `docs/decisions.md`, its confirmed link list `docs/decision-links.toml` and `records/`; exit 2 on a finding.
     Backtest {
         #[arg(long)]
         json: bool,

@@ -4,7 +4,8 @@
 //! It does four things, all by code and from stored fields only:
 //!
 //! 1. Defines the typed header for D87 and D88 (and no other decision) and parses the supersession phrases of
-//!    `docs/decisions.md`.
+//!    `docs/decisions.md`, then checks the hits against the user-confirmed list `docs/decision-links.toml`
+//!    (see [`crate::decisions`]).
 //! 2. Reads `records/` (job outcomes and interventions) without an agent.
 //! 3. Runs the exact-match signals of those headers over the records. The one signal with an exact match is
 //!    D87's: a hand change (`did-work-themselves`) on a landed job, class of work `docs`, threshold two jobs.
@@ -15,6 +16,7 @@
 //! [`Finding`] with its reason; the report does not pass, and nothing is retried or loosened. The backtest writes
 //! nothing: the introspection record is returned, not committed.
 
+use crate::decisions::{ConfirmedLinks, DecisionView, view};
 use anyhow::{Context, Result};
 use athena_data::records::{InterventionCategory, OutcomeState};
 use serde::de::DeserializeOwned;
@@ -516,6 +518,8 @@ pub struct Report {
     pub entries: usize,
     pub hits: Vec<Hit>,
     pub lacking_target: Vec<usize>,
+    /// The typed view of every entry of the log, from the parse and the confirmed list.
+    pub decision_view: Vec<DecisionView>,
     pub headers: Vec<DecisionHeader>,
     pub jobs_read: usize,
     pub landed_jobs: usize,
@@ -532,46 +536,31 @@ impl Report {
     }
 }
 
-/// The supersession hits the review expects, each on two lines: D46 by D79 and D87 by D88.
-const EXPECTED_SUPERSESSIONS: [(&str, &str); 2] = [("D46", "D79"), ("D87", "D88")];
-
-fn check_parse(parsed: &Parsed, findings: &mut Vec<Finding>) {
-    let supersessions: Vec<&Hit> = parsed
-        .hits
-        .iter()
-        .filter(|h| h.kind != HitKind::Amends)
-        .collect();
-    for (older, newer) in EXPECTED_SUPERSESSIONS {
-        let lines: Vec<usize> = supersessions
-            .iter()
-            .filter(|h| h.older == older && h.newer == newer)
-            .map(|h| h.line)
-            .collect();
-        if lines.len() != 2 {
-            findings.push(Finding {
-                condition: "a",
-                reason: format!(
-                    "expected two hits for {older} superseded by {newer}, found {} (lines {lines:?})",
-                    lines.len()
-                ),
-            });
-        }
-    }
-    for hit in &supersessions {
-        if !EXPECTED_SUPERSESSIONS.contains(&(hit.older.as_str(), hit.newer.as_str())) {
-            findings.push(Finding {
-                condition: "a",
-                reason: format!(
-                    "unexpected supersession hit: {} superseded by {} (line {}, in {})",
-                    hit.older, hit.newer, hit.line, hit.entry
-                ),
-            });
-        }
-    }
-    if !parsed.hits.iter().any(|h| h.kind == HitKind::Amends) {
+/// Condition (a): every parsed hit is in the user-confirmed list, and every listed hit is found by the parse.
+fn check_parse(parsed: &Parsed, confirmed: &ConfirmedLinks, findings: &mut Vec<Finding>) {
+    for hit in confirmed.unlisted(&parsed.hits) {
         findings.push(Finding {
             condition: "a",
-            reason: "no \"Amends\" hit found".to_string(),
+            reason: format!(
+                "hit not in the confirmed list: {} {} {} (line {}, in {})",
+                hit.older,
+                match hit.kind {
+                    HitKind::Amends => "amended by",
+                    _ => "superseded by",
+                },
+                hit.newer,
+                hit.line,
+                hit.entry
+            ),
+        });
+    }
+    for link in confirmed.not_found(&parsed.hits) {
+        findings.push(Finding {
+            condition: "a",
+            reason: format!(
+                "listed but not found in the log: {} and {} at line {}",
+                link.older, link.newer, link.line
+            ),
         });
     }
     if !parsed.lacking_target.is_empty() {
@@ -664,12 +653,13 @@ fn check_introspection(
 }
 
 /// Run the backtest on the text of `docs/decisions.md` and the records under `root`.
-pub fn run_on(decisions: &str, records: &Records) -> Report {
+pub fn run_on(decisions: &str, confirmed: &ConfirmedLinks, records: &Records) -> Report {
     let parsed = parse_supersessions(decisions);
     let headers = headers();
     let runs = run_signals(&headers, records);
     let mut findings = Vec::new();
-    check_parse(&parsed, &mut findings);
+    check_parse(&parsed, confirmed, &mut findings);
+    let decision_view = view(&parsed, confirmed);
     let under_review = check_signals(&runs, records, &mut findings);
     let introspection = runs
         .iter()
@@ -682,6 +672,7 @@ pub fn run_on(decisions: &str, records: &Records) -> Report {
         entries: parsed.entries.len(),
         hits: parsed.hits,
         lacking_target: parsed.lacking_target,
+        decision_view,
         headers,
         jobs_read: records.jobs.len(),
         landed_jobs: records.landed.len(),
@@ -693,12 +684,17 @@ pub fn run_on(decisions: &str, records: &Records) -> Report {
     }
 }
 
-/// Read `docs/decisions.md` and `records/` under `root`, and run the backtest.
+/// Read `docs/decisions.md`, the confirmed list `docs/decision-links.toml` and `records/` under `root`, and run
+/// the backtest.
 pub fn run(root: &Path) -> Result<Report> {
     let path = root.join("docs/decisions.md");
     let text =
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    Ok(run_on(&text, &read_records(root)?))
+    Ok(run_on(
+        &text,
+        &ConfirmedLinks::load(root)?,
+        &read_records(root)?,
+    ))
 }
 
 /// A short text view of a report.
