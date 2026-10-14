@@ -1,0 +1,89 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261014-035456-267v",
+  "base_commit": "dfa92f8718fa5e632dd532d36ee2a4dafafe3693",
+  "base_fingerprint": "sha256:a17b9c8aa898e71c9e723168b515bb6aa9cff6386941d0833234aad5b2442458",
+  "previous_job": "20261014-032524-cbxt",
+  "candidate_commit": "ed962064aba6caa958e9a6b406bc052d95803dce",
+  "candidate_tree": "cb72b332e3ae64c14faaffe81b202d04703ec90d",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 40153
+    },
+    {
+      "path": "README.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 10319
+    },
+    {
+      "path": "crates/athena-cli/tests/external_calls.rs",
+      "status": "added",
+      "mode": "100644",
+      "bytes": 9708
+    },
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 82371
+    },
+    {
+      "path": "crates/athena-core/tests/external_calls_guard.rs",
+      "status": "added",
+      "mode": "100644",
+      "bytes": 3442
+    }
+  ],
+  "fingerprint": "sha256:c6afbeb12baf3aa0a5d0a5c32ad94efbea19bb50456687dd5127829281513d23",
+  "violations": [],
+  "producer_report": {
+    "summary": "Extended the existing retry in crates/athena-core/src/gh.rs into the single wrapper. `GhFailure::transient_reason` classifies failures. A 500, 502, 503 or 504 is transient, as are timeouts and connection resets read from gh's text. A 4xx or auth failure is not. `Retry::wait` gives exponential backoff plus up to 50% jitter taken from the clock, so no new crate. `GhClient` has a new `ui` field, and each retry writes one line naming the command, the status or kind, and the attempt. After the last attempt the error names the call, the status and the attempt count, and still downcasts to `GhFailure`. `Athena::land_pr` passes its Ui through. Added unit tests in gh.rs. Added a source-scan guard test that fails on `Command::new(\\\"gh\\\")` or an HTTP client outside gh.rs, with a fixture test showing it fires. Added CLI-crate tests that inject a one-off and a persistent 500 into default branch, open PR, checks, merge, merged commit and the whole `land_pr` flow. Updated CHANGELOG and README.",
+    "files": [
+      "crates/athena-core/src/gh.rs",
+      "crates/athena-core/tests/external_calls_guard.rs",
+      "crates/athena-cli/tests/external_calls.rs",
+      "CHANGELOG.md",
+      "README.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "first run flagged a type-complexity lint in the new CLI test; fixed with a type alias, then clean"
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "exited 0. Output was too large to inline and I could not read the saved file, so I judge pass from the exit status; an earlier run of the new tests showed them passing/failing as expected before the fix."
+      }
+    ],
+    "open_issues": [
+      "Cargo.toml, Cargo.lock, main.rs and run.rs were listed as deliverables but needed no change: no new crate (jitter comes from the clock's sub-second part) and the CLI passes the existing Ui through Athena::land_pr.",
+      "The CLI tests drive the public land_pr flow and GhClient with an injected Runner, not the real athena binary with a fake gh on PATH, so the Athena::land_pr wrapper that sets ui on the client is not itself exercised.",
+      "Jitter uses the clock rather than a rand crate; its distribution is crude but bounded to +50%.",
+      "I could not read the saved cargo test output, so I did not confirm each test's name in it."
+    ],
+    "mistakes": [
+      "My first land_pr test asserted calls == 2 x distinct paths, which is wrong because the flow re-reads some paths that then succeed at once; corrected.",
+      "The first one-off land test saw the PR as merged from the start, so it did not exercise the merge path; the fake now reports merged only after the merge call."
+    ],
+    "learnings": [
+      "The only gh call site is GhCli in gh.rs; the retry loop lived in GhClient::api and had no jitter or logging, and its wait was linear.",
+      "anyhow context keeps downcast_ref::<GhFailure>() working, so the final error can carry a clear message without changing the HostError record.",
+      "No HTTP client crate is used under crates/; xtask's curl is outside crates/ and not scanned.",
+      "The `regex` crate was already a dependency of athena-core, so the guard test needed no Cargo change."
+    ],
+    "desires": [
+      "Ability to read a saved long tool-output file to confirm per-test results."
+    ]
+  }
+}

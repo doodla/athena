@@ -100,13 +100,50 @@ pub fn is_transient(status: Option<u16>) -> bool {
     matches!(status, Some(500 | 502 | 503 | 504))
 }
 
+impl GhFailure {
+    /// Why this failure is worth asking again, or `None` when it is not. An HTTP status decides on its own
+    /// (5xx of [`is_transient`] yes; 4xx and auth errors no). Without a status, `gh`'s text is read for a timeout
+    /// or a connection reset; "not logged in" and the like never match.
+    pub fn transient_reason(&self) -> Option<String> {
+        if let Some(status) = self.status_code {
+            return is_transient(Some(status)).then(|| format!("HTTP {status}"));
+        }
+        let text = self.text.to_ascii_lowercase();
+        if text.contains("timeout") || text.contains("timed out") {
+            Some("timeout".to_string())
+        } else if text.contains("connection reset") || text.contains("econnreset") {
+            Some("connection reset".to_string())
+        } else {
+            None
+        }
+    }
+}
+
 /// How a call is repeated after a transient failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Retry {
     /// How many times the call is made in all, at least once.
     pub attempts: u32,
-    /// The wait before the second call; the wait before the third is twice that, and so on.
+    /// The wait before the second call; the wait before the third is twice that, and so on. Jitter is added
+    /// on top (see [`Retry::wait`]).
     pub delay: Duration,
+}
+
+impl Retry {
+    /// The wait after the failed attempt number `attempt` (counting from 1): `delay` doubled for each earlier
+    /// failure, plus up to half of that again. `entropy` picks the jitter (any number; it is taken modulo 1000),
+    /// so a test can fix it.
+    pub fn wait(&self, attempt: u32, entropy: u32) -> Duration {
+        let base = self.delay * 2u32.saturating_pow(attempt.saturating_sub(1));
+        base + base * (entropy % 1000) / 2000
+    }
+}
+
+/// A jitter source without a new dependency: the sub-second part of the clock.
+fn clock_entropy() -> u32 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos())
 }
 
 impl Retry {
@@ -326,6 +363,8 @@ pub struct GhClient<'a> {
     pub log: Option<&'a HostErrorLog>,
     /// How a transient failure is repeated.
     pub retry: Retry,
+    /// Where each retry is reported (one line naming the command, the status and the attempt); none is silent.
+    pub ui: Option<&'a dyn Ui>,
 }
 
 impl std::fmt::Debug for GhClient<'_> {
@@ -344,6 +383,7 @@ impl<'a> GhClient<'a> {
             repository,
             log: None,
             retry: Retry::STANDARD,
+            ui: None,
         }
     }
 
@@ -377,10 +417,25 @@ impl<'a> GhClient<'a> {
                     if let Some(log) = self.log {
                         log.record(operation, failure.status_code);
                     }
-                    if !is_transient(failure.status_code) || attempt >= attempts {
+                    let Some(reason) = failure.transient_reason() else {
                         return Err(error);
+                    };
+                    if attempt >= attempts {
+                        let message = format!(
+                            "gh {} failed after {attempt} attempts ({reason}): {}",
+                            failure.call, failure.text
+                        );
+                        return Err(error.context(message));
                     }
-                    std::thread::sleep(self.retry.delay * attempt);
+                    let wait = self.retry.wait(attempt, clock_entropy());
+                    if let Some(ui) = self.ui {
+                        ui.line(&format!(
+                            "retrying gh {} after {reason} (attempt {attempt} of {attempts} failed; waiting {} ms)",
+                            failure.call,
+                            wait.as_millis()
+                        ));
+                    }
+                    std::thread::sleep(wait);
                     attempt += 1;
                 }
             }
@@ -807,6 +862,7 @@ impl Athena {
         let log = HostErrorLog::new(id.clone(), WorkPhase::Landing);
         let client = GhClient {
             log: Some(&log),
+            ui: Some(ui),
             ..GhClient::new(runner, repository.clone())
         };
         let remote = GitRemote {
@@ -1936,6 +1992,139 @@ mod tests {
         };
         assert!(client.default_branch().is_err());
         assert!(log.entries().is_empty());
+    }
+
+    fn failure(status_code: Option<u16>, text: &str) -> GhFailure {
+        GhFailure {
+            call: "repos/example/project".into(),
+            status_code,
+            text: text.into(),
+        }
+    }
+
+    #[test]
+    fn timeouts_and_connection_resets_are_transient_and_auth_and_4xx_are_not() {
+        let reason = |f: GhFailure| f.transient_reason();
+        assert_eq!(reason(failure(Some(503), "")).as_deref(), Some("HTTP 503"));
+        assert_eq!(
+            reason(failure(None, "Get \"https://api.github.com\": i/o timeout")).as_deref(),
+            Some("timeout")
+        );
+        assert_eq!(
+            reason(failure(None, "read tcp: connection reset by peer")).as_deref(),
+            Some("connection reset")
+        );
+        for (status, text) in [
+            (Some(404), "Not Found"),
+            (Some(401), "Bad credentials"),
+            (Some(403), "Forbidden"),
+            // A status decides on its own, whatever the words.
+            (Some(404), "request timeout"),
+            (
+                None,
+                "You are not logged into any GitHub hosts. Run gh auth login",
+            ),
+            (None, "gh: unknown failure"),
+        ] {
+            assert_eq!(reason(failure(status, text)), None, "{status:?} {text}");
+        }
+    }
+
+    #[test]
+    fn the_wait_doubles_with_each_failure_and_jitter_adds_up_to_half() {
+        let retry = Retry {
+            attempts: 3,
+            delay: Duration::from_secs(2),
+        };
+        assert_eq!(retry.wait(1, 0), Duration::from_secs(2));
+        assert_eq!(retry.wait(2, 0), Duration::from_secs(4));
+        assert_eq!(retry.wait(2, 999), Duration::from_millis(4000 + 1998));
+        assert_eq!(retry.wait(1, 1000), retry.wait(1, 0));
+        let none = Retry {
+            attempts: 3,
+            delay: Duration::ZERO,
+        };
+        assert_eq!(none.wait(3, 500), Duration::ZERO);
+    }
+
+    /// Fails each call with the given failures in turn, then answers with an empty object.
+    struct Scripted {
+        failures: RefCell<std::collections::VecDeque<GhFailure>>,
+        calls: Cell<u32>,
+    }
+    impl Runner for Scripted {
+        fn gh(&self, _: &[String]) -> Result<String> {
+            self.calls.set(self.calls.get() + 1);
+            match self.failures.borrow_mut().pop_front() {
+                Some(f) => Err(f.into()),
+                None => Ok(r#"{"default_branch": "trunk"}"#.to_string()),
+            }
+        }
+    }
+
+    struct Lines(RefCell<Vec<String>>);
+    impl Ui for Lines {
+        fn line(&self, text: &str) {
+            self.0.borrow_mut().push(text.to_string());
+        }
+    }
+
+    /// Calls `default_branch` against a runner that fails with `failures`; returns the outcome, the number of
+    /// calls and the retry lines.
+    fn scripted(failures: Vec<GhFailure>) -> (Result<String>, u32, Vec<String>) {
+        let runner = Scripted {
+            failures: RefCell::new(failures.into()),
+            calls: Cell::new(0),
+        };
+        let lines = Lines(RefCell::new(vec![]));
+        let client = GhClient {
+            retry: Retry {
+                attempts: 3,
+                delay: Duration::ZERO,
+            },
+            ui: Some(&lines),
+            ..GhClient::new(&runner, "example/project".into())
+        };
+        let result = client.default_branch();
+        (result, runner.calls.get(), lines.0.into_inner())
+    }
+
+    #[test]
+    fn timeouts_and_resets_are_retried_and_404_and_auth_failures_are_not() {
+        for text in ["dial tcp: i/o timeout", "read: connection reset by peer"] {
+            let (result, calls, lines) = scripted(vec![failure(None, text)]);
+            assert_eq!(result.unwrap(), "trunk", "{text}");
+            assert_eq!(calls, 2, "{text}");
+            assert_eq!(lines.len(), 1);
+        }
+        for (status, text) in [
+            (Some(404), "Not Found"),
+            (Some(401), "Bad credentials"),
+            (Some(403), "Forbidden"),
+            (None, "You are not logged into any GitHub hosts"),
+        ] {
+            let (result, calls, lines) = scripted(vec![failure(status, text); 3]);
+            assert!(result.is_err());
+            assert_eq!(calls, 1, "{status:?} {text}");
+            assert!(lines.is_empty());
+        }
+    }
+
+    #[test]
+    fn each_retry_is_logged_with_the_command_status_and_attempt_and_the_last_error_names_them() {
+        let (result, calls, lines) = scripted(vec![failure(Some(500), "boom"); 3]);
+        assert_eq!(calls, 3);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("repos/example/project"), "{lines:?}");
+        assert!(lines[0].contains("HTTP 500"), "{lines:?}");
+        assert!(lines[0].contains("attempt 1 of 3"), "{lines:?}");
+        assert!(lines[1].contains("attempt 2 of 3"), "{lines:?}");
+        let error = result.unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("repos/example/project"), "{message}");
+        assert!(message.contains("HTTP 500"), "{message}");
+        assert!(message.contains("3 attempts"), "{message}");
+        assert!(error.downcast_ref::<GhFailure>().is_some());
     }
 
     #[test]

@@ -9,6 +9,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- One bounded-retry wrapper for every call to GitHub. The audit found a single call site, `GhCli` in
+  `crates/athena-core/src/gh.rs` (the only place that runs `gh`; no HTTP client is used in `crates/`), and the
+  retry loop already in `GhClient` (the 5xx retry) is now the wrapper. A call is made at most 3 times. Transient
+  means an HTTP 5xx of 500, 502, 503 or 504, a timeout, or a connection reset (the last two read from `gh`'s
+  text, since it gives no status for them). A 4xx, an auth error (401, 403, "not logged in") and anything
+  else fails on the first attempt. The wait doubles with each failure and adds up to half again as jitter
+  taken from the clock. Each retry prints one line on standard error with the call, the status or failure
+  kind and the attempt number; the last failure's error names the call, the status and the attempt count. The
+  stored `HostError` record is unchanged. A test (`crates/athena-core/tests/external_calls_guard.rs`) scans
+  `crates/` and fails when code outside the wrapper runs `gh` or names an HTTP client. Tests in
+  `crates/athena-cli/tests/external_calls.rs` inject a one-off and a persistent 500 into each GitHub-calling
+  operation and into the `land --pr` flow. Git, the `claude` binary and the tool downloads in `xtask` are not
+  covered.
 - Introspection, step 1 of the build order in `docs/design/defaults-loop.md` section 12. After every job that
   ends `rejected` or `failed`, every correction of a reading (or answer to its question) and every other
   intervention, Athena records one `athena.introspection/1` without being asked: what happened, the failure
