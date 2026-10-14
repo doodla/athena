@@ -210,6 +210,13 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Read-only: coverage per goal (rows, covered, partial, not covered, and the not-covered rows) computed
+    /// from `docs/design/requirements-map.md` and the goal lists of `docs/design/strategy-view.md`. Exit 2
+    /// when the two disagree on which rows exist.
+    Strategy {
+        #[arg(long)]
+        json: bool,
+    },
     /// The kill switch: terminate every running agent and check, and block new ones.
     Stop,
     /// Turn the kill switch off.
@@ -691,6 +698,15 @@ fn run(cli: Cli) -> Result<u8> {
                 print!("{}", athena_cli::backtest::render(&report));
             }
             Ok(if report.passed() { 0 } else { 2 })
+        }
+        Command::Strategy { json } => {
+            let report = athena_cli::strategy::run(&std::env::current_dir()?)?;
+            if json {
+                print_json(&report)?;
+            } else {
+                print!("{}", athena_cli::strategy::render(&report));
+            }
+            Ok(if report.errors.is_empty() { 0 } else { 2 })
         }
         Command::Stop => {
             let athena = open(false)?;

@@ -1,11 +1,14 @@
 # Strategy view
 
 This page groups the rows of the [requirements map](requirements-map.md) by goal and shows how much of each
-goal the repository covers. It is a snapshot written by hand from the map; when a row's status changes in
-the map, update the counts here. The ordered next steps for every goal are in the [roadmap](roadmap.md).
+goal the repository covers. The counts are computed: `athena strategy` reads the map's tables and the goal lists
+below and prints rows, covered, partial and not covered per goal with each goal's not-covered rows. A test
+(`strategy_view_table_matches_the_map` in `crates/athena-cli/src/strategy.rs`) fails when the table below
+differs from that computation, so when a row's status changes in the map, update the table here. The ordered
+next steps for every goal are in the [roadmap](roadmap.md).
 
-Rows are cited by ID. Each ID appears under exactly one goal. Statuses are the map's: covered, partial, not
-covered. Counts were made by counting rows in the map's tables, and they are exact for the map as written.
+Rows are cited by ID. Each ID appears under exactly one goal; the command reports an ID that is missing from
+the map or from every goal. Statuses are the map's: covered, partial, not covered.
 
 ## Coverage at a glance
 
