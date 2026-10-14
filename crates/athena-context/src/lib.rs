@@ -147,6 +147,8 @@ pub enum BudgetSet {
     Reader,
     Producer,
     Verifier,
+    /// The contract and the steward's stored prompt (`athena_data::roles::STEWARD_PROMPT`).
+    Steward,
 }
 
 impl BudgetSet {
@@ -157,6 +159,7 @@ impl BudgetSet {
             BudgetSet::Reader => 1_930,
             BudgetSet::Producer => 1_100,
             BudgetSet::Verifier => 1_300,
+            BudgetSet::Steward => 600,
         }
     }
     pub fn name(self) -> &'static str {
@@ -165,8 +168,18 @@ impl BudgetSet {
             BudgetSet::Reader => "reader",
             BudgetSet::Producer => "producer",
             BudgetSet::Verifier => "verifier",
+            BudgetSet::Steward => "steward",
         }
     }
+}
+
+/// The steward's system prompt: the contract, then the role's stored prompt. The stored prompt is the
+/// role definition's, so a change to it is a new recorded version of the role.
+pub fn steward_system_prompt(prompt: &str, version: u32) -> Composed {
+    compose(&[
+        CONTRACT.into(),
+        Component::new("steward.prompt", version, prompt),
+    ])
 }
 
 /// Checks a composed set against its budget with the estimator.
@@ -230,6 +243,18 @@ mod tests {
             let composed = compose(&[CONTRACT.into(), frame.into()]);
             assert!(check_budget(set, &composed).is_ok(), "{} frame", set.name());
         }
+    }
+
+    #[test]
+    fn the_steward_prompt_follows_the_contract_and_fits_its_budget() {
+        let prompt = "You are the steward.";
+        let composed = steward_system_prompt(prompt, 2);
+        assert!(composed.text.starts_with("# Athena agent contract"));
+        assert!(composed.text.contains(prompt));
+        assert_eq!(composed.components[1].id, "steward.prompt");
+        assert!(check_budget(BudgetSet::Steward, &composed).is_ok());
+        let long = steward_system_prompt(&"word ".repeat(2_000), 2);
+        assert!(check_budget(BudgetSet::Steward, &long).is_err());
     }
 
     #[test]

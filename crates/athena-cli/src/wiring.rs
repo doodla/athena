@@ -145,7 +145,7 @@ pub fn open(cwd: &Path, writes: bool, announce: &dyn Fn(&str)) -> Result<Athena>
         return Ok(Athena {
             git: Git::at(&scratch.repo),
             state,
-            driver: Box::new(driver),
+            driver: std::sync::Arc::new(driver),
             capabilities: capabilities(),
             build,
             athena_bin,
@@ -167,7 +167,7 @@ pub fn open(cwd: &Path, writes: bool, announce: &dyn Fn(&str)) -> Result<Athena>
     Ok(Athena {
         git: user,
         state,
-        driver: Box::new(driver),
+        driver: std::sync::Arc::new(driver),
         capabilities: capabilities(),
         build,
         athena_bin,

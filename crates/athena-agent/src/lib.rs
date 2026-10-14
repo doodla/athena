@@ -135,8 +135,9 @@ pub enum DriverError {
     Io(#[from] std::io::Error),
 }
 
-/// The one interface for running agents (design §10.1).
-pub trait AgentDriver {
+/// The one interface for running agents (design §10.1). Drivers are shared between threads, because the
+/// steward runs in the background beside the command that started it.
+pub trait AgentDriver: Send + Sync {
     fn info(&self) -> DriverInfo;
     fn invoke(
         &self,

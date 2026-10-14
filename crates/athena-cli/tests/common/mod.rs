@@ -120,7 +120,7 @@ impl Fixture {
         Athena {
             git: Git::at(self.dir.path()),
             state,
-            driver: Box::new(driver),
+            driver: std::sync::Arc::new(driver),
             capabilities: athena_cli::wiring::capabilities(),
             build: Build {
                 version: "0.1.0".into(),
@@ -238,7 +238,15 @@ pub struct Scenario {
     /// Everything the verifier was given: system prompt, brief, and its snapshot's files.
     pub seen_by_verifier: Arc<Mutex<Vec<String>>>,
     pub invocations: Arc<Mutex<Vec<Role>>>,
+    /// What the steward reports (`{ "items": [...] }`); nothing, unless a test says otherwise.
+    pub steward: Value,
+    /// Reads the fake steward claims to have made, from what it was given. Tests use it to record what the
+    /// steward's brief and workspace offered.
+    pub steward_reads: Option<StewardReads>,
 }
+
+/// The commands a fake steward reports having run, given its invocation.
+pub type StewardReads = Arc<dyn Fn(&AgentInvocation) -> Vec<String> + Send + Sync>;
 
 impl Default for Scenario {
     fn default() -> Self {
@@ -256,6 +264,8 @@ impl Default for Scenario {
             during_verification: None,
             seen_by_verifier: Arc::new(Mutex::new(Vec::new())),
             invocations: Arc::new(Mutex::new(Vec::new())),
+            steward: json!({ "items": [] }),
+            steward_reads: None,
         }
     }
 }
@@ -310,6 +320,13 @@ impl Scenario {
                     }
                     let mut t = FakeTurn::output(self.verdict.clone());
                     t.commands_run = self.verifier_commands.clone();
+                    t
+                }
+                Role::Steward => {
+                    let mut t = FakeTurn::output(self.steward.clone());
+                    if let Some(reads) = &self.steward_reads {
+                        t.commands_run = reads(spec);
+                    }
                     t
                 }
             };

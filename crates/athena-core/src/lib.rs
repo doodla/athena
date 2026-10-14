@@ -27,9 +27,10 @@
 //! - [`review`]: `athena review`, a person's verdict on an introspection's class, committed as a class-label
 //!   record (and a class record for a new class); the introspection is never edited;
 //! - [`watcher`]: decisions put under review by exact matching of host-error records, run at landing;
-//! - [`steward`]: the first role, run in the background every five finished tasks: it reads Athena's state in
-//!   place and queues work items, one for each thing it could not see; the requirements ladder decides what it
-//!   may change itself;
+//! - [`steward`]: the first role, run in the background every five finished tasks. It calls a model, read-only,
+//!   over a workspace of Athena's code, records and git log (and GitHub through `gh` reads), and queues the
+//!   work items the model reports after Athena has validated them; the requirements ladder decides, for each,
+//!   whether a request is queued or only a proposal;
 //! - [`pin`]: a study's repository ref resolved to a commit by the core, and mounted read-only.
 
 pub mod admission;
@@ -70,6 +71,7 @@ use athena_git::Git;
 use capability::Capability;
 use state::StateDir;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// Where progress lines go: the terminal for people, a buffer in tests.
 pub trait Ui {
@@ -88,7 +90,8 @@ impl Ui for Quiet {
 pub struct Athena {
     pub git: Git,
     pub state: StateDir,
-    pub driver: Box<dyn AgentDriver>,
+    /// Shared, so the steward can use it from its background thread.
+    pub driver: Arc<dyn AgentDriver>,
     pub capabilities: Vec<Box<dyn Capability>>,
     /// The running binary's version and source.
     pub build: Build,
