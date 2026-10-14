@@ -218,7 +218,7 @@ pub fn deterministic_turn(spec: &AgentInvocation) -> FakeTurn {
             let mut turn = FakeTurn::output(json!({
                 "summary": format!("Wrote the request to {FAKE_DELIVERABLE} (fake producer, no model call)."),
                 "files": [FAKE_DELIVERABLE],
-                "checks_run": [],
+                "checks_run": [{ "command": "cargo test --locked", "result": "pass", "note": "fake producer: nothing was run" }],
                 "open_issues": [],
                 "mistakes": [],
                 "learnings": [],

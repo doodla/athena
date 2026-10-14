@@ -768,7 +768,7 @@ verbatim as `brief-producer.md` and hashed into `job.json`:
 ## Expected deliverables          path and action; governance files are named as such
 ## Out of scope
 ## User defaults that apply       each id with its statement and how it applies here
-## Checks Athena will run         names and commands; the producer may run them first
+## Checks Athena will run         names and commands; the producer may run them first, and must run the full `cargo test --locked` (D95)
 ## Working directory              a snapshot of the base; records/, owner-private files, and history are absent by design
 ## Report                         the structured report the role must end with (Appendix B.2)
 ```
@@ -1505,7 +1505,7 @@ file keeps one rule per line, as measured.
 |---|---|---:|
 | contract | the contract | 350 |
 | reader | contract + reader frame + defaults model + capability catalog | 1,930 |
-| producer | contract + producer frame + capability's producer section | 1,100 |
+| producer | contract + producer frame + capability's producer section | 1,300 |
 | verifier | contract + verifier frame + capability's verifier section | 1,300 |
 
 A rule moved out of the contract into a frame is still inside its role's budget, so moving rules between
@@ -1775,6 +1775,13 @@ learnings      [string]   (facts about the repository it had to discover)
 desires        [string]   (context or tools it wished it had)
 ```
 
+`checks_run` must hold the full `cargo test --locked` with a real result, `pass` or `fail`, for every change,
+including docs, TOML and data-only ones, because policy and config tests read tracked non-Rust files (D95).
+If the report lists it as `not-run`, or lists no such check, the core does not build a candidate for
+verification: it re-invokes the producer once, in the same working directory, with a message that explains
+why. A second report without the result fails the job before any check or verifier runs. A pinned study is
+exempt, since it has no test suite of its own.
+
 **B.3 Verifier → verdict**
 
 ```text
@@ -1865,7 +1872,7 @@ Every finding of [review 1](reviews/athena-v0-review-1.md) is listed here with w
 | m1 Fingerprint and landing edge cases | Accepted. Attributes come from committed files only (`core.attributesFile=/dev/null`, `GIT_ATTR_NOSYSTEM=1`, and a refusal if `info/attributes` uses `athena-*`; E14). Fingerprints use P's rules. A classification change makes a job stale, as does a base that is no longer an ancestor. Setup requires git 2.40 and a C linker. | §4.2, §7.3, §11.1; D10, D19 |
 | m2 Verifier's power to exercise is unspecified | Accepted, and made mechanical. The verifier has an allow-list. Criteria are marked `behavior` or `content`, and behavior criteria must cite commands the core saw the verifier run. | §7.2, App. B.3, §8 M16; D43 |
 | m3 Classes are free text | Accepted: a closed list in `athena.toml`, chosen by the reader and by `intervene`; adding a class is a job. | §3.5; D42 |
-| m4 Budget escapes through role frames | Accepted: fixed budgets for each role's whole always-loaded set (reader 1,930, producer 1,100, verifier 1,300), plus the contract's 350. | §12; D25 |
+| m4 Budget escapes through role frames | Accepted: fixed budgets for each role's whole always-loaded set (reader 1,930, producer 1,300, verifier 1,300), plus the contract's 350. | §12; D25 |
 | m5 Personal data in the change is guarded by prose only | Accepted: a gate check on added lines, with the same allow-list, in all three gate places. | §7.4 check 5, §8 M22 |
 | m6 Re-score paths can collide | Accepted: `score-<intervention id>.json`, ordered by time. | §5.2, §9.5 |
 | m7 Five underspecified flows | Accepted. (a) The question never blocks: Enter runs with the stated assumption, and an answer re-reads. (b) A `declined` outcome. (c) `--minutes` and `--tokens` are `estimated` unless `--measured`. (d) The resolution procedure is documented and checked. (e) `job.json.owner`. | §3.2, §3.3, §3.5, §5.3 |
