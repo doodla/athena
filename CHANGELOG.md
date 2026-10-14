@@ -7,6 +7,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- A request's goal now survives to the verdict. The reader prompt names the request's audience, requires one
+  acceptance criterion that audience can check, forbids listing the request's own goal as out of scope, and
+  tells the reader to read the output a request is about first. The producer prompt treats the criteria as a
+  floor and serves the goal. The verifier prompt judges user-facing output as its audience would. A non-empty
+  `request_reading_mismatch` now adds a major finding in `judge()`, so the verdict is not pass. The reader
+  token budget rises from 1,800 to 1,930 (measured 1,927; D93).
+
 ### Added
 
 - Roles and a first role, the steward (rows A9-1 and A10-1). `athena.role/1` records a role: name, version,

@@ -44,7 +44,7 @@ job request **(reported)**. Where the repository itself shows the repeat, that i
 | # | Repeat | Count | What it is |
 |---|--------|-------|------------|
 | R1 | A change reading's scope criteria excluded `CHANGELOG.md`, so the verifier saw a changed file outside scope | x4 **(reported)** | **Closed in code by D89.** Change readings now always list `CHANGELOG.md`, and the verifier brief says the deliverables list is the one statement of scope **(read: D89)**. R1 cannot recur as it did. It is a test case for matching (a correction that should land on "none" or at most `small`), not proof that the loop is needed. |
-| R2 | The reader's always-loaded set went over its token budget and blocked the job | x4 **(reported)** | **A counter-example, not a defaults repeat.** The reader budget is 1,800 tokens, and an over-budget static set fails a **test**; it is not a check at job time **(read: D25; `crates/athena-context/src/lib.rs`, `check_budget`, called only from tests and `crates/athena-cli/tests/budgets.rs`; `docs/enforcement.md` row M18)**. What actually blocked the four jobs is reported and was not verified here. D89 records one instance **(read)**. The fault is caught by a test, so a default such as "keep prompts under budget" would restate a rule the tests enforce and cost reader tokens. R2 is labelled "none" in the labeled set (§10.2). Its other lesson, that four retries each patched the last finding, belongs to introspection (§3, case C2). |
+| R2 | The reader's always-loaded set went over its token budget and blocked the job | x4 **(reported)** | **A counter-example, not a defaults repeat.** The reader budget is 1,930 tokens, and an over-budget static set fails a **test**; it is not a check at job time **(read: D25; `crates/athena-context/src/lib.rs`, `check_budget`, called only from tests and `crates/athena-cli/tests/budgets.rs`; `docs/enforcement.md` row M18)**. What actually blocked the four jobs is reported and was not verified here. D89 records one instance **(read)**. The fault is caught by a test, so a default such as "keep prompts under budget" would restate a rule the tests enforce and cost reader tokens. R2 is labelled "none" in the labeled set (§10.2). Its other lesson, that four retries each patched the last finding, belongs to introspection (§3, case C2). |
 | R3 | One job bundled design, review and build | x1 visible **(reported for the rest)** | The nearest written rules are `small` and `designed` **(read: `defaults.toml`)**. No instance is visible here: **unverified**. Test case for "close to `small`, not covered by it" (an amend, §7.2). |
 | R4 | A new config field and its first use landed in one commit | not visible **(reported)** | Matches no entry. No instance is visible here: **unverified**. Test case for a new id. |
 
@@ -224,7 +224,7 @@ gateway's refusal on the chat route, §6)**. A probe answered a typed forecast q
 $0.000012 per call **(read: `docs/design/athena-v0.md` E12, one probe, route not recorded; not re-measured)**.
 The rendered defaults list carries the id, scope and first sentence of each entry (§8.3); its size is measured
 before it is relied on. The earlier guess of "under 1,500 tokens for 12 entries" is withdrawn: the reader set as a
-whole measures 1,798 of 1,800 tokens **(measured in review 1: `cargo test --locked -p athena-cli --test budgets --
+whole measured 1,798 of what was then an 1,800-token budget **(measured in review 1: `cargo test --locked -p athena-cli --test budgets --
 --nocapture`)**, which says nothing about the share `render()` takes. That share is **unmeasured**; the build
 measures `render()` alone with the live counter (D25, §8.3).
 
@@ -410,9 +410,9 @@ sentence** of the statement **(read: `defaults.rs`, `render`)**. So:
 
 - **For the reader, the cost of an entry is its id, scope and first sentence, and the entry count.** The rest of
   the statement costs the reader nothing. The proposal states its rendered size (**estimate:** ⌈bytes/3.0⌉, the
-  tripwire estimate in D25) and the **test** that composes the reader set fails if it would go over 1,800 tokens.
-  That is a test, not a job-time refusal (§2, R2). The reader set is 2 tokens under budget today (measured, review
-  1), so a proposal that adds an entry's line needs headroom made first.
+  tripwire estimate in D25) and the **test** that composes the reader set fails if it would go over 1,930 tokens.
+  That is a test, not a job-time refusal (§2, R2). The reader set was 2 tokens under its then budget of 1,800
+  (measured, review 1) and is 3 tokens under 1,930 now (measured, D93), so a proposal that adds an entry's line needs headroom made first.
 - **The full statement lands in the producer and verifier briefs**, through `get()`, for the defaults the
   reader selected **(read: `defaults.rs`)**, in the per-job section "User defaults that apply" **(read:
   `crates/athena-context/src/briefs.rs` line 158)**. **Defaults do not count against the producer and verifier
