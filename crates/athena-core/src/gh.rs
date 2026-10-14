@@ -152,6 +152,8 @@ impl HostErrorLog {
             job: self.job.clone(),
             phase: self.phase,
             message_class: MessageClass::of_status(status_code),
+            derived: false,
+            source_intervention: None,
         });
     }
 

@@ -1,0 +1,94 @@
+# Job 20261014-020435-qb2r: verify "Fix D87 intervention class; derive host-error records from interventions"
+
+## Request (verbatim)
+
+> Two follow-ups to job 86p4, from running 'athena backtest' on the real records (condition (a) now passes; (b) fails). First, the D87 intervention signal still matches class 'docs'; docs/design/decision-sets.md section 9 revised it to class 'code', so fix the code to match. Second, the 405 that falsified D87 (PR #41, job 9h2j) happened before host errors were recorded; it exists only in intervention 20261013-192156-ar1x, whose text says GitHub refused a merge commit with HTTP 405. Add a way to derive host-error records from past interventions whose text states a host refusal: the derived record is marked derived, cites its source intervention, and is never presented as having been observed by the client. Derivation is a typed decision that may later use Jev, but here use a strict exact pattern in code ('HTTP <code>' plus a merge operation). Rerunning the backtest should then flag D87 under review, citing ar1x through the derived record, and flag nothing else. Report the real result either way.
+
+## Reading (accepted by the user)
+
+Change D87's intervention signal in backtest.rs from class 'docs' to 'code' (per decision-sets.md section 9). Add a strict-pattern derivation ('HTTP <code>' plus a merge operation) that turns past interventions into host-error records marked derived and citing the source intervention. The backtest uses those records, so rerunning it should flag D87 via ar1x and nothing else; the real result is reported either way.
+
+Assumptions:
+- Derived records are held in memory during the backtest and not written under records/ (records/ never changes in a job).
+- HostError gains an optional provenance field (derived, with the source intervention id). It is absent for observed records, so existing records still parse.
+- The pattern is matched against the intervention's what and why text: 'HTTP <3-digit code>' plus the word 'merge'. The job, at, and phase come from the intervention (landing phase for a merge). If the intervention has no job, nothing is derived.
+- Derived records are distinguishable everywhere they are listed, and the report never says the client observed them.
+- The exact-match intervention signal for D87 also needs the intervention text read in the backtest, so InterventionRow gains what/why or the derivation reads the full record.
+- Whether the real run flags only D87 depends on records/ data, which I cannot see; the producer reports the actual result.
+
+## Acceptance criteria
+
+1. [content] backtest.rs D87's intervention signal uses class_of_work "code" (name and doc comments updated to say code), matching decision-sets.md section 9.
+2. [content] The HostError record carries a derived marker and the source intervention id. An observed record has neither, and record validation rejects a derived record without a source.
+3. [content] A derivation function takes an intervention and returns a derived HostError only when its text matches 'HTTP <code>' plus a merge operation exactly; otherwise it returns none. Unit tests cover a match, a non-match, a missing job, and an out-of-range code.
+4. [content] The backtest report lists derived records separately from observed ones, labels them derived, and cites the source intervention id. D87's firing cites the derived record and, through it, ar1x.
+5. [behavior] Run `cargo test` and `cargo clippy --all-targets`, then `cargo fmt --check`: all pass. This includes a backtest test with a fixture intervention whose text states an HTTP 405 on a merge, showing D87 flagged under review through a derived record, and a fixture with no such text showing nothing flagged.
+6. [behavior] `cargo run -p athena-cli -- backtest` (or the actual subcommand form) runs. The producer's report states the real result for D87 and for all other decisions, whatever it is.
+
+## Expected deliverables
+
+- crates/athena-cli/src/backtest.rs (modify)
+- crates/athena-data/src/records.rs (modify)
+- crates/athena-cli/tests/backtest.rs (modify)
+- crates/athena-core/src/watcher.rs (modify)
+- crates/athena-core/src/gh.rs (modify)
+- crates/athena-core/src/store.rs (modify)
+- crates/athena-cli/src/decisions.rs (modify)
+- CHANGELOG.md (modify)
+- docs/design/decision-sets.md (modify)
+
+## Out of scope
+
+- Using Jev or any model to derive records.
+- Writing derived records under records/.
+- Changing the landing watcher's behavior on live host errors.
+- Clearing a decision's review state.
+- Changing D88 or any decision other than D87.
+
+## User defaults that apply
+
+- rust: All code is Rust. Non-Rust files appear only where a platform requires them, and each is listed with its reason. Here: All changes are Rust.
+- tested: Every module has passing tests; cargo test passes and clippy is clean. Here: Unit and integration tests for the derivation and the backtest; clippy clean.
+- evidence: Claims cite their sources, and numbers are measured or labeled as estimates. Here: The report cites the source intervention and states the real backtest result.
+- root-cause: Fix the root cause, not the symptom or the one instance that surfaced. The fault is fixed where it originates; when that lies outside the job's scope, name it and propose the fix rather than working around it. The change description names the root cause and why the change addresses it. The root-cause fix is the one focused change. Here: The derived marker is a typed field on the record, not a special case in the backtest.
+- strangers: Code, commits, docs, and records are written for an outside reader. Here: Doc comments explain the derived marker and the exact pattern.
+- verified: Done means independently verified, and user-facing behavior is verified by exercising it. Here: The backtest is run and its result reported.
+- small: Prefer one focused change; size is a design choice, not a wish list. Here: One change covering both follow-ups; no extra features.
+- changelog: (not in the defaults model) Here: BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md.
+
+## Scope
+
+The expected deliverables list is the one statement of scope. A changed file that is not on that list is the scope finding, judged against the list and not against the wording of a criterion.
+
+## The change
+
+Base d8055aa0039a → candidate 28b8ac6444b2. In your working directory, `git diff HEAD~1` shows it.
+
+```text
+ CHANGELOG.md                        |  10 +++
+ crates/athena-cli/src/backtest.rs   | 112 ++++++++++++++++++++++++++---
+ crates/athena-cli/tests/backtest.rs | 138 +++++++++++++++++++++++++++++++++---
+ crates/athena-core/src/gh.rs        |   2 +
+ crates/athena-core/src/watcher.rs   | 123 +++++++++++++++++++++++++++++++-
+ crates/athena-data/src/records.rs   |  38 ++++++++++
+ docs/design/decision-sets.md        |  12 ++++
+ 7 files changed, 414 insertions(+), 21 deletions(-)
+```
+
+(The diff was inlined for the verifier; it is elided in this record.)
+
+## Checks Athena ran on this tree
+
+- fmt: `cargo fmt --all --check` passed
+- clippy: `cargo clippy --all-targets --locked -- -D warnings` passed
+- test: `cargo test --locked` passed (428 tests ran)
+
+## Commands Bash may run
+
+- cargo build | check | test | clippy | fmt | run | metadata | tree
+- git status | diff | log | show
+- ls (paths inside your working directory)
+
+## Verdict
+
+End with the verdict as your structured output: one criteria entry per acceptance criterion, in order.
