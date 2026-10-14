@@ -7,6 +7,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- Decision-sets and defaults-loop designs revised to apply the eight changes of section 6 of review 1: sets reach
+  the reader only through capped code-side narrowing, with a runtime per-job set-size check named as a build item;
+  over-budget refusal is described as a test; a default's assumptions and signals get a typed record keyed by
+  default id; host errors get a record with a status field and landing becomes a watcher trigger; one evidence
+  rule and a corrected D87 example; a closed class vocabulary, `decisions_matched`, a no-recursion rule and the
+  under-review state as a hashed brief component; one boolean question per decision with the probability of the true
+  option as threshold; labeled set, scoring and promotion for set membership and signal match; and the small
+  corrections. D90 gets a dated note for its stale section reference. Design only; no code changes.
+
 ### Added
 
 - Review 1 of the decision-sets design together with the introspection step of the defaults-loop design

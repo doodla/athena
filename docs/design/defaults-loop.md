@@ -1,8 +1,10 @@
 # The defaults-learning loop: introspection on every correction, and repeats become proposed, versioned defaults
 
-**Status:** proposed (D90), revised after review 1 (`docs/design/reviews/defaults-loop-review-1.md`) and extended
-with introspection as a first-class step (`BRIEF.md`, addendum "2026-10-13: Introspection on every correction").
-This document builds nothing. It changes no Rust, no tests and no `defaults.toml`. A later job reviews it;
+**Status:** proposed (D90), revised after review 1 (`docs/design/reviews/defaults-loop-review-1.md`), extended
+with introspection as a first-class step (`BRIEF.md`, addendum "2026-10-13: Introspection on every correction"),
+and revised again after the joint review of this document with `docs/design/decision-sets.md`
+(`docs/design/reviews/decision-sets-review-1.md`, accept with changes; its section 6 changes are applied in both
+documents). Awaiting the confirming look at that revision. This document builds nothing. It changes no Rust, no tests and no `defaults.toml`. A later job reviews it;
 nothing is built before that review (the `designed` default). Paths are relative to the repository root. The
 reader is someone who knows what `defaults.toml` is (D26) and what an intervention record is
 (`docs/records.md`) but has not seen the jobs that motivated this.
@@ -42,7 +44,7 @@ job request **(reported)**. Where the repository itself shows the repeat, that i
 | # | Repeat | Count | What it is |
 |---|--------|-------|------------|
 | R1 | A change reading's scope criteria excluded `CHANGELOG.md`, so the verifier saw a changed file outside scope | x4 **(reported)** | **Closed in code by D89.** Change readings now always list `CHANGELOG.md`, and the verifier brief says the deliverables list is the one statement of scope **(read: D89)**. R1 cannot recur as it did. It is a test case for matching (a correction that should land on "none" or at most `small`), not proof that the loop is needed. |
-| R2 | The reader's always-loaded set went over its token budget and blocked the job | x4 **(reported)** | **A counter-example, not a defaults repeat.** The reader budget is 1,800 tokens, measured live, and over-budget sets are refused by code **(read: D25; `crates/athena-context/src/lib.rs`, "over its budget")**. D89 records one instance **(read)**. The fault is caught by a check, so a default such as "keep prompts under budget" would restate a rule the code enforces and cost reader tokens. R2 is labelled "none" in the labeled set (§10.2). Its other lesson, that four retries each patched the last finding, belongs to introspection (§3, case C2). |
+| R2 | The reader's always-loaded set went over its token budget and blocked the job | x4 **(reported)** | **A counter-example, not a defaults repeat.** The reader budget is 1,800 tokens, and an over-budget static set fails a **test**; it is not a check at job time **(read: D25; `crates/athena-context/src/lib.rs`, `check_budget`, called only from tests and `crates/athena-cli/tests/budgets.rs`; `docs/enforcement.md` row M18)**. What actually blocked the four jobs is reported and was not verified here. D89 records one instance **(read)**. The fault is caught by a test, so a default such as "keep prompts under budget" would restate a rule the tests enforce and cost reader tokens. R2 is labelled "none" in the labeled set (§10.2). Its other lesson, that four retries each patched the last finding, belongs to introspection (§3, case C2). |
 | R3 | One job bundled design, review and build | x1 visible **(reported for the rest)** | The nearest written rules are `small` and `designed` **(read: `defaults.toml`)**. No instance is visible here: **unverified**. Test case for "close to `small`, not covered by it" (an amend, §7.2). |
 | R4 | A new config field and its first use landed in one commit | not visible **(reported)** | Matches no entry. No instance is visible here: **unverified**. Test case for a new id. |
 
@@ -68,12 +70,17 @@ Athena runs an introspection after each of these, with no request from the user 
 |---|---|
 | **Correction** of a reading or an answer to a reader question | intervention `corrected-output` or `answered-question` (D27) **(read)** |
 | **Intervention** of any other category (a hand change, an overridden decision) | intervention record, other categories **(read)** |
-| **Rejection** of a result, a proposal (§8) or a plan by the user | a rejected outcome; a new record kind is added when built |
-| **Failure**: a job fails, a check fails or never finishes, a budget refuses a set | job outcome and check results |
+| **Rejection** of a result, a proposal (§8) or a plan by the user | a rejected result is `OutcomeState::Rejected`, which is recorded today **(read: `crates/athena-core/src/run.rs` lines 925, 1042; `crates/athena-data/src/records.rs` line 96)**; a rejected proposal or plan has no record, and a new kind is added when built |
+| **Failure**: a job fails, a check fails or never finishes, a budget test fails | job outcome and check results |
+| **Host error**: the host (GitHub) refuses a call, whether or not a job fails | `athena.host-error/1`, a new record written by the client: `status_code`, `operation`, `job`, `phase`, `at` (decision-sets §4). Today the client keeps only error text **(read: `crates/athena-core/src/gh.rs` lines 47-53)**, so the status is lost |
+| **Landing**: `athena land` runs, after the job is closed | the landing run, its host-error records and check results; a merge refusal (`gh.rs` line 485) happens here and fits none of the rows above unless it also fails a job |
 
 An introspection is recorded even if the user never asks for a retry. A failed introspection (spend cap, model
 error) is recorded as failed and never blocks or delays the job; it is itself a failure and is not
-introspected again.
+introspected again. **No recursion on firings:** the introspection recorded for a decision's signal firing
+(decision-sets §4) is not itself watched, so a firing cannot cause a firing. The signal watcher of decision-sets §4
+runs after job close, after each introspection and at landing, and the introspection triggers above include the
+last two rows so that a host refusal is diagnosed even when no job fails.
 
 ### 3.2 The record
 
@@ -85,6 +92,7 @@ by id (the intervention remains the single counted unit, §7.1):
 | `what_happened` | What the event was, in plain words, with job ids | language model, from stored fields |
 | `failure_class` | One id from the class registry (§3.4) or `new` with a proposed name | typed decision (Jev, §3.4) |
 | `earlier_cases` | Ids of earlier events in the same class, with job ids | **code** (§3.3); the model may not add ids |
+| `decisions_matched` | Ids of typed decisions whose signals the event matched (decision-sets §4, §5); empty if none | **code**; the model may not add ids |
 | `cause` | The cause beyond this instance: why the system allowed it, not what was wrong this time | language model |
 | `prevention_kind` | `default`, `code-check` or `design-change` | typed decision |
 | `prevention` | What exactly would have prevented it: the default text, the check and where it runs, or the design change | language model |
@@ -113,8 +121,10 @@ tested. Cost: the code that selects earlier cases must be right, since the agent
 The reading code is a function of Athena itself, run before the agent is invoked. Exactly what it does:
 
 - **Reads** the stored fields of intervention, correction and introspection records: `what`, `why`,
-  `class_of_work`, `category`, job id, date, and for introspections the `failure_class` and `cause`.
-- **Never reads** model transcripts, diffs, or files from other jobs.
+  `class_of_work`, `category`, job id, date, and for introspections the `failure_class` and `cause`; for host-error
+  records the `status_code`, `operation`, `phase` and `message_class`; for check records the check name, its result
+  and the job id (§5 lists the whole set).
+- **Never reads** model transcripts, diffs, standard-error text, or files from other jobs.
 - **Selects** earlier cases in two steps: code narrows by `class_of_work` and `category`, then a Jev choice
   question assigns the event to a class (§3.4); the earlier cases are the records already in that class.
 - **Passes to the introspecting agent** (only this): the event's stored fields; the class registry entry chosen
@@ -169,7 +179,7 @@ root-cause default covers all seven: a fix at the place the fault arises, not th
 ## 4. The loop in one view
 
 ```
- event: correction / intervention / rejection / failure
+ event: correction / intervention / rejection / failure / host error / landing
         |
         v
  [0] Athena: introspection record (§3). Code reads past records and passes a filtered summary.
@@ -208,8 +218,10 @@ Jev (`typesafe-ai/jev`, through the gateway) returns choices, scores and probabi
 gateway's refusal on the chat route, §6)**. A probe answered a typed forecast question in about 0.75 s at about
 $0.000012 per call **(read: `docs/design/athena-v0.md` E12, one probe, route not recorded; not re-measured)**.
 The rendered defaults list carries the id, scope and first sentence of each entry (§8.3); its size is measured
-before it is relied on (**estimate:** under 1,500 tokens for 12 entries, derived from the reader budget of 1,800
-that holds the model plus the reader prompt; D25).
+before it is relied on. The earlier guess of "under 1,500 tokens for 12 entries" is withdrawn: the reader set as a
+whole measures 1,798 of 1,800 tokens **(measured in review 1: `cargo test --locked -p athena-cli --test budgets --
+--nocapture`)**, which says nothing about the share `render()` takes. That share is **unmeasured**; the build
+measures `render()` alone with the live counter (D25, §8.3).
 
 | Decision | Who | Why |
 |---|---|---|
@@ -218,6 +230,7 @@ that holds the model plus the reader prompt; D25).
 | Which candidate cluster a record joins, or "new" | **Jev** (`choice`), or a pairwise `boolean` | Assignment, not free clustering. Pairs grow with the square of the pool, so assignment is the practical form. Cluster membership then depends on arrival order; the order is stored and the shadow run (§10) tests the effect. |
 | Introspection prose: `what_happened`, `cause`, `prevention`, `proposed_request` | **language model** | Writing. Jev cannot. |
 | Draft statement, `applies_to` and title of a candidate | **language model** (the stronger shadow model or the producer tier) | Writing. Its output is text for review, not a decision. |
+| Whether a signal matches a record, and which decisions in a candidate set apply (decision-sets §5) | **Jev** (`boolean`), in shadow only; exact `match` fields and class/phase/path narrowing are **code** | A choice between two fixed options. Different question and threshold from default matching (§6.1). |
 | Match threshold, escalation threshold, N | **code** | Numbers in `athena.toml`, set from calibration (§10). |
 | Earlier cases for an event, and the validity of every cited id | **code** | §3.3. |
 | Whether the id is unique and well formed | **code** | Code derives a kebab-case id from the title and refuses any id already in the model or a pending proposal; `DefaultsModel::parse` also rejects duplicates **(read: `DefaultsError::Duplicate`)**. |
@@ -226,7 +239,11 @@ that holds the model plus the reader prompt; D25).
 | Writing any record | **code** | Model output is parsed against a typed schema; anything that does not parse is dropped and logged, never repaired. |
 
 Jev's input is built only from stored fields: `what`, `why`, `class_of_work`, `category`, the text of a reading
-correction, and, for introspections, `failure_class` and `cause`. It never sees outcomes or scores (the rule D31
+correction, and, for introspections, `failure_class` and `cause`. For the two questions of decision-sets §5 the list
+also holds: for set membership, the reading's `class_of_work`, `deliverables` paths and `summary` (the field that
+decision-sets §5 names for the "request summary"); for signal match, a host-error record's `status_code`,
+`operation`, `phase` and `message_class`, and a check record's check name, result and job id. **No standard-error or
+log text from any job is sent**, and nothing from another job's files. It never sees outcomes or scores (the rule D31
 set for Jev's forecasts, which keeps every match computable again from records alone) **(read: D31)**.
 
 ## 6. How Jev is reached: `POST /v1/evaluate`
@@ -246,6 +263,12 @@ wrong route), never as a transient fault to retry.
 | `state` | The text the question is about: the record's stored fields |
 | `questions` | A map from a key to one question: `type` (`boolean` or `choice`), `instructions`, and `criteria`, a map from each option to its description |
 
+**Pre-build requirement: a multi-question call.** The reported response is for one question only. Decision-sets §5
+asks one `boolean` per decision or per signal in one call, so before the client is written the building job probes a
+call with several questions in `questions` and records here the response shape (one answer per key, its
+probabilities and confidence, and whether the call is priced per question). If it does not answer several
+questions, the fallback is one call per question. This job made no call to the gateway.
+
 **Response fields.** The chosen option; a probability per option; a confidence. One probe returned `none` at
 0.06, a top option at 0.90 and a confidence of 0.87 with 409 input and 59 output tokens, for five short options.
 The probe offered a `changelog` option that is not in `defaults.toml`, so it shows that Jev can pick a supplied
@@ -262,7 +285,11 @@ fake that returns anything else would let a wrong client pass.
 
 - **Top probability** `p_top`: the probability of the chosen option. It controls **matching**: at or above
   `t_match`, the record is matched to that option (a default, a class, or a cluster); below it, to the unmatched
-  pool or to "new".
+  pool or to "new". This reading is for `choice` questions.
+- **Boolean questions (set membership, signal match).** For a `boolean`, `p_top` is not the threshold input: a
+  chosen "false" at 0.9 has a high `p_top` and means no match. Code reads the probability of the `true` option
+  (apply, or match) and compares it with `t_apply` or `t_signal`, numbers set by calibration (§10.3) and separate from
+  `t_match` (decision-sets §5).
 - **Confidence** `c`: the number the gateway returns beside the probabilities. It controls **escalation** only:
   below `t_conf`, the question is asked again of a stronger model (§6.2). The probe returned 0.90 and 0.87, so
   they differ; what `c` measures is not known, so `t_conf` is set from calibration (§10), not guessed.
@@ -291,8 +318,14 @@ its intervention **(read: `docs/records.md`)**, so counting both would count a c
 text is read as part of its intervention and is not a separate input. An introspection links to its event's
 intervention and is read as an extension of it. An intervention of category `answered-question` is an answer to
 the reader's question, not a repeated expectation; it stays in the labeled set as its own stratum and does not
-count toward N **(design)**. Events with no intervention record (a failure, a rejection) get one when the
-introspection is recorded, so the unit is uniform.
+count toward N **(design)**. Events with no intervention record (a failure, a rejection, a host error, a check
+failure) get one when the introspection is recorded, so the unit is uniform, with `source = observed` (a value
+`docs/records.md` line 70 lists). **Only user-originated units count toward N.** Observed interventions made for host
+errors and check failures do not: a system fault would otherwise count as the user repeating an expectation.
+
+**One evidence rule across both designs.** One event is enough to put a decision under review (decision-sets §4);
+N = 3 distinct jobs, user-originated, is needed before a default is added (§7.2). Review costs a short mark in a
+brief and is cleared by the user; adding a default changes every later brief.
 
 ### 7.2 Matching and clustering
 
@@ -329,9 +362,16 @@ A proposal is a record, not an edit to `defaults.toml` (`docs/records.md`). Name
 | `applies_to` | The scope list; `*` means every class. |
 | `version` | `{ from, to }`: the base commit's model version and `from + 1`. |
 | `sources` | The intervention ids of the cluster (at least N distinct jobs), each with its job id, and the introspection ids that reached the same `cause`. These become the `source` text of the entry when accepted. |
+| `assumptions` | Plain sentences: what must be true for the default to be right. Drafted by the language model, reviewed by the user (decision-sets §2, §5). |
+| `signals` | Typed watched conditions in the form of decision-sets §4 (`source`, `match`, optional `text`, `threshold`), or an explicit "none" with the reason. |
 | `evidence` | For each source: the probabilities and confidence of each Jev answer, the thresholds used, and **the model that gave each answer** (Jev, the stronger model, or a drafting model). |
 | `status` | `pending`, `accepted` (with the job that applied it), `rejected` (with the user's reason), or `withdrawn`. |
 | `candidate_sha256` | Hash of the full candidate `defaults.toml` that passed `DefaultsModel::parse`. |
+
+**Where the two new fields live once accepted (F2).** `defaults.toml` cannot hold them (`DefaultsModel::parse`
+rejects unknown fields; **read** `defaults.rs` lines 7, 16). On acceptance, code writes them to an
+`athena.default-expectations/1` record keyed by the default's `id` (decision-sets §2). The `defaults.toml` entry is
+unchanged in shape. The alternative, new optional keys in `defaults.toml`, is a governance job and is not chosen now.
 
 ### 8.2 Example
 
@@ -365,14 +405,19 @@ sentence** of the statement **(read: `defaults.rs`, `render`)**. So:
 
 - **For the reader, the cost of an entry is its id, scope and first sentence, and the entry count.** The rest of
   the statement costs the reader nothing. The proposal states its rendered size (**estimate:** ⌈bytes/3.0⌉, the
-  tripwire estimate in D25) and is refused if the reader set would go over 1,800 tokens.
+  tripwire estimate in D25) and the **test** that composes the reader set fails if it would go over 1,800 tokens.
+  That is a test, not a job-time refusal (§2, R2). The reader set is 2 tokens under budget today (measured, review
+  1), so a proposal that adds an entry's line needs headroom made first.
 - **The full statement lands in the producer and verifier briefs**, through `get()`, for the defaults the
-  reader selected **(read: `defaults.rs`)**. Those sets have budgets of 1,100 and 1,300
-  **(read: `crates/athena-context/src/lib.rs` lines 158-159)**. Whether defaults count against them was not
-  read; the building job reads it. A statement-length cap stays, set from that finding, and protects those sets.
-- **Gate on the 1,500-token estimate.** Before any entry is added or the figure is relied on, a test calls
-  `render()` and measures the result with the live counter (D25: the live measurement is the authority). The
-  build does not proceed on the estimate alone.
+  reader selected **(read: `defaults.rs`)**, in the per-job section "User defaults that apply" **(read:
+  `crates/athena-context/src/briefs.rs` line 158)**. **Defaults do not count against the producer and verifier
+  budgets of 1,100 and 1,300 today:** the budget test composes only the contract, the frame and the capability
+  section **(read: `budgets.rs` lines 35-44, `lib.rs` lines 158-159)**. A statement-length cap stays and protects
+  the per-job section, which decision-sets §3 puts under a cap, `brief_set_tokens`, enforced at run time by a new
+  check with its own test.
+- **Gate before relying on any figure.** Before any entry is added, a test calls `render()` alone and measures the
+  result with the live counter (D25: the live measurement is the authority). The earlier 1,500-token estimate is
+  withdrawn (§5). The build does not proceed on an estimate.
 
 ## 9. How a proposal reaches the user, and why Athena never edits `defaults.toml`
 
@@ -403,7 +448,8 @@ and refusal handling, and because its forecasts could be computed retroactively.
 calibration review, or the first typed decision in the flow" (`docs/design/athena-v0.md` §14) **(read)**. This
 design is that typed decision. D90 narrows D31: Jev may be added, in shadow only, for the typed decisions here
 (class assignment, default matching, cluster assignment, `prevention_kind`), and nothing runs live until the
-promotion criteria hold. Introspection prose, which a language model writes, is not gated on Jev; it is
+promotion criteria hold. `docs/design/decision-sets.md` (D91) widens the narrowing to two more typed questions,
+set membership and signal match, which are covered by §10.2 to §10.4 below. Introspection prose, which a language model writes, is not gated on Jev; it is
 reviewed as part of the introspection record and scored in §10.3.
 
 ### 10.1 Shadow mode
@@ -422,8 +468,17 @@ reviewed as part of the introspection record and scored in §10.3.
   it matches or "none", the failure class, and groups repeats. Who labeled which is stored.
 - **Must include** R1 to R4 and the cases in §3.6, with R2 labelled "none", and for each, records that look
   similar but are not repeats.
+- **Set membership (J6; design):** a second labeled set, one row per (reading, decision in the code-narrowed
+  candidate set): the user, or a stronger model spot-checked by the user, labels `apply` or `not apply` from
+  past readings (class, deliverables, `summary`). Labels are written before Jev's output is read. Rows where the
+  decision is a `requirement` are labeled too but are scored for information only, since requirements are selected
+  by code alone.
+- **Signal match (J6; design):** a third labeled set, one row per (record, signal): `match` or `no match` over
+  stored intervention, correction, host-error and check records, including near-misses (same class, other
+  category; same operation, other status). The first rows are the D87 cases of decision-sets §4 and §6 step 5;
+  where `records/` has too few, the set says so.
 - **Split:** by time. Records up to a cut date calibrate the thresholds and N; later records test. No tuning on
-  the test part.
+  the test part. The same split applies to the two sets above, and they calibrate `t_apply` and `t_signal`.
 - **Label hygiene:** labels are written before Jev's output is read.
 
 ### 10.3 Scoring
@@ -436,6 +491,12 @@ reviewed as part of the introspection record and scored in §10.3.
   a gap.
 - **Class and cluster assignment:** whether each labeled group lands in one class or cluster, and whether any
   mixes groups; the effect of arrival order.
+- **Set membership and signal match:** the Brier score of the probability of the `true` option against the label,
+  with two references (always `false`, and the code-only matcher: class, phase and path narrowing for membership,
+  exact `match` fields for signals); skill is the improvement over the better reference. Also the **miss rate**
+  (a label `apply` or `match` that Jev scored below the threshold), which is the costly error here because it hides a
+  decision or a failure, and the false-apply and false-match rates. A `requirement` dropped by Jev is counted as a
+  critical failure and must be zero.
 - **Confidence:** whether `c` predicts error better than `p_top` does, which fixes `t_conf` (§6.1).
 - **Prose:** a person (or the stronger model, spot-checked) rates each introspection's `cause` and each draft:
   pass if it says something beyond the instance (introspection) or says what the sources say (draft).
@@ -460,7 +521,12 @@ starting points to be set at review and are **estimates** unless computed.
 4. No proposal in shadow cites a record id that does not exist (a code check, so zero), and every draft passes
    `DefaultsModel::parse` in the candidate file.
 5. At least **90% (estimate)** of drafts and introspection causes are rated faithful and beyond the instance.
-6. The user reviews the shadow report and agrees.
+6. **Set membership and signal match are promoted separately from default matching,** each when: skill is above
+   zero on its own test part (the interval rule of item 1 applies, with the same fall-back to raw scores); the miss
+   rate is under **5% (estimate)** for signal match and **no `requirement` is ever dropped** for membership; the
+   false-apply and false-match rates are under **10% (estimate)**; and the multi-question call of §6 has been probed.
+   Until then membership and the watcher run by code alone (decision-sets §5).
+7. The user reviews the shadow report and agrees.
 
 **Demotion:** if agreement with the stronger model drops, or the user rejects proposals for the reason "Jev
 misread the records" twice in a row, Jev returns to shadow (counts are estimates).
@@ -504,8 +570,10 @@ with a person-visible review.
    review of the output, with a language model for the prose and no Jev.
 2. Add retry-from-record (§3.5).
 3. Add the proposal record and validation, `athena status` surfacing and the apply-as-a-job check (§9).
-4. Measure `render()` with the live counter (§8.3) and read how the producer and verifier sets budget defaults.
-5. Write the fake Jev to the shape in §6, then the Jev client; check each reported fact in §6 against a live call.
+4. Measure `render()` alone with the live counter (§8.3). Defaults are known not to count against the producer and
+   verifier budgets (§8.3); the per-job runtime set-size check is built under decision-sets §8.
+5. Probe a multi-question `evaluate` call (§6), write the fake Jev to the shape found, then the Jev client; check
+   each reported fact in §6 against a live call.
 6. Build the labeled set and scoring (§10.2, §10.3) with the fake, then run in shadow; review; promote under
    §10.4.
 
@@ -519,6 +587,11 @@ with a person-visible review.
   hold out.
 - Whether classes of work (`applies_to` values) need a registry so code can check them exactly.
 - What the gateway's confidence measures, and whether a fallback answer is labelled (§6).
-- How a rejection is recorded when it is not a proposal (a plan, a result): a new record kind, not designed here.
+- How a rejection is recorded when it is not a proposal or a rejected outcome (a plan): a new record kind, not
+  designed here. A rejected outcome is already recorded (`OutcomeState::Rejected`, §3.1).
 - Whether the class registry should be merged by Jev pairwise questions; not decided.
-- A separate independent review of this revision is still to be done; none is recorded.
+- The class vocabulary is closed in decision-sets §2 to the values `defaults.toml` uses; a registry that code can
+  check exactly remains open, as the item above says.
+- The correction to `docs/decisions.md` D90 ("Alternatives ... section 9" should read §11 of this document) is made
+  by a dated note on the entry, not a rewrite of it.
+- A review of this revision is still to be done; review 1 of the pair is `docs/design/reviews/decision-sets-review-1.md`.
