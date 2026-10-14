@@ -7,6 +7,8 @@
 //! - a file exceeds the size limit;
 //! - an added line contains an email address outside the allow-list, or gitleaks finds a secret;
 //! - the candidate would change how any path is classified;
+//! - a changed `athena.toml` or `defaults.toml` does not parse (rule `configuration`), so an unknown field
+//!   fails here with a repairable finding instead of at landing;
 //! - a governance file changed without the accepted reading listing it as a deliverable and naming it in
 //!   an acceptance criterion. For a `Cargo.toml`, only its `[lints]` and `[workspace.lints]` tables are
 //!   governance content.
@@ -14,7 +16,9 @@
 use anyhow::Result;
 use athena_data::config::PersonalData;
 use athena_data::records::{ChangeStatus, PolicyViolation, Reading};
+use athena_data::{Config, DefaultsModel};
 use athena_gate::content::disallowed_emails;
+use athena_gate::{CONFIG_PATH, DEFAULTS_PATH};
 use athena_git::Git;
 use athena_git::attrs::{PathClass, classification_changes, classify};
 use std::collections::BTreeSet;
@@ -116,6 +120,25 @@ pub fn governance_change_is_listed(reading: &Reading, path: &str) -> bool {
 
 /// The core's admission rules. Returns every violation found.
 pub fn admit(input: &AdmissionInput<'_>) -> Result<Vec<PolicyViolation>> {
+    let mut violations = admit_without_secrets(input)?;
+    // Secrets: the candidate is scanned now, so a secret fails the job here instead of at landing.
+    for finding in athena_gate::secrets::check_commit(
+        input.git,
+        input.config,
+        Some(input.base),
+        input.candidate,
+    )? {
+        violations.push(violation(
+            "secret",
+            finding.path.as_deref(),
+            finding.detail.clone(),
+        ));
+    }
+    Ok(violations)
+}
+
+/// Every admission rule except the secret scan, which needs the pinned gitleaks binary.
+fn admit_without_secrets(input: &AdmissionInput<'_>) -> Result<Vec<PolicyViolation>> {
     let git = input.git;
     let mut violations = Vec::new();
     let paths: Vec<String> = input.changes.iter().map(|c| c.path.clone()).collect();
@@ -189,15 +212,29 @@ pub fn admit(input: &AdmissionInput<'_>) -> Result<Vec<PolicyViolation>> {
         ));
     }
 
-    // Secrets: the candidate is scanned now, so a secret fails the job here instead of at landing.
-    for finding in
-        athena_gate::secrets::check_commit(git, input.config, Some(input.base), input.candidate)?
-    {
-        violations.push(violation(
-            "secret",
-            finding.path.as_deref(),
-            finding.detail.clone(),
-        ));
+    // Configuration: a changed athena.toml or defaults.toml must parse, so an unknown field fails the job
+    // here with a finding the producer can repair, instead of at landing.
+    for change in input.changes {
+        let path = change.path.as_str();
+        if change.status == ChangeStatus::Deleted || ![CONFIG_PATH, DEFAULTS_PATH].contains(&path) {
+            continue;
+        }
+        let Some(bytes) = git.show_file(input.candidate, path)? else {
+            continue;
+        };
+        let text = String::from_utf8_lossy(&bytes);
+        let problem = if path == CONFIG_PATH {
+            Config::parse(&text).err().map(|e| e.to_string())
+        } else {
+            DefaultsModel::parse(&text).err().map(|e| e.to_string())
+        };
+        if let Some(problem) = problem {
+            violations.push(violation(
+                "configuration",
+                Some(path),
+                format!("{path} does not parse: {problem}. Repair it: remove or correct the offending field so the file parses"),
+            ));
+        }
     }
 
     // Governance files.
@@ -236,6 +273,136 @@ pub fn admit(input: &AdmissionInput<'_>) -> Result<Vec<PolicyViolation>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use athena_data::JobId;
+    use athena_data::records::{
+        Criterion, CriterionKind, Deliverable, DeliverableAction, Forecast, Forecasts, Quantiles,
+    };
+
+    const BASE_CONFIG: &str = include_str!("../../../athena.toml");
+    const BASE_DEFAULTS: &str = include_str!("../../../defaults.toml");
+
+    fn reading() -> Reading {
+        let forecast = Forecast {
+            p_reading_accepted: 0.8,
+            p_verification_passes: 0.7,
+            p_user_intervenes: 0.1,
+            cost_usd: Quantiles::new(0.2, 0.5, 1.5).unwrap(),
+            wall_time_s: Quantiles::new(100.0, 300.0, 900.0).unwrap(),
+        };
+        Reading {
+            job: JobId::parse("20261012-084936-n1p0").unwrap(),
+            n: 1,
+            at: jiff::Timestamp::UNIX_EPOCH,
+            invocation_seq: 1,
+            base_commit: "a".repeat(40),
+            config_sha256: "b".repeat(64),
+            defaults_sha256: "c".repeat(64),
+            defaults_version: 1,
+            title: "Edit configuration".into(),
+            summary: "Edit configuration.".into(),
+            class_of_work: "feature".into(),
+            capability: Some("change".into()),
+            decline_reason: None,
+            producer_model: "producer".into(),
+            verifier_model: "verifier".into(),
+            defaults_applied: vec![],
+            assumptions: vec![],
+            question: None,
+            acceptance_criteria: vec![Criterion {
+                text: "athena.toml and defaults.toml change".into(),
+                kind: CriterionKind::Content,
+            }],
+            deliverables: ["athena.toml", "defaults.toml"]
+                .map(|path| Deliverable {
+                    path: path.into(),
+                    action: DeliverableAction::Modify,
+                    p: 0.9,
+                })
+                .into(),
+            out_of_scope: vec![],
+            forecasts: Forecasts {
+                reader: forecast.clone(),
+                reference: forecast,
+            },
+            departures: None,
+        }
+    }
+
+    /// Commits the base files, then a candidate with `files` written over them; returns the violations of
+    /// the rules admission applies to content, which do not need gitleaks.
+    fn admit_files(files: &[(&str, &str)]) -> Vec<PolicyViolation> {
+        let dir = tempfile::tempdir().unwrap();
+        let git = Git::isolated(dir.path());
+        git.run(["init", "-q", "-b", "main"]).unwrap();
+        std::fs::write(dir.path().join("athena.toml"), BASE_CONFIG).unwrap();
+        std::fs::write(dir.path().join("defaults.toml"), BASE_DEFAULTS).unwrap();
+        std::fs::write(dir.path().join("a.txt"), "a\n").unwrap();
+        git.run(["add", "-A"]).unwrap();
+        git.run(["commit", "-q", "-m", "base"]).unwrap();
+        let base = git.head().unwrap().unwrap();
+        let mut changes = Vec::new();
+        for (path, text) in files {
+            std::fs::write(dir.path().join(path), text).unwrap();
+            changes.push(Changed {
+                path: path.to_string(),
+                status: ChangeStatus::Modified,
+                mode: "100644".into(),
+                size: text.len() as u64,
+            });
+        }
+        git.run(["add", "-A"]).unwrap();
+        git.run(["commit", "-q", "-m", "candidate"]).unwrap();
+        let candidate = git.head().unwrap().unwrap();
+        let config = athena_data::Config::parse(BASE_CONFIG).unwrap();
+        admit_without_secrets(&AdmissionInput {
+            git: &git,
+            base: &base,
+            candidate: &candidate,
+            changes: &changes,
+            reading: &reading(),
+            max_file_bytes: 1 << 20,
+            personal_data: &config.personal_data,
+            config: &config,
+        })
+        .unwrap()
+    }
+
+    fn configuration(violations: Vec<PolicyViolation>) -> Vec<PolicyViolation> {
+        violations
+            .into_iter()
+            .filter(|v| v.rule == "configuration")
+            .collect()
+    }
+
+    #[test]
+    fn an_unknown_field_in_athena_toml_is_a_configuration_violation() {
+        let text = format!("{BASE_CONFIG}\n[bogus]\nfield = 1\n");
+        let found = configuration(admit_files(&[("athena.toml", &text)]));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].path.as_deref(), Some("athena.toml"));
+        assert!(found[0].detail.contains("does not parse"), "{found:?}");
+        assert!(found[0].detail.contains("bogus"), "{found:?}");
+        assert!(found[0].detail.contains("Repair it"), "{found:?}");
+    }
+
+    #[test]
+    fn an_unknown_field_in_defaults_toml_is_a_configuration_violation() {
+        let text = format!("bogus_field = 1\n{BASE_DEFAULTS}");
+        let found = configuration(admit_files(&[("defaults.toml", &text)]));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].path.as_deref(), Some("defaults.toml"));
+        assert!(found[0].detail.contains("does not parse"), "{found:?}");
+    }
+
+    #[test]
+    fn parsing_configuration_and_untouched_configuration_add_no_violation() {
+        let config = format!("# edited\n{BASE_CONFIG}");
+        let defaults = format!("# edited\n{BASE_DEFAULTS}");
+        let parsing = admit_files(&[("athena.toml", &config), ("defaults.toml", &defaults)]);
+        assert!(configuration(parsing).is_empty());
+        let untouched = admit_files(&[("a.txt", "b\n")]);
+        assert!(configuration(untouched).is_empty());
+    }
 
     #[test]
     fn governance_files_are_recognized() {
