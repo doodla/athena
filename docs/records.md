@@ -88,7 +88,7 @@ An abridged invocation record:
   "job": "20261010-153012-k7q2",
   "seq": 2,
   "role": "producer",
-  "driver": { "name": "claude-code", "version": "2.1.296" },
+  "driver": { "name": "claude-code", "version": "2.1.299" },
   "model": "claude-sonnet-5-5",
   "wall_time": { "value": 192.4, "unit": "seconds", "provenance": "measured", "basis": "athena monotonic clock" },
   "tokens": {

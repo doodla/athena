@@ -22,7 +22,7 @@ SHA-256 sums, and reads credentials only to report whether Claude Code can
 authenticate. It never stores them. `athena.toml` currently pins no `[tools.sccache]` (D84), so setup skips
 that step; if a pin is added, setup builds it with `cargo install --locked` into the install directory (no
 digest; this can take minutes). It needs git 2.40 or later, a C linker, curl, and either Claude Code
-2.1.296 or npm to install it. `./setup.sh --ci` also skips any pinned sccache (CI does not use it) and stops
+2.1.299 or npm to install it. `./setup.sh --ci` also skips any pinned sccache (CI does not use it) and stops
 after building Athena.
 
 `athena --version` prints the package version and the commit the binary was built from, for example

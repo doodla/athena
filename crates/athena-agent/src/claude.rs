@@ -509,7 +509,7 @@ mod stand_in_tests {
     use std::os::unix::fs::PermissionsExt;
 
     const STAND_IN: &str = r#"#!/bin/sh
-if [ "$1" = "--version" ]; then echo "2.1.296 (Claude Code)"; exit 0; fi
+if [ "$1" = "--version" ]; then echo "2.1.299 (Claude Code)"; exit 0; fi
 cat > /dev/null
 echo '{"type":"system","subtype":"init","session_id":"0c32611b-5c0a-43eb-bacb-20a90569b268"}'
 if [ "$MODE" = "spill" ]; then
@@ -531,7 +531,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"num_turns":2,"durat
 
     /// A driver for the stand-in, which makes no model call, so the nested-run marker does not apply.
     fn driver(bin: PathBuf, registry: Registry) -> ClaudeCodeDriver {
-        let version = check_pinned(&bin, "2.1.296").unwrap();
+        let version = check_pinned(&bin, "2.1.299").unwrap();
         ClaudeCodeDriver {
             bin,
             version,
