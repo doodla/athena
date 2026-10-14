@@ -11,7 +11,7 @@ use crate::pin::{is_full_sha, mount};
 use crate::reading::Proposal;
 use crate::scoring::{self, Happened, score, totals};
 use crate::store::{JobRecords, JobState, Records};
-use crate::verify::{VerdictInputs, Verified, judge, verified};
+use crate::verify::{MAP_PATH, VerdictInputs, Verified, judge, verified};
 use crate::{Athena, Ui};
 use anyhow::{Context, Result, bail};
 use athena_agent::env::{EnvSpec, Side};
@@ -907,6 +907,15 @@ impl Athena {
         }
         let mut redacted_commands = commands_run.clone();
         ctx.redactor.redact_all(&mut redacted_commands)?;
+        // The verifier's snapshot holds the base, then the candidate, as two commits.
+        let map_at = |rev: &str| -> Result<Option<String>> {
+            Ok(vsnap
+                .git()
+                .show_file(rev, MAP_PATH)?
+                .map(|b| String::from_utf8_lossy(&b).into_owned()))
+        };
+        let map_base = map_at("HEAD~1")?;
+        let map_candidate = map_at("HEAD")?;
         let judgment = judge(&VerdictInputs {
             criteria: &criteria,
             checks: &check_runs,
@@ -914,6 +923,8 @@ impl Athena {
             commands_run: &redacted_commands,
             snapshot_changed: snapshot_changed.clone(),
             verifier_failure: verifier_failure.clone(),
+            map_base: map_base.as_deref(),
+            map_candidate: map_candidate.as_deref(),
         });
         let verification = Verification {
             job: id.clone(),

@@ -1,0 +1,219 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261014-192610-xgke",
+  "n": 1,
+  "at": "2026-10-14T19:26:51.346219758Z",
+  "invocation_seq": 1,
+  "base_commit": "ac5e3ecfbfc2b959f7db1f02e61f5abb041b9e6e",
+  "config_sha256": "94fb1807d6308583910799522415a96161c06fe11f0ed2bb4de718efd447a604",
+  "defaults_sha256": "7ca3db44e78a075634195d4e9722ade9188c5268e963b636ac7b9c38d2bee2c6",
+  "defaults_version": 1,
+  "title": "Make the steward an agent that reads Athena broadly and queues work",
+  "summary": "Replace the steward's built-in failure counting with a model-backed agent run: the stored short, stable prompt becomes the system prompt, and the agent gets read-only access to code, prompts, briefs, records, git history and GitHub CI/PRs/deploys (via gh), then returns work items and ladder-gated changes that Athena queues. The audience is the Athena owner, who judges whether the steward now reasons over Athena and steers it as the 2026-10-14 BRIEF addendum describes.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "All changes are Rust."
+    },
+    {
+      "id": "tested",
+      "how": "Fake-driver tests for the steward run and policy tests; cargo test and clippy must pass."
+    },
+    {
+      "id": "mechanism",
+      "how": "Read-only access is enforced by the tool policy hook, and the ladder limit by decide(), not by prompt text."
+    },
+    {
+      "id": "root-cause",
+      "how": "The steward's prompt reaching nothing is fixed by wiring a model call, not by editing the prompt text."
+    },
+    {
+      "id": "strangers",
+      "how": "Docs and changelog explain the steward for an outside reader."
+    },
+    {
+      "id": "buy-first",
+      "how": "Reuse the existing AgentDriver, policy and gh CLI rather than a GitHub client crate."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "The agent runs through the existing AgentDriver and Claude Code headless path, so it is budgeted, hermetic and recorded; the driver must be made available to the background thread (e.g. shared via Arc or a fresh driver built from wiring).",
+    "A new Role variant (steward) or reuse of an existing one is chosen by the producer; adding a variant requires updating exhaustive matches, scoring and invariants that treat reader specially.",
+    "GitHub data is fetched where it lives by read-only gh commands inside the agent's policy, not stored in Athena; a missing gh or network is a blind spot, not an error.",
+    "The stored prompt stays short and stable; if its text changes it is a new role version (steward-2) per roles.rs convention.",
+    "Cadence (every five finished tasks) and the ladder limit (defaults-conventions) are kept unchanged; BRIEF says no triggers beyond the parallel loop.",
+    "records/ is not edited directly by the producer; steward output lands through the existing committer."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "steward::run invokes an AgentDriver with the stored STEWARD_PROMPT as the system prompt (via the role definition, unchanged in meaning) and records that invocation (role, usage, cost) like other roles' invocations; the call site in note_finished still runs in the background and never blocks the main flow.",
+      "kind": "content"
+    },
+    {
+      "text": "The steward's invocation is read-only: its tool policy allows reading the repository snapshot, records, prompts, briefs and git history (git log/show/diff) plus read-only GitHub queries (gh run/pr/api GET for CI, PRs, deploys), and denies writes, pushes, and mutating gh/git commands; policy tests cover both allowed and denied cases.",
+      "kind": "content"
+    },
+    {
+      "text": "The agent returns structured output (work items with kind, key, title, rung, source and evidence references, and a request text); Athena validates it, then still routes every item through decide(): rungs at or below the role's limit queue a request via RequestQueue, higher rungs (owner goals, brief requirements, design decisions) queue only a proposal with evidence.",
+      "kind": "content"
+    },
+    {
+      "text": "Each source the agent reports it could not read (including GitHub when gh or network is unavailable) becomes a blind-spot work item naming that source; items whose key already exists in records are not queued twice.",
+      "kind": "content"
+    },
+    {
+      "text": "The old repeated_failures counting is no longer the steward's only reasoning: it is either removed or provided to the agent as input, and docs/design/roles-and-ladder.md and CHANGELOG.md say the steward now calls a model.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo test` (including crates/athena-cli/tests/steward.rs using the fake driver): a steward run with a scripted fake agent output commits the expected work items and queued request, makes no commit when the output is empty, and a nested run makes no real model call.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo clippy --all-targets` and `cargo fmt --check`: both are clean.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/steward.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-data/src/roles.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-agent/src/lib.rs",
+      "action": "modify",
+      "p": 0.25
+    },
+    {
+      "path": "crates/athena-agent/src/policy.rs",
+      "action": "modify",
+      "p": 0.75
+    },
+    {
+      "path": "crates/athena-agent/src/fake.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-agent/src/claude.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-core/src/invocation.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-core/src/scoring.rs",
+      "action": "modify",
+      "p": 0.25
+    },
+    {
+      "path": "crates/athena-context/src/outputs.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-context/src/lib.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-cli/src/wiring.rs",
+      "action": "modify",
+      "p": 0.35
+    },
+    {
+      "path": "crates/athena-cli/tests/steward.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "docs/design/roles-and-ladder.md",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-gate/src/invariant.rs",
+      "action": "modify",
+      "p": 0.2
+    }
+  ],
+  "out_of_scope": [
+    "Changing BRIEF.md, athena.toml, defaults.toml or CI workflows",
+    "Adding new steward cadence triggers or a second role",
+    "Storing GitHub data in Athena's records (it is pulled as needed)",
+    "Letting the steward edit files directly instead of queueing requests",
+    "Changing the ladder's rungs or the may_change rule"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.65,
+      "p_verification_passes": 0.5,
+      "p_user_intervenes": 0.2,
+      "cost_usd": {
+        "p10": 0.7,
+        "p50": 1.6,
+        "p90": 3.5
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 1200.0,
+        "p90": 2400.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7836734693877551,
+      "p_verification_passes": 0.7051282051282052,
+      "p_user_intervenes": 0.11282051282051284,
+      "cost_usd": {
+        "p10": 0.4109041657224685,
+        "p50": 0.8601236852528712,
+        "p90": 2.0080388395574893
+      },
+      "wall_time_s": {
+        "p10": 493.85143355460957,
+        "p50": 772.2884948089998,
+        "p90": 1184.432357434334
+      }
+    }
+  },
+  "departures": "Larger than typical jobs: new model-backed role touching agent driver, tool policy, records, scoring and background threading, so cost, time and failure risk are above the reference."
+}

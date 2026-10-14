@@ -2099,3 +2099,33 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   checkable and enforced at the verdict. The 3-token headroom is as thin as before.
 - **Reversal cost:** Low: restore 1,800 and remove the rules.
 - **Provenance:** measured: the budgets test above; read: `crates/athena-context/src/lib.rs`.
+
+## D94 · A job may not mark its own requirement rows Covered, and a cited document is checked by the verifier
+
+- **Case:** Job 20261014-174815-7bf8 landed a steward that never calls a model. Its request cited a `BRIEF.md`
+  addendum, but the verifier judged only the reading's criteria and never compared the change with the
+  addendum. The same job moved its own rows A9-1 and A10-1 of `docs/design/requirements-map.md` to Covered, and
+  nobody checked that independently.
+- **Decision:** Two rules. (1) *Code:* `judge()` takes the map text at the base and at the candidate. For each
+  row that is Covered at the candidate and was not Covered at the base (moved from Partial or Not covered, or
+  added already Covered) it adds an Athena-sourced major finding naming the row ID and a reason, so the final
+  verdict is not pass. Rows that stay Covered or move away from Covered add nothing. `run.rs` reads both texts
+  from the verifier's snapshot (`HEAD~1` and `HEAD`). The producer prompt states the rule. (2) *Prose only:*
+  the verifier prompt says that when the request cites a document, the verifier reads it and compares the
+  change with it, and that falling short is a `request_reading_mismatch` (already rated major by D93). Rows
+  A9-1 and A10-1 are put back to Partial, each with its reason (the steward never calls a model; cost and
+  yield tracking, reshaping and retiring are not built).
+- **Alternatives:** (a) Only reset the two rows (fixes the instance, not the gap). (b) Reuse the CLI's
+  `strategy::parse_map` (core cannot depend on the CLI) or move it into `athena-data` (a larger change for one
+  small parser; the duplicate is about twenty lines and is tested). (c) Detect cited documents mechanically
+  (the request is free text; no reliable rule tells a cited document from a mentioned one). (d) Hard-block the
+  landing beyond the normal fail verdict (a major finding already stops it).
+- **Tradeoff:** A row can no longer reach Covered inside the job that builds it, so a truly finished row stays
+  Partial until a later change or the user marks it; in return nobody grades their own work. The map parser is
+  duplicated, so a change to the row format must change both. The document comparison depends on the
+  verifier reading the request, and nothing checks that it did. The prompts grew, and the producer and
+  verifier sets were kept inside their budgets by trimming wording (change producer 881 of 1,100, change
+  verifier 1,148 of 1,300, study producer 1,097 of 1,100, study verifier 1,298 of 1,300, measured with the
+  budgets test).
+- **Reversal cost:** Low: remove the check in `judge()` and the two prompt lines.
+- **Provenance:** read: the request of this job and the map rows; measured: the budgets test.

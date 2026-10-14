@@ -9,6 +9,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- A job may not mark its own requirement rows Covered, and the verifier checks cited documents (D94, from job
+  20261014-174815-7bf8). `judge()` now compares `docs/design/requirements-map.md` at the base with the
+  candidate and adds a major, Athena-sourced finding for each row that moved to Covered or was added Covered,
+  so the verdict is not pass. The producer prompt states the rule. The verifier prompt says to read a document
+  the request cites and compare the change with it; falling short is a request-reading mismatch. That second
+  rule is prose-only, because the repository cannot tell which documents a request cites. Rows A9-1 (the
+  steward never calls a model) and A10-1 (cost and yield tracking, reshaping and retiring are not built) are
+  back to Partial, and the strategy view counts follow.
 - A request's goal now survives to the verdict. The reader prompt names the request's audience, requires one
   acceptance criterion that audience can check, forbids listing the request's own goal as out of scope, and
   tells the reader to read the output a request is about first. The producer prompt treats the criteria as a
