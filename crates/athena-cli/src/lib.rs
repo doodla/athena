@@ -5,4 +5,5 @@ pub mod backtest;
 pub mod decisions;
 pub mod display;
 pub mod hooks;
+pub mod strategy;
 pub mod wiring;

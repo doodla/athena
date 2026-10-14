@@ -7,6 +7,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- `athena strategy` (read-only, `--json`): coverage per goal (rows, covered, partial, not covered, and the
+  not-covered rows) computed from `docs/design/requirements-map.md`, with goal membership read from the goal
+  lists of `docs/design/strategy-view.md`. An ID in a goal but not in the map, or a map row in no goal, is an
+  error (exit 2). A test fails when the view's "Coverage at a glance" table differs from the computed counts,
+  so the strategic view cannot go stale unnoticed. The view's intro no longer calls the counts hand-counted.
+
 ### Changed
 
 - The requirements map, strategy view and roadmap are brought up to date. The map gains four rows for the
