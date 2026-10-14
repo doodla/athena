@@ -1,7 +1,7 @@
 //! The explainer site: `cargo run -p xtask -- site [--out <dir>]`.
 //!
 //! Renders one self-contained HTML file, `index.html`, from the JSON files of
-//! `studies/firstmate-work-handling`. Every sentence on the page comes from those files, is HTML-escaped,
+//! `studies/firstmate-work-handling` (including `intro.json`, the newcomer introduction). Every sentence on the page comes from those files, is HTML-escaped,
 //! and carries the id of the claim in `claims.json` that supports it. A citation of a claim that does not
 //! exist, an element that cites no claim, or a missing file is an error, so a page is never built from
 //! partial data. The design is in `docs/design/explainer-site.md`.
@@ -25,6 +25,7 @@ pub struct Study {
     model: Value,
     rationales: Value,
     findings: Value,
+    intro: Value,
 }
 
 /// Reads the study files from `dir`. A missing or malformed file is an error that names the file.
@@ -41,6 +42,7 @@ pub fn load(dir: &Path) -> Result<Study> {
         model: read("model.json")?,
         rationales: read("rationales.json")?,
         findings: read("findings.json")?,
+        intro: read("intro.json")?,
     })
 }
 
@@ -138,6 +140,42 @@ pub fn render(study: &Study) -> Result<String> {
         sha = escape(sha),
         repo = escape(repo),
     );
+
+    // Start here: what firstmate is, one piece of work end to end, and a glossary.
+    body.push_str(
+        "<section><h2>Start here</h2>\
+         <p>This page reads one system, firstmate, through a study of it. The three parts below \
+         say what it is, follow one piece of work, and define the words the rest of the page uses.</p>\
+         <h3>What firstmate is</h3><ul>",
+    );
+    for item in array_of(&study.intro, "what", "intro.json")? {
+        intro_item(&mut body, item, "an intro sentence", &known)?;
+    }
+    body.push_str("</ul><h3>One piece of work, start to finish</h3><ol>");
+    for item in array_of(&study.intro, "walkthrough", "intro.json")? {
+        intro_item(&mut body, item, "a walk-through step", &known)?;
+    }
+    body.push_str("</ol><h3>Glossary</h3><dl class=\"glossary\">");
+    for entry in array_of(&study.intro, "glossary", "intro.json")? {
+        let term = str_of(entry, "term", "a glossary entry")?;
+        let what = format!("glossary entry {term}");
+        let definition = escape(str_of(entry, "definition", &what)?);
+        // Terms about the page's own structure make no claim about firstmate and need no citation.
+        let cite = if entry.get("about").and_then(Value::as_str) == Some("page") {
+            String::from("<span class=\"tag\">about this page</span>")
+        } else {
+            cites(entry, &what, &known)?
+        };
+        let _ = write!(
+            body,
+            "<dt id=\"term-{}\">{}</dt><dd>{} {}</dd>",
+            escape(&term.replace(' ', "-")),
+            escape(term),
+            definition,
+            cite
+        );
+    }
+    body.push_str("</dl></section>");
 
     // States
     body.push_str("<section><h2>States of a piece of work</h2><ul>");
@@ -300,6 +338,13 @@ pub fn render(study: &Study) -> Result<String> {
     ))
 }
 
+/// One sentence of the intro as a list item. It must cite at least one claim.
+fn intro_item(body: &mut String, item: &Value, what: &str, known: &BTreeSet<String>) -> Result<()> {
+    let text = escape(str_of(item, "text", what)?);
+    let _ = write!(body, "<li>{} {}</li>", text, cites(item, what, known)?);
+    Ok(())
+}
+
 fn array_of_value<'a>(value: &'a Value, file: &str) -> Result<&'a Vec<Value>> {
     value
         .as_array()
@@ -376,7 +421,62 @@ mod tests {
             "findings.json",
             r#"[{"id":"f1","kind":"model-limit","detail":"limit"}]"#,
         );
+        write(
+            dir.path(),
+            "intro.json",
+            r#"{"what":[{"text":"Firstmate does a thing.","claims":["c1"]}],
+                "walkthrough":[{"text":"First step.","claims":["c1"]}],
+                "glossary":[
+                  {"term":"guard","about":"page","definition":"A condition."},
+                  {"term":"worker","definition":"Does the task.","claims":["c1"]}]}"#,
+        );
         dir
+    }
+
+    #[test]
+    fn the_intro_and_glossary_come_before_the_states() {
+        let dir = study_dir("[mechanism] A thing happens.", "c1");
+        let html = render(&load(dir.path()).unwrap()).unwrap();
+        let start = html.find("<h2>Start here</h2>").unwrap();
+        assert!(start < html.find("<h2>States of a piece of work</h2>").unwrap());
+        assert!(html.contains("<h3>What firstmate is</h3>"));
+        assert!(html.contains("<h3>One piece of work, start to finish</h3>"));
+        assert!(html.contains("<h3>Glossary</h3>"));
+        assert!(html.contains("<li>Firstmate does a thing. <span class=\"cites\">"));
+        assert!(html.contains(
+            "<dt id=\"term-worker\">worker</dt><dd>Does the task. <span class=\"cites\">"
+        ));
+        assert!(html.contains("<dt id=\"term-guard\">guard</dt><dd>A condition. <span class=\"tag\">about this page</span>"));
+    }
+
+    #[test]
+    fn an_uncited_intro_element_is_an_error() {
+        for bad in [
+            r#"{"what":[{"text":"x","claims":[]}],"walkthrough":[],"glossary":[]}"#,
+            r#"{"what":[],"walkthrough":[{"text":"x","claims":["c99"]}],"glossary":[]}"#,
+            r#"{"what":[],"walkthrough":[],"glossary":[{"term":"t","definition":"d"}]}"#,
+        ] {
+            let dir = study_dir("[mechanism] A thing happens.", "c1");
+            write(dir.path(), "intro.json", bad);
+            assert!(render(&load(dir.path()).unwrap()).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_real_study_renders_with_an_intro_and_glossary() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let html = render(&load(&root.join(STUDY_DIR)).unwrap()).unwrap();
+        for term in [
+            "state",
+            "counter",
+            "transition",
+            "trigger",
+            "guard",
+            "claim",
+            "pin",
+        ] {
+            assert!(html.contains(&format!("<dt id=\"term-{term}\">")), "{term}");
+        }
     }
 
     #[test]
@@ -433,6 +533,7 @@ mod tests {
             "model.json",
             "rationales.json",
             "findings.json",
+            "intro.json",
         ] {
             std::fs::copy(src.path().join(name), study.join(name)).unwrap();
         }

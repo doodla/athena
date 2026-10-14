@@ -9,13 +9,18 @@ published to GitHub Pages from this repository and runs locally with one command
 - `cargo run -p xtask -- site [--out <dir>]` renders one self-contained file, `index.html`, into `site/` (or
   `<dir>`). The directory is gitignored, so building never changes tracked files.
 - The only content source is `studies/firstmate-work-handling`: `pin.json`, `claims.json`, `model.json`,
-  `rationales.json` and `findings.json`. The renderer lives in `xtask/src/site.rs`.
+  `rationales.json`, `findings.json` and `intro.json`. The renderer lives in `xtask/src/site.rs`.
 - The page has inline CSS, a viewport meta tag, a responsive grid, and a dark theme through
   `prefers-color-scheme`. It loads no script, font, image or stylesheet from elsewhere.
 - Every piece of study text is HTML-escaped. Every state, counter, transition and rationale links to the
   claim ids that support it, and the claims with their source paths and lines are listed at the end. A
   citation of a claim that does not exist, an element with no claim, or a missing or malformed study file is
   an error; no page is written from partial data.
+- The page opens with a "Start here" section for a reader who has never seen firstmate: what it is, one
+  piece of work from start to finish, and a glossary. Its text lives in `intro.json` beside the other study
+  files. Every sentence and every glossary term about firstmate cites claim ids from `claims.json`; a
+  glossary term about the page's own structure (state, transition, trigger, guard, counter, claim, pin,
+  mark) is marked "about this page" and cites nothing. An entry with no claims and no such mark is an error.
 - The page states the pinned firstmate commit from `pin.json` at the top and in the footer. The study's
   findings are shown under their own finding ids, in a section that says they are not claims about firstmate.
 - `.github/workflows/pages.yml` runs on a push to `main` and on manual dispatch. It builds with
@@ -49,5 +54,6 @@ published to GitHub Pages from this repository and runs locally with one command
 ## Checks
 
 Unit tests in `xtask/src/site.rs` cover escaping, claim-id citation, the pinned commit, an unknown claim id,
-missing study data, and the output location. `xtask/tests/policy.rs` and `docs/non-rust-files.md` list
+missing study data, the output location, the intro and glossary appearing before the states, and an uncited
+intro element being rejected. `xtask/tests/policy.rs` and `docs/non-rust-files.md` list
 `pages.yml` as an allowed YAML workflow.
