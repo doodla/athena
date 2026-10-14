@@ -446,6 +446,18 @@ pub fn status(v: &StatusView) -> String {
         };
         let _ = writeln!(out, "{label:<11} {}#{} — {state}", p.record, p.field);
     }
+    for (i, p) in v.proposals.iter().enumerate() {
+        let label = if i == 0 { "proposals" } else { "" };
+        let _ = writeln!(
+            out,
+            "{label:<11} {} [{}] version {} -> {} · class {}: {}",
+            p.id, p.kind, p.version_from, p.version_to, p.failure_class, p.statement
+        );
+        let _ = writeln!(out, "{:<11}   applies to: {}", "", p.applies_to.join(", "));
+        for source in &p.sources {
+            let _ = writeln!(out, "{:<11}   source: {source}", "");
+        }
+    }
     if !v.invalid_records.is_empty() {
         let _ = writeln!(
             out,

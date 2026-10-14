@@ -589,6 +589,18 @@ with a person-visible review.
    introspection, with each earlier prevention shown as already tried. A job without a usable introspection falls
    back to plain "try again on". Nothing is submitted without the user's acceptance.
 3. Add the proposal record and validation, `athena status` surfacing and the apply-as-a-job check (§9).
+   **Built (step 3).** `athena.defaults-proposal/1` is in `crates/athena-data/src/records.rs`; generation,
+   validation and the apply check are `crates/athena-core/src/proposals.rs`. `athena propose` groups recorded
+   introspections by `failure_class` and, at `REPEAT_THRESHOLD` (3) distinct jobs, writes a pending proposal
+   whose statement code drafts from the class entry and the cases' `cause` (no model, no Jev; `assumptions`,
+   `signals` and `evidence` are not fields yet and the record's `notes` say so). Each proposal is validated by
+   building the candidate `defaults.toml` in memory and parsing it with `DefaultsModel::parse`, a unique id, the
+   version base plus one, and the evidence-after-decision rule over its sources. `athena status` lists open
+   proposals with their sources. `athena accept-proposal` submits the ordinary job of §9 item 3; `athena
+   check-proposal` is its verifier check; `athena reject-proposal` records the reason and suppresses the class
+   until `REPEAT_THRESHOLD` newer distinct jobs arrive. A test asserts the module's code never opens a file for
+   writing. Not built: the reject-triggered introspection, cases of kind `code-check` or `design-change` listed
+   apart, and the check running by itself inside the apply job.
 4. Measure `render()` alone with the live counter (§8.3). Defaults are known not to count against the producer and
    verifier budgets (§8.3); the per-job runtime set-size check is built under decision-sets §8.
 5. Probe a multi-question `evaluate` call (§6), write the fake Jev to the shape found, then the Jev client; check

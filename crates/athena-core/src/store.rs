@@ -6,7 +6,8 @@ use anyhow::{Result, anyhow, bail};
 use athena_data::records::{
     AnyRecord, Candidate, Correction, DecisionState, DecisionStateKind, DefaultExpectations,
     FailureClass, HostError, Intervention, IntrospectionRecord, Invocation, Job, Outcome,
-    OutcomeState, Reading, Request, Resolution, Restart, Score, Verification, fold_decision_states,
+    OutcomeState, ProposalRecord, Reading, Request, Resolution, Restart, Score, Verification,
+    fold_decision_states,
 };
 use athena_data::{JobId, RecordId};
 use athena_gate::records::RecordSet;
@@ -184,6 +185,8 @@ pub struct Records {
     pub introspections: Vec<IntrospectionRecord>,
     /// The class registry: one record per class, oldest first.
     pub classes: Vec<FailureClass>,
+    /// Every defaults-proposal record, oldest first; fold them with `proposals::current`.
+    pub proposals: Vec<ProposalRecord>,
     /// Files that are not acceptable records, by path.
     pub invalid: Vec<String>,
 }
@@ -237,6 +240,7 @@ impl Records {
                 AnyRecord::DefaultExpectations(e) => records.default_expectations.push(e),
                 AnyRecord::Introspection(i) => records.introspections.push(*i),
                 AnyRecord::FailureClass(c) => records.classes.push(c),
+                AnyRecord::DefaultsProposal(p) => records.proposals.push(*p),
                 other => {
                     let job = job_of(&other)
                         .expect("every other record names its job")
@@ -267,6 +271,9 @@ impl Records {
         records
             .classes
             .sort_by(|a, b| (a.at, &a.id).cmp(&(b.at, &b.id)));
+        records
+            .proposals
+            .sort_by(|a, b| (a.at, &a.record).cmp(&(b.at, &b.record)));
         Ok(records)
     }
 
@@ -331,6 +338,7 @@ impl Records {
             || self.default_expectations.iter().any(|r| &r.id == id)
             || self.introspections.iter().any(|r| &r.id == id)
             || self.classes.iter().any(|r| &r.id == id)
+            || self.proposals.iter().any(|r| &r.record == id)
     }
 
     /// The current state of each decision, folded from its append-only state records.

@@ -20,6 +20,8 @@
 //!   over REST only when the opt-in setting is on;
 //! - [`introspect`]: the introspection record of an event, the class registry, and the reading code shared with
 //!   `athena backtest`;
+//! - [`proposals`]: proposed defaults from repeated introspections, their validation, and the apply-as-a-job
+//!   check; `defaults.toml` is never written by Athena;
 //! - [`watcher`]: decisions put under review by exact matching of host-error records, run at landing;
 //! - [`pin`]: a study's repository ref resolved to a commit by the core, and mounted read-only.
 
@@ -37,6 +39,7 @@ pub mod manage;
 pub mod nested;
 pub mod pin;
 pub mod pr;
+pub mod proposals;
 pub mod reading;
 pub mod run;
 #[cfg(test)]

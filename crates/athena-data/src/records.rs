@@ -1258,6 +1258,126 @@ pub struct FailureClass {
     pub proposed_by: RecordId,
 }
 
+/// The schema tag of a defaults proposal.
+pub const PROPOSAL_SCHEMA: &str = "athena.defaults-proposal/1";
+
+/// Whether a proposal adds a default or amends one that exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProposalKind {
+    Add,
+    Amend,
+}
+
+impl ProposalKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProposalKind::Add => "add",
+            ProposalKind::Amend => "amend",
+        }
+    }
+}
+
+/// The model version a proposal is built on, and the one it would produce (`to` is `from + 1`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProposalVersion {
+    pub from: u32,
+    pub to: u32,
+}
+
+/// One record a proposal cites: an introspection, the intervention it extends (if any), and its job.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProposalSource {
+    pub introspection: RecordId,
+    pub intervention: Option<RecordId>,
+    pub job: JobId,
+    /// When the cited introspection was recorded.
+    pub at: Timestamp,
+}
+
+/// Where a proposal stands. A change of status is a new record, never an edit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+pub enum ProposalStatus {
+    Pending,
+    /// The job that applies it to `defaults.toml`.
+    Accepted {
+        job: JobId,
+    },
+    Rejected {
+        reason: String,
+    },
+    Withdrawn,
+}
+
+impl ProposalStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ProposalStatus::Pending => "pending",
+            ProposalStatus::Accepted { .. } => "accepted",
+            ProposalStatus::Rejected { .. } => "rejected",
+            ProposalStatus::Withdrawn => "withdrawn",
+        }
+    }
+}
+
+/// `athena.defaults-proposal/1`: a proposed default, written by code when introspections of one failure class
+/// reach the repeat threshold across distinct jobs (`docs/design/defaults-loop.md` sections 8 and 9). It is a
+/// record, never an edit to `defaults.toml`. Each status change is a further record with the same `id`; the
+/// newest by time is current. Without Jev there are no assumptions, signals or probabilities, and `notes` says so.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProposalRecord {
+    /// This record's own id; it names the file.
+    pub record: RecordId,
+    pub at: Timestamp,
+    /// The default's id: new for `add`, existing for `amend`.
+    pub id: String,
+    pub kind: ProposalKind,
+    pub statement: String,
+    pub applies_to: Vec<String>,
+    pub version: ProposalVersion,
+    pub sources: Vec<ProposalSource>,
+    /// The failure class whose repeats produced it.
+    pub failure_class: RecordId,
+    pub status: ProposalStatus,
+    /// Hash of the full candidate `defaults.toml` that passed `DefaultsModel::parse`.
+    pub candidate_sha256: String,
+    /// What this build leaves out (no Jev: no assumptions, signals or evidence probabilities).
+    pub notes: String,
+}
+
+impl ProposalRecord {
+    /// Why this record is not acceptable, if it is not.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.id.trim().is_empty() || self.statement.trim().is_empty() {
+            return Err("a proposal has an id and a statement".into());
+        }
+        if self.applies_to.is_empty() || self.applies_to.iter().any(|a| a.trim().is_empty()) {
+            return Err("a proposal lists the classes it applies to".into());
+        }
+        if self.version.from.checked_add(1) != Some(self.version.to) {
+            return Err("a proposal's version is the base plus one".into());
+        }
+        if self.sources.is_empty() {
+            return Err("a proposal cites the records that support it".into());
+        }
+        if self.candidate_sha256.len() != 64
+            || !self.candidate_sha256.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            return Err("candidate_sha256 is a SHA-256 in hexadecimal".into());
+        }
+        match &self.status {
+            ProposalStatus::Rejected { reason } if reason.trim().is_empty() => {
+                Err("a rejection gives a reason".into())
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------------
 // The envelope
 
@@ -1301,6 +1421,8 @@ pub enum AnyRecord {
     Introspection(Box<IntrospectionRecord>),
     #[serde(rename = "athena.failure-class/1")]
     FailureClass(FailureClass),
+    #[serde(rename = "athena.defaults-proposal/1")]
+    DefaultsProposal(Box<ProposalRecord>),
 }
 
 /// Why a file under `records/` is not acceptable.
@@ -1376,6 +1498,7 @@ impl AnyRecord {
             AnyRecord::FailureClass(c) if c.name.trim().is_empty() => {
                 return Err(invalid("a failure class has a name".into()));
             }
+            AnyRecord::DefaultsProposal(p) => p.validate().map_err(invalid)?,
             // Totals are what reconciliation checks an outcome against; only the bootstrap has none
             // (acceptance verification 2).
             AnyRecord::Outcome(o) if o.job.is_request() && o.totals.is_none() => {
@@ -1446,6 +1569,13 @@ impl AnyRecord {
             AnyRecord::FailureClass(r) => {
                 format!("records/failure-classes/{}/{}.json", r.id.month(), r.id)
             }
+            AnyRecord::DefaultsProposal(r) => {
+                format!(
+                    "records/defaults-proposals/{}/{}.json",
+                    r.record.month(),
+                    r.record
+                )
+            }
         }
     }
 
@@ -1469,6 +1599,7 @@ impl AnyRecord {
             AnyRecord::DefaultExpectations(_) => "athena.default-expectations/1",
             AnyRecord::Introspection(_) => INTROSPECTION_SCHEMA,
             AnyRecord::FailureClass(_) => "athena.failure-class/1",
+            AnyRecord::DefaultsProposal(_) => PROPOSAL_SCHEMA,
         }
     }
 }
@@ -1910,6 +2041,70 @@ mod tests {
         let mut unkeyed = expectations;
         unkeyed.default_id = " ".into();
         assert!(unkeyed.validate().is_err());
+    }
+
+    fn sample_proposal() -> ProposalRecord {
+        ProposalRecord {
+            record: RecordId::parse("20261014-110000-eeee").unwrap(),
+            at: ts(),
+            id: "field-with-use".into(),
+            kind: ProposalKind::Add,
+            statement: "A new field lands with its first use.".into(),
+            applies_to: vec!["code".into()],
+            version: ProposalVersion { from: 1, to: 2 },
+            sources: vec![ProposalSource {
+                introspection: RecordId::parse("20261014-100000-aaaa").unwrap(),
+                intervention: None,
+                job: job(),
+                at: ts(),
+            }],
+            failure_class: RecordId::parse("20261014-090000-cccc").unwrap(),
+            status: ProposalStatus::Pending,
+            candidate_sha256: "a".repeat(64),
+            notes: "No Jev.".into(),
+        }
+    }
+
+    #[test]
+    fn defaults_proposals_have_a_path_a_schema_and_are_validated() {
+        let proposal = sample_proposal();
+        let record = AnyRecord::DefaultsProposal(Box::new(proposal.clone()));
+        assert_eq!(record.schema(), "athena.defaults-proposal/1");
+        assert_eq!(
+            record.canonical_path(),
+            "records/defaults-proposals/2026-10/20261014-110000-eeee.json"
+        );
+        assert_eq!(
+            AnyRecord::parse("x", record.to_json().as_bytes()).unwrap(),
+            record
+        );
+        assert!(
+            record
+                .to_json()
+                .contains("\"schema\": \"athena.defaults-proposal/1\"")
+        );
+        let invalid = |edit: &dyn Fn(&mut ProposalRecord)| {
+            let mut p = proposal.clone();
+            edit(&mut p);
+            AnyRecord::parse(
+                "x",
+                AnyRecord::DefaultsProposal(Box::new(p))
+                    .to_json()
+                    .as_bytes(),
+            )
+            .is_err()
+        };
+        assert!(invalid(&|p| p.version.to = 5));
+        assert!(invalid(&|p| p.sources.clear()));
+        assert!(invalid(&|p| p.statement = " ".into()));
+        assert!(invalid(&|p| p.candidate_sha256 = "abc".into()));
+        assert!(invalid(
+            &|p| p.status = ProposalStatus::Rejected { reason: " ".into() }
+        ));
+        let mut accepted = proposal;
+        accepted.status = ProposalStatus::Accepted { job: job() };
+        assert!(accepted.validate().is_ok());
+        assert_eq!(accepted.status.as_str(), "accepted");
     }
 
     #[test]
