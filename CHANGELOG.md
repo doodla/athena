@@ -9,6 +9,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Backtest evidence now postdates the decision and each citation is validated. A decision starts at the first
+  commit that introduced its id heading (`## D87 `), found with `git log -S`, not its current full heading text.
+  `athena backtest` counts only records later than that start and fails (condition `e`) on any cited record that
+  does not exist, does not match the signal, or is not later than the start. `derive_host_error` now derives only
+  when the HTTP code is tied to the refusal of the merge itself ("GitHub refused a merge commit (HTTP 405)"); a
+  code from another failure ("the push failed with HTTP 422") derives nothing, and a full stop inside a number
+  or version no longer cuts the text. Tests use fixture records with the text and times of interventions kn3q,
+  qk2d and ar1x and show D87 under review citing only ar1x.
+
 - Derived host-error records. The 405 that falsified D87 (PR #41, job 9h2j) predates host-error records and
   exists only in the text of intervention `20261013-192156-ar1x`. `athena.host-error/1` gains `derived` and
   `source_intervention` (absent on observed records; validation rejects a derived record without a source).

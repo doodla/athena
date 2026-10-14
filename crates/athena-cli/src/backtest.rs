@@ -17,6 +17,10 @@
 //! 4. Builds one introspection record for the earliest event that fired a signal naming D87. The record holds
 //!    only the fields code writes; the fields a language model writes are listed as pending.
 //!
+//! Only records later than a decision's start count. The start is the first commit that introduced the
+//! decision's id heading ([`decision_start`]). Every record a fired signal cites is validated against the
+//! signal's fields and that window ([`validate_citations`]); an invalid citation is a finding.
+//!
 //! The result is a [`Report`] with the review's pass conditions applied. A condition that does not hold is a
 //! [`Finding`] with its reason; the report does not pass, and nothing is retried or loosened. The backtest writes
 //! nothing: the introspection record is returned, not committed.
@@ -25,6 +29,7 @@ use crate::decisions::{ConfirmedLinks, DecisionView, mark_under_review, view};
 use anyhow::{Context, Result};
 use athena_core::watcher::{self, D87_SIGNAL, HostErrorSignal};
 use athena_data::records::{AnyRecord, HostError, InterventionCategory, OutcomeState};
+use jiff::Timestamp;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -517,20 +522,88 @@ fn matches(m: &InterventionMatch, row: &InterventionRow, records: &Records) -> b
         }
 }
 
-pub fn run_signals(headers: &[DecisionHeader], records: &Records) -> Vec<SignalRun> {
+/// The time each decision started: the first commit that introduced its id heading in `docs/decisions.md`. A
+/// decision with no start counts every record.
+pub type Starts = BTreeMap<String, Timestamp>;
+
+/// True when a record at `at` is later than the start of `decision`. A decision with no start counts every
+/// record; a record with no usable time is not later than any start.
+fn after_start(starts: &Starts, decision: &str, at: Option<Timestamp>) -> bool {
+    match starts.get(decision) {
+        None => true,
+        Some(start) => at.is_some_and(|at| at > *start),
+    }
+}
+
+fn row_at(row: &InterventionRow) -> Option<Timestamp> {
+    row.at.parse().ok()
+}
+
+/// The time of the first commit that introduced the id heading `## <id> ` in `docs/decisions.md` of the
+/// repository at `root`, from `git log -S`. The heading is found by its id and the space after it, not by its
+/// full text, so a heading that was renamed later still dates from the commit that first added the id. `None`
+/// when no commit adds it.
+pub fn decision_start(root: &Path, id: &str) -> Result<Option<Timestamp>> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["log", "--reverse", "--format=%cI", "-S"])
+        .arg(format!("## {id} "))
+        .args(["--", "docs/decisions.md"])
+        .output()
+        .context("running git log to date a decision")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git log failed while dating {id}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let Some(first) = text.lines().find(|l| !l.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let at = first
+        .trim()
+        .parse()
+        .with_context(|| format!("reading the commit time {first:?} of {id}"))?;
+    Ok(Some(at))
+}
+
+/// The start of every decision with a typed header, from the history of the repository at `root`. A decision
+/// whose heading no commit adds is an error: its records cannot be dated.
+pub fn starts_from_history(root: &Path) -> Result<Starts> {
+    let mut starts = Starts::new();
+    for header in headers() {
+        let start = decision_start(root, header.id)?.with_context(|| {
+            format!(
+                "no commit in git history adds the heading `## {} `",
+                header.id
+            )
+        })?;
+        starts.insert(header.id.to_string(), start);
+    }
+    Ok(starts)
+}
+
+pub fn run_signals(
+    headers: &[DecisionHeader],
+    records: &Records,
+    starts: &Starts,
+) -> Vec<SignalRun> {
     let mut runs = Vec::new();
     for header in headers {
+        let later = |at: Option<Timestamp>| after_start(starts, header.id, at);
         for signal in &header.signals {
             if let Some(host_error) = &signal.host_error {
                 let matched: Vec<&HostError> = records
                     .host_errors
                     .iter()
-                    .filter(|e| host_error.matches(e))
+                    .filter(|e| host_error.matches(e) && later(Some(e.at)))
                     .collect();
                 let derived: Vec<&HostError> = records
                     .derived_host_errors
                     .iter()
-                    .filter(|e| host_error.matches(e))
+                    .filter(|e| host_error.matches(e) && later(Some(e.at)))
                     .collect();
                 let jobs: BTreeSet<String> = matched
                     .iter()
@@ -553,7 +626,7 @@ pub fn run_signals(headers: &[DecisionHeader], records: &Records) -> Vec<SignalR
             let events: Vec<InterventionRow> = records
                 .interventions
                 .iter()
-                .filter(|row| matches(exact, row, records))
+                .filter(|row| matches(exact, row, records) && later(row_at(row)))
                 .cloned()
                 .collect();
             let jobs: BTreeSet<String> = events.iter().filter_map(|e| e.job.clone()).collect();
@@ -783,12 +856,144 @@ fn check_introspection(
     }
 }
 
-/// Run the backtest on the text of `docs/decisions.md` and the records under `root`.
+/// Validates every record a signal run cites, against the signal's own fields and the decision's time window
+/// (condition `e`). A cited record is valid when it exists in `records`, matches the signal (a host error: the
+/// operation, phase and status; an intervention: the category, class of work and landed job), and is later than
+/// the start of the decision. A derived record must also cite a source intervention that exists and is later
+/// than the start. Each invalid citation is a finding; the backtest fails on any.
+pub fn validate_citations(
+    headers: &[DecisionHeader],
+    runs: &[SignalRun],
+    records: &Records,
+    starts: &Starts,
+) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let mut invalid = |decision: &str, record: &str, why: &str| {
+        findings.push(Finding {
+            condition: "e",
+            reason: format!("{decision} cites {record}, which is not valid: {why}"),
+        });
+    };
+    for run in runs {
+        let signal = headers
+            .iter()
+            .filter(|h| h.id == run.decision)
+            .flat_map(|h| &h.signals)
+            .find(|s| s.name == run.signal);
+        let Some(signal) = signal else {
+            invalid(&run.decision, &run.signal, "no such signal on the decision");
+            continue;
+        };
+        let later = |at: Option<Timestamp>| after_start(starts, &run.decision, at);
+        for id in &run.host_error_records {
+            let found = records.host_errors.iter().find(|e| e.id.as_str() == id);
+            match (found, &signal.host_error) {
+                (None, _) => invalid(
+                    &run.decision,
+                    id,
+                    "no observed host-error record has this id",
+                ),
+                (Some(_), None) => {
+                    invalid(&run.decision, id, "the signal is not a host-error signal")
+                }
+                (Some(e), Some(s)) if !s.matches(e) => invalid(
+                    &run.decision,
+                    id,
+                    "it does not match the signal's operation, phase and status",
+                ),
+                (Some(e), Some(_)) if !later(Some(e.at)) => invalid(
+                    &run.decision,
+                    id,
+                    "it is not later than the decision's start",
+                ),
+                _ => {}
+            }
+        }
+        for cite in &run.derived_records {
+            let id = cite.record.as_str();
+            let found = records
+                .derived_host_errors
+                .iter()
+                .find(|e| e.id.as_str() == id);
+            let source = records
+                .interventions
+                .iter()
+                .find(|i| i.id == cite.source_intervention);
+            match (found, &signal.host_error) {
+                (None, _) => invalid(
+                    &run.decision,
+                    id,
+                    "no derived host-error record has this id",
+                ),
+                (Some(_), None) => {
+                    invalid(&run.decision, id, "the signal is not a host-error signal")
+                }
+                (Some(e), Some(s)) if !s.matches(e) => invalid(
+                    &run.decision,
+                    id,
+                    "it does not match the signal's operation, phase and status",
+                ),
+                (Some(e), Some(_)) if !later(Some(e.at)) => invalid(
+                    &run.decision,
+                    id,
+                    "it is not later than the decision's start",
+                ),
+                _ => match source {
+                    None => invalid(&run.decision, id, "its source intervention does not exist"),
+                    Some(row) if !later(row_at(row)) => invalid(
+                        &run.decision,
+                        id,
+                        "its source intervention is not later than the decision's start",
+                    ),
+                    Some(_) => {}
+                },
+            }
+        }
+        for event in &run.events {
+            let found = records.interventions.iter().find(|i| i.id == event.id);
+            match (found, &signal.exact) {
+                (None, _) => invalid(&run.decision, &event.id, "no intervention has this id"),
+                (Some(_), None) => invalid(
+                    &run.decision,
+                    &event.id,
+                    "the signal has no intervention match",
+                ),
+                (Some(row), Some(m)) if !matches(m, row, records) => invalid(
+                    &run.decision,
+                    &event.id,
+                    "it does not match the signal's category, class of work and landed job",
+                ),
+                (Some(row), Some(_)) if !later(row_at(row)) => invalid(
+                    &run.decision,
+                    &event.id,
+                    "it is not later than the decision's start",
+                ),
+                _ => {}
+            }
+        }
+    }
+    findings
+}
+
+/// Run the backtest with no decision start known: every record counts. Use [`run_on_from`] to count only the
+/// records after each decision's start.
 pub fn run_on(decisions: &str, confirmed: &ConfirmedLinks, records: &Records) -> Report {
+    run_on_from(decisions, confirmed, records, &Starts::new())
+}
+
+/// Run the backtest on the text of `docs/decisions.md` and the records, counting only the records later than
+/// the start of the decision a signal belongs to, and failing on any invalid citation.
+pub fn run_on_from(
+    decisions: &str,
+    confirmed: &ConfirmedLinks,
+    records: &Records,
+    starts: &Starts,
+) -> Report {
     let parsed = parse_supersessions(decisions);
     let headers = headers();
-    let runs = run_signals(&headers, records);
+    let runs = run_signals(&headers, records, starts);
     let mut findings = Vec::new();
+    findings.extend(validate_citations(&headers, &runs, records, starts));
     check_parse(&parsed, confirmed, &mut findings);
     let mut decision_view = view(&parsed, confirmed);
     let under_review = check_signals(&runs, records, &mut findings);
@@ -831,16 +1036,17 @@ pub fn run_on(decisions: &str, confirmed: &ConfirmedLinks, records: &Records) ->
     }
 }
 
-/// Read `docs/decisions.md`, the confirmed list `docs/decision-links.toml` and `records/` under `root`, and run
-/// the backtest.
+/// Read `docs/decisions.md`, the confirmed list `docs/decision-links.toml` and `records/` under `root`, date
+/// each typed decision from git history ([`starts_from_history`]) and run the backtest.
 pub fn run(root: &Path) -> Result<Report> {
     let path = root.join("docs/decisions.md");
     let text =
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    Ok(run_on(
+    Ok(run_on_from(
         &text,
         &ConfirmedLinks::load(root)?,
         &read_records(root)?,
+        &starts_from_history(root)?,
     ))
 }
 
