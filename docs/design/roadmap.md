@@ -8,16 +8,19 @@ acceleration" (`BRIEF.md:494-496`), gives Athena the mandate to accelerate and t
 back into the system, so every later step is cheaper and quicker to do once RM-0 lands. RM-0 gathers the speed
 work: the build cache, concurrent jobs, native pull-request landing and timings. The firstmate study (RM-6)
 runs alongside RM-0, not after it: the brief requires the study to reach full quality (OR-1), it needs no
-change to the core, and RM-0 does not wait on it. After those, cheap steps that make state and evidence
-visible, because the brief says improvement work is pulled by evidence (OM-9) and later steps need that
-evidence. Then the user model, then enforcement, then the site, then the optional pieces. The order is a
+change to the core, and RM-0 does not wait on it. Next comes the rest of RM-4, the user-model loop, because
+the addenda of 2026-10-13 (root causes, introspection, decision sets) are already partly built and their
+first run over real records is the nearest evidence. After that, cheap steps that make state and evidence
+visible (RM-1 to RM-3), because the brief says improvement work is pulled by evidence (OM-9) and later steps
+need that evidence. Then enforcement, then the site, then the optional pieces. The order is a
 proposal for the user to correct, not a commitment: Athena owns the method, and each step would be designed,
 reviewed and verified like any other change.
 
-Each step lists the row IDs it closes and a "done when" test that a reader can run or read. All 104 partial
-and uncovered rows appear in exactly one step (13 steps: RM-0 to RM-7 and RM-9 to RM-13). The earlier RM-8
-no longer exists as a step: its eight rows and AD-11 moved into RM-0, and the other numbers did not change.
-Nothing here is implemented by this change.
+Each step lists the row IDs it closes and a "done when" test that a reader can run or read. All 108 partial
+and uncovered rows (67 partial and 41 not covered in the map of 2026-10-14) appear in exactly one step (13
+steps: RM-0 to RM-7 and RM-9 to RM-13). The earlier RM-8 no longer exists as a step: its eight rows and AD-11
+moved into RM-0, and the other numbers did not change. The rows AD-12 to AD-15 were added to the map on
+2026-10-14: AD-12 to AD-14 sit in RM-4 and AD-15 in RM-13. Nothing here is implemented by this change.
 
 ## RM-0 Accelerate Athena: build cache, concurrent jobs, pull-request landing, timings
 
@@ -36,8 +39,9 @@ Nothing here is implemented by this change.
      append-only files) and awaits a second review; then build concurrent jobs. Jobs that both edit the
      shared `CHANGELOG.md` and `docs/decisions.md` collide; the revised design's section 9 says how that is
      avoided, and the build must test it.
-  3. *Native pull-request landing,* from `docs/design/native-pr-landing.md`, including a mode that leaves no
-     Athena files in a third-party repository.
+  3. *Native pull-request landing,* from `docs/design/native-pr-landing.md`. Owned mode is built
+     (`athena land --pr`, D86 to D88); what remains is the mode that leaves no Athena files in a third-party
+     repository (stealth).
   4. *Timings fed back.* Report invocation and job wall time per class of work, and use them to change
      routing, ordering or the cache, so a recorded timing leads to a recorded change (AD-11).
   Mechanism rows are added to `docs/enforcement.md` when the tests exist.
@@ -80,12 +84,14 @@ Nothing here is implemented by this change.
 
 ## RM-4 Close the user-model loop
 
-- **Rows:** A1-1, A1-3, A1-4, A2-1, A2-4, AD-2, AD-7.
+- **Rows:** A1-1, A1-3, A1-4, A2-1, A2-4, AD-2, AD-7, AD-12, AD-13, AD-14.
 - **What:** feed scored mispredictions back into `defaults.toml`, the estimates and the routing (the
   repeat-to-proposal part is designed in `docs/design/defaults-loop.md`, D90: Jev matches records to
-  defaults in shadow, code validates, and proposals are review-only); record
-  organize decisions into typed sets applied to briefs, each with assumptions and failure signals that put it
-  under review (designed in `docs/design/decision-sets.md`, D91); record
+  defaults in shadow, code validates, and proposals are review-only; introspection, `athena propose` and the
+  Jev client are built, and the first run over real records, labeling and the live shadow remain); organize
+  decisions into typed sets applied to briefs, each with assumptions and failure signals that put it
+  under review (designed in `docs/design/decision-sets.md`, D91; the decision view and the D87 watcher are
+  built, set selection is not); check that a change names and fixes its root cause (AD-12); record
   evidence-backed pushback exchanges; add taste probes with expiry; add decision-sheet artifacts for a tired
   user; propose the next big task when the study ends.
 - **Done when:** a misprediction changes a defaults entry through a verified job that cites the score, and
@@ -123,9 +129,9 @@ Nothing here is implemented by this change.
 ## RM-9 Efficiency, learning and delegation
 
 - **Rows:** A6-3, A6-4, A9-1, A9-2, A10-1, A12-1, A12-2, A12-3, A13-1, A13-2, A13-3.
-- **What:** revise routing from recorded cost per verified result and record the revision; add Jev as a
-  shadow decision-maker with a calibration record (its first use is the defaults loop,
-  `docs/design/defaults-loop.md` §8); register automations with measured savings; define
+- **What:** revise routing from recorded cost per verified result and record the revision; calibrate Jev, whose
+  client and scoring are built (D92, `athena score-jev`), on real records and add escalation on low
+  confidence (its first use is the defaults loop, `docs/design/defaults-loop.md` §8); register automations with measured savings; define
   specialist roles with cost and yield; version skills in the repo; measure tokens per class of work; track
   learning curves; train the always-loaded contract from verbatim evidence within its budget; test a cold
   agent against the repository.
@@ -158,7 +164,8 @@ Nothing here is implemented by this change.
 
 ## RM-13 Keep the standards honest
 
-- **Rows:** SD-1, SD-2, SD-5.
-- **What:** these are judgments. Add a verifier severity check that each significant design has a recorded
+- **Rows:** SD-1, SD-2, SD-5, AD-15.
+- **What:** these are judgments; AD-15 asks for common-sense checks in place of rigid rules, and M20 is the
+  first rule revised that way. Add a verifier severity check that each significant design has a recorded
   independent review, and that each new doc names its reader; revisit each milestone.
 - **Done when:** a design without a review is a finding the verifier reports.

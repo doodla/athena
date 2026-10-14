@@ -7,6 +7,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- The requirements map, strategy view and roadmap are brought up to date. The map gains four rows for the
+  addenda of 2026-10-13 and 2026-10-14 (AD-12 root causes, AD-13 introspection on every correction, AD-14
+  decision sets and knowing when a decision is not working, AD-15 common sense over rigid rules), all partial,
+  making 128 rows. Five rows move from not covered to partial against what landed (A2-4, A5-5, A6-4, AD-4,
+  AD-5), each citing the changelog entry and file that justify it; other rows were re-read and their evidence
+  cells updated. The strategy view's coverage table is recounted from the map's tables (20 covered, 67 partial,
+  41 not covered) and its "What to do next" is now a numbered list of steps with what blocks each. The roadmap
+  counts and step rows agree (108 partial and uncovered rows; AD-12 to AD-14 in RM-4, AD-15 in RM-13). Docs only.
+
 ### Added
 
 - `athena review <introspection-id>`, the writer of class labels that `athena score-jev` needs (it counts only
