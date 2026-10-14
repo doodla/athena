@@ -9,6 +9,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Introspection, step 1 of the build order in `docs/design/defaults-loop.md` section 12. After every job that
+  ends `rejected` or `failed`, every correction of a reading (or answer to its question) and every other
+  intervention, Athena records one `athena.introspection/1` without being asked: what happened, the failure
+  class, earlier cases in the same class, the cause beyond this instance, what would have prevented the class,
+  and a proposed next request. A language model writes the prose and no Jev is called, so the class and the
+  prevention kind are marked as not from Jev. New classes are added to the class registry (a store of
+  `athena.failure-class/1` records, never a repository file) as `proposed`, with an id assigned by code.
+  The reading code passes the model only the stored fields section 3.3 lists, narrows earlier cases by class of
+  work and category, caps them at 5, and drops and logs any returned id that was not on the list it passed in. A
+  cause that restates what happened (equal after normalising) is flagged and the record rated failed. A failed
+  introspection is recorded as failed, never blocks the job, and is not itself introspected. `athena status
+  <job>` prints the introspection and `--json` includes it. The records reader, the typed decision headers, the
+  evidence-after-decision rule and the citation validation moved from `athena backtest` to
+  `athena_core::introspect` and exist once; the backtest re-exports them and its output is unchanged. Step 1 is
+  built; the run over the real `records/` follows landing, because the agents' copies leave `records/` out.
+  Host-error and landing triggers, retry-from-record and proposals are later steps.
+
 - Fix: the backtest's introspection record was tied to one kind of evidence (the fired run's intervention
   events), so D87 under review through the derived host-error record of ar1x built none. It is now built from the
   earliest valid citation of whichever signal fired: an intervention, or for a derived host-error record its

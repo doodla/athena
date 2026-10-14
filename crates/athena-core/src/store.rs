@@ -5,8 +5,8 @@
 use anyhow::{Result, anyhow, bail};
 use athena_data::records::{
     AnyRecord, Candidate, Correction, DecisionState, DecisionStateKind, DefaultExpectations,
-    HostError, Intervention, Invocation, Job, Outcome, OutcomeState, Reading, Request, Resolution,
-    Restart, Score, Verification, fold_decision_states,
+    FailureClass, HostError, Intervention, IntrospectionRecord, Invocation, Job, Outcome,
+    OutcomeState, Reading, Request, Resolution, Restart, Score, Verification, fold_decision_states,
 };
 use athena_data::{JobId, RecordId};
 use athena_gate::records::RecordSet;
@@ -180,6 +180,10 @@ pub struct Records {
     pub decision_states: Vec<DecisionState>,
     /// What each default assumes and watches, oldest first.
     pub default_expectations: Vec<DefaultExpectations>,
+    /// Introspections, oldest first.
+    pub introspections: Vec<IntrospectionRecord>,
+    /// The class registry: one record per class, oldest first.
+    pub classes: Vec<FailureClass>,
     /// Files that are not acceptable records, by path.
     pub invalid: Vec<String>,
 }
@@ -231,6 +235,8 @@ impl Records {
                 AnyRecord::HostError(h) => records.host_errors.push(h),
                 AnyRecord::DecisionState(d) => records.decision_states.push(d),
                 AnyRecord::DefaultExpectations(e) => records.default_expectations.push(e),
+                AnyRecord::Introspection(i) => records.introspections.push(*i),
+                AnyRecord::FailureClass(c) => records.classes.push(c),
                 other => {
                     let job = job_of(&other)
                         .expect("every other record names its job")
@@ -254,6 +260,12 @@ impl Records {
             .sort_by(|a, b| (a.at, &a.id).cmp(&(b.at, &b.id)));
         records
             .default_expectations
+            .sort_by(|a, b| (a.at, &a.id).cmp(&(b.at, &b.id)));
+        records
+            .introspections
+            .sort_by(|a, b| (a.at, &a.id).cmp(&(b.at, &b.id)));
+        records
+            .classes
             .sort_by(|a, b| (a.at, &a.id).cmp(&(b.at, &b.id)));
         Ok(records)
     }
@@ -317,6 +329,8 @@ impl Records {
             || self.host_errors.iter().any(|r| &r.id == id)
             || self.decision_states.iter().any(|r| &r.id == id)
             || self.default_expectations.iter().any(|r| &r.id == id)
+            || self.introspections.iter().any(|r| &r.id == id)
+            || self.classes.iter().any(|r| &r.id == id)
     }
 
     /// The current state of each decision, folded from its append-only state records.

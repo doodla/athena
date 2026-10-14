@@ -23,164 +23,24 @@
 //! decision's id heading ([`decision_start`]). Every record a fired signal cites is validated against the
 //! signal's fields and that window ([`validate_citations`]); an invalid citation is a finding.
 //!
+//! The typed headers, the records reader, the evidence-after-decision rule, the citation validation and the
+//! introspection schema are defined once, in [`athena_core::introspect`], which the introspection step uses
+//! as well; this module re-exports them and keeps no copy.
+//!
 //! The result is a [`Report`] with the review's pass conditions applied. A condition that does not hold is a
 //! [`Finding`] with its reason; the report does not pass, and nothing is retried or loosened. The backtest writes
 //! nothing: the introspection record is returned, not committed.
 
 use crate::decisions::{ConfirmedLinks, DecisionView, mark_under_review, view};
 use anyhow::{Context, Result};
-use athena_core::watcher::{self, D87_SIGNAL, HostErrorSignal};
-use athena_data::records::{AnyRecord, HostError, InterventionCategory, OutcomeState};
-use jiff::Timestamp;
-use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
+pub use athena_core::introspect::{
+    DecisionHeader, DerivedCite, Enforcement, Finding, InterventionMatch, InterventionRow,
+    Introspection, Kind, Phase, Records, Signal, SignalRun, Starts, Status, decision_start,
+    headers, read_records, run_signals, starts_from_history, validate_citations,
+};
+use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
-
-// ---------------------------------------------------------------------------------------------------------
-// The typed header (decision-sets.md section 2), for D87 and D88 only.
-// ---------------------------------------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum Kind {
-    Requirement,
-    Expectation,
-    Design,
-    Process,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum Status {
-    Active,
-    Proposed,
-    Superseded,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum Enforcement {
-    CodeCheck,
-    Brief,
-    ProseOnly,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum Phase {
-    Reading,
-    Producing,
-    Verifying,
-    Landing,
-}
-
-/// An exact match on a stored intervention: the category and class of work are equal, and the job it names
-/// landed. Nothing here is free text.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct InterventionMatch {
-    pub category: InterventionCategory,
-    pub class_of_work: &'static str,
-    pub on_landed_job: bool,
-}
-
-/// A watched condition. It is run when it has an exact match: on an intervention (`exact`) or on a host-error
-/// record (`host_error`, the same signal the landing watcher evaluates). A signal with neither cannot be decided
-/// from the records this backtest reads (history checks have no record yet), so it is listed and not run.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Signal {
-    pub name: &'static str,
-    pub threshold_jobs: usize,
-    pub exact: Option<InterventionMatch>,
-    pub host_error: Option<HostErrorSignal>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct DecisionHeader {
-    pub id: &'static str,
-    pub kind: Kind,
-    pub classes: Vec<&'static str>,
-    pub paths: Vec<&'static str>,
-    pub phases: Vec<Phase>,
-    pub status: Status,
-    pub superseded_by: Option<&'static str>,
-    pub amended_by: Vec<&'static str>,
-    pub enforcement: Enforcement,
-    pub assumptions: Vec<&'static str>,
-    pub signals: Vec<Signal>,
-}
-
-/// The typed headers the backtest knows: D87 and D88, as `decision-sets.md` section 4 gives them. D87 stays
-/// `active` with `amended_by = D88`, not `superseded`: it is superseded for its landing shape only, and its two
-/// rerun fixes stand (review 1, section 3). Its enforcement is `brief` (finding F4).
-pub fn headers() -> Vec<DecisionHeader> {
-    vec![
-        DecisionHeader {
-            id: "D87",
-            kind: Kind::Process,
-            classes: vec!["*"],
-            paths: vec!["crates/athena-core/src/gh.rs"],
-            phases: vec![Phase::Landing],
-            status: Status::Active,
-            superseded_by: None,
-            amended_by: vec!["D88"],
-            enforcement: Enforcement::Brief,
-            assumptions: vec![
-                "The repository allows merge commits (allow_merge_commit is true).",
-                "A user who merges by hand follows the recommendation.",
-            ],
-            signals: vec![
-                // The hard signal: the host refusing a merge falsifies the first assumption. Its values are
-                // the watcher's own, validated against the record vocabulary when they are loaded.
-                Signal {
-                    name: D87_SIGNAL.name,
-                    threshold_jobs: D87_SIGNAL.threshold_jobs,
-                    exact: None,
-                    host_error: Some(
-                        watcher::load(&D87_SIGNAL).expect("D87's signal is in the vocabulary"),
-                    ),
-                },
-                Signal {
-                    name: "check-failure: history violation after a pull request merge",
-                    threshold_jobs: 1,
-                    exact: None,
-                    host_error: None,
-                },
-                Signal {
-                    name: "intervention: did-work-themselves on a landed branch, class code",
-                    threshold_jobs: 2,
-                    exact: Some(InterventionMatch {
-                        category: InterventionCategory::DidWorkThemselves,
-                        class_of_work: "code",
-                        on_landed_job: true,
-                    }),
-                    host_error: None,
-                },
-            ],
-        },
-        DecisionHeader {
-            id: "D88",
-            kind: Kind::Process,
-            classes: vec!["*"],
-            paths: vec!["crates/athena-core/src/gh.rs"],
-            phases: vec![Phase::Landing],
-            status: Status::Active,
-            superseded_by: None,
-            amended_by: vec![],
-            enforcement: Enforcement::Brief,
-            assumptions: vec![
-                "The host reports the three allow flags accurately.",
-                "The squash text is accepted as given (D88 says this was not observed).",
-            ],
-            signals: vec![Signal {
-                name: "check-failure: history violation after a squash",
-                threshold_jobs: 1,
-                exact: None,
-                host_error: None,
-            }],
-        },
-    ]
-}
+use std::path::Path;
 
 // ---------------------------------------------------------------------------------------------------------
 // Supersession phrases of docs/decisions.md (decision-sets.md section 6, step 3).
@@ -339,333 +199,8 @@ pub fn standing(hits: &[Hit]) -> BTreeMap<String, Standing> {
 }
 
 // ---------------------------------------------------------------------------------------------------------
-// Reading records/ (stored fields only).
-// ---------------------------------------------------------------------------------------------------------
-
-#[derive(Debug, Deserialize)]
-struct OutcomeRow {
-    job: String,
-    state: OutcomeState,
-}
-
-/// The stored fields of an `athena.intervention/1` record that the signals use.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-pub struct InterventionRow {
-    pub id: String,
-    pub at: String,
-    pub class_of_work: String,
-    pub category: InterventionCategory,
-    pub job: Option<String>,
-}
-
-#[derive(Debug, Default)]
-pub struct Records {
-    /// Every job that has an outcome record.
-    pub jobs: BTreeSet<String>,
-    /// Jobs with an outcome whose state is `landed` (including the retried landing of a blocked job).
-    pub landed: BTreeSet<String>,
-    pub interventions: Vec<InterventionRow>,
-    /// Every observed `athena.host-error/1` record, oldest first.
-    pub host_errors: Vec<HostError>,
-    /// Host-error records derived from interventions, oldest first. Each is marked derived and cites its
-    /// source intervention. They are held in memory and never written to `records/`.
-    pub derived_host_errors: Vec<HostError>,
-}
-
-/// The children of a directory, sorted; a directory that does not exist has none.
-fn children(dir: &Path) -> Result<Vec<PathBuf>> {
-    if !dir.exists() {
-        return Ok(Vec::new());
-    }
-    let mut paths = Vec::new();
-    for entry in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
-        paths.push(entry?.path());
-    }
-    paths.sort();
-    Ok(paths)
-}
-
-fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
-    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))
-}
-
-fn is_json(path: &Path) -> bool {
-    path.extension().is_some_and(|e| e == "json")
-}
-
-/// Read job outcomes (`records/jobs/<month>/<job>/outcome*.json`) and interventions
-/// (`records/interventions/<month>/<id>.json`). A missing `records/` reads as empty.
-pub fn read_records(root: &Path) -> Result<Records> {
-    let mut records = Records::default();
-    for month in children(&root.join("records/jobs"))? {
-        for job_dir in children(&month)? {
-            if !job_dir.is_dir() {
-                continue;
-            }
-            for file in children(&job_dir)? {
-                let is_outcome = file
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with("outcome"));
-                if !is_outcome || !is_json(&file) {
-                    continue;
-                }
-                let row: OutcomeRow = read_json(&file)?;
-                if row.state == OutcomeState::Landed {
-                    records.landed.insert(row.job.clone());
-                }
-                records.jobs.insert(row.job);
-            }
-        }
-    }
-    for month in children(&root.join("records/interventions"))? {
-        for file in children(&month)? {
-            if !is_json(&file) {
-                continue;
-            }
-            records.interventions.push(read_json(&file)?);
-            // The derivation reads the whole record (its `what` and `why`). A file that is not a valid
-            // intervention record derives nothing; the row above is read as before.
-            let bytes =
-                std::fs::read(&file).with_context(|| format!("reading {}", file.display()))?;
-            if let Ok(AnyRecord::Intervention(intervention)) =
-                AnyRecord::parse(&file.display().to_string(), &bytes)
-                && let Some(derived) = watcher::derive_host_error(&intervention)
-            {
-                records.derived_host_errors.push(derived);
-            }
-        }
-    }
-    records
-        .interventions
-        .sort_by(|a, b| (&a.at, &a.id).cmp(&(&b.at, &b.id)));
-    for month in children(&root.join("records/host-errors"))? {
-        for file in children(&month)? {
-            if !is_json(&file) {
-                continue;
-            }
-            let bytes =
-                std::fs::read(&file).with_context(|| format!("reading {}", file.display()))?;
-            let path = file.display().to_string();
-            match AnyRecord::parse(&path, &bytes)? {
-                // A record on disk that is marked derived is kept with the derived ones, never as observed.
-                AnyRecord::HostError(error) if error.derived => {
-                    records.derived_host_errors.push(error)
-                }
-                AnyRecord::HostError(error) => records.host_errors.push(error),
-                _ => anyhow::bail!("{path}: not an athena.host-error/1 record"),
-            }
-        }
-    }
-    records
-        .host_errors
-        .sort_by(|a, b| (a.at, &a.id).cmp(&(b.at, &b.id)));
-    records
-        .derived_host_errors
-        .sort_by(|a, b| (a.at, &a.id).cmp(&(b.at, &b.id)));
-    Ok(records)
-}
-
-// ---------------------------------------------------------------------------------------------------------
-// The signal.
-// ---------------------------------------------------------------------------------------------------------
-
-/// One run of one exact-match signal over the records.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct SignalRun {
-    pub decision: String,
-    pub signal: String,
-    pub threshold_jobs: usize,
-    /// The matching interventions, earliest first.
-    pub events: Vec<InterventionRow>,
-    /// The observed `athena.host-error/1` records a host-error signal matched, oldest first.
-    pub host_error_records: Vec<String>,
-    /// The derived host-error records the signal matched, oldest first. The client did not observe these.
-    pub derived_records: Vec<DerivedCite>,
-    pub jobs: BTreeSet<String>,
-    pub fired: bool,
-}
-
-/// A derived host-error record that fired a signal, with the intervention it was derived from.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct DerivedCite {
-    pub record: String,
-    pub source_intervention: String,
-}
-
-impl DerivedCite {
-    fn of(error: &HostError) -> Self {
-        DerivedCite {
-            record: error.id.to_string(),
-            source_intervention: error
-                .source_intervention
-                .as_ref()
-                .map(ToString::to_string)
-                .unwrap_or_default(),
-        }
-    }
-
-    /// How a decision's review cites the record: as derived, and through it the source intervention.
-    pub fn citation(&self) -> String {
-        format!(
-            "{} (derived, not observed; from intervention {})",
-            self.record, self.source_intervention
-        )
-    }
-}
-
-fn matches(m: &InterventionMatch, row: &InterventionRow, records: &Records) -> bool {
-    row.category == m.category
-        && row.class_of_work == m.class_of_work
-        && match &row.job {
-            Some(job) => !m.on_landed_job || records.landed.contains(job),
-            None => false,
-        }
-}
-
-/// The time each decision started: the first commit that introduced its id heading in `docs/decisions.md`. A
-/// decision with no start counts every record.
-pub type Starts = BTreeMap<String, Timestamp>;
-
-/// True when a record at `at` is later than the start of `decision`. A decision with no start counts every
-/// record; a record with no usable time is not later than any start.
-fn after_start(starts: &Starts, decision: &str, at: Option<Timestamp>) -> bool {
-    match starts.get(decision) {
-        None => true,
-        Some(start) => at.is_some_and(|at| at > *start),
-    }
-}
-
-fn row_at(row: &InterventionRow) -> Option<Timestamp> {
-    row.at.parse().ok()
-}
-
-/// The time of the first commit that introduced the id heading `## <id> ` in `docs/decisions.md` of the
-/// repository at `root`, from `git log -S`. The heading is found by its id and the space after it, not by its
-/// full text, so a heading that was renamed later still dates from the commit that first added the id. `None`
-/// when no commit adds it.
-pub fn decision_start(root: &Path, id: &str) -> Result<Option<Timestamp>> {
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["log", "--reverse", "--format=%cI", "-S"])
-        .arg(format!("## {id} "))
-        .args(["--", "docs/decisions.md"])
-        .output()
-        .context("running git log to date a decision")?;
-    if !output.status.success() {
-        anyhow::bail!(
-            "git log failed while dating {id}: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let Some(first) = text.lines().find(|l| !l.trim().is_empty()) else {
-        return Ok(None);
-    };
-    let at = first
-        .trim()
-        .parse()
-        .with_context(|| format!("reading the commit time {first:?} of {id}"))?;
-    Ok(Some(at))
-}
-
-/// The start of every decision with a typed header, from the history of the repository at `root`. A decision
-/// whose heading no commit adds is an error: its records cannot be dated.
-pub fn starts_from_history(root: &Path) -> Result<Starts> {
-    let mut starts = Starts::new();
-    for header in headers() {
-        let start = decision_start(root, header.id)?.with_context(|| {
-            format!(
-                "no commit in git history adds the heading `## {} `",
-                header.id
-            )
-        })?;
-        starts.insert(header.id.to_string(), start);
-    }
-    Ok(starts)
-}
-
-pub fn run_signals(
-    headers: &[DecisionHeader],
-    records: &Records,
-    starts: &Starts,
-) -> Vec<SignalRun> {
-    let mut runs = Vec::new();
-    for header in headers {
-        let later = |at: Option<Timestamp>| after_start(starts, header.id, at);
-        for signal in &header.signals {
-            if let Some(host_error) = &signal.host_error {
-                let matched: Vec<&HostError> = records
-                    .host_errors
-                    .iter()
-                    .filter(|e| host_error.matches(e) && later(Some(e.at)))
-                    .collect();
-                let derived: Vec<&HostError> = records
-                    .derived_host_errors
-                    .iter()
-                    .filter(|e| host_error.matches(e) && later(Some(e.at)))
-                    .collect();
-                let jobs: BTreeSet<String> = matched
-                    .iter()
-                    .chain(&derived)
-                    .map(|e| e.job.to_string())
-                    .collect();
-                runs.push(SignalRun {
-                    decision: header.id.to_string(),
-                    signal: signal.name.to_string(),
-                    threshold_jobs: signal.threshold_jobs,
-                    fired: !jobs.is_empty() && jobs.len() >= signal.threshold_jobs,
-                    events: Vec::new(),
-                    host_error_records: matched.iter().map(|e| e.id.to_string()).collect(),
-                    derived_records: derived.iter().map(|e| DerivedCite::of(e)).collect(),
-                    jobs,
-                });
-                continue;
-            }
-            let Some(exact) = &signal.exact else { continue };
-            let events: Vec<InterventionRow> = records
-                .interventions
-                .iter()
-                .filter(|row| matches(exact, row, records) && later(row_at(row)))
-                .cloned()
-                .collect();
-            let jobs: BTreeSet<String> = events.iter().filter_map(|e| e.job.clone()).collect();
-            runs.push(SignalRun {
-                decision: header.id.to_string(),
-                signal: signal.name.to_string(),
-                threshold_jobs: signal.threshold_jobs,
-                fired: jobs.len() >= signal.threshold_jobs,
-                events,
-                host_error_records: Vec::new(),
-                derived_records: Vec::new(),
-                jobs,
-            });
-        }
-    }
-    runs
-}
-
-// ---------------------------------------------------------------------------------------------------------
 // The introspection record (defaults-loop.md section 3.2): the code-written fields.
 // ---------------------------------------------------------------------------------------------------------
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Introspection {
-    pub schema: &'static str,
-    /// The intervention of the triggering event.
-    pub intervention: String,
-    pub job: String,
-    pub class_of_work: String,
-    pub at: String,
-    /// Ids of earlier events of the same signal, by code.
-    pub earlier_cases: Vec<String>,
-    /// Typed decisions whose signal the event matched, by code.
-    pub decisions_matched: Vec<String>,
-    /// The fields a language model or a typed decision writes; not written by this backtest.
-    pub pending_fields: Vec<&'static str>,
-}
 
 /// The interventions a fired run cites that can serve as the introspection's event, each with a valid
 /// citation, earliest first. An intervention event is its own source; a derived host-error record is
@@ -723,42 +258,22 @@ fn introspection_for(
 ) -> Option<Introspection> {
     let sources = introspection_sources(run, headers, records, starts);
     let first = sources.first()?;
-    Some(Introspection {
-        schema: "athena.introspection/1",
-        intervention: first.id.clone(),
-        job: first.job.clone()?,
-        class_of_work: first.class_of_work.clone(),
-        at: first.at.clone(),
-        earlier_cases: sources
+    Some(Introspection::code_fields(
+        first,
+        first.job.clone()?,
+        sources
             .iter()
             .skip(1)
             .take_while(|e| (&e.at, &e.id) < (&first.at, &first.id))
             .map(|e| e.id.clone())
             .collect(),
-        decisions_matched: vec![run.decision.clone()],
-        pending_fields: vec![
-            "what_happened",
-            "failure_class",
-            "cause",
-            "prevention_kind",
-            "prevention",
-            "proposed_request",
-        ],
-    })
+        vec![run.decision.clone()],
+    ))
 }
 
 // ---------------------------------------------------------------------------------------------------------
 // The report and the review's pass conditions (review 1, section 5).
 // ---------------------------------------------------------------------------------------------------------
-
-/// A pass condition that did not hold, with the reason. A finding is reported as it is; the backtest does not
-/// retry or relax a condition.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Finding {
-    /// The review's condition: `a`, `b`, `c` or `d`.
-    pub condition: &'static str,
-    pub reason: String,
-}
 
 #[derive(Debug, Serialize)]
 pub struct Report {
@@ -910,125 +425,6 @@ fn check_introspection(
             Some(_) => {}
         }
     }
-}
-
-/// Validates every record a signal run cites, against the signal's own fields and the decision's time window
-/// (condition `e`). A cited record is valid when it exists in `records`, matches the signal (a host error: the
-/// operation, phase and status; an intervention: the category, class of work and landed job), and is later than
-/// the start of the decision. A derived record must also cite a source intervention that exists and is later
-/// than the start. Each invalid citation is a finding; the backtest fails on any.
-pub fn validate_citations(
-    headers: &[DecisionHeader],
-    runs: &[SignalRun],
-    records: &Records,
-    starts: &Starts,
-) -> Vec<Finding> {
-    let mut findings = Vec::new();
-    let mut invalid = |decision: &str, record: &str, why: &str| {
-        findings.push(Finding {
-            condition: "e",
-            reason: format!("{decision} cites {record}, which is not valid: {why}"),
-        });
-    };
-    for run in runs {
-        let signal = headers
-            .iter()
-            .filter(|h| h.id == run.decision)
-            .flat_map(|h| &h.signals)
-            .find(|s| s.name == run.signal);
-        let Some(signal) = signal else {
-            invalid(&run.decision, &run.signal, "no such signal on the decision");
-            continue;
-        };
-        let later = |at: Option<Timestamp>| after_start(starts, &run.decision, at);
-        for id in &run.host_error_records {
-            let found = records.host_errors.iter().find(|e| e.id.as_str() == id);
-            match (found, &signal.host_error) {
-                (None, _) => invalid(
-                    &run.decision,
-                    id,
-                    "no observed host-error record has this id",
-                ),
-                (Some(_), None) => {
-                    invalid(&run.decision, id, "the signal is not a host-error signal")
-                }
-                (Some(e), Some(s)) if !s.matches(e) => invalid(
-                    &run.decision,
-                    id,
-                    "it does not match the signal's operation, phase and status",
-                ),
-                (Some(e), Some(_)) if !later(Some(e.at)) => invalid(
-                    &run.decision,
-                    id,
-                    "it is not later than the decision's start",
-                ),
-                _ => {}
-            }
-        }
-        for cite in &run.derived_records {
-            let id = cite.record.as_str();
-            let found = records
-                .derived_host_errors
-                .iter()
-                .find(|e| e.id.as_str() == id);
-            let source = records
-                .interventions
-                .iter()
-                .find(|i| i.id == cite.source_intervention);
-            match (found, &signal.host_error) {
-                (None, _) => invalid(
-                    &run.decision,
-                    id,
-                    "no derived host-error record has this id",
-                ),
-                (Some(_), None) => {
-                    invalid(&run.decision, id, "the signal is not a host-error signal")
-                }
-                (Some(e), Some(s)) if !s.matches(e) => invalid(
-                    &run.decision,
-                    id,
-                    "it does not match the signal's operation, phase and status",
-                ),
-                (Some(e), Some(_)) if !later(Some(e.at)) => invalid(
-                    &run.decision,
-                    id,
-                    "it is not later than the decision's start",
-                ),
-                _ => match source {
-                    None => invalid(&run.decision, id, "its source intervention does not exist"),
-                    Some(row) if !later(row_at(row)) => invalid(
-                        &run.decision,
-                        id,
-                        "its source intervention is not later than the decision's start",
-                    ),
-                    Some(_) => {}
-                },
-            }
-        }
-        for event in &run.events {
-            let found = records.interventions.iter().find(|i| i.id == event.id);
-            match (found, &signal.exact) {
-                (None, _) => invalid(&run.decision, &event.id, "no intervention has this id"),
-                (Some(_), None) => invalid(
-                    &run.decision,
-                    &event.id,
-                    "the signal has no intervention match",
-                ),
-                (Some(row), Some(m)) if !matches(m, row, records) => invalid(
-                    &run.decision,
-                    &event.id,
-                    "it does not match the signal's category, class of work and landed job",
-                ),
-                (Some(row), Some(_)) if !later(row_at(row)) => invalid(
-                    &run.decision,
-                    &event.id,
-                    "it is not later than the decision's start",
-                ),
-                _ => {}
-            }
-        }
-    }
-    findings
 }
 
 /// Run the backtest with no decision start known: every record counts. Use [`run_on_from`] to count only the
@@ -1183,6 +579,7 @@ pub fn render(report: &Report) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use athena_core::introspect::{after_start, row_at};
 
     #[test]
     fn take_id_needs_two_digits() {
@@ -1210,5 +607,29 @@ mod tests {
     fn a_statement_without_an_id_is_reported_with_its_line() {
         let text = "## D01 · x\n- **Superseded by** nothing\n";
         assert_eq!(parse_supersessions(text).lacking_target, [2]);
+    }
+
+    #[test]
+    fn the_evidence_after_decision_rule_is_the_shared_one() {
+        let mut starts = Starts::new();
+        starts.insert("D87".into(), "2026-10-01T00:00:00Z".parse().unwrap());
+        assert!(after_start(
+            &starts,
+            "D87",
+            "2026-10-02T00:00:00Z".parse().ok()
+        ));
+        assert!(!after_start(
+            &starts,
+            "D87",
+            "2026-09-30T00:00:00Z".parse().ok()
+        ));
+        let row = InterventionRow {
+            id: "x".into(),
+            at: "not a time".into(),
+            class_of_work: "code".into(),
+            category: athena_data::records::InterventionCategory::Other,
+            job: None,
+        };
+        assert!(row_at(&row).is_none());
     }
 }

@@ -83,6 +83,83 @@ pub struct InvocationLine {
     pub denials: usize,
 }
 
+/// An introspection as `athena status <job>` shows it (`defaults-loop.md` section 3.2).
+#[derive(Debug, Clone, Serialize)]
+pub struct IntrospectionView {
+    pub id: String,
+    pub trigger: String,
+    pub intervention: Option<String>,
+    pub what_happened: Option<String>,
+    /// The class's name and id; `proposed` marks a class this introspection introduced.
+    pub failure_class: Option<String>,
+    pub new_class: bool,
+    /// Earlier cases, each with its job where it has one.
+    pub earlier_cases: Vec<String>,
+    pub decisions_matched: Vec<String>,
+    pub cause: Option<String>,
+    pub prevention_kind: Option<String>,
+    pub prevention: Option<String>,
+    pub proposed_request: Option<String>,
+    pub status: String,
+    pub failure: Option<String>,
+    pub flags: Vec<String>,
+    pub dropped_ids: Vec<String>,
+    /// False: the class and prevention kind came from a language model, not from Jev.
+    pub from_jev: bool,
+    pub cost_usd: Option<f64>,
+}
+
+/// The introspections of one job, oldest first, with class names and the jobs of earlier cases.
+fn introspection_views(records: &Records, job: &athena_data::JobId) -> Vec<IntrospectionView> {
+    let class_name = |id: &athena_data::RecordId| {
+        let name = records
+            .classes
+            .iter()
+            .find(|c| &c.id == id)
+            .map_or("unknown class", |c| c.name.as_str());
+        format!("{name} ({id})")
+    };
+    records
+        .introspections
+        .iter()
+        .filter(|i| i.job.as_ref() == Some(job))
+        .map(|i| IntrospectionView {
+            id: i.id.to_string(),
+            trigger: i.trigger.as_str().into(),
+            intervention: i.intervention.as_ref().map(ToString::to_string),
+            what_happened: i.what_happened.clone(),
+            failure_class: i.failure_class.as_ref().map(class_name),
+            new_class: i.new_class,
+            earlier_cases: i
+                .earlier_cases
+                .iter()
+                .map(|case| {
+                    let job = records
+                        .introspections
+                        .iter()
+                        .find(|c| &c.id == case)
+                        .and_then(|c| c.job.as_ref());
+                    match job {
+                        Some(job) => format!("{case} (job {job})"),
+                        None => case.to_string(),
+                    }
+                })
+                .collect(),
+            decisions_matched: i.decisions_matched.clone(),
+            cause: i.cause.clone(),
+            prevention_kind: i.prevention_kind.map(|k| k.as_str().into()),
+            prevention: i.prevention.clone(),
+            proposed_request: i.proposed_request.clone(),
+            status: i.status.as_str().into(),
+            failure: i.failure.clone(),
+            flags: i.flags.clone(),
+            dropped_ids: i.dropped_ids.clone(),
+            from_jev: i.from_jev,
+            cost_usd: i.evidence.as_ref().map(|e| e.cost_usd),
+        })
+        .collect()
+}
+
 /// A job's full trace: request → prediction → owner → model → cost → verification → outcome → score.
 #[derive(Debug, Clone, Serialize)]
 pub struct JobTrace {
@@ -101,6 +178,8 @@ pub struct JobTrace {
     pub later_outcome: Option<serde_json::Value>,
     pub score: Option<serde_json::Value>,
     pub interventions: Vec<String>,
+    /// What went wrong or was changed, and why the system allowed it (`athena.introspection/1`).
+    pub introspections: Vec<IntrospectionView>,
     pub commits: Vec<String>,
     pub directory: String,
 }
@@ -366,6 +445,7 @@ impl Athena {
                 .iter()
                 .map(|i| format!("{} [{}] {}", i.id, i.category.as_str(), i.what))
                 .collect(),
+            introspections: introspection_views(&records, &id),
             commits,
             directory: id.dir(),
         })

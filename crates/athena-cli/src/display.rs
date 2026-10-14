@@ -460,6 +460,66 @@ pub fn status(v: &StatusView) -> String {
     out
 }
 
+/// One introspection, as a block of labeled lines in `athena status <job>`.
+fn introspection(out: &mut String, i: &athena_core::status::IntrospectionView) {
+    let none = "-".to_string();
+    let _ = writeln!(
+        out,
+        "introspection {} · {} · {}{}",
+        i.id,
+        i.trigger,
+        i.status,
+        i.intervention
+            .as_ref()
+            .map_or(String::new(), |id| format!(" · intervention {id}"))
+    );
+    if let Some(why) = &i.failure {
+        let _ = writeln!(out, "  failed        {why}");
+    }
+    let field = |label: &str, value: &Option<String>, out: &mut String| {
+        let _ = writeln!(out, "  {label:<13} {}", value.as_ref().unwrap_or(&none));
+    };
+    field("what happened", &i.what_happened, out);
+    let class = i.failure_class.as_ref().map(|c| {
+        if i.new_class {
+            format!("{c} · new, proposed")
+        } else {
+            c.clone()
+        }
+    });
+    field("class", &class, out);
+    let cases = if i.earlier_cases.is_empty() {
+        "none".to_string()
+    } else {
+        i.earlier_cases.join(", ")
+    };
+    let _ = writeln!(out, "  earlier cases {cases}");
+    if !i.decisions_matched.is_empty() {
+        let _ = writeln!(out, "  decisions     {}", i.decisions_matched.join(", "));
+    }
+    field("cause", &i.cause, out);
+    let prevention = i
+        .prevention
+        .as_ref()
+        .map(|p| format!("{}: {p}", i.prevention_kind.as_deref().unwrap_or("?")));
+    field("prevention", &prevention, out);
+    field("next request", &i.proposed_request, out);
+    for flag in &i.flags {
+        let _ = writeln!(out, "  flag          {flag}");
+    }
+    for id in &i.dropped_ids {
+        let _ = writeln!(
+            out,
+            "  dropped id    {id} (not on the list passed to the model)"
+        );
+    }
+    let _ = writeln!(
+        out,
+        "  written by    a language model, not Jev{}",
+        i.cost_usd.map_or(String::new(), |c| format!(" · ${c:.4}"))
+    );
+}
+
 /// `athena status <job>`.
 pub fn trace(t: &JobTrace) -> String {
     let mut out = String::new();
@@ -571,6 +631,9 @@ pub fn trace(t: &JobTrace) -> String {
     }
     for i in &t.interventions {
         let _ = writeln!(out, "intervention {i}");
+    }
+    for i in &t.introspections {
+        introspection(&mut out, i);
     }
     for c in &t.commits {
         let _ = writeln!(out, "commit      {c}");
