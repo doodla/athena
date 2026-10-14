@@ -358,6 +358,8 @@ impl Athena {
             id,
             short(&commit)
         ));
+        // Every intervention is introspected at once; this never blocks or fails the command.
+        self.introspect_intervention(&id, ui);
         Ok(Intervened {
             intervention,
             commit,

@@ -1073,6 +1073,191 @@ impl DefaultExpectations {
     }
 }
 
+/// The schema tag of an introspection record. The one definition: the backtest and the introspection step
+/// both name it through this constant.
+pub const INTROSPECTION_SCHEMA: &str = "athena.introspection/1";
+
+/// The fields of an introspection that a language model writes (`docs/design/defaults-loop.md` section 3.2).
+/// Until they are written they are pending.
+pub const INTROSPECTION_PROSE_FIELDS: [&str; 6] = [
+    "what_happened",
+    "failure_class",
+    "cause",
+    "prevention_kind",
+    "prevention",
+    "proposed_request",
+];
+
+/// What set an introspection off (`docs/design/defaults-loop.md` section 3.1, rows 1 to 4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum IntrospectionTrigger {
+    /// A job ended `rejected`.
+    Rejection,
+    /// A job ended `failed`.
+    Failure,
+    /// A correction of a reading, or an answer to its question.
+    Correction,
+    /// An intervention of any other kind.
+    Intervention,
+}
+
+impl IntrospectionTrigger {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            IntrospectionTrigger::Rejection => "rejection",
+            IntrospectionTrigger::Failure => "failure",
+            IntrospectionTrigger::Correction => "correction",
+            IntrospectionTrigger::Intervention => "intervention",
+        }
+    }
+}
+
+/// What kind of prevention would have stopped the class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PreventionKind {
+    Default,
+    CodeCheck,
+    DesignChange,
+}
+
+impl PreventionKind {
+    pub const ALL: [PreventionKind; 3] = [
+        PreventionKind::Default,
+        PreventionKind::CodeCheck,
+        PreventionKind::DesignChange,
+    ];
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PreventionKind::Default => "default",
+            PreventionKind::CodeCheck => "code-check",
+            PreventionKind::DesignChange => "design-change",
+        }
+    }
+    pub fn parse(text: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|k| k.as_str() == text)
+    }
+}
+
+/// Whether the introspection was written. `acted-on` is a later build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum IntrospectionStatus {
+    Recorded,
+    Failed,
+}
+
+impl IntrospectionStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            IntrospectionStatus::Recorded => "recorded",
+            IntrospectionStatus::Failed => "failed",
+        }
+    }
+}
+
+/// What the model that wrote the prose cost. There are no probabilities or confidence: no Jev is called.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IntrospectionEvidence {
+    pub model: String,
+    pub cost_usd: f64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+/// `athena.introspection/1`: why one event happened and what would have stopped its class, not only this
+/// instance. One per triggering event.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IntrospectionRecord {
+    pub id: RecordId,
+    pub at: Timestamp,
+    pub trigger: IntrospectionTrigger,
+    /// The job the event concerns, if any.
+    pub job: Option<JobId>,
+    /// The intervention of the event, for a correction or an intervention. A rejection or a failure has none.
+    pub intervention: Option<RecordId>,
+    pub class_of_work: String,
+    /// The intervention category, or `rejected` or `failed` for a job.
+    pub category: String,
+    pub what_happened: Option<String>,
+    /// A class of the registry; written with `new_class` when this record introduced it.
+    pub failure_class: Option<RecordId>,
+    pub new_class: bool,
+    /// Introspections of earlier events in the same class, by code.
+    pub earlier_cases: Vec<RecordId>,
+    /// Typed decisions whose signals the event matched, by code.
+    pub decisions_matched: Vec<String>,
+    pub cause: Option<String>,
+    pub prevention_kind: Option<PreventionKind>,
+    pub prevention: Option<String>,
+    pub proposed_request: Option<String>,
+    pub evidence: Option<IntrospectionEvidence>,
+    pub status: IntrospectionStatus,
+    /// Why the record is `failed`.
+    pub failure: Option<String>,
+    /// Problems code found in the model's answer, such as a cause that restates the event.
+    pub flags: Vec<String>,
+    /// Ids the model returned that were not on the list code passed in; dropped, not repaired.
+    pub dropped_ids: Vec<String>,
+    /// Always false in this build: the class and prevention kind came from a language model, not from Jev.
+    pub from_jev: bool,
+}
+
+impl IntrospectionRecord {
+    /// Why this record is not acceptable, if it is not.
+    pub fn validate(&self) -> Result<(), String> {
+        match self.status {
+            IntrospectionStatus::Failed if self.failure.is_none() => {
+                Err("a failed introspection says why".into())
+            }
+            IntrospectionStatus::Recorded
+                if self.what_happened.is_none()
+                    || self.cause.is_none()
+                    || self.failure_class.is_none()
+                    || self.prevention_kind.is_none()
+                    || self.prevention.is_none()
+                    || self.proposed_request.is_none() =>
+            {
+                Err("a recorded introspection has every field written".into())
+            }
+            _ if self.trigger != IntrospectionTrigger::Rejection
+                && self.trigger != IntrospectionTrigger::Failure
+                && self.intervention.is_none() =>
+            {
+                Err("a correction or an intervention names its intervention".into())
+            }
+            _ if self.from_jev => Err("no Jev is called in this build".into()),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// Where a class stands in the registry. Only `proposed` is written by code; the user renames or merges.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ClassStatus {
+    Proposed,
+}
+
+/// `athena.failure-class/1`: one entry of the class registry (`docs/design/defaults-loop.md` section 3.4).
+/// The registry is the set of these records; no file in the repository holds it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FailureClass {
+    /// Assigned by code.
+    pub id: RecordId,
+    pub at: Timestamp,
+    pub name: String,
+    /// One line.
+    pub description: String,
+    pub status: ClassStatus,
+    /// The introspection that proposed it.
+    pub proposed_by: RecordId,
+}
+
 // ---------------------------------------------------------------------------------------------------------
 // The envelope
 
@@ -1112,6 +1297,10 @@ pub enum AnyRecord {
     DecisionState(DecisionState),
     #[serde(rename = "athena.default-expectations/1")]
     DefaultExpectations(DefaultExpectations),
+    #[serde(rename = "athena.introspection/1")]
+    Introspection(Box<IntrospectionRecord>),
+    #[serde(rename = "athena.failure-class/1")]
+    FailureClass(FailureClass),
 }
 
 /// Why a file under `records/` is not acceptable.
@@ -1183,6 +1372,10 @@ impl AnyRecord {
                 ));
             }
             AnyRecord::DefaultExpectations(e) => e.validate().map_err(invalid)?,
+            AnyRecord::Introspection(i) => i.validate().map_err(invalid)?,
+            AnyRecord::FailureClass(c) if c.name.trim().is_empty() => {
+                return Err(invalid("a failure class has a name".into()));
+            }
             // Totals are what reconciliation checks an outcome against; only the bootstrap has none
             // (acceptance verification 2).
             AnyRecord::Outcome(o) if o.job.is_request() && o.totals.is_none() => {
@@ -1247,6 +1440,12 @@ impl AnyRecord {
                     r.id
                 )
             }
+            AnyRecord::Introspection(r) => {
+                format!("records/introspections/{}/{}.json", r.id.month(), r.id)
+            }
+            AnyRecord::FailureClass(r) => {
+                format!("records/failure-classes/{}/{}.json", r.id.month(), r.id)
+            }
         }
     }
 
@@ -1268,6 +1467,8 @@ impl AnyRecord {
             AnyRecord::HostError(_) => "athena.host-error/1",
             AnyRecord::DecisionState(_) => "athena.decision-state/1",
             AnyRecord::DefaultExpectations(_) => "athena.default-expectations/1",
+            AnyRecord::Introspection(_) => INTROSPECTION_SCHEMA,
+            AnyRecord::FailureClass(_) => "athena.failure-class/1",
         }
     }
 }

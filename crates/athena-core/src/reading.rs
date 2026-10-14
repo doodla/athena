@@ -752,6 +752,10 @@ impl Athena {
         }
         let body = "The user's one-line correction, the intervention it implies, and the new reading with its forecasts.";
         let commit = self.commit_records(&files, &message(&subject, body, &trailers))?;
+        // A correction is an event: it is introspected at once; this never blocks or fails the command.
+        if let Some(id) = &intervention_id {
+            self.introspect_intervention(id, ui);
+        }
         Ok(Proposal {
             job: job_id,
             reading,

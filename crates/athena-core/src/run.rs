@@ -107,7 +107,23 @@ pub fn introducing_commit(athena: &Athena, rev: &str, path: &str) -> Result<Opti
 
 impl Athena {
     /// `athena go`: runs a proposed job to its terminal state, or retries the landing of a blocked one.
+    ///
+    /// A job that ends `rejected` or `failed` is introspected at once, with no request from the user. The
+    /// introspection never changes the result and never blocks `go` (`defaults-loop.md` section 3.1).
     pub fn go(&self, job_ref: &str, accepted_by: AcceptedBy, ui: &dyn Ui) -> Result<GoResult> {
+        let result = self.go_job(job_ref, accepted_by, ui)?;
+        if let GoResult::Finished(finished) = &result
+            && matches!(
+                finished.state,
+                OutcomeState::Rejected | OutcomeState::Failed
+            )
+        {
+            self.introspect_job(&finished.job, ui);
+        }
+        Ok(result)
+    }
+
+    fn go_job(&self, job_ref: &str, accepted_by: AcceptedBy, ui: &dyn Ui) -> Result<GoResult> {
         self.refuse_if_stopped()?;
         self.state.registry().reap();
         let head = self.head()?;

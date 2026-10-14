@@ -18,6 +18,8 @@
 //! - [`pr`]: pull-request landing in owned mode: the link store, the push guard, the merged-content check;
 //! - [`gh`]: `athena land --pr`: push the job's branch, open the pull request, wait for green checks, and merge
 //!   over REST only when the opt-in setting is on;
+//! - [`introspect`]: the introspection record of an event, the class registry, and the reading code shared with
+//!   `athena backtest`;
 //! - [`watcher`]: decisions put under review by exact matching of host-error records, run at landing;
 //! - [`pin`]: a study's repository ref resolved to a commit by the core, and mounted read-only.
 
@@ -28,6 +30,7 @@ pub mod checks;
 pub mod commits;
 pub mod fake;
 pub mod gh;
+pub mod introspect;
 pub mod invocation;
 pub mod land;
 pub mod manage;

@@ -573,6 +573,16 @@ with a person-visible review.
    distinct jobs show a repeat a default would cover. Introspection (steps 1 and 2) goes ahead on its own value.
 1. Add the introspection record, the class registry, the records-reading code (§3.3) and a person-visible
    review of the output, with a language model for the prose and no Jev.
+   **Built (step 1).** `crates/athena-core/src/introspect.rs` holds the reading code and the step itself; the
+   record and the registry entry are `athena.introspection/1` and `athena.failure-class/1` in
+   `crates/athena-data/src/records.rs`. The triggers built are rows 1 to 4 of §3.1 (a correction, any other
+   intervention, a rejected job, a failed job); host errors and landings, and a rejected proposal or plan, are
+   not. Without Jev the model names the class (a registry id, or `new` with a name) and the prevention kind, and
+   the record says so (`from_jev` is false); code assigns the id of a new class and adds it as `proposed`. The
+   reading code takes the shared reader, the typed headers, the evidence-after-decision rule and the citation
+   validation from the backtest, which now re-exports them. The review is the introspection block of
+   `athena status <job>` and its `--json`. Tests use fixture records in a temporary directory. **The run over the
+   real `records/` follows landing**: the agents' copies leave `records/` out, so it cannot be done before.
 2. Add retry-from-record (§3.5).
 3. Add the proposal record and validation, `athena status` surfacing and the apply-as-a-job check (§9).
 4. Measure `render()` alone with the live counter (§8.3). Defaults are known not to count against the producer and
