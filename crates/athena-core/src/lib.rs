@@ -22,6 +22,8 @@
 //!   `athena backtest`;
 //! - [`proposals`]: proposed defaults from repeated introspections, their validation, and the apply-as-a-job
 //!   check; `defaults.toml` is never written by Athena;
+//! - [`labeled`]: the labeled set of reviewed introspections and the scoring of Jev's recorded shadow answers
+//!   against it, read-only;
 //! - [`watcher`]: decisions put under review by exact matching of host-error records, run at landing;
 //! - [`pin`]: a study's repository ref resolved to a commit by the core, and mounted read-only.
 
@@ -35,6 +37,7 @@ pub mod gh;
 pub mod introspect;
 pub mod invocation;
 pub mod jev;
+pub mod labeled;
 pub mod land;
 pub mod manage;
 pub mod nested;

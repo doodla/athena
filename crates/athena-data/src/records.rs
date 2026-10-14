@@ -1308,6 +1308,45 @@ pub struct FailureClass {
     pub proposed_by: RecordId,
 }
 
+/// Who wrote a class label (`docs/design/defaults-loop.md` section 10.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Labeler {
+    /// A person named the class.
+    Person,
+    /// A stronger model named the class and a person spot-checked it.
+    StrongerModel,
+}
+
+impl Labeler {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Labeler::Person => "person",
+            Labeler::StrongerModel => "stronger-model",
+        }
+    }
+}
+
+/// `athena.class-label/1`: the failure class a reviewer assigned to one recorded introspection, written before
+/// Jev's answers are read (`docs/design/defaults-loop.md` section 10.2). Introspections without such a record
+/// are unreviewed and are not part of the labeled set. A later label for the same introspection replaces an
+/// earlier one (the newest by time, then id, counts). This build only reads these records.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClassLabel {
+    pub id: RecordId,
+    pub at: Timestamp,
+    /// The introspection that was reviewed.
+    pub introspection: RecordId,
+    /// The class the reviewer assigned: a registry id, or `None` when no registry class fits.
+    pub class: Option<RecordId>,
+    pub labeled_by: Labeler,
+    /// Whether the reviewer judged the event a repeat of an earlier case with the same cause. Absent when the
+    /// reviewer did not say; such a label is used for the class score only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_repeat: Option<bool>,
+}
+
 /// The schema tag of a defaults proposal.
 pub const PROPOSAL_SCHEMA: &str = "athena.defaults-proposal/1";
 
@@ -1473,6 +1512,8 @@ pub enum AnyRecord {
     FailureClass(FailureClass),
     #[serde(rename = "athena.defaults-proposal/1")]
     DefaultsProposal(Box<ProposalRecord>),
+    #[serde(rename = "athena.class-label/1")]
+    ClassLabel(ClassLabel),
 }
 
 /// Why a file under `records/` is not acceptable.
@@ -1548,8 +1589,7 @@ impl AnyRecord {
             AnyRecord::FailureClass(c) if c.name.trim().is_empty() => {
                 return Err(invalid("a failure class has a name".into()));
             }
-            AnyRecord::DefaultsProposal(p) => p.validate().map_err(invalid)?,
-            // Totals are what reconciliation checks an outcome against; only the bootstrap has none
+            AnyRecord::DefaultsProposal(p) => p.validate().map_err(invalid)?, // Totals are what reconciliation checks an outcome against; only the bootstrap has none
             // (acceptance verification 2).
             AnyRecord::Outcome(o) if o.job.is_request() && o.totals.is_none() => {
                 return Err(invalid(
@@ -1626,6 +1666,9 @@ impl AnyRecord {
                     r.record
                 )
             }
+            AnyRecord::ClassLabel(r) => {
+                format!("records/class-labels/{}/{}.json", r.id.month(), r.id)
+            }
         }
     }
 
@@ -1650,6 +1693,7 @@ impl AnyRecord {
             AnyRecord::Introspection(_) => INTROSPECTION_SCHEMA,
             AnyRecord::FailureClass(_) => "athena.failure-class/1",
             AnyRecord::DefaultsProposal(_) => PROPOSAL_SCHEMA,
+            AnyRecord::ClassLabel(_) => "athena.class-label/1",
         }
     }
 }
@@ -2155,6 +2199,28 @@ mod tests {
         accepted.status = ProposalStatus::Accepted { job: job() };
         assert!(accepted.validate().is_ok());
         assert_eq!(accepted.status.as_str(), "accepted");
+    }
+
+    #[test]
+    fn class_labels_have_a_path_a_schema_and_round_trip() {
+        let label = ClassLabel {
+            id: RecordId::parse("20261014-120000-1abc").unwrap(),
+            at: ts(),
+            introspection: RecordId::parse("20261014-100000-aaaa").unwrap(),
+            class: None,
+            labeled_by: Labeler::StrongerModel,
+            is_repeat: None,
+        };
+        let record = AnyRecord::ClassLabel(label);
+        assert_eq!(record.schema(), "athena.class-label/1");
+        assert_eq!(
+            record.canonical_path(),
+            "records/class-labels/2026-10/20261014-120000-1abc.json"
+        );
+        let json = record.to_json();
+        assert!(json.contains("\"labeled_by\": \"stronger-model\""));
+        assert!(!json.contains("is_repeat"));
+        assert_eq!(AnyRecord::parse("x", json.as_bytes()).unwrap(), record);
     }
 
     #[test]

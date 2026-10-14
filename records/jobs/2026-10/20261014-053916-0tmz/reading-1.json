@@ -1,0 +1,195 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261014-053916-0tmz",
+  "n": 1,
+  "at": "2026-10-14T05:39:55.483001421Z",
+  "invocation_seq": 1,
+  "base_commit": "878fd73c55003d0ab3e4e8ac5772cb686663fe96",
+  "config_sha256": "3a5a7c10c8f8142be7e5f5cbd5f0238f710d6a133b92a5731607ebe61c2e2789",
+  "defaults_sha256": "7ca3db44e78a075634195d4e9722ade9188c5268e963b636ac7b9c38d2bee2c6",
+  "defaults_version": 1,
+  "title": "Add read-only labeled set and Jev shadow scoring command",
+  "summary": "Add a read-only `athena` command that builds the labeled set from introspection records whose failure class a person reviewed. It scores the stored Jev class and repeat answers by Brier skill against two references, with sample size, interval and the §10.4 verdict. Below the minimum labeled count it says so and gives no verdict. It is tested with FakeJev and fixture records in a temp directory.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "The command and scoring are Rust in the existing crates."
+    },
+    {
+      "id": "tested",
+      "how": "The new module has passing tests, and cargo test and clippy are clean."
+    },
+    {
+      "id": "verified",
+      "how": "The behavior is exercised with FakeJev and fixture records in a temp directory."
+    },
+    {
+      "id": "evidence",
+      "how": "The report labels sample size, the interval and the estimates; the 10% false-match and sizing figures are marked as estimates."
+    },
+    {
+      "id": "small",
+      "how": "One command and one module covering the matching and repeat scoring of §10.3 only."
+    },
+    {
+      "id": "strangers",
+      "how": "Doc comments and the design doc update are written for an outside reader."
+    },
+    {
+      "id": "root-cause",
+      "how": "The review is modeled as an explicit record, not inferred from the status of the introspection."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "No record of a person's class review exists in the code today (searched crates/ for review/label markers). I assume a person's review is a new record kind, e.g. athena.class-label/1 in athena-data records.rs, naming an introspection, the reviewed class (a registry id or none), who labeled it (person or stronger model spot-checked) and when. The new command only reads these. The writer of such records is out of scope.",
+    "Only the failure-class (matching) and is-repeat answers are scored, since those are the only Jev answers recorded (IntrospectionJev). Set membership, signal match, cluster, confidence, prose and cost scoring from §10.3 are not built.",
+    "Reference forecasters: always predict 'none', and a word-overlap matcher over the stored what_happened/cause text against the registry class names and descriptions. Skill is the Brier improvement over the better reference.",
+    "Time split: records before a cut date calibrate, later ones test. The cut is a command flag with a default of the earliest two thirds by time. Only the test part is scored for the verdict.",
+    "The interval is a normal-approximation 95% interval on mean per-record skill, given only when the test size n exceeds (1.96*sd/mean)^2 per §10.4 item 1. Otherwise the report says no bound was computed and shows the raw Brier scores and a per-record table.",
+    "Verdict logic covers only the §10.4 items computable from these records: item 1 (skill), item 3 (false-match rate on 'none' labels under 10%) and the class-grouping check of item 2. Items 4, 5, 6 and 7 are reported as not evaluated. A minimum labeled-case count constant (about 10 test cases) triggers 'insufficient labeled cases' with no score or verdict.",
+    "The command is a new Score-style subcommand in athena-cli main.rs (with a --json flag, like Propose) over a new athena-core module that never opens a file for writing."
+  ],
+  "question": "How is a person's review of an introspection's class stored today? I found no such record. I assumed a new `athena.class-label/1` record that the command reads. If a different marker exists, name it.",
+  "acceptance_criteria": [
+    {
+      "text": "A new module in crates/athena-core builds the labeled set only from introspection records that have a matching person-review record, and keeps the labeler (person or stronger model) on each row.",
+      "kind": "content"
+    },
+    {
+      "text": "The scoring module computes the Brier score of Jev's class probability vector against the label, the two references (always 'none', word overlap), skill over the better reference, top-1 accuracy and the false-match rate on 'none' labels, split by time.",
+      "kind": "content"
+    },
+    {
+      "text": "The module and command never open a file for writing, and a test asserts it as proposals.rs does.",
+      "kind": "content"
+    },
+    {
+      "text": "docs/design/defaults-loop.md step 6 is updated to say what was built and what is not (membership, signal match, cluster, prose and cost scoring, and live shadow run), and CHANGELOG.md is updated.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo test`: tests with FakeJev answers and fixture records in a temp directory show that (a) enough labeled cases give a score, sample size and interval-or-'no bound computed' note plus a verdict, (b) too few labeled cases give an explicit 'too few labeled cases' message with no score and no verdict, (c) unreviewed introspections and records with no Jev answer are excluded and counted, (d) a Jev-error record is excluded and counted.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo clippy --all-targets` and `cargo fmt --check`: both are clean.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo run -p athena-cli -- --help`: the new command is listed, and its `--json` output on an empty temp store reports 'too few labeled cases' and exits cleanly.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/labeled.rs",
+      "action": "create",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-cli/src/wiring.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-cli/tests/labeled.rs",
+      "action": "create",
+      "p": 0.5
+    },
+    {
+      "path": "docs/design/defaults-loop.md",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/jev.rs",
+      "action": "modify",
+      "p": 0.15
+    },
+    {
+      "path": "crates/athena-core/src/introspect.rs",
+      "action": "modify",
+      "p": 0.1
+    },
+    {
+      "path": "README.md",
+      "action": "modify",
+      "p": 0.2
+    }
+  ],
+  "out_of_scope": [
+    "Running the command over the real records/ (the user does this after landing).",
+    "A command that writes review or label records.",
+    "Scoring set membership, signal match, cluster assignment, confidence, prose faithfulness, cost and latency.",
+    "Promotion itself, or any change to what `athena status` shows as live.",
+    "Live Jev calls; only FakeJev is used.",
+    "Changes to athena.toml, defaults.toml, CI, or lint configuration."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.6,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.18,
+      "cost_usd": {
+        "p10": 0.4,
+        "p50": 0.95,
+        "p90": 2.2
+      },
+      "wall_time_s": {
+        "p10": 450.0,
+        "p50": 800.0,
+        "p90": 1300.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7908045977011494,
+      "p_verification_passes": 0.7,
+      "p_user_intervenes": 0.12571428571428572,
+      "cost_usd": {
+        "p10": 0.3854419204164228,
+        "p50": 0.8370942093821581,
+        "p90": 1.941388165693692
+      },
+      "wall_time_s": {
+        "p10": 470.7604272498949,
+        "p50": 751.8458670420001,
+        "p90": 1028.8057700166119
+      }
+    }
+  },
+  "departures": "The cost and time are above the reference. The change adds a record kind, a scoring module, a CLI command and tests. The review-record storage is also not settled, which raises the chance of rework."
+}
