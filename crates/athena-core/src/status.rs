@@ -152,9 +152,11 @@ pub struct IntrospectionView {
     pub failure: Option<String>,
     pub flags: Vec<String>,
     pub dropped_ids: Vec<String>,
-    /// False: the class and prevention kind came from a language model, not from Jev.
+    /// False: the class and prevention kind came from a language model; Jev runs in shadow only (see `jev`).
     pub from_jev: bool,
     pub cost_usd: Option<f64>,
+    /// Jev's shadow answers, when it was asked. They decide nothing.
+    pub jev: Option<athena_data::records::IntrospectionJev>,
 }
 
 /// The introspections of one job, oldest first, with class names and the jobs of earlier cases.
@@ -204,6 +206,7 @@ fn introspection_views(records: &Records, job: &athena_data::JobId) -> Vec<Intro
             dropped_ids: i.dropped_ids.clone(),
             from_jev: i.from_jev,
             cost_usd: i.evidence.as_ref().map(|e| e.cost_usd),
+            jev: i.jev.clone(),
         })
         .collect()
 }

@@ -108,14 +108,20 @@ impl GhFailure {
         if let Some(status) = self.status_code {
             return is_transient(Some(status)).then(|| format!("HTTP {status}"));
         }
-        let text = self.text.to_ascii_lowercase();
-        if text.contains("timeout") || text.contains("timed out") {
-            Some("timeout".to_string())
-        } else if text.contains("connection reset") || text.contains("econnreset") {
-            Some("connection reset".to_string())
-        } else {
-            None
-        }
+        transient_text(&self.text)
+    }
+}
+
+/// Why a failure with no HTTP status is worth asking again, read from the client's own words: a timeout or a
+/// connection reset. Anything else, such as "not logged in", is not.
+pub fn transient_text(text: &str) -> Option<String> {
+    let text = text.to_ascii_lowercase();
+    if text.contains("timeout") || text.contains("timed out") {
+        Some("timeout".to_string())
+    } else if text.contains("connection reset") || text.contains("econnreset") {
+        Some("connection reset".to_string())
+    } else {
+        None
     }
 }
 
@@ -152,6 +158,132 @@ impl Retry {
         attempts: 3,
         delay: Duration::from_secs(2),
     };
+}
+
+/// Runs `call` and repeats it while it fails transiently, up to the bound of `retry`. `transient` says whether
+/// an error is worth asking again, and why; any other error, and the last transient one, is returned. Each
+/// repeat is reported to `ui` as one line naming `what`, the reason and the attempt. The wait between calls is
+/// [`Retry::wait`].
+pub fn retry_transient<T, E>(
+    retry: Retry,
+    ui: Option<&dyn Ui>,
+    what: &str,
+    mut call: impl FnMut() -> Result<T, E>,
+    transient: impl Fn(&E) -> Option<String>,
+) -> Result<T, E> {
+    let attempts = retry.attempts.max(1);
+    let mut attempt = 1;
+    loop {
+        match call() {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                let Some(reason) = transient(&error) else {
+                    return Err(error);
+                };
+                if attempt >= attempts {
+                    return Err(error);
+                }
+                let wait = retry.wait(attempt, clock_entropy());
+                if let Some(ui) = ui {
+                    ui.line(&format!(
+                        "retrying {what} after {reason} (attempt {attempt} of {attempts} failed; waiting {} ms)",
+                        wait.as_millis()
+                    ));
+                }
+                std::thread::sleep(wait);
+                attempt += 1;
+            }
+        }
+    }
+}
+
+/// What an HTTP server answered: the status and the body, whether or not it is a success.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpReply {
+    pub status: u16,
+    pub body: String,
+}
+
+/// Posts a JSON body and returns the reply, whatever its status. An `Err` means no reply was received (the
+/// connection failed, timed out, or the client program could not run). The bearer token, when there is one, is
+/// the caller's secret: an implementation never writes it to a file, a log or an error.
+pub trait HttpPost {
+    fn post_json(&self, url: &str, bearer: Option<&str>, body: &str) -> Result<HttpReply>;
+}
+
+/// [`HttpPost`] over the installed `curl` program, the same way [`GhCli`] runs `gh`: no HTTP crate is added to
+/// the workspace. The request settings, including the token header, go to the program on its standard input,
+/// so the token is never in its argument list; the body goes through a temporary file that is removed after.
+/// A proxy named by the usual environment variables is used by the program itself.
+#[derive(Debug, Clone, Copy)]
+pub struct CurlHttp {
+    /// The most seconds one call may take.
+    pub max_seconds: u64,
+}
+
+impl Default for CurlHttp {
+    fn default() -> Self {
+        CurlHttp { max_seconds: 60 }
+    }
+}
+
+impl HttpPost for CurlHttp {
+    fn post_json(&self, url: &str, bearer: Option<&str>, body: &str) -> Result<HttpReply> {
+        use std::io::Write;
+        let unsafe_text = |s: &str| s.contains(['"', '\\', '\n', '\r']);
+        if unsafe_text(url) || bearer.is_some_and(unsafe_text) {
+            bail!("the request has a character that cannot be sent safely");
+        }
+        let mut body_file = tempfile::NamedTempFile::new().context("preparing the request body")?;
+        body_file
+            .write_all(body.as_bytes())
+            .context("preparing the request body")?;
+        let mut config = format!(
+            "silent\nshow-error\nrequest = \"POST\"\nheader = \"Content-Type: application/json\"\n\
+             max-time = {}\nwrite-out = \"\\n%{{http_code}}\"\nurl = \"{url}\"\ndata-binary = \"@{}\"\n",
+            self.max_seconds,
+            body_file.path().display()
+        );
+        if let Some(token) = bearer {
+            config.push_str(&format!("header = \"Authorization: Bearer {token}\"\n"));
+        }
+        let mut child = Command::new("curl")
+            .args(["--config", "-"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("running curl; is it installed?")?;
+        child
+            .stdin
+            .take()
+            .context("curl has no standard input")?
+            .write_all(config.as_bytes())
+            .context("sending the request settings to curl")?;
+        let out = child.wait_with_output().context("waiting for curl")?;
+        let scrub = |text: &str| match bearer {
+            Some(token) if !token.is_empty() => text.replace(token, "<key>"),
+            _ => text.to_string(),
+        };
+        if !out.status.success() {
+            bail!(
+                "the request failed: {}",
+                scrub(String::from_utf8_lossy(&out.stderr).trim())
+            );
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        let (body, code) = text
+            .rsplit_once('\n')
+            .context("the reply has no status line")?;
+        let status = code
+            .trim()
+            .parse()
+            .context("the reply has no HTTP status")?;
+        Ok(HttpReply {
+            status,
+            body: body.to_string(),
+        })
+    }
 }
 
 /// The refusals of one landing run, kept in memory until the caller commits them as records. The client writes

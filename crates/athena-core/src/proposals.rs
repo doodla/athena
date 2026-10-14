@@ -748,6 +748,7 @@ mod tests {
                 flags: vec![],
                 dropped_ids: vec![],
                 from_jev: false,
+                jev: None,
             })),
         );
         id

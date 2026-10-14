@@ -9,6 +9,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The Jev client and a shape-faithful fake, step 5 of the build order in `docs/design/defaults-loop.md` section
+  12 (decision D92). `crates/athena-core/src/jev.rs` builds `POST /v1/evaluate` with `{model:
+  "typesafe-ai/jev", state, questions}`, several questions per call (`choice` with described options, or
+  `boolean`), and parses the answers (`choice`, `probabilities`, `confidence`; or the `probability` of true),
+  `usage` and the gateway's cost string. A refusal from the chat endpoint is a build error and is not retried;
+  auth and other 4xx errors are not retried; 500, 502, 503, 504, timeouts and resets are, through the retry
+  loop of `gh.rs` (now `retry_transient`) over a new `HttpPost` transport (`CurlHttp`, the `curl` program, no new
+  crate). The key comes only from `AI_GATEWAY_API_KEY` and is never printed or recorded. `FakeJev` returns the
+  same typed reply and is the only Jev used outside the ignored live test. After a rejected or failed job, a
+  correction or an intervention, Athena asks Jev the failure-class question (a choice over the registry ids plus
+  `new`) and the is-repeat question (a boolean) in one call, in shadow, when `Athena::jev` is set (tests; the
+  command line only with `ATHENA_JEV_SHADOW=1`). Both answers, the usage and the cost are stored in the optional
+  `jev` field of `athena.introspection/1`, which older records lack; a failed call is stored as an error. Jev
+  never changes the recorded class, status or any outcome. `athena status` shows the answers. Live facts are not
+  checked here (no network); the live test is ignored by default.
 - Defaults proposals, step 3 of the build order in `docs/design/defaults-loop.md` section 12. A new record,
   `athena.defaults-proposal/1`, holds a proposed default: id, `kind` (`add` or `amend`), statement, `applies_to`,
   the version bump (`from`, and `to` = `from + 1`), the introspections it cites with their jobs, a `status`

@@ -34,6 +34,7 @@ pub mod fake;
 pub mod gh;
 pub mod introspect;
 pub mod invocation;
+pub mod jev;
 pub mod land;
 pub mod manage;
 pub mod nested;
@@ -87,6 +88,9 @@ pub struct Athena {
     pub nested: Option<String>,
     /// Resolves and checks out a study's repository ref; only capabilities that pin ever call it.
     pub pinner: Box<dyn pin::Pinner>,
+    /// Jev, asked in shadow beside the introspection (`jev`). None means it is not asked. Its answers are
+    /// recorded and never decide anything.
+    pub jev: Option<Box<dyn jev::Evaluate>>,
 }
 
 impl std::fmt::Debug for Athena {

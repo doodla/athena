@@ -605,6 +605,25 @@ with a person-visible review.
    verifier budgets (§8.3); the per-job runtime set-size check is built under decision-sets §8.
 5. Probe a multi-question `evaluate` call (§6), write the fake Jev to the shape found, then the Jev client; check
    each reported fact in §6 against a live call.
+   **Built (step 5), shadow only.** `crates/athena-core/src/jev.rs` holds the client for `POST /v1/evaluate`
+   (body `{model: "typesafe-ai/jev", state, questions}`; several questions per call; `choice` and `boolean`
+   answers; `usage`; the gateway cost string parsed to a number) and `FakeJev`, which returns the same typed
+   reply. Calls use the outbound wrapper in `gh.rs` (`HttpPost`, `retry_transient`, `Retry::STANDARD`); only
+   500, 502, 503, 504, timeouts and resets are retried, and the chat endpoint's "a decision model, not a language
+   model" refusal is a build error that is not retried (decision D92). The key is read only from
+   `AI_GATEWAY_API_KEY`; where the proxy authenticates `*.vercel.sh` it is unset and no header is sent. The
+   introspection step asks the failure-class choice (registry ids plus `new`) and the is-repeat boolean in one
+   call and stores both answers, the usage and the cost in the optional `jev` field of the introspection record,
+   so they can be scored later; a failed call is stored as an error. Nothing reads them: the class, the status
+   and every outcome are as before. Athena asks no Jev unless `Athena::jev` is set (tests use the fake; the
+   command line uses the real client only with `ATHENA_JEV_SHADOW=1`).
+   **Checked against the code, not live.** The request and response shapes are the facts from the
+   probes of 2026-10-13 and 2026-10-14 as reported in the job request; the tests run the client against a
+   scripted transport and the fake. Not checked live (no network in the build): the real call, the reply's key
+   for the answers (`answers` is assumed, with `results` accepted), the cost of about $0.00002 a call (an
+   estimate from the probes) and the proxy's authentication. The opt-in live test
+   `live_jev_answers_both_question_kinds` (`cargo test -p athena-core -- --ignored live_jev`) is the check to run.
+   Not built: scoring the recorded answers, and the other Jev questions of §6.
 6. Build the labeled set and scoring (§10.2, §10.3) with the fake, then run in shadow; review; promote under
    §10.4.
 

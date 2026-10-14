@@ -131,6 +131,8 @@ impl Fixture {
             nested: None,
             // Tests never reach the network: this pinner only counts calls.
             pinner: Box::new(athena_core::fake::CountingPinner::new(&"a".repeat(40))),
+            // Jev is not asked unless a test sets one (the fake in `athena_core::jev`).
+            jev: None,
         }
     }
 

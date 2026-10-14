@@ -1157,7 +1157,8 @@ impl IntrospectionStatus {
     }
 }
 
-/// What the model that wrote the prose cost. There are no probabilities or confidence: no Jev is called.
+/// What the model that wrote the prose cost. The probabilities and confidence of Jev are in
+/// [`IntrospectionJev`], not here.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IntrospectionEvidence {
@@ -1165,6 +1166,37 @@ pub struct IntrospectionEvidence {
     pub cost_usd: f64,
     pub input_tokens: u64,
     pub output_tokens: u64,
+}
+
+/// Jev's answer to the failure-class question, as it came back: the option it chose, the probability of each
+/// option, and its confidence.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JevClassAnswer {
+    /// A registry class id, or `new`.
+    pub choice: String,
+    pub probabilities: std::collections::BTreeMap<String, f64>,
+    pub confidence: f64,
+}
+
+/// What Jev said about an event, recorded in shadow so that it can be scored later (`defaults-loop.md`
+/// sections 3.3 and 12). Nothing here decides anything: the recorded class, status and outcome come from the
+/// language model and from code. A call that failed is recorded with `error` and no answers.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IntrospectionJev {
+    /// The model asked, such as `typesafe-ai/jev`.
+    pub model: String,
+    /// The failure-class question: a choice over the registry ids plus `new`.
+    pub class: Option<JevClassAnswer>,
+    /// The is-repeat question: the probability that the event is a repeat of an earlier one.
+    pub repeat_probability: Option<f64>,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    /// The gateway's cost for the call, when it reported one.
+    pub cost_usd: Option<f64>,
+    /// Why the call produced no answers (no secret, no response text beyond a short excerpt).
+    pub error: Option<String>,
 }
 
 /// `athena.introspection/1`: why one event happened and what would have stopped its class, not only this
@@ -1202,8 +1234,12 @@ pub struct IntrospectionRecord {
     pub flags: Vec<String>,
     /// Ids the model returned that were not on the list code passed in; dropped, not repaired.
     pub dropped_ids: Vec<String>,
-    /// Always false in this build: the class and prevention kind came from a language model, not from Jev.
+    /// Always false: the class and prevention kind came from a language model, not from Jev. Jev runs in shadow.
     pub from_jev: bool,
+    /// Jev's shadow answers to the two introspection questions. Absent on records written before step 5 and
+    /// when Jev is not asked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jev: Option<IntrospectionJev>,
 }
 
 impl IntrospectionRecord {
@@ -1229,8 +1265,22 @@ impl IntrospectionRecord {
             {
                 Err("a correction or an intervention names its intervention".into())
             }
-            _ if self.from_jev => Err("no Jev is called in this build".into()),
-            _ => Ok(()),
+            _ if self.from_jev => Err("Jev only runs in shadow; from_jev stays false".into()),
+            _ => match &self.jev {
+                Some(jev)
+                    if jev.error.is_none()
+                        && (jev.class.is_none() || jev.repeat_probability.is_none()) =>
+                {
+                    Err("a Jev record without an error holds both answers".into())
+                }
+                Some(jev)
+                    if jev.error.is_some()
+                        && (jev.class.is_some() || jev.repeat_probability.is_some()) =>
+                {
+                    Err("a Jev record with an error holds no answers".into())
+                }
+                _ => Ok(()),
+            },
         }
     }
 }
