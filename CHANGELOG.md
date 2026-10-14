@@ -9,6 +9,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Fix: the backtest's introspection record was tied to one kind of evidence (the fired run's intervention
+  events), so D87 under review through the derived host-error record of ar1x built none. It is now built from the
+  earliest valid citation of whichever signal fired: an intervention, or for a derived host-error record its
+  source intervention. Observed host-error records have no intervention and are not sources. A decision under
+  review with no introspection record is now a finding (condition `d`) naming the decision. Tests copy the
+  ar1x intervention and its derived record.
+
 - Backtest evidence now postdates the decision and each citation is validated. A decision starts at the first
   commit that introduced its id heading (`## D87 `), found with `git log -S`, not its current full heading text.
   `athena backtest` counts only records later than that start and fails (condition `e`) on any cited record that

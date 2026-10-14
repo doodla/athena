@@ -100,6 +100,11 @@ by id (the intervention remains the single counted unit, §7.1):
 | `evidence` | Models that answered, probabilities, confidence (§6), cost and tokens | code |
 | `status` | `recorded`, `failed`, or `acted-on` with the job that did | code |
 
+The triggering event is the earliest valid citation of whichever signal fired. For an intervention signal that is
+an intervention; for a derived host-error record it is the record's source intervention, so the introspection
+links to an intervention in every case. A decision put under review with no introspection record is a finding
+in the backtest (condition `d`), not a silent gap **(design)**.
+
 The rule behind `cause`: a retry that patches only the last finding is the failure this step exists to stop
 (case C2). The model is asked "what would have stopped this class, not this instance", and a record whose
 `cause` restates `what_happened` is flagged by code (equal text after normalising) and rated as failed.
