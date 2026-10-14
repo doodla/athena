@@ -370,8 +370,16 @@ fn a_host_error_record_of_the_405_puts_d87_under_review_and_cites_the_record() {
             .count(),
         1
     );
-    // The first occurrence is enough, and condition (b) holds without an intervention.
-    assert!(report.passed(), "{:?}", report.findings);
+    // The first occurrence is enough, and condition (b) holds without an intervention. An observed record
+    // has no intervention, so no introspection can be built and the only finding is that.
+    assert!(report.introspection.is_none());
+    assert_eq!(report.findings.len(), 1, "{:?}", report.findings);
+    assert_eq!(report.findings[0].condition, "d");
+    assert!(
+        report.findings[0].reason.contains("D87"),
+        "{:?}",
+        report.findings
+    );
     let text = backtest::render(&report);
     assert!(text.contains("D87 is under review"), "{text}");
     assert!(text.contains("20261013-192200-k7q2"), "{text}");
@@ -636,6 +644,45 @@ fn with_the_real_interventions_d87_is_under_review_citing_only_ar1x() {
             .flatten()
             .all(|c| !c.contains("kn3q") && !c.contains("qk2d"))
     );
+}
+
+#[test]
+fn the_derived_record_of_ar1x_builds_the_introspection_from_its_source_intervention() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    real_interventions(root);
+    let records = backtest::read_records(root).unwrap();
+    let report = backtest::run_on_from(LOG, &links(), &records, &d87_starts());
+    assert_eq!(report.under_review, ["D87"]);
+    let record = report.introspection.as_ref().expect("an introspection");
+    assert_eq!(record.intervention, AR1X);
+    assert_eq!(record.job, "20261013-192156-9h2j");
+    assert_eq!(record.class_of_work, "code");
+    assert_eq!(record.at, "2026-10-13T19:21:56Z");
+    assert_eq!(record.decisions_matched, ["D87"]);
+    assert!(report.findings.is_empty(), "{:?}", report.findings);
+}
+
+#[test]
+fn a_decision_under_review_with_no_introspection_is_a_finding_naming_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    host_error(
+        root,
+        "20261013-192200-k7q2",
+        Some(405),
+        "merge",
+        "method-not-allowed",
+    );
+    let report = run_in(root);
+    assert_eq!(report.under_review, ["D87"]);
+    assert!(report.introspection.is_none());
+    let finding = report
+        .findings
+        .iter()
+        .find(|f| f.condition == "d")
+        .expect("a finding for the missing introspection");
+    assert!(finding.reason.contains("D87"), "{}", finding.reason);
 }
 
 #[test]

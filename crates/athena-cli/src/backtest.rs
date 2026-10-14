@@ -14,7 +14,9 @@
 //!    interventions whose text states a host refusal ([`athena_core::watcher::derive_host_error`]). A derived
 //!    record is marked derived, cites its source intervention, and is listed apart from the observed ones; the
 //!    client did not observe it.
-//! 4. Builds one introspection record for the earliest event that fired a signal naming D87. The record holds
+//! 4. Builds one introspection record from the earliest valid citation of whichever D87 signal fired: an
+//!    intervention, or for a derived host-error record its source intervention. A decision under review with no
+//!    such record is a finding (condition `d`). The record holds
 //!    only the fields code writes; the fields a language model writes are listed as pending.
 //!
 //! Only records later than a decision's start count. The start is the first commit that introduced the
@@ -665,17 +667,71 @@ pub struct Introspection {
     pub pending_fields: Vec<&'static str>,
 }
 
-fn introspection_for(run: &SignalRun) -> Option<Introspection> {
-    let first = run.events.first()?;
+/// The interventions a fired run cites that can serve as the introspection's event, each with a valid
+/// citation, earliest first. An intervention event is its own source; a derived host-error record is
+/// represented by its source intervention. An observed host-error record has no intervention row, so it
+/// is not a source. A citation that fails [`validate_citations`] is skipped, as is a source with no job.
+fn introspection_sources(
+    run: &SignalRun,
+    headers: &[DecisionHeader],
+    records: &Records,
+    starts: &Starts,
+) -> Vec<InterventionRow> {
+    let valid =
+        |single: SignalRun| validate_citations(headers, &[single], records, starts).is_empty();
+    let bare = SignalRun {
+        events: Vec::new(),
+        host_error_records: Vec::new(),
+        derived_records: Vec::new(),
+        ..run.clone()
+    };
+    let mut ids: BTreeSet<&str> = BTreeSet::new();
+    for event in &run.events {
+        let single = SignalRun {
+            events: vec![event.clone()],
+            ..bare.clone()
+        };
+        if valid(single) {
+            ids.insert(event.id.as_str());
+        }
+    }
+    for cite in &run.derived_records {
+        let single = SignalRun {
+            derived_records: vec![cite.clone()],
+            ..bare.clone()
+        };
+        if valid(single) {
+            ids.insert(cite.source_intervention.as_str());
+        }
+    }
+    let mut rows: Vec<InterventionRow> = records
+        .interventions
+        .iter()
+        .filter(|row| ids.contains(row.id.as_str()) && row.job.is_some())
+        .cloned()
+        .collect();
+    rows.sort_by(|a, b| (&a.at, &a.id).cmp(&(&b.at, &b.id)));
+    rows
+}
+
+/// The introspection record for a fired run, from the earliest valid citation of whichever signal fired.
+fn introspection_for(
+    run: &SignalRun,
+    headers: &[DecisionHeader],
+    records: &Records,
+    starts: &Starts,
+) -> Option<Introspection> {
+    let sources = introspection_sources(run, headers, records, starts);
+    let first = sources.first()?;
     Some(Introspection {
         schema: "athena.introspection/1",
         intervention: first.id.clone(),
         job: first.job.clone()?,
         class_of_work: first.class_of_work.clone(),
         at: first.at.clone(),
-        earlier_cases: run
-            .events
+        earlier_cases: sources
             .iter()
+            .skip(1)
             .take_while(|e| (&e.at, &e.id) < (&first.at, &first.id))
             .map(|e| e.id.clone())
             .collect(),
@@ -1009,10 +1065,20 @@ pub fn run_on_from(
     }
     let introspection = runs
         .iter()
-        .find(|r| r.decision == "D87" && r.fired && !r.events.is_empty())
-        .and_then(introspection_for);
+        .filter(|r| r.decision == "D87" && r.fired)
+        .find_map(|r| introspection_for(r, &headers, records, starts));
     if let Some(record) = &introspection {
         check_introspection(record, records, &mut findings);
+    } else {
+        for decision in &under_review {
+            findings.push(Finding {
+                condition: "d",
+                reason: format!(
+                    "{decision} is under review but no introspection record could be built: \
+                     no fired run cites a valid intervention, or a derived record's source intervention"
+                ),
+            });
+        }
     }
     Report {
         entries: parsed.entries.len(),
