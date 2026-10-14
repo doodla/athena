@@ -13,14 +13,17 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
+mod site;
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("setup") => setup(&Flags::parse(&args[1..])),
         Some("ci") => ci(),
+        Some("site") => site_command(&args[1..]),
         _ => {
             eprintln!(
-                "usage: cargo run -p xtask -- setup [--ci] [--force] [--allow-dirty]\n       cargo run -p xtask -- ci"
+                "usage: cargo run -p xtask -- setup [--ci] [--force] [--allow-dirty]\n       cargo run -p xtask -- ci\n       cargo run -p xtask -- site [--out <dir>]"
             );
             return ExitCode::from(2);
         }
@@ -32,6 +35,17 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// `site [--out <dir>]`: renders the explainer page to `<dir>/index.html` (default `site/`, gitignored).
+fn site_command(args: &[String]) -> Result<()> {
+    let root = repo_root();
+    let out = match args {
+        [] => root.join(site::DEFAULT_OUT),
+        [flag, dir] if flag == "--out" => PathBuf::from(dir),
+        _ => bail!("usage: cargo run -p xtask -- site [--out <dir>]"),
+    };
+    site::build(&root, &out)
 }
 
 #[derive(Debug, Default)]

@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `cargo run -p xtask -- site [--out <dir>]` renders the explainer page for the firstmate work-handling
+  study to `site/index.html` (gitignored): one self-contained HTML file with inline CSS, a responsive layout
+  and a dark theme. All text comes from the study JSON, is HTML-escaped, and cites claim ids; the page states
+  the pinned firstmate commit. A new workflow, `.github/workflows/pages.yml`, builds it on pushes to `main`
+  and deploys it to GitHub Pages. The repository owner must set Pages source to GitHub Actions once. The
+  design note is `docs/design/explainer-site.md`.
 - `docs/design/socratic-review.md`: a design (no code) for a plan review between reading and dispatch, for the
   `BRIEF.md` addendum "2026-10-14: Socratic questions". Six fixed question kinds, an answer ladder (facts, then
   Jev, then at most two user questions), recording, defaults-loop feedback, failure origin, honest acceptance,

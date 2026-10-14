@@ -1,0 +1,44 @@
+# Publishes the explainer page to GitHub Pages (docs/design/explainer-site.md). A thin call into Rust:
+# `cargo run -p xtask -- site` renders site/index.html from studies/firstmate-work-handling, and the
+# three Pages actions upload and deploy that directory. The repository owner must set
+# Settings -> Pages -> Source to "GitHub Actions" once; until then the deploy job fails.
+name: pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time; a newer push replaces one still waiting, but never cancels one in progress.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/configure-pages@v5
+      - name: Render the page
+        run: cargo run --locked -p xtask -- site
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
