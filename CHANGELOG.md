@@ -9,6 +9,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `docs/design/socratic-review.md`: a design (no code) for a plan review between reading and dispatch, for the
+  `BRIEF.md` addendum "2026-10-14: Socratic questions". Six fixed question kinds, an answer ladder (facts, then
+  Jev, then at most two user questions), recording, defaults-loop feedback, failure origin, honest acceptance,
+  alternatives and cost. It is grounded in D87, 9gwv, 16zf, nem8, 8qkc, m1bs, the four reader-budget retries and
+  the PR #59 claim. It is for review before anything is built.
 - `athena strategy` (read-only, `--json`): coverage per goal (rows, covered, partial, not covered, and the
   not-covered rows) computed from `docs/design/requirements-map.md`, with goal membership read from the goal
   lists of `docs/design/strategy-view.md`. An ID in a goal but not in the map, or a map row in no goal, is an
