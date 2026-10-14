@@ -264,6 +264,19 @@ pub fn judge(inputs: &VerdictInputs<'_>) -> Judgment {
                 source: FindingSource::Verifier,
             });
         }
+        if let Some(mismatch) = output
+            .request_reading_mismatch
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+        {
+            reasons.push("the reading misread the request".into());
+            findings.push(athena_finding(
+                Severity::Major,
+                "The reading does not match the request, so passing criteria do not show the request was met".into(),
+                mismatch.to_string(),
+            ));
+        }
     } else if inputs.verifier_failure.is_none() && inputs.checks.iter().all(|c| c.passed) {
         reasons.push("the verifier returned no verdict".into());
     }
@@ -410,6 +423,31 @@ mod tests {
             verified(&j, "b", "c", "sha256:x").is_none(),
             "only a pass constructs Verified"
         );
+    }
+
+    fn judged_with_mismatch(mismatch: Option<&str>) -> Judgment {
+        let mut out = output(vec!["cargo test"], vec![]);
+        out.request_reading_mismatch = mismatch.map(String::from);
+        judge_with(&out, &["cargo test".to_string()], &[check(true)])
+    }
+
+    #[test]
+    fn a_request_reading_mismatch_is_a_major_finding_and_the_verdict_is_not_pass() {
+        let j = judged_with_mismatch(Some("The request asked for the goal, not the checklist"));
+        assert_eq!(j.final_verdict, Verdict::Fail);
+        assert!(j.findings.iter().any(|f| f.severity == Severity::Major
+            && f.evidence == "The request asked for the goal, not the checklist"));
+        assert!(j.reasons.iter().any(|r| r.contains("misread the request")));
+    }
+
+    #[test]
+    fn an_absent_or_blank_request_reading_mismatch_adds_nothing() {
+        for mismatch in [None, Some(""), Some("  \n")] {
+            let j = judged_with_mismatch(mismatch);
+            assert_eq!(j.final_verdict, Verdict::Pass, "{mismatch:?}");
+            assert!(j.findings.is_empty(), "{mismatch:?}");
+            assert!(j.reasons.is_empty(), "{mismatch:?}");
+        }
     }
 
     fn passes_when_ran(cited: &str, ran: &str) -> bool {

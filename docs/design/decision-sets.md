@@ -104,13 +104,13 @@ deliverable paths **(design)**:
    rule the code enforces is not worth reader tokens **(read)**. They appear in the brief only as a one-line
    pointer if they have an open review (§4).
 
-**Token budget (F1).** The budgets are in code: contract 350, reader 1,800, producer 1,100, verifier 1,300 tokens
+**Token budget (F1).** The budgets are in code: contract 350, reader 1,930, producer 1,100, verifier 1,300 tokens
 **(read: `crates/athena-context/src/lib.rs` lines 156-159)**, estimated as ⌈bytes/3.0⌉. What those budgets do and do
 not enforce, measured and read for review 1:
 
-- **Measured (review 1):** the budgets test prints the reader set at 1,798 of 1,800 tokens, change producer 883 of
+- **Measured (review 1, when the reader budget was 1,800):** the budgets test printed the reader set at 1,798 of 1,800 tokens, change producer 883 of
   1,100, change verifier 1,088 of 1,300, study producer 1,099 of 1,100, study verifier 1,238 of 1,300, contract 326
-  of 350. The reader set has 2 tokens of headroom, and the log has 91 entries; at an assumed 25 tokens a line
+  of 350. The reader set then had 2 tokens of headroom, and the log has 91 entries; at an assumed 25 tokens a line
   **(estimate)** one line each would be about 2,300 tokens. **The reader therefore does not see the whole set.**
 - **Reader: narrowing and a cap, in code.** Code narrows the candidate set by class and phase (§3 step 1) before the
   reader is invoked. The reader is given at most **K lines** of that narrowed set (K is a number in `athena.toml`,
@@ -414,7 +414,7 @@ superseded by an inactive one, and every `code-check` decision names a test that
    no signals are watched.
 2. **Stored set files (one TOML per set).** Duplicates scope in two places and drifts. Rejected for computed sets.
 3. **Put every decision in `defaults.toml`.** Makes the user's model carry design choices and burns reader tokens
-   (1,800 budget). Rejected.
+   (1,930 budget). Rejected.
 4. **Auto-supersede on a firing signal.** Rejected: Athena would edit its own rulebook (defaults-loop §9).
 5. **Jev for all membership.** Rejected: a requirement dropped by a wrong answer is worse than a token cost; Jev
    is in shadow only (D90).

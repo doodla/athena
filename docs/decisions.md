@@ -609,8 +609,8 @@ amend earlier entries without rewriting them. All of these entries belong to the
 
 - **Decision:**
   - The contract has eight rules, measured at 294 tokens, and a budget of 350.
-  - Each role's always-loaded set also has a fixed budget: reader 1,800, producer 1,100, and verifier
-    1,300.
+  - Each role's always-loaded set also has a fixed budget: reader 1,930, producer 1,100, and verifier
+    1,300. The reader budget was 1,800 until the goal-preservation change (D93).
   - The live measurement, by the delta method, is the authority. CI uses ⌈bytes/3.0⌉ as a tripwire for
     prose.
   - Every asset is compiled in and hashed into each invocation record.
@@ -2074,3 +2074,28 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Reversal cost:** Low: swap `CurlHttp` for a crate-backed `HttpPost`; the `jev` field is optional.
 - **Provenance:** stated: the probe facts in the job request of 2026-10-14 (endpoint, body, answer shapes,
   usage, cost string, the chat refusal, the proxy). Not re-run: no network was available when this was built.
+
+## D93 · A request's goal is carried to the verdict, and the reader budget rises from 1,800 to 1,930 tokens
+
+- **Decision:** The reader prompt names the request's audience, requires one acceptance criterion written as an
+  outcome that audience can check, forbids putting the request's own goal in out of scope, and says to read the
+  output a request is about before planning a change to it. The producer prompt treats the criteria as a floor
+  and serves the goal. The verifier prompt judges user-facing output as its audience would and rates a
+  request-reading mismatch at least major. `judge()` enforces the rating: a non-empty
+  `request_reading_mismatch` adds a major finding and a reason, so the verdict is not pass. `BudgetSet::Reader`
+  rises from 1,800 to 1,930 (the reader figure in D25); the producer and verifier budgets are unchanged.
+- **Measured:** The budgets test (`cargo test --locked -p athena-cli --test budgets -- --nocapture`) prints the
+  reader set at 1,927 tokens with the new text (⌈bytes/3.0⌉), against 1,798 before, so the new rules cost 129
+  tokens. The other sets fit: change producer 876 of 1,100, change verifier 1,148 of 1,300, study producer 1,092
+  of 1,100, study verifier 1,297 of 1,300, contract 326 of 350.
+- **Why removals cannot pay for it:** The reader set was 2 tokens under budget, and its remaining text is the
+  schema-bound rules each output field needs, the defaults model and the capability catalog, which are not
+  prose to cut. Removing 129 tokens would delete rules the reader needs to produce a valid reading. The producer
+  and verifier sets were also full (study producer 1,099 of 1,100 before), so they paid for their additions by
+  trimming wording instead.
+- **Alternatives:** Keep 1,800 and drop reader rules (the goal is lost again); move the rules into the contract
+  (moving rules between components escapes nothing, M18).
+- **Tradeoff:** A larger reader prompt on every job, 129 tokens, in return for a request's goal being named,
+  checkable and enforced at the verdict. The 3-token headroom is as thin as before.
+- **Reversal cost:** Low: restore 1,800 and remove the rules.
+- **Provenance:** measured: the budgets test above; read: `crates/athena-context/src/lib.rs`.

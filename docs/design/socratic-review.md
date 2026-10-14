@@ -173,7 +173,7 @@ cited through the document that mentions them.
 | 16zf: a plan to edit the owner-only `BRIEF.md` | `docs/design/defaults-loop.md` §3.6 row C5 (read) | K3: "Does any deliverable name an owner-only path?" | 1: the owner-only list. That document says it did not check whether a guard exists today | plan |
 | nem8: design bundled with build | `docs/design/defaults-loop.md` §3.6 row C6 names the class without the job id (read); the id is from the request (reported) | K4: "Is this one change, or design and build together?" | 1: classes in the deliverables (`design` and `code`) then 2 | plan |
 | 8qkc and m1bs: `CHANGELOG.md` left out because scope came from criteria wording | `docs/design/defaults-loop.md` §3.6 row C1; D89 (read) | K5, and K3: "Does the deliverables list match what the repository requires and what the criteria say?" | 1: D89 now adds `CHANGELOG.md` in code, so this question is already answered by a code check | plan |
-| Reader-budget retries 69gf, t1y6, 3p3y, jk8v: each retry patched the last finding | `docs/design/defaults-loop.md` §3.6 row C2; D89 (read); the reader budget of 1,800 is D25 (read) | K6: "Does the retry change the place the fault arises, or only the last finding?" and K1: "Is the always-loaded set under its budget?" | 1: the live token counter against the budget, and the earlier introspection of the class | plan (and execution of the retries) |
+| Reader-budget retries 69gf, t1y6, 3p3y, jk8v: each retry patched the last finding | `docs/design/defaults-loop.md` §3.6 row C2; D89 (read); the reader budget (1,930 now, 1,800 when those retries ran) is D25 (read) | K6: "Does the retry change the place the fault arises, or only the last finding?" and K1: "Is the always-loaded set under its budget?" | 1: the live token counter against the budget, and the earlier introspection of the class | plan (and execution of the retries) |
 | PR #59: the claim that the work was on a "real repo" | job request (reported); I found no record of it here | K1: "Which claim about the repository is the plan resting on, and where is it observed?" The claim is an assumption stated as fact | 1: read the repository or host; if only the user's word exists, mark it `reported`, as D87 and D88 do for their sources | plan |
 
 Notes on honesty: for 9gwv and PR #59 I could not read a record, and what is above is the question that would have
@@ -216,7 +216,7 @@ The review should repay itself: a plan that is wrong fails after a producer and 
 $3.00 + $2.00 (the caps) is at stake against a few cents (estimate). The measurement to make first is the
 actual cost on the backtest of §10.
 
-**Reader's token budget.** The reader's whole always-loaded set is 1,800 tokens (D25 and
+**Reader's token budget.** The reader's whole always-loaded set is 1,930 tokens (D25 and
 `BudgetSet::Reader` in `crates/athena-context/src/lib.rs` per the defaults-loop review, **read**; the producer's
 is 1,100 and the verifier's 1,300). The set is full enough that a line in `reader.md` already overran it once
 (D89). So:
