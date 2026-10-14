@@ -18,6 +18,7 @@
 //! - [`pr`]: pull-request landing in owned mode: the link store, the push guard, the merged-content check;
 //! - [`gh`]: `athena land --pr`: push the job's branch, open the pull request, wait for green checks, and merge
 //!   over REST only when the opt-in setting is on;
+//! - [`watcher`]: decisions put under review by exact matching of host-error records, run at landing;
 //! - [`pin`]: a study's repository ref resolved to a commit by the core, and mounted read-only.
 
 pub mod admission;
@@ -43,6 +44,7 @@ pub mod status;
 pub mod store;
 pub mod toolconfig;
 pub mod verify;
+pub mod watcher;
 
 use anyhow::{Result, anyhow, bail};
 use athena_agent::AgentDriver;

@@ -46,6 +46,9 @@ records/
   interventions/<YYYY-MM>/<id>.json  athena.intervention/1
   restarts/<YYYY-MM>/<id>.json       athena.restart/1
   resolutions/<YYYY-MM>/<id>.json    athena.resolution/1
+  host-errors/<YYYY-MM>/<id>.json    athena.host-error/1
+  decision-states/<YYYY-MM>/<id>.json  athena.decision-state/1
+  default-expectations/<YYYY-MM>/<id>.json  athena.default-expectations/1
 ```
 
 Ids are `YYYYMMDD-HHMMSS-xxxx`: UTC time, then four Crockford base32 characters. They sort by time and give
@@ -70,6 +73,9 @@ Every record has a `schema` field naming its type and version.
 | `athena.intervention/1` | `what`, `why`, `class_of_work`, `category`, `job`, `source` (`user` or `observed`), `with_staged_changes` |
 | `athena.restart/1` | `cost` (free text), `minutes` and `tokens` (estimated unless measured), `lost`, `via` |
 | `athena.resolution/1` | `target_path`, `target_field`, `value`, `note`: supplies a pending quantity |
+| `athena.host-error/1` | A call to the code host was refused. `id`, `at`, `status_code` (an integer from 100 to 599, or absent when the call failed before an HTTP answer), `operation` (`merge`, `create-pr`, `read-repo`, `read-pr`, `read-checks`), `job` (the job the call was made for), `phase` (`reading`, `producing`, `verifying`, `landing`), `message_class` (`server-error`, `method-not-allowed`, `unprocessable`, `not-found`, `not-authorized`, `rate-limited`, `other-status`, `no-answer`; it follows from `status_code` and the gate refuses one that does not). The client's own text is **not** a field and is never stored. The host client writes one for every refused call, including each repeat of a transient failure (500, 502, 503, 504, repeated up to three calls in all); `athena land --pr` commits them under an `Athena-Record` trailer |
+| `athena.decision-state/1` | Append-only: one change of a decision's state. `id`, `at`, `decision` (such as `D87`), `state` (`under-review`, or `cleared`, which nothing writes yet), `signal` (the name of the signal that fired), `firing_records` (the ids that fired it; required for `under-review`), `decision_job` (for `cleared`). The current state is the fold of all of them: the latest by `(at, id)` per decision. The watcher writes `under-review` when a signal fires; `docs/decisions.md` is never edited |
+| `athena.default-expectations/1` | What a default in `defaults.toml` assumes and how to tell it failed, keyed by the default's id (`default_id`), so `defaults.toml` itself stays as it is (D26). `id`, `at`, `assumptions`, `signals` (each with `source`, `strength` `hard` or `soft`, `text`, `threshold_jobs`: at least 1 for hard and at least 2 for soft), `defaults_version` (the `defaults.toml` version it was written against), `proposal` (the defaults proposal it came from, if any). A newer record for the same default replaces an older one for readers; neither is edited. Only the type, a writer and a reader exist; no migration of the 12 defaults has been done |
 
 An abridged invocation record:
 

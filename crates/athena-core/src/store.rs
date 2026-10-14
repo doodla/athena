@@ -4,8 +4,9 @@
 
 use anyhow::{Result, anyhow, bail};
 use athena_data::records::{
-    AnyRecord, Candidate, Correction, Intervention, Invocation, Job, Outcome, OutcomeState,
-    Reading, Request, Resolution, Restart, Score, Verification,
+    AnyRecord, Candidate, Correction, DecisionState, DecisionStateKind, DefaultExpectations,
+    HostError, Intervention, Invocation, Job, Outcome, OutcomeState, Reading, Request, Resolution,
+    Restart, Score, Verification, fold_decision_states,
 };
 use athena_data::{JobId, RecordId};
 use athena_gate::records::RecordSet;
@@ -173,6 +174,12 @@ pub struct Records {
     pub interventions: Vec<Intervention>,
     pub restarts: Vec<Restart>,
     pub resolutions: Vec<Resolution>,
+    /// Refused host calls, oldest first.
+    pub host_errors: Vec<HostError>,
+    /// Changes of a decision's state, oldest first; fold them with [`Records::decision_state`].
+    pub decision_states: Vec<DecisionState>,
+    /// What each default assumes and watches, oldest first.
+    pub default_expectations: Vec<DefaultExpectations>,
     /// Files that are not acceptable records, by path.
     pub invalid: Vec<String>,
 }
@@ -221,6 +228,9 @@ impl Records {
                 AnyRecord::Intervention(i) => records.interventions.push(i),
                 AnyRecord::Restart(r) => records.restarts.push(r),
                 AnyRecord::Resolution(r) => records.resolutions.push(r),
+                AnyRecord::HostError(h) => records.host_errors.push(h),
+                AnyRecord::DecisionState(d) => records.decision_states.push(d),
+                AnyRecord::DefaultExpectations(e) => records.default_expectations.push(e),
                 other => {
                     let job = job_of(&other)
                         .expect("every other record names its job")
@@ -236,6 +246,15 @@ impl Records {
         }
         records.interventions.sort_by_key(|i| i.at);
         records.restarts.sort_by_key(|r| r.at);
+        records
+            .host_errors
+            .sort_by(|a, b| (a.at, &a.id).cmp(&(b.at, &b.id)));
+        records
+            .decision_states
+            .sort_by(|a, b| (a.at, &a.id).cmp(&(b.at, &b.id)));
+        records
+            .default_expectations
+            .sort_by(|a, b| (a.at, &a.id).cmp(&(b.at, &b.id)));
         Ok(records)
     }
 
@@ -295,5 +314,20 @@ impl Records {
         self.interventions.iter().any(|i| &i.id == id)
             || self.restarts.iter().any(|r| &r.id == id)
             || self.resolutions.iter().any(|r| &r.id == id)
+            || self.host_errors.iter().any(|r| &r.id == id)
+            || self.decision_states.iter().any(|r| &r.id == id)
+            || self.default_expectations.iter().any(|r| &r.id == id)
+    }
+
+    /// The current state of each decision, folded from its append-only state records.
+    pub fn decision_state(&self) -> BTreeMap<String, DecisionStateKind> {
+        fold_decision_states(&self.decision_states)
+    }
+
+    /// The newest `athena.default-expectations/1` record for a default, if any.
+    pub fn expectations_for(&self, default_id: &str) -> Option<&DefaultExpectations> {
+        self.default_expectations
+            .iter()
+            .rfind(|e| e.default_id == default_id)
     }
 }

@@ -9,6 +9,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Decision-sets design §8 step 4, without the brief component and set selection. The root cause of two problems
+  seen on 2026-10-13 and 2026-10-14 was that the host client threw away the HTTP status of a refused call:
+  - `athena.host-error/1` (status code, operation, phase, a closed message class; no host text), written by the
+    host client in `crates/athena-core/src/gh.rs` for every refused call. A 5xx of 500, 502, 503 or 504 is
+    repeated up to three calls in all, each refusal recorded, and only the last one reaches the user (the `athena
+    land --pr` run of job w4cj that needed a manual rerun after an HTTP 500). Other statuses, 405 and 404
+    included, are recorded once and not repeated.
+  - `crates/athena-core/src/watcher.rs`: the landing trigger and exact matching. D87's hard signal (operation
+    `merge`, status 405 or 422, phase `landing`, one job) is loaded and checked against the record vocabulary;
+    `athena land --pr` runs the watcher at the end of every run, so the HTTP 405 of job 9h2j (PR #41) puts D87
+    under review on its first occurrence. The watcher reads host-error records only: a record cited by an earlier
+    state record is not evaluated twice and an introspection is never an input.
+  - `athena.decision-state/1` (append-only, folded to the current state) and `athena.default-expectations/1`
+    (record type, writer and reader only; `defaults.toml` is unchanged).
+  - `athena backtest` reads host-error records and reports D87 under review, with the record id cited, when one
+    shows a refused merge; the decision view gains `under_review`.
+  - Held back: the brief component for the decision-state fold (it needs step 3 set selection), and clearing a
+    review. `docs/records.md` and the design §8 describe what was built.
 - A typed, read-only decision view (`crates/athena-cli/src/decisions.rs`) of every entry of `docs/decisions.md`
   (id, status, `superseded_by`, `amended_by`), and `docs/decision-links.toml`, the committed list of the log's 24
   supersession and amend hits with their confirmed status (D11 by D39 at line 322 is `amended`). Decision-sets

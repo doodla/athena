@@ -17,11 +17,12 @@ use crate::pr::{
 use crate::state::StateDir;
 use crate::{Athena, Ui};
 use anyhow::{Context, Result, bail};
-use athena_data::JobId;
-use athena_data::records::Verdict;
+use athena_data::records::{HostError, HostOperation, MessageClass, Verdict, WorkPhase};
+use athena_data::{JobId, RecordId};
 use athena_git::{CommitText, Git};
 use serde::Serialize;
 use serde_json::Value;
+use std::cell::RefCell;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -45,13 +46,118 @@ impl Runner for GhCli {
             .output()
             .context("running gh; is the GitHub client installed?")?;
         if !out.status.success() {
-            bail!(
-                "gh {} failed: {}",
-                args.get(3).map(String::as_str).unwrap_or("api"),
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            return Err(GhFailure {
+                call: args.get(3).cloned().unwrap_or_else(|| "api".to_string()),
+                status_code: parse_status(&stderr),
+                text: stderr.trim().to_string(),
+            }
+            .into());
         }
         String::from_utf8(out.stdout).context("gh printed non-text output")
+    }
+}
+
+/// A call that `gh` ran and the host refused. It is the error a [`Runner`] returns for that case, so the client
+/// can read the status without matching text again. `text` is for the person reading the error; it is never
+/// stored in a record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GhFailure {
+    /// What was called (the REST path).
+    pub call: String,
+    /// The HTTP status, when `gh` reported one.
+    pub status_code: Option<u16>,
+    /// The client's own words, as printed.
+    pub text: String,
+}
+
+impl std::fmt::Display for GhFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "gh {} failed: {}", self.call, self.text)
+    }
+}
+
+impl std::error::Error for GhFailure {}
+
+/// The HTTP status in the text `gh` prints for a refused call, which has the form `... (HTTP 405)`. The first
+/// `HTTP ` followed by three digits that make a status from 100 to 599 counts; no such text gives `None`.
+pub fn parse_status(stderr: &str) -> Option<u16> {
+    stderr.match_indices("HTTP ").find_map(|(at, marker)| {
+        let digits = &stderr[at + marker.len()..];
+        let code = digits.get(..3)?;
+        if !code.bytes().all(|b| b.is_ascii_digit())
+            || digits[3..].starts_with(|c: char| c.is_ascii_digit())
+        {
+            return None;
+        }
+        code.parse().ok().filter(|n| (100..=599).contains(n))
+    })
+}
+
+/// Whether a status is a failure worth asking again: a server that did not answer well, not one that refused
+/// the request.
+pub fn is_transient(status: Option<u16>) -> bool {
+    matches!(status, Some(500 | 502 | 503 | 504))
+}
+
+/// How a call is repeated after a transient failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Retry {
+    /// How many times the call is made in all, at least once.
+    pub attempts: u32,
+    /// The wait before the second call; the wait before the third is twice that, and so on.
+    pub delay: Duration,
+}
+
+impl Retry {
+    /// Three calls in all, with a short wait between them.
+    pub const STANDARD: Retry = Retry {
+        attempts: 3,
+        delay: Duration::from_secs(2),
+    };
+}
+
+/// The refusals of one landing run, kept in memory until the caller commits them as records. The client writes
+/// one for every refused call, retried or not.
+#[derive(Debug)]
+pub struct HostErrorLog {
+    job: JobId,
+    phase: WorkPhase,
+    entries: RefCell<Vec<HostError>>,
+}
+
+impl HostErrorLog {
+    pub fn new(job: JobId, phase: WorkPhase) -> Self {
+        HostErrorLog {
+            job,
+            phase,
+            entries: RefCell::new(Vec::new()),
+        }
+    }
+
+    /// Notes one refused call. The client does this for every refusal; it is public so a test of the landing
+    /// trigger can stand in for the client.
+    pub fn record(&self, operation: HostOperation, status_code: Option<u16>) {
+        let mut entries = self.entries.borrow_mut();
+        let now = crate::now();
+        let mut id = RecordId::generate(now);
+        while entries.iter().any(|e| e.id == id) {
+            id = RecordId::generate(now);
+        }
+        entries.push(HostError {
+            id,
+            at: now,
+            status_code,
+            operation,
+            job: self.job.clone(),
+            phase: self.phase,
+            message_class: MessageClass::of_status(status_code),
+        });
+    }
+
+    /// The refusals so far, oldest first.
+    pub fn entries(&self) -> Vec<HostError> {
+        self.entries.borrow().clone()
     }
 }
 
@@ -214,6 +320,10 @@ pub struct GhClient<'a> {
     pub runner: &'a dyn Runner,
     /// `owner/name`.
     pub repository: String,
+    /// Where every refused call is recorded; none records nothing.
+    pub log: Option<&'a HostErrorLog>,
+    /// How a transient failure is repeated.
+    pub retry: Retry,
 }
 
 impl std::fmt::Debug for GhClient<'_> {
@@ -224,8 +334,27 @@ impl std::fmt::Debug for GhClient<'_> {
     }
 }
 
-impl GhClient<'_> {
-    fn api(&self, method: &str, path: &str, fields: &[(&str, &str)]) -> Result<Value> {
+impl<'a> GhClient<'a> {
+    /// A client that records nothing and repeats a transient failure as [`Retry::STANDARD`] says.
+    pub fn new(runner: &'a dyn Runner, repository: String) -> Self {
+        GhClient {
+            runner,
+            repository,
+            log: None,
+            retry: Retry::STANDARD,
+        }
+    }
+
+    /// Runs one call. A refusal by the host is recorded in the log, whatever its status. A transient failure
+    /// (see [`is_transient`]) is called again, up to the bound of [`Retry`]; any other failure, and the last
+    /// transient one, is returned to the caller.
+    fn api(
+        &self,
+        operation: HostOperation,
+        method: &str,
+        path: &str,
+        fields: &[(&str, &str)],
+    ) -> Result<Value> {
         let mut args: Vec<String> = ["api", "--method", method, path]
             .iter()
             .map(|s| s.to_string())
@@ -234,7 +363,26 @@ impl GhClient<'_> {
             args.push("-f".into());
             args.push(format!("{key}={value}"));
         }
-        let text = self.runner.gh(&args)?;
+        let attempts = self.retry.attempts.max(1);
+        let mut attempt = 1;
+        let text = loop {
+            match self.runner.gh(&args) {
+                Ok(text) => break text,
+                Err(error) => {
+                    let Some(failure) = error.downcast_ref::<GhFailure>() else {
+                        return Err(error);
+                    };
+                    if let Some(log) = self.log {
+                        log.record(operation, failure.status_code);
+                    }
+                    if !is_transient(failure.status_code) || attempt >= attempts {
+                        return Err(error);
+                    }
+                    std::thread::sleep(self.retry.delay * attempt);
+                    attempt += 1;
+                }
+            }
+        };
         if text.trim().is_empty() {
             return Ok(Value::Null);
         }
@@ -249,6 +397,7 @@ impl GhClient<'_> {
 impl Host for GhClient<'_> {
     fn merged_commit(&self, link: &PrLink) -> Result<Option<String>> {
         let pull = self.api(
+            HostOperation::ReadPr,
             "GET",
             &self.repo_path(&format!("pulls/{}", link.pr_number)),
             &[],
@@ -268,7 +417,12 @@ impl Host for GhClient<'_> {
 
 impl PrHost for GhClient<'_> {
     fn default_branch(&self) -> Result<String> {
-        let repo = self.api("GET", &format!("repos/{}", self.repository), &[])?;
+        let repo = self.api(
+            HostOperation::ReadRepo,
+            "GET",
+            &format!("repos/{}", self.repository),
+            &[],
+        )?;
         match repo["default_branch"].as_str() {
             Some(name) if !name.is_empty() => Ok(name.to_string()),
             _ => bail!("the host's reply for the repository names no default branch"),
@@ -277,6 +431,7 @@ impl PrHost for GhClient<'_> {
 
     fn open_pr(&self, pr: &NewPr) -> Result<u64> {
         let created = self.api(
+            HostOperation::CreatePr,
             "POST",
             &self.repo_path("pulls"),
             &[
@@ -293,11 +448,13 @@ impl PrHost for GhClient<'_> {
 
     fn checks(&self, commit: &str) -> Result<Checks> {
         let runs = self.api(
+            HostOperation::ReadChecks,
             "GET",
             &self.repo_path(&format!("commits/{commit}/check-runs?per_page=100")),
             &[],
         )?;
         let status = self.api(
+            HostOperation::ReadChecks,
             "GET",
             &self.repo_path(&format!("commits/{commit}/status")),
             &[],
@@ -306,7 +463,12 @@ impl PrHost for GhClient<'_> {
     }
 
     fn merge(&self, number: u64, head: &str, text: &CommitText) -> Result<()> {
-        let repo = self.api("GET", &format!("repos/{}", self.repository), &[])?;
+        let repo = self.api(
+            HostOperation::ReadRepo,
+            "GET",
+            &format!("repos/{}", self.repository),
+            &[],
+        )?;
         let method = MergeMethods::from_repository(&repo).choose()?;
         let mut fields = vec![("sha", head), ("merge_method", method.as_str())];
         if method == MergeMethod::Squash {
@@ -315,6 +477,7 @@ impl PrHost for GhClient<'_> {
             fields.push(("commit_message", text.body.as_str()));
         }
         self.api(
+            HostOperation::Merge,
             "PUT",
             &self.repo_path(&format!("pulls/{number}/merge")),
             &fields,
@@ -639,9 +802,10 @@ impl Athena {
             rules_commit: &candidate.base_commit,
             remote: remote_name,
         };
+        let log = HostErrorLog::new(id.clone(), WorkPhase::Landing);
         let client = GhClient {
-            runner,
-            repository: repository.clone(),
+            log: Some(&log),
+            ..GhClient::new(runner, repository.clone())
         };
         let remote = GitRemote {
             git: &self.git,
@@ -649,41 +813,54 @@ impl Athena {
         };
         let landed = landed_commit(&self.git, &head, &id, &verification.verified_fingerprint);
         let landed_id = landed.as_ref().ok().cloned();
-        let report = match landed {
-            Ok(landed) => land_pr(&LandPr {
-                state: &self.state,
-                job: &id,
-                branch: &branch,
-                commit: &landed,
-                verified_fingerprint: &verification.verified_fingerprint,
-                pr: PrDraft {
-                    title: &title,
-                    body: &body,
-                    head: &branch,
+        let attempt = || -> Result<PrReport> {
+            match landed {
+                Ok(landed) => land_pr(&LandPr {
+                    state: &self.state,
+                    job: &id,
+                    branch: &branch,
+                    commit: &landed,
+                    verified_fingerprint: &verification.verified_fingerprint,
+                    pr: PrDraft {
+                        title: &title,
+                        body: &body,
+                        head: &branch,
+                    },
+                    squash: &self.git.squash_text(&landed)?,
+                    host_name: &host_name,
+                    repository: &repository,
+                    merge_via_rest: config.landing.merge_via_rest,
+                    poll,
+                    ancestry: &self.git,
+                    remote: &remote,
+                    host: &client,
+                    content: &content,
+                }),
+                // The landed commit is not on this branch. If the job's pull request already exists, the
+                // host may have merged it, and that confirms the landing without the local commit.
+                Err(not_landed) => match confirm_existing_merge(
+                    &self.state,
+                    &id,
+                    &client,
+                    &content,
+                    &verification.verified_fingerprint,
+                )? {
+                    Some(report) => Ok(report),
+                    None => Err(not_landed),
                 },
-                squash: &self.git.squash_text(&landed)?,
-                host_name: &host_name,
-                repository: &repository,
-                merge_via_rest: config.landing.merge_via_rest,
-                poll,
-                ancestry: &self.git,
-                remote: &remote,
-                host: &client,
-                content: &content,
-            }),
-            // The landed commit is not on this branch. If the job's pull request already exists, the host
-            // may have merged it, and that confirms the landing without the local commit.
-            Err(not_landed) => match confirm_existing_merge(
-                &self.state,
-                &id,
-                &client,
-                &content,
-                &verification.verified_fingerprint,
-            )? {
-                Some(report) => Ok(report),
-                None => Err(not_landed),
-            },
-        }?;
+            }
+        };
+        let outcome = attempt();
+        // The watcher runs at landing, after a host error or not: it records every refused call of this run
+        // and puts a decision under review when a signal fires. It runs before the outcome is returned, so a
+        // refusal that failed the landing is seen too. A failure of the watcher is shown, not allowed to hide
+        // the landing's own result.
+        if let Err(problem) = self.watch_landing(&log, ui) {
+            ui.line(&format!(
+                "warning: could not record host errors or watch the decisions: {problem:#}"
+            ));
+        }
+        let report = outcome?;
         ui.line(&format!(
             "pull request #{} on {}/{}: {:?}",
             report.link.pr_number, report.link.host, report.link.repository, report.link.state
@@ -755,10 +932,7 @@ mod tests {
     #[test]
     fn the_client_runs_only_gh_api_with_rest_paths() {
         let runner = FakeRunner::new(ALL_METHODS);
-        let client = GhClient {
-            runner: &runner,
-            repository: "example/project".into(),
-        };
+        let client = GhClient::new(&runner, "example/project".into());
         let pr = NewPr {
             title: "t",
             body: "b",
@@ -801,10 +975,7 @@ mod tests {
     /// The arguments of the merge request a client makes against a repository reply.
     fn merge_request(repo: &'static str) -> Result<Vec<String>> {
         let runner = FakeRunner::new(repo);
-        let client = GhClient {
-            runner: &runner,
-            repository: "example/project".into(),
-        };
+        let client = GhClient::new(&runner, "example/project".into());
         client.merge(7, "abc", &text())?;
         let calls = runner.calls.borrow();
         Ok(calls.last().unwrap().clone())
@@ -862,10 +1033,7 @@ mod tests {
         let none = r#"{"default_branch": "trunk", "allow_merge_commit": false,
             "allow_squash_merge": false, "allow_rebase_merge": false}"#;
         let runner = FakeRunner::new(none);
-        let client = GhClient {
-            runner: &runner,
-            repository: "example/project".into(),
-        };
+        let client = GhClient::new(&runner, "example/project".into());
         let err = client.merge(7, "abc", &text()).unwrap_err().to_string();
         assert!(err.contains("allows no merge method"), "{err}");
         assert!(err.contains("allow_squash_merge false"), "{err}");
@@ -1034,7 +1202,7 @@ mod tests {
 
         fn run_with(
             &self,
-            host: &FakeHost,
+            host: &dyn PrHost,
             merge_via_rest: bool,
             branch: &str,
             commit: &str,
@@ -1155,10 +1323,7 @@ mod tests {
     #[test]
     fn the_client_reads_the_default_branch_from_the_repository() {
         let runner = FakeRunner::new(ALL_METHODS);
-        let client = GhClient {
-            runner: &runner,
-            repository: "example/project".into(),
-        };
+        let client = GhClient::new(&runner, "example/project".into());
         assert_eq!(client.default_branch().unwrap(), "trunk");
         let calls = runner.calls.borrow();
         assert_eq!(calls.len(), 1);
@@ -1601,5 +1766,183 @@ mod tests {
         assert!(rig.remote.pushes.borrow().is_empty());
         assert_eq!(host.opened.get(), 0);
         assert_eq!(load_link(&state, &rig.job).unwrap(), None);
+    }
+
+    // ---- refused host calls: the status, the record and the bounded retry ----
+
+    #[test]
+    fn the_status_is_read_from_the_text_gh_prints() {
+        // The form `gh api` prints for a refused call.
+        assert_eq!(parse_status("gh: Method Not Allowed (HTTP 405)"), Some(405));
+        assert_eq!(parse_status("gh: Server Error (HTTP 500)\n"), Some(500));
+        assert_eq!(
+            parse_status("gh: Merge failed (HTTP 405) after HTTP 500"),
+            Some(405)
+        );
+        assert_eq!(parse_status("gh: connection refused"), None);
+        assert_eq!(parse_status("HTTP 4050"), None);
+        assert_eq!(parse_status("HTTP 999"), None);
+        assert_eq!(parse_status("HTTP 40"), None);
+        assert_eq!(parse_status(""), None);
+        for status in [500, 502, 503, 504] {
+            assert!(is_transient(Some(status)));
+        }
+        for status in [400, 404, 405, 422, 501] {
+            assert!(!is_transient(Some(status)));
+        }
+        assert!(!is_transient(None));
+    }
+
+    /// A host that fails the merge request with the given statuses, one per call, then (unless `always` is
+    /// set) lets it through.
+    struct Refusing {
+        failures: RefCell<std::collections::VecDeque<Option<u16>>>,
+        always: Option<Option<u16>>,
+        merged: Cell<bool>,
+        merge_calls: Cell<u32>,
+        other_calls: Cell<u32>,
+    }
+    impl Refusing {
+        fn new(failures: &[Option<u16>], always: Option<Option<u16>>) -> Self {
+            Refusing {
+                failures: RefCell::new(failures.iter().copied().collect()),
+                always,
+                merged: Cell::new(false),
+                merge_calls: Cell::new(0),
+                other_calls: Cell::new(0),
+            }
+        }
+    }
+    impl Runner for Refusing {
+        fn gh(&self, args: &[String]) -> Result<String> {
+            let path = args.iter().find(|a| a.starts_with("repos/")).unwrap();
+            if !path.ends_with("/merge") {
+                self.other_calls.set(self.other_calls.get() + 1);
+                return Ok(if path == "repos/example/project" {
+                    ALL_METHODS.to_string()
+                } else if path.ends_with("/pulls") {
+                    r#"{"number": 7}"#.to_string()
+                } else if path.contains("/pulls/") {
+                    if self.merged.get() {
+                        r#"{"merged": true, "merge_commit_sha": "merged1"}"#.to_string()
+                    } else {
+                        r#"{"merged": false}"#.to_string()
+                    }
+                } else if path.contains("check-runs") {
+                    r#"{"check_runs": [{"status": "completed", "conclusion": "success"}]}"#
+                        .to_string()
+                } else {
+                    r#"{"state": "success", "statuses": []}"#.to_string()
+                });
+            }
+            self.merge_calls.set(self.merge_calls.get() + 1);
+            let refusal = match self.always {
+                Some(status) => Some(status),
+                None => self.failures.borrow_mut().pop_front(),
+            };
+            match refusal {
+                Some(status_code) => Err(GhFailure {
+                    call: "api".into(),
+                    status_code,
+                    text: "refused".into(),
+                }
+                .into()),
+                None => {
+                    self.merged.set(true);
+                    Ok("{}".to_string())
+                }
+            }
+        }
+    }
+
+    /// Lands over REST through a client on `runner`, with a log of its refusals.
+    fn land_through(runner: &Refusing, rig: &Rig) -> (Result<PrReport>, Vec<HostError>) {
+        let log = HostErrorLog::new(rig.job.clone(), WorkPhase::Landing);
+        let client = GhClient {
+            log: Some(&log),
+            retry: Retry {
+                attempts: 3,
+                delay: Duration::ZERO,
+            },
+            ..GhClient::new(runner, "example/project".into())
+        };
+        let result = rig.run_with(&client, true, "athena/bootstrap", "cand1", &Anc(true));
+        (result, log.entries())
+    }
+
+    #[test]
+    fn a_500_twice_then_success_lands_with_two_host_errors_and_no_error_for_the_user() {
+        let runner = Refusing::new(&[Some(500), Some(500)], None);
+        let rig = Rig::new();
+        let (result, errors) = land_through(&runner, &rig);
+        let report = result.expect("a transient failure is retried, not shown");
+        assert_eq!(report.link.state, LinkState::Landed);
+        assert!(report.merge_requested);
+        assert_eq!(runner.merge_calls.get(), 3);
+        assert_eq!(errors.len(), 2);
+        for error in &errors {
+            assert_eq!(error.status_code, Some(500));
+            assert_eq!(error.operation, HostOperation::Merge);
+            assert_eq!(error.phase, WorkPhase::Landing);
+            assert_eq!(error.job, rig.job);
+            assert_eq!(error.message_class, MessageClass::ServerError);
+        }
+        assert_ne!(errors[0].id, errors[1].id);
+    }
+
+    #[test]
+    fn a_persistent_500_stops_at_the_bound_and_the_error_reaches_the_user() {
+        let runner = Refusing::new(&[], Some(Some(500)));
+        let rig = Rig::new();
+        let (result, errors) = land_through(&runner, &rig);
+        let error = result.unwrap_err();
+        let failure = error.downcast_ref::<GhFailure>().expect("the host's error");
+        assert_eq!(failure.status_code, Some(500));
+        assert_eq!(runner.merge_calls.get(), 3, "three calls in all, then stop");
+        assert_eq!(errors.len(), 3);
+        // The pull request was opened and stays open: a rerun finds it by its number.
+        assert_eq!(rig.stored().state, LinkState::Open);
+    }
+
+    #[test]
+    fn a_refusal_that_is_not_transient_is_recorded_once_and_not_retried() {
+        for status in [Some(405), Some(404), Some(422), Some(403), Some(501), None] {
+            let runner = Refusing::new(&[], Some(status));
+            let rig = Rig::new();
+            let (result, errors) = land_through(&runner, &rig);
+            assert!(result.is_err(), "{status:?}");
+            assert_eq!(runner.merge_calls.get(), 1, "{status:?}");
+            assert_eq!(errors.len(), 1, "{status:?}");
+            assert_eq!(errors[0].status_code, status);
+            assert_eq!(errors[0].operation, HostOperation::Merge);
+            assert_eq!(errors[0].message_class, MessageClass::of_status(status));
+        }
+    }
+
+    #[test]
+    fn a_failure_that_is_not_a_host_refusal_is_not_recorded() {
+        struct Missing;
+        impl Runner for Missing {
+            fn gh(&self, _: &[String]) -> Result<String> {
+                bail!("running gh; is the GitHub client installed?")
+            }
+        }
+        let log = HostErrorLog::new(JobId::parse("bootstrap").unwrap(), WorkPhase::Landing);
+        let client = GhClient {
+            log: Some(&log),
+            ..GhClient::new(&Missing, "example/project".into())
+        };
+        assert!(client.default_branch().is_err());
+        assert!(log.entries().is_empty());
+    }
+
+    #[test]
+    fn the_stored_record_has_no_text_of_the_host() {
+        let runner = Refusing::new(&[], Some(Some(405)));
+        let rig = Rig::new();
+        let (_, errors) = land_through(&runner, &rig);
+        let json = athena_data::records::AnyRecord::HostError(errors[0].clone()).to_json();
+        assert!(!json.contains("refused"), "{json}");
+        assert!(json.contains("\"status_code\": 405"), "{json}");
     }
 }

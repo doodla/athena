@@ -2,8 +2,9 @@
 
 **Status:** proposed (D91), revised after review 1 (`docs/design/reviews/decision-sets-review-1.md`, verdict accept
 with changes; all eight changes of its section 6 are applied here and in `docs/design/defaults-loop.md`). Awaiting
-the confirming look at the revision; no build starts before it. Design only: no Rust, no schema file, no change to
-`defaults.toml` or `athena.toml`. A review comes before any build (the `designed` default). Paths are relative to the
+the confirming look at the revision. Build steps 0, 2 and 4 are built (§8; step 4 without its brief component),
+steps 1, 3, 5 and 6 are not. No change to `defaults.toml` or `athena.toml`. A review comes before any build (the
+`designed` default). Paths are relative to the
 repository root. The reader knows `defaults.toml` (D26) and `docs/decisions.md` but has not seen the jobs behind this.
 
 **Revision summary.** F1 to F4 were settled first and the rest follows from them: (F1) the reader gets sets only
@@ -460,6 +461,30 @@ superseded by an inactive one, and every `code-check` decision names a test that
    per-job set-size check and its test**.
 4. The host-error record written by the client (§4), landing as a watcher trigger, the watcher with exact matching,
    the `athena.decision-state/1` record and its brief component; the `athena.default-expectations/1` record.
+   **Built, except the brief component.**
+   - `athena.host-error/1` (`crates/athena-data/src/records.rs`): `status_code` (optional), `operation` (closed:
+     `merge`, `create-pr`, `read-repo`, `read-pr`, `read-checks`), `job`, `phase`, `at` and a closed
+     `message_class` that follows from the status. The raw standard-error text is not a field. `GhCli` returns a
+     typed `GhFailure` that carries the status, read from the `(HTTP nnn)` text `gh api` prints (pinned by
+     `the_status_is_read_from_the_text_gh_prints`); a call with no such text has `status_code` absent.
+   - The retry is in the client, not in the land command (`GhClient::api` in `crates/athena-core/src/gh.rs`): every
+     refused call is recorded, a 500, 502, 503 or 504 is called again up to three calls in all with a growing wait,
+     and every other status (405, 422 and 404 included) and a call with no status is recorded once and returned.
+     Tests: a 500 twice then success lands with two host-error records and no error; a persistent 500 stops after
+     three calls and the error is returned.
+   - The watcher (`crates/athena-core/src/watcher.rs`) loads D87's hard signal through a vocabulary check, matches
+     exactly (operation, phase, status in 405 or 422; threshold one job) and is run by `athena land --pr` after
+     every run, whether the landing succeeded or not. It commits the run's host-error records, then appends one
+     `athena.decision-state/1` record per firing. A record cited by an earlier state record is not evaluated again,
+     a decision already under review does not fire again, and no introspection is an input (F7).
+   - `athena.decision-state/1` is append-only with `fold_decision_states` to the current state. `cleared` exists in
+     the type so the fold is defined, but nothing writes it: clearing stays with the user and is not built.
+   - `athena.default-expectations/1`: the type with validation, a writer (`Athena::record_default_expectations`)
+     and a reader (`Records::expectations_for`). The 12 defaults are not migrated and `defaults.toml` is unchanged.
+   - `athena backtest` reads `records/host-errors/` and reports D87 under review with the host-error record id.
+   - **Held back:** the brief component that hashes the decision-state fold into the reading. It selects what the
+     brief shows and so needs the set selection of step 3, which is not built. Until then a decision under review
+     is visible in the records, in `athena land --pr` output and in `athena backtest`, not in a brief.
 5. Backtest the signals on past records (§6 step 5), D87 first.
 6. Probe a multi-question `evaluate` call (§5), then add Jev for the two questions, in shadow, scored as in
    defaults-loop §10.

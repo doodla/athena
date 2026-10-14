@@ -314,6 +314,135 @@ fn only_d87_and_d88_have_headers_and_only_d87_has_an_exact_signal() {
     assert_eq!(d87.amended_by, ["D88"]);
 }
 
+fn host_error(root: &Path, id: &str, status: Option<u16>, operation: &str, class: &str) {
+    write(
+        root,
+        &format!("records/host-errors/2026-10/{id}.json"),
+        json!({
+            "schema": "athena.host-error/1",
+            "id": id,
+            "at": "2026-10-13T19:21:56Z",
+            "status_code": status,
+            "operation": operation,
+            "job": "20261013-192156-ar1x",
+            "phase": "landing",
+            "message_class": class,
+        }),
+    );
+}
+
+#[test]
+fn a_host_error_record_of_the_405_puts_d87_under_review_and_cites_the_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    host_error(
+        root,
+        "20261013-192200-k7q2",
+        Some(405),
+        "merge",
+        "method-not-allowed",
+    );
+
+    let report = run_in(root);
+    assert_eq!(report.under_review, ["D87"]);
+    let run = report
+        .runs
+        .iter()
+        .find(|r| r.decision == "D87" && !r.host_error_records.is_empty())
+        .expect("the host-error signal ran");
+    assert!(run.fired);
+    assert_eq!(run.host_error_records, ["20261013-192200-k7q2"]);
+    let d87 = report
+        .decision_view
+        .iter()
+        .find(|v| v.id == "D87")
+        .expect("D87 is in the log");
+    assert_eq!(
+        d87.under_review.as_deref(),
+        Some(&["20261013-192200-k7q2".to_string()][..])
+    );
+    // No other decision is marked.
+    assert_eq!(
+        report
+            .decision_view
+            .iter()
+            .filter(|v| v.under_review.is_some())
+            .count(),
+        1
+    );
+    // The first occurrence is enough, and condition (b) holds without an intervention.
+    assert!(report.passed(), "{:?}", report.findings);
+    let text = backtest::render(&report);
+    assert!(text.contains("D87 is under review"), "{text}");
+    assert!(text.contains("20261013-192200-k7q2"), "{text}");
+}
+
+#[test]
+fn without_the_host_error_record_d87_is_not_under_review() {
+    let dir = tempfile::tempdir().unwrap();
+    let report = run_in(dir.path());
+    assert!(report.under_review.is_empty());
+    assert!(
+        report
+            .decision_view
+            .iter()
+            .all(|v| v.under_review.is_none())
+    );
+    assert!(!backtest::render(&report).contains("under review"));
+    assert!(report.findings.iter().any(|f| f.condition == "b"));
+}
+
+#[test]
+fn host_errors_that_do_not_falsify_the_assumption_leave_d87_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    host_error(
+        root,
+        "20261013-192201-aaaa",
+        Some(404),
+        "merge",
+        "not-found",
+    );
+    host_error(
+        root,
+        "20261013-192202-bbbb",
+        Some(500),
+        "merge",
+        "server-error",
+    );
+    host_error(root, "20261013-192203-cccc", None, "merge", "no-answer");
+    host_error(
+        root,
+        "20261013-192204-dddd",
+        Some(405),
+        "create-pr",
+        "method-not-allowed",
+    );
+    let report = run_in(root);
+    assert!(report.under_review.is_empty());
+    assert!(
+        report
+            .decision_view
+            .iter()
+            .all(|v| v.under_review.is_none())
+    );
+}
+
+#[test]
+fn a_malformed_host_error_record_is_an_error_naming_the_file() {
+    let dir = tempfile::tempdir().unwrap();
+    // The class does not follow from the status.
+    host_error(
+        dir.path(),
+        "20261013-192200-k7q2",
+        Some(405),
+        "merge",
+        "not-found",
+    );
+    let error = backtest::read_records(dir.path()).unwrap_err();
+    assert!(format!("{error:#}").contains("20261013-192200-k7q2.json"));
+}
+
 #[test]
 fn a_malformed_record_is_an_error_naming_the_file() {
     let dir = tempfile::tempdir().unwrap();

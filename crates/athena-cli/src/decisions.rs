@@ -111,6 +111,22 @@ pub struct DecisionView {
     pub status: Status,
     pub superseded_by: Option<String>,
     pub amended_by: Vec<String>,
+    /// Set when a signal fired: the ids of the records that fired it. This is the state a decision is in beside
+    /// its `status` (`athena.decision-state/1`); the log's prose is untouched.
+    pub under_review: Option<Vec<String>>,
+}
+
+/// Marks the view of `decision` as under review, citing `records`. A second firing adds its records; an id the
+/// log has no entry for is ignored.
+pub fn mark_under_review(views: &mut [DecisionView], decision: &str, records: &[String]) {
+    if let Some(view) = views.iter_mut().find(|v| v.id == decision) {
+        let cited = view.under_review.get_or_insert_with(Vec::new);
+        for id in records {
+            if !cited.contains(id) {
+                cited.push(id.clone());
+            }
+        }
+    }
 }
 
 /// One view per entry heading, in log order. Only hits that are both parsed and confirmed are applied; the
@@ -145,6 +161,7 @@ pub fn view(parsed: &Parsed, confirmed: &ConfirmedLinks) -> Vec<DecisionView> {
                 },
                 superseded_by,
                 amended_by,
+                under_review: None,
             }
         })
         .collect()

@@ -1,4 +1,5 @@
-//! The twelve record types and where each one lives (design §5).
+//! The record types and where each one lives (design §5; the host-error, decision-state and
+//! default-expectations types come from `docs/design/decision-sets.md`).
 //!
 //! A record is a pretty-printed JSON file under `records/`, written once and never modified (D06). Its
 //! `schema` field names its type and version, and [`AnyRecord`] parses any record with unknown fields
@@ -815,6 +816,255 @@ pub struct Resolution {
     pub note: Option<String>,
 }
 
+/// The phase of work a host call or a decision belongs to (`docs/design/decision-sets.md` section 2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WorkPhase {
+    Reading,
+    Producing,
+    Verifying,
+    Landing,
+}
+
+/// The host operation that was refused: a closed list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HostOperation {
+    /// Asking the host to merge a pull request.
+    Merge,
+    /// Opening a pull request.
+    CreatePr,
+    /// Reading the repository (its default branch and allowed merge methods).
+    ReadRepo,
+    /// Reading a pull request.
+    ReadPr,
+    /// Reading the checks of a commit.
+    ReadChecks,
+}
+
+impl HostOperation {
+    pub const ALL: [HostOperation; 5] = [
+        HostOperation::Merge,
+        HostOperation::CreatePr,
+        HostOperation::ReadRepo,
+        HostOperation::ReadPr,
+        HostOperation::ReadChecks,
+    ];
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HostOperation::Merge => "merge",
+            HostOperation::CreatePr => "create-pr",
+            HostOperation::ReadRepo => "read-repo",
+            HostOperation::ReadPr => "read-pr",
+            HostOperation::ReadChecks => "read-checks",
+        }
+    }
+    pub fn parse(text: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|o| o.as_str() == text)
+    }
+}
+
+/// A short class of a refusal, chosen by code from the status code alone: a closed list. The host's own text
+/// is never stored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MessageClass {
+    /// A 5xx answer.
+    ServerError,
+    /// 405: the host does not allow this method here.
+    MethodNotAllowed,
+    /// 422: the host understood the request and refused its content.
+    Unprocessable,
+    /// 404.
+    NotFound,
+    /// 401 or 403.
+    NotAuthorized,
+    /// 429.
+    RateLimited,
+    /// Any other HTTP answer.
+    OtherStatus,
+    /// The call failed before an HTTP answer.
+    NoAnswer,
+}
+
+impl MessageClass {
+    pub const ALL: [MessageClass; 8] = [
+        MessageClass::ServerError,
+        MessageClass::MethodNotAllowed,
+        MessageClass::Unprocessable,
+        MessageClass::NotFound,
+        MessageClass::NotAuthorized,
+        MessageClass::RateLimited,
+        MessageClass::OtherStatus,
+        MessageClass::NoAnswer,
+    ];
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MessageClass::ServerError => "server-error",
+            MessageClass::MethodNotAllowed => "method-not-allowed",
+            MessageClass::Unprocessable => "unprocessable",
+            MessageClass::NotFound => "not-found",
+            MessageClass::NotAuthorized => "not-authorized",
+            MessageClass::RateLimited => "rate-limited",
+            MessageClass::OtherStatus => "other-status",
+            MessageClass::NoAnswer => "no-answer",
+        }
+    }
+    pub fn parse(text: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|c| c.as_str() == text)
+    }
+    /// The class of an answer with this status code, or of no answer.
+    pub fn of_status(status: Option<u16>) -> Self {
+        match status {
+            None => MessageClass::NoAnswer,
+            Some(500..=599) => MessageClass::ServerError,
+            Some(405) => MessageClass::MethodNotAllowed,
+            Some(422) => MessageClass::Unprocessable,
+            Some(404) => MessageClass::NotFound,
+            Some(401 | 403) => MessageClass::NotAuthorized,
+            Some(429) => MessageClass::RateLimited,
+            Some(_) => MessageClass::OtherStatus,
+        }
+    }
+}
+
+/// `athena.host-error/1`: a call to the code host was refused. The host's text is not stored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostError {
+    pub id: RecordId,
+    pub at: Timestamp,
+    /// The HTTP status, or absent when the call failed before an HTTP answer.
+    pub status_code: Option<u16>,
+    pub operation: HostOperation,
+    /// The job the call was made for.
+    pub job: JobId,
+    pub phase: WorkPhase,
+    pub message_class: MessageClass,
+}
+
+/// The state a decision is in beside its `status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DecisionStateKind {
+    /// A signal of the decision fired; only the user clears it.
+    UnderReview,
+    /// The user cleared the review. Nothing writes this yet: clearing is a later build.
+    Cleared,
+}
+
+impl DecisionStateKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DecisionStateKind::UnderReview => "under-review",
+            DecisionStateKind::Cleared => "cleared",
+        }
+    }
+}
+
+/// `athena.decision-state/1`: one change of a decision's state. Append-only: the current state is the fold of
+/// all of them ([`fold_decision_states`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DecisionState {
+    pub id: RecordId,
+    pub at: Timestamp,
+    /// The decision's id, such as `D87`.
+    pub decision: String,
+    pub state: DecisionStateKind,
+    /// The name of the signal that fired, for an `under-review` change.
+    pub signal: Option<String>,
+    /// The records that fired it (for a host-error signal, `athena.host-error/1` ids).
+    pub firing_records: Vec<RecordId>,
+    /// The job that decided a clearing, for a `cleared` change.
+    pub decision_job: Option<JobId>,
+}
+
+/// The current state of each decision that has any state record: the latest by `(at, id)` wins.
+pub fn fold_decision_states(states: &[DecisionState]) -> BTreeMap<String, DecisionStateKind> {
+    let mut ordered: Vec<&DecisionState> = states.iter().collect();
+    ordered.sort_by(|a, b| (a.at, &a.id).cmp(&(b.at, &b.id)));
+    ordered
+        .into_iter()
+        .map(|s| (s.decision.clone(), s.state))
+        .collect()
+}
+
+/// A signal's source: one of the five of `docs/design/decision-sets.md` section 4.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SignalSource {
+    Rejection,
+    Intervention,
+    Correction,
+    CheckFailure,
+    HostError,
+}
+
+/// How strongly one event of a signal counts: a hard signal needs one job, a soft one repeats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SignalStrength {
+    Hard,
+    Soft,
+}
+
+/// One watched condition of a default, in `athena.default-expectations/1`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExpectationSignal {
+    pub source: SignalSource,
+    pub strength: SignalStrength,
+    /// A one-line description.
+    pub text: String,
+    /// Distinct jobs needed; at least 1, and at least 2 for a soft signal.
+    pub threshold_jobs: u32,
+}
+
+/// `athena.default-expectations/1`: what a default in `defaults.toml` assumes and how to tell it failed.
+/// `defaults.toml` itself is not changed (D26).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DefaultExpectations {
+    pub id: RecordId,
+    pub at: Timestamp,
+    /// The default's id in `defaults.toml`.
+    pub default_id: String,
+    pub assumptions: Vec<String>,
+    pub signals: Vec<ExpectationSignal>,
+    /// The `version` of `defaults.toml` this was written against.
+    pub defaults_version: u32,
+    /// The defaults proposal it came from, if any.
+    pub proposal: Option<String>,
+}
+
+impl DefaultExpectations {
+    /// Why this record is not acceptable, if it is not.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.default_id.trim().is_empty() {
+            return Err("default-expectations names no default_id".into());
+        }
+        if self.defaults_version == 0 {
+            return Err(
+                "default-expectations records the defaults version it was written against".into(),
+            );
+        }
+        for signal in &self.signals {
+            let least = match signal.strength {
+                SignalStrength::Hard => 1,
+                SignalStrength::Soft => 2,
+            };
+            if signal.threshold_jobs < least {
+                return Err(format!(
+                    "a {:?} signal needs a threshold of at least {least} job(s)",
+                    signal.strength
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------------
 // The envelope
 
@@ -848,6 +1098,12 @@ pub enum AnyRecord {
     Restart(Restart),
     #[serde(rename = "athena.resolution/1")]
     Resolution(Resolution),
+    #[serde(rename = "athena.host-error/1")]
+    HostError(HostError),
+    #[serde(rename = "athena.decision-state/1")]
+    DecisionState(DecisionState),
+    #[serde(rename = "athena.default-expectations/1")]
+    DefaultExpectations(DefaultExpectations),
 }
 
 /// Why a file under `records/` is not acceptable.
@@ -890,6 +1146,29 @@ impl AnyRecord {
             AnyRecord::Intervention(i) if i.what.trim().is_empty() || i.why.trim().is_empty() => {
                 return Err(invalid("an intervention needs what and why".into()));
             }
+            AnyRecord::HostError(h) if h.status_code.is_some_and(|s| !(100..=599).contains(&s)) => {
+                return Err(invalid(
+                    "a host error's status_code is an HTTP status".into(),
+                ));
+            }
+            AnyRecord::HostError(h)
+                if h.message_class != MessageClass::of_status(h.status_code) =>
+            {
+                return Err(invalid(
+                    "a host error's message_class follows from its status_code".into(),
+                ));
+            }
+            AnyRecord::DecisionState(d) if d.decision.trim().is_empty() => {
+                return Err(invalid("a decision-state names its decision".into()));
+            }
+            AnyRecord::DecisionState(d)
+                if d.state == DecisionStateKind::UnderReview && d.firing_records.is_empty() =>
+            {
+                return Err(invalid(
+                    "an under-review decision-state cites the records that fired it".into(),
+                ));
+            }
+            AnyRecord::DefaultExpectations(e) => e.validate().map_err(invalid)?,
             // Totals are what reconciliation checks an outcome against; only the bootstrap has none
             // (acceptance verification 2).
             AnyRecord::Outcome(o) if o.job.is_request() && o.totals.is_none() => {
@@ -941,6 +1220,19 @@ impl AnyRecord {
             AnyRecord::Resolution(r) => {
                 format!("records/resolutions/{}/{}.json", r.id.month(), r.id)
             }
+            AnyRecord::HostError(r) => {
+                format!("records/host-errors/{}/{}.json", r.id.month(), r.id)
+            }
+            AnyRecord::DecisionState(r) => {
+                format!("records/decision-states/{}/{}.json", r.id.month(), r.id)
+            }
+            AnyRecord::DefaultExpectations(r) => {
+                format!(
+                    "records/default-expectations/{}/{}.json",
+                    r.id.month(),
+                    r.id
+                )
+            }
         }
     }
 
@@ -959,6 +1251,9 @@ impl AnyRecord {
             AnyRecord::Intervention(_) => "athena.intervention/1",
             AnyRecord::Restart(_) => "athena.restart/1",
             AnyRecord::Resolution(_) => "athena.resolution/1",
+            AnyRecord::HostError(_) => "athena.host-error/1",
+            AnyRecord::DecisionState(_) => "athena.decision-state/1",
+            AnyRecord::DefaultExpectations(_) => "athena.default-expectations/1",
         }
     }
 }
@@ -1227,6 +1522,155 @@ mod tests {
             record.canonical_path(),
             "records/interventions/2026-10/20261010-153012-k7q2.json"
         );
+    }
+
+    fn host_error(status: Option<u16>) -> HostError {
+        HostError {
+            id: RecordId::parse("20261013-192156-k7q2").unwrap(),
+            at: ts(),
+            status_code: status,
+            operation: HostOperation::Merge,
+            job: JobId::parse("20261013-192156-ar1x").unwrap(),
+            phase: WorkPhase::Landing,
+            message_class: MessageClass::of_status(status),
+        }
+    }
+
+    #[test]
+    fn a_host_error_has_a_status_a_closed_class_and_no_text() {
+        let record = AnyRecord::HostError(host_error(Some(405)));
+        assert_eq!(
+            record.canonical_path(),
+            "records/host-errors/2026-10/20261013-192156-k7q2.json"
+        );
+        let text = record.to_json();
+        assert!(text.contains("\"schema\": \"athena.host-error/1\""));
+        assert!(text.contains("\"status_code\": 405"));
+        assert!(text.contains("\"operation\": \"merge\""));
+        assert!(text.contains("\"message_class\": \"method-not-allowed\""));
+        assert_eq!(AnyRecord::parse("x", text.as_bytes()).unwrap(), record);
+        // A field outside the record, such as the host's text, is refused.
+        let with_text = text.replace("\"phase\"", "\"stderr\": \"x\", \"phase\"");
+        assert!(AnyRecord::parse("x", with_text.as_bytes()).is_err());
+        // No HTTP answer: the status is absent.
+        let none = AnyRecord::HostError(host_error(None));
+        assert!(AnyRecord::parse("x", none.to_json().as_bytes()).is_ok());
+        // The class follows from the status.
+        let mut wrong = host_error(Some(405));
+        wrong.message_class = MessageClass::NotFound;
+        assert!(AnyRecord::parse("x", AnyRecord::HostError(wrong).to_json().as_bytes()).is_err());
+        let bad_status = host_error(Some(999));
+        assert!(
+            AnyRecord::parse("x", AnyRecord::HostError(bad_status).to_json().as_bytes()).is_err()
+        );
+    }
+
+    #[test]
+    fn the_message_classes_and_operations_are_closed_lists() {
+        for class in MessageClass::ALL {
+            assert_eq!(MessageClass::parse(class.as_str()), Some(class));
+        }
+        for operation in HostOperation::ALL {
+            assert_eq!(HostOperation::parse(operation.as_str()), Some(operation));
+        }
+        assert_eq!(HostOperation::parse("delete-repo"), None);
+        assert_eq!(
+            MessageClass::of_status(Some(503)),
+            MessageClass::ServerError
+        );
+        assert_eq!(
+            MessageClass::of_status(Some(418)),
+            MessageClass::OtherStatus
+        );
+    }
+
+    fn state(id: &str, at: &str, decision: &str, kind: DecisionStateKind) -> DecisionState {
+        DecisionState {
+            id: RecordId::parse(id).unwrap(),
+            at: at.parse().unwrap(),
+            decision: decision.into(),
+            state: kind,
+            signal: None,
+            firing_records: vec![RecordId::parse("20261013-192156-k7q2").unwrap()],
+            decision_job: None,
+        }
+    }
+
+    #[test]
+    fn decision_states_fold_to_the_latest_state_per_decision() {
+        let states = [
+            state(
+                "20261014-100000-aaaa",
+                "2026-10-14T10:00:00Z",
+                "D87",
+                DecisionStateKind::Cleared,
+            ),
+            state(
+                "20261013-100000-bbbb",
+                "2026-10-13T10:00:00Z",
+                "D87",
+                DecisionStateKind::UnderReview,
+            ),
+            state(
+                "20261013-110000-cccc",
+                "2026-10-13T11:00:00Z",
+                "D12",
+                DecisionStateKind::UnderReview,
+            ),
+        ];
+        let folded = fold_decision_states(&states);
+        assert_eq!(folded["D87"], DecisionStateKind::Cleared);
+        assert_eq!(folded["D12"], DecisionStateKind::UnderReview);
+        assert_eq!(folded.len(), 2);
+        assert!(fold_decision_states(&[]).is_empty());
+        let record = AnyRecord::DecisionState(states[1].clone());
+        assert_eq!(
+            record.canonical_path(),
+            "records/decision-states/2026-10/20261013-100000-bbbb.json"
+        );
+        assert_eq!(
+            AnyRecord::parse("x", record.to_json().as_bytes()).unwrap(),
+            record
+        );
+        // An under-review change cites the records that fired it.
+        let mut uncited = states[1].clone();
+        uncited.firing_records.clear();
+        assert!(
+            AnyRecord::parse("x", AnyRecord::DecisionState(uncited).to_json().as_bytes()).is_err()
+        );
+    }
+
+    #[test]
+    fn default_expectations_are_keyed_by_the_default_and_validated() {
+        let expectations = DefaultExpectations {
+            id: RecordId::parse("20261014-100000-dddd").unwrap(),
+            at: ts(),
+            default_id: "small".into(),
+            assumptions: vec!["A focused change is easier to review.".into()],
+            signals: vec![ExpectationSignal {
+                source: SignalSource::Rejection,
+                strength: SignalStrength::Soft,
+                text: "a change rejected as too large".into(),
+                threshold_jobs: 2,
+            }],
+            defaults_version: 1,
+            proposal: None,
+        };
+        let record = AnyRecord::DefaultExpectations(expectations.clone());
+        assert_eq!(
+            record.canonical_path(),
+            "records/default-expectations/2026-10/20261014-100000-dddd.json"
+        );
+        assert_eq!(
+            AnyRecord::parse("x", record.to_json().as_bytes()).unwrap(),
+            record
+        );
+        let mut weak = expectations.clone();
+        weak.signals[0].threshold_jobs = 1;
+        assert!(weak.validate().is_err(), "a soft signal needs repeats");
+        let mut unkeyed = expectations;
+        unkeyed.default_id = " ".into();
+        assert!(unkeyed.validate().is_err());
     }
 
     #[test]
