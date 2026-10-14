@@ -1,0 +1,53 @@
+# Explainer site
+
+This note records how the explainer page is built and published, what else was considered, and what is
+left for later. It answers requirement D2-1 in [`requirements-map.md`](requirements-map.md): the explainer is
+published to GitHub Pages from this repository and runs locally with one command.
+
+## What is built
+
+- `cargo run -p xtask -- site [--out <dir>]` renders one self-contained file, `index.html`, into `site/` (or
+  `<dir>`). The directory is gitignored, so building never changes tracked files.
+- The only content source is `studies/firstmate-work-handling`: `pin.json`, `claims.json`, `model.json`,
+  `rationales.json` and `findings.json`. The renderer lives in `xtask/src/site.rs`.
+- The page has inline CSS, a viewport meta tag, a responsive grid, and a dark theme through
+  `prefers-color-scheme`. It loads no script, font, image or stylesheet from elsewhere.
+- Every piece of study text is HTML-escaped. Every state, counter, transition and rationale links to the
+  claim ids that support it, and the claims with their source paths and lines are listed at the end. A
+  citation of a claim that does not exist, an element with no claim, or a missing or malformed study file is
+  an error; no page is written from partial data.
+- The page states the pinned firstmate commit from `pin.json` at the top and in the footer. The study's
+  findings are shown under their own finding ids, in a section that says they are not claims about firstmate.
+- `.github/workflows/pages.yml` runs on a push to `main` and on manual dispatch. It builds with
+  `cargo run --locked -p xtask -- site`, then deploys with `actions/configure-pages`,
+  `actions/upload-pages-artifact` and `actions/deploy-pages`. Permissions are `contents: read`,
+  `pages: write` and `id-token: write`, and a `pages` concurrency group stops two deploys overlapping.
+  Because `index.html` sits at the root of the uploaded directory, the Pages URL serves it directly.
+
+## Alternatives considered
+
+| Alternative | Why not |
+|---|---|
+| A template or Markdown crate (for example `tera`, `pulldown-cmark`) | The page is one fixed layout over a handful of JSON shapes. Plain string building with one escape function adds no dependency and no new lockfile entries. |
+| A static site generator (mdBook, Zola) | Needs a second tool in CI and a second source format; the content already exists as JSON. |
+| Committing the rendered HTML | It would drift from the study files. Building it in the workflow keeps one source. |
+| Publishing from a `gh-pages` branch | Needs write access to a branch and a bot commit per build. The Actions deploy needs only the three permissions above. |
+| Adding the Pages steps to `ci.yml` | `ci.yml` stays read-only with no deploy permissions; a separate workflow keeps the broader token scope to one job file. |
+| Client-side rendering of the JSON in the browser | It would need JavaScript, which the repository's all-Rust rule disallows, and the page would not work without script. |
+
+## Deferred
+
+- Enabling Pages in the repository settings (source: GitHub Actions) is an owner action. Until it is done the
+  deploy job fails. Checking that the live URL answers HTTP 200 can only be done after that and a workflow run.
+- The Pages actions are referenced by major version tag, not by commit SHA as `ci.yml` does. Pinning them is
+  worth doing once the SHAs are looked up from the official releases.
+- A tag-triggered or pull-request preview build.
+- An expert track, a replay view, and a custom domain.
+- The state graph is shown as lists and cards, not a drawn diagram; a drawing would need generated SVG.
+- Studies beyond firstmate-work-handling. The study directory is a constant in `site.rs` for now.
+
+## Checks
+
+Unit tests in `xtask/src/site.rs` cover escaping, claim-id citation, the pinned commit, an unknown claim id,
+missing study data, and the output location. `xtask/tests/policy.rs` and `docs/non-rust-files.md` list
+`pages.yml` as an allowed YAML workflow.

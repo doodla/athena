@@ -1,0 +1,447 @@
+//! The explainer site: `cargo run -p xtask -- site [--out <dir>]`.
+//!
+//! Renders one self-contained HTML file, `index.html`, from the JSON files of
+//! `studies/firstmate-work-handling`. Every sentence on the page comes from those files, is HTML-escaped,
+//! and carries the id of the claim in `claims.json` that supports it. A citation of a claim that does not
+//! exist, an element that cites no claim, or a missing file is an error, so a page is never built from
+//! partial data. The design is in `docs/design/explainer-site.md`.
+
+use anyhow::{Context, Result, anyhow, bail};
+use serde_json::Value;
+use std::collections::BTreeSet;
+use std::fmt::Write as _;
+use std::path::Path;
+
+/// The study the page explains, relative to the repository root.
+pub const STUDY_DIR: &str = "studies/firstmate-work-handling";
+/// The default output directory, relative to the repository root. It is gitignored.
+pub const DEFAULT_OUT: &str = "site";
+
+/// The parsed study files.
+#[derive(Debug)]
+pub struct Study {
+    pin: Value,
+    claims: Value,
+    model: Value,
+    rationales: Value,
+    findings: Value,
+}
+
+/// Reads the study files from `dir`. A missing or malformed file is an error that names the file.
+pub fn load(dir: &Path) -> Result<Study> {
+    let read = |name: &str| -> Result<Value> {
+        let path = dir.join(name);
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("study data is missing: cannot read {}", path.display()))?;
+        serde_json::from_str(&text).with_context(|| format!("{} is not valid JSON", path.display()))
+    };
+    Ok(Study {
+        pin: read("pin.json")?,
+        claims: read("claims.json")?,
+        model: read("model.json")?,
+        rationales: read("rationales.json")?,
+        findings: read("findings.json")?,
+    })
+}
+
+/// Escapes text for HTML element content and attribute values.
+pub fn escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+fn str_of<'a>(value: &'a Value, key: &str, what: &str) -> Result<&'a str> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("{what} has no text field `{key}`"))
+}
+
+fn array_of<'a>(value: &'a Value, key: &str, what: &str) -> Result<&'a Vec<Value>> {
+    value
+        .get(key)
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("{what} has no list `{key}`"))
+}
+
+/// The ids of the claims in `claims.json`, checked to be well formed.
+fn claim_ids(claims: &Value) -> Result<BTreeSet<String>> {
+    let list = claims
+        .as_array()
+        .ok_or_else(|| anyhow!("claims.json is not a list"))?;
+    list.iter()
+        .map(|c| str_of(c, "id", "a claim").map(String::from))
+        .collect()
+}
+
+/// Links to the claims an element cites. At least one claim is required, and each must exist.
+fn cites(value: &Value, what: &str, known: &BTreeSet<String>) -> Result<String> {
+    let ids = array_of(value, "claims", what)?;
+    if ids.is_empty() {
+        bail!("{what} cites no claim");
+    }
+    let mut out = String::from("<span class=\"cites\">");
+    for id in ids {
+        let id = id
+            .as_str()
+            .ok_or_else(|| anyhow!("{what} has a claim id that is not text"))?;
+        if !known.contains(id) {
+            bail!("{what} cites {id}, which is not in claims.json");
+        }
+        let id = escape(id);
+        let _ = write!(out, "<a href=\"#claim-{id}\">[{id}]</a> ");
+    }
+    out.truncate(out.trim_end().len());
+    out.push_str("</span>");
+    Ok(out)
+}
+
+/// A claim's text starts with a bracketed tag such as `[mechanism]`; this splits it from the sentence.
+fn split_tag(text: &str) -> (Option<&str>, &str) {
+    if let Some(rest) = text.strip_prefix('[')
+        && let Some((tag, body)) = rest.split_once(']')
+    {
+        return (Some(tag), body.trim_start());
+    }
+    (None, text)
+}
+
+/// Renders the page. Every factual statement cites a claim id; the pinned commit is stated up front.
+pub fn render(study: &Study) -> Result<String> {
+    let known = claim_ids(&study.claims)?;
+    let claims = array_of_value(&study.claims, "claims.json")?;
+    let sha = str_of(&study.pin, "sha", "pin.json")?;
+    let repo = str_of(&study.pin, "repository_url", "pin.json")?;
+    let system = str_of(&study.pin, "system", "pin.json")?;
+    let study_id = str_of(&study.pin, "study_id", "pin.json")?;
+
+    let mut body = String::new();
+    let _ = write!(
+        body,
+        "<header><h1>How {sys} handles work</h1>\
+         <p class=\"lede\">A reading of {sys} at one pinned commit, from the study <code>{id}</code>. \
+         Each statement below ends with the id of the claim that supports it; the claims, with their \
+         sources, are listed at the end.</p>\
+         <p class=\"pin\">Pinned {sys} commit: <code>{sha}</code> in <code>{repo}</code></p></header>",
+        sys = escape(system),
+        id = escape(study_id),
+        sha = escape(sha),
+        repo = escape(repo),
+    );
+
+    // States
+    body.push_str("<section><h2>States of a piece of work</h2><ul>");
+    for state in array_of(&study.model, "states", "model.json")? {
+        let id = str_of(state, "id", "a state")?;
+        let kind = str_of(state, "kind", &format!("state {id}"))?;
+        let _ = write!(
+            body,
+            "<li><strong>{}</strong> <span class=\"tag\">{}</span> {}</li>",
+            escape(id),
+            escape(kind),
+            cites(state, &format!("state {id}"), &known)?
+        );
+    }
+    body.push_str("</ul></section>");
+
+    // Counters
+    let counters = array_of(&study.model, "counters", "model.json")?;
+    if !counters.is_empty() {
+        body.push_str("<section><h2>Counters</h2><ul>");
+        for counter in counters {
+            let id = str_of(counter, "id", "a counter")?;
+            let changed: Vec<&str> = array_of(counter, "changed_by", &format!("counter {id}"))?
+                .iter()
+                .filter_map(Value::as_str)
+                .collect();
+            let _ = write!(
+                body,
+                "<li><strong>{}</strong>, changed by transitions {} {}</li>",
+                escape(id),
+                escape(&changed.join(", ")),
+                cites(counter, &format!("counter {id}"), &known)?
+            );
+        }
+        body.push_str("</ul></section>");
+    }
+
+    // Transitions
+    body.push_str("<section><h2>Transitions</h2><div class=\"cards\">");
+    for t in array_of(&study.model, "transitions", "model.json")? {
+        let id = str_of(t, "id", "a transition")?;
+        let what = format!("transition {id}");
+        let _ = write!(
+            body,
+            "<article class=\"card\"><h3>{} <span class=\"arrow\">{} &rarr; {}</span></h3><dl>",
+            escape(id),
+            escape(str_of(t, "from", &what)?),
+            escape(str_of(t, "to", &what)?)
+        );
+        let _ = write!(
+            body,
+            "<dt>Trigger</dt><dd>{} (decided by {})</dd>",
+            escape(str_of(t, "trigger", &what)?),
+            escape(str_of(t, "trigger_evaluated_by", &what)?)
+        );
+        let _ = write!(
+            body,
+            "<dt>Guard</dt><dd>{} (checked by {})</dd>",
+            escape(str_of(t, "guard", &what)?),
+            escape(str_of(t, "guard_evaluated_by", &what)?)
+        );
+        if let Some(failure) = t.get("failure").and_then(Value::as_str) {
+            let _ = write!(body, "<dt>Failure</dt><dd>{}</dd>", escape(failure));
+        }
+        let _ = write!(body, "</dl><p>{}</p></article>", cites(t, &what, &known)?);
+    }
+    body.push_str("</div></section>");
+
+    // Rationales
+    body.push_str("<section><h2>Why it is built this way</h2><div class=\"cards\">");
+    for r in array_of_value(&study.rationales, "rationales.json")? {
+        let id = str_of(r, "id", "a rationale")?;
+        let what = format!("rationale {id}");
+        let _ = write!(
+            body,
+            "<article class=\"card\"><h3>{}</h3><p>{}</p>",
+            escape(id),
+            escape(str_of(r, "decision", &what)?)
+        );
+        let alternatives = array_of(r, "alternatives", &what)?;
+        if !alternatives.is_empty() {
+            body.push_str("<p>Alternatives named:</p><ul>");
+            for a in alternatives.iter().filter_map(Value::as_str) {
+                let _ = write!(body, "<li>{}</li>", escape(a));
+            }
+            body.push_str("</ul>");
+        }
+        let _ = write!(
+            body,
+            "<p>Trade-off: {}</p><p>{}</p></article>",
+            escape(str_of(r, "tradeoff", &what)?),
+            cites(r, &what, &known)?
+        );
+    }
+    body.push_str("</div></section>");
+
+    // Findings: records of the study itself, not claims about the studied system.
+    body.push_str(
+        "<section><h2>Limits of this study</h2><p>These are the study's own findings, identified \
+         by finding id; they say nothing about firstmate beyond what the claims above support.</p><ul>",
+    );
+    for f in array_of_value(&study.findings, "findings.json")? {
+        let id = str_of(f, "id", "a finding")?;
+        let _ = write!(
+            body,
+            "<li><strong>{}</strong> <span class=\"tag\">{}</span> {}</li>",
+            escape(id),
+            escape(str_of(f, "kind", &format!("finding {id}"))?),
+            escape(str_of(f, "detail", &format!("finding {id}"))?)
+        );
+    }
+    body.push_str("</ul></section>");
+
+    // Claims and their sources
+    body.push_str("<section><h2>Claims and sources</h2><ol class=\"claims\">");
+    for c in claims {
+        let id = str_of(c, "id", "a claim")?;
+        let what = format!("claim {id}");
+        let (tag, sentence) = split_tag(str_of(c, "text", &what)?);
+        let _ = write!(body, "<li id=\"claim-{}\">", escape(id));
+        if let Some(tag) = tag {
+            let _ = write!(body, "<span class=\"tag\">{}</span> ", escape(tag));
+        }
+        let _ = write!(
+            body,
+            "{} <span class=\"cites\">[{}]</span> <span class=\"mark\">{}</span><ul class=\"sources\">",
+            escape(sentence),
+            escape(id),
+            escape(str_of(c, "mark", &what)?)
+        );
+        for s in array_of(c, "sources", &what)? {
+            let path = str_of(s, "path", &what)?;
+            let start = s.get("start_line").and_then(Value::as_u64).unwrap_or(0);
+            let end = s.get("end_line").and_then(Value::as_u64).unwrap_or(start);
+            let _ = write!(
+                body,
+                "<li><code>{}:{}-{}</code></li>",
+                escape(path),
+                start,
+                end
+            );
+        }
+        body.push_str("</ul></li>");
+    }
+    body.push_str("</ol></section>");
+
+    let _ = write!(
+        body,
+        "<footer>Generated from <code>{}</code>: {} claims at commit <code>{}</code>.</footer>",
+        escape(STUDY_DIR),
+        known.len(),
+        escape(sha)
+    );
+
+    Ok(format!(
+        "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+         <title>How {sys} handles work</title><style>{CSS}</style></head><body><main>{body}</main></body></html>\n",
+        sys = escape(system)
+    ))
+}
+
+fn array_of_value<'a>(value: &'a Value, file: &str) -> Result<&'a Vec<Value>> {
+    value
+        .as_array()
+        .ok_or_else(|| anyhow!("{file} is not a list"))
+}
+
+/// Builds the site: reads the study under `root` and writes `index.html` into `out`.
+pub fn build(root: &Path, out: &Path) -> Result<()> {
+    let html = render(&load(&root.join(STUDY_DIR))?)?;
+    std::fs::create_dir_all(out).with_context(|| format!("cannot create {}", out.display()))?;
+    let index = out.join("index.html");
+    std::fs::write(&index, html).with_context(|| format!("cannot write {}", index.display()))?;
+    println!("wrote {}", index.display());
+    Ok(())
+}
+
+const CSS: &str = "\
+:root{color-scheme:light dark;--bg:#fff;--fg:#1b1f24;--muted:#59636e;--card:#f6f8fa;--line:#d0d7de;--accent:#0b5cad}\
+@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--muted:#9198a1;--card:#161b22;--line:#30363d;--accent:#58a6ff}}\
+*{box-sizing:border-box}\
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}\
+main{max-width:64rem;margin:0 auto;padding:1rem}\
+h1{font-size:1.9rem;line-height:1.2}h2{margin-top:2.2rem;border-bottom:1px solid var(--line);padding-bottom:.3rem}\
+a{color:var(--accent)}code{font-family:ui-monospace,monospace;font-size:.9em;word-break:break-all}\
+.lede,.pin,footer{color:var(--muted)}\
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(18rem,1fr));gap:1rem}\
+.card{background:var(--card);border:1px solid var(--line);border-radius:.5rem;padding:.8rem 1rem}\
+.card h3{margin:.2rem 0}.arrow{color:var(--muted);font-weight:normal}\
+dt{font-weight:600}dd{margin:0 0 .5rem}\
+.tag{display:inline-block;border:1px solid var(--line);border-radius:1rem;padding:0 .5rem;font-size:.8rem;color:var(--muted)}\
+.cites a,.cites{font-size:.85rem}.mark{color:var(--muted);font-size:.8rem}\
+.sources{color:var(--muted);font-size:.85rem}\
+@media (max-width:40rem){h1{font-size:1.5rem}main{padding:.6rem}}";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write(dir: &Path, name: &str, json: &str) {
+        std::fs::write(dir.join(name), json).unwrap();
+    }
+
+    /// A small study. `claim_text` is the text of claim c1; `cited` the claim a transition cites.
+    fn study_dir(claim_text: &str, cited: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "pin.json",
+            r#"{"study_id":"s","system":"firstmate","repository_url":"https://example.org/f.git","sha":"abc123def"}"#,
+        );
+        let claims = serde_json::json!([{
+            "id": "c1", "mark": "read", "text": claim_text,
+            "sources": [{"path": "a.md", "start_line": 3, "end_line": 4}]
+        }]);
+        write(dir.path(), "claims.json", &claims.to_string());
+        let model = serde_json::json!({
+            "states": [{"id": "queued", "kind": "initial", "claims": ["c1"]}],
+            "counters": [],
+            "transitions": [{
+                "id": "t1", "from": "queued", "to": "queued",
+                "trigger": "x", "trigger_evaluated_by": "agent",
+                "guard": "y", "guard_evaluated_by": "code",
+                "failure": null, "claims": [cited]
+            }]
+        });
+        write(dir.path(), "model.json", &model.to_string());
+        write(
+            dir.path(),
+            "rationales.json",
+            r#"[{"id":"ra1","decision":"d","alternatives":["alt"],"tradeoff":"t","claims":["c1"]}]"#,
+        );
+        write(
+            dir.path(),
+            "findings.json",
+            r#"[{"id":"f1","kind":"model-limit","detail":"limit"}]"#,
+        );
+        dir
+    }
+
+    #[test]
+    fn text_is_html_escaped() {
+        assert_eq!(
+            escape("<a href=\"x\">&'</a>"),
+            "&lt;a href=&quot;x&quot;&gt;&amp;&#39;&lt;/a&gt;"
+        );
+        let dir = study_dir("[mechanism] <script>alert(1)</script> & more", "c1");
+        let html = render(&load(dir.path()).unwrap()).unwrap();
+        assert!(!html.contains("<script>"));
+        assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt; &amp; more"));
+    }
+
+    #[test]
+    fn the_page_cites_claim_ids_and_the_pinned_commit() {
+        let dir = study_dir("[mechanism] A thing happens.", "c1");
+        let html = render(&load(dir.path()).unwrap()).unwrap();
+        assert!(html.contains("href=\"#claim-c1\">[c1]</a>"));
+        assert!(html.contains("id=\"claim-c1\""));
+        assert!(html.contains("Pinned firstmate commit: <code>abc123def</code>"));
+        assert!(html.contains("name=\"viewport\""));
+        assert!(html.contains("prefers-color-scheme:dark"));
+        assert!(!html.contains("<link") && !html.contains("<script"));
+    }
+
+    #[test]
+    fn a_citation_of_an_unknown_claim_is_an_error() {
+        let dir = study_dir("[mechanism] A thing happens.", "c99");
+        let err = render(&load(dir.path()).unwrap()).unwrap_err();
+        assert!(format!("{err:#}").contains("c99"));
+    }
+
+    #[test]
+    fn missing_study_data_is_an_error_naming_the_file() {
+        let dir = study_dir("[mechanism] A thing happens.", "c1");
+        std::fs::remove_file(dir.path().join("claims.json")).unwrap();
+        let err = load(dir.path()).unwrap_err();
+        assert!(format!("{err:#}").contains("claims.json"));
+        let empty = tempfile::tempdir().unwrap();
+        assert!(build(empty.path(), &empty.path().join("out")).is_err());
+        assert!(!empty.path().join("out/index.html").exists());
+    }
+
+    #[test]
+    fn build_writes_index_html_at_the_output_root() {
+        let root = tempfile::tempdir().unwrap();
+        let study = root.path().join(STUDY_DIR);
+        std::fs::create_dir_all(&study).unwrap();
+        let src = study_dir("[mechanism] A thing happens.", "c1");
+        for name in [
+            "pin.json",
+            "claims.json",
+            "model.json",
+            "rationales.json",
+            "findings.json",
+        ] {
+            std::fs::copy(src.path().join(name), study.join(name)).unwrap();
+        }
+        let out = root.path().join("site");
+        build(root.path(), &out).unwrap();
+        assert!(
+            std::fs::read_to_string(out.join("index.html"))
+                .unwrap()
+                .starts_with("<!doctype html>")
+        );
+    }
+}

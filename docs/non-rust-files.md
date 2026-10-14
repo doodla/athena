@@ -23,6 +23,7 @@ Non-Rust code is allowed only where it must exist. The same list is a named cons
 |---|---|
 | `setup.sh` | runs before any Rust toolchain exists: it installs a pinned rustup and passes control to Rust |
 | `.github/workflows/ci.yml` | GitHub Actions reads only YAML workflows; it is a thin call into Rust |
+| `.github/workflows/pages.yml` | GitHub Actions reads only YAML workflows; it renders the explainer page with a Rust xtask command and deploys it |
 
 ## Notes
 

@@ -250,6 +250,10 @@ const ALLOWED_OTHER_LANGUAGE_CODE: &[(&str, &str)] = &[
         ".github/workflows/ci.yml",
         "GitHub Actions reads only YAML workflows; it is a thin call into Rust",
     ),
+    (
+        ".github/workflows/pages.yml",
+        "GitHub Actions reads only YAML workflows; it renders the explainer page with a Rust xtask command and deploys it",
+    ),
 ];
 
 /// Whether a tracked file is code in a language other than Rust: by extension, or by a `#!` first line
@@ -315,6 +319,7 @@ fn a_stray_script_is_flagged() {
     // The named exceptions are allowed.
     assert!(!flagged("setup.sh", b"#!/bin/sh\n"));
     assert!(!flagged(".github/workflows/ci.yml", b"name: ci\n"));
+    assert!(!flagged(".github/workflows/pages.yml", b"name: pages\n"));
 }
 
 // --------------------------------------------------------------------------------------------------------
