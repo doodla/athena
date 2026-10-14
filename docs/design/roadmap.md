@@ -93,7 +93,9 @@ moved into RM-0, and the other numbers did not change. The rows AD-12 to AD-15 w
   under review (designed in `docs/design/decision-sets.md`, D91; the decision view and the D87 watcher are
   built, set selection is not); check that a change names and fixes its root cause (AD-12); record
   evidence-backed pushback exchanges; add taste probes with expiry; add decision-sheet artifacts for a tired
-  user; propose the next big task when the study ends.
+  user; propose the next big task when the study ends. The Socratic plan review (six fixed question kinds
+  answered facts first, then Jev, then at most two user questions; designed in
+  `docs/design/socratic-review.md`, not built) serves the pushback, defaults and root-cause parts of this step.
 - **Done when:** a misprediction changes a defaults entry through a verified job that cites the score, and
   a probe answer carries an expiry that the model respects.
 
