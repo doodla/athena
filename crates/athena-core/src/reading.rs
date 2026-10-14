@@ -10,7 +10,9 @@ use anyhow::{Context, Result, bail};
 use athena_agent::AgentInvocation;
 use athena_agent::env::{EnvSpec, Side};
 use athena_agent::policy::Policy;
-use athena_context::briefs::{EarlierAttempt, ReaderInputs, reader_brief, render_catalog};
+use athena_context::briefs::{
+    EarlierAttempt, EarlierCase, ReaderInputs, RetryCause, reader_brief, render_catalog,
+};
 use athena_context::outputs::{
     CriterionKindOutput, DeliverableActionOutput, ReaderChoices, ReadingOutput, reading_schema,
 };
@@ -18,7 +20,8 @@ use athena_context::{CONTRACT, Component, Composed, READER_FRAME, compose};
 use athena_data::records::{
     AnyRecord, Correction, CorrectionKind, Criterion, CriterionKind, DefaultApplied, Deliverable,
     DeliverableAction, Forecast, Forecasts, Intervention, InterventionCategory, InterventionSource,
-    Invocation, OutcomeState, Quantiles, Reading, Request, Role,
+    IntrospectionRecord, IntrospectionStatus, IntrospectionTrigger, Invocation, OutcomeState,
+    PreventionKind, Quantiles, Reading, Request, Role,
 };
 use athena_data::{JobId, RecordId};
 use athena_gate::redact::Redactor;
@@ -628,6 +631,21 @@ impl Athena {
         })
     }
 
+    /// `athena retry <job>`: reads a retry of a rejected or failed job, seeded from that job's
+    /// introspection record when it has one. The request recorded is "try again on <job id>", so a later
+    /// retry of this job finds the original; nothing is run. The flag says whether the introspection
+    /// record seeded the reading (false: the plain "try again on" behavior).
+    pub fn retry(&self, job_ref: &str, ui: &dyn Ui) -> Result<(Proposal, bool)> {
+        let head = self.head()?;
+        let records = crate::store::Records::load(&self.git, &head)?;
+        let id = records.resolve(job_ref)?;
+        let job = records.jobs.get(id.as_str()).expect("resolved");
+        let seeded = has_retry_introspection(&records, job);
+        // `ask` refuses a job that is not rejected or failed before any model is called.
+        let proposal = self.ask(&format!("{RETRY_PREFIX}{id}"), ui)?;
+        Ok((proposal, seeded))
+    }
+
     /// `athena correct`: records a one-line correction (or an answer), and reads again.
     pub fn correct(&self, job_ref: &str, line: &str, ui: &dyn Ui) -> Result<Proposal> {
         self.refuse_if_stopped()?;
@@ -819,7 +837,117 @@ pub fn earlier_attempt(
         texts.append(&mut attempt.corrections);
         attempt.corrections = texts;
     }
+    attempt.introspection = retry_cause(records, job, redactor)?;
     Ok(Some(attempt))
+}
+
+/// The job's own introspection of its rejection or failure that can seed a retry: the latest recorded
+/// one with a proposed request.
+fn retry_introspection<'a>(
+    records: &'a Records,
+    job: &JobRecords,
+) -> Option<&'a IntrospectionRecord> {
+    records.introspections.iter().rev().find(|i| {
+        i.job.as_ref() == Some(job.id())
+            && matches!(
+                i.trigger,
+                IntrospectionTrigger::Rejection | IntrospectionTrigger::Failure
+            )
+            && i.status == IntrospectionStatus::Recorded
+            && i.proposed_request.is_some()
+            && i.cause.is_some()
+            && i.prevention.is_some()
+    })
+}
+
+/// The longest one-line account of an earlier case that is carried, in characters.
+const CASE_WHAT_CHARS: usize = 160;
+
+/// The cause, prevention, proposed request and earlier cases from `job`'s introspection record, redacted;
+/// `None` when the job has no such record. Earlier cases are the ids the record stored; classes are not
+/// matched again.
+fn retry_cause(
+    records: &Records,
+    job: &JobRecords,
+    redactor: &Redactor,
+) -> Result<Option<RetryCause>> {
+    let Some(record) = retry_introspection(records, job) else {
+        return Ok(None);
+    };
+    let kind_and_text = |kind: Option<PreventionKind>, text: &str| match kind {
+        Some(kind) => format!("{}: {text}", kind.as_str()),
+        None => text.to_string(),
+    };
+    let class = record.failure_class.as_ref().map(|id| {
+        let name = records
+            .classes
+            .iter()
+            .find(|c| &c.id == id)
+            .map_or("unknown class", |c| c.name.as_str());
+        format!("{name} ({id})")
+    });
+    // Everything is redacted in one pass: the cause fields first, then each case's text.
+    let mut texts = vec![
+        record.cause.clone().unwrap_or_default(),
+        kind_and_text(
+            record.prevention_kind,
+            record.prevention.as_deref().unwrap_or_default(),
+        ),
+        record.proposed_request.clone().unwrap_or_default(),
+    ];
+    let mut cases = Vec::new();
+    for id in &record.earlier_cases {
+        let Some(case) = records.introspections.iter().find(|c| &c.id == id) else {
+            continue;
+        };
+        let what = case
+            .what_happened
+            .as_deref()
+            .and_then(|w| w.lines().find(|l| !l.trim().is_empty()))
+            .unwrap_or("(no account recorded)")
+            .trim()
+            .chars()
+            .take(CASE_WHAT_CHARS)
+            .collect::<String>();
+        let prevention = case
+            .prevention
+            .as_deref()
+            .map(|p| kind_and_text(case.prevention_kind, p));
+        texts.push(what);
+        texts.push(prevention.clone().unwrap_or_default());
+        cases.push((case, prevention.is_some()));
+    }
+    redactor.redact_all(&mut texts)?;
+    let mut texts = texts.into_iter();
+    let cause = texts.next().expect("three leading texts");
+    let prevention = texts.next().expect("three leading texts");
+    let proposed_request = texts.next().expect("three leading texts");
+    let earlier_cases = cases
+        .into_iter()
+        .map(|(case, has_prevention)| {
+            let what = texts.next().expect("two texts per case");
+            let text = texts.next().expect("two texts per case");
+            EarlierCase {
+                id: case.id.to_string(),
+                job: case.job.as_ref().map(ToString::to_string),
+                what,
+                prevention: has_prevention.then_some(text),
+            }
+        })
+        .collect();
+    Ok(Some(RetryCause {
+        introspection: record.id.to_string(),
+        class,
+        cause,
+        prevention,
+        proposed_request,
+        earlier_cases,
+    }))
+}
+
+/// Whether `job` has an introspection record that `athena retry` can seed a retry from.
+pub fn has_retry_introspection(records: &Records, job: &JobRecords) -> bool {
+    retry_introspection(records, job).is_some()
 }
 
 /// The reference after "try again on " at the start of `request`; `None` when it is not that form.
@@ -961,6 +1089,7 @@ fn carry(job: &JobRecords, redactor: &Redactor) -> Result<Option<EarlierAttempt>
     let reading_summary = final_reading.and_then(|_| extra.next());
     let reading_criteria: Vec<String> = extra.by_ref().take(criteria).collect();
     Ok(Some(EarlierAttempt {
+        introspection: None,
         job: job.id().as_str().to_string(),
         request,
         failed,

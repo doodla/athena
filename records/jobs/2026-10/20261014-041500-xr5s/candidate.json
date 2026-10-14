@@ -1,0 +1,104 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261014-041500-xr5s",
+  "base_commit": "43e03f3d84fd5e56346e2f86d050d395f365692c",
+  "base_fingerprint": "sha256:c6afbeb12baf3aa0a5d0a5c32ad94efbea19bb50456687dd5127829281513d23",
+  "previous_job": "20261014-035456-267v",
+  "candidate_commit": "dc0ad975e1ab5442e8ae095cb217934a160472d5",
+  "candidate_tree": "67afece3bfaa4357f9d2698ecdd12bdc823e25fb",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 41065
+    },
+    {
+      "path": "README.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 10987
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 18974
+    },
+    {
+      "path": "crates/athena-cli/tests/retry.rs",
+      "status": "added",
+      "mode": "100644",
+      "bytes": 10171
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 47037
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 63579
+    },
+    {
+      "path": "docs/design/defaults-loop.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 49813
+    }
+  ],
+  "fingerprint": "sha256:4625c664347521fc378d4372d0264ded0cb49244536f7e5d090d1901a235a200",
+  "violations": [],
+  "producer_report": {
+    "summary": "Added `athena retry <job>`. It retries a rejected or failed job from that job's introspection record and shows the reading as `ask` does. Without a usable introspection record it falls back to plain \"try again on\" and says so on stderr. The CLI help test (retry shows `<JOB>`, `--yes`, `--json`) passes, and the full `cargo test --locked` run exited successfully. I could not read its output file, so I did not see per-test counts. `cargo fmt --all --check` and `cargo clippy --all-targets --locked -- -D warnings` also pass.\n\n**How it works.**\n- The stored request is \"try again on <full id>\", so later retry chains still find the original request.\n- `earlier_attempt()` now also attaches a `RetryCause` when the job has a recorded rejection or failure introspection with a cause, prevention and proposed request. The latest such record is used.\n- The reader brief gets a \"Why it happened\" section only when that record exists. It holds:\n  - the cause, prevention and proposed next request;\n  - the earlier cases of the same class, taken from the ids stored on the introspection, each with its job and a one-line account;\n  - \"Prevention already tried\" for each earlier case that has one;\n  - \"This is case N of its class\";\n  - a note when an earlier prevention is identical to the current one.\n- `Retry { job, yes, json }` in `main.rs` shares a new `show_proposal` helper with `Ask`, so the reading display, `--yes` and `--json` behave identically. Nothing runs unless the user accepts.\n- A job that is not rejected or failed is refused before any model call, with \"only a rejected or failed job can be tried again\".\n- A job with no usable introspection falls back to plain \"try again on\" and says so on stderr.\n\n**Tests.**\n- `crates/athena-cli/tests/retry.rs` has 5 fixture tests in temporary directories. They cover:\n  - the seeded retry;\n  - earlier cases and the already-tried prevention;\n  - the no-earlier-case message;\n  - the refusal of a job that is not rejected or failed;\n  - the fallback.\n- A unit test in `briefs.rs` shows the section appears only when the retry came from an introspection.\n- The CLI help test is in the same file.\n\n**Docs.** `CHANGELOG.md`, `README.md` (command table and a paragraph) and a short \"Built (step 2)\" note in `docs/design/defaults-loop.md` section 12.\n\n**Root cause.** The retry used to carry only the last findings, not the cause record. The fix reads the cause record in the one function both `ask \"try again on\"` and `retry` already share.",
+    "files": [
+      "crates/athena-cli/src/main.rs",
+      "crates/athena-core/src/reading.rs",
+      "crates/athena-context/src/briefs.rs",
+      "crates/athena-cli/tests/retry.rs",
+      "CHANGELOG.md",
+      "README.md",
+      "docs/design/defaults-loop.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "The run exited successfully. The output was too large to display and its file was outside the working directory, so I did not see per-test counts. `cargo test --locked -p athena-cli --test retry` separately showed 5 passed."
+      }
+    ],
+    "open_issues": [
+      "Because the logic lives in `earlier_attempt()`, a hand-typed 'try again on <job>' also gets the introspection section. The two share one code path, and the reader brief is rebuilt from the stored request text on a re-read. The CHANGELOG says so.",
+      "Nothing records whether a prevention was acted on, because the 'acted-on' status is a later build. 'Already tried' therefore means 'proposed in an earlier case of the same class', and the brief says the class recurred.",
+      "The `--json` output has no field saying whether the retry was seeded from the introspection. The fallback notice goes to stderr only.",
+      "I did not touch run.rs, status.rs, introspect.rs or display.rs, which the brief listed as possible deliverables. The existing code paths already cover them."
+    ],
+    "mistakes": [
+      "My first draft of the retry test queued only one introspection reply for two jobs, so the second rejection's introspection failed. I restructured it so a reply is queued after the correction and before the run.",
+      "The first `cargo check` failed on imports I had guessed from `athena_data` instead of `athena_data::records`."
+    ],
+    "learnings": [
+      "Records::introspections is oldest-first; IntrospectionRecord and its enums are exported from athena_data::records, and JobState from athena_core::store.",
+      "The fake script in tests/common runs the introspection step through the same driver, so tests recognise it by its system prompt starting 'You write one introspection'.",
+      "A correction is introspected immediately. With no scripted reply it records a failed introspection and does not break the command.",
+      "Bash is limited to cargo, git and ls, so a long `cargo test` output cannot be searched afterwards."
+    ],
+    "desires": [
+      "A way to read large test output files from tool results.",
+      "A shell-free way to run a single test and see only its summary."
+    ]
+  }
+}

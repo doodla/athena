@@ -584,6 +584,10 @@ with a person-visible review.
    `athena status <job>` and its `--json`. Tests use fixture records in a temporary directory. **The run over the
    real `records/` follows landing**: the agents' copies leave `records/` out, so it cannot be done before.
 2. Add retry-from-record (§3.5).
+   **Built (step 2).** `athena retry <job>` asks "try again on" the job and shows the reading as `ask` does;
+   the reader's brief gains the job's cause, prevention, proposed next request and the earlier cases stored on its
+   introspection, with each earlier prevention shown as already tried. A job without a usable introspection falls
+   back to plain "try again on". Nothing is submitted without the user's acceptance.
 3. Add the proposal record and validation, `athena status` surfacing and the apply-as-a-job check (§9).
 4. Measure `render()` alone with the live counter (§8.3). Defaults are known not to count against the producer and
    verifier budgets (§8.3); the per-job runtime set-size check is built under decision-sets §8.

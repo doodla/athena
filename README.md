@@ -52,6 +52,11 @@ attempt's changes were discarded, so the retry starts from the base. A failed jo
 admission, which has no verification) also has its recorded reason carried there. Jobs that are landed, stale,
 in flight, or unknown are refused.
 
+`athena retry <job>` is the short form: it does the same, and when the job has an introspection record it also shows
+the reader that record's cause, prevention and proposed next request, and the earlier cases of the same class with
+the preventions already tried, so a repeat is seen as a repeat. It takes `--yes` and `--json` like `ask`, and runs
+nothing until the reading is accepted.
+
 Any request that names a job by its full id (like `20261012-075824-1x28`) anywhere in its text also shows the
 reader that job's request and its final verification's findings, redacted, in a "Referenced jobs" section, whatever
 the job's state. At most three jobs are carried; an id that matches no job is ignored. Unique suffixes are resolved
@@ -63,6 +68,7 @@ itself erred.
 | Command | What it does |
 |---|---|
 | `athena ask "<request>" [--yes \| --later]` | Read a request; on a terminal, Enter runs it, a typed line corrects it, `q` leaves it proposed. `--later` only queues the request, with no model call |
+| `athena retry <job> [--yes]` | Try a rejected or failed job again from its introspection record (proposed next request, cause, prevention, earlier cases of the same class); shown as `ask` shows a reading. Without an introspection record it is `athena ask "try again on <job>"` |
 | `athena correct <job> "<line>"` | Correct the latest reading, or answer its question, and read again |
 | `athena go <job>` | Run a proposed job, read a queued one, or retry the landing of a blocked one |
 | `athena land <job> --pr` | Push the job's locally landed commit as its branch (a rerun on an open pull request replaces the branch with one atomic conditional push, never a plain force), open a pull request with `gh api`, and wait for green checks. It stops at an open, green pull request unless `[landing] merge_via_rest = true` is set (off when absent). Run it again after the merge to land the job (exit 0 when landed, or open with green checks; 2 otherwise). Every GitHub call goes through one wrapper that tries at most 3 times, with exponential backoff and jitter, on a 5xx, a timeout or a connection reset, and prints a line for each retry; a 4xx or an auth error fails at once |
