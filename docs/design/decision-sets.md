@@ -534,14 +534,24 @@ revised signal exist; until then the build order of §8 is unchanged except that
 **Derived host-error records.** The 405 of job 9h2j happened before host errors were recorded, so no
 `athena.host-error/1` record of it exists; it survives only in the text of intervention `20261013-192156-ar1x`.
 The backtest therefore derives records from past interventions, by code and with no model
-(`derive_host_error` in `crates/athena-core/src/watcher.rs`). The pattern is exact: the intervention's `what` and
-`why` together contain `HTTP ` and a three-digit code from 100 to 599, and the word `merge`, `merges` or `merged`;
-and the intervention names a job. The derived record has operation `merge`, phase `landing`, the intervention's
+(`derive_host_error` in `crates/athena-core/src/watcher.rs`). The pattern is exact: the intervention's `what` or
+`why` says the host refused a merge and ties the code to that refusal: the word `refused`, optional "a", "the" or
+"to", the word `merge`, and within four words `HTTP ` and a three-digit code from 100 to 599, all before a `;`, a
+line break or a full stop that ends a sentence ("GitHub refused a merge commit (HTTP 405)"). A full stop inside a
+number or version does not end the sentence. A code that belongs to another failure ("the push failed with HTTP
+422") derives nothing, even when the text also says the pull request was merged by hand; and the intervention
+names a job. The derived record has operation `merge`, phase `landing`, the intervention's
 time and job, and is marked `derived` with `source_intervention` set to the intervention's id. Validation rejects
 a derived record without a source and an observed record with one. Derived records live in memory during the
 backtest and are never written under `records/`. The report lists them apart from the observed records, labels
 them derived and not observed by the client, and a review they fire cites the derived record and, through it, the
 source intervention. Replacing the pattern with a Jev-assisted typed decision is left for later.
+
+**Evidence postdates the decision.** A decision starts at the first commit that added its id heading (`## D87 `)
+to `docs/decisions.md`, found by `git log -S` on the id and the space after it, so a later rename of the heading
+text does not move it. The backtest counts only records later than that start, and validates every record a
+signal cites (it exists, matches the signal's fields, is later than the start; a derived record's source
+intervention too). Any invalid citation is a finding of condition (e) and the backtest fails.
 
 ## 10. What is left open
 

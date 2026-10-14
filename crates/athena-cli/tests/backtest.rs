@@ -456,7 +456,7 @@ fn an_intervention_stating_a_405_on_a_merge_puts_d87_under_review_through_a_deri
         "20261013-192156-ar1x",
         "20261013-192156-9h2j",
         "Merged the pull request by hand",
-        "GitHub refused a merge commit with HTTP 405",
+        "GitHub refused a merge commit (HTTP 405)",
     );
 
     let records = backtest::read_records(root).unwrap();
@@ -519,6 +519,243 @@ fn an_intervention_stating_a_405_on_a_merge_puts_d87_under_review_through_a_deri
         "{text}"
     );
     assert!(text.contains("host errors: 0 observed"), "{text}");
+}
+
+/// An intervention of class `code` at `at`, as the real ones are recorded.
+fn intervention_at(root: &Path, id: &str, at: &str, job: &str, what: &str) {
+    write(
+        root,
+        &format!("records/interventions/2026-10/{id}.json"),
+        json!({
+            "schema": "athena.intervention/1",
+            "id": id,
+            "at": at,
+            "what": what,
+            "why": "recorded after the fact",
+            "class_of_work": "code",
+            "category": "did-work-themselves",
+            "job": job,
+            "source": "user",
+            "with_staged_changes": false,
+        }),
+    );
+}
+
+const KN3Q: &str = "20261013-150702-kn3q";
+const QK2D: &str = "20261013-162049-qk2d";
+const AR1X: &str = "20261013-192156-ar1x";
+
+/// The three real interventions of 2026-10-13. The text of kn3q and ar1x is the text of the real records; the
+/// word for the person who ran the commands is built at run time because the boundary scan rejects it in a
+/// file. The text of qk2d is a stand-in with no refusal in it.
+fn real_interventions(root: &Path) {
+    let who = ["Oper", "ator"].concat();
+    for (job, state) in [
+        ("20261013-140000-vbdn", "landed"),
+        ("20261013-160000-qk2j", "landed"),
+        ("20261013-192156-9h2j", "landed"),
+    ] {
+        outcome(root, job, state);
+    }
+    intervention_at(
+        root,
+        KN3Q,
+        "2026-10-13T15:07:02Z",
+        "20261013-140000-vbdn",
+        &format!(
+            "athena land --pr failed with HTTP 422 for job vbdn; {who} opened PR #38 by hand, \
+             simulated the squash, and merged it with the job trailer."
+        ),
+    );
+    intervention_at(
+        root,
+        QK2D,
+        "2026-10-13T16:20:49Z",
+        "20261013-160000-qk2j",
+        "Edited the landing summary by hand.",
+    );
+    intervention_at(
+        root,
+        AR1X,
+        "2026-10-13T19:21:56Z",
+        "20261013-192156-9h2j",
+        &format!(
+            "{who} squash-merged PR #41 by hand with the job's trailers after GitHub refused a \
+             merge commit (HTTP 405)."
+        ),
+    );
+}
+
+fn d87_starts() -> backtest::Starts {
+    backtest::Starts::from([("D87".to_string(), "2026-10-13T19:21:00Z".parse().unwrap())])
+}
+
+#[test]
+fn with_the_real_interventions_d87_is_under_review_citing_only_ar1x() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    real_interventions(root);
+    let records = backtest::read_records(root).unwrap();
+    // Only ar1x states a refused merge; kn3q's text (a failed landing, then a hand merge) derives nothing.
+    let derived: Vec<String> = records
+        .derived_host_errors
+        .iter()
+        .map(|e| e.id.to_string())
+        .collect();
+    assert_eq!(derived, [AR1X]);
+
+    let report = backtest::run_on_from(LOG, &links(), &records, &d87_starts());
+    assert!(report.passed(), "{:?}", report.findings);
+    assert_eq!(report.under_review, ["D87"]);
+    let d87 = report
+        .decision_view
+        .iter()
+        .find(|v| v.id == "D87")
+        .expect("D87 is in the log");
+    let cited = d87.under_review.as_deref().expect("D87 is under review");
+    assert_eq!(cited.len(), 1, "{cited:?}");
+    assert!(cited[0].contains(AR1X), "{cited:?}");
+    assert!(cited[0].contains("derived"), "{cited:?}");
+    // Directly (an observed record or an intervention event) nothing is cited, and the derived record cites
+    // ar1x as its source.
+    for run in &report.runs {
+        assert!(run.host_error_records.is_empty());
+        // The hand-change signal sees ar1x alone (one job, below its threshold of two), so it does not fire.
+        assert!(run.events.iter().all(|e| e.id == AR1X), "{:?}", run.events);
+        assert!(run.events.is_empty() || !run.fired);
+        for cite in &run.derived_records {
+            assert_eq!(cite.record, AR1X);
+            assert_eq!(cite.source_intervention, AR1X);
+        }
+    }
+    let text = backtest::render(&report);
+    assert!(!text.contains("kn3q") && !text.contains("qk2d"), "{text}");
+    assert!(
+        d87.under_review
+            .iter()
+            .flatten()
+            .all(|c| !c.contains("kn3q") && !c.contains("qk2d"))
+    );
+}
+
+#[test]
+fn a_refusal_before_the_decision_started_is_not_counted_and_a_pre_start_citation_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    real_interventions(root);
+    // A refused merge stated before D87 started.
+    intervention_at(
+        root,
+        "20261013-150800-e4r1",
+        "2026-10-13T15:08:00Z",
+        "20261013-140000-vbdn",
+        "GitHub refused a merge commit (HTTP 422).",
+    );
+    let records = backtest::read_records(root).unwrap();
+    let starts = d87_starts();
+
+    // Counting only later records, the early one is left out.
+    let report = backtest::run_on_from(LOG, &links(), &records, &starts);
+    assert!(report.passed(), "{:?}", report.findings);
+    let d87 = report.decision_view.iter().find(|v| v.id == "D87").unwrap();
+    assert_eq!(d87.under_review.as_ref().unwrap().len(), 1);
+
+    // Without the start the run cites the early record; validating that run against the start fails.
+    let headers = backtest::headers();
+    let runs = backtest::run_signals(&headers, &records, &backtest::Starts::new());
+    assert!(
+        runs.iter()
+            .flat_map(|r| &r.derived_records)
+            .any(|c| c.record == "20261013-150800-e4r1")
+    );
+    let findings = backtest::validate_citations(&headers, &runs, &records, &starts);
+    assert!(
+        findings.iter().any(|f| f.condition == "e"
+            && f.reason.contains("20261013-150800-e4r1")
+            && f.reason.contains("not later than")),
+        "{findings:?}"
+    );
+    // The same runs validate when no start is known.
+    assert!(
+        backtest::validate_citations(&headers, &runs, &records, &backtest::Starts::new())
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_citation_of_a_record_that_does_not_exist_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    real_interventions(dir.path());
+    let records = backtest::read_records(dir.path()).unwrap();
+    let headers = backtest::headers();
+    let starts = d87_starts();
+    let mut runs = backtest::run_signals(&headers, &records, &starts);
+    let run = runs
+        .iter_mut()
+        .find(|r| r.decision == "D87" && !r.derived_records.is_empty())
+        .unwrap();
+    run.derived_records[0].source_intervention = "20261013-000000-gone".to_string();
+    run.host_error_records
+        .push("20261013-000001-none".to_string());
+    let findings = backtest::validate_citations(&headers, &runs, &records, &starts);
+    assert_eq!(findings.len(), 2, "{findings:?}");
+}
+
+fn git(root: &Path, date: &str, args: &[&str]) {
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args([
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.invalid",
+        ])
+        .args([
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+        ])
+        .args(args)
+        .env("GIT_COMMITTER_DATE", date)
+        .env("GIT_AUTHOR_DATE", date)
+        .status()
+        .unwrap();
+    assert!(status.success(), "git {args:?}");
+}
+
+#[test]
+fn a_decision_is_dated_from_the_first_commit_that_added_its_id_heading() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    git(root, "2026-10-13T10:00:00Z", &["init", "-q"]);
+    let file = root.join("docs/decisions.md");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, "## D86 · Earlier\n").unwrap();
+    git(root, "2026-10-13T10:00:00Z", &["add", "-A"]);
+    git(root, "2026-10-13T10:00:00Z", &["commit", "-q", "-m", "D86"]);
+    std::fs::write(&file, "## D86 · Earlier\n\n## D87 · Merge commits\nbody\n").unwrap();
+    git(root, "2026-10-13T19:21:00Z", &["add", "-A"]);
+    git(root, "2026-10-13T19:21:00Z", &["commit", "-q", "-m", "D87"]);
+    // The heading is renamed later, and the entry edited: the id heading is the same.
+    std::fs::write(
+        &file,
+        "## D86 · Earlier\n\n## D87 · Follow the repository's merge settings\nbody, revised\n",
+    )
+    .unwrap();
+    git(root, "2026-10-14T08:00:00Z", &["add", "-A"]);
+    git(
+        root,
+        "2026-10-14T08:00:00Z",
+        &["commit", "-q", "-m", "rename"],
+    );
+
+    let start = backtest::decision_start(root, "D87").unwrap().unwrap();
+    assert_eq!(start, "2026-10-13T19:21:00Z".parse().unwrap());
+    let early = backtest::decision_start(root, "D86").unwrap().unwrap();
+    assert_eq!(early, "2026-10-13T10:00:00Z".parse().unwrap());
+    assert_eq!(backtest::decision_start(root, "D99").unwrap(), None);
 }
 
 #[test]

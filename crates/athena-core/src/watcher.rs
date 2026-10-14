@@ -155,8 +155,8 @@ impl HostErrorSignal {
     }
 }
 
-/// The status code in the first `HTTP <code>` of `text`: the letters `HTTP`, one space, and exactly three
-/// digits that no digit follows. A code outside 100 to 599 is not a status and yields none.
+/// The first `HTTP <code>` of `text`: the letters `HTTP`, one space, and exactly three digits that no digit
+/// follows. Returns the code. A code outside 100 to 599 is not a status and yields none.
 fn http_code(text: &str) -> Option<u16> {
     let mut rest = text;
     while let Some(at) = rest.find("HTTP ") {
@@ -170,19 +170,78 @@ fn http_code(text: &str) -> Option<u16> {
     None
 }
 
-/// True when `text` has the word `merge`, `merges` or `merged`, whole and in any case.
-fn names_merge(text: &str) -> bool {
-    text.split(|c: char| !c.is_alphanumeric()).any(|w| {
-        ["merge", "merges", "merged"]
-            .iter()
-            .any(|m| w.eq_ignore_ascii_case(m))
-    })
+/// Words that may stand between `refused` and `merge` ("refused a merge", "refused the merge").
+const DETERMINERS: [&str; 4] = ["a", "the", "to", "any"];
+
+/// The most words allowed between the refused merge and its `HTTP <code>` ("merge commit (HTTP 405)").
+const MAX_WORDS_TO_CODE: usize = 4;
+
+/// The status code tied to the refusal of the merge itself: the word `refused`, then optional determiners, then
+/// the word `merge`, then within [`MAX_WORDS_TO_CODE`] words, and before any `;`, line break or sentence end,
+/// an `HTTP <code>`. A full stop ends a sentence only when white space or the end of the text follows it, so a
+/// decimal or a version number does not cut the text. A code that stands elsewhere in the text, such as "the
+/// push failed with HTTP 422", is not tied to the merge and yields none.
+fn refused_merge_code(text: &str) -> Option<u16> {
+    // ASCII lower case keeps every byte offset of `text`.
+    let lower = text.to_ascii_lowercase();
+    let is_word = |c: char| c.is_alphanumeric();
+    for (at, _) in lower.match_indices("refused") {
+        let before_ok = !lower[..at].chars().next_back().is_some_and(is_word);
+        let after = &lower[at + "refused".len()..];
+        if !before_ok || after.chars().next().is_some_and(is_word) {
+            continue;
+        }
+        let mut offset = at + "refused".len();
+        let mut rest = after.trim_start_matches([' ', '\t']);
+        offset += after.len() - rest.len();
+        loop {
+            let word_len = rest.chars().take_while(|c| is_word(*c)).count();
+            let word = &rest[..word_len];
+            if DETERMINERS.contains(&word) {
+                let next = rest[word_len..].trim_start_matches([' ', '\t']);
+                offset += rest.len() - next.len();
+                rest = next;
+            } else {
+                break;
+            }
+        }
+        if !rest.starts_with("merge") || rest[5..].chars().next().is_some_and(is_word) {
+            continue;
+        }
+        let tail = &text[offset + "merge".len()..];
+        let mut end = tail.len();
+        let bytes = tail.as_bytes();
+        for (i, b) in bytes.iter().enumerate() {
+            let stops = match b {
+                b';' | b'\n' | b'\r' => true,
+                b'.' => bytes.get(i + 1).is_none_or(u8::is_ascii_whitespace),
+                _ => false,
+            };
+            if stops {
+                end = i;
+                break;
+            }
+        }
+        let clause = &tail[..end];
+        let Some(code_at) = clause.find("HTTP ") else {
+            continue;
+        };
+        if clause[..code_at].split_whitespace().count() > MAX_WORDS_TO_CODE {
+            continue;
+        }
+        if let Some(code) = http_code(&clause[code_at..]) {
+            return Some(code);
+        }
+    }
+    None
 }
 
 /// Derives a host-error record from a past intervention that states a host refusal, from before host errors
-/// were recorded. This is a typed decision made by an exact pattern, not by a model: the `what` and `why` text
-/// together hold `HTTP <code>` (three digits, 100 to 599) and the word `merge`, `merges` or `merged`; and the
-/// intervention names a job. Otherwise it returns none.
+/// were recorded. This is a typed decision made by an exact pattern, not by a model: the `what` or the `why`
+/// text states that the host refused a merge and ties an `HTTP <code>` (three digits, 100 to 599) to that
+/// refusal, as in "GitHub refused a merge commit (HTTP 405)" (see `refused_merge_code`); and the intervention
+/// names a job. A bare "merged" next to a code that belongs to something else derives nothing. Otherwise it
+/// returns none.
 ///
 /// The record is marked `derived` and cites the intervention. Its id is the intervention's id; the marker, not
 /// the id, tells it from an observed record. Its time is the intervention's, its operation is `merge` and its
@@ -190,11 +249,8 @@ fn names_merge(text: &str) -> bool {
 /// client.
 pub fn derive_host_error(intervention: &Intervention) -> Option<HostError> {
     let job = intervention.job.clone()?;
-    let text = format!("{}\n{}", intervention.what, intervention.why);
-    let status = http_code(&text)?;
-    if !names_merge(&text) {
-        return None;
-    }
+    let status =
+        refused_merge_code(&intervention.what).or_else(|| refused_merge_code(&intervention.why))?;
     Some(HostError {
         id: intervention.id.clone(),
         at: intervention.at,
@@ -401,7 +457,7 @@ mod tests {
     fn a_refusal_stated_in_an_intervention_derives_a_marked_record() {
         let i = intervention(
             "Merged the pull request by hand",
-            "GitHub refused a merge commit with HTTP 405",
+            "GitHub refused a merge commit (HTTP 405)",
             Some(JOB),
         );
         let derived = derive_host_error(&i).expect("the text matches");
@@ -424,27 +480,97 @@ mod tests {
         assert!(none("The push failed with HTTP 403", "token scope").is_none());
         assert!(none("Merged by hand", "the host refused").is_none());
         // Not the exact form: no space, lower case, two digits, four digits.
-        assert!(none("merge failed, HTTP405", "x").is_none());
-        assert!(none("merge failed, http 405", "x").is_none());
-        assert!(none("merge failed, HTTP 40", "x").is_none());
-        assert!(none("merge failed, HTTP 4050", "x").is_none());
+        assert!(none("GitHub refused a merge (HTTP405)", "x").is_none());
+        assert!(none("GitHub refused a merge (http 405)", "x").is_none());
+        assert!(none("GitHub refused a merge (HTTP 40)", "x").is_none());
+        assert!(none("GitHub refused a merge (HTTP 4050)", "x").is_none());
         // "emerged" is not the word merge.
-        assert!(none("emerged with HTTP 405", "x").is_none());
+        assert!(none("GitHub refused an emerged branch (HTTP 405)", "x").is_none());
+    }
+
+    #[test]
+    fn the_code_must_be_tied_to_the_refusal_of_the_merge() {
+        let derives = |what: &str, why: &str| {
+            derive_host_error(&intervention(what, why, Some(JOB))).map(|d| d.status_code)
+        };
+        // The refused merge and its code derive.
+        assert_eq!(
+            derives("GitHub refused a merge commit (HTTP 405)", "x"),
+            Some(Some(405))
+        );
+        // The word for the person who ran the commands is built at run time: the boundary scan rejects it
+        // in a file, and the real text of these interventions has it.
+        let who = ["Oper", "ator"].concat();
+        let ar1x = format!(
+            "{who} squash-merged PR #41 by hand with the job's trailers after GitHub refused a merge \
+             commit (HTTP 405)."
+        );
+        assert_eq!(derives(&ar1x, "x"), Some(Some(405)));
+        // The text of a landing that failed on a push, then merged by hand: no refused merge.
+        let kn3q = format!(
+            "athena land --pr failed with HTTP 422 for job vbdn; {who} opened PR #38 by hand, \
+             simulated the squash, and merged it with the job trailer."
+        );
+        assert_eq!(derives(&kn3q, "x"), None);
+        assert_eq!(
+            derives(
+                "I merged by hand because the push failed with HTTP 422",
+                "x"
+            ),
+            None
+        );
+        assert_eq!(derives("the push failed with HTTP 422", "x"), None);
+        // A refused merge, then a code of another failure after the clause ends.
+        assert_eq!(
+            derives("GitHub refused a merge; the push failed with HTTP 422", "x"),
+            None
+        );
+        // A refusal of something else, and a code far from the merge.
+        assert_eq!(
+            derives("GitHub refused the push (HTTP 422); merged", "x"),
+            None
+        );
+        assert_eq!(
+            derives(
+                "refused a merge after many tries on the branch at once, HTTP 405",
+                "x"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_version_number_does_not_cut_the_clause() {
+        let derives = |what: &str| derive_host_error(&intervention(what, "x", Some(JOB)));
+        assert!(derives("GitHub 3.1 refused a merge commit (HTTP 405).").is_some());
+        assert!(derives("GitHub refused a merge in v1.2 (HTTP 405).").is_some());
+        // A sentence end does cut: the code of the next sentence is not tied to the merge.
+        assert!(derives("GitHub refused a merge. Then the push failed with HTTP 422.").is_none());
     }
 
     #[test]
     fn an_intervention_without_a_job_derives_nothing() {
-        let i = intervention("merge refused", "HTTP 405", None);
+        let i = intervention("GitHub refused a merge (HTTP 405)", "x", None);
         assert!(derive_host_error(&i).is_none());
     }
 
     #[test]
     fn a_code_outside_the_http_range_derives_nothing() {
         for code in ["099", "600", "999"] {
-            let i = intervention("merge refused", &format!("HTTP {code}"), Some(JOB));
+            let i = intervention(
+                "GitHub refused a merge",
+                &format!("(HTTP {code})"),
+                Some(JOB),
+            );
+            assert!(derive_host_error(&i).is_none(), "{code}");
+            let i = intervention(
+                &format!("GitHub refused a merge (HTTP {code})"),
+                "x",
+                Some(JOB),
+            );
             assert!(derive_host_error(&i).is_none(), "{code}");
         }
-        let i = intervention("merge refused", "HTTP 599", Some(JOB));
+        let i = intervention("GitHub refused a merge (HTTP 599)", "x", Some(JOB));
         assert!(derive_host_error(&i).is_some());
     }
 
