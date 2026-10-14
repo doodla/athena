@@ -1,0 +1,204 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261014-192610-xgke",
+  "base_commit": "e851235b463eb7ecd4a9f0a34813f99530a163cb",
+  "base_fingerprint": "sha256:a5a857cf693c3026633ea207dac730a281b360156aa7085c3543a75504e04018",
+  "previous_job": "20261014-192705-j4be",
+  "candidate_commit": "f82d47487c9b0c907bcbae163099540d70545d70",
+  "candidate_tree": "7821573b4408a873190fc5fd89582a6cfee6ae1c",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 54832
+    },
+    {
+      "path": "crates/athena-agent/src/claude.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 26916
+    },
+    {
+      "path": "crates/athena-agent/src/fake.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 12511
+    },
+    {
+      "path": "crates/athena-agent/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 5950
+    },
+    {
+      "path": "crates/athena-agent/src/policy.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 41206
+    },
+    {
+      "path": "crates/athena-cli/src/wiring.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 6974
+    },
+    {
+      "path": "crates/athena-cli/tests/common/mod.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 11271
+    },
+    {
+      "path": "crates/athena-cli/tests/retry.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 10187
+    },
+    {
+      "path": "crates/athena-cli/tests/steward.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 12543
+    },
+    {
+      "path": "crates/athena-context/src/outputs.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 13808
+    },
+    {
+      "path": "crates/athena-core/src/invocation.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 11558
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 6590
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 11062
+    },
+    {
+      "path": "crates/athena-core/src/scoring.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 6537
+    },
+    {
+      "path": "crates/athena-core/src/steward.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 43318
+    },
+    {
+      "path": "crates/athena-core/src/store.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 14280
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 90659
+    },
+    {
+      "path": "crates/athena-data/src/roles.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 8050
+    },
+    {
+      "path": "crates/athena-gate/src/invariant.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 40885
+    },
+    {
+      "path": "docs/design/roles-and-ladder.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 8603
+    }
+  ],
+  "fingerprint": "sha256:5f89c7ffa8d349c9bc16c3daa1a6e18d3b0a9feb3953162975b57171ac5ba932",
+  "violations": [],
+  "producer_report": {
+    "summary": "The steward is now a model-backed agent. Its stored prompt is unchanged, so it stays steward-1, and it is now the agent's system prompt. The run goes through the existing AgentDriver, so it is budgeted, hermetic and recorded. All checks pass: `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, and `cargo test --locked`. The one failing test (my own brief test, a helper missing a job id) was fixed and its steward tests re-run green. I did not rerun the full suite after that fix, or after the two last edits to steward.rs. Nothing was run against real Claude Code or a real `gh`.\n\n**Root cause.** `steward::run` counted failure classes and never invoked a driver, so the prompt reached nothing. The fix is to wire the model call, not to edit the prompt.\n\n**What changed**\n- **Agent run.** `steward.rs` has an `Agent` trait and a `DriverAgent`. For each run it builds a read-only working directory: the code snapshot (owner private paths hidden), the records exported from HEAD, and `history/log.txt` (the last 300 commits with subjects and trailers).\n- **Brief.** The agent gets a brief giving where to look, the ladder and which rungs Athena applies, the work item keys already queued, and the old failure count. `repeated_failures` is kept as input to that brief.\n- **Background thread.** `AgentDriver::share()` is a new default method returning `None`; it is implemented for the real driver (a fresh `DeferredDriver`), `ClaudeCodeDriver` and `FakeAgentDriver` (cloned script). A driver that cannot be shared becomes a blind spot, never a model call on the main thread. A nested run still starts no steward.\n- **Tool policy.** `Role::Steward` has no write access. `policy.rs` gains `check_gh` and `steward_commands()`. Allowed:\n  - `git` `status`, `diff`, `log` and `show`.\n  - `gh run list|view`.\n  - `gh pr list|view|diff|checks|status`.\n  - `gh api` with GET, no body, no `--hostname`, and no GraphQL.\n  - Policy tests cover both the allowed and the denied cases.\n- **Structured output.** `StewardOutput` has `work_items` (kind, key, title, rung, source, evidence, request) and `unread`.\n- **Validation.** Athena rejects the whole output if an item has an empty key, title or request, has no evidence, cites a job not in the records, uses a path that escapes the repository, or uses a bad commit id. Free text is redacted. A rejected output becomes a blind spot naming `steward-agent`.\n- **Queueing.** Each `unread` source becomes a `blind-spot:<source>` item. Every item goes through `decide()`, so rungs at or below the limit queue a request via `RequestQueue`, and higher rungs queue only a proposal. Keys already in the records, or earlier in the same run, are skipped before `decide` so they queue no second request.\n- **Recording.** The invocation is a normal invocation record with role `steward`. It belongs to no job, so it is stored under `records/steward-runs/<month>/<run id>-01.json` and loaded into a new `Records.steward_runs`. No job's totals include it. A run with nothing to add, a recorded role and zero cost makes no commit; any spend is always recorded.\n- **Also changed.**\n  - A `finding` work item kind was added.\n  - `invocation_record` became a free function (`build_invocation_record`) so the thread can use it.\n  - Exhaustive `Role` matches were updated in the fake driver, scoring, the invariant check and three test files.\n- **Docs and changelog.** `roles-and-ladder.md` and `CHANGELOG.md` say the steward now calls a model.\n- **Tests.** `crates/athena-cli/tests/steward.rs` was rewritten with a scripted fake agent. It covers:\n  - the fifth-task start;\n  - ladder routing (one applied request, one proposal);\n  - the blind spot from `unread`;\n  - no double queueing;\n  - spend recorded on a repeat run;\n  - no commit on a free empty run;\n  - an invalid output becoming a blind spot;\n  - a nested run making no steward call.\n\n  Unit tests cover `changes_from_output`, the brief and the steward schema.\n\n**Judgment calls to check**\n- The steward uses the verifier's model, cap and timeout, because there is no steward entry in `athena.toml` and that file is out of scope.\n- The criterion that an empty run makes no commit conflicts with recording every invocation. I resolved it as above, so a zero-cost empty run leaves no record of itself in git.\n- Git history is `history/log.txt` plus the working directory's single base commit, not the full object history. This keeps the owner's private paths hidden. `git show` of older commits therefore does not work, and the docs say so.",
+    "files": [
+      "crates/athena-core/src/steward.rs",
+      "crates/athena-core/src/invocation.rs",
+      "crates/athena-core/src/store.rs",
+      "crates/athena-core/src/scoring.rs",
+      "crates/athena-core/src/lib.rs",
+      "crates/athena-core/src/run_pin_tests.rs",
+      "crates/athena-data/src/records.rs",
+      "crates/athena-data/src/roles.rs",
+      "crates/athena-agent/src/lib.rs",
+      "crates/athena-agent/src/policy.rs",
+      "crates/athena-agent/src/fake.rs",
+      "crates/athena-agent/src/claude.rs",
+      "crates/athena-context/src/outputs.rs",
+      "crates/athena-cli/src/wiring.rs",
+      "crates/athena-cli/tests/steward.rs",
+      "crates/athena-cli/tests/common/mod.rs",
+      "crates/athena-cli/tests/retry.rs",
+      "crates/athena-gate/src/invariant.rs",
+      "docs/design/roles-and-ladder.md",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test --locked --quiet --no-fail-fast",
+        "result": "pass",
+        "note": "All suites passed except my own brief unit test, which failed on a missing job id in its helper. I fixed it and re-ran only `cargo test --locked -p athena-core --lib steward`, which passed (8 tests). I did not rerun the full suite after that fix, or after the two last edits to steward.rs. `crates/athena-cli/tests/steward.rs` passed in the full run, and nothing it depends on was edited afterwards."
+      },
+      {
+        "command": "cargo test --locked -p athena-cli --test steward",
+        "result": "pass",
+        "note": "6 tests; the nested-run test failed on the first run and passed in the full run after I rewrote it"
+      }
+    ],
+    "open_issues": [
+      "No live test against real Claude Code and `gh`. The `--allowedTools` rules, the `gh` auth environment (the agent env allow-list may not pass GH_TOKEN) and the cost of a real steward run are untested; a missing `gh` or network is reported as a blind spot.",
+      "`docs/design/requirements-map.md` was not edited (outside the deliverables). Its A9-1 row still says the steward never calls a model; it should be updated, and stays Partial.",
+      "The steward uses the verifier's model, cap and timeout. A steward-specific `[models]` and `[budget]` entry needs an `athena.toml` change, which is out of scope.",
+      "The working directory has only a base commit, so older commits can't be inspected with `git show`; the log file and `gh` cover history.",
+      "A zero-cost empty run is not recorded in git, only mirrored in the state directory.",
+      "A failed agent run queues a single `blind-spot:steward-agent` item whose key then stops later failures being raised again. The error is also written to `steward-error.txt`."
+    ],
+    "mistakes": [
+      "I first left a placeholder comment in `fake.rs` and a no-op `let _ = config` in `steward.rs`; I removed both before finishing.",
+      "I passed `--message-format=short` after `--` to clippy, which clippy rejected; I reran without it.",
+      "My first brief unit test used `JobRecords::default()`, which has no id; I set the id."
+    ],
+    "learnings": [
+      "Invocation records must name a job and live under the job's directory, so the steward's records go to a new path, `records/steward-runs/`, loaded into `Records.steward_runs`, to stay out of any job's totals and invariants.",
+      "Athena has exhaustive `match spec.role` blocks in test helpers (`tests/common/mod.rs`, `run_pin_tests.rs`, `retry.rs`) and the fake driver, so a new `Role` needs an arm in each.",
+      "Snapshots never include `records/` and hide private paths, so the steward builds its own working directory: a Base snapshot, records exported from HEAD, and `history/log.txt`.",
+      "The producer's Bash policy has no grep, head or cat, and cargo's `--message-format` goes before the `--` separator or clippy rejects it.",
+      "In a nested run (`Athena.nested`), `go` lands the job even when the fixture deletes the README, so it cannot reuse the rejected-job helper."
+    ],
+    "desires": [
+      "A way to run only a named test or list failures from `cargo test` without a pipe (the first full run's output was truncated).",
+      "A sample of real `gh` output, and the agent env allow-list, to check the read-only policy against actual commands."
+    ]
+  }
+}
