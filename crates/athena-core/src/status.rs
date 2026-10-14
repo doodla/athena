@@ -65,6 +65,9 @@ pub struct StatusView {
     pub restarts: usize,
     pub forecasts: Vec<ClassHeadline>,
     pub pending: Vec<Pending>,
+    /// Introspections no class-label record names yet (`crate::labeled::unreviewed`); `athena review` clears
+    /// them one at a time.
+    pub unreviewed_introspections: usize,
     /// Open defaults proposals (`athena.defaults-proposal/1`): pending ones only.
     pub proposals: Vec<ProposalView>,
     pub invalid_records: Vec<String>,
@@ -426,6 +429,14 @@ impl Athena {
             let id = &p.id;
             next.push(format!("athena accept-proposal {id}   # runs a job that edits defaults.toml · or: athena reject-proposal {id} --why \"...\""));
         }
+        let unreviewed = crate::labeled::unreviewed(&records.introspections, &records.class_labels);
+        if let Some(oldest) = unreviewed.first() {
+            next.push(format!(
+                "athena review {}   # {} introspection(s) have no class label; one of: --right · --class <id> · --new-class <name> --description \"...\"",
+                oldest.id,
+                unreviewed.len()
+            ));
+        }
         if records.request_jobs().is_empty() {
             next.push("athena ask \"<a one- or two-line request>\"".into());
         }
@@ -446,6 +457,7 @@ impl Athena {
             restarts: records.restarts.len(),
             forecasts,
             pending,
+            unreviewed_introspections: unreviewed.len(),
             proposals,
             invalid_records: records.invalid.clone(),
             next,

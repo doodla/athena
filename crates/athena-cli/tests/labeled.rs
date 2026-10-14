@@ -112,6 +112,7 @@ fn label(i: u32, class: Option<&str>, by: Labeler) -> AnyRecord {
         class: class.map(|c| RecordId::parse(c).unwrap()),
         labeled_by: by,
         is_repeat: None,
+        note: None,
     })
 }
 

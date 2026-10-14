@@ -9,10 +9,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `athena review <introspection-id>`, the writer of class labels that `athena score-jev` needs (it counts only
+  introspections a reviewer labeled, and no command recorded a review). It shows the introspection (what
+  happened, class, cause, prevention, Jev's shadow answer, or that Jev was not asked or failed) and commits an
+  `athena.class-label/1` record in the same call: `--right` (the recorded class), `--class <id>` (another
+  registry class) or `--new-class <name> --description "..."` (also writes a proposed `athena.failure-class/1`
+  record in the same commit), with an optional one-line `--note` and `--json`. `ClassLabel` gains an optional
+  `note` (absent from the JSON when not given; older records still parse). `labeled_by` is `person`. A review
+  never edits the introspection; reviewing again adds a newer label, which the newest-wins rule already handles,
+  and the command says so. An unknown or ambiguous id, an unknown class, no verdict or two, `--right` on an
+  introspection with no class, and a multi-line note are errors that write nothing. `athena status` shows the
+  number of unreviewed introspections and, when it is above zero, a `next` line that points at `athena review`;
+  the count and `labeled::build` share one definition (`labeled::unreviewed`).
 - The labeled set and Jev scoring, step 6 of the build order in `docs/design/defaults-loop.md` section 12
   (sections 10.2 to 10.4), as a read-only command: `athena score-jev [--cut <time>] [--json]`. A new record,
   `athena.class-label/1`, holds a reviewer's class for one introspection (a registry id or none, who labeled it:
-  `person` or `stronger-model`, and optionally whether it repeats); nothing writes it yet. `labeled.rs` in
+  `person` or `stronger-model`, and optionally whether it repeats); `athena review` (below) writes it. `labeled.rs` in
   `athena-core` builds the labeled set from introspections that have a label and a stored Jev answer, counting
   those left out (unreviewed, no Jev answer, Jev call failed). It scores the stored failure-class probabilities
   by Brier score against two references (always `none`, word overlap), reports skill over the better one, top-1
@@ -20,8 +32,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   test size meets the section 10.4 rule, otherwise "no bound was computed". The promotion verdict covers items 1
   to 3; items 4 to 7 are shown as not evaluated. With fewer than 10 test cases (an estimate) it says "too few
   labeled cases" and gives no score and no verdict. The module never opens a file for writing (a test asserts
-  it). Not built: set membership, signal match, cluster, confidence, prose and cost scoring, the writer of
-  labels, and the live shadow run. The run over the real `records/` follows landing.
+  it). Not built: set membership, signal match, cluster, confidence, prose and cost scoring, and the live
+  shadow run. The run over the real `records/` follows landing.
 - The Jev client and a shape-faithful fake, step 5 of the build order in `docs/design/defaults-loop.md` section
   12 (decision D92). `crates/athena-core/src/jev.rs` builds `POST /v1/evaluate` with `{model:
   "typesafe-ai/jev", state, questions}`, several questions per call (`choice` with described options, or

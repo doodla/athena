@@ -1330,7 +1330,8 @@ impl Labeler {
 /// `athena.class-label/1`: the failure class a reviewer assigned to one recorded introspection, written before
 /// Jev's answers are read (`docs/design/defaults-loop.md` section 10.2). Introspections without such a record
 /// are unreviewed and are not part of the labeled set. A later label for the same introspection replaces an
-/// earlier one (the newest by time, then id, counts). This build only reads these records.
+/// earlier one (the newest by time, then id, counts). `athena review` writes these records; the introspection
+/// itself is never edited.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClassLabel {
@@ -1345,6 +1346,9 @@ pub struct ClassLabel {
     /// reviewer did not say; such a label is used for the class score only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_repeat: Option<bool>,
+    /// A one-line note from the reviewer. Absent when none was given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// The schema tag of a defaults proposal.
@@ -2210,8 +2214,9 @@ mod tests {
             class: None,
             labeled_by: Labeler::StrongerModel,
             is_repeat: None,
+            note: None,
         };
-        let record = AnyRecord::ClassLabel(label);
+        let record = AnyRecord::ClassLabel(label.clone());
         assert_eq!(record.schema(), "athena.class-label/1");
         assert_eq!(
             record.canonical_path(),
@@ -2220,7 +2225,17 @@ mod tests {
         let json = record.to_json();
         assert!(json.contains("\"labeled_by\": \"stronger-model\""));
         assert!(!json.contains("is_repeat"));
+        assert!(!json.contains("note"));
         assert_eq!(AnyRecord::parse("x", json.as_bytes()).unwrap(), record);
+
+        // With a note the field is written and read back.
+        let noted = AnyRecord::ClassLabel(ClassLabel {
+            note: Some("The cause is the missing default.".into()),
+            ..label
+        });
+        let json = noted.to_json();
+        assert!(json.contains("\"note\": \"The cause is the missing default.\""));
+        assert_eq!(AnyRecord::parse("x", json.as_bytes()).unwrap(), noted);
     }
 
     #[test]

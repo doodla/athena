@@ -446,6 +446,16 @@ pub fn status(v: &StatusView) -> String {
         };
         let _ = writeln!(out, "{label:<11} {}#{} — {state}", p.record, p.field);
     }
+    let _ = writeln!(
+        out,
+        "unreviewed  {} introspection(s) with no class label{}",
+        v.unreviewed_introspections,
+        if v.unreviewed_introspections > 0 {
+            " (athena review <id>)"
+        } else {
+            ""
+        }
+    );
     for (i, p) in v.proposals.iter().enumerate() {
         let label = if i == 0 { "proposals" } else { "" };
         let _ = writeln!(
@@ -544,6 +554,97 @@ fn introspection(out: &mut String, i: &athena_core::status::IntrospectionView) {
         "  written by    a language model, not Jev{}",
         i.cost_usd.map_or(String::new(), |c| format!(" · ${c:.4}"))
     );
+}
+
+/// `athena review`: the introspection that was shown and the verdict that was recorded.
+pub fn review(r: &athena_core::review::Review) -> String {
+    let s = &r.shown;
+    let dash = "-";
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "introspection {} · {}{}",
+        s.id,
+        s.trigger,
+        s.job
+            .as_ref()
+            .map_or(String::new(), |j| format!(" · job {j}"))
+    );
+    let _ = writeln!(
+        out,
+        "  what happened {}",
+        s.what_happened.as_deref().unwrap_or(dash)
+    );
+    let _ = writeln!(
+        out,
+        "  class         {}",
+        s.class.as_deref().unwrap_or(dash)
+    );
+    let _ = writeln!(
+        out,
+        "  cause         {}",
+        s.cause.as_deref().unwrap_or(dash)
+    );
+    let prevention = s
+        .prevention
+        .as_ref()
+        .map(|p| format!("{}: {p}", s.prevention_kind.as_deref().unwrap_or("?")));
+    let _ = writeln!(
+        out,
+        "  prevention    {}",
+        prevention.as_deref().unwrap_or(dash)
+    );
+    let jev = &s.jev;
+    if !jev.asked {
+        let _ = writeln!(out, "  jev (shadow)  Jev was not asked");
+    } else if let Some(why) = &jev.error {
+        let _ = writeln!(out, "  jev (shadow)  Jev failed: {why}");
+    } else if let Some(choice) = &jev.choice {
+        let _ = writeln!(
+            out,
+            "  jev (shadow)  chose {choice} (confidence {:.2}){}",
+            jev.confidence.unwrap_or(0.0),
+            jev.repeat_probability
+                .map_or(String::new(), |p| format!(" · repeat {p:.2}")),
+        );
+        for o in &jev.options {
+            let _ = writeln!(
+                out,
+                "                {:.2}  {}{}",
+                o.probability,
+                o.option,
+                o.name.as_ref().map_or(String::new(), |n| format!(" ({n})"))
+            );
+        }
+    } else {
+        let _ = writeln!(out, "  jev (shadow)  no answers");
+    }
+    if let Some(old) = &r.replaces {
+        let _ = writeln!(
+            out,
+            "this introspection was already reviewed (label {}); this review replaces it",
+            old.id
+        );
+    }
+    if let Some(class) = &r.new_class {
+        let _ = writeln!(
+            out,
+            "added class {} ({}), proposed by this introspection",
+            class.name, class.id
+        );
+    }
+    let _ = writeln!(
+        out,
+        "recorded: class {} (label {}, by {}){}",
+        r.assigned,
+        r.label.id,
+        r.label.labeled_by.as_str(),
+        r.label
+            .note
+            .as_ref()
+            .map_or(String::new(), |n| format!(" · note: {n}"))
+    );
+    out
 }
 
 /// `athena score-jev`: the labeled set, what was left out, and either the score and the promotion verdict or

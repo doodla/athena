@@ -485,6 +485,15 @@ reviewed as part of the introspection record and scored in §10.3.
 - **Split:** by time. Records up to a cut date calibrate the thresholds and N; later records test. No tuning on
   the test part. The same split applies to the two sets above, and they calibrate `t_apply` and `t_signal`.
 - **Label hygiene:** labels are written before Jev's output is read.
+- **Class labels (`athena.class-label/1`):** the failure-class label of one introspection is a record: the
+  introspection, the class (a registry id, or none), who labeled it (`person` or `stronger-model`), when, whether
+  the event repeats (optional), and a one-line `note` (optional, absent when not given). `athena review
+  <introspection-id>` writes it for a person: it shows the introspection (what happened, class, cause,
+  prevention, Jev's shadow answer) and records the verdict in the same call (`--right`, `--class <id>`, or
+  `--new-class <name> --description "..."`, with an optional `--note`). A new class is added as an
+  `athena.failure-class/1` record in the same commit. A review never edits the introspection; a second review
+  adds a newer label, and the newest per introspection counts. `athena status` shows how many introspections have
+  no label.
 
 ### 10.3 Scoring
 
@@ -631,8 +640,9 @@ with a person-visible review.
    nothing (a test asserts the module never opens a file for writing). A person's review is a new record,
    `athena.class-label/1` (`crates/athena-data/src/records.rs`): the introspection it labels, the reviewed class
    (a registry id, or none), who labeled it (`person`, or `stronger-model` with a person's spot-check), when, and
-   optionally whether the event repeats. The newest label per introspection counts. Nothing in this build writes
-   these records; the user, or a later command, adds them before Jev's answers are read (§10.2 label hygiene).
+   optionally whether the event repeats, and optionally a one-line note. The newest label per introspection
+   counts. `athena review` writes these records (§10.2); `score-jev` itself still only reads them, and labels are
+   added before Jev's answers are read (§10.2 label hygiene).
    The labeled set is every introspection with a label and a usable stored Jev answer (`IntrospectionJev`); the
    report counts the unreviewed, the reviewed ones with no Jev answer, and the reviewed ones whose Jev call
    failed, each left out. Scoring covers §10.3 matching: the Brier score of Jev's failure-class probabilities
