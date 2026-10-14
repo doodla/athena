@@ -9,6 +9,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `athena retry <job>` (`docs/design/defaults-loop.md` section 3.5, build order step 2). It retries a rejected or
+  failed job from that job's introspection record: the reader's brief gains a "Why it happened" section with the
+  cause, the prevention and the proposed next request, and lists the earlier cases of the same class (id, job,
+  one line on what happened, and the prevention each proposed, shown as already tried). The original request and
+  the accepted corrections are carried as before. The reading is shown as `ask` shows it, with `--yes` and
+  `--json`, and nothing runs until the user accepts. A job with no usable introspection falls back to
+  `athena ask "try again on <job>"` and says so on standard error. The earlier cases are the ids the
+  introspection stored; no class matching is repeated. The section also appears for a typed "try again on <job>",
+  since the two share one code path.
 - One bounded-retry wrapper for every call to GitHub. The audit found a single call site, `GhCli` in
   `crates/athena-core/src/gh.rs` (the only place that runs `gh`; no HTTP client is used in `crates/`), and the
   retry loop already in `GhClient` (the 5xx retry) is now the wrapper. A call is made at most 3 times. Transient

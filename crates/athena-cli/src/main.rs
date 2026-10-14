@@ -40,6 +40,16 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Try a rejected or failed job again, starting from its introspection record (the proposed next
+    /// request, the cause and the prevention) and shown as `ask` shows a reading; Enter runs it.
+    Retry {
+        job: String,
+        /// Run without waiting at the prompt (the reading is printed, but its acceptance stays unresolved).
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Correct the latest reading in one line (or answer its question), and read again.
     Correct {
         job: String,
@@ -289,6 +299,43 @@ fn prompt_loop(athena: &Athena, mut proposal: Proposal) -> Result<u8> {
     }
 }
 
+/// Shows a fresh reading as `ask` does: with `--yes` it is printed and run without waiting; with
+/// `--json` it is printed as data; on a terminal Enter accepts it. Nothing runs unless the user accepts.
+fn show_proposal(athena: &Athena, proposal: Proposal, yes: bool, json: bool) -> Result<u8> {
+    if yes {
+        if let Some(r) = &proposal.reading
+            && !json
+        {
+            print!("{}", display::reading(proposal.job.as_str(), r, false));
+        }
+        if proposal
+            .reading
+            .as_ref()
+            .is_some_and(|r| r.capability.is_some())
+        {
+            return go_and_report(athena, proposal.job.as_str(), AcceptedBy::Flag, json);
+        }
+        if json {
+            print_json(&proposal_json(&proposal))?;
+        } else {
+            print!("{}", display::follow_up(&proposal));
+        }
+        return Ok(2);
+    }
+    if json {
+        print_json(&proposal_json(&proposal))?;
+        return Ok(0);
+    }
+    if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+        return prompt_loop(athena, proposal);
+    }
+    if let Some(r) = &proposal.reading {
+        print!("{}", display::reading(proposal.job.as_str(), r, false));
+    }
+    print!("{}", display::follow_up(&proposal));
+    Ok(0)
+}
+
 fn run(cli: Cli) -> Result<u8> {
     match cli.command {
         Command::Ask {
@@ -312,38 +359,17 @@ fn run(cli: Cli) -> Result<u8> {
                 return Ok(0);
             }
             let proposal = athena.ask(&request.join(" "), &Terminal)?;
-            if yes {
-                if let Some(r) = &proposal.reading
-                    && !json
-                {
-                    print!("{}", display::reading(proposal.job.as_str(), r, false));
-                }
-                if proposal
-                    .reading
-                    .as_ref()
-                    .is_some_and(|r| r.capability.is_some())
-                {
-                    return go_and_report(&athena, proposal.job.as_str(), AcceptedBy::Flag, json);
-                }
-                if json {
-                    print_json(&proposal_json(&proposal))?;
-                } else {
-                    print!("{}", display::follow_up(&proposal));
-                }
-                return Ok(2);
+            show_proposal(&athena, proposal, yes, json)
+        }
+        Command::Retry { job, yes, json } => {
+            let athena = open(true)?;
+            let (proposal, from_introspection) = athena.retry(&job, &Terminal)?;
+            if !from_introspection {
+                eprintln!(
+                    "job {job} has no introspection record with a proposed request; retrying as 'try again on' does, from its request and findings"
+                );
             }
-            if json {
-                print_json(&proposal_json(&proposal))?;
-                return Ok(0);
-            }
-            if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
-                return prompt_loop(&athena, proposal);
-            }
-            if let Some(r) = &proposal.reading {
-                print!("{}", display::reading(proposal.job.as_str(), r, false));
-            }
-            print!("{}", display::follow_up(&proposal));
-            Ok(0)
+            show_proposal(&athena, proposal, yes, json)
         }
         Command::Correct { job, line, json } => {
             let athena = open(true)?;
