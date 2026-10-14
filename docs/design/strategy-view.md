@@ -18,11 +18,11 @@ the map or from every goal. Statuses are the map's: covered, partial, not covere
 | G2 Know the user, and be a strategic partner | 14 | 2 | 8 | 4 |
 | G3 Safe, traceable, verified work | 19 | 4 | 15 | 0 |
 | G4 Sound shape, standards and resumption | 14 | 6 | 8 | 0 |
-| G5 Efficiency, learning and delegation | 14 | 4 | 6 | 4 |
+| G5 Efficiency, learning and delegation | 14 | 2 | 8 | 4 |
 | G6 The study of three systems | 23 | 0 | 7 | 16 |
 | G7 Explainer site, report and adoption | 15 | 0 | 3 | 12 |
 | G8 Work Athena does so the user does not have to | 5 | 0 | 4 | 1 |
-| **Total** | **128** | **22** | **66** | **40** |
+| **Total** | **128** | **20** | **68** | **40** |
 
 Reading the table: the core of v0 is built and gated (G3, G4), and the addenda of 2026-10-12 to 2026-10-14
 have moved the most since the map was first written: pull-request landing, introspection, defaults proposals,
@@ -89,8 +89,8 @@ repository alone.
 The aim: cost per verified result falls for repeated work, and Athena delegates toil to automations and
 specialists.
 
-- **Covered:** A6-1, A6-2, A9-1, A10-1.
-- **Partial:** A6-3, A6-4, A12-3, A13-1, A13-3, AD-11.
+- **Covered:** A6-1, A6-2.
+- **Partial:** A6-3, A6-4, A9-1, A10-1, A12-3, A13-1, A13-3, AD-11.
 - **Not covered:** A9-2, A12-1, A12-2, A13-2.
 - **Bet:** a typed-decision model (Jev) can take over many small decisions cheaply. It was left out of v0 on
   purpose (`docs/decisions.md`, *D31*); a client and scoring now exist (*D92*, `athena score-jev`), but no

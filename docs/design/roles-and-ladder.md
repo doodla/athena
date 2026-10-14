@@ -2,7 +2,8 @@
 
 This note covers the first build of the `BRIEF.md` addendum "2026-10-14: A loop that steers Athena, roles, and
 a ladder of requirements" (rows A9-1 and A10-1 of `docs/design/requirements-map.md`). It is small on purpose:
-one role, one ladder.
+one role, one ladder. Both rows are Partial in the map: A9-1 because the steward never calls a model, and
+A10-1 because cost and yield tracking, reshaping and retiring are not built.
 
 ## What was built
 

@@ -83,6 +83,59 @@ pub struct VerdictInputs<'a> {
     pub snapshot_changed: Option<String>,
     /// Set when the verifier did not complete.
     pub verifier_failure: Option<String>,
+    /// `docs/design/requirements-map.md` at the base, if the file exists there.
+    pub map_base: Option<&'a str>,
+    /// The same file at the candidate, if it exists there.
+    pub map_candidate: Option<&'a str>,
+}
+
+/// The requirements map, relative to the repository root.
+pub const MAP_PATH: &str = "docs/design/requirements-map.md";
+
+/// The map rows as `(ID, covered)`, in order. A row is a table line whose first cell looks like an ID
+/// (`A9-1`); it is covered when the first words of its last cell are `Covered`. Same rule as the strategy
+/// view's parser in the CLI, which core cannot call.
+fn map_rows(text: &str) -> Vec<(&str, bool)> {
+    text.lines()
+        .filter_map(|line| {
+            let inner = line.trim().strip_prefix('|')?;
+            let first = inner.split('|').next().unwrap_or("").trim();
+            let is_id = first.starts_with(|c: char| c.is_ascii_uppercase())
+                && first.contains('-')
+                && first.ends_with(|c: char| c.is_ascii_digit())
+                && first.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+            if !is_id {
+                return None;
+            }
+            let last = inner
+                .trim_end()
+                .trim_end_matches('|')
+                .rsplit('|')
+                .next()
+                .unwrap_or("")
+                .trim();
+            Some((first, last.starts_with("Covered")))
+        })
+        .collect()
+}
+
+/// The IDs of rows that are Covered in the candidate's map but were not Covered at the base: moved to
+/// Covered, or added already Covered. A job may not mark its own requirement rows covered.
+fn rows_newly_covered(base: Option<&str>, candidate: Option<&str>) -> Vec<String> {
+    let Some(candidate) = candidate else {
+        return Vec::new();
+    };
+    let before = map_rows(base.unwrap_or(""));
+    map_rows(candidate)
+        .into_iter()
+        .filter(|(id, covered)| {
+            *covered
+                && !before
+                    .iter()
+                    .any(|(old, was_covered)| old == id && *was_covered)
+        })
+        .map(|(id, _)| id.to_string())
+        .collect()
 }
 
 fn athena_finding(severity: Severity, summary: String, evidence: String) -> Finding {
@@ -183,6 +236,15 @@ pub fn judge(inputs: &VerdictInputs<'_>) -> Judgment {
             Severity::Blocker,
             "The verifier changed its snapshot, which invalidates its verdict".into(),
             change.clone(),
+        ));
+    }
+
+    for id in rows_newly_covered(inputs.map_base, inputs.map_candidate) {
+        reasons.push(format!("the change marked requirement row {id} Covered"));
+        findings.push(athena_finding(
+            Severity::Major,
+            format!("The change marked requirement row {id} Covered; a job may not mark its own rows covered"),
+            format!("{id} is Covered in docs/design/requirements-map.md at the candidate and was not Covered at the base"),
         ));
     }
 
@@ -394,7 +456,74 @@ mod tests {
             commands_run: ran,
             snapshot_changed: None,
             verifier_failure: None,
+            map_base: None,
+            map_candidate: None,
         })
+    }
+
+    fn map(a: &str, b: &str) -> String {
+        format!(
+            "| ID | Requirement | Status |\n|---|---|---|\n| A1-1 | x | `f` | {a} |\n| A2-1 | y | `g` | {b} |\n"
+        )
+    }
+
+    fn judged_with_maps(base: &str, candidate: &str) -> Judgment {
+        let ran = ["cargo test".to_string()];
+        judge(&VerdictInputs {
+            criteria: &criteria(),
+            checks: &[check(true)],
+            output: Some(&output(vec!["cargo test"], vec![])),
+            commands_run: &ran,
+            snapshot_changed: None,
+            verifier_failure: None,
+            map_base: Some(base),
+            map_candidate: Some(candidate),
+        })
+    }
+
+    #[test]
+    fn a_row_moved_to_covered_is_a_major_finding_and_the_verdict_fails() {
+        for from in ["Partial: later", "Not covered"] {
+            let j = judged_with_maps(&map(from, "Covered"), &map("Covered", "Covered"));
+            assert_eq!(j.final_verdict, Verdict::Fail, "{from}");
+            let named: Vec<_> = j
+                .findings
+                .iter()
+                .filter(|f| f.source == FindingSource::Athena && f.severity == Severity::Major)
+                .collect();
+            assert_eq!(named.len(), 1, "{from}");
+            assert!(named[0].summary.contains("A1-1"), "{from}");
+        }
+    }
+
+    #[test]
+    fn a_row_added_already_covered_is_a_major_finding() {
+        let base = "| A1-1 | x | `f` | Covered |\n";
+        let candidate = "| A1-1 | x | `f` | Covered |\n| A3-1 | z | `h` | Covered |\n";
+        let j = judged_with_maps(base, candidate);
+        assert_eq!(j.final_verdict, Verdict::Fail);
+        assert_eq!(j.findings.len(), 1);
+        assert!(j.findings[0].summary.contains("A3-1"));
+    }
+
+    #[test]
+    fn a_row_left_covered_or_moved_away_from_covered_adds_no_finding() {
+        let same = judged_with_maps(&map("Covered", "Partial"), &map("Covered", "Partial"));
+        assert_eq!(same.final_verdict, Verdict::Pass);
+        assert!(same.findings.is_empty());
+        let away = judged_with_maps(
+            &map("Covered", "Covered"),
+            &map("Partial: reason", "Not covered"),
+        );
+        assert_eq!(away.final_verdict, Verdict::Pass);
+        assert!(away.findings.is_empty());
+        assert!(away.reasons.is_empty());
+    }
+
+    #[test]
+    fn a_missing_map_adds_no_finding() {
+        assert!(rows_newly_covered(None, None).is_empty());
+        assert!(rows_newly_covered(Some("| A1-1 | x | Covered |"), None).is_empty());
     }
 
     #[test]

@@ -43,6 +43,7 @@ records of more than one job; it refuses one that does not form a valid chain.
 | M28 | What agents and checks run stays inside the job | agent and check environments put any nested Athena's state in the job's directory; setup refuses under the nested-run marker; the driver removes the folders Claude Code leaves under the user's home after every run (D57) | `claude_codes_leftovers_are_removed_after_each_run`, `setup_refuses_inside_a_job` | `claude_codes_leftovers_are_removed_after_each_run` (other folders are untouched), `only_allow_listed_variables_reach_agents` |
 | M29 | Deferred work is visible from the records alone | a request queued with `athena ask --later` is open work in `athena status`, with the command that picks it up, until it is read and run or dropped (D58) | `a_queued_request_is_open_work_until_it_is_read_and_run` | `ask_later_queues_a_request_without_calling_a_model`, `a_queued_request_is_open_work_until_it_is_read_and_run` |
 | M31 | A check is skipped only when the whole change is of a kind the configuration names, and the skip is recorded | a check may carry the optional key skip_when_only, a list of path patterns: `dir/` matches everything under that directory, `*.ext` matches any path ending in `.ext` at any depth, anything else matches one exact path. The runner skips the check only when the change list is not empty and every changed path matches a pattern; an absent list, an empty change list, or any other path runs it. A skipped check is recorded as passed with a "not run" note. `athena.toml` sets `skip_when_only = ["docs/", "*.md"]` on the change capability's fmt and clippy checks only; the test check never skips, because xtask's policy tests read prose | `a_studies_json_only_change_runs_every_check`, `a_check_without_a_skip_list_always_runs`, `an_empty_or_mixed_change_runs_the_check` | `a_docs_only_change_skips_and_says_so`, `path_patterns_match_by_directory_suffix_or_exact_path`, `skip_when_only_is_optional_and_parsed_when_present`, `skip_when_only_is_set_on_fmt_and_clippy_only` |
+| M32 | A job does not mark its own requirement rows Covered (D94) | `judge()` compares `docs/design/requirements-map.md` at the base with the candidate and adds a major Athena-sourced finding naming each row that moved to Covered or was added Covered; the producer prompt states the rule | `a_row_moved_to_covered_is_a_major_finding_and_the_verdict_fails`, `a_row_added_already_covered_is_a_major_finding` | `a_row_left_covered_or_moved_away_from_covered_adds_no_finding`, `a_missing_map_adds_no_finding` |
 
 ## Prose-only in v0
 
@@ -50,6 +51,10 @@ Each of these is a judgment or a boundary that a mechanism would not yet pay for
 
 - *Written for strangers*, and *evidence over assertion* in prose. They reach every job through the
   applicable defaults in the briefs and through the verifier's severity rules; no mechanism checks them.
+- *A document a request cites is checked against the change* (D94): the verifier prompt says to read it and
+  treat falling short as a request-reading mismatch. Prose-only, because the repository cannot tell which
+  documents a request cites. The companion rule, that a job may not mark its own requirement rows Covered, is
+  enforced by code (row M32).
 - *Buy before build* and *design before build*: process rules, recorded in the decision log.
 - *Keep v0 small*: a judgment; the design's §14 is the record.
 - *Interventions are never suppressed*. Corrections, answers, and hand changes to governed content are
