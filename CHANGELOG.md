@@ -9,6 +9,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Review 1 of the decision-sets design together with the introspection step of the defaults-loop design
+  (`docs/design/reviews/decision-sets-review-1.md`): fit across introspection records, the defaults loop, typed
+  decisions and failure signals; claims checked against code; Jev usage checked against `POST /v1/evaluate`; the
+  smallest first build; verdict accept with changes. Review only; neither design is edited.
 - Decision-sets design (`docs/design/decision-sets.md`, D91): typed decision fields (kind, scope, status,
   source, enforcement), sets computed by scope and applied to role briefs within their token budgets, per-decision
   assumptions and failure signals that put a decision under review, the D87 merge refusal as the worked example,
