@@ -1,0 +1,150 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261014-222157-mvkf",
+  "n": 1,
+  "at": "2026-10-14T22:49:19.122908626Z",
+  "invocation_seq": 1,
+  "base_commit": "d2d49e268a03b79618b487d3f782d7926cfc56c5",
+  "config_sha256": "94fb1807d6308583910799522415a96161c06fe11f0ed2bb4de718efd447a604",
+  "defaults_sha256": "7ca3db44e78a075634195d4e9722ade9188c5268e963b636ac7b9c38d2bee2c6",
+  "defaults_version": 1,
+  "title": "Check that athena.toml and defaults.toml parse during admission",
+  "summary": "Today the gate's \"configuration parses\" check (content.rs) only runs at landing. The reading adds the same check to candidate admission in athena-core, where secrets are already scanned. A candidate whose athena.toml or defaults.toml has an unknown field then fails with a repairable finding before the landing commit is built. A test covers an unknown field. The audience is the Athena operator and the producer agent that reads the finding.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "The change and its tests are Rust."
+    },
+    {
+      "id": "tested",
+      "how": "The new tests cover an unknown field in each of the two files; cargo test and clippy must pass."
+    },
+    {
+      "id": "small",
+      "how": "One focused change in admission.rs, with at most a changelog line."
+    },
+    {
+      "id": "root-cause",
+      "how": "The candidate is checked at admission using the real parsers, rather than catching one unknown-field case by hand."
+    },
+    {
+      "id": "buy-first",
+      "how": "It reuses Config::parse and DefaultsModel::parse, so no new parser or schema is built."
+    },
+    {
+      "id": "verified",
+      "how": "Behavior criteria name the cargo test commands the verifier can run."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "\"During verification\" means candidate admission in crates/athena-core/src/admission.rs, which run.rs calls before fingerprinting and the verifier checks. Admission already scans for secrets there \"so a secret fails the job here instead of at landing\". I did not take it to mean a configured [capabilities.change] check command, because that would mean editing athena.toml, a governance file.",
+    "The gate's own check in athena-gate/src/content.rs stays as the landing-time backstop. Admission reuses the same parsers rather than a new schema.",
+    "The finding goes through PolicyViolation (rule, path, detail), which has no separate repair field. The repair text goes into the detail, for example \"fix the file so it parses\".",
+    "Only a changed athena.toml or defaults.toml is parsed, using the candidate's blob. Whether the check also repeats the exempt-commit rule is left to the producer. Parsing alone meets the request.",
+    "The test uses Git::isolated with a temporary repository, as other athena-core tests do."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new test in crates/athena-core/src/admission.rs builds a base commit and a candidate commit whose athena.toml contains an unknown field. admit() must return a violation with rule \"configuration\", the path athena.toml, and a detail that names the parse error and says how to repair it. Run `cargo test -p athena-core admission`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A second test covers an unknown field in defaults.toml: admit() returns a configuration violation for the path defaults.toml. A third test shows that a candidate whose athena.toml and defaults.toml both parse, and a candidate that touches neither file, add no configuration violation. Run `cargo test -p athena-core admission`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "admit() parses the candidate's athena.toml and defaults.toml only when they changed, using Config::parse and DefaultsModel::parse from athena-data (the same parsers the gate uses). It does not duplicate the schema. A deleted file is not parsed. The violation reaches the existing candidate.violations path in run.rs, so the job is rejected with the finding before landing.",
+      "kind": "content"
+    },
+    {
+      "text": "The module doc comment in admission.rs lists the new rule. A parse failure is reported as an admission violation (the finding), not as an anyhow error that aborts the job.",
+      "kind": "content"
+    },
+    {
+      "text": "`cargo test`, `cargo clippy --all-targets` and `cargo fmt --check` pass, including the existing athena-gate content tests for the configuration rule.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/admission.rs",
+      "action": "modify",
+      "p": 0.93
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "p": 0.12
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.35
+    },
+    {
+      "path": "crates/athena-gate/src/content.rs",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "crates/athena-gate/src/lib.rs",
+      "action": "modify",
+      "p": 0.08
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.1
+    }
+  ],
+  "out_of_scope": [
+    "Changing the gate's landing-time checks or the Rule enum names",
+    "Editing athena.toml or defaults.toml, including adding a check entry to [capabilities.change]",
+    "Changing the config schema or adding fields",
+    "The exempt-commit history validation in content.rs::new_exemptions",
+    "Validating other files, such as roles.toml or Cargo.toml"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.72,
+      "p_verification_passes": 0.7,
+      "p_user_intervenes": 0.12,
+      "cost_usd": {
+        "p10": 0.3,
+        "p50": 0.7,
+        "p90": 1.7
+      },
+      "wall_time_s": {
+        "p10": 340.0,
+        "p50": 660.0,
+        "p90": 1250.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7844660194174757,
+      "p_verification_passes": 0.7073170731707317,
+      "p_user_intervenes": 0.10731707317073172,
+      "cost_usd": {
+        "p10": 0.41675091041097295,
+        "p50": 0.8644130623639372,
+        "p90": 2.1217023544625566
+      },
+      "wall_time_s": {
+        "p10": 498.9341788608506,
+        "p50": 797.1127581549999,
+        "p90": 1261.3926207258303
+      }
+    }
+  },
+  "departures": "None beyond the reference. The change is small and has a clear precedent in admission's secrets scan, but \"as a check during verification\" could mean a configured check, and that risk lowers acceptance a little."
+}
