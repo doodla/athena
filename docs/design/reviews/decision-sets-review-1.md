@@ -303,3 +303,15 @@ steps 1 to 7 above are applied.
 to start with is the one in section 5.
 
 The designs are not edited by this review.
+
+## Addendum: first backtest result (2026-10-14)
+
+The section 5 build ran on the real records and failed (reported by the user; recorded in `decision-sets.md` §9).
+Corrections to the pass conditions above:
+
+- **(a)** The parse found 24 hits, 0 lacking a target, plus one the list above did not expect: D11, line 322,
+  "Revised ... superseded by D39". It is a partial supersession, so it is `amended_by`, and the expected list is
+  corrected to include D11/D39.
+- **(b)** D87's signal named class `docs` and found 0 jobs. The real interventions are class `code`; job
+  `20261013-192156-ar1x` (9h2j, the hand squash of PR #41 after HTTP 405) is the only one after D87 was recorded
+  (kn3q and qk2d predate it). The F3 host-error record is therefore needed before (b) can pass on the 405.

@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- Decision-sets design records the first `athena backtest` result (failed): the supersession parse had 24 hits and
+  one unexpected partial revision (D11 by D39), now decided as `amended_by`; D87's hand-change signal found 0 jobs
+  because it named class `docs` and is revised to class `code` (job 9h2j, PR #41, HTTP 405). New design rules: a
+  host error that falsifies an assumption puts a decision under review on first occurrence while soft signals need
+  repeats, signal values are validated against the record vocabulary, and a rule that rejects work meeting its
+  intent is a failure signal (`BRIEF.md` addendum 2026-10-14). Review 1 gets a matching addendum. Design only.
 - Decision-sets and defaults-loop designs revised to apply the eight changes of section 6 of review 1: sets reach
   the reader only through capped code-side narrowing, with a runtime per-job set-size check named as a build item;
   over-budget refusal is described as a test; a default's assumptions and signals get a typed record keyed by

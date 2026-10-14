@@ -507,3 +507,7 @@ Stopping: you're done when "How I'll judge it" passes. If you're blocked on ever
 
 * I also want some way to classify, organize, and apply decision sets almost. How do you organize all these decisions?
 * As well as indications that the current thing isn't working. Can't confidently be wrong
+
+### 2026-10-14: Common sense over rigid rules
+
+* A rule to land non rust files in a md file is a bit dumb maybe. Have the system check for common sense issues with simpler handling maybe?

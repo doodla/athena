@@ -11,6 +11,12 @@ through code-side narrowing with a cap, and per-job set size gets a runtime chec
 of a default live in a separate typed record keyed by the default's id (§2); (F3) host errors get a record with a
 status field, and landing becomes a watcher trigger (§4); (F4) one evidence rule (§4) and a corrected D87 example.
 
+**Revision 2 (first backtest).** The first `athena backtest` on the real records failed (§9). It settled four
+changes, all design only: partial revisions are `amended_by`, never `superseded` (§6 step 3); a host error that
+falsifies a decision's stated assumption puts it under review on its first occurrence, while soft signals need repeats
+(§4); signal values are validated against the record vocabulary (§4); and a new signal reads the common-sense addendum
+(§4). D87's hand-change signal is revised from class `docs` to class `code` (§4 example, §9).
+
 Claims are marked **(read)** when taken from a file named beside them, **(design)** for proposals,
 **(reported)** when taken from the job request and not checked, **(estimate)** for unmeasured numbers.
 
@@ -173,6 +179,45 @@ errors from the GitHub client **(read: defaults-loop §3.1)**.
   reliably, the record carries `status_code` absent and a signal on it matches `operation` only.
   The merge call is `job.host.merge(...)` **(read: `gh.rs` line 485)**, so the landing path writes this record.
 
+**Signal values are validated (revision 2; design).** A signal's `match` values are checked by code against the
+vocabulary the records actually use, when the signal is written and again when the watcher loads it: `class_of_work`
+against the closed class list of §2, `category` against the intervention and correction categories in
+`docs/records.md`, `operation` and `message_class` against the closed lists of the host-error record, `status_code`
+against an integer, and check names against the checks Athena defines. A signal naming a value outside its
+vocabulary is rejected with the list of valid values, and is not stored. Root cause: D87's first signal named class
+`docs`, a class that no intervention of that kind carries, so it could never fire and nothing said so (§9). Validation
+turns that silent zero into an error at write time. As a second guard, a signal that has matched nothing over the
+records it was backtested on (§6 step 5) is listed by `athena status` as "never matched", so a valid but wrong value
+is visible too.
+
+**Hard and soft signals (revision 2; design).** Signals come in two strengths, and the `threshold` default follows
+the strength:
+
+- **Hard: a host error that falsifies a stated assumption.** If a decision's `assumptions` name a fact about the host
+  (D87: the repository allows merge commits) and an `athena.host-error/1` record shows the host refused on that
+  basis (`operation = merge`, `status_code` 405 or 422), the decision goes under review on the **first occurrence**:
+  threshold 1 job, not configurable upward. A refusal by the host is not noise; it is the host stating that the
+  assumption is false.
+- **Soft: friction.** Interventions of category `did-work-themselves`, corrections, repeated check failures and
+  rejections may have causes unrelated to the decision, so they need repeats: the signal's own threshold, never below
+  two distinct jobs unless the signal says why. The evidence rule below still governs adding a default (three jobs).
+
+A signal declares which strength it is; an assumption that names a host fact must have at least one hard signal, and
+`athena status` lists decisions that have such an assumption without one.
+
+**Rule-versus-intent signal (revision 2; design; source: `BRIEF.md`, addendum "2026-10-14: Common sense over rigid
+rules", **read**).** The addendum says that a rule to land non-Rust files in a markdown file "is a bit dumb maybe" and
+asks for the system to "check for common sense issues with simpler handling". A rule that rejects work which does
+not go against the rule's stated intent is a failure signal for that rule. Source: `rejection` or `check-failure`;
+match: the rejecting decision or check id, and an explicit user or reviewer judgment recorded on the rejection or
+correction that the work met the rule's intent (a field `against_intent`, `false`, written from the user's own
+statement; Athena does not judge intent itself, and the field is added to the rejection and correction records by the
+building job). Threshold: one event puts the rule under review (a hard signal), because the user's statement is
+direct evidence; the review question is whether the rule's `statement` or its scope should change. The code-side
+check for a rule's intent is out of scope here; this signal only makes the failure visible. Every `code-check` or
+`brief` rule whose enforcement can reject work (a check, a verifier criterion) gets this signal by default, with a
+`text` of "work rejected although it met the intent of the rule".
+
 **Watching.** Code evaluates every active decision's signals against records written since the last evaluation at
 three points **(design)**: after each job closes, after each introspection (defaults-loop §3), and **at landing**,
 because the merge refusal D87 met happens in `athena land --pr`, after the job is closed **(read: `gh.rs` line 485 is
@@ -229,10 +274,13 @@ assumptions:
   - The repository allows merge commits (GET repos/{owner}/{repo} reports allow_merge_commit true).
   - A user who merges by hand follows the recommendation.
 signals:
-  - host-error: operation merge, status_code 405 or 422, phase landing; threshold 1 job
+  - host-error (hard): operation merge, status_code 405 or 422, phase landing; threshold 1 job
   - check-failure: athena check --history violation after a PR merge; threshold 1 job
-  - intervention: category did-work-themselves on a landed branch, class docs; threshold 2 jobs
+  - intervention (soft): category did-work-themselves on a landed branch, class code; threshold 2 jobs
 ```
+
+The third signal said class `docs` in revision 1. The backtest found 0 jobs for it (§9); the real intervention
+was of class `code`. It is corrected here and in the validation rule above.
 
 **Why the enforcement is `brief`, not `code-check` (F4).** D87 states its landing rule as a recommendation in docs
 ("a user who merges by hand should pick a merge commit") and says the recommendation cannot stop a user from
@@ -334,6 +382,13 @@ Nothing is migrated by this job. A later job does it in this order, each step re
    on the older entry. Code lists every hit for the user to confirm; no hit is applied unconfirmed, because
    "Amends" may be partial (D87 is superseded for its landing shape only, and its two rerun fixes stand, so it
    is `amended_by = D88`, not `superseded`). An "Amends" with unclear extent is left `active` with `amended_by`.
+   **Decided (revision 2, from the backtest, §9): a partial revision is `amended_by`, whatever the log's wording.**
+   `superseded` means nothing of the old decision still stands, and it removes the decision from every brief (§3
+   step 1); a partly standing decision removed that way would drop the part that still governs. So the phrase
+   "superseded by" in the log is not enough: code lists each hit with its sentence, and the user confirms the status.
+   D11's line 322, "Revised ... superseded by D39", is a real but partial supersession (D39's invariant replaces
+   one part of D11), so D11 is `active` with `amended_by = D39`. The expected list of review 1 section 5 (D46 to D79,
+   D87 to D88, plus "Amends" entries) was incomplete; it is corrected to include D11/D39.
 4. **`BRIEF.md` addenda.** The brief is owner-only; it is not edited. Each addendum bullet that states a rule
    becomes a decision with `kind = requirement`, `source` set to the addendum heading, `status = active`. The
    decisions are stored in `docs/decisions.md` and the default's `source` fields already cite addenda
@@ -378,7 +433,7 @@ superseded by an inactive one, and every `code-check` decision names a test that
    new record kind other than the typed header. It starts once this revision is accepted.
    **Built** as `athena backtest` (`crates/athena-cli/src/backtest.rs`): typed headers for D87 and D88 only, the
    supersession parse, a records reader, D87's one exact-match signal (a `did-work-themselves` intervention of
-   class `docs` on a landed job, two distinct jobs), and one introspection record (the code-written fields) for
+   class `docs` on a landed job, two distinct jobs; revised to class `code` by §9), and one introspection record (the code-written fields) for
    the earliest matching event, with the pass conditions of review 1 section 5 applied. A condition that does
    not hold is printed as a finding with its reason and the command exits 2; it is not retried. Its tests build
    their `records/` fixtures in a temporary directory and remove it, so no fixture file is committed. Read on
@@ -397,7 +452,49 @@ superseded by an inactive one, and every `code-check` decision names a test that
 6. Probe a multi-question `evaluate` call (§5), then add Jev for the two questions, in shadow, scored as in
    defaults-loop §10.
 
-## 9. What is left open
+## 9. Backtest result: the first run failed
+
+Sources: the run of `athena backtest` on the real `records/` and `docs/decisions.md` **(reported: the user's run;
+the records are not readable by the job that wrote this section, so no figure below is re-measured)**. The run
+exited with a finding, as §8 step 0 specifies; it is a fail, not a retry (review 1, section 5).
+
+**(a) Supersession parse.** 24 hits, 0 lacking a target id. One hit was not on the review's expected list: D11,
+line 322, "Revised ... superseded by D39". Reading it: a real, partial supersession. Decision: partial revisions are
+`amended_by`, not `superseded` (§6 step 3, with the reason). The expected list is corrected to add D11/D39, so with
+that correction condition (a) holds: every hit has a target, and the unexpected hit is now an expected one.
+
+**(b) The D87 signal.** The signal (intervention, category `did-work-themselves`, class `docs`, threshold 2 jobs)
+found 0 jobs, so the review's fail condition "fewer than 2 jobs" applies. The signal is wrong on the field, not
+absent for lack of events: the real interventions are class `code`.
+
+| Job | Event | After D87 was recorded? |
+|---|---|---|
+| `20261013-192156-ar1x` (short id 9h2j) | The hand squash of PR #41, after GitHub refused a merge commit with HTTP 405 | Yes; the only one |
+| kn3q | An intervention of class `code` | No; predates D87 |
+| qk2d | An intervention of class `code` | No; predates D87 |
+
+(The classes of kn3q and qk2d are **reported** as part of "the real interventions are class code".) With class
+`code`, the corrected signal finds one job after D87, below its threshold of 2. That is the right outcome for a soft
+signal and not a reason to lower the threshold; the 405 itself is the better evidence, see below.
+
+**Findings, and what each changed.**
+
+1. **The signal named a class nobody records for these events.** Fixed at the root by the validation rule of §4:
+   signal values are checked against the record vocabulary. D87's signal is revised to class `code` (§4 example).
+2. **A host error that falsifies an assumption must not wait for repeats.** The 405 of job 9h2j is the host saying
+   that D87's assumption (merge commits allowed) is false. One occurrence is enough: the hard signal of §4. Soft
+   signals such as friction keep their repeats. The two-job threshold of the intervention signal is unchanged.
+3. **Host errors need their own record (review 1, F3).** Until `athena.host-error/1` exists (§4), the 405 survives
+   only in the intervention's prose, which no signal can match exactly. The first build item after this revision is
+   that record (§8 step 4); the backtest cannot pass condition (b) on the 405 without it.
+4. **A rule can fail by being right about the letter and wrong about the intent.** The addendum "2026-10-14: Common
+   sense over rigid rules" adds the rule-versus-intent signal of §4.
+
+Condition (c) (no other decision marked) and (d) (the introspection record's cited ids exist) were not reached
+because (b) failed first **(reported; not re-checked)**. The backtest is re-run after the record of finding 3 and the
+revised signal exist; until then the build order of §8 is unchanged except that step 4 comes before step 0's re-run.
+
+## 10. What is left open
 
 - The number of distinct jobs and window per signal (set from backtest, not guessed).
 - Whether `under-review` clears automatically after a quiet period, or only by a user decision. Starting rule: only
