@@ -1471,6 +1471,100 @@ impl ProposalRecord {
     }
 }
 
+/// What a reference points at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RefKind {
+    /// A job id.
+    Job,
+    /// A path in the repository or in a state directory.
+    Path,
+    /// A commit id.
+    Commit,
+}
+
+/// A pointer to where data lives. Work items carry these instead of the data itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Reference {
+    pub kind: RefKind,
+    pub value: String,
+}
+
+impl Reference {
+    pub fn job(id: &JobId) -> Reference {
+        Reference {
+            kind: RefKind::Job,
+            value: id.as_str().to_string(),
+        }
+    }
+    pub fn path(path: impl Into<String>) -> Reference {
+        Reference {
+            kind: RefKind::Path,
+            value: path.into(),
+        }
+    }
+    pub fn commit(sha: impl Into<String>) -> Reference {
+        Reference {
+            kind: RefKind::Commit,
+            value: sha.into(),
+        }
+    }
+}
+
+/// What a work item asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WorkItemKind {
+    /// Something the role could not see; the source names what it could not read.
+    BlindSpot,
+    /// A failure that repeats, with the jobs as evidence.
+    RepeatedFailure,
+    /// A change on a rung above the role's limit, proposed for a person to decide.
+    Proposal,
+}
+
+/// `athena.work-item/1`: work a role queued. It names its source and cites its evidence by reference, and
+/// copies no data from either. Work items are never edited.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkItem {
+    pub id: RecordId,
+    pub at: Timestamp,
+    /// The role that queued it.
+    pub role: String,
+    pub kind: WorkItemKind,
+    /// Stable across runs for the same finding, so a role does not queue it twice.
+    pub key: String,
+    /// One line.
+    pub title: String,
+    /// The requirement rung it concerns.
+    pub rung: crate::roles::Ladder,
+    /// Where the finding came from. For a blind spot, the data that could not be read.
+    pub source: Reference,
+    pub evidence: Vec<Reference>,
+}
+
+impl WorkItem {
+    /// Why this record is not acceptable, if it is not.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.role.trim().is_empty() || self.key.trim().is_empty() || self.title.trim().is_empty()
+        {
+            return Err("a work item names its role, key and title".into());
+        }
+        if self.source.value.trim().is_empty() {
+            return Err("a work item names its source".into());
+        }
+        if self.kind != WorkItemKind::BlindSpot && self.evidence.is_empty() {
+            return Err("a work item that is not a blind spot cites its evidence".into());
+        }
+        if self.evidence.iter().any(|e| e.value.trim().is_empty()) {
+            return Err("an evidence reference is not empty".into());
+        }
+        Ok(())
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------------
 // The envelope
 
@@ -1518,6 +1612,10 @@ pub enum AnyRecord {
     DefaultsProposal(Box<ProposalRecord>),
     #[serde(rename = "athena.class-label/1")]
     ClassLabel(ClassLabel),
+    #[serde(rename = "athena.role/1")]
+    Role(Box<crate::roles::RoleDefinition>),
+    #[serde(rename = "athena.work-item/1")]
+    WorkItem(Box<WorkItem>),
 }
 
 /// Why a file under `records/` is not acceptable.
@@ -1593,6 +1691,8 @@ impl AnyRecord {
             AnyRecord::FailureClass(c) if c.name.trim().is_empty() => {
                 return Err(invalid("a failure class has a name".into()));
             }
+            AnyRecord::Role(r) => r.validate().map_err(invalid)?,
+            AnyRecord::WorkItem(w) => w.validate().map_err(invalid)?,
             AnyRecord::DefaultsProposal(p) => p.validate().map_err(invalid)?, // Totals are what reconciliation checks an outcome against; only the bootstrap has none
             // (acceptance verification 2).
             AnyRecord::Outcome(o) if o.job.is_request() && o.totals.is_none() => {
@@ -1673,6 +1773,10 @@ impl AnyRecord {
             AnyRecord::ClassLabel(r) => {
                 format!("records/class-labels/{}/{}.json", r.id.month(), r.id)
             }
+            AnyRecord::Role(r) => r.path(),
+            AnyRecord::WorkItem(r) => {
+                format!("records/work-items/{}/{}.json", r.id.month(), r.id)
+            }
         }
     }
 
@@ -1698,6 +1802,8 @@ impl AnyRecord {
             AnyRecord::FailureClass(_) => "athena.failure-class/1",
             AnyRecord::DefaultsProposal(_) => PROPOSAL_SCHEMA,
             AnyRecord::ClassLabel(_) => "athena.class-label/1",
+            AnyRecord::Role(_) => crate::roles::ROLE_SCHEMA,
+            AnyRecord::WorkItem(_) => "athena.work-item/1",
         }
     }
 }
@@ -2236,6 +2342,57 @@ mod tests {
         let json = noted.to_json();
         assert!(json.contains("\"note\": \"The cause is the missing default.\""));
         assert_eq!(AnyRecord::parse("x", json.as_bytes()).unwrap(), noted);
+    }
+
+    fn sample_work_item() -> WorkItem {
+        WorkItem {
+            id: RecordId::parse("20261014-120000-1abc").unwrap(),
+            at: ts(),
+            role: "steward".into(),
+            kind: WorkItemKind::BlindSpot,
+            key: "blind-spot:records".into(),
+            title: "The records could not be read".into(),
+            rung: crate::roles::Ladder::Implementation,
+            source: Reference::path("records/"),
+            evidence: vec![],
+        }
+    }
+
+    #[test]
+    fn roles_and_work_items_have_paths_schemas_and_round_trip() {
+        let role = AnyRecord::Role(Box::new(crate::roles::steward(ts())));
+        assert_eq!(role.schema(), "athena.role/1");
+        assert_eq!(role.canonical_path(), "records/roles/steward-1.json");
+        let json = role.to_json();
+        assert!(json.contains("\"highest_rung\": \"defaults-conventions\""));
+        assert_eq!(
+            AnyRecord::parse(&role.canonical_path(), json.as_bytes()).unwrap(),
+            role
+        );
+
+        let item = AnyRecord::WorkItem(Box::new(sample_work_item()));
+        assert_eq!(item.schema(), "athena.work-item/1");
+        assert_eq!(
+            item.canonical_path(),
+            "records/work-items/2026-10/20261014-120000-1abc.json"
+        );
+        let json = item.to_json();
+        assert!(json.contains("\"kind\": \"blind-spot\""));
+        assert!(json.contains("\"rung\": \"implementation\""));
+        assert_eq!(AnyRecord::parse("x", json.as_bytes()).unwrap(), item);
+        assert!(check_record_file(&item.canonical_path(), json.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn a_work_item_that_is_not_a_blind_spot_cites_evidence() {
+        let mut item = sample_work_item();
+        assert_eq!(item.validate(), Ok(()));
+        item.kind = WorkItemKind::Proposal;
+        assert!(item.validate().is_err());
+        item.evidence.push(Reference::job(&job()));
+        assert_eq!(item.validate(), Ok(()));
+        item.source.value = " ".into();
+        assert!(item.validate().is_err());
     }
 
     #[test]

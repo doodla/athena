@@ -515,3 +515,13 @@ Stopping: you're done when "How I'll judge it" passes. If you're blocked on ever
 ### 2026-10-14: Socratic questions
 
 * Can we add a Socratic question generator or something?
+
+### 2026-10-14: A loop that steers Athena, roles, and a ladder of requirements
+
+* I think the loop has to be baked into Athena and it has to be basically only looking at Athena to see how the pieces fit and stuff. I would say liberal permissions to start, with simple prompts that stay stable and describe the goal, and based on how Athena changes, the prompt output will change.
+* The way I imagine it, whenever something goes wrong, this is the loop that would figure out how to tweak stuff. This is the loop that realizes that maybe permissions are not enough, or more research is needed, or we've thrashed around a particular topic for six commits. Maybe more planning is needed to diagnose and debug the chain of decisions and events that happen.
+* I think I wouldn't put triggers on it. Rather let's just make it like a parallel loop. I know you're the operator but I feel like Athena needs to start doing its own thing.
+* Figure out how to add the concept of jobs to Athena and then this would be one job that is triggered maybe every n number of tasks to see everything. If it cannot see something, that becomes a work item. It's important that we are able to observe agent state, what happened in the environment, what changed in the environment, etc.
+* Jobs as in roles I guess.
+* Also don't want to become a database. Pull in data as needed if it lives somewhere else.
+* Let's also say that we're in active dev and everything can be revisited. Though I imagine that to be in some sort of ladder of requirements.

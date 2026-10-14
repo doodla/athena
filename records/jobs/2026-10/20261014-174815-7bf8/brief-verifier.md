@@ -1,0 +1,106 @@
+# Job 20261014-174815-7bf8: verify "Add role definitions, a steward role, and a requirements ladder"
+
+## Request (verbatim)
+
+> Build what the BRIEF.md addendum '2026-10-14: A loop that steers Athena, roles, and a ladder of requirements' asks for, starting small: roles as recorded definitions (A9, A10), and a first role that runs every 5 tasks in parallel with other work, looks at everything Athena has done, and queues work items, including one for anything it could not see. Record only what would otherwise be lost; pull the rest from where it lives. Use the ladder to decide what it may change itself.
+
+## Reading (accepted by the user)
+
+Add recorded role definitions and a first steward role that runs in parallel every 5 finished tasks. It reads Athena's state in place and queues work items, including one for each blind spot. A requirements ladder (owner goals, brief requirements, design decisions, defaults and conventions, implementation) lets it change only the lower rungs itself and propose the upper ones with evidence.
+
+Assumptions:
+- Cadence counts finished tasks (landed or rejected) since the steward's last run, kept as a persisted counter.
+- The steward writes proposals and work items only; it does not edit the owner's goals or BRIEF.md.
+- Data it cannot read (for example records/ or history absent from its view) becomes a blind-spot work item.
+- Rungs from design decisions down are the ones the steward may change itself, but this first version only applies changes on the lowest two (defaults/conventions, implementation); upper rungs are proposed with evidence.
+- Athena's checks and the independent verifier still gate any change the steward applies.
+
+## Acceptance criteria
+
+1. [content] athena-data has a role definition record (name, goal, prompt, cadence in finished tasks, highest rung it may change itself) and one steward definition with a short stable prompt.
+2. [content] A work item record names its source by reference (job id, path or commit) and carries evidence by reference, not copied data. It has a field for the requirement rung it concerns, and a kind for a blind spot.
+3. [content] A Ladder enum in athena-data orders five rungs: OwnerGoals, BriefRequirements, DesignDecisions, DefaultsConventions, Implementation. A function decides whether a role may change a rung itself (only DesignDecisions and below, or whatever the role's limit is, never the top two) or must queue a proposal.
+4. [behavior] Run cargo test: with the fake agent, finishing the 5th task starts the steward without blocking the main flow, and the 4th does not.
+5. [behavior] Run cargo test: when a data source is unreadable, the steward queues a work item that names the blind spot and its source.
+6. [behavior] Run cargo test: a proposed change on a rung above the role's limit is queued with evidence and not applied. A change on a lower rung is applied.
+7. [behavior] Run cargo clippy and cargo fmt --check, then cargo test: all clean and passing.
+8. [content] docs/design/requirements-map.md moves A9-1 and A10-1 to covered, naming the code. CHANGELOG.md has an entry. A short design note gives the alternatives and the ladder.
+
+## Expected deliverables
+
+- crates/athena-data/src/records.rs (modify)
+- crates/athena-data/src/roles.rs (create)
+- crates/athena-data/src/lib.rs (modify)
+- crates/athena-core/src/steward.rs (create)
+- crates/athena-core/src/lib.rs (modify)
+- crates/athena-core/src/run.rs (modify)
+- crates/athena-cli/src/wiring.rs (modify)
+- crates/athena-core/src/fake.rs (modify)
+- docs/design/requirements-map.md (modify)
+- CHANGELOG.md (modify)
+- docs/design/roles-and-ladder.md (create)
+- docs/records.md (modify)
+- Cargo.lock (modify)
+
+## Out of scope
+
+- Further roles beyond the steward
+- Role cost and yield tracking, reshaping and retirement (rest of A10-1 and A9-2)
+- Changing owner goals, brief requirements or athena.toml
+- Copying Athena's state into new records
+
+## User defaults that apply
+
+- rust: All code is Rust. Non-Rust files appear only where a platform requires them, and each is listed with its reason. Here: All new code is Rust in the existing crates.
+- tested: Every module has passing tests; cargo test passes and clippy is clean. Here: New modules ship with tests; cargo test and clippy pass.
+- small: Prefer one focused change; size is a design choice, not a wish list. Here: Start with one role and one ladder; no other roles.
+- strangers: Code, commits, docs, and records are written for an outside reader. Here: The design note and changelog are written for an outside reader.
+- lazy-requests: Requests are short; recover hidden requirements from the repository before asking. Here: Details recovered from BRIEF.md and the requirements map, with the user's reply fixing the ladder.
+- mechanism: Rules that matter are enforced by mechanism, or explicitly marked prose-only. Here: The ladder is enforced by a function with tests, not prose.
+- verified: Done means independently verified, and user-facing behavior is verified by exercising it. Here: Behavior is checked through cargo test with the fake agent.
+- changelog: (not in the defaults model) Here: BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md.
+
+## Scope
+
+The expected deliverables list is the one statement of scope. A changed file that is not on that list is the scope finding, judged against the list and not against the wording of a criterion.
+
+## The change
+
+Base bbbeccdf2564 → candidate 9658c28fc587. In your working directory, `git diff HEAD~1` shows it.
+
+```text
+ CHANGELOG.md                       |  10 +
+ crates/athena-cli/src/main.rs      |   6 +-
+ crates/athena-cli/tests/steward.rs | 150 +++++++++++
+ crates/athena-core/src/commits.rs  |  71 ++++-
+ crates/athena-core/src/lib.rs      |   4 +
+ crates/athena-core/src/run.rs      |  12 +-
+ crates/athena-core/src/steward.rs  | 538 +++++++++++++++++++++++++++++++++++++
+ crates/athena-core/src/store.rs    |   6 +
+ crates/athena-data/src/lib.rs      |   2 +
+ crates/athena-data/src/records.rs  | 157 +++++++++++
+ crates/athena-data/src/roles.rs    | 226 ++++++++++++++++
+ docs/design/requirements-map.md    |   4 +-
+ docs/design/roles-and-ladder.md    |  73 +++++
+ docs/design/strategy-view.md       |  10 +-
+ docs/records.md                    |   4 +
+ 15 files changed, 1257 insertions(+), 16 deletions(-)
+```
+
+(The diff was inlined for the verifier; it is elided in this record.)
+
+## Checks Athena ran on this tree
+
+- fmt: `cargo fmt --all --check` passed
+- clippy: `cargo clippy --all-targets --locked -- -D warnings` passed
+- test: `cargo test --locked` passed (561 tests ran)
+
+## Commands Bash may run
+
+- cargo build | check | test | clippy | fmt | run | metadata | tree
+- git status | diff | log | show
+- ls (paths inside your working directory)
+
+## Verdict
+
+End with the verdict as your structured output: one criteria entry per acceptance criterion, in order.

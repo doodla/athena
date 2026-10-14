@@ -9,6 +9,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Roles and a first role, the steward (rows A9-1 and A10-1). `athena.role/1` records a role: name, version,
+  goal, prompt, cadence in finished tasks, and the highest rung it may change itself. `athena.work-item/1`
+  records work a role queued, naming its source and citing evidence by reference, with a kind (including
+  `blind-spot`) and the requirement rung it concerns. `Ladder` orders five rungs (owner goals, brief
+  requirements, design decisions, defaults and conventions, implementation), and `may_change` lets a role
+  change a rung itself only at or below its limit and never in the top two. The steward starts in the
+  background when the fifth finished task (landed or rejected) is counted, reads the records in place, queues
+  a work item for each repeated failure and for each thing it could not read, applies a change on a rung it
+  may change by queueing a request, and queues anything above its limit as a proposal with evidence. The
+  design note is `docs/design/roles-and-ladder.md`.
 - The explainer page opens with a "Start here" section for readers new to firstmate: what it is, a walk-through
   of one piece of work, and a glossary of the page's terms. The text is in
   `studies/firstmate-work-handling/intro.json`; each sentence cites claim ids, and the renderer rejects an
