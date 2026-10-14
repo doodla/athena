@@ -531,6 +531,18 @@ Condition (c) (no other decision marked) and (d) (the introspection record's cit
 because (b) failed first **(reported; not re-checked)**. The backtest is re-run after the record of finding 3 and the
 revised signal exist; until then the build order of §8 is unchanged except that step 4 comes before step 0's re-run.
 
+**Derived host-error records.** The 405 of job 9h2j happened before host errors were recorded, so no
+`athena.host-error/1` record of it exists; it survives only in the text of intervention `20261013-192156-ar1x`.
+The backtest therefore derives records from past interventions, by code and with no model
+(`derive_host_error` in `crates/athena-core/src/watcher.rs`). The pattern is exact: the intervention's `what` and
+`why` together contain `HTTP ` and a three-digit code from 100 to 599, and the word `merge`, `merges` or `merged`;
+and the intervention names a job. The derived record has operation `merge`, phase `landing`, the intervention's
+time and job, and is marked `derived` with `source_intervention` set to the intervention's id. Validation rejects
+a derived record without a source and an observed record with one. Derived records live in memory during the
+backtest and are never written under `records/`. The report lists them apart from the observed records, labels
+them derived and not observed by the client, and a review they fire cites the derived record and, through it, the
+source intervention. Replacing the pattern with a Jev-assisted typed decision is left for later.
+
 ## 10. What is left open
 
 - The number of distinct jobs and window per signal (set from backtest, not guessed).

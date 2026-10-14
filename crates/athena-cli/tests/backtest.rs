@@ -176,14 +176,14 @@ fn two_hand_changes_on_two_landed_jobs_pass_and_name_d87_in_one_introspection() 
         "20261002-000000-i002",
         Some("20261002-000000-bbbb"),
         "did-work-themselves",
-        "docs",
+        "code",
     );
     intervention(
         root,
         "20261001-000000-i001",
         Some("20261001-000000-aaaa"),
         "did-work-themselves",
-        "docs",
+        "code",
     );
     // Not matches: wrong category, wrong class, a job that did not land, and no job.
     intervention(
@@ -191,28 +191,28 @@ fn two_hand_changes_on_two_landed_jobs_pass_and_name_d87_in_one_introspection() 
         "20261004-000000-i004",
         Some("20261001-000000-aaaa"),
         "corrected-output",
-        "docs",
+        "code",
     );
     intervention(
         root,
         "20261005-000000-i005",
         Some("20261001-000000-aaaa"),
         "did-work-themselves",
-        "code",
+        "docs",
     );
     intervention(
         root,
         "20261006-000000-i006",
         Some("20261003-000000-cccc"),
         "did-work-themselves",
-        "docs",
+        "code",
     );
     intervention(
         root,
         "20261007-000000-i007",
         None,
         "did-work-themselves",
-        "docs",
+        "code",
     );
 
     let report = run_in(root);
@@ -240,7 +240,7 @@ fn one_job_is_a_finding_with_its_reason_and_no_introspection() {
         "20261001-000000-i001",
         Some("20261001-000000-aaaa"),
         "did-work-themselves",
-        "docs",
+        "code",
     );
     // A second matching intervention on the same job is still one job.
     intervention(
@@ -248,7 +248,7 @@ fn one_job_is_a_finding_with_its_reason_and_no_introspection() {
         "20261002-000000-i002",
         Some("20261001-000000-aaaa"),
         "did-work-themselves",
-        "docs",
+        "code",
     );
 
     let report = run_in(root);
@@ -419,6 +419,128 @@ fn host_errors_that_do_not_falsify_the_assumption_leave_d87_alone() {
         "method-not-allowed",
     );
     let report = run_in(root);
+    assert!(report.under_review.is_empty());
+    assert!(
+        report
+            .decision_view
+            .iter()
+            .all(|v| v.under_review.is_none())
+    );
+}
+
+fn intervention_text(root: &Path, id: &str, job: &str, what: &str, why: &str) {
+    write(
+        root,
+        &format!("records/interventions/2026-10/{id}.json"),
+        json!({
+            "schema": "athena.intervention/1",
+            "id": id,
+            "at": "2026-10-13T19:30:00Z",
+            "what": what,
+            "why": why,
+            "class_of_work": "code",
+            "category": "did-work-themselves",
+            "job": job,
+            "source": "user",
+            "with_staged_changes": false,
+        }),
+    );
+}
+
+#[test]
+fn an_intervention_stating_a_405_on_a_merge_puts_d87_under_review_through_a_derived_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    intervention_text(
+        root,
+        "20261013-192156-ar1x",
+        "20261013-192156-9h2j",
+        "Merged the pull request by hand",
+        "GitHub refused a merge commit with HTTP 405",
+    );
+
+    let records = backtest::read_records(root).unwrap();
+    assert!(records.host_errors.is_empty(), "nothing was observed");
+    assert_eq!(records.derived_host_errors.len(), 1);
+    let derived = &records.derived_host_errors[0];
+    assert!(derived.derived);
+    assert_eq!(
+        derived
+            .source_intervention
+            .as_ref()
+            .map(ToString::to_string),
+        Some("20261013-192156-ar1x".to_string())
+    );
+
+    let report = run_in(root);
+    assert_eq!(report.under_review, ["D87"]);
+    assert_eq!(report.host_errors_read, 0);
+    assert_eq!(report.derived_host_errors.len(), 1);
+    let run = report
+        .runs
+        .iter()
+        .find(|r| r.decision == "D87" && !r.derived_records.is_empty())
+        .expect("the host-error signal matched the derived record");
+    assert!(run.fired);
+    assert!(
+        run.host_error_records.is_empty(),
+        "not presented as observed"
+    );
+    assert_eq!(
+        run.derived_records[0].source_intervention,
+        "20261013-192156-ar1x"
+    );
+    let d87 = report
+        .decision_view
+        .iter()
+        .find(|v| v.id == "D87")
+        .expect("D87 is in the log");
+    let cited = d87.under_review.as_deref().expect("D87 is under review");
+    assert_eq!(cited.len(), 1);
+    assert!(cited[0].contains("derived"), "{cited:?}");
+    assert!(cited[0].contains("20261013-192156-ar1x"), "{cited:?}");
+    assert_eq!(
+        report
+            .decision_view
+            .iter()
+            .filter(|v| v.under_review.is_some())
+            .count(),
+        1,
+        "nothing else is flagged"
+    );
+    assert!(report.passed(), "{:?}", report.findings);
+    let text = backtest::render(&report);
+    assert!(
+        text.contains("derived from interventions (not observed by the client): 1"),
+        "{text}"
+    );
+    assert!(
+        text.contains("from intervention 20261013-192156-ar1x"),
+        "{text}"
+    );
+    assert!(text.contains("host errors: 0 observed"), "{text}");
+}
+
+#[test]
+fn interventions_without_a_stated_refusal_flag_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    intervention_text(
+        root,
+        "20261013-192156-ar1x",
+        "20261013-192156-9h2j",
+        "Merged the pull request by hand",
+        "the host refused it",
+    );
+    intervention_text(
+        root,
+        "20261013-192157-bbbb",
+        "20261013-192156-9h2j",
+        "Pushed the branch",
+        "GitHub answered HTTP 403",
+    );
+    let report = run_in(root);
+    assert!(report.derived_host_errors.is_empty());
     assert!(report.under_review.is_empty());
     assert!(
         report

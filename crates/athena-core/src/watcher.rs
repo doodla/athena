@@ -27,7 +27,7 @@ use anyhow::Result;
 use athena_data::RecordId;
 use athena_data::records::{
     AnyRecord, DecisionState, DecisionStateKind, DefaultExpectations, HostError, HostOperation,
-    SignalStrength, WorkPhase,
+    Intervention, MessageClass, SignalStrength, WorkPhase,
 };
 use serde::Serialize;
 use std::collections::BTreeSet;
@@ -153,6 +153,59 @@ impl HostErrorSignal {
                 .status_code
                 .is_some_and(|status| self.status_codes.contains(&status))
     }
+}
+
+/// The status code in the first `HTTP <code>` of `text`: the letters `HTTP`, one space, and exactly three
+/// digits that no digit follows. A code outside 100 to 599 is not a status and yields none.
+fn http_code(text: &str) -> Option<u16> {
+    let mut rest = text;
+    while let Some(at) = rest.find("HTTP ") {
+        let after = &rest[at + "HTTP ".len()..];
+        let digits = after.chars().take_while(char::is_ascii_digit).count();
+        if digits == 3 {
+            return after[..3].parse().ok().filter(|c| (100..=599).contains(c));
+        }
+        rest = after;
+    }
+    None
+}
+
+/// True when `text` has the word `merge`, `merges` or `merged`, whole and in any case.
+fn names_merge(text: &str) -> bool {
+    text.split(|c: char| !c.is_alphanumeric()).any(|w| {
+        ["merge", "merges", "merged"]
+            .iter()
+            .any(|m| w.eq_ignore_ascii_case(m))
+    })
+}
+
+/// Derives a host-error record from a past intervention that states a host refusal, from before host errors
+/// were recorded. This is a typed decision made by an exact pattern, not by a model: the `what` and `why` text
+/// together hold `HTTP <code>` (three digits, 100 to 599) and the word `merge`, `merges` or `merged`; and the
+/// intervention names a job. Otherwise it returns none.
+///
+/// The record is marked `derived` and cites the intervention. Its id is the intervention's id; the marker, not
+/// the id, tells it from an observed record. Its time is the intervention's, its operation is `merge` and its
+/// phase is `landing`. It is never written under `records/`, and nothing may present it as observed by the
+/// client.
+pub fn derive_host_error(intervention: &Intervention) -> Option<HostError> {
+    let job = intervention.job.clone()?;
+    let text = format!("{}\n{}", intervention.what, intervention.why);
+    let status = http_code(&text)?;
+    if !names_merge(&text) {
+        return None;
+    }
+    Some(HostError {
+        id: intervention.id.clone(),
+        at: intervention.at,
+        status_code: Some(status),
+        operation: HostOperation::Merge,
+        job,
+        phase: WorkPhase::Landing,
+        message_class: MessageClass::of_status(Some(status)),
+        derived: true,
+        source_intervention: Some(intervention.id.clone()),
+    })
 }
 
 /// A signal that crossed its threshold.
@@ -313,7 +366,6 @@ impl Athena {
 mod tests {
     use super::*;
     use athena_data::JobId;
-    use athena_data::records::MessageClass;
 
     fn error(id: &str, job: &str, op: HostOperation, status: Option<u16>) -> HostError {
         HostError {
@@ -324,10 +376,77 @@ mod tests {
             job: JobId::parse(job).unwrap(),
             phase: WorkPhase::Landing,
             message_class: MessageClass::of_status(status),
+            derived: false,
+            source_intervention: None,
         }
     }
 
     const JOB: &str = "20261013-192156-ar1x";
+
+    fn intervention(what: &str, why: &str, job: Option<&str>) -> Intervention {
+        Intervention {
+            id: RecordId::parse("20261013-192156-ar1x").unwrap(),
+            at: "2026-10-13T19:30:00Z".parse().unwrap(),
+            what: what.to_string(),
+            why: why.to_string(),
+            class_of_work: "code".to_string(),
+            category: athena_data::records::InterventionCategory::DidWorkThemselves,
+            job: job.map(|j| JobId::parse(j).unwrap()),
+            source: athena_data::records::InterventionSource::User,
+            with_staged_changes: false,
+        }
+    }
+
+    #[test]
+    fn a_refusal_stated_in_an_intervention_derives_a_marked_record() {
+        let i = intervention(
+            "Merged the pull request by hand",
+            "GitHub refused a merge commit with HTTP 405",
+            Some(JOB),
+        );
+        let derived = derive_host_error(&i).expect("the text matches");
+        assert!(derived.derived);
+        assert_eq!(derived.source_intervention.as_ref(), Some(&i.id));
+        assert_eq!(derived.status_code, Some(405));
+        assert_eq!(derived.operation, HostOperation::Merge);
+        assert_eq!(derived.phase, WorkPhase::Landing);
+        assert_eq!(derived.job.to_string(), JOB);
+        assert_eq!(derived.at, i.at);
+        assert_eq!(derived.message_class, MessageClass::MethodNotAllowed);
+        assert!(load(&D87_SIGNAL).unwrap().matches(&derived));
+    }
+
+    #[test]
+    fn text_without_the_exact_pattern_derives_nothing() {
+        let none = |what: &str, why: &str| derive_host_error(&intervention(what, why, Some(JOB)));
+        assert!(none("Fixed the docs by hand", "the wording was wrong").is_none());
+        // A code without a merge, and a merge without a code.
+        assert!(none("The push failed with HTTP 403", "token scope").is_none());
+        assert!(none("Merged by hand", "the host refused").is_none());
+        // Not the exact form: no space, lower case, two digits, four digits.
+        assert!(none("merge failed, HTTP405", "x").is_none());
+        assert!(none("merge failed, http 405", "x").is_none());
+        assert!(none("merge failed, HTTP 40", "x").is_none());
+        assert!(none("merge failed, HTTP 4050", "x").is_none());
+        // "emerged" is not the word merge.
+        assert!(none("emerged with HTTP 405", "x").is_none());
+    }
+
+    #[test]
+    fn an_intervention_without_a_job_derives_nothing() {
+        let i = intervention("merge refused", "HTTP 405", None);
+        assert!(derive_host_error(&i).is_none());
+    }
+
+    #[test]
+    fn a_code_outside_the_http_range_derives_nothing() {
+        for code in ["099", "600", "999"] {
+            let i = intervention("merge refused", &format!("HTTP {code}"), Some(JOB));
+            assert!(derive_host_error(&i).is_none(), "{code}");
+        }
+        let i = intervention("merge refused", "HTTP 599", Some(JOB));
+        assert!(derive_host_error(&i).is_some());
+    }
 
     #[test]
     fn d87s_signal_is_in_the_vocabulary() {

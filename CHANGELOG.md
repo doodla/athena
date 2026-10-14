@@ -9,6 +9,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Derived host-error records. The 405 that falsified D87 (PR #41, job 9h2j) predates host-error records and
+  exists only in the text of intervention `20261013-192156-ar1x`. `athena.host-error/1` gains `derived` and
+  `source_intervention` (absent on observed records; validation rejects a derived record without a source).
+  `derive_host_error` in `crates/athena-core/src/watcher.rs` derives a record from an intervention whose text has
+  `HTTP <code>` (100 to 599) and the word merge, and a job. `athena backtest` holds them in memory (nothing is
+  written under `records/`), lists them apart from observed records, labels them derived and not observed by the
+  client, and cites the source intervention when one fires D87.
+
+- Fix: D87's intervention signal in `athena backtest` matched class `docs`; it now matches class `code`, as
+  `docs/design/decision-sets.md` §9 revised it.
 - Decision-sets design §8 step 4, without the brief component and set selection. The root cause of two problems
   seen on 2026-10-13 and 2026-10-14 was that the host client threw away the HTTP status of a refused call:
   - `athena.host-error/1` (status code, operation, phase, a closed message class; no host text), written by the

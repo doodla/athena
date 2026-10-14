@@ -941,6 +941,14 @@ pub struct HostError {
     pub job: JobId,
     pub phase: WorkPhase,
     pub message_class: MessageClass,
+    /// True when the client did not observe this refusal: the record was derived by code from the text of a
+    /// past intervention (`source_intervention`). Absent (false) for a refusal the client observed. A derived
+    /// record is never presented as observed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub derived: bool,
+    /// The intervention a derived record was derived from. Present exactly when `derived` is true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_intervention: Option<RecordId>,
 }
 
 /// The state a decision is in beside its `status`.
@@ -1156,6 +1164,12 @@ impl AnyRecord {
             {
                 return Err(invalid(
                     "a host error's message_class follows from its status_code".into(),
+                ));
+            }
+            AnyRecord::HostError(h) if h.derived != h.source_intervention.is_some() => {
+                return Err(invalid(
+                    "a derived host error cites its source intervention, and an observed one has none"
+                        .into(),
                 ));
             }
             AnyRecord::DecisionState(d) if d.decision.trim().is_empty() => {
@@ -1533,7 +1547,31 @@ mod tests {
             job: JobId::parse("20261013-192156-ar1x").unwrap(),
             phase: WorkPhase::Landing,
             message_class: MessageClass::of_status(status),
+            derived: false,
+            source_intervention: None,
         }
+    }
+
+    #[test]
+    fn a_derived_host_error_needs_a_source_and_an_observed_one_has_none() {
+        let mut derived = host_error(Some(405));
+        derived.derived = true;
+        // A derived record without a source is refused.
+        let json = AnyRecord::HostError(derived.clone()).to_json();
+        assert!(AnyRecord::parse("x", json.as_bytes()).is_err());
+        derived.source_intervention = Some(RecordId::parse("20261013-192156-ar1x").unwrap());
+        let record = AnyRecord::HostError(derived);
+        let text = record.to_json();
+        assert!(text.contains("\"derived\": true"));
+        assert!(text.contains("\"source_intervention\": \"20261013-192156-ar1x\""));
+        assert_eq!(AnyRecord::parse("x", text.as_bytes()).unwrap(), record);
+        // A source on an observed record is refused, and an observed record writes neither field.
+        let mut sourced = host_error(Some(405));
+        sourced.source_intervention = Some(RecordId::parse("20261013-192156-ar1x").unwrap());
+        let json = AnyRecord::HostError(sourced).to_json();
+        assert!(AnyRecord::parse("x", json.as_bytes()).is_err());
+        let observed = AnyRecord::HostError(host_error(Some(405))).to_json();
+        assert!(!observed.contains("derived") && !observed.contains("source_intervention"));
     }
 
     #[test]

@@ -7,8 +7,13 @@
 //!    `docs/decisions.md`, then checks the hits against the user-confirmed list `docs/decision-links.toml`
 //!    (see [`crate::decisions`]).
 //! 2. Reads `records/` (job outcomes and interventions) without an agent.
-//! 3. Runs the exact-match signals of those headers over the records. The one signal with an exact match is
-//!    D87's: a hand change (`did-work-themselves`) on a landed job, class of work `docs`, threshold two jobs.
+//! 3. Runs the exact-match signals of those headers over the records. The intervention signal with an exact
+//!    match is D87's: a hand change (`did-work-themselves`) on a landed job, class of work `code`, threshold
+//!    two jobs (`docs/design/decision-sets.md` section 9). D87's host-error signal runs over the observed
+//!    `athena.host-error/1` records and over the derived ones: records that code derives, in memory, from past
+//!    interventions whose text states a host refusal ([`athena_core::watcher::derive_host_error`]). A derived
+//!    record is marked derived, cites its source intervention, and is listed apart from the observed ones; the
+//!    client did not observe it.
 //! 4. Builds one introspection record for the earliest event that fired a signal naming D87. The record holds
 //!    only the fields code writes; the fields a language model writes are listed as pending.
 //!
@@ -135,11 +140,11 @@ pub fn headers() -> Vec<DecisionHeader> {
                     host_error: None,
                 },
                 Signal {
-                    name: "intervention: did-work-themselves on a landed branch, class docs",
+                    name: "intervention: did-work-themselves on a landed branch, class code",
                     threshold_jobs: 2,
                     exact: Some(InterventionMatch {
                         category: InterventionCategory::DidWorkThemselves,
-                        class_of_work: "docs",
+                        class_of_work: "code",
                         on_landed_job: true,
                     }),
                     host_error: None,
@@ -353,8 +358,11 @@ pub struct Records {
     /// Jobs with an outcome whose state is `landed` (including the retried landing of a blocked job).
     pub landed: BTreeSet<String>,
     pub interventions: Vec<InterventionRow>,
-    /// Every `athena.host-error/1` record, oldest first.
+    /// Every observed `athena.host-error/1` record, oldest first.
     pub host_errors: Vec<HostError>,
+    /// Host-error records derived from interventions, oldest first. Each is marked derived and cites its
+    /// source intervention. They are held in memory and never written to `records/`.
+    pub derived_host_errors: Vec<HostError>,
 }
 
 /// The children of a directory, sorted; a directory that does not exist has none.
@@ -406,8 +414,19 @@ pub fn read_records(root: &Path) -> Result<Records> {
     }
     for month in children(&root.join("records/interventions"))? {
         for file in children(&month)? {
-            if is_json(&file) {
-                records.interventions.push(read_json(&file)?);
+            if !is_json(&file) {
+                continue;
+            }
+            records.interventions.push(read_json(&file)?);
+            // The derivation reads the whole record (its `what` and `why`). A file that is not a valid
+            // intervention record derives nothing; the row above is read as before.
+            let bytes =
+                std::fs::read(&file).with_context(|| format!("reading {}", file.display()))?;
+            if let Ok(AnyRecord::Intervention(intervention)) =
+                AnyRecord::parse(&file.display().to_string(), &bytes)
+                && let Some(derived) = watcher::derive_host_error(&intervention)
+            {
+                records.derived_host_errors.push(derived);
             }
         }
     }
@@ -423,6 +442,10 @@ pub fn read_records(root: &Path) -> Result<Records> {
                 std::fs::read(&file).with_context(|| format!("reading {}", file.display()))?;
             let path = file.display().to_string();
             match AnyRecord::parse(&path, &bytes)? {
+                // A record on disk that is marked derived is kept with the derived ones, never as observed.
+                AnyRecord::HostError(error) if error.derived => {
+                    records.derived_host_errors.push(error)
+                }
                 AnyRecord::HostError(error) => records.host_errors.push(error),
                 _ => anyhow::bail!("{path}: not an athena.host-error/1 record"),
             }
@@ -430,6 +453,9 @@ pub fn read_records(root: &Path) -> Result<Records> {
     }
     records
         .host_errors
+        .sort_by(|a, b| (a.at, &a.id).cmp(&(b.at, &b.id)));
+    records
+        .derived_host_errors
         .sort_by(|a, b| (a.at, &a.id).cmp(&(b.at, &b.id)));
     Ok(records)
 }
@@ -446,10 +472,40 @@ pub struct SignalRun {
     pub threshold_jobs: usize,
     /// The matching interventions, earliest first.
     pub events: Vec<InterventionRow>,
-    /// The `athena.host-error/1` records a host-error signal matched, oldest first.
+    /// The observed `athena.host-error/1` records a host-error signal matched, oldest first.
     pub host_error_records: Vec<String>,
+    /// The derived host-error records the signal matched, oldest first. The client did not observe these.
+    pub derived_records: Vec<DerivedCite>,
     pub jobs: BTreeSet<String>,
     pub fired: bool,
+}
+
+/// A derived host-error record that fired a signal, with the intervention it was derived from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DerivedCite {
+    pub record: String,
+    pub source_intervention: String,
+}
+
+impl DerivedCite {
+    fn of(error: &HostError) -> Self {
+        DerivedCite {
+            record: error.id.to_string(),
+            source_intervention: error
+                .source_intervention
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_default(),
+        }
+    }
+
+    /// How a decision's review cites the record: as derived, and through it the source intervention.
+    pub fn citation(&self) -> String {
+        format!(
+            "{} (derived, not observed; from intervention {})",
+            self.record, self.source_intervention
+        )
+    }
 }
 
 fn matches(m: &InterventionMatch, row: &InterventionRow, records: &Records) -> bool {
@@ -471,7 +527,16 @@ pub fn run_signals(headers: &[DecisionHeader], records: &Records) -> Vec<SignalR
                     .iter()
                     .filter(|e| host_error.matches(e))
                     .collect();
-                let jobs: BTreeSet<String> = matched.iter().map(|e| e.job.to_string()).collect();
+                let derived: Vec<&HostError> = records
+                    .derived_host_errors
+                    .iter()
+                    .filter(|e| host_error.matches(e))
+                    .collect();
+                let jobs: BTreeSet<String> = matched
+                    .iter()
+                    .chain(&derived)
+                    .map(|e| e.job.to_string())
+                    .collect();
                 runs.push(SignalRun {
                     decision: header.id.to_string(),
                     signal: signal.name.to_string(),
@@ -479,6 +544,7 @@ pub fn run_signals(headers: &[DecisionHeader], records: &Records) -> Vec<SignalR
                     fired: !jobs.is_empty() && jobs.len() >= signal.threshold_jobs,
                     events: Vec::new(),
                     host_error_records: matched.iter().map(|e| e.id.to_string()).collect(),
+                    derived_records: derived.iter().map(|e| DerivedCite::of(e)).collect(),
                     jobs,
                 });
                 continue;
@@ -498,6 +564,7 @@ pub fn run_signals(headers: &[DecisionHeader], records: &Records) -> Vec<SignalR
                 fired: jobs.len() >= signal.threshold_jobs,
                 events,
                 host_error_records: Vec::new(),
+                derived_records: Vec::new(),
                 jobs,
             });
         }
@@ -575,6 +642,11 @@ pub struct Report {
     pub jobs_read: usize,
     pub landed_jobs: usize,
     pub interventions_read: usize,
+    /// Observed host-error records read from `records/`.
+    pub host_errors_read: usize,
+    /// Host-error records derived from interventions, listed apart from the observed ones. Each cites its
+    /// source intervention; the client did not observe them.
+    pub derived_host_errors: Vec<DerivedCite>,
     pub runs: Vec<SignalRun>,
     pub under_review: Vec<String>,
     pub introspection: Option<Introspection>,
@@ -665,8 +737,8 @@ fn check_signals(
             condition: "b",
             reason: format!(
                 "the signal found {} distinct job(s), fewer than the threshold of {}; no athena.host-error/1 \
-                 record of a refused merge (405 or 422) is in records/, and the interventions were not \
-                 recorded with the fields the signal needs (finding F3)",
+                 record of a refused merge (405 or 422) is in records/, no intervention states one, and the \
+                 interventions were not recorded with the fields the signal needs (finding F3)",
                 run.jobs.len(),
                 run.threshold_jobs
             ),
@@ -725,6 +797,7 @@ pub fn run_on(decisions: &str, confirmed: &ConfirmedLinks, records: &Records) ->
             .host_error_records
             .iter()
             .cloned()
+            .chain(run.derived_records.iter().map(DerivedCite::citation))
             .chain(run.events.iter().map(|e| e.id.clone()))
             .collect();
         mark_under_review(&mut decision_view, &run.decision, &cited);
@@ -745,6 +818,12 @@ pub fn run_on(decisions: &str, confirmed: &ConfirmedLinks, records: &Records) ->
         jobs_read: records.jobs.len(),
         landed_jobs: records.landed.len(),
         interventions_read: records.interventions.len(),
+        host_errors_read: records.host_errors.len(),
+        derived_host_errors: records
+            .derived_host_errors
+            .iter()
+            .map(DerivedCite::of)
+            .collect(),
         runs,
         under_review,
         introspection,
@@ -778,6 +857,17 @@ pub fn render(report: &Report) -> String {
         "records: {} job(s) with outcomes ({} landed), {} intervention(s)\n",
         report.jobs_read, report.landed_jobs, report.interventions_read
     ));
+    out.push_str(&format!(
+        "host errors: {} observed by the client\n",
+        report.host_errors_read
+    ));
+    out.push_str(&format!(
+        "host errors derived from interventions (not observed by the client): {}\n",
+        report.derived_host_errors.len()
+    ));
+    for cite in &report.derived_host_errors {
+        out.push_str(&format!("  - derived {}\n", cite.citation()));
+    }
     for run in &report.runs {
         out.push_str(&format!(
             "signal {} [{}]: {} job(s) of {} needed: {}\n",
