@@ -9,6 +9,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- The non-Rust file check (M20) now aims at its intent, that all code is Rust: it flags code in another language
+  by extension or `#!` line and allows data and documents anywhere, so a JSON test fixture no longer needs a
+  ledger entry. A named allow-list holds `setup.sh` and the CI workflow with their reasons. `docs/non-rust-files.md`
+  describes the new rule; the test is renamed `every_tracked_file_is_rust_or_data_or_an_allowed_exception`, with
+  `a_stray_script_is_flagged` as its blocking test.
 - Decision-sets design records the first `athena backtest` result (failed): the supersession parse had 24 hits and
   one unexpected partial revision (D11 by D39), now decided as `amended_by`; D87's hand-change signal found 0 jobs
   because it named class `docs` and is revised to class `code` (job 9h2j, PR #41, HTTP 405). New design rules: a

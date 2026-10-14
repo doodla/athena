@@ -760,13 +760,21 @@ amend earlier entries without rewriting them. All of these entries belong to the
 
 ## D33 · Non-Rust files are inventoried, and the inventory is enforced
 
-- **Decision:** `docs/non-rust-files.md` lists every kind of non-Rust file with its reason, and a test fails
-  on any tracked file that is neither Rust nor listed. Owner paths are outside Athena and exempt.
-- **Alternatives:** (a) List the files in prose only.
-- **Tradeoff:** A table to maintain, but no new kind of file slips in.
+- **Decision:** A test fails on any tracked file that is code in another language, found by extension or a
+  `#!` first line. Data and documents are allowed anywhere. A short named allow-list (`setup.sh` and the CI
+  workflow), each with its reason, is described in `docs/non-rust-files.md`. Owner paths are outside Athena
+  and exempt.
+- **Alternatives:**
+  - (a) List the files in prose only.
+  - (b) Refuse any file kind not in a ledger (the first version; it failed a JSON test fixture, which is
+    data and not code).
+- **Tradeoff:** A new kind of code could use an extension the list lacks, but the shebang check and a short
+  list cover the common cases; data needs no upkeep.
 - **Reversal cost:** Low.
 - **Provenance:** Stated: non-Rust files only where a platform requires them, each with its reason (A4).
 - **Revised** (review 1, n3, M5): there is no `.gitleaks.toml` and no `schemas/` directory.
+- **Revised** (2026-10-14, common sense over rigid rules): the check aims at the intent of A4 (all code is
+  Rust) instead of listing every file kind.
 
 ## D34 · A boundary test keeps Athena free of references to who runs it and where
 

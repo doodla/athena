@@ -1,7 +1,8 @@
 //! Repository-policy tests: rules about the repository itself, enforced by test (design §8).
 //!
 //! - M19: nothing in Athena refers to who runs it or the particular machine it runs on;
-//! - M20: every tracked file is Rust or a kind listed in `docs/non-rust-files.md`;
+//! - M20: no tracked file is code in another language (by extension or shebang), beyond the short
+//!   allow-list described in `docs/non-rust-files.md`; data and documents are allowed anywhere;
 //! - M21: the crate dependency graph matches `docs/architecture.md`;
 //! - M24: every test named in `docs/enforcement.md` exists.
 
@@ -230,63 +231,90 @@ fn the_producer_brief_lists_exactly_the_scanners_terms() {
 }
 
 // --------------------------------------------------------------------------------------------------------
-// M20: the non-Rust inventory
+// M20: no code in another language
 
-fn inventory() -> Vec<String> {
-    let text = std::fs::read_to_string(root().join("docs/non-rust-files.md")).unwrap();
-    let cell = Regex::new(r"`([^`]+)`").unwrap();
-    text.lines()
-        .filter(|l| l.starts_with("| `"))
-        .filter_map(|l| l.split('|').nth(1))
-        .flat_map(|first| {
-            cell.captures_iter(first)
-                .map(|c| c[1].to_string())
-                .collect::<Vec<_>>()
-        })
-        .collect()
+/// Extensions of code in a language other than Rust. Data and documents (json, toml, yaml, md, txt) are
+/// not code and are not listed.
+const OTHER_LANGUAGE_EXTENSIONS: &[&str] = &[
+    "py", "js", "mjs", "cjs", "jsx", "ts", "tsx", "sh", "bash", "zsh", "rb", "go", "pl", "php",
+    "java", "c", "cpp", "h", "lua", "ps1",
+];
+
+/// The non-Rust code that must exist, each with its reason. Mirrored in `docs/non-rust-files.md`.
+const ALLOWED_OTHER_LANGUAGE_CODE: &[(&str, &str)] = &[
+    (
+        "setup.sh",
+        "runs before any Rust toolchain exists: it installs a pinned rustup and passes control to Rust",
+    ),
+    (
+        ".github/workflows/ci.yml",
+        "GitHub Actions reads only YAML workflows; it is a thin call into Rust",
+    ),
+];
+
+/// Whether a tracked file is code in a language other than Rust: by extension, or by a `#!` first line
+/// (`#![` opens a Rust inner attribute, not a shebang). `head` is the start of the file's content.
+fn is_other_language_code(path: &str, head: &[u8]) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let by_extension = name
+        .rsplit_once('.')
+        .is_some_and(|(_, ext)| OTHER_LANGUAGE_EXTENSIONS.contains(&ext.to_lowercase().as_str()));
+    by_extension || (head.starts_with(b"#!") && !head.starts_with(b"#!["))
 }
 
-fn listed(path: &str, patterns: &[String]) -> bool {
-    let name = path.rsplit('/').next().unwrap_or(path);
-    patterns.iter().any(|p| {
-        if let Some(prefix) = p.strip_suffix("/**") {
-            path.starts_with(&format!("{prefix}/"))
-        } else if let Some(ext) = p.strip_prefix("*.") {
-            name.ends_with(&format!(".{ext}"))
-        } else if p.contains('/') {
-            path == p
-        } else {
-            name == p
-        }
-    })
+/// Whether the file is flagged: other-language code that is not on the allow-list.
+fn flagged(path: &str, head: &[u8]) -> bool {
+    is_other_language_code(path, head)
+        && !ALLOWED_OTHER_LANGUAGE_CODE
+            .iter()
+            .any(|(allowed, _)| *allowed == path)
 }
 
 #[test]
-fn every_tracked_file_is_rust_or_a_listed_kind() {
-    // M20 (allows): listed kinds.
-    let patterns = inventory();
-    assert!(patterns.len() >= 10, "the inventory parses: {patterns:?}");
-    let unlisted: Vec<String> = athena_files()
+fn every_tracked_file_is_rust_or_data_or_an_allowed_exception() {
+    // M20 (allows): the tree holds no code in another language beyond the allow-list.
+    let stray: Vec<String> = athena_files()
         .into_iter()
-        .filter(|p| !listed(p, &patterns))
+        .filter(|p| {
+            let head = std::fs::read(root().join(p)).unwrap_or_default();
+            flagged(p, &head)
+        })
         .collect();
     assert!(
-        unlisted.is_empty(),
-        "files of an unlisted kind (add them to docs/non-rust-files.md, with the reason): {unlisted:?}"
+        stray.is_empty(),
+        "code in a language other than Rust (rewrite it in Rust, or allow-list it with its reason in \
+         xtask/tests/policy.rs and docs/non-rust-files.md): {stray:?}"
     );
+    for (path, reason) in ALLOWED_OTHER_LANGUAGE_CODE {
+        assert!(root().join(path).exists(), "allow-listed {path} is missing");
+        assert!(!reason.is_empty(), "{path} needs a reason");
+    }
 }
 
 #[test]
-fn an_unlisted_file_kind_is_flagged() {
-    // M20 (blocks): an unlisted file kind.
-    let patterns = inventory();
-    assert!(!listed("tools/build.py", &patterns));
+fn a_stray_script_is_flagged() {
+    // M20 (blocks): code in another language, by extension or by shebang.
+    assert!(flagged("tools/build.py", b"print('x')\n"));
+    assert!(flagged("scripts/run.sh", b"echo hi\n"));
+    assert!(flagged("web/app.ts", b""));
+    assert!(flagged("bin/tool", b"#!/bin/sh\necho hi\n"));
     assert!(
-        !listed("scripts/run.sh", &patterns),
-        "only the root setup.sh is listed"
+        flagged("sub/setup.sh", b"#!/bin/sh\n"),
+        "only the root setup.sh is allowed"
     );
-    assert!(listed("crates/x/Cargo.toml", &patterns));
-    assert!(listed("records/jobs/bootstrap/brief.md", &patterns));
+    // Data and documents pass anywhere, with no ledger entry.
+    assert!(!flagged("crates/x/tests/fixtures/case.json", b"{}\n"));
+    assert!(!flagged("docs/notes.md", b"# Notes\n"));
+    assert!(!flagged("config/x.toml", b"[a]\n"));
+    assert!(!flagged("data/x.yaml", b"a: 1\n"));
+    assert!(!flagged("data/x.txt", b"text\n"));
+    assert!(!flagged(
+        "crates/x/src/lib.rs",
+        b"#![forbid(unsafe_code)]\n"
+    ));
+    // The named exceptions are allowed.
+    assert!(!flagged("setup.sh", b"#!/bin/sh\n"));
+    assert!(!flagged(".github/workflows/ci.yml", b"name: ci\n"));
 }
 
 // --------------------------------------------------------------------------------------------------------
