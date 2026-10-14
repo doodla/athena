@@ -1147,7 +1147,7 @@ every named test exists, so the map cannot drift from the code (A8).
 | M17 | Numbers are measured or labeled (Standards) | the `Quantity` type | a record with a bare number fails parsing | labeled quantities, with bounds |
 | M18 | Always-loaded context stays within fixed budgets (A13; D25) | per-set budget test with a byte estimator as a tripwire; opt-in live measurement as the authority | an over-budget contract or role set fails | the current sets pass |
 | M19 | Athena never refers to who runs it or where it runs (brief) | the boundary test over Athena's files | the scanner flags a planted term | Athena's tree passes |
-| M20 | Only listed kinds of non-Rust file exist (A4) | an inventory test against `docs/non-rust-files.md` | an unlisted file kind | listed kinds |
+| M20 | No code in another language beyond a short allow-list (A4) | a test for other-language extensions and `#!` lines | a stray script | data, documents, and the allow-list |
 | M21 | Dependency direction is documented and acyclic (A4) | Cargo, plus a test comparing `cargo metadata` with the architecture table | an undocumented edge; a core-to-capability edge | the documented graph |
 | M22 | Personal data never reaches committed content (Boundaries; A5) | redaction of agent free text before recording; the personal-data gate on added lines | an email address or generated token in a producer summary is redacted; an added line with a non-allow-listed email is refused | ordinary text; `noreply@` addresses |
 | M23 | The prediction precedes the outcome (A2; D07) | the `Athena-Prediction` trailer and its CI check, plus append-only records | a closing commit whose prediction commit is not an ancestor, or did not add the accepted reading | a proper prediction commit |
@@ -1455,20 +1455,15 @@ are the backstop.
 
 ### 11.3 Non-Rust files
 
-All code is Rust. Every other kind of file exists because a platform or a format requires it. The built
-inventory, `docs/non-rust-files.md`, is enforced by test M20:
+All code is Rust. Test M20 flags code in another language, by extension (`.py`, `.js`, `.ts`, `.sh`, `.rb`,
+`.go`, and similar) or by a `#!` first line. Data and documents (JSON, TOML, YAML, Markdown, text) are
+allowed anywhere with no entry. A short named allow-list in the test, mirrored in `docs/non-rust-files.md`,
+covers the non-Rust code that must exist:
 
 | Files | Why they are not Rust |
 |---|---|
-| `Cargo.toml` (root and per crate), `Cargo.lock` | Cargo's manifest and lockfile formats |
-| `rust-toolchain.toml` | rustup reads the toolchain pin from this file |
-| `setup.sh` | runs before any Rust toolchain exists; about 30 lines that install rustup and hand off to Rust |
+| `setup.sh` | runs before any Rust toolchain exists; about 30 lines that install rustup and pass control to Rust |
 | `.github/workflows/ci.yml` | GitHub Actions reads only YAML workflows; it is a thin call into Rust |
-| `.gitignore`, `.gitattributes` | git's own formats |
-| `athena.toml`, `defaults.toml` | configuration and the defaults model: data, not code |
-| `records/**` | machine-written JSON records, plus verbatim inputs such as the bootstrap brief |
-| `*.md` | documentation, and prompt text compiled into the binary (prose, not code) |
-| `LICENSE` | license text |
 
 There is no `.gitleaks.toml`. Secret-scan allow-list entries live in `athena.toml` and are handed to
 gitleaks through a generated `--config`. There are no committed schemas, and the git hooks are symlinks, not
