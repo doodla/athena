@@ -112,13 +112,15 @@ impl Athena {
     /// introspection never changes the result and never blocks `go` (`defaults-loop.md` section 3.1).
     pub fn go(&self, job_ref: &str, accepted_by: AcceptedBy, ui: &dyn Ui) -> Result<GoResult> {
         let result = self.go_job(job_ref, accepted_by, ui)?;
-        if let GoResult::Finished(finished) = &result
-            && matches!(
+        if let GoResult::Finished(finished) = &result {
+            if matches!(
                 finished.state,
                 OutcomeState::Rejected | OutcomeState::Failed
-            )
-        {
-            self.introspect_job(&finished.job, ui);
+            ) {
+                self.introspect_job(&finished.job, ui);
+            }
+            // The steward runs beside the main flow: this only counts the task and may start it.
+            self.note_finished(finished.state, ui);
         }
         Ok(result)
     }

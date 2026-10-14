@@ -3,6 +3,7 @@
 //! Everything Athena writes to, or reads from, a repository has its shape defined here:
 //!
 //! - [`records`]: the twelve immutable record types under `records/`, and where each one lives;
+//! - [`roles`]: recorded role definitions and the requirements ladder that limits what a role changes itself;
 //! - [`quantity`]: numbers that always carry their provenance (measured, reported, estimated, or pending);
 //! - [`id`]: time-sortable ids, and the reserved `bootstrap` job id;
 //! - [`config`]: `athena.toml`, the repository's configuration;
@@ -17,6 +18,7 @@ pub mod id;
 pub mod paths;
 pub mod quantity;
 pub mod records;
+pub mod roles;
 
 pub use config::Config;
 pub use defaults::DefaultsModel;

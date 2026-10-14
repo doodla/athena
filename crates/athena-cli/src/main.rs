@@ -263,7 +263,11 @@ fn main() -> ExitCode {
         Ok(cli) => cli,
         Err(error) => error.exit(),
     };
-    match run(cli) {
+    let result = run(cli);
+    // A background role (the steward) started by this command finishes before the process ends. The
+    // command's own work is done by now, so nothing waited on it.
+    athena_core::steward::wait_for_background();
+    match result {
         Ok(code) => ExitCode::from(code),
         Err(error) => {
             eprintln!("error: {error:#}");

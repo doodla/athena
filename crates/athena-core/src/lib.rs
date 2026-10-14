@@ -27,6 +27,9 @@
 //! - [`review`]: `athena review`, a person's verdict on an introspection's class, committed as a class-label
 //!   record (and a class record for a new class); the introspection is never edited;
 //! - [`watcher`]: decisions put under review by exact matching of host-error records, run at landing;
+//! - [`steward`]: the first role, run in the background every five finished tasks: it reads Athena's state in
+//!   place and queues work items, one for each thing it could not see; the requirements ladder decides what it
+//!   may change itself;
 //! - [`pin`]: a study's repository ref resolved to a commit by the core, and mounted read-only.
 
 pub mod admission;
@@ -54,6 +57,7 @@ mod run_pin_tests;
 pub mod scoring;
 pub mod state;
 pub mod status;
+pub mod steward;
 pub mod store;
 pub mod toolconfig;
 pub mod verify;

@@ -189,6 +189,10 @@ pub struct Records {
     pub proposals: Vec<ProposalRecord>,
     /// Every class-label record (`crate::labeled`), in file order.
     pub class_labels: Vec<athena_data::records::ClassLabel>,
+    /// Every recorded role definition, in file order.
+    pub roles: Vec<athena_data::roles::RoleDefinition>,
+    /// Every work item a role queued, in file order.
+    pub work_items: Vec<athena_data::records::WorkItem>,
     /// Files that are not acceptable records, by path.
     pub invalid: Vec<String>,
 }
@@ -244,6 +248,8 @@ impl Records {
                 AnyRecord::FailureClass(c) => records.classes.push(c),
                 AnyRecord::DefaultsProposal(p) => records.proposals.push(*p),
                 AnyRecord::ClassLabel(l) => records.class_labels.push(l),
+                AnyRecord::Role(r) => records.roles.push(*r),
+                AnyRecord::WorkItem(w) => records.work_items.push(*w),
                 other => {
                     let job = job_of(&other)
                         .expect("every other record names its job")

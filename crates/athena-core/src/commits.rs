@@ -7,9 +7,11 @@
 //! it happens under the repository lock.
 
 use crate::Athena;
+use crate::state::StateDir;
 use anyhow::{Result, bail};
 use athena_data::records::AnyRecord;
 use athena_gate::{Change, Scope, gate};
+use athena_git::Git;
 use athena_git::index::{IndexEdit, TempIndex};
 
 /// A file to add in a commit.
@@ -58,7 +60,22 @@ pub enum Refusal {
     LocalEdits(String),
 }
 
+/// The part of [`Athena`] that writes records: the repository and its state directory, nothing else. It is
+/// what a background role holds, because the agent driver in [`Athena`] is not shared between threads.
+#[derive(Debug, Clone, Copy)]
+pub struct Committer<'a> {
+    pub git: &'a Git,
+    pub state: &'a StateDir,
+}
+
 impl Athena {
+    fn committer(&self) -> Committer<'_> {
+        Committer {
+            git: &self.git,
+            state: &self.state,
+        }
+    }
+
     /// Builds a commit of `tree` plus `files` on parent `parent`, and gates it. The commit is not yet on
     /// any branch.
     pub fn build_commit(
@@ -68,7 +85,55 @@ impl Athena {
         files: &[NewFile],
         message: &str,
     ) -> Result<String> {
-        let index = TempIndex::from_tree(&self.git, tree)?;
+        self.committer().build_commit(tree, parent, files, message)
+    }
+
+    /// Fast-forwards the current branch to `commit`, which must descend from `expected_head`.
+    pub fn advance(
+        &self,
+        commit: &str,
+        expected_head: &str,
+    ) -> Result<std::result::Result<(), Refusal>> {
+        self.committer().advance(commit, expected_head)
+    }
+
+    /// Commits `files` (records only) on top of the current branch, gated, and fast-forwards to it.
+    /// Returns the new commit.
+    pub fn commit_records(&self, files: &[NewFile], message: &str) -> Result<String> {
+        self.committer().commit_records(files, message)
+    }
+
+    /// Like [`Athena::commit_records`], for records that depend on the commit they are built on, such as a
+    /// score that reads the interventions there. `files` is called again whenever the branch moved.
+    pub fn commit_records_with(
+        &self,
+        files: &dyn Fn(&str) -> Result<Vec<NewFile>>,
+        message: &str,
+    ) -> Result<String> {
+        self.committer().commit_records_with(files, message)
+    }
+}
+
+impl Committer<'_> {
+    fn head(&self) -> Result<String> {
+        match self.git.head()? {
+            Some(head) => Ok(head),
+            None => bail!(
+                "the repository has no commits yet; commit athena.toml and defaults.toml first"
+            ),
+        }
+    }
+
+    /// Builds a commit of `tree` plus `files` on parent `parent`, and gates it. The commit is not yet on
+    /// any branch.
+    pub fn build_commit(
+        &self,
+        tree: &str,
+        parent: &str,
+        files: &[NewFile],
+        message: &str,
+    ) -> Result<String> {
+        let index = TempIndex::from_tree(self.git, tree)?;
         let mut edits = Vec::new();
         for file in files {
             let oid = self.git.hash_object_w(&file.bytes)?;
@@ -83,8 +148,8 @@ impl Athena {
         let sign = self.git.signs_commits()?;
         let commit = self.git.commit_tree(&new_tree, &[parent], message, sign)?;
         let violations = gate(
-            &self.git,
-            &Change::of_commit(&self.git, &commit)?,
+            self.git,
+            &Change::of_commit(self.git, &commit)?,
             Scope::Commit,
         )?;
         if !violations.is_empty() {
