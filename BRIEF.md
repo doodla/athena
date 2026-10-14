@@ -511,3 +511,7 @@ Stopping: you're done when "How I'll judge it" passes. If you're blocked on ever
 ### 2026-10-14: Common sense over rigid rules
 
 * A rule to land non rust files in a md file is a bit dumb maybe. Have the system check for common sense issues with simpler handling maybe?
+
+### 2026-10-14: Socratic questions
+
+* Can we add a Socratic question generator or something?
