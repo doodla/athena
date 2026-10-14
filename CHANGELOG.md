@@ -9,6 +9,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The explainer page opens with a "Start here" section for readers new to firstmate: what it is, a walk-through
+  of one piece of work, and a glossary of the page's terms. The text is in
+  `studies/firstmate-work-handling/intro.json`; each sentence cites claim ids, and the renderer rejects an
+  uncited one.
 - `cargo run -p xtask -- site [--out <dir>]` renders the explainer page for the firstmate work-handling
   study to `site/index.html` (gitignored): one self-contained HTML file with inline CSS, a responsive layout
   and a dark theme. All text comes from the study JSON, is HTML-escaped, and cites claim ids; the page states
