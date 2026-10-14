@@ -22,6 +22,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- The verifier prompt now says its working directory is a snapshot without records/, owner files or history, so
+  anything it ran there is a result about the snapshot only. It must say so in evidence and findings when a
+  command depends on absent paths, and never present such a run as a result on the real repository (the false
+  claim that reached main in PR #59). Root cause: the prompt never told the verifier what its snapshot lacked.
+  A unit test pins the wording; the rule itself stays prose.
 - The requirements map, strategy view and roadmap are brought up to date. The map gains four rows for the
   addenda of 2026-10-13 and 2026-10-14 (AD-12 root causes, AD-13 introspection on every correction, AD-14
   decision sets and knowing when a decision is not working, AD-15 common sense over rigid rules), all partial,

@@ -345,8 +345,8 @@ amend earlier entries without rewriting them. All of these entries belong to the
   the highest tier verifies high-stakes conclusions (A7; bootstrap brief, item 4). Inferred: model-level
   separation. Review 1 (Q2) concurred.
 - **Bundle:** Follows the bundle: its whole-job closure includes adversarial review in a separate context.
-- **Revised** (review 1, B1, m2): the verifier works in a snapshot, and its exercise is made mechanical
-  (D43).
+- **Revised** (review 1, B1, m2): the verifier works in a snapshot, and its exercise is made mechanical (D43).
+  Later (PR #59 false claim): the prompt says the snapshot lacks records/, owner files and history, so runs there are snapshot results only, never real-repository results; a test pins the wording.
 
 ## D13 · One verification round, with severities and a verdict computed by code
 
