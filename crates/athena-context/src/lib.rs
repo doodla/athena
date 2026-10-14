@@ -233,6 +233,20 @@ mod tests {
     }
 
     #[test]
+    fn the_verifier_frame_limits_snapshot_runs_to_the_snapshot() {
+        let text = VERIFIER_FRAME.text;
+        for wording in [
+            "a snapshot, not the real repository",
+            "no records/, no owner files, no history",
+            "a result about the snapshot only",
+            "say so explicitly in evidence and findings",
+            "never report it as a result on the real repository",
+        ] {
+            assert!(text.contains(wording), "verifier frame lacks: {wording}");
+        }
+    }
+
+    #[test]
     fn components_are_recorded_with_hashes_and_estimates() {
         let composed = compose(&[CONTRACT.into(), READER_FRAME.into()]);
         assert_eq!(composed.components.len(), 2);

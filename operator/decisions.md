@@ -137,3 +137,18 @@ Athena's decision log, not here. Newest last.
 - Also from the same chat: PRs that add records without landing a job are merged by hand with a squash message
   whose last paragraph names the job (`Athena-Job:`); a squash may name only one landed job. GitHub's auto-merge
   appends a co-author paragraph that hides those trailers. This lasts until native PR landing is built.
+
+## OP-13. Course correction: an outcome milestone, lazy requests, every rescue logged (2026-10-14)
+
+- Finding (BRIEF.md O4): work on Athena's machinery crowded out the study for a sustained stretch. On 2026-10-14
+  `athena strategy` showed the study (G6) at 0 of 23 rows covered and the site (G7) at 0 of 15. Over the same
+  stretch the operator's requests carried diagnosis, code locations and fixes (O2, O3), so the strategic judgment
+  lived in the operator. Intervention 20261014-075229-5x3e records the unlogged detailed instructions.
+- Decision: the next milestone is one bounded, externally useful outcome: a published Firstmate explainer slice,
+  asked for in a line or two. Athena chooses and revises its own sequence of jobs. The operator logs every rescue,
+  including diagnosis handed over, and fixes infrastructure only when it blocks the milestone or is a material
+  safety risk (the verifier recording records-less runs as real results, audit finding H2, qualifies).
+- Measures: total cost, elapsed time, operator interventions by category, and an independent rating of the
+  slice's usefulness. Then repeat on a comparable slice and compare.
+- Paused unless the milestone needs them: parallel jobs, decision-sets steps 1 and 3, the Socratic review build,
+  the Jev data-quality fixes, the remaining defaults-loop steps.
