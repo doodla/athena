@@ -258,6 +258,30 @@ mod tests {
     }
 
     #[test]
+    fn reader_checks_for_governance_files_and_producer_stops_on_unlisted_ones() {
+        // Guidance only: admission enforces the rule; these frames help the agents avoid a refusal.
+        let reader = READER_FRAME.text;
+        for wording in [
+            "Check whether the outcome needs a change to athena.toml, defaults.toml",
+            ".github/workflows/",
+            "list that file as a deliverable and name it in an acceptance criterion",
+        ] {
+            assert!(reader.contains(wording), "reader frame lacks: {wording}");
+        }
+        let producer = PRODUCER_FRAME.text;
+        for wording in [
+            "governance file",
+            "does not list as a deliverable",
+            "stop and report it in open_issues; do not edit it",
+        ] {
+            assert!(
+                producer.contains(wording),
+                "producer frame lacks: {wording}"
+            );
+        }
+    }
+
+    #[test]
     fn the_verifier_frame_limits_snapshot_runs_to_the_snapshot() {
         let text = VERIFIER_FRAME.text;
         for wording in [

@@ -328,6 +328,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_workflow_change_must_be_listed_and_named() {
+        let path = ".github/workflows/ci.yml";
+        assert!(is_governance(path));
+        let mut r = reading();
+        assert!(!governance_change_is_listed(&r, path));
+        r.deliverables.push(Deliverable {
+            path: path.into(),
+            action: DeliverableAction::Modify,
+            p: 0.9,
+        });
+        assert!(!governance_change_is_listed(&r, path), "listed but unnamed");
+        r.acceptance_criteria.push(Criterion {
+            text: format!("{path} runs the new check"),
+            kind: CriterionKind::Content,
+        });
+        assert!(governance_change_is_listed(&r, path));
+        let mut named_only = reading();
+        named_only.acceptance_criteria.push(Criterion {
+            text: format!("{path} runs the new check"),
+            kind: CriterionKind::Content,
+        });
+        assert!(
+            !governance_change_is_listed(&named_only, path),
+            "named but unlisted"
+        );
+    }
+
     /// Commits the base files, then a candidate with `files` written over them; returns the violations of
     /// the rules admission applies to content, which do not need gitleaks.
     fn admit_files(files: &[(&str, &str)]) -> Vec<PolicyViolation> {

@@ -9,6 +9,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- The reader frame now has the reader check whether the outcome needs `athena.toml`, `defaults.toml` or a
+  workflow file, and list and name it, so admission does not refuse the reading later. The producer frame tells
+  the producer to stop and report, not edit, a governance file the reading does not list. Both are guidance;
+  admission stays the enforcement. Tests cover the frame wording and a workflow path under
+  `governance_change_is_listed`.
 - Candidate admission now parses a changed `athena.toml` and `defaults.toml` with the gate's own parsers
   (`Config::parse`, `DefaultsModel::parse`). A file with an unknown field fails the job with a
   `configuration` finding before the landing commit is built, instead of only at landing. Tests cover an
