@@ -376,6 +376,16 @@ superseded by an inactive one, and every `code-check` decision names a test that
 
 0. **First build (review 1, section 5):** the read-only backtest of D87 and D88, with no Jev, no brief change and no
    new record kind other than the typed header. It starts once this revision is accepted.
+   **Built** as `athena backtest` (`crates/athena-cli/src/backtest.rs`): typed headers for D87 and D88 only, the
+   supersession parse, a records reader, D87's one exact-match signal (a `did-work-themselves` intervention of
+   class `docs` on a landed job, two distinct jobs), and one introspection record (the code-written fields) for
+   the earliest matching event, with the pass conditions of review 1 section 5 applied. A condition that does
+   not hold is printed as a finding with its reason and the command exits 2; it is not retried. Its tests build
+   their `records/` fixtures in a temporary directory and remove it, so no fixture file is committed. Read on
+   `docs/decisions.md` (case-insensitive parse): the log has a fifth supersession hit the review's list does not
+   name, "superseded by D39's invariant" in D11, so condition (a) reports it as an unexpected hit and the
+   backtest does not pass on the log as it stands until the user confirms it as a known hit. Whether the real
+   `records/` meet conditions (b) to (d) is not known here: the records are not part of the tests.
 1. Measure rendered sets with the live counter and `render()` alone (defaults do not count against the producer and
    verifier budgets today, §3).
 2. Typed decision view and the supersession parse (§6, steps 2-3), with a user-confirmed list. No briefs change.

@@ -127,6 +127,11 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Read-only backtest of decisions D87 and D88 over `docs/decisions.md` and `records/`; exit 2 on a finding.
+    Backtest {
+        #[arg(long)]
+        json: bool,
+    },
     /// The kill switch: terminate every running agent and check, and block new ones.
     Stop,
     /// Turn the kill switch off.
@@ -498,6 +503,15 @@ fn run(cli: Cli) -> Result<u8> {
                 }
             }
             Ok(if report.violations.is_empty() { 0 } else { 2 })
+        }
+        Command::Backtest { json } => {
+            let report = athena_cli::backtest::run(&std::env::current_dir()?)?;
+            if json {
+                print_json(&report)?;
+            } else {
+                print!("{}", athena_cli::backtest::render(&report));
+            }
+            Ok(if report.passed() { 0 } else { 2 })
         }
         Command::Stop => {
             let athena = open(false)?;

@@ -20,6 +20,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `athena backtest`: the read-only backtest of decisions D87 and D88 (review 1, section 5). It defines the typed
+  header for those two decisions, parses the supersession phrases of `docs/decisions.md`, reads job outcomes and
+  interventions from `records/` in Athena code, runs D87's exact-match hand-change signal, builds one
+  introspection record for the earliest matching event, and reports pass or a finding with its reason (exit 2).
+  Its tests write their `records/` fixtures into a temporary directory and remove it; no fixture files are
+  committed.
 - Review 1 of the decision-sets design together with the introspection step of the defaults-loop design
   (`docs/design/reviews/decision-sets-review-1.md`): fit across introspection records, the defaults loop, typed
   decisions and failure signals; claims checked against code; Jev usage checked against `POST /v1/evaluate`; the
