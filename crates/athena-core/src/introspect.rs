@@ -11,7 +11,10 @@
 //! 2. **The introspection step.** After each of these events, Athena records one introspection with no request
 //!    from the user: a job that ends `rejected` or `failed`, a correction of a reading (or an answer to its
 //!    question), and any other intervention ([`Athena::introspect_job`], [`Athena::introspect_intervention`]).
-//!    Host errors and landings are later builds; no Jev is called.
+//!    Host errors and landings are later builds. When Athena has a Jev (`Athena::jev`; the fake in tests), it
+//!    is asked the failure-class and is-repeat questions in one call, in shadow ([`ask_jev`]): the answers
+//!    are stored in the record's `jev` field so they can be scored later, and never change the class, the
+//!    status or any outcome. A failed Jev call is stored as an error and blocks nothing.
 //!
 //! The reading code (section 3.3) is a function of Athena itself. It reads only the stored fields it lists:
 //! `what`, `why`, `class_of_work`, `category`, job id and date of the event; and for earlier cases the record
@@ -26,6 +29,7 @@
 
 use crate::capability::JobConfig;
 use crate::commits::{NewFile, message};
+use crate::jev::{Answer as JevAnswer, Evaluate, Question};
 use crate::store::Records as GitRecords;
 use crate::watcher::{self, D87_SIGNAL, HostErrorSignal};
 use crate::{Athena, Ui};
@@ -34,8 +38,9 @@ use athena_agent::env::{EnvSpec, Side};
 use athena_agent::{AgentInvocation, NoSink};
 use athena_data::records::{
     AnyRecord, ClassStatus, FailureClass, HostError, INTROSPECTION_PROSE_FIELDS,
-    INTROSPECTION_SCHEMA, InterventionCategory, IntrospectionEvidence, IntrospectionRecord,
-    IntrospectionStatus, IntrospectionTrigger, OutcomeState, PreventionKind, ProposalRecord, Role,
+    INTROSPECTION_SCHEMA, InterventionCategory, IntrospectionEvidence, IntrospectionJev,
+    IntrospectionRecord, IntrospectionStatus, IntrospectionTrigger, JevClassAnswer, OutcomeState,
+    PreventionKind, ProposalRecord, Role,
 };
 use athena_data::{JobId, RecordId};
 use jiff::Timestamp;
@@ -918,6 +923,91 @@ fn user_prompt(
     serde_json::to_string_pretty(&value).expect("a JSON value serializes")
 }
 
+/// The key of the failure-class question in the call to Jev.
+pub const JEV_CLASS_KEY: &str = "failure_class";
+/// The key of the is-repeat question in the call to Jev.
+pub const JEV_REPEAT_KEY: &str = "is_repeat";
+/// The option of the failure-class question that means no registry class fits.
+pub const JEV_NEW_OPTION: &str = "new";
+
+/// The two introspection questions: the failure class (a choice over the registry ids, plus `new`) and whether
+/// the event repeats an earlier case (a boolean).
+pub fn jev_questions(classes: &[ClassRow]) -> BTreeMap<String, Question> {
+    let mut criteria: BTreeMap<String, String> = classes
+        .iter()
+        .map(|c| (c.id.clone(), format!("{}: {}", c.name, c.description)))
+        .collect();
+    criteria.insert(
+        JEV_NEW_OPTION.to_string(),
+        "None of the registry classes fits this event; it is a new class.".to_string(),
+    );
+    BTreeMap::from([
+        (
+            JEV_CLASS_KEY.to_string(),
+            Question::Choice {
+                instructions: "Which failure class does the event belong to? Choose the id of the \
+                               registry class that fits, or `new` when none does."
+                    .to_string(),
+                criteria,
+            },
+        ),
+        (
+            JEV_REPEAT_KEY.to_string(),
+            Question::Boolean {
+                instructions:
+                    "Is this event a repeat of one of the earlier cases listed, with the \
+                               same underlying cause?"
+                        .to_string(),
+            },
+        ),
+    ])
+}
+
+/// Asks Jev both questions in one call over `state` (the text the model is given) and turns the reply into
+/// the stored form. This never fails: a call that failed becomes a record with its error and no answers. The
+/// result is stored and read by nothing that decides.
+pub fn ask_jev(jev: &dyn Evaluate, state: &str, classes: &[ClassRow]) -> IntrospectionJev {
+    let mut stored = IntrospectionJev {
+        model: crate::jev::MODEL.to_string(),
+        class: None,
+        repeat_probability: None,
+        input_tokens: 0,
+        output_tokens: 0,
+        cost_usd: None,
+        error: None,
+    };
+    match jev.evaluate(state, &jev_questions(classes)) {
+        Err(error) => stored.error = Some(error.to_string()),
+        Ok(evaluation) => {
+            stored.input_tokens = evaluation.usage.input_tokens;
+            stored.output_tokens = evaluation.usage.output_tokens;
+            stored.cost_usd = evaluation.cost_usd;
+            match (
+                evaluation.answers.get(JEV_CLASS_KEY),
+                evaluation.answers.get(JEV_REPEAT_KEY),
+            ) {
+                (
+                    Some(JevAnswer::Choice {
+                        choice,
+                        probabilities,
+                        confidence,
+                    }),
+                    Some(JevAnswer::Boolean { probability }),
+                ) => {
+                    stored.class = Some(JevClassAnswer {
+                        choice: choice.clone(),
+                        probabilities: probabilities.clone(),
+                        confidence: *confidence,
+                    });
+                    stored.repeat_probability = Some(*probability);
+                }
+                _ => stored.error = Some("Jev did not answer both questions".to_string()),
+            }
+        }
+    }
+    stored
+}
+
 impl Athena {
     /// Introspects a job that ended `rejected` or `failed`. A job in any other state is not an event. Never
     /// returns an error: a problem is a line to the user, since an introspection never blocks a job.
@@ -1050,8 +1140,15 @@ impl Athena {
             flags: Vec::new(),
             dropped_ids: Vec::new(),
             from_jev: false,
+            jev: None,
         };
         let prompt = user_prompt(&event, &past.classes, &cases, &candidates);
+        // Shadow: Jev sees the same fields the model sees. Its answers are stored beside the model's and are
+        // read by nothing in this function.
+        let jev_answers = self
+            .jev
+            .as_deref()
+            .map(|jev| ask_jev(jev, &prompt, &past.classes));
         let scratch = self.state.root().join("introspect").join(id.as_str());
         std::fs::create_dir_all(&scratch)?;
         let spec = self.introspection_spec(&config, &event, &id, prompt, &scratch)?;
@@ -1094,6 +1191,7 @@ impl Athena {
             }
         }
         let _ = std::fs::remove_dir_all(&scratch);
+        record.jev = jev_answers;
         let mut files = Vec::new();
         if let Some(class) = new_class {
             files.push(NewFile::record(&AnyRecord::FailureClass(class)));
@@ -1117,7 +1215,8 @@ impl Athena {
             record.status.as_str()
         );
         let body = "Why the event happened, the class it belongs to and what would have stopped the class. \
-                    Written by a language model from the stored fields of the event and earlier cases; no Jev.";
+                    Written by a language model from the stored fields of the event and earlier cases. Jev, when asked, \
+                    answered in shadow and decided nothing.";
         self.commit_records(&files, &message(&subject, body, &[("Athena-Record", path)]))?;
         Ok(record)
     }

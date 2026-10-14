@@ -63,6 +63,7 @@ fn case_record(day: u32, job: u32) -> AnyRecord {
         flags: vec![],
         dropped_ids: vec![],
         from_jev: false,
+        jev: None,
     }))
 }
 

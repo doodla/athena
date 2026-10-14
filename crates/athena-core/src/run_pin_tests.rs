@@ -218,6 +218,7 @@ fn athena(
         athena_bin: "/bin/false".into(),
         nested: None,
         pinner: Box::new(pinner),
+        jev: None,
     }
 }
 

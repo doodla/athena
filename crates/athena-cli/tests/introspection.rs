@@ -7,18 +7,20 @@ mod common;
 
 use athena_agent::fake::{FakeTurn, Script};
 use athena_core::introspect::{CASE_CAP, CaseRow, Event, Records as Past, narrow_cases};
+use athena_core::introspect::{JEV_CLASS_KEY, JEV_NEW_OPTION, JEV_REPEAT_KEY};
+use athena_core::jev::{Answer, Evaluation, FakeJev, JevError, Question, Usage};
 use athena_core::manage::InterveneArgs;
 use athena_core::run::GoResult;
 use athena_core::store::Records;
 use athena_core::{Athena, Ui};
 use athena_data::records::{
-    AcceptedBy, ClassStatus, IntrospectionRecord, IntrospectionStatus, IntrospectionTrigger,
-    InvocationOutcome, OutcomeState,
+    AcceptedBy, AnyRecord, ClassStatus, IntrospectionRecord, IntrospectionStatus,
+    IntrospectionTrigger, InvocationOutcome, OutcomeState,
 };
 use athena_data::{JobId, RecordId};
 use common::*;
 use serde_json::{Value, json};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
@@ -246,6 +248,153 @@ fn a_failed_job_is_introspected() {
     assert_eq!(record.trigger, IntrospectionTrigger::Failure);
     assert_eq!(record.category, "failed");
     assert_eq!(record.status, IntrospectionStatus::Recorded);
+}
+
+fn chosen(choice: &str, probability: f64) -> Evaluation {
+    Evaluation {
+        answers: BTreeMap::from([
+            (
+                JEV_CLASS_KEY.to_string(),
+                Answer::Choice {
+                    choice: choice.into(),
+                    probabilities: BTreeMap::from([(choice.to_string(), 0.75)]),
+                    confidence: 0.6,
+                },
+            ),
+            (JEV_REPEAT_KEY.to_string(), Answer::Boolean { probability }),
+        ]),
+        usage: Usage {
+            input_tokens: 410,
+            output_tokens: 9,
+        },
+        cost_usd: Some(0.00002),
+    }
+}
+
+#[test]
+fn jev_is_asked_in_shadow_and_both_answers_are_recorded_without_changing_the_class() {
+    let model = Model::default();
+    model.say(reply(
+        "new",
+        "The job removed README.md, so the test check failed and the job was rejected.",
+        "Nothing stops a candidate from deleting a file the checks need before the checks run.",
+    ));
+    // Jev disagrees with the model on purpose: it names an id that is not in the registry.
+    let jev = FakeJev::new().then(Ok(chosen("not-a-registry-class", 0.25)));
+    let (fx, mut athena) = setup(rejecting(), &model);
+    athena.jev = Some(Box::new(jev.clone()));
+    let finished = run_job(&athena, "remove the readme");
+    assert_eq!(finished.state, OutcomeState::Rejected);
+
+    // One call, both questions, over the text the model was given.
+    let calls = jev.calls();
+    let [(state, questions)] = calls.as_slice() else {
+        panic!("one Jev call, got {}", calls.len())
+    };
+    assert_eq!(
+        questions.keys().map(String::as_str).collect::<Vec<_>>(),
+        [JEV_CLASS_KEY, JEV_REPEAT_KEY]
+    );
+    let sent: Value = serde_json::from_str(state).unwrap();
+    assert_eq!(sent, model.prompts.lock().unwrap()[0]);
+    assert!(
+        matches!(&questions[JEV_CLASS_KEY], Question::Choice { criteria, .. }
+        if criteria.keys().map(String::as_str).collect::<Vec<_>>() == [JEV_NEW_OPTION])
+    );
+
+    // Both answers, the usage and the cost are in the record, which validates and loads from git.
+    let [record] = introspections(&fx)
+        .try_into()
+        .unwrap_or_else(|_| panic!("one"));
+    let stored = record.jev.as_ref().expect("Jev's answers are recorded");
+    assert_eq!(stored.model, "typesafe-ai/jev");
+    let class = stored.class.as_ref().unwrap();
+    assert_eq!(class.choice, "not-a-registry-class");
+    assert_eq!(class.probabilities["not-a-registry-class"], 0.75);
+    assert_eq!(class.confidence, 0.6);
+    assert_eq!(stored.repeat_probability, Some(0.25));
+    assert_eq!((stored.input_tokens, stored.output_tokens), (410, 9));
+    assert_eq!(stored.cost_usd, Some(0.00002));
+    assert_eq!(stored.error, None);
+    assert!(record.validate().is_ok());
+
+    // It decided nothing: the class is the model's, the record is not from Jev, the outcome is unchanged.
+    assert_eq!(record.status, IntrospectionStatus::Recorded);
+    assert!(!record.from_jev);
+    assert!(record.new_class);
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    let [class_record] = records.classes.as_slice() else {
+        panic!("one class")
+    };
+    assert_eq!(record.failure_class.as_ref(), Some(&class_record.id));
+    assert_ne!(class_record.id.as_str(), class.choice);
+}
+
+#[test]
+fn a_failed_jev_call_is_recorded_and_blocks_nothing() {
+    let model = Model::default();
+    model.say(reply(
+        "new",
+        "The job removed README.md, so the test check failed and the job was rejected.",
+        "Nothing stops a candidate from deleting a file the checks need before the checks run.",
+    ));
+    let jev = FakeJev::new().then(Err(JevError::Refused {
+        status: 401,
+        excerpt: "bad key".into(),
+    }));
+    let (fx, mut athena) = setup(rejecting(), &model);
+    athena.jev = Some(Box::new(jev));
+    let finished = run_job(&athena, "remove the readme");
+    assert_eq!(finished.state, OutcomeState::Rejected);
+    let [record] = introspections(&fx)
+        .try_into()
+        .unwrap_or_else(|_| panic!("one"));
+    assert_eq!(record.status, IntrospectionStatus::Recorded);
+    assert!(record.new_class);
+    let stored = record.jev.as_ref().unwrap();
+    assert!(stored.error.as_deref().unwrap().contains("HTTP 401"));
+    assert!(stored.class.is_none() && stored.repeat_probability.is_none());
+    assert_eq!((stored.input_tokens, stored.output_tokens), (0, 0));
+    assert!(record.validate().is_ok());
+}
+
+#[test]
+fn jev_is_asked_even_when_the_model_fails_and_that_stays_a_failed_record() {
+    // No model reply is scripted, so the model is unavailable; Jev answers anyway.
+    let model = Model::default();
+    let jev = FakeJev::new();
+    let (fx, mut athena) = setup(rejecting(), &model);
+    athena.jev = Some(Box::new(jev.clone()));
+    run_job(&athena, "remove the readme");
+    let [record] = introspections(&fx)
+        .try_into()
+        .unwrap_or_else(|_| panic!("one"));
+    assert_eq!(record.status, IntrospectionStatus::Failed);
+    assert!(record.failure_class.is_none());
+    assert!(record.jev.as_ref().unwrap().class.is_some());
+    assert_eq!(jev.calls().len(), 1);
+}
+
+#[test]
+fn without_a_jev_nothing_is_asked_and_older_records_without_the_field_still_parse() {
+    let model = Model::default();
+    model.say(reply(
+        "new",
+        "The job removed README.md, so the test check failed and the job was rejected.",
+        "Nothing stops a candidate from deleting a file the checks need before the checks run.",
+    ));
+    let (fx, athena) = setup(rejecting(), &model);
+    run_job(&athena, "remove the readme");
+    let [record] = introspections(&fx)
+        .try_into()
+        .unwrap_or_else(|_| panic!("one"));
+    assert!(record.jev.is_none());
+    // The field is left out of the stored JSON, which is also how a record from before step 5 looks.
+    let any = AnyRecord::Introspection(Box::new(record));
+    let json: Value = serde_json::from_str(&any.to_json()).unwrap();
+    assert!(json.get("jev").is_none(), "{json}");
+    let parsed = AnyRecord::parse("old.json", any.to_json().as_bytes()).unwrap();
+    assert_eq!(parsed, any);
 }
 
 #[test]

@@ -151,6 +151,7 @@ pub fn open(cwd: &Path, writes: bool, announce: &dyn Fn(&str)) -> Result<Athena>
             athena_bin,
             nested: Some(outer),
             pinner: Box::new(GitPinner),
+            jev: None,
         });
     }
     let state = StateDir::for_repository(&user.common_dir()?);
@@ -172,5 +173,6 @@ pub fn open(cwd: &Path, writes: bool, announce: &dyn Fn(&str)) -> Result<Athena>
         athena_bin,
         nested: nested_marker(),
         pinner: Box::new(GitPinner),
+        jev: athena_core::jev::shadow_from_env(),
     })
 }

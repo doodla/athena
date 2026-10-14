@@ -2048,3 +2048,29 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   `brief`; the class vocabulary is closed and landing is a phase; the under-review state is a hashed brief
   component; set membership is one boolean per decision, thresholded on the probability of the true option.
   Alternatives 9 and 10 were added to the design. No review of the revision is recorded yet.
+
+## D92 · The Jev client rides the existing outbound wrapper, over the `curl` program, and runs only in shadow
+
+- **Decision:** Build step 5 of `docs/design/defaults-loop.md` section 12. `crates/athena-core/src/jev.rs`
+  holds a client for `POST https://ai-gateway.vercel.sh/v1/evaluate` (and no other endpoint) and a fake that
+  returns the same typed response. The outbound wrapper in `gh.rs` gains a transport trait (`HttpPost`), its
+  implementation over the installed `curl` program (`CurlHttp`), and the retry loop it already had in
+  `GhClient::api`, now also callable on its own (`retry_transient`), with the same `Retry::STANDARD` bound and
+  transient classification (500, 502, 503, 504, timeouts, resets). Auth errors and other 4xx answers are not
+  retried. The chat endpoint's refusal ("a decision model, not a language model") is a build error and is not
+  retried. The key is read only from `AI_GATEWAY_API_KEY`, passed to `curl` on its standard input rather than
+  in its argument list, printed as `<key>`, and replaced in error text. Introspection asks Jev the failure-class
+  choice and the is-repeat boolean in one call and stores both answers, the usage and the cost in an optional
+  `jev` field of `athena.introspection/1`; the class, the status and every outcome come from the language model
+  and code as before (`from_jev` stays false). Athena asks no Jev unless `Athena::jev` is set: tests set the
+  fake, and the command line sets the real client only when `ATHENA_JEV_SHADOW=1`.
+- **Alternatives:** an HTTP crate (`ureq` or `reqwest`) in the workspace; calling the chat endpoint; reading
+  Jev's choice to set the recorded class; asking the two questions in two calls; making the shadow call a
+  default of the command line.
+- **Tradeoff:** The `curl` program is a prerequisite for the opt-in shadow call, and its stdout is parsed for a
+  status line, which is less typed than a crate. In return the workspace gains no dependency (none could be
+  fetched where this was built) and the guard that confines HTTP to the one wrapper keeps holding. The
+  `answers` key of the reply was not in the probe notes and is an assumption until the live test has run.
+- **Reversal cost:** Low: swap `CurlHttp` for a crate-backed `HttpPost`; the `jev` field is optional.
+- **Provenance:** stated: the probe facts in the job request of 2026-10-14 (endpoint, body, answer shapes,
+  usage, cost string, the chat refusal, the proxy). Not re-run: no network was available when this was built.

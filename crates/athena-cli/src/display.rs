@@ -525,6 +525,20 @@ fn introspection(out: &mut String, i: &athena_core::status::IntrospectionView) {
             "  dropped id    {id} (not on the list passed to the model)"
         );
     }
+    if let Some(jev) = &i.jev {
+        let line = match (&jev.error, &jev.class, jev.repeat_probability) {
+            (Some(why), _, _) => format!("not answered: {why}"),
+            (None, Some(class), Some(repeat)) => format!(
+                "class {} (confidence {:.2}) · repeat {repeat:.2}",
+                class.choice, class.confidence
+            ),
+            _ => "no answers".to_string(),
+        };
+        let _ = writeln!(
+            out,
+            "  jev (shadow)  {line}; recorded only, decides nothing"
+        );
+    }
     let _ = writeln!(
         out,
         "  written by    a language model, not Jev{}",
