@@ -1,0 +1,177 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261014-035456-267v",
+  "n": 1,
+  "at": "2026-10-14T03:55:19.864422296Z",
+  "invocation_seq": 1,
+  "base_commit": "f7dcb06d01104fd73223607655041827edbed10d",
+  "config_sha256": "3a5a7c10c8f8142be7e5f5cbd5f0238f710d6a133b92a5731607ebe61c2e2789",
+  "defaults_sha256": "7ca3db44e78a075634195d4e9722ade9188c5268e963b636ac7b9c38d2bee2c6",
+  "defaults_version": 1,
+  "title": "Route external calls through one bounded-retry wrapper, with a guard tes",
+  "summary": "Extend the existing 5xx retry in crates/athena-core/src/gh.rs (job 86p4) into the single wrapper: add jitter, timeout and connection-reset classification, and a per-retry log line with command and status. Add a source-scanning test that fails when `Command::new(\"gh\")` or an HTTP client appears outside the wrapper, and tests that inject a one-off and a persistent 500 into each GitHub-calling command, including `land --pr`.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "All code and tests are Rust."
+    },
+    {
+      "id": "tested",
+      "how": "New unit and integration tests; cargo test and clippy must pass."
+    },
+    {
+      "id": "buy-first",
+      "how": "Extend the existing retry; use a maintained crate for jitter only if needed."
+    },
+    {
+      "id": "root-cause",
+      "how": "One wrapper plus a guard test, not per-call patches."
+    },
+    {
+      "id": "mechanism",
+      "how": "The guard is an enforced test."
+    },
+    {
+      "id": "small",
+      "how": "One focused change, centred on gh.rs."
+    },
+    {
+      "id": "verified",
+      "how": "Behavior is checked by running cargo test."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "The audit found one GitHub call site: GhCli in crates/athena-core/src/gh.rs, the only Command::new(\"gh\"). I grepped for reqwest, ureq and curl in crates/ and found no HTTP client. The only curl is in xtask (tool download, which already passes --retry 3).",
+    "Other external processes (git, the claude agent binary) are not 'external services' for this task. The claude binary's busy-retry in athena-agent stays as it is.",
+    "The guard is a test (a source scan) rather than a clippy lint, because disallowed-methods cannot ban Command::new(\"gh\") by argument. No clippy config changes.",
+    "Jitter is deterministic-injectable (a sleeper or jitter seam) so tests do not really sleep. No new crate is added if a small hash- or time-based jitter suffices; otherwise add the rand crate, per buy-first.",
+    "Retry logging goes to stderr via the existing output path. Each line names the command (the REST path or operation) and the status.",
+    "Non-HTTP transient failures (timeouts, connection resets) are detected from gh's stderr text, since gh gives no status for them."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Retry lives in one place in crates/athena-core/src/gh.rs, built on the existing Retry and is_transient code with no second retry loop. It makes at most 3 attempts with exponential backoff plus jitter.",
+      "kind": "content"
+    },
+    {
+      "text": "Transient means HTTP 5xx, timeouts and connection resets. 4xx and auth errors (401/403, 'not logged in') fail on the first attempt with no retry.",
+      "kind": "content"
+    },
+    {
+      "text": "Each retry writes a log line containing the command name, the status or failure kind, and the attempt number.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo test`. A source-scan test passes on the tree and fails when a fixture file outside the wrapper contains Command::new(\"gh\") or an HTTP client call.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`. For `land --pr` and each other GitHub-calling command (default branch, PR create/read, merged-commit and similar), a test that injects one 500 sees a retry followed by success. A test that injects persistent 500s sees a failure after 3 attempts with an error naming the command and status.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`. Unit tests show a 404 and an auth failure are not retried, and that timeouts and connection resets are retried.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`cargo clippy` reports no warnings and `cargo fmt --check` passes.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-cli/tests/external_calls.rs",
+      "action": "create",
+      "p": 0.45
+    },
+    {
+      "path": "crates/athena-core/tests/external_calls_guard.rs",
+      "action": "create",
+      "p": 0.35
+    },
+    {
+      "path": "crates/athena-core/Cargo.toml",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "Cargo.lock",
+      "action": "modify",
+      "p": 0.15
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "p": 0.15
+    },
+    {
+      "path": "README.md",
+      "action": "modify",
+      "p": 0.1
+    }
+  ],
+  "out_of_scope": [
+    "Retry for git, the claude agent binary or xtask downloads.",
+    "Changing the landing logic or the HostError record schema.",
+    "Adding new GitHub-calling commands.",
+    "Changes to CI workflows, clippy config or other governance files."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.15,
+      "cost_usd": {
+        "p10": 0.4,
+        "p50": 0.95,
+        "p90": 2.0
+      },
+      "wall_time_s": {
+        "p10": 420.0,
+        "p50": 780.0,
+        "p90": 1200.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7807228915662651,
+      "p_verification_passes": 0.6818181818181818,
+      "p_user_intervenes": 0.13333333333333333,
+      "cost_usd": {
+        "p10": 0.36933058694043064,
+        "p50": 0.8050073838512415,
+        "p90": 1.8376818093493614
+      },
+      "wall_time_s": {
+        "p10": 449.78653706200015,
+        "p50": 741.2127160690001,
+        "p90": 998.1793896630002
+      }
+    }
+  },
+  "departures": "The change touches retry classification, jitter, logging, a source-scan guard and tests across several commands. That is larger than the typical job, so cost and time are somewhat above the reference, and pass probability is somewhat lower."
+}
