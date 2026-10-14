@@ -16,9 +16,10 @@
 //! [`Finding`] with its reason; the report does not pass, and nothing is retried or loosened. The backtest writes
 //! nothing: the introspection record is returned, not committed.
 
-use crate::decisions::{ConfirmedLinks, DecisionView, view};
+use crate::decisions::{ConfirmedLinks, DecisionView, mark_under_review, view};
 use anyhow::{Context, Result};
-use athena_data::records::{InterventionCategory, OutcomeState};
+use athena_core::watcher::{self, D87_SIGNAL, HostErrorSignal};
+use athena_data::records::{AnyRecord, HostError, InterventionCategory, OutcomeState};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -71,13 +72,15 @@ pub struct InterventionMatch {
     pub on_landed_job: bool,
 }
 
-/// A watched condition. A signal with no `exact` match cannot be decided from the records this backtest reads
-/// (host errors and history checks have no record yet, review finding F3), so it is listed and not run.
+/// A watched condition. It is run when it has an exact match: on an intervention (`exact`) or on a host-error
+/// record (`host_error`, the same signal the landing watcher evaluates). A signal with neither cannot be decided
+/// from the records this backtest reads (history checks have no record yet), so it is listed and not run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Signal {
     pub name: &'static str,
     pub threshold_jobs: usize,
     pub exact: Option<InterventionMatch>,
+    pub host_error: Option<HostErrorSignal>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -115,15 +118,21 @@ pub fn headers() -> Vec<DecisionHeader> {
                 "A user who merges by hand follows the recommendation.",
             ],
             signals: vec![
+                // The hard signal: the host refusing a merge falsifies the first assumption. Its values are
+                // the watcher's own, validated against the record vocabulary when they are loaded.
                 Signal {
-                    name: "host-error: operation merge, status 405 or 422, phase landing",
-                    threshold_jobs: 1,
+                    name: D87_SIGNAL.name,
+                    threshold_jobs: D87_SIGNAL.threshold_jobs,
                     exact: None,
+                    host_error: Some(
+                        watcher::load(&D87_SIGNAL).expect("D87's signal is in the vocabulary"),
+                    ),
                 },
                 Signal {
                     name: "check-failure: history violation after a pull request merge",
                     threshold_jobs: 1,
                     exact: None,
+                    host_error: None,
                 },
                 Signal {
                     name: "intervention: did-work-themselves on a landed branch, class docs",
@@ -133,6 +142,7 @@ pub fn headers() -> Vec<DecisionHeader> {
                         class_of_work: "docs",
                         on_landed_job: true,
                     }),
+                    host_error: None,
                 },
             ],
         },
@@ -154,6 +164,7 @@ pub fn headers() -> Vec<DecisionHeader> {
                 name: "check-failure: history violation after a squash",
                 threshold_jobs: 1,
                 exact: None,
+                host_error: None,
             }],
         },
     ]
@@ -342,6 +353,8 @@ pub struct Records {
     /// Jobs with an outcome whose state is `landed` (including the retried landing of a blocked job).
     pub landed: BTreeSet<String>,
     pub interventions: Vec<InterventionRow>,
+    /// Every `athena.host-error/1` record, oldest first.
+    pub host_errors: Vec<HostError>,
 }
 
 /// The children of a directory, sorted; a directory that does not exist has none.
@@ -401,6 +414,23 @@ pub fn read_records(root: &Path) -> Result<Records> {
     records
         .interventions
         .sort_by(|a, b| (&a.at, &a.id).cmp(&(&b.at, &b.id)));
+    for month in children(&root.join("records/host-errors"))? {
+        for file in children(&month)? {
+            if !is_json(&file) {
+                continue;
+            }
+            let bytes =
+                std::fs::read(&file).with_context(|| format!("reading {}", file.display()))?;
+            let path = file.display().to_string();
+            match AnyRecord::parse(&path, &bytes)? {
+                AnyRecord::HostError(error) => records.host_errors.push(error),
+                _ => anyhow::bail!("{path}: not an athena.host-error/1 record"),
+            }
+        }
+    }
+    records
+        .host_errors
+        .sort_by(|a, b| (a.at, &a.id).cmp(&(b.at, &b.id)));
     Ok(records)
 }
 
@@ -416,6 +446,8 @@ pub struct SignalRun {
     pub threshold_jobs: usize,
     /// The matching interventions, earliest first.
     pub events: Vec<InterventionRow>,
+    /// The `athena.host-error/1` records a host-error signal matched, oldest first.
+    pub host_error_records: Vec<String>,
     pub jobs: BTreeSet<String>,
     pub fired: bool,
 }
@@ -433,6 +465,24 @@ pub fn run_signals(headers: &[DecisionHeader], records: &Records) -> Vec<SignalR
     let mut runs = Vec::new();
     for header in headers {
         for signal in &header.signals {
+            if let Some(host_error) = &signal.host_error {
+                let matched: Vec<&HostError> = records
+                    .host_errors
+                    .iter()
+                    .filter(|e| host_error.matches(e))
+                    .collect();
+                let jobs: BTreeSet<String> = matched.iter().map(|e| e.job.to_string()).collect();
+                runs.push(SignalRun {
+                    decision: header.id.to_string(),
+                    signal: signal.name.to_string(),
+                    threshold_jobs: signal.threshold_jobs,
+                    fired: !jobs.is_empty() && jobs.len() >= signal.threshold_jobs,
+                    events: Vec::new(),
+                    host_error_records: matched.iter().map(|e| e.id.to_string()).collect(),
+                    jobs,
+                });
+                continue;
+            }
             let Some(exact) = &signal.exact else { continue };
             let events: Vec<InterventionRow> = records
                 .interventions
@@ -447,6 +497,7 @@ pub fn run_signals(headers: &[DecisionHeader], records: &Records) -> Vec<SignalR
                 threshold_jobs: signal.threshold_jobs,
                 fired: jobs.len() >= signal.threshold_jobs,
                 events,
+                host_error_records: Vec::new(),
                 jobs,
             });
         }
@@ -586,7 +637,15 @@ fn check_signals(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    match runs.iter().find(|r| r.decision == "D87") {
+    // D87 passes when any of its signals fired. A host-error signal cites its own records, which exist by
+    // construction; an intervention signal cites interventions and jobs that must exist in records/.
+    let d87: Vec<&SignalRun> = runs.iter().filter(|r| r.decision == "D87").collect();
+    match d87
+        .iter()
+        .find(|r| r.fired)
+        .or_else(|| d87.last())
+        .copied()
+    {
         Some(run) if run.fired => {
             let known: BTreeSet<&str> = records.interventions.iter().map(|i| i.id.as_str()).collect();
             for event in &run.events {
@@ -605,9 +664,9 @@ fn check_signals(
         Some(run) => findings.push(Finding {
             condition: "b",
             reason: format!(
-                "the signal found {} distinct job(s), fewer than the threshold of {}; the interventions were \
-                 not recorded with the fields the signal needs, so the design needs the host-error record \
-                 first (finding F3)",
+                "the signal found {} distinct job(s), fewer than the threshold of {}; no athena.host-error/1 \
+                 record of a refused merge (405 or 422) is in records/, and the interventions were not \
+                 recorded with the fields the signal needs (finding F3)",
                 run.jobs.len(),
                 run.threshold_jobs
             ),
@@ -659,11 +718,20 @@ pub fn run_on(decisions: &str, confirmed: &ConfirmedLinks, records: &Records) ->
     let runs = run_signals(&headers, records);
     let mut findings = Vec::new();
     check_parse(&parsed, confirmed, &mut findings);
-    let decision_view = view(&parsed, confirmed);
+    let mut decision_view = view(&parsed, confirmed);
     let under_review = check_signals(&runs, records, &mut findings);
+    for run in runs.iter().filter(|r| r.fired) {
+        let cited: Vec<String> = run
+            .host_error_records
+            .iter()
+            .cloned()
+            .chain(run.events.iter().map(|e| e.id.clone()))
+            .collect();
+        mark_under_review(&mut decision_view, &run.decision, &cited);
+    }
     let introspection = runs
         .iter()
-        .find(|r| r.decision == "D87" && r.fired)
+        .find(|r| r.decision == "D87" && r.fired && !r.events.is_empty())
         .and_then(introspection_for);
     if let Some(record) = &introspection {
         check_introspection(record, records, &mut findings);
@@ -718,6 +786,17 @@ pub fn render(report: &Report) -> String {
             run.jobs.len(),
             run.threshold_jobs,
             if run.fired { "fired" } else { "did not fire" }
+        ));
+    }
+    for view in report
+        .decision_view
+        .iter()
+        .filter(|v| v.under_review.is_some())
+    {
+        out.push_str(&format!(
+            "{} is under review: cited record(s) {}\n",
+            view.id,
+            view.under_review.as_deref().unwrap_or_default().join(", ")
         ));
     }
     if let Some(record) = &report.introspection {
