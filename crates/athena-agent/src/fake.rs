@@ -245,6 +245,8 @@ pub fn deterministic_turn(spec: &AgentInvocation) -> FakeTurn {
                 "summary": "A fake verdict made without a model call."
             }))
         }
+        // A nested run has nothing for the steward to report.
+        Role::Steward => FakeTurn::output(json!({ "items": [] })),
     }
 }
 
@@ -319,6 +321,11 @@ mod tests {
                 .len(),
             2
         );
+        let steward = driver
+            .invoke(&spec(Role::Steward, "", dir.path().into()), &mut NoSink)
+            .unwrap();
+        assert_eq!(steward.structured.unwrap()["items"], json!([]));
+        assert_eq!(steward.cost_usd, Some(0.0), "no model call, no cost");
     }
 
     #[test]

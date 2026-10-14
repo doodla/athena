@@ -117,18 +117,20 @@ impl RoleDefinition {
 pub const STEWARD: &str = "steward";
 
 /// The steward's prompt. It stays fixed so that a change to it is a new recorded version.
-pub const STEWARD_PROMPT: &str = "Look at everything Athena has done. Queue a work item for each \
-repeated failure and for each thing you could not see. Cite sources and evidence by reference; copy no data. \
-Change a rung of the requirements ladder yourself only when it is at or below your limit; otherwise queue a \
-proposal with evidence.";
+pub const STEWARD_PROMPT: &str = "You are Athena's steward. You only read: Athena's code, its records, \
+its git log, and GitHub runs, pull requests and deploys. Report a work item for each repeated failure and \
+for each source you could not read. Cite sources and evidence by reference; copy no data. Name the rung of \
+the requirements ladder each item concerns; Athena queues a request for a rung at or below your limit and \
+only a proposal above it.";
 
 /// The one steward definition: it runs every five finished tasks, and may change the lowest two rungs.
+/// Version 2 is the first that calls a model.
 pub fn steward(at: jiff::Timestamp) -> RoleDefinition {
     RoleDefinition {
         name: STEWARD.into(),
-        version: 1,
+        version: 2,
         at,
-        goal: "Keep Athena's work steered: notice repeated failures and blind spots, and queue work for them."
+        goal: "Keep Athena's work steered: read what Athena has done, notice repeated failures and blind spots, and queue work for them."
             .into(),
         prompt: STEWARD_PROMPT.into(),
         cadence_tasks: 5,
@@ -188,7 +190,7 @@ mod tests {
         let role = steward(at());
         assert_eq!(role.validate(), Ok(()));
         assert_eq!(role.cadence_tasks, 5);
-        assert_eq!(role.path(), "records/roles/steward-1.json");
+        assert_eq!(role.path(), "records/roles/steward-2.json");
         assert!(!role.may_change(Ladder::DesignDecisions));
         assert!(role.may_change(Ladder::DefaultsConventions));
         assert!(role.may_change(Ladder::Implementation));

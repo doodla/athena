@@ -192,6 +192,73 @@ pub struct FindingOutput {
     pub location: Option<String>,
 }
 
+/// The steward's report: the work items it found. Athena validates every one before it queues anything.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StewardOutput {
+    /// Empty when there is nothing to report.
+    pub items: Vec<StewardItemOutput>,
+}
+
+/// What a steward's work item is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum StewardKindOutput {
+    /// A source the steward could not read; `source` names it.
+    BlindSpot,
+    /// A failure that repeats; the evidence cites the jobs.
+    RepeatedFailure,
+    /// A change on a rung the steward may not change itself.
+    Proposal,
+}
+
+/// A rung of the requirements ladder, highest first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum RungOutput {
+    OwnerGoals,
+    BriefRequirements,
+    DesignDecisions,
+    DefaultsConventions,
+    Implementation,
+}
+
+/// What a reference points at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum RefKindOutput {
+    Job,
+    Path,
+    Commit,
+}
+
+/// A pointer to where data lives: a job id, a path in the workspace, or a commit id. Never the data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StewardRefOutput {
+    pub kind: RefKindOutput,
+    pub value: String,
+}
+
+/// One work item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StewardItemOutput {
+    pub kind: StewardKindOutput,
+    /// Stable for the same finding, so it is not queued twice. Ignored for a blind spot, whose key is made
+    /// from its source.
+    pub key: String,
+    /// One line.
+    pub title: String,
+    pub rung: RungOutput,
+    /// Where the finding came from. For a blind spot, the name of the source that could not be read.
+    pub source: StewardRefOutput,
+    /// Required unless the item is a blind spot.
+    pub evidence: Vec<StewardRefOutput>,
+    /// What to ask Athena to do, when the rung is at or below your limit.
+    pub request: Option<String>,
+}
+
 /// The closed lists that narrow the reader's schema.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ReaderChoices {
@@ -269,6 +336,11 @@ pub fn verdict_schema() -> Value {
     schema_of::<VerdictOutput>()
 }
 
+/// The steward's schema.
+pub fn steward_schema() -> Value {
+    schema_of::<StewardOutput>()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,5 +408,29 @@ mod tests {
                 .is_some()
         );
         assert!(producer_schema()["properties"]["checks_run"].is_object());
+    }
+
+    #[test]
+    fn the_steward_schema_requires_every_field_of_an_item() {
+        let schema = steward_schema();
+        assert_eq!(schema["required"], json!(["items"]));
+        let item = &schema["properties"]["items"]["items"];
+        assert_eq!(item["additionalProperties"], json!(false));
+        let required = item["required"].as_array().unwrap();
+        for field in [
+            "kind", "key", "title", "rung", "source", "evidence", "request",
+        ] {
+            assert!(required.contains(&json!(field)), "{field}");
+        }
+        assert!(schema.to_string().find("$ref").is_none());
+        let output: StewardOutput = serde_json::from_value(json!({ "items": [{
+            "kind": "repeated-failure", "key": "k", "title": "t", "rung": "defaults-conventions",
+            "source": { "kind": "path", "value": "records/jobs" },
+            "evidence": [{ "kind": "job", "value": "20261010-153012-k7q2" }],
+            "request": null
+        }] }))
+        .unwrap();
+        assert_eq!(output.items[0].kind, StewardKindOutput::RepeatedFailure);
+        assert_eq!(output.items[0].rung, RungOutput::DefaultsConventions);
     }
 }

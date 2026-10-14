@@ -6,7 +6,7 @@ use anyhow::{Result, anyhow, bail};
 use athena_data::records::{
     AnyRecord, Candidate, Correction, DecisionState, DecisionStateKind, DefaultExpectations,
     FailureClass, HostError, Intervention, IntrospectionRecord, Invocation, Job, Outcome,
-    OutcomeState, ProposalRecord, Reading, Request, Resolution, Restart, Score, Verification,
+    OutcomeState, ProposalRecord, Reading, Request, Resolution, Restart, Role, Score, Verification,
     fold_decision_states,
 };
 use athena_data::{JobId, RecordId};
@@ -193,6 +193,9 @@ pub struct Records {
     pub roles: Vec<athena_data::roles::RoleDefinition>,
     /// Every work item a role queued, in file order.
     pub work_items: Vec<athena_data::records::WorkItem>,
+    /// The steward's model invocations, oldest first. A steward run is no job, so its invocation is kept apart
+    /// from `jobs` and never shows as work to do.
+    pub steward_runs: Vec<Invocation>,
     /// Files that are not acceptable records, by path.
     pub invalid: Vec<String>,
 }
@@ -250,6 +253,9 @@ impl Records {
                 AnyRecord::ClassLabel(l) => records.class_labels.push(l),
                 AnyRecord::Role(r) => records.roles.push(*r),
                 AnyRecord::WorkItem(w) => records.work_items.push(*w),
+                AnyRecord::Invocation(i) if i.role == Role::Steward => {
+                    records.steward_runs.push(*i);
+                }
                 other => {
                     let job = job_of(&other)
                         .expect("every other record names its job")
@@ -263,6 +269,7 @@ impl Records {
         for job in records.jobs.values_mut() {
             job.sort();
         }
+        records.steward_runs.sort_by_key(|i| i.started_at);
         records.interventions.sort_by_key(|i| i.at);
         records.restarts.sort_by_key(|r| r.at);
         records

@@ -12,13 +12,14 @@ use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// The three agent roles.
+/// The agent roles: the three that work on a job, and the steward, which runs in the background beside them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
     Reader,
     Producer,
     Verifier,
+    Steward,
 }
 
 impl Role {
@@ -27,6 +28,7 @@ impl Role {
             Role::Reader => "reader",
             Role::Producer => "producer",
             Role::Verifier => "verifier",
+            Role::Steward => "steward",
         }
     }
     pub fn parse(text: &str) -> Option<Role> {
@@ -34,6 +36,7 @@ impl Role {
             "reader" => Some(Role::Reader),
             "producer" => Some(Role::Producer),
             "verifier" => Some(Role::Verifier),
+            "steward" => Some(Role::Steward),
             _ => None,
         }
     }
@@ -2362,7 +2365,7 @@ mod tests {
     fn roles_and_work_items_have_paths_schemas_and_round_trip() {
         let role = AnyRecord::Role(Box::new(crate::roles::steward(ts())));
         assert_eq!(role.schema(), "athena.role/1");
-        assert_eq!(role.canonical_path(), "records/roles/steward-1.json");
+        assert_eq!(role.canonical_path(), "records/roles/steward-2.json");
         let json = role.to_json();
         assert!(json.contains("\"highest_rung\": \"defaults-conventions\""));
         assert_eq!(

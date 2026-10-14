@@ -11,9 +11,12 @@
 //! - cargo's `--ignored` and `--include-ignored` are denied to every role, so no agent starts the live
 //!   tests, which make real model calls;
 //! - git's `-c`, `-C`, `--git-dir`, `--work-tree`, `--exec-path`, and similar overrides are denied;
+//! - `gh` (the steward's) reads GitHub only: `gh run list|view`, `gh pr list|view|status|checks|diff`,
+//!   `gh workflow list|view`, and `gh api` with GET. Its flags are an allow-list; any word starting `-f` or
+//!   `-F`, `--field`, `--raw-field`, `--input`, and a method other than GET are denied by name;
 //! - every path argument, after resolving `..` and symlinks, must lie inside the snapshot, and outside its
 //!   `.git`; output redirection is confined the same way;
-//! - roles without write access (reader, verifier) may not write at all.
+//! - roles without write access (reader, verifier, steward) may not write at all.
 //!
 //! The file tools are confined the same way. A denial wins even where a permission rule would allow the
 //! call (E4), and it says why and what to do instead.
@@ -542,6 +545,7 @@ fn check_segment(
     match program {
         "cargo" => check_cargo(policy, root, cwd, allowed, args),
         "git" => check_git(allowed, args),
+        "gh" => check_gh(allowed, args),
         _ => {
             let first = args
                 .iter()
@@ -677,6 +681,186 @@ fn check_git(allowed: &[String], args: &[(&str, bool)]) -> Result<(), String> {
                 "git {sub} {name} is not allowed (it reads or writes outside the repository)"
             ));
         }
+    }
+    Ok(())
+}
+
+/// Whether a `gh` flag takes a value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GhFlag {
+    Switch,
+    Value,
+}
+
+/// A `gh` flag and whether it takes a value.
+type GhFlagSpec = (&'static str, GhFlag);
+
+/// The flags `gh run`, `gh pr`, and `gh workflow` reads may carry. Anything else is denied.
+const GH_READ_FLAGS: [GhFlagSpec; 31] = [
+    ("--json", GhFlag::Value),
+    ("--jq", GhFlag::Value),
+    ("-q", GhFlag::Value),
+    ("--limit", GhFlag::Value),
+    ("-L", GhFlag::Value),
+    ("--status", GhFlag::Value),
+    ("-s", GhFlag::Value),
+    ("--branch", GhFlag::Value),
+    ("-b", GhFlag::Value),
+    ("--workflow", GhFlag::Value),
+    ("-w", GhFlag::Value),
+    ("--event", GhFlag::Value),
+    ("-e", GhFlag::Value),
+    ("--state", GhFlag::Value),
+    ("--author", GhFlag::Value),
+    ("-A", GhFlag::Value),
+    ("--label", GhFlag::Value),
+    ("--base", GhFlag::Value),
+    ("--head", GhFlag::Value),
+    ("--search", GhFlag::Value),
+    ("-S", GhFlag::Value),
+    ("--repo", GhFlag::Value),
+    ("-R", GhFlag::Value),
+    ("--job", GhFlag::Value),
+    ("--created", GhFlag::Value),
+    ("--comments", GhFlag::Switch),
+    ("--log", GhFlag::Switch),
+    ("--log-failed", GhFlag::Switch),
+    ("--verbose", GhFlag::Switch),
+    ("--exit-status", GhFlag::Switch),
+    ("--all", GhFlag::Switch),
+];
+
+/// The flags `gh api` may carry (a read). Fields, headers, and bodies are not among them.
+const GH_API_FLAGS: [(&str, GhFlag); 9] = [
+    ("--jq", GhFlag::Value),
+    ("-q", GhFlag::Value),
+    ("--cache", GhFlag::Value),
+    ("--paginate", GhFlag::Switch),
+    ("--slurp", GhFlag::Switch),
+    ("--include", GhFlag::Switch),
+    ("-i", GhFlag::Switch),
+    ("--silent", GhFlag::Switch),
+    ("--verbose", GhFlag::Switch),
+];
+
+/// The read actions of each `gh` command the steward may use.
+const GH_READ_ACTIONS: [(&str, &[&str]); 3] = [
+    ("run", &["list", "view"]),
+    ("pr", &["list", "view", "status", "checks", "diff"]),
+    ("workflow", &["list", "view"]),
+];
+
+/// Splits `--name=value` into the name and the attached value.
+fn split_flag(arg: &str) -> (&str, Option<&str>) {
+    match arg.split_once('=') {
+        Some((name, value)) if name.starts_with("--") => (name, Some(value)),
+        _ => (arg, None),
+    }
+}
+
+/// `gh` is for reading GitHub: runs, pull requests, workflows, and `gh api` with GET. The flags are an
+/// allow-list, so a form nobody thought of (`-ftitle=x`, `-Fbody=@file`, `-XPOST`) is denied by default, and
+/// the field, method, and input flags are named in the denial so the agent knows why.
+fn check_gh(allowed: &[String], args: &[(&str, bool)]) -> Result<(), String> {
+    for (arg, _) in args {
+        let name = split_flag(arg).0;
+        if arg.starts_with("-f")
+            || arg.starts_with("-F")
+            || matches!(name, "--field" | "--raw-field" | "--input")
+        {
+            return Err(format!(
+                "gh {arg}: fields and request bodies make a write; gh is read-only here (runs, pull requests, workflows, and `gh api` with GET)"
+            ));
+        }
+    }
+    let Some(&(cmd, _)) = args.first() else {
+        return Err("gh without a command".into());
+    };
+    if cmd.starts_with('-') {
+        return Err(format!(
+            "gh {cmd}: options before the command are not allowed"
+        ));
+    }
+    if !allowed.iter().any(|a| a == cmd) {
+        return Err(format!(
+            "gh {cmd} is not allowed here; allowed: gh {}",
+            allowed.join(", ")
+        ));
+    }
+    let (flags, rest): (&[GhFlagSpec], &[(&str, bool)]) = if cmd == "api" {
+        (&GH_API_FLAGS, &args[1..])
+    } else {
+        let Some((_, actions)) = GH_READ_ACTIONS.iter().find(|(c, _)| *c == cmd) else {
+            return Err(format!("gh {cmd} is not a read Athena allows"));
+        };
+        let action = args.get(1).map(|(a, _)| *a).unwrap_or("");
+        if !actions.contains(&action) {
+            return Err(format!(
+                "gh {cmd} {action}: only gh {cmd} {} are allowed; Athena owns writes to GitHub",
+                actions.join(", ")
+            ));
+        }
+        (&GH_READ_FLAGS, &args[2..])
+    };
+    let mut positionals = 0;
+    let mut i = 0;
+    while i < rest.len() {
+        let arg = rest[i].0;
+        i += 1;
+        if !arg.starts_with('-') {
+            positionals += 1;
+            if cmd == "api" && (positionals > 1 || arg.eq_ignore_ascii_case("graphql")) {
+                return Err(
+                    "gh api takes one REST endpoint; graphql can write, so it is not allowed"
+                        .into(),
+                );
+            }
+            continue;
+        }
+        let (name, inline) = split_flag(arg);
+        // A method is allowed only when it is GET.
+        if cmd == "api" && (name == "--method" || arg.starts_with("-X")) {
+            let attached = if name == "--method" {
+                inline.map(str::to_string)
+            } else {
+                Some(arg[2..].to_string()).filter(|v| !v.is_empty())
+            };
+            let value = match attached {
+                Some(value) => value,
+                None => {
+                    i += 1;
+                    rest.get(i - 1)
+                        .map(|(v, _)| v.to_string())
+                        .unwrap_or_default()
+                }
+            };
+            if !value.eq_ignore_ascii_case("GET") {
+                return Err(format!(
+                    "gh api {arg} {value}: only GET is allowed; Athena owns writes to GitHub"
+                ));
+            }
+            continue;
+        }
+        match flags.iter().find(|(f, _)| *f == name) {
+            Some((_, GhFlag::Value)) if inline.is_none() => {
+                if i >= rest.len() {
+                    return Err(format!("gh {cmd}: {name} needs a value"));
+                }
+                i += 1;
+            }
+            Some((_, GhFlag::Switch)) if inline.is_some() => {
+                return Err(format!("gh {cmd}: {name} takes no value"));
+            }
+            Some(_) => {}
+            None => {
+                return Err(format!(
+                    "gh {cmd} {arg}: this flag is not on the read list; the steward may only read"
+                ));
+            }
+        }
+    }
+    if cmd == "api" && positionals != 1 {
+        return Err("gh api needs one endpoint".into());
     }
     Ok(())
 }
@@ -975,6 +1159,141 @@ mod tests {
         ));
         assert!(matches!(
             evaluate(&p, "Agent", &json!({}), None),
+            Decision::Deny(_)
+        ));
+    }
+
+    fn steward_policy(root: &Path) -> Policy {
+        Policy {
+            role: Role::Steward,
+            root: root.to_path_buf(),
+            commands: BTreeMap::from([
+                (
+                    "git".to_string(),
+                    vec!["status".into(), "diff".into(), "log".into(), "show".into()],
+                ),
+                (
+                    "gh".to_string(),
+                    vec!["run".into(), "pr".into(), "api".into(), "workflow".into()],
+                ),
+                ("ls".to_string(), vec!["*".into()]),
+            ]),
+            writes: false,
+        }
+    }
+
+    #[test]
+    fn the_steward_may_read_github() {
+        let dir = snapshot();
+        let p = steward_policy(dir.path());
+        for command in [
+            "gh run list",
+            "gh run list --limit 20 --status failure --json databaseId,conclusion",
+            "gh run list -L 5 -b main --json conclusion --jq '.[0]'",
+            "gh run view 123 --log-failed",
+            "gh run view 123 --json jobs --repo owner/repo",
+            "gh pr list --state all --json number,title",
+            "gh pr view 7 --comments",
+            "gh pr checks 7",
+            "gh workflow list",
+            "gh api repos/owner/repo/deployments",
+            "gh api repos/owner/repo/actions/runs --paginate --jq '.workflow_runs[0]'",
+            "gh api -X GET repos/owner/repo/deployments",
+            "gh api --method GET repos/owner/repo/deployments",
+            "gh api --method=get repos/owner/repo/deployments",
+            "gh api -XGET repos/owner/repo/deployments",
+            "git log --oneline -20",
+            "git show HEAD",
+            "ls records",
+        ] {
+            assert_eq!(bash(&p, command), Decision::NoObjection, "{command}");
+        }
+    }
+
+    #[test]
+    fn the_steward_cannot_write_to_github_in_any_flag_form() {
+        let dir = snapshot();
+        let p = steward_policy(dir.path());
+        for command in [
+            // Fields, every spelling: separate, attached, and long.
+            "gh api repos/o/r/issues -f title=x",
+            "gh api repos/o/r/issues -ftitle=x",
+            "gh api repos/o/r/issues -F body=@file",
+            "gh api repos/o/r/issues -Fx=@f",
+            "gh api repos/o/r/issues --field title=x",
+            "gh api repos/o/r/issues --field=title=x",
+            "gh api repos/o/r/issues --raw-field title=x",
+            "gh api repos/o/r/issues --raw-field=title=x",
+            "gh api repos/o/r/issues --input body.json",
+            "gh api repos/o/r/issues --input=body.json",
+            "gh run list -ftitle=x",
+            "gh pr view 7 -Fx=@f",
+            // Methods other than GET, every spelling.
+            "gh api -X POST repos/o/r/issues",
+            "gh api -XPOST repos/o/r/issues",
+            "gh api -X DELETE repos/o/r/issues/1",
+            "gh api --method POST repos/o/r/issues",
+            "gh api --method=PATCH repos/o/r/issues/1",
+            "gh api repos/o/r/issues -X PUT",
+            "gh api -X",
+            // GraphQL and headers can write or override the method.
+            "gh api graphql",
+            "gh api repos/o/r -H 'X-HTTP-Method-Override: POST'",
+            "gh api repos/o/r/issues extra",
+            "gh api",
+            // Mutating gh commands, and flags nobody listed.
+            "gh pr create --title x --body y",
+            "gh pr merge 7",
+            "gh pr comment 7 --body hi",
+            "gh pr close 7",
+            "gh run rerun 123",
+            "gh run cancel 123",
+            "gh workflow run build.yml",
+            "gh workflow enable build.yml",
+            "gh issue create",
+            "gh repo delete",
+            "gh release create v1",
+            "gh auth login",
+            "gh pr view 7 --web",
+            "gh run list --template x",
+            "gh run list --limit",
+            "gh --repo o/r run list",
+            "gh",
+            // Mutating git commands.
+            "git push origin main",
+            "git commit -m x",
+            "git checkout -- .",
+            "git reset --hard",
+            "git fetch",
+            "git -c core.hooksPath=/tmp log",
+            // The steward never writes files.
+            "rm records/x",
+            "ls > out.txt",
+        ] {
+            assert!(
+                matches!(bash(&p, command), Decision::Deny(_)),
+                "{command} must be denied"
+            );
+        }
+        let edit = json!({ "file_path": dir.path().join("src/new.rs").to_str().unwrap() });
+        assert!(matches!(
+            evaluate(&p, "Write", &edit, None),
+            Decision::Deny(_)
+        ));
+    }
+
+    #[test]
+    fn gh_is_denied_to_a_role_that_does_not_list_it() {
+        let dir = snapshot();
+        let p = policy(Role::Verifier, dir.path());
+        assert!(matches!(bash(&p, "gh run list"), Decision::Deny(_)));
+        // A role that lists only some gh commands gets only those.
+        let mut limited = steward_policy(dir.path());
+        limited.commands.insert("gh".into(), vec!["run".into()]);
+        assert_eq!(bash(&limited, "gh run list"), Decision::NoObjection);
+        assert!(matches!(bash(&limited, "gh pr list"), Decision::Deny(_)));
+        assert!(matches!(
+            bash(&limited, "gh api repos/o/r"),
             Decision::Deny(_)
         ));
     }

@@ -186,6 +186,7 @@ fn athena(
                 t.commands_run = vec!["cargo test".into()];
                 t
             }
+            Role::Steward => FakeTurn::output(json!({ "items": [] })),
         };
         if spec.role != Role::Reader {
             let readonly = std::fs::metadata(mount.join(FAKE_TREE_FILE))
@@ -208,7 +209,7 @@ fn athena(
     Athena {
         git: Git::at(dir.path()),
         state,
-        driver: Box::new(driver),
+        driver: std::sync::Arc::new(driver),
         capabilities: vec![Box::new(PinningStudy)],
         build: Build {
             version: "0.1.0".into(),

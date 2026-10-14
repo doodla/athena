@@ -9,6 +9,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- The steward now calls a model (row A9-1 stays Partial). `steward::run` starts an agent with the stored
+  `STEWARD_PROMPT` as its system prompt, in a read-only workspace of the code, a copy of `records/`, and a
+  `GIT-LOG.txt` of the last 200 commit subjects, and records the invocation (role, usage, cost) as a
+  `steward` role record kept apart from jobs. The agent reports structured work items; Athena validates them
+  and routes every item through `decide()`: a rung at or below the limit queues a request, a higher one only
+  a proposal with its evidence. Each unreadable source, GitHub included, is a blind spot keyed on the
+  source's stable name, never on error text, so repeats are not queued twice; a key already in the records is
+  skipped. The old failure counting is now an input to the agent. The steward role is version 2. A run that
+  queues nothing makes no commit, and a nested run makes no model call. The tool policy gains an allow-list
+  for `gh` reads: `-f`/`-F` in any form (`-ftitle=x`), `--field`, `--raw-field`, `--input`, any method but
+  GET, graphql, and every unlisted flag are denied, with tests. `AgentDriver` is now `Send + Sync` and
+  `Athena.driver` an `Arc`, so the background thread can use it. Limits: the agent sees recent commit
+  subjects and a one-commit snapshot, not the full history; it borrows the verifier's model and budget; and
+  it has not been run against the real driver.
 - A job may not mark its own requirement rows Covered, and the verifier checks cited documents (D94, from job
   20261014-174815-7bf8). `judge()` now compares `docs/design/requirements-map.md` at the base with the
   candidate and adds a major, Athena-sourced finding for each row that moved to Covered or was added Covered,
