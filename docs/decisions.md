@@ -2129,3 +2129,25 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   budgets test).
 - **Reversal cost:** Low: remove the check in `judge()` and the two prompt lines.
 - **Provenance:** read: the request of this job and the map rows; measured: the budgets test.
+
+## D95 · The producer must run the full `cargo test --locked`, and a report without it is sent back once
+
+- **Case:** The producer prompt said the producer "may" run the checks. A docs, TOML or data-only candidate could
+  therefore reach verification with the full test suite never run, although policy and config tests read tracked
+  non-Rust files: boundary words, unlisted file kinds, `defaults.toml` and the study `model.json`.
+- **Decision:** (1) *Prose:* the producer frame requires the full `cargo test --locked` before finishing, for
+  every change, with the reason, and says `not-run` is not an acceptable finish. (2) *Code:*
+  `produce_and_verify` in `run.rs` inspects the producer's `checks_run`. Unless the entry with the command
+  `cargo test --locked` has the result `pass` or `fail`, the producer is re-invoked once in the same working
+  directory with a "Sent back" section appended to its brief. If the second report still lacks it, the job fails
+  with a reason naming the command, before admission, checks and the verifier. A capability that pins a repository
+  (the study) is exempt. The producer budget rises from 1,100 to 1,300 tokens, because the frame is shared and the
+  study producer set was at 1,097 of 1,100; measured now: change producer 1,033, study producer 1,249.
+- **Alternatives:** (a) Prose only (an unenforced request). (b) Make Athena's check runner always run tests (the
+  verifier path already does; the gap is the producer finishing without feedback). (c) Fail at once with no
+  send-back (wastes a producer run for a fixable omission). (d) More than one send-back (unbounded cost).
+- **Tradeoff:** The gate trusts the producer's own report: it proves the producer claimed a result, not that it
+  ran, and Athena's checks still run the suite afterwards. A producer that reports a different spelling of the
+  command is sent back. The study set has a longer frame than it needs, and a higher budget for all producers.
+- **Reversal cost:** Low: remove the gate, the prompt line and restore the budget.
+- **Provenance:** read: `run.rs`, the producer frame; measured: the budgets test and the lifecycle tests.

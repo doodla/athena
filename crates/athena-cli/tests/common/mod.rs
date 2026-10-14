@@ -229,6 +229,8 @@ pub struct Scenario {
     pub reading: Value,
     pub edits: Vec<(String, Option<String>)>,
     pub report: Value,
+    /// The report for every producer run after the first, when the producer is sent back.
+    pub report_when_sent_back: Option<Value>,
     pub producer_commands: Vec<String>,
     pub verdict: Value,
     pub verifier_commands: Vec<String>,
@@ -256,7 +258,11 @@ impl Default for Scenario {
                 "README.md".into(),
                 Some("# Demo\n\nHello, reader.\n".into()),
             )],
-            report: producer_report("Added a greeting line to README.md.", &["cargo test"]),
+            report: producer_report(
+                "Added a greeting line to README.md.",
+                &["cargo test --locked"],
+            ),
+            report_when_sent_back: None,
             producer_commands: vec!["cargo test".into()],
             verdict: passing_verdict(2),
             verifier_commands: vec!["cargo test".into()],
@@ -304,7 +310,18 @@ impl Scenario {
             let mut turn = match spec.role {
                 Role::Reader => FakeTurn::output(self.reading.clone()),
                 Role::Producer => {
-                    let mut t = FakeTurn::output(self.report.clone());
+                    let producer_runs = self
+                        .invocations
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|r| **r == Role::Producer)
+                        .count();
+                    let report = match (&self.report_when_sent_back, producer_runs) {
+                        (Some(second), n) if n > 1 => second.clone(),
+                        _ => self.report.clone(),
+                    };
+                    let mut t = FakeTurn::output(report);
                     t.edits = self.edits.clone();
                     t.commands_run = self.producer_commands.clone();
                     t

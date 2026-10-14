@@ -1,0 +1,169 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261014-222157-bk5x",
+  "n": 1,
+  "at": "2026-10-14T22:24:13.019694734Z",
+  "invocation_seq": 1,
+  "base_commit": "fc21554d670b2798e936eba03e4ac6ac7ef81cd0",
+  "config_sha256": "94fb1807d6308583910799522415a96161c06fe11f0ed2bb4de718efd447a604",
+  "defaults_sha256": "7ca3db44e78a075634195d4e9722ade9188c5268e963b636ac7b9c38d2bee2c6",
+  "defaults_version": 1,
+  "title": "Require producer to run full cargo test --locked; return not-run",
+  "summary": "Replace line 8 of the producer frame prompt with a must-run rule for `cargo test --locked` on every change, including docs, TOML and data-only ones. Add a gate in the job flow: if the producer's report shows that test run as `not-run`, re-invoke the producer once rather than passing the candidate to verification. Audience: the Athena maintainer, who judges whether docs-only candidates stop reaching verification with an unrun test suite.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "The new gate gets a test, and cargo test and clippy must stay clean."
+    },
+    {
+      "id": "root-cause",
+      "how": "The prompt rule and the gate that enforces it are both changed, so the rule is not left as an unenforced request."
+    },
+    {
+      "id": "mechanism",
+      "how": "The not-run rule is enforced in the job flow, not only stated in prose."
+    },
+    {
+      "id": "small",
+      "how": "One retry, no new config keys, and no changes to the check runner."
+    },
+    {
+      "id": "strangers",
+      "how": "The prompt text states the reason for the rule, so an outside reader understands why docs-only changes still need the full test run."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Today no code path re-invokes the producer: produce_and_verify in crates/athena-core/src/run.rs calls it once, and the candidate then goes straight to checks and verification. 'Sent back to the producer' therefore needs a small bounded retry in that function, which I assume the user wants.",
+    "The retry is limited to one extra producer invocation, to bound cost. If it is still not-run, the job fails with a clear reason and does not reach verification.",
+    "The gate keys on the producer's reported checks_run: an entry whose command is `cargo test --locked` with result not-run, or no such entry. Athena's own check runner is unchanged, though its skip_when_only patterns for docs and *.md remain; athena.toml line 79 already says the test check never skips.",
+    "The producer's Bash grant must allow `cargo test --locked`. athena.toml already lists cargo test as allowed, so no governance file changes. If the grant needs a change, that is a separate decision.",
+    "Only the shared producer frame (crates/athena-context/prompts/producer.md) changes. The capability-specific producer.md files are left alone."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "crates/athena-context/prompts/producer.md no longer says the producer 'may' run the checks. It requires the producer to run the full `cargo test --locked` before finishing, for every change including docs, TOML and data-only ones. It names the reason: policy and config tests read tracked non-Rust files (boundary words, unlisted file kinds, defaults.toml, study model.json).",
+      "kind": "content"
+    },
+    {
+      "text": "The prompt says a `not-run` full test result is not an acceptable finish, and that the producer must report the real result in checks_run.",
+      "kind": "content"
+    },
+    {
+      "text": "A candidate whose producer report lists the full `cargo test --locked` as `not-run` (or lists no such check) is not sent to the verifier. The producer is re-invoked with a message explaining why, and a bounded retry count applies. Run `cargo test` and check that the new test for this gate passes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A candidate whose report shows the full test run as pass or fail continues to verification as before. Run `cargo test` and check that the existing lifecycle and run tests still pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`cargo fmt --check` and `cargo clippy` are clean, and prompt budget tests (crates/athena-cli/tests/budgets.rs) still pass with the longer prompt.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Docs that describe the producer's checks (docs/design/athena-v0.md) match the new rule and the send-back behavior. The CHANGELOG records the change.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-context/prompts/producer.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "action": "modify",
+      "p": 0.35
+    },
+    {
+      "path": "crates/athena-context/src/outputs.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-agent/src/fake.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "p": 0.25
+    },
+    {
+      "path": "docs/design/athena-v0.md",
+      "action": "modify",
+      "p": 0.35
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.3
+    }
+  ],
+  "out_of_scope": [
+    "Changing Athena's own check runner or the skip_when_only patterns in athena.toml",
+    "Changing the verifier or reader prompts",
+    "Changing the study capability's producer prompt",
+    "Making the producer run clippy or fmt as a hard requirement"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.15,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.4,
+        "p90": 3.2
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 1200.0,
+        "p90": 2400.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7823529411764706,
+      "p_verification_passes": 0.7037037037037037,
+      "p_user_intervenes": 0.10864197530864199,
+      "cost_usd": {
+        "p10": 0.4152814707520613,
+        "p50": 0.8649010000000001,
+        "p90": 2.125332559751571
+      },
+      "wall_time_s": {
+        "p10": 497.6586092051614,
+        "p50": 794.6528637902167,
+        "p90": 1266.187705798376
+      }
+    }
+  },
+  "departures": "The request needs a prompt edit and a new retry path in produce_and_verify, which has no retry today. That makes the job larger than a typical prompt-only change, so I raised cost and time above the reference and lowered the pass probability."
+}

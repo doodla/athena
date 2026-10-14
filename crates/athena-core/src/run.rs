@@ -430,6 +430,19 @@ impl RunContext<'_> {
     }
 }
 
+/// The command whose real result every producer report must show.
+const FULL_TEST_COMMAND: &str = "cargo test --locked";
+
+/// How many times a report without that result goes back to the producer before the job fails.
+const PRODUCER_SEND_BACKS: u32 = 1;
+
+/// Whether the report lists the full test run with a real result, pass or fail.
+fn ran_full_tests(report: &ProducerReport) -> bool {
+    report.checks_run.iter().any(|c| {
+        c.command.trim() == FULL_TEST_COMMAND && (c.result == "pass" || c.result == "fail")
+    })
+}
+
 impl Athena {
     fn produce_and_verify(
         &self,
@@ -461,67 +474,96 @@ impl Athena {
         ]);
         let capability_env = ctx.capability.env(jc);
         let model = ctx.reading.producer_model.clone();
-        let spec = self.agent_spec(
-            jc,
-            &id,
-            seq,
-            Role::Producer,
-            &model,
-            &composed,
-            brief.to_string(),
-            &grant,
-            snapshot.dir(),
-            Side::Produce,
-            &capability_env,
-            jc.config.budget.producer_usd,
-            jc.config.budget.producer_timeout_s,
-            producer_schema(),
-        )?;
-        seq += 1;
-        let facts = InvocationFacts {
-            job: &id,
-            spec: &spec,
-            composed: &composed,
-            config: &jc.config,
-            fake: self.is_fake(),
-        };
-        let (output, record) = match self.invoke_and_record(&facts, ctx.redactor)? {
-            Ok(done) => done,
-            Err(error) => {
-                closing.happened =
-                    self.failure(ctx, &format!("the producer could not run: {error}"));
+        // A report without a real full test run is sent back to the producer, in the same working
+        // directory, up to `PRODUCER_SEND_BACKS` times; a pinned study is exempt, since it has no tests.
+        let enforce_tests = !ctx.capability.pins_repo();
+        let mut attempt_brief = brief.to_string();
+        let mut send_backs = 0;
+        let report = loop {
+            let spec = self.agent_spec(
+                jc,
+                &id,
+                seq,
+                Role::Producer,
+                &model,
+                &composed,
+                attempt_brief.clone(),
+                &grant,
+                snapshot.dir(),
+                Side::Produce,
+                &capability_env,
+                jc.config.budget.producer_usd,
+                jc.config.budget.producer_timeout_s,
+                producer_schema(),
+            )?;
+            seq += 1;
+            let facts = InvocationFacts {
+                job: &id,
+                spec: &spec,
+                composed: &composed,
+                config: &jc.config,
+                fake: self.is_fake(),
+            };
+            let (output, record) = match self.invoke_and_record(&facts, ctx.redactor)? {
+                Ok(done) => done,
+                Err(error) => {
+                    closing.happened =
+                        self.failure(ctx, &format!("the producer could not run: {error}"));
+                    return Ok(closing);
+                }
+            };
+            ctx.ui.line(&format!(
+                "producer   {model} · {:.0}s · {} · {} commands run",
+                output.wall_s,
+                cost_text(&record),
+                record.commands_run.len()
+            ));
+            closing.new_invocations.push(record.clone());
+            if output.outcome != InvocationOutcome::Success {
+                closing.happened = self.failure(
+                    ctx,
+                    &format!(
+                        "the producer did not complete: {}",
+                        record.detail.clone().unwrap_or_default()
+                    ),
+                );
                 return Ok(closing);
             }
-        };
-        ctx.ui.line(&format!(
-            "producer   {model} · {:.0}s · {} · {} commands run",
-            output.wall_s,
-            cost_text(&record),
-            record.commands_run.len()
-        ));
-        closing.new_invocations.push(record.clone());
-        if output.outcome != InvocationOutcome::Success {
-            closing.happened = self.failure(
-                ctx,
-                &format!(
-                    "the producer did not complete: {}",
-                    record.detail.clone().unwrap_or_default()
-                ),
+            let report = match output
+                .structured
+                .clone()
+                .map(serde_json::from_value::<ProducerOutput>)
+            {
+                Some(Ok(report)) => self.redact_report(report, ctx.redactor)?,
+                _ => {
+                    closing.happened = self.failure(ctx, "the producer returned no valid report");
+                    return Ok(closing);
+                }
+            };
+            if !enforce_tests || ran_full_tests(&report) {
+                break Some(report);
+            }
+            if send_backs >= PRODUCER_SEND_BACKS {
+                closing.happened = self.failure(
+                    ctx,
+                    &format!(
+                        "the producer did not run the full `{FULL_TEST_COMMAND}` even when sent back"
+                    ),
+                );
+                return Ok(closing);
+            }
+            send_backs += 1;
+            ctx.ui.line(&format!(
+                "producer   sent back: no real `{FULL_TEST_COMMAND}` result in its report"
+            ));
+            attempt_brief = format!(
+                "{brief}\n\n## Sent back\n\nYour previous report did not show a real result for the full \
+                 `{FULL_TEST_COMMAND}`: it was missing or `not-run`. Your edits are still in your working \
+                 directory. Run it now, even though this change touches only docs, TOML or data: policy and \
+                 config tests read tracked non-Rust files. Fix what fails, then report its real pass or fail \
+                 result in checks_run under the command `{FULL_TEST_COMMAND}`.\n"
             );
-            return Ok(closing);
-        }
-        let report = match output
-            .structured
-            .clone()
-            .map(serde_json::from_value::<ProducerOutput>)
-        {
-            Some(Ok(report)) => Some(self.redact_report(report, ctx.redactor)?),
-            _ => None,
         };
-        if report.is_none() {
-            closing.happened = self.failure(ctx, "the producer returned no valid report");
-            return Ok(closing);
-        }
 
         // The candidate: the snapshot's change list, applied to the base's full tree in the user's repository.
         let changes = snapshot.change_list()?;

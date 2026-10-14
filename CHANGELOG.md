@@ -9,6 +9,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- The producer must run the full `cargo test --locked` before it finishes, for every change including docs,
+  TOML and data-only ones (D95). Policy and config tests read tracked non-Rust files, so such a change can
+  fail them. The producer frame says so and no longer says the producer "may" run the checks. In code,
+  `produce_and_verify` sends a report whose `checks_run` lacks that command, or shows it `not-run`, back to the
+  producer once, with a "Sent back" section in its brief; a second miss fails the job before verification. A
+  pinned study is exempt. The producer token budget rises from 1,100 to 1,300 because the study and change
+  producers share the frame. The fake producer now reports a passing `cargo test --locked`, and the lifecycle
+  tests cover the send-back, the bound, a missing check, and a `fail` result going on to verification.
 - The steward now calls a model (row A9-1 stays Partial). `steward::run` starts an agent with the stored
   `STEWARD_PROMPT` as its system prompt, in a read-only workspace of the code, a copy of `records/`, and a
   `GIT-LOG.txt` of the last 200 commit subjects, and records the invocation (role, usage, cost) as a
