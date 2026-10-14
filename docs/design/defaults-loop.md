@@ -626,6 +626,30 @@ with a person-visible review.
    Not built: scoring the recorded answers, and the other Jev questions of §6.
 6. Build the labeled set and scoring (§10.2, §10.3) with the fake, then run in shadow; review; promote under
    §10.4.
+   **Built (step 6), the fake and the read-only command; not the live shadow run.** `athena score-jev [--cut
+   <time>] [--json]` runs `crates/athena-core/src/labeled.rs` over the working tree's `records/` and writes
+   nothing (a test asserts the module never opens a file for writing). A person's review is a new record,
+   `athena.class-label/1` (`crates/athena-data/src/records.rs`): the introspection it labels, the reviewed class
+   (a registry id, or none), who labeled it (`person`, or `stronger-model` with a person's spot-check), when, and
+   optionally whether the event repeats. The newest label per introspection counts. Nothing in this build writes
+   these records; the user, or a later command, adds them before Jev's answers are read (§10.2 label hygiene).
+   The labeled set is every introspection with a label and a usable stored Jev answer (`IntrospectionJev`); the
+   report counts the unreviewed, the reviewed ones with no Jev answer, and the reviewed ones whose Jev call
+   failed, each left out. Scoring covers §10.3 matching: the Brier score of Jev's failure-class probabilities
+   against the label (`none` is Jev's `new` option), the two references (always `none`, and a word-overlap
+   matcher over the stored event text and the registry's names and descriptions, whose threshold is set on the
+   calibration part), skill over the better reference, top-1 accuracy, the false-match rate on `none` labels, and
+   the Brier score of the is-repeat answer where a label says whether the event repeats. The split is by time:
+   `--cut`, or by default the earliest two thirds calibrate; only the test part is scored. The interval is the
+   §10.4 item 1 rule (given only when *n* > (1.96·sd/mean)², else "no bound was computed" with the per-record
+   table). The verdict covers items 1 to 3 (item 2 as the check that each reviewed group lands in one Jev class
+   with no class mixing groups, not yet the named R1 to R4 and §3.6 cases); items 4 to 7 print as not evaluated.
+   Below `MIN_TEST_CASES` (10 test cases, an **estimate**, not a power calculation) the report says "too few
+   labeled cases" and carries no score and no verdict. Tests use the fake Jev (through the real `ask_jev`) and
+   fixture records in a temporary directory. **Not built:** scoring set membership, signal match, cluster
+   assignment, confidence, prose faithfulness, and cost and latency (§10.3); the writer of label records; a live
+   shadow run (needs `ATHENA_JEV_SHADOW=1` and the real gateway, and the opt-in live check of step 5 first); and
+   promotion. **The run over the real `records/` follows landing**, as for step 1.
 
 ## 13. What is left open
 

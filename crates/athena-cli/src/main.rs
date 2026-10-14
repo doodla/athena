@@ -56,6 +56,17 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Read-only: build the labeled set from introspections a reviewer labeled, score Jev's recorded shadow
+    /// answers against it (Brier skill over two references, sample size, interval) and give the promotion
+    /// verdict of defaults-loop section 10.4. With too few labeled cases it says so and gives no verdict.
+    ScoreJev {
+        /// Cases recorded before this time (RFC 3339) calibrate and later ones test. Default: the earliest
+        /// two thirds by time calibrate.
+        #[arg(long)]
+        cut: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Accept an open defaults proposal: submit the ordinary job "apply defaults proposal <id>", which lists
     /// `defaults.toml` as a deliverable and is read and run like any request. Enter runs it.
     AcceptProposal {
@@ -415,6 +426,23 @@ fn run(cli: Cli) -> Result<u8> {
                         "reasons": r.reasons,
                     })).collect::<Vec<_>>(),
                 }))?;
+            }
+            Ok(0)
+        }
+        Command::ScoreJev { cut, json } => {
+            let cut = cut
+                .map(|text| {
+                    text.parse::<jiff::Timestamp>().map_err(|e| {
+                        anyhow::anyhow!("--cut {text:?} is not an RFC 3339 time such as 2026-10-01T00:00:00Z: {e}")
+                    })
+                })
+                .transpose()?;
+            let athena = open(false)?;
+            let report = athena.score_jev(cut)?;
+            if json {
+                print_json(&report)?;
+            } else {
+                print!("{}", display::jev_score(&report));
             }
             Ok(0)
         }

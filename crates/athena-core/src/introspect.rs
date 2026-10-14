@@ -286,7 +286,7 @@ fn is_json(path: &Path) -> bool {
 }
 
 /// The parsed records of the files in `records/<kind>/<month>/`, oldest path first.
-fn month_files(root: &Path, kind: &str) -> Result<Vec<(String, Vec<u8>)>> {
+pub(crate) fn month_files(root: &Path, kind: &str) -> Result<Vec<(String, Vec<u8>)>> {
     let mut files = Vec::new();
     for month in children(&root.join("records").join(kind))? {
         for file in children(&month)? {

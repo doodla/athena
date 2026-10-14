@@ -546,6 +546,120 @@ fn introspection(out: &mut String, i: &athena_core::status::IntrospectionView) {
     );
 }
 
+/// `athena score-jev`: the labeled set, what was left out, and either the score and the promotion verdict or
+/// the statement that there are too few labeled cases.
+pub fn jev_score(r: &athena_core::labeled::Report) -> String {
+    let mut out = String::new();
+    let e = &r.excluded;
+    let _ = writeln!(out, "Jev shadow answers against reviewed labels");
+    let _ = writeln!(
+        out,
+        "  introspections read      {}\n  labeled (scored set)     {}\n  left out: unreviewed     {}\n  left out: no Jev answer  {}\n  left out: Jev call failed {}",
+        e.introspections, e.labeled, e.unreviewed, e.no_jev_answer, e.jev_error
+    );
+    if e.labels_without_introspection > 0 {
+        let _ = writeln!(
+            out,
+            "  labels naming no recorded introspection  {}",
+            e.labels_without_introspection
+        );
+    }
+    let _ = writeln!(
+        out,
+        "  split by time            {} calibration, {} test (cut {})",
+        r.calibration,
+        r.test,
+        r.cut.map_or("none".to_string(), |c| c.to_string())
+    );
+    if let Some(message) = &r.insufficient {
+        let _ = writeln!(out, "\n{message}");
+        return out;
+    }
+    let (Some(s), Some(v)) = (&r.score, &r.verdict) else {
+        return out;
+    };
+    let _ = writeln!(out, "\nClass answers, test part (n = {})", s.n);
+    let _ = writeln!(
+        out,
+        "  Brier, Jev               {:.3}\n  Brier, always none       {:.3}\n  Brier, word overlap      {:.3} (threshold {:.1}, set on the calibration part)\n  better reference         {}\n  skill over it            {:.3}",
+        s.jev_brier,
+        s.always_none_brier,
+        s.overlap_brier,
+        s.overlap_threshold,
+        s.better_reference,
+        s.skill
+    );
+    match (&s.interval, &s.no_bound_note) {
+        (Some(i), _) => {
+            let _ = writeln!(
+                out,
+                "  95% interval on skill    {:.3} to {:.3}",
+                i.low, i.high
+            );
+        }
+        (None, Some(note)) => {
+            let _ = writeln!(out, "  {note}");
+        }
+        (None, None) => {}
+    }
+    let _ = writeln!(out, "  top-1 accuracy           {}", pct(s.top1_accuracy));
+    let _ = writeln!(
+        out,
+        "  false-match rate         {}",
+        s.false_match_rate.map_or(
+            "not defined (no `none` labels in the test part)".to_string(),
+            |x| format!("{} of {} `none` labels", pct(x), s.none_labels)
+        )
+    );
+    match &s.repeat {
+        Some(p) => {
+            let _ = writeln!(
+                out,
+                "  is-repeat answer         Brier {:.3} (always false {:.3}{}), skill over {} {:.3}, n = {}",
+                p.jev_brier,
+                p.always_false_brier,
+                p.base_rate_brier
+                    .map_or(String::new(), |b| format!(", base rate {b:.3}")),
+                p.better_reference,
+                p.skill,
+                p.n
+            );
+        }
+        None => {
+            let _ = writeln!(
+                out,
+                "  is-repeat answer         not scored (no test label says whether the event repeats)"
+            );
+        }
+    }
+    let _ = writeln!(out, "\nPromotion (section 10.4): {}", v.summary);
+    for item in &v.items {
+        let _ = writeln!(
+            out,
+            "  {}. {} - {}: {}",
+            item.item,
+            item.name,
+            item.status.as_str(),
+            item.detail
+        );
+    }
+    let _ = writeln!(out, "\nPer record (test part)");
+    for row in &s.per_record {
+        let _ = writeln!(
+            out,
+            "  {}  label {}  by {}  Jev says {}  Brier Jev {:.3}, none {:.3}, overlap {:.3}",
+            row.introspection,
+            row.label.as_deref().unwrap_or("none"),
+            row.labeled_by.as_str(),
+            row.jev_choice,
+            row.jev_brier,
+            row.always_none_brier,
+            row.overlap_brier
+        );
+    }
+    out
+}
+
 /// `athena status <job>`.
 pub fn trace(t: &JobTrace) -> String {
     let mut out = String::new();
