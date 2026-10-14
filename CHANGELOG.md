@@ -7,8 +7,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- A typed, read-only decision view (`crates/athena-cli/src/decisions.rs`) of every entry of `docs/decisions.md`
+  (id, status, `superseded_by`, `amended_by`), and `docs/decision-links.toml`, the committed list of the log's 24
+  supersession and amend hits with their confirmed status (D11 by D39 at line 322 is `amended`). Decision-sets
+  design §8 step 2 is marked built. No brief, default or decision text changes.
+
 ### Changed
 
+- `athena backtest` condition (a) compares the parsed hits with the confirmed list in both directions instead of
+  a hard-coded pair list, so it passes on the real log.
 - The non-Rust file check (M20) now aims at its intent, that all code is Rust: it flags code in another language
   by extension or `#!` line and allows data and documents anywhere, so a JSON test fixture no longer needs a
   ledger entry. A named allow-list holds `setup.sh` and the CI workflow with their reasons. `docs/non-rust-files.md`

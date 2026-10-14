@@ -1,7 +1,8 @@
 //! The D87/D88 backtest. Every records/ fixture is written into a temporary directory by the test that uses
 //! it and removed afterwards; no fixture file is committed.
 
-use athena_cli::backtest::{self, HitKind};
+use athena_cli::backtest::{self, HitKind, Status};
+use athena_cli::decisions::{self, ConfirmedLinks, LinkStatus};
 use serde_json::json;
 use std::path::Path;
 
@@ -57,8 +58,25 @@ fn intervention(root: &Path, id: &str, job: Option<&str>, category: &str, class:
     );
 }
 
+/// The confirmed list for `LOG`: every hit, with D87 amended and not superseded.
+const LINKS: &str = "\
+[[link]]\nline = 5\nolder = \"D46\"\nnewer = \"D79\"\nstatus = \"superseded\"\n\
+[[link]]\nline = 8\nolder = \"D46\"\nnewer = \"D79\"\nstatus = \"superseded\"\n\
+[[link]]\nline = 11\nolder = \"D62\"\nnewer = \"D80\"\nstatus = \"amended\"\n\
+[[link]]\nline = 11\nolder = \"D43\"\nnewer = \"D80\"\nstatus = \"amended\"\n\
+[[link]]\nline = 14\nolder = \"D87\"\nnewer = \"D88\"\nstatus = \"amended\"\n\
+[[link]]\nline = 17\nolder = \"D87\"\nnewer = \"D88\"\nstatus = \"amended\"\n";
+
+fn links() -> ConfirmedLinks {
+    ConfirmedLinks::parse(LINKS).unwrap()
+}
+
 fn run_in(root: &Path) -> backtest::Report {
-    backtest::run_on(LOG, &backtest::read_records(root).unwrap())
+    backtest::run_on(LOG, &links(), &backtest::read_records(root).unwrap())
+}
+
+fn real_root() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
 #[test]
@@ -94,23 +112,56 @@ fn the_parse_returns_the_four_known_hits_and_the_amends() {
 }
 
 #[test]
-fn the_real_log_yields_the_known_hits_and_no_phrase_without_a_target() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/decisions.md");
-    let parsed = backtest::parse_supersessions(&std::fs::read_to_string(path).unwrap());
-    for (older, newer) in [("D46", "D79"), ("D87", "D88")] {
-        let n = parsed
-            .hits
-            .iter()
-            .filter(|h| h.kind != HitKind::Amends && h.older == older && h.newer == newer)
-            .count();
-        assert_eq!(n, 2, "{older} by {newer}");
-    }
-    assert!(parsed.hits.iter().any(|h| h.kind == HitKind::Amends));
+fn the_real_log_has_no_condition_a_finding_against_the_confirmed_list() {
+    let root = real_root();
+    let text = std::fs::read_to_string(root.join("docs/decisions.md")).unwrap();
+    let confirmed = ConfirmedLinks::load(&root).unwrap();
+    let report = backtest::run_on(&text, &confirmed, &backtest::Records::default());
+    let a: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|f| f.condition == "a")
+        .collect();
+    assert!(a.is_empty(), "{a:?}");
     assert!(
-        parsed.lacking_target.is_empty(),
+        report.lacking_target.is_empty(),
         "{:?}",
-        parsed.lacking_target
+        report.lacking_target
     );
+    assert_eq!(report.hits.len(), confirmed.links.len());
+    assert_eq!(report.decision_view.len(), report.entries);
+}
+
+#[test]
+fn the_confirmed_list_has_the_known_hits_and_the_view_follows_it() {
+    let root = real_root();
+    let text = std::fs::read_to_string(root.join("docs/decisions.md")).unwrap();
+    let confirmed = ConfirmedLinks::load(&root).unwrap();
+    let has = |line, older, newer, status| {
+        confirmed
+            .links
+            .iter()
+            .any(|l| l.line == line && l.older == older && l.newer == newer && l.status == status)
+    };
+    assert!(has(322, "D11", "D39", LinkStatus::Amended));
+    assert!(has(1028, "D46", "D79", LinkStatus::Superseded));
+    assert!(has(1760, "D46", "D79", LinkStatus::Superseded));
+    assert!(has(1909, "D87", "D88", LinkStatus::Amended));
+    assert!(has(1930, "D87", "D88", LinkStatus::Amended));
+    assert!(confirmed.links.iter().any(|l| l.newer == "D48"));
+
+    let parsed = backtest::parse_supersessions(&text);
+    let views = decisions::view(&parsed, &confirmed);
+    let get = |id: &str| views.iter().find(|v| v.id == id).unwrap();
+    assert_eq!(get("D11").status, Status::Active);
+    assert_eq!(get("D11").superseded_by, None);
+    assert_eq!(get("D11").amended_by, ["D39"]);
+    assert_eq!(get("D46").status, Status::Superseded);
+    assert_eq!(get("D46").superseded_by.as_deref(), Some("D79"));
+    assert_eq!(get("D87").status, Status::Active);
+    assert_eq!(get("D87").amended_by, ["D88"]);
+    assert_eq!(views.first().unwrap().id, "D01");
+    assert!(views.iter().any(|v| v.id == "D90"));
 }
 
 #[test]
@@ -228,7 +279,7 @@ fn a_changed_log_is_a_finding_for_the_parse_condition() {
     let log = format!(
         "{LOG}\n## D89 · More\n- **Decision:** Supersedes D80.\n- **Superseded by** nothing\n"
     );
-    let report = backtest::run_on(&log, &backtest::read_records(dir.path()).unwrap());
+    let report = backtest::run_on(&log, &links(), &backtest::read_records(dir.path()).unwrap());
     let reasons: Vec<&str> = report
         .findings
         .iter()
@@ -238,7 +289,7 @@ fn a_changed_log_is_a_finding_for_the_parse_condition() {
     assert!(
         reasons
             .iter()
-            .any(|r| r.contains("unexpected supersession hit: D80 superseded by D89")),
+            .any(|r| r.contains("hit not in the confirmed list: D80 superseded by D89")),
         "{reasons:?}"
     );
     assert!(
