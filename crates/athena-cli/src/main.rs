@@ -67,6 +67,30 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Show one introspection (what happened, class, cause, prevention, Jev's shadow answer) and record your
+    /// verdict on its class in the same step, as a class-label record. The introspection is not edited.
+    /// Give exactly one of --right, --class and --new-class.
+    Review {
+        /// The introspection id (or a unique prefix or suffix of it).
+        id: String,
+        /// The class the introspection recorded is right.
+        #[arg(long)]
+        right: bool,
+        /// The right class is this other class in the registry.
+        #[arg(long, value_name = "CLASS_ID")]
+        class: Option<String>,
+        /// No registry class fits: add a class with this name (needs --description).
+        #[arg(long, value_name = "NAME")]
+        new_class: Option<String>,
+        /// One line saying what the new class is.
+        #[arg(long)]
+        description: Option<String>,
+        /// A one-line note kept with the verdict.
+        #[arg(long)]
+        note: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Accept an open defaults proposal: submit the ordinary job "apply defaults proposal <id>", which lists
     /// `defaults.toml` as a deliverable and is read and run like any request. Enter runs it.
     AcceptProposal {
@@ -443,6 +467,30 @@ fn run(cli: Cli) -> Result<u8> {
                 print_json(&report)?;
             } else {
                 print!("{}", display::jev_score(&report));
+            }
+            Ok(0)
+        }
+        Command::Review {
+            id,
+            right,
+            class,
+            new_class,
+            description,
+            note,
+            json,
+        } => {
+            let verdict = athena_core::review::Verdict::from_flags(
+                right,
+                class.as_deref(),
+                new_class.as_deref(),
+                description.as_deref(),
+            )?;
+            let athena = open(true)?;
+            let review = athena.review(&id, &verdict, note.as_deref())?;
+            if json {
+                print_json(&review)?;
+            } else {
+                print!("{}", display::review(&review));
             }
             Ok(0)
         }

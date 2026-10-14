@@ -24,6 +24,8 @@
 //!   check; `defaults.toml` is never written by Athena;
 //! - [`labeled`]: the labeled set of reviewed introspections and the scoring of Jev's recorded shadow answers
 //!   against it, read-only;
+//! - [`review`]: `athena review`, a person's verdict on an introspection's class, committed as a class-label
+//!   record (and a class record for a new class); the introspection is never edited;
 //! - [`watcher`]: decisions put under review by exact matching of host-error records, run at landing;
 //! - [`pin`]: a study's repository ref resolved to a commit by the core, and mounted read-only.
 
@@ -45,6 +47,7 @@ pub mod pin;
 pub mod pr;
 pub mod proposals;
 pub mod reading;
+pub mod review;
 pub mod run;
 #[cfg(test)]
 mod run_pin_tests;

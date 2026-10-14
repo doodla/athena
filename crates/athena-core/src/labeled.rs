@@ -153,10 +153,10 @@ pub struct LabeledSet {
     pub excluded: Exclusions,
 }
 
-/// Builds the labeled set. Where an introspection has several labels the newest by time, then id, counts.
-pub fn build(inputs: &Inputs) -> LabeledSet {
+/// The label that counts for each introspection id: where several exist, the newest by time, then id.
+pub fn newest_labels(labels: &[ClassLabel]) -> BTreeMap<String, &ClassLabel> {
     let mut newest: BTreeMap<String, &ClassLabel> = BTreeMap::new();
-    for label in &inputs.labels {
+    for label in labels {
         let key = label.introspection.to_string();
         let better = newest
             .get(&key)
@@ -165,6 +165,25 @@ pub fn build(inputs: &Inputs) -> LabeledSet {
             newest.insert(key, label);
         }
     }
+    newest
+}
+
+/// The introspections no class-label record names, in the order given. This is the one definition of
+/// "unreviewed": [`build`] counts it and `athena status` shows it.
+pub fn unreviewed<'a>(
+    introspections: &'a [IntrospectionRecord],
+    labels: &[ClassLabel],
+) -> Vec<&'a IntrospectionRecord> {
+    let newest = newest_labels(labels);
+    introspections
+        .iter()
+        .filter(|i| !newest.contains_key(&i.id.to_string()))
+        .collect()
+}
+
+/// Builds the labeled set. Where an introspection has several labels the newest by time, then id, counts.
+pub fn build(inputs: &Inputs) -> LabeledSet {
+    let newest = newest_labels(&inputs.labels);
     let known: BTreeSet<String> = inputs
         .introspections
         .iter()
@@ -174,9 +193,9 @@ pub fn build(inputs: &Inputs) -> LabeledSet {
     set.excluded.introspections = inputs.introspections.len();
     set.excluded.labels_without_introspection =
         newest.keys().filter(|k| !known.contains(*k)).count();
+    set.excluded.unreviewed = unreviewed(&inputs.introspections, &inputs.labels).len();
     for i in &inputs.introspections {
         let Some(label) = newest.get(&i.id.to_string()) else {
-            set.excluded.unreviewed += 1;
             continue;
         };
         let Some(jev) = &i.jev else {
@@ -912,6 +931,7 @@ mod tests {
             class: class.map(|c| RecordId::parse(c).unwrap()),
             labeled_by: by,
             is_repeat: repeat,
+            note: None,
         }
     }
 
@@ -1136,6 +1156,21 @@ mod tests {
         };
         assert_eq!(row.label.as_deref(), Some(A));
         assert_eq!(row.labeled_by, Labeler::Person);
+    }
+
+    #[test]
+    fn unreviewed_lists_introspections_with_no_label_and_agrees_with_build() {
+        let mut inputs = registry();
+        case(&mut inputs, 1, Some(A), A);
+        inputs
+            .introspections
+            .push(introspection(2, "x", Some(jev_says(A, 0.9, 0.1))));
+        let open = unreviewed(&inputs.introspections, &inputs.labels);
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].id, rid(2, 1));
+        assert_eq!(build(&inputs).excluded.unreviewed, 1);
+        inputs.labels.push(label(2, None, Labeler::Person, None));
+        assert!(unreviewed(&inputs.introspections, &inputs.labels).is_empty());
     }
 
     #[test]
