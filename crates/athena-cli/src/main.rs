@@ -50,6 +50,39 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Write a pending defaults proposal for every failure class whose introspections span enough distinct
+    /// jobs. Proposals are records; `defaults.toml` is not edited. `athena status` lists them.
+    Propose {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Accept an open defaults proposal: submit the ordinary job "apply defaults proposal <id>", which lists
+    /// `defaults.toml` as a deliverable and is read and run like any request. Enter runs it.
+    AcceptProposal {
+        id: String,
+        /// Run without waiting at the prompt (the reading is printed, but its acceptance stays unresolved).
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Reject an open defaults proposal, with your reason. Its class is not proposed again until enough
+    /// new introspections arrive.
+    RejectProposal {
+        id: String,
+        #[arg(long)]
+        why: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Check a candidate `defaults.toml` against an open or accepted proposal and `defaults.toml` at HEAD:
+    /// id, statement, version (base plus one) and parse. Exit 2 on a problem.
+    CheckProposal {
+        id: String,
+        /// The candidate file to check.
+        #[arg(long)]
+        candidate: PathBuf,
+    },
     /// Correct the latest reading in one line (or answer its question), and read again.
     Correct {
         job: String,
@@ -370,6 +403,50 @@ fn run(cli: Cli) -> Result<u8> {
                 );
             }
             show_proposal(&athena, proposal, yes, json)
+        }
+        Command::Propose { json } => {
+            let athena = open(true)?;
+            let generated = athena.propose(&Terminal)?;
+            if json {
+                print_json(&serde_json::json!({
+                    "proposals": generated.proposals,
+                    "refused": generated.refusals.iter().map(|r| serde_json::json!({
+                        "failure_class": r.failure_class,
+                        "reasons": r.reasons,
+                    })).collect::<Vec<_>>(),
+                }))?;
+            }
+            Ok(0)
+        }
+        Command::AcceptProposal { id, yes, json } => {
+            let athena = open(true)?;
+            let proposal = athena.accept_proposal(&id, &Terminal)?;
+            show_proposal(&athena, proposal, yes, json)
+        }
+        Command::RejectProposal { id, why, json } => {
+            let athena = open(true)?;
+            let rejected = athena.reject_proposal(&id, &why)?;
+            if json {
+                print_json(&rejected)?;
+            } else {
+                println!(
+                    "rejected {}; it is not proposed again until new cases arrive",
+                    rejected.id
+                );
+            }
+            Ok(0)
+        }
+        Command::CheckProposal { id, candidate } => {
+            let athena = open(false)?;
+            let text = std::fs::read_to_string(&candidate)?;
+            let problems = athena.check_proposal(&id, &text)?;
+            for problem in &problems {
+                println!("  - {problem}");
+            }
+            if problems.is_empty() {
+                println!("{} applies proposal {id}", candidate.display());
+            }
+            Ok(if problems.is_empty() { 0 } else { 2 })
         }
         Command::Correct { job, line, json } => {
             let athena = open(true)?;

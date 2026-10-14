@@ -9,6 +9,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Defaults proposals, step 3 of the build order in `docs/design/defaults-loop.md` section 12. A new record,
+  `athena.defaults-proposal/1`, holds a proposed default: id, `kind` (`add` or `amend`), statement, `applies_to`,
+  the version bump (`from`, and `to` = `from + 1`), the introspections it cites with their jobs, a `status`
+  (`pending`, `accepted` with the job, `rejected` with a reason, or `withdrawn`) and the hash of the candidate
+  `defaults.toml`. A status change is a new record. `athena propose` groups the recorded introspections by failure
+  class and writes a pending proposal when a class spans at least 3 distinct jobs (`REPEAT_THRESHOLD`, a constant
+  in code; repeats within one job count once). Code drafts the statement from the class and its cases' cause text;
+  no language model and no Jev is used, so assumptions, signals and probabilities are not recorded. Each proposal
+  is checked before it is written: the candidate `defaults.toml` is built in memory and must parse with
+  `DefaultsModel::parse`, the id is unique among the model and the pending proposals, the version is the base plus
+  one, and every cited record is later than the decision's start (the evidence-after-decision rule). `athena
+  status` and `--json` list open proposals with id, kind, statement, version bump and source records, and omit
+  rejected and accepted ones. `athena accept-proposal <id>` submits the ordinary job "apply defaults proposal
+  <id>", which lists `defaults.toml` as a deliverable and is read and verified like any request; Athena never
+  writes `defaults.toml`, and a test asserts the module's code has no write call. `athena check-proposal <id>
+  --candidate <file>` is the apply check: id and statement equal the proposal, the version is the base plus one,
+  no other entry changed, and the file parses. `athena reject-proposal <id> --why "..."` records the reason and
+  suppresses the class until 3 more distinct jobs have cases newer than the rejection.
 - `athena retry <job>` (`docs/design/defaults-loop.md` section 3.5, build order step 2). It retries a rejected or
   failed job from that job's introspection record: the reader's brief gains a "Why it happened" section with the
   cause, the prevention and the proposed next request, and lists the earlier cases of the same class (id, job,

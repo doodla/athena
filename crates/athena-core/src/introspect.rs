@@ -35,7 +35,7 @@ use athena_agent::{AgentInvocation, NoSink};
 use athena_data::records::{
     AnyRecord, ClassStatus, FailureClass, HostError, INTROSPECTION_PROSE_FIELDS,
     INTROSPECTION_SCHEMA, InterventionCategory, IntrospectionEvidence, IntrospectionRecord,
-    IntrospectionStatus, IntrospectionTrigger, OutcomeState, PreventionKind, Role,
+    IntrospectionStatus, IntrospectionTrigger, OutcomeState, PreventionKind, ProposalRecord, Role,
 };
 use athena_data::{JobId, RecordId};
 use jiff::Timestamp;
@@ -252,6 +252,10 @@ pub struct Records {
     pub cases: Vec<CaseRow>,
     /// The class registry, oldest first.
     pub classes: Vec<ClassRow>,
+    /// For each case (by introspection id), the intervention its event recorded, if it has one.
+    pub case_interventions: BTreeMap<String, String>,
+    /// Every `athena.defaults-proposal/1` record, oldest first (`crate::proposals`).
+    pub proposals: Vec<ProposalRecord>,
 }
 
 /// The children of a directory, sorted; a directory that does not exist has none.
@@ -373,6 +377,11 @@ pub fn read_records(root: &Path) -> Result<Records> {
                     i.what_happened.as_deref(),
                     i.cause.as_deref(),
                 ) {
+                    if let Some(intervention) = &i.intervention {
+                        records
+                            .case_interventions
+                            .insert(i.id.to_string(), intervention.to_string());
+                    }
                     records.cases.push(CaseRow {
                         id: i.id.to_string(),
                         job: i.job.as_ref().map(ToString::to_string),
@@ -402,6 +411,15 @@ pub fn read_records(root: &Path) -> Result<Records> {
         }
     }
     records.classes.sort_by(|a, b| a.id.cmp(&b.id));
+    for (path, bytes) in month_files(root, "defaults-proposals")? {
+        match AnyRecord::parse(&path, &bytes)? {
+            AnyRecord::DefaultsProposal(p) => records.proposals.push(*p),
+            _ => anyhow::bail!("{path}: not an athena.defaults-proposal/1 record"),
+        }
+    }
+    records
+        .proposals
+        .sort_by(|a, b| (a.at, &a.record).cmp(&(b.at, &b.record)));
     Ok(records)
 }
 

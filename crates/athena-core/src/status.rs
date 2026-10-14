@@ -65,8 +65,56 @@ pub struct StatusView {
     pub restarts: usize,
     pub forecasts: Vec<ClassHeadline>,
     pub pending: Vec<Pending>,
+    /// Open defaults proposals (`athena.defaults-proposal/1`): pending ones only.
+    pub proposals: Vec<ProposalView>,
     pub invalid_records: Vec<String>,
     pub next: Vec<String>,
+}
+
+/// An open defaults proposal as `athena status` lists it (`defaults-loop.md` section 9).
+#[derive(Debug, Clone, Serialize)]
+pub struct ProposalView {
+    pub id: String,
+    pub kind: String,
+    pub statement: String,
+    pub applies_to: Vec<String>,
+    pub version_from: u32,
+    pub version_to: u32,
+    /// The failure class's name and id.
+    pub failure_class: String,
+    /// The proposal record that holds it.
+    pub record: String,
+    /// The introspections it cites, each with its job.
+    pub sources: Vec<String>,
+}
+
+fn proposal_views(records: &Records) -> Vec<ProposalView> {
+    crate::proposals::open(&records.proposals)
+        .into_iter()
+        .map(|p| ProposalView {
+            id: p.id.clone(),
+            kind: p.kind.as_str().into(),
+            statement: p.statement.clone(),
+            applies_to: p.applies_to.clone(),
+            version_from: p.version.from,
+            version_to: p.version.to,
+            failure_class: format!(
+                "{} ({})",
+                records
+                    .classes
+                    .iter()
+                    .find(|c| c.id == p.failure_class)
+                    .map_or("unknown class", |c| c.name.as_str()),
+                p.failure_class
+            ),
+            record: p.record.to_string(),
+            sources: p
+                .sources
+                .iter()
+                .map(|s| format!("introspection {} (job {})", s.introspection, s.job))
+                .collect(),
+        })
+        .collect()
 }
 
 /// One invocation in a job's trace.
@@ -370,6 +418,11 @@ impl Athena {
         for p in pending.iter().filter(|p| p.resolved_by.is_none()) {
             next.push(format!("resolve {}#{}: add an athena.resolution/1 record (docs/records.md, \"Resolving a pending quantity\")", p.record, p.field));
         }
+        let proposals = proposal_views(&records);
+        for p in &proposals {
+            let id = &p.id;
+            next.push(format!("athena accept-proposal {id}   # runs a job that edits defaults.toml · or: athena reject-proposal {id} --why \"...\""));
+        }
         if records.request_jobs().is_empty() {
             next.push("athena ask \"<a one- or two-line request>\"".into());
         }
@@ -390,6 +443,7 @@ impl Athena {
             restarts: records.restarts.len(),
             forecasts,
             pending,
+            proposals,
             invalid_records: records.invalid.clone(),
             next,
         })
