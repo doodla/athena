@@ -204,7 +204,7 @@ mod tests {
             role: Role::Producer,
             driver: DriverInfo {
                 name: "claude-code".into(),
-                version: "2.1.296".into(),
+                version: "2.1.299".into(),
             },
             athena: Build {
                 version: "0.1.0".into(),

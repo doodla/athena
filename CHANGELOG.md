@@ -32,6 +32,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- The pinned Claude Code version is 2.1.299, up from 2.1.296. The pin is `claude_version` in `athena.toml`;
+  the README, the design's setup and pin table, and D03 name the new pin. Root cause: the version was written
+  into several current-state docs and a fixture, so each had to change with the pin. Historical review records
+  keep 2.1.296 as the version they tested.
 - The verifier prompt now says its working directory is a snapshot without records/, owner files or history, so
   anything it ran there is a result about the snapshot only. It must say so in evidence and findings when a
   command depends on absent paths, and never present such a run as a result on the real repository (the false

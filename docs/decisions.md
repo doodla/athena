@@ -95,7 +95,7 @@ amend earlier entries without rewriting them. All of these entries belong to the
 ## D03 · Agents run as headless Claude Code processes, one per invocation, at a pinned version
 
 - **Decision:** Every agent invocation is a separate `claude -p` process with `--output-format stream-json`.
-  Claude Code is pinned at 2.1.296, and agents never spawn further agents.
+  Claude Code is pinned at 2.1.299, and agents never spawn further agents.
 - **Alternatives:**
   - (a) Call the Messages API directly and implement the tool loop in Athena.
   - (b) Embed the Claude Agent SDK, which runs under TypeScript or Python.

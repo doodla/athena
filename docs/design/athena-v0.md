@@ -1407,7 +1407,7 @@ installs rustup if `cargo` is absent, from a pinned `rustup-init` whose SHA-256 
 5. **Git hooks.** `pre-commit` and `commit-msg` in the repository's common git directory become symlinks to
    the adopted binary. A foreign hook is never overwritten: setup reports it and stops unless `--force` is
    given. Other hooks, such as an existing `pre-push`, are left alone.
-6. **Claude Code.** If `claude --version` matches the pin in `athena.toml` (2.1.296), setup uses it.
+6. **Claude Code.** If `claude --version` matches the pin in `athena.toml` (2.1.299), setup uses it.
    Otherwise it installs that exact version privately (`npm install --prefix $ATHENA_HOME/claude-code/<version>`)
    and records the path in the machine-local `$ATHENA_HOME/config.toml`. If `npm` is missing, setup stops
    and says why.
@@ -1422,7 +1422,7 @@ installs rustup if `cargo` is absent, from a pinned `rustup-init` whose SHA-256 
 | Rust toolchain | `rust-toolchain.toml` | 1.97.0, edition 2024 |
 | rustup-init | `setup.sh` (its only consumer) | 1.28.2, SHA-256 per platform |
 | gitleaks | `athena.toml` `[tools.gitleaks]` | 8.30.1, SHA-256 per platform |
-| Claude Code | `athena.toml` `[agents]` | 2.1.296 |
+| Claude Code | `athena.toml` `[agents]` | 2.1.299 |
 | Models | `athena.toml` `[models]` | `claude-sonnet-5-5`, `claude-haiku-5-5`, `claude-opus-5-5` |
 | Crates | `Cargo.lock`; every build uses `--locked` | — |
 | GitHub Actions | the workflow file, by commit SHA | — |
@@ -1619,7 +1619,7 @@ repository carries this attribution in `README.md`.
 | *Prove the outcome*: match evidence to the claim; preserve artifact identity through delivery | Checks run by code, plus an independent verdict whose behavior claims rest on commands actually run; the fingerprint makes the landed bytes the verified bytes | Athena lets the producer self-check but never counts that as verification. The bundle's own whole-job closure includes adversarial review, so this follows the bundle. |
 | *Turn feedback into infrastructure*; MLD as telemetry | Interventions recorded with class and category, and hand work captured by mechanism; the producer reports mistakes, learnings, and desires, which stay with the run and are never fed into later contexts (D32) | Promoting lessons into context or checks is left out of v0, to be pulled in by evidence. |
 | *Measure effectiveness*: keep dimensions separate; separate clocks | Score components kept separate and raw; worker wall time and request-to-outcome time recorded; human attention captured as interventions and restarts | — |
-| *Hold the worker constant* | Claude Code pinned at 2.1.296 and model ids pinned; the driver version recorded in every invocation; a host change starts a new epoch | — |
+| *Hold the worker constant* | Claude Code pinned at 2.1.299 and model ids pinned; the driver version recorded in every invocation; a host change starts a new epoch | — |
 | *Evaluate the harness*: record what was available, retrieved, and invoked | Every invocation records which context components were loaded, with hashes, and which commands ran | — |
 | *Preserve coherence*: dependency ownership | Every dependency has a recorded capability, trust basis, and pin (D17, D36) | — |
 
@@ -1796,7 +1796,7 @@ An invocation record, abridged:
   "job": "20261010-153012-k7q2",
   "seq": 3,
   "role": "producer",
-  "driver": { "name": "claude-code", "version": "2.1.296" },
+  "driver": { "name": "claude-code", "version": "2.1.299" },
   "athena": { "version": "0.1.0", "source_commit": "9b1d0e4…", "dirty": false },
   "model": "claude-sonnet-5-5",
   "context": {
