@@ -9,13 +9,76 @@
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value;
 use std::collections::BTreeSet;
+use std::ffi::OsString;
 use std::fmt::Write as _;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 /// The study the page explains, relative to the repository root.
 pub const STUDY_DIR: &str = "studies/firstmate-work-handling";
-/// The default output directory, relative to the repository root. It is gitignored.
+/// The default output directory, relative to the cargo target directory.
 pub const DEFAULT_OUT: &str = "site";
+
+/// The cargo target directory: `CARGO_TARGET_DIR` when set and not empty (made absolute against `cwd`),
+/// else `target` under the repository root.
+pub fn target_dir(root: &Path, env: Option<OsString>, cwd: &Path) -> PathBuf {
+    match env.filter(|v| !v.is_empty()) {
+        Some(dir) => cwd.join(dir),
+        None => root.join("target"),
+    }
+}
+
+/// The directory the page goes to when `--out` is not given: `site/` in the cargo target directory.
+/// Building there never writes into the repository work tree, so a verifier's snapshot stays unchanged.
+pub fn default_out(root: &Path, env: Option<OsString>, cwd: &Path) -> PathBuf {
+    target_dir(root, env, cwd).join(DEFAULT_OUT)
+}
+
+/// Makes `path` absolute and free of `.` and `..`, following symlinks in the part that exists.
+fn resolve(path: &Path, cwd: &Path) -> PathBuf {
+    let mut abs = PathBuf::new();
+    for part in cwd.join(path).components() {
+        match part {
+            Component::ParentDir => {
+                abs.pop();
+            }
+            Component::CurDir => {}
+            other => abs.push(other.as_os_str()),
+        }
+    }
+    let mut tail = Vec::new();
+    let mut head = abs.as_path();
+    loop {
+        if let Ok(real) = head.canonicalize() {
+            return tail.iter().rev().fold(real, |p, part| p.join(part));
+        }
+        match (head.parent(), head.file_name()) {
+            (Some(parent), Some(name)) => {
+                tail.push(name.to_owned());
+                head = parent;
+            }
+            _ => return abs,
+        }
+    }
+}
+
+/// Refuses an output directory inside the repository work tree, unless it is inside the cargo target
+/// directory (which is gitignored or outside the tree). Writing anywhere else in the tree would change
+/// the files a verifier snapshots.
+pub fn check_out(root: &Path, out: &Path, target: &Path, cwd: &Path) -> Result<()> {
+    let root = resolve(root, cwd);
+    let out = resolve(out, cwd);
+    let target = resolve(target, cwd);
+    if out.starts_with(&root) && !out.starts_with(&target) {
+        bail!(
+            "refusing to write the page to {}: it is inside the repository work tree ({}), and building \
+             must not change the tree. Use a directory under the cargo target directory ({}) or outside the repository",
+            out.display(),
+            root.display(),
+            target.display()
+        );
+    }
+    Ok(())
+}
 
 /// The parsed study files.
 #[derive(Debug)]
@@ -630,6 +693,48 @@ mod tests {
         let empty = tempfile::tempdir().unwrap();
         assert!(build(empty.path(), &empty.path().join("out")).is_err());
         assert!(!empty.path().join("out/index.html").exists());
+    }
+
+    #[test]
+    fn the_default_output_is_in_the_target_directory_not_the_work_tree() {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path();
+        let out = default_out(root.path(), None, cwd);
+        assert_eq!(out, root.path().join("target/site"));
+        check_out(root.path(), &out, &target_dir(root.path(), None, cwd), cwd).unwrap();
+        // With CARGO_TARGET_DIR set outside the tree, the page goes there.
+        let elsewhere = tempfile::tempdir().unwrap();
+        let env = Some(elsewhere.path().as_os_str().to_owned());
+        let out = default_out(root.path(), env.clone(), cwd);
+        assert_eq!(out, elsewhere.path().join("site"));
+        assert!(!out.starts_with(root.path()));
+        check_out(root.path(), &out, &target_dir(root.path(), env, cwd), cwd).unwrap();
+        // An empty value counts as unset.
+        assert_eq!(
+            default_out(root.path(), Some("".into()), cwd),
+            root.path().join("target/site")
+        );
+    }
+
+    #[test]
+    fn an_output_inside_the_repository_root_is_refused_with_a_clear_error() {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path();
+        let target = target_dir(root.path(), None, cwd);
+        for bad in ["site", "docs/out", "./site/../x", "target/../site", "."] {
+            let err = check_out(root.path(), Path::new(bad), &target, cwd).unwrap_err();
+            let text = format!("{err:#}");
+            assert!(
+                text.contains("inside the repository work tree"),
+                "{bad}: {text}"
+            );
+        }
+        // The target directory and places outside the tree are fine.
+        for good in ["target/site", "target/x/y"] {
+            check_out(root.path(), Path::new(good), &target, cwd).unwrap();
+        }
+        let outside = tempfile::tempdir().unwrap();
+        check_out(root.path(), &outside.path().join("site"), &target, cwd).unwrap();
     }
 
     #[test]
