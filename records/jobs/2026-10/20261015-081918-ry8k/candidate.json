@@ -1,0 +1,168 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261015-081918-ry8k",
+  "base_commit": "ede67e41d9d1fae319c46972c06173cc243033e6",
+  "base_fingerprint": "sha256:40ac1b130fc93cd05c3e789ecfd1acac8d79ee1dddcf57187f6f3eef5a14e76d",
+  "previous_job": "20261015-070754-zy4a",
+  "candidate_commit": "c85ecaee3b296d725b7d11445cd45f95ce8902f2",
+  "candidate_tree": "b5b6d904402e795f6c0e04b82b5626c05a177d85",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 66574
+    },
+    {
+      "path": "crates/athena-agent/src/policy.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 48353
+    },
+    {
+      "path": "crates/athena-cap-change/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 6357
+    },
+    {
+      "path": "crates/athena-core/src/capability.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 4995
+    },
+    {
+      "path": "crates/athena-core/src/pin.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 12361
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 71460
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 18287
+    },
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 25722
+    },
+    {
+      "path": "crates/athena-git/src/snapshot.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 20603
+    }
+  ],
+  "fingerprint": "sha256:c27c121be4dc7a10b2e5a3fc51ca684ab8c43a2c380027c37d463c1f61e7a464",
+  "violations": [],
+  "producer_report": {
+    "summary": "The verifier's snapshot is now locked while the verifier runs, so writes are refused even from root. If the snapshot still changes, the verdict is discarded, the verifier reruns once on a fresh snapshot, and a system fault is recorded instead of a blocker against the work.\n\n**What I changed**\n- **Lock** (`athena-git/src/snapshot.rs`):\n  - `Snapshot::lock` removes write bits everywhere, `.git` included, and sets the immutable attribute with `chattr -R +i` where it can.\n  - It then probes: it tries to create a file and open `.git/HEAD` for writing. If either works, it unlocks and returns an error. A lock that doesn't hold fails loudly.\n  - `unlock` and `unlock_dir` undo it. `pin::remove_tree` now unlocks first, so a locked directory can still be removed.\n- **Rerun** (`run.rs`):\n  - The verifier call is now a loop: lock, run, unlock, compare HEAD and tree to the prepared state.\n  - On a change it clears the verdict, commands and invocation, and builds a fresh snapshot with a new `verifier_snapshot` helper. It then reruns once.\n  - If the budget cannot pay for the rerun, the job's reason is the budget message. If the rerun also changes the snapshot, the verifier counts as not completed. If the lock cannot be taken, the verifier counts as not completed.\n- **Judgment** (`verify.rs`): `snapshot_changed` is replaced by `system_fault`. It yields one Minor finding starting \"System fault\" and no reason, and does not affect pass or fail. Records have no field for a system fault, so a Minor finding is the stand-in.\n- **Policy and docs:** a new policy test covers every write tool and command for the verifier. `capability.rs` has a doc note, the change capability has a test that the verifier gets no writing programs, and `CHANGELOG.md` has an entry naming the root cause.\n\n**Tests**\n- `athena-git`: an unlocked snapshot takes an edit, a new file and a commit. After `lock()`, all three are refused, and HEAD and tree are unchanged after unlock.\n- `athena-agent`: `the_verifier_grant_denies_every_write_to_the_snapshot_whoever_runs_it` first shows the process can write the file, then shows every write route denied to the verifier. The producer is still allowed.\n- `athena-core`:\n  - `verify.rs`: a system fault is recorded and does not reject the work.\n  - `run_pin_tests.rs`: rerun once on a fresh snapshot, with the first verdict discarded.\n  - `run_pin_tests.rs`: an unchanged snapshot runs the verifier once.\n  - `run_pin_tests.rs`: a verifier write is refused by the lock.\n  - `run_pin_tests.rs`: two changes mean no third run.\n  - `run_pin_tests.rs`: the budget case reports \"budget left\", not \"twice\".\n\n`cargo test --locked`, `cargo fmt --all --check` and `cargo clippy --all-targets --locked -- -D warnings` all pass here.",
+    "files": [
+      "crates/athena-git/src/snapshot.rs",
+      "crates/athena-core/src/run.rs",
+      "crates/athena-core/src/verify.rs",
+      "crates/athena-core/src/run_pin_tests.rs",
+      "crates/athena-core/src/pin.rs",
+      "crates/athena-core/src/capability.rs",
+      "crates/athena-agent/src/policy.rs",
+      "crates/athena-cap-change/src/lib.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "all crates pass (run with -q; includes athena-cli lifecycle tests)"
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test -p athena-git --locked",
+        "result": "pass",
+        "note": "27 pass, including the unlocked and locked snapshot tests"
+      },
+      {
+        "command": "cargo test -p athena-agent --locked policy",
+        "result": "pass",
+        "note": "14 pass"
+      },
+      {
+        "command": "cargo test -p athena-core --locked run_pin_tests",
+        "result": "pass",
+        "note": "7 pass"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A test first shows a file edit and a git commit succeed in an unlocked snapshot under the current user, then shows both are refused once the verifier's lock/grant is applied, and that HEAD and work-tree tree are unchanged. It fails (not skips or returns early) if the write is not refused. Run: cargo test -p athena-git and cargo test -p athena-core.",
+        "status": "met",
+        "evidence": "crates/athena-git/src/snapshot.rs tests an_unlocked_snapshot_takes_edits_and_commits (edit, new file and commit succeed, HEAD moves) and a_locked_snapshot_refuses_edits_and_commits_and_keeps_head_and_tree (lock() must succeed or the test panics; edit, create and commit all refused; HEAD and tree equal after unlock). lock() probes a write and returns an error if it succeeds. Ran cargo test -p athena-git: pass. In athena-core, a_verifier_write_is_refused_by_the_lock_and_does_not_reach_the_work shows a scripted verifier write refused through the real run path."
+      },
+      {
+        "criterion": "The verifier-grant write deny is tested in policy: a write tool call against the snapshot path is denied even when the process is root. Run: cargo test -p athena-agent.",
+        "status": "met",
+        "evidence": "policy.rs test the_verifier_grant_denies_every_write_to_the_snapshot_whoever_runs_it: first proves the process can write the file, then Write/Edit/MultiEdit/NotebookEdit and Bash write commands are denied for the verifier; the producer is allowed. The decision never reads a user id. Ran cargo test -p athena-agent: pass."
+      },
+      {
+        "criterion": "A fake-agent test shows a changed snapshot fingerprint after the first verifier run triggers exactly one more verifier invocation on a freshly created snapshot, and the first verdict is discarded. Run: cargo test -p athena-core.",
+        "status": "met",
+        "evidence": "run_pin_tests.rs a_verifier_that_changed_its_snapshot_is_rerun_once_on_a_fresh_one_and_the_fault_is_recorded: runs.len()==2, second run starts without the first run's tampered file, first (fail) verdict discarded: job Landed with summary 'Fine.'. Also a twice-changing verifier gets no third run. Ran: pass."
+      },
+      {
+        "criterion": "A test shows that after a changed fingerprint the outcome is recorded as a system fault and the judgment has no 'verifier changed its snapshot' blocker and does not reject the work; an unchanged snapshot runs the verifier once and uses its verdict. Run: cargo test -p athena-core.",
+        "status": "met",
+        "evidence": "verify.rs a_system_fault_is_recorded_and_never_rejects_the_work (judge passes, one Minor 'System fault' finding, no blocker/major, no reasons); run_pin_tests.rs asserts the same on the full job, and an_unchanged_snapshot_runs_the_verifier_once_and_uses_its_verdict asserts one run, no fault. Ran: pass."
+      },
+      {
+        "criterion": "A test shows that when the budget is exhausted before the rerun, the job's reason reports the budget failure rather than 'snapshot changed twice'. Run: cargo test -p athena-core.",
+        "status": "met",
+        "evidence": "run_pin_tests.rs when_the_budget_runs_out_before_the_rerun_the_reason_reports_the_budget: one verifier run, state Rejected, reason contains 'budget left' and not 'twice' or 'both runs'. Ran: pass."
+      },
+      {
+        "criterion": "cargo fmt --check, cargo clippy --all-targets and cargo test pass on the workspace.",
+        "status": "met",
+        "evidence": "Ran cargo fmt --all --check, cargo clippy --all-targets --locked -- -D warnings, cargo test --locked: all pass."
+      },
+      {
+        "criterion": "verify.rs no longer turns snapshot_changed into a blocker against the work, and run.rs near the old snapshot_changed branch discards the verdict and reruns once.",
+        "status": "met",
+        "evidence": "verify.rs: snapshot_changed replaced by system_fault, which yields a Minor Athena finding and does not enter the pass condition. run.rs: the verifier call is now a loop; on a changed HEAD or tree it clears verdict_output, verifier_failure, commands_run and verifier_invocation, builds a fresh snapshot via verifier_snapshot, and reruns once (second change sets verifier_failure)."
+      }
+    ],
+    "open_issues": [
+      "Where the immutable attribute cannot be set (root on a file system without support, or no chattr), Snapshot::lock returns an error and verification stops with 'the verifier's snapshot could not be locked'. This is deliberate (fail loudly); a deployment on such a file system needs the verifier run as an unprivileged user.",
+      "The system fault is stored as a Minor finding because athena-data's Verification record has no fault field. A dedicated field needs a schema change outside this job's deliverables.",
+      "crates/athena-cli/tests/lifecycle.rs was listed as a deliverable but needed no change; it passes unchanged."
+    ],
+    "mistakes": [
+      "My first locked-snapshot test computed the work tree while still locked and failed; I moved the unlock before reading the tree."
+    ],
+    "learnings": [
+      "The verifier grant already has writes: false, so the policy already denied every write; the gap was the missing OS-level lock on the snapshot.",
+      "In this environment the lock holds as root: chattr +i works on the temp directories used by the tests.",
+      "git add on a path whose files are immutable fails (it tries to refresh object mtimes), so the core must unlock before computing work_tree_tree.",
+      "Records have no field for a system fault; I recorded it as a Minor Athena finding with the summary prefix 'System fault' (verify::SYSTEM_FAULT_PREFIX).",
+      "check_budget requires producer_usd + verifier_usd <= job_usd at dispatch, which constrains budget-test configs."
+    ],
+    "desires": [
+      "A way to read the host's chattr and filesystem support, to know in advance whether the immutable attribute works where checks run."
+    ]
+  }
+}

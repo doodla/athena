@@ -172,6 +172,12 @@ mod tests {
         let verifier = Change.verifier_grant(&jc);
         assert!(!verifier.writes, "the verifier never writes");
         assert_eq!(verifier.commands, section.verifier_commands);
+        for program in ["rm", "mv", "chmod", "cp", "touch", "mkdir"] {
+            assert!(
+                !verifier.commands.contains_key(program),
+                "the verifier's list names no writing program: {program}"
+            );
+        }
         assert_eq!(Change.checks(&jc).len(), section.checks.len());
     }
 }

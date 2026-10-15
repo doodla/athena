@@ -100,6 +100,51 @@ impl Snapshot {
         Ok(git.head()?.expect("a commit was just made"))
     }
 
+    /// Makes the whole snapshot, `.git` included, refuse writes, even from root.
+    ///
+    /// Write bits come off every file and directory, which stops every user but root. Where the process may
+    /// set it (root, on a file system that supports it), the immutable attribute goes on as well, which
+    /// stops root too. The lock is then probed: a file is created and an existing one opened for writing.
+    /// If either probe succeeds the snapshot is unlocked again and the call fails, so a lock that does not
+    /// hold is never taken for one that does.
+    pub fn lock(&self) -> Result<()> {
+        set_tree_writable(&self.dir, false)?;
+        // Best effort: without the privilege or file system support the probe below decides.
+        let _ = set_immutable(&self.dir, true);
+        if let Some(how) = self.probe_write() {
+            let _ = self.unlock();
+            return Err(crate::GitError::Refused(format!(
+                "the snapshot lock does not hold: {how} succeeded in {}; run as a user the permission bits \
+                 bind, or on a file system that supports the immutable attribute",
+                self.dir.display()
+            )));
+        }
+        Ok(())
+    }
+
+    /// Undoes [`Snapshot::lock`], so the snapshot can be changed and removed again.
+    pub fn unlock(&self) -> Result<()> {
+        unlock_dir(&self.dir)
+    }
+
+    /// The first write that works on a locked snapshot, if any (what it did is undone).
+    fn probe_write(&self) -> Option<&'static str> {
+        let fresh = self.dir.join(".athena-lock-probe");
+        if std::fs::write(&fresh, b"x").is_ok() {
+            let _ = std::fs::remove_file(&fresh);
+            return Some("creating a file");
+        }
+        let existing = self.dir.join(".git").join("HEAD");
+        if std::fs::OpenOptions::new()
+            .append(true)
+            .open(existing)
+            .is_ok()
+        {
+            return Some("opening a git file for writing");
+        }
+        None
+    }
+
     /// Everything that changed in the work tree since the base commit, without rename detection.
     pub fn change_list(&self) -> Result<Vec<DiffEntry>> {
         let base = self
@@ -202,6 +247,73 @@ fn clear_work_tree(dir: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Clears the immutable attribute under `dir` and gives every file and directory its owner write bit back.
+/// Harmless on a directory that was never locked.
+pub fn unlock_dir(dir: &Path) -> Result<()> {
+    let _ = set_immutable(dir, false);
+    set_tree_writable(dir, true)
+}
+
+/// Adds or removes the owner write bit (all write bits, when removing) on `path` and everything under it.
+/// Symlinks are left alone.
+fn set_tree_writable(path: &Path, writable: bool) -> Result<()> {
+    let meta = std::fs::symlink_metadata(path)?;
+    if meta.file_type().is_symlink() {
+        return Ok(());
+    }
+    // A directory must be writable again before its children can be reached for changing.
+    if writable {
+        set_write_bits(path, true)?;
+    }
+    if meta.is_dir() {
+        for entry in std::fs::read_dir(path)? {
+            set_tree_writable(&entry?.path(), writable)?;
+        }
+    }
+    if !writable {
+        set_write_bits(path, false)?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_write_bits(path: &Path, writable: bool) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(path)?.permissions().mode();
+    let mode = if writable {
+        mode | 0o200
+    } else {
+        mode & !0o222
+    };
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_write_bits(path: &Path, writable: bool) -> Result<()> {
+    let mut permissions = std::fs::metadata(path)?.permissions();
+    permissions.set_readonly(!writable);
+    std::fs::set_permissions(path, permissions)?;
+    Ok(())
+}
+
+/// Sets or clears the immutable attribute under `dir` with the system's `chattr`. Fails where the
+/// program, the privilege, or file system support is missing.
+fn set_immutable(dir: &Path, on: bool) -> std::io::Result<()> {
+    let status = std::process::Command::new("chattr")
+        .arg("-R")
+        .arg(if on { "+i" } else { "-i" })
+        .arg(dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other("chattr failed"))
+    }
 }
 
 #[cfg(unix)]
@@ -366,6 +478,72 @@ mod tests {
                 .unwrap()
                 .contains("candidate")
         );
+    }
+
+    /// A verifier-shaped snapshot of the test repository.
+    fn verifier_snapshot(name: &str) -> (tempfile::TempDir, Snapshot) {
+        let (_dir, git, head) = user_repo();
+        let parent = tempfile::tempdir().unwrap();
+        let snap = Snapshot::create(
+            &git,
+            &head,
+            &head,
+            &parent.path().join(name),
+            SnapshotRepo::BaseAndCandidate {
+                candidate_commit: head.clone(),
+            },
+        )
+        .unwrap();
+        (parent, snap)
+    }
+
+    /// Tries a file edit, a new file, and a git commit in the snapshot; returns whether each worked.
+    fn try_writes(snap: &Snapshot) -> (bool, bool, bool) {
+        let edit =
+            std::fs::write(snap.dir().join("src/main.rs"), "fn main() { /* x */ }\n").is_ok();
+        let create = std::fs::write(snap.dir().join("new.txt"), "new").is_ok();
+        let git = snap.git();
+        let commit = git
+            .run(["add", "-A"])
+            .and_then(|_| git.run(["commit", "-q", "--allow-empty", "--no-verify", "-m", "x"]))
+            .is_ok();
+        (edit, create, commit)
+    }
+
+    #[test]
+    fn an_unlocked_snapshot_takes_edits_and_commits() {
+        // The control for the lock test: the same writes succeed when nothing locks the snapshot.
+        let (_parent, snap) = verifier_snapshot("snap-open");
+        let head = snap.git().head().unwrap();
+        assert_eq!(try_writes(&snap), (true, true, true));
+        assert_ne!(snap.git().head().unwrap(), head, "the commit moved HEAD");
+    }
+
+    #[test]
+    fn a_locked_snapshot_refuses_edits_and_commits_and_keeps_head_and_tree() {
+        // Fails (never skips) when the lock does not hold: `lock` itself errors then.
+        let (_parent, snap) = verifier_snapshot("snap-locked");
+        let head = snap.git().head().unwrap();
+        let tree = snap.work_tree_tree().unwrap();
+        snap.lock().expect("the snapshot lock must hold");
+        assert_eq!(try_writes(&snap), (false, false, false));
+        // Reading the tree needs git to touch object files, so it waits for the unlock.
+        snap.unlock().unwrap();
+        assert_eq!(snap.git().head().unwrap(), head, "HEAD is unchanged");
+        assert_eq!(
+            snap.work_tree_tree().unwrap(),
+            tree,
+            "the tree is unchanged"
+        );
+        assert_eq!(
+            try_writes(&snap),
+            (true, true, true),
+            "unlock restores writes"
+        );
+        // A locked snapshot can still be removed after unlocking.
+        snap.lock().unwrap();
+        snap.unlock().unwrap();
+        std::fs::remove_dir_all(snap.dir()).unwrap();
     }
 
     #[test]

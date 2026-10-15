@@ -7,6 +7,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- The verifier's snapshot now refuses writes even from root. Root cause: the verifier ran in a snapshot that
+  only its tool policy protected, so a command it ran as root could change HEAD or the work tree, and the
+  change was only detected afterwards and counted as a blocker against the work. Now the grant's write deny
+  (`crates/athena-agent/src/policy.rs`, tested for every write tool and command) is joined by a lock the
+  core takes around the verifier's run (`Snapshot::lock`: write bits removed everywhere, plus the immutable
+  attribute through `chattr` where the process may set it). The lock is probed and fails loudly if a write
+  still works. If the verifier still changed its snapshot, the core discards that verdict, reruns the verifier
+  once on a freshly created snapshot, and records a system fault (a minor finding) instead of a blocker
+  against the work. If the budget cannot pay for the rerun, the job's reason reports the budget; if the rerun
+  changes the snapshot too, the verifier is recorded as not having completed.
+
 ### Fixed
 
 - The firstmate explainer page now states the failure and limit behaviour the claims already record, and drops

@@ -17,6 +17,7 @@ use athena_data::records::{
 use athena_git::Git;
 use serde_json::json;
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 const FAKE_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
@@ -133,6 +134,19 @@ fn athena(
     pinner: CountingPinner,
     seen: Seen,
 ) -> Athena {
+    athena_with(dir, state, pinner, seen, Arc::new(|_, _| {}))
+}
+
+/// Changes a scripted turn after the standard script made it.
+type Tweak = Arc<dyn Fn(&AgentInvocation, &mut FakeTurn) + Send + Sync>;
+
+fn athena_with(
+    dir: &tempfile::TempDir,
+    state: &tempfile::TempDir,
+    pinner: CountingPinner,
+    seen: Seen,
+    tweak: Tweak,
+) -> Athena {
     let state = StateDir::new(state.path().join("repo"));
     let script = Box::new(move |spec: &AgentInvocation| {
         let mount = spec.workdir.join(MOUNT_DIR);
@@ -208,6 +222,7 @@ fn athena(
             cache_read: 1,
             cache_write: 1,
         };
+        tweak(spec, &mut turn);
         turn
     });
     let driver = FakeAgentDriver::new(script).with_registry(state.registry());
@@ -304,4 +319,174 @@ fn a_study_without_a_configured_repository_stops_before_dispatch() {
     assert!(error.to_string().contains("repo_url"), "{error:#}");
     assert_eq!(pinner.count(), 0);
     assert_eq!(git.head().unwrap(), head, "nothing was committed");
+}
+
+/// The file a faulty verifier run leaves in its snapshot.
+const TAMPERED: &str = "tampered.txt";
+
+/// Each verifier run: its snapshot directory, and whether the tampered file was there when it began.
+type Runs = Arc<Mutex<Vec<(PathBuf, bool)>>>;
+
+/// A verifier that, on its first `faulty` runs, breaks the snapshot lock and changes the snapshot (a fault
+/// of the system, not of the work), and answers fail then. Every run costs `cost` dollars.
+fn faulty_verifier(runs: Runs, faulty: usize, cost: f64) -> Tweak {
+    Arc::new(move |spec, turn| {
+        if spec.role != Role::Verifier {
+            return;
+        }
+        let mut runs = runs.lock().unwrap();
+        let n = runs.len();
+        runs.push((spec.workdir.clone(), spec.workdir.join(TAMPERED).exists()));
+        turn.cost_usd = cost;
+        if n < faulty {
+            athena_git::snapshot::unlock_dir(&spec.workdir).unwrap();
+            turn.edits.push((TAMPERED.into(), Some("changed".into())));
+            let verdict = turn.structured.as_mut().unwrap();
+            verdict["verdict"] = json!("fail");
+            verdict["summary"] = json!("a verdict from a faulty run");
+        }
+    })
+}
+
+/// Runs a whole study job with this verifier; returns what happened and the verifier runs.
+fn run_with(
+    config: &str,
+    tweak: impl Fn(Runs) -> Tweak,
+) -> (crate::run::Finished, Vec<(PathBuf, bool)>) {
+    let (dir, _git) = repo(config);
+    let state = tempfile::tempdir().unwrap();
+    let runs: Runs = Arc::default();
+    let athena = athena_with(
+        &dir,
+        &state,
+        CountingPinner::new(FAKE_SHA),
+        Arc::default(),
+        tweak(runs.clone()),
+    );
+    let proposal = athena.ask("study the demo", &Quiet).unwrap();
+    let GoResult::Finished(finished) = athena
+        .go(proposal.job.as_str(), AcceptedBy::User, &Quiet)
+        .unwrap()
+    else {
+        panic!("expected the job to finish");
+    };
+    let runs = runs.lock().unwrap().clone();
+    (*finished, runs)
+}
+
+fn fault_findings(finished: &crate::run::Finished) -> Vec<athena_data::records::Finding> {
+    finished
+        .verification
+        .as_ref()
+        .expect("a verification record")
+        .findings
+        .iter()
+        .filter(|f| f.summary.starts_with(crate::verify::SYSTEM_FAULT_PREFIX))
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn a_verifier_that_changed_its_snapshot_is_rerun_once_on_a_fresh_one_and_the_fault_is_recorded() {
+    let (finished, runs) = run_with(&config(true), |runs| faulty_verifier(runs, 1, 0.01));
+    assert_eq!(runs.len(), 2, "exactly one more verifier run");
+    assert!(!runs[0].1);
+    assert!(
+        !runs[1].1,
+        "the second run began on a fresh snapshot, without the first run's change"
+    );
+    // The first verdict (fail) was discarded; the second (pass) decided.
+    assert_eq!(finished.state, OutcomeState::Landed, "{}", finished.reason);
+    let verification = finished.verification.as_ref().unwrap();
+    assert_eq!(verification.summary.as_deref(), Some("Fine."));
+    assert!(
+        verification.reasons.is_empty(),
+        "{:?}",
+        verification.reasons
+    );
+    // The fault is recorded, as a finding that does not block, and nothing says the work changed it.
+    let faults = fault_findings(&finished);
+    assert_eq!(faults.len(), 1);
+    assert_eq!(faults[0].severity, athena_data::records::Severity::Minor);
+    assert!(verification.findings.iter().all(|f| {
+        !f.summary
+            .contains("changed its snapshot, which invalidates")
+    }));
+}
+
+#[test]
+fn an_unchanged_snapshot_runs_the_verifier_once_and_uses_its_verdict() {
+    let (finished, runs) = run_with(&config(true), |runs| faulty_verifier(runs, 0, 0.01));
+    assert_eq!(runs.len(), 1);
+    assert_eq!(finished.state, OutcomeState::Landed, "{}", finished.reason);
+    assert!(fault_findings(&finished).is_empty());
+    assert_eq!(
+        finished.verification.unwrap().summary.as_deref(),
+        Some("Fine.")
+    );
+}
+
+#[test]
+fn a_verifier_write_is_refused_by_the_lock_and_does_not_reach_the_work() {
+    // The scripted verifier writes without breaking the lock first: the write is refused, so the run
+    // fails to complete and the snapshot is unchanged. No rerun, no fault.
+    let (finished, runs) = run_with(&config(true), |runs| {
+        Arc::new(move |spec: &AgentInvocation, turn: &mut FakeTurn| {
+            if spec.role == Role::Verifier {
+                runs.lock().unwrap().push((spec.workdir.clone(), false));
+                turn.edits.push((TAMPERED.into(), Some("changed".into())));
+            }
+        })
+    });
+    assert_eq!(runs.len(), 1);
+    assert_eq!(finished.state, OutcomeState::Rejected);
+    assert!(fault_findings(&finished).is_empty());
+    assert!(
+        finished.reason.contains("could not run"),
+        "{}",
+        finished.reason
+    );
+}
+
+#[test]
+fn a_verifier_that_changes_its_snapshot_twice_gets_no_third_run_and_no_blocker_against_the_work() {
+    let (finished, runs) = run_with(&config(true), |runs| faulty_verifier(runs, 2, 0.01));
+    assert_eq!(runs.len(), 2, "one rerun at most");
+    assert_eq!(finished.state, OutcomeState::Rejected);
+    assert_eq!(fault_findings(&finished).len(), 1);
+    let verification = finished.verification.as_ref().unwrap();
+    assert!(verification.findings.iter().all(|f| {
+        !matches!(
+            f.severity,
+            athena_data::records::Severity::Blocker | athena_data::records::Severity::Major
+        )
+    }));
+    assert!(
+        finished.reason.contains("did not complete"),
+        "{}",
+        finished.reason
+    );
+}
+
+#[test]
+fn when_the_budget_runs_out_before_the_rerun_the_reason_reports_the_budget() {
+    // $2.60 for the job,$0.50 for the producer, and a verifier run that costs $1.00 against a $2.00 cap:
+    // the first run is allowed, the rerun is not.
+    let tight = config(true)
+        .replace("job_usd = 8.00", "job_usd = 2.60")
+        .replace("producer_usd = 3.00", "producer_usd = 0.50");
+    let (finished, runs) = run_with(&tight, |runs| faulty_verifier(runs, 1, 1.0));
+    assert_eq!(runs.len(), 1, "no rerun without budget");
+    assert_eq!(finished.state, OutcomeState::Rejected);
+    assert!(
+        finished.reason.contains("budget left"),
+        "{}",
+        finished.reason
+    );
+    assert!(!finished.reason.contains("twice"), "{}", finished.reason);
+    assert!(
+        !finished.reason.contains("both runs"),
+        "{}",
+        finished.reason
+    );
 }
