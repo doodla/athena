@@ -1,0 +1,162 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261015-205805-kdqd",
+  "n": 1,
+  "at": "2026-10-15T20:58:34.032604088Z",
+  "invocation_seq": 1,
+  "base_commit": "d79b3cd0cd1197170575dd1b92174d3e39e44ee3",
+  "config_sha256": "36cc8236b906040fe507a6461dabd9eddad491a69739eeee2bf0d38753b1202e",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Let athena close abandon a job whose old usage records fail reconcile",
+  "summary": "Job 20261015-131540-2fsa is dispatched and interrupted, and its pre-fix invocation record fails the gate's \"usage records reconcile\" rule. That blocks the Abandoned close commit in `Athena::close`, and `retry` refuses dispatched jobs. I read the goal as making `athena close <job> --why` finish such a job (the operator is the audience), without weakening the gate for new records.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "New tests for the close path and the still-enforced gate; cargo test and clippy criteria."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "The criteria check that closing a job with a legacy bad record succeeds."
+    },
+    {
+      "id": "root-cause",
+      "how": "The fix targets any job with pre-fix records, not just this one job."
+    },
+    {
+      "id": "mechanism",
+      "how": "The gate remains the enforcement for new records, covered by a test."
+    },
+    {
+      "id": "small",
+      "how": "One focused change to the close path and the gate scope."
+    },
+    {
+      "id": "strangers",
+      "how": "Decision and changelog entries are written for an outside reader."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "The close commit fails because the gate re-checks the job's already-committed invocation record. I read manage.rs and reconcile.rs but did not run the failing case.",
+    "The fix goes in `close`, not `retry`, because D52 and the design say `close` is the way out for interrupted jobs.",
+    "Running `athena close` on the real job is an operator action after the change lands, and is not part of this change.",
+    "The exemption should not loosen reconciliation for newly written records."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new test builds a dispatched, interrupted job whose committed invocation record has a per-model cost sum that disagrees with its reported total (the pre-fix shape). `athena close <job> --why ...` then succeeds and writes outcome-abandoned or outcome-failed, a score record and a commit. Run `cargo test`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A companion test shows the gate still rejects a new invocation record that fails reconciliation, and a new outcome whose totals do not match its invocations. Run `cargo test -p athena-gate`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The closing outcome's totals are computed from the job's actual invocation records, so the outcome itself reconciles. The legacy record is left unmodified (records stay append-only).",
+      "kind": "content"
+    },
+    {
+      "text": "The exemption is narrow and visible: it covers only records already committed before the close, or needs an explicit flag, and `athena close` prints which legacy records it let through.",
+      "kind": "content"
+    },
+    {
+      "text": "docs/decisions.md has a new decision entry with alternatives (flag vs automatic exemption vs rewriting records), and CHANGELOG.md mentions the change, so an operator can find how to close a stuck job.",
+      "kind": "content"
+    },
+    {
+      "text": "`cargo clippy` is clean and `cargo fmt --check` passes.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/manage.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-gate/src/reconcile.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-gate/src/lib.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "docs/design/athena-v0.md",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.7
+    }
+  ],
+  "out_of_scope": [
+    "Rewriting or deleting the existing invocation record in history",
+    "Making `athena retry` accept dispatched jobs",
+    "Closing job 20261015-131540-2fsa itself",
+    "Changing the study or explainer work that job was doing"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.12,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.2,
+        "p90": 2.8
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 1200.0,
+        "p90": 2400.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.8158730158730159,
+      "p_verification_passes": 0.6788990825688074,
+      "p_user_intervenes": 0.08073394495412844,
+      "cost_usd": {
+        "p10": 0.41986821579177824,
+        "p50": 0.9202356,
+        "p90": 2.1679952487266565
+      },
+      "wall_time_s": {
+        "p10": 540.7789343390651,
+        "p50": 894.2391610478504,
+        "p90": 1657.2776005462676
+      }
+    }
+  },
+  "departures": "Higher cost and time than the reference: the change touches the gate and close logic and needs a test that builds a legacy-shaped job. Lower pass chance because the exact gate scope was not confirmed."
+}
