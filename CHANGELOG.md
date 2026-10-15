@@ -18,7 +18,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   one with a subagent passes, and
   `a_result_whose_totals_disagree_with_model_usage_is_flagged_end_to_end` builds its record from an event whose
   reported cost disagrees with `modelUsage` and asserts a Reconciliation violation (it fails with the cost check
-  disabled). The gate had no legacy exception to remove.
+  disabled). The gate had no legacy exception to remove. The `modelUsage` definition: an invocation's tokens
+  are the requested model's `modelUsage` entry. So the end-to-end negative test covers only the cost
+  disagreement (`total_cost_usd` against the `costUSD` sum); a token disagreement cannot arise through the
+  parser, and it is not claimed to be covered end to end.
 
 ### Added
 

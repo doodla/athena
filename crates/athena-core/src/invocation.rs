@@ -343,8 +343,10 @@ mod tests {
     /// (90/52656/3634696/134508) exceed the requested model's own `modelUsage` (6/3136/275219/3821).
     const AGREEING: &str = r#"{"type":"result","subtype":"success","is_error":false,"num_turns":4,"duration_api_ms":900,"total_cost_usd":0.30,"usage":{"input_tokens":90,"output_tokens":134508,"cache_read_input_tokens":3634696,"cache_creation_input_tokens":52656},"modelUsage":{"claude-sonnet-5-5":{"inputTokens":6,"outputTokens":3821,"cacheReadInputTokens":275219,"cacheCreationInputTokens":3136,"costUSD":0.10},"claude-haiku-5-5":{"inputTokens":84,"outputTokens":130687,"cacheReadInputTokens":3359477,"cacheCreationInputTokens":49520,"costUSD":0.20}},"permission_denials":[]}"#;
 
-    /// The same event, except that the reported total cost disagrees with the per-model costs
-    /// (0.10 + 0.20), which the gate also reconciles.
+    /// The same event, except that `total_cost_usd` (0.75) disagrees with the per-model `costUSD` sum
+    /// (0.10 + 0.20 = 0.30). The tokens are left alone on purpose: under the `modelUsage` definition the
+    /// record's tokens are the requested model's `modelUsage` entry, so a token disagreement cannot arise
+    /// through the parser. The cost is the only figure that can disagree end to end.
     const DISAGREEING: &str = r#"{"type":"result","subtype":"success","is_error":false,"num_turns":4,"duration_api_ms":900,"total_cost_usd":0.75,"usage":{"input_tokens":90,"output_tokens":134508,"cache_read_input_tokens":3634696,"cache_creation_input_tokens":52656},"modelUsage":{"claude-sonnet-5-5":{"inputTokens":6,"outputTokens":3821,"cacheReadInputTokens":275219,"cacheCreationInputTokens":3136,"costUSD":0.10},"claude-haiku-5-5":{"inputTokens":84,"outputTokens":130687,"cacheReadInputTokens":3359477,"cacheCreationInputTokens":49520,"costUSD":0.20}},"permission_denials":[]}"#;
 
     /// Parses a result event and builds the invocation record, as a real invocation does.
@@ -425,6 +427,10 @@ mod tests {
         assert_eq!(check_invocation("x", &record), vec![]);
     }
 
+    /// Builds the record through the same parse and record path as the positive test, from an event whose
+    /// `total_cost_usd` really differs from the `costUSD` sum. Token disagreement cannot arise through the
+    /// parser under the `modelUsage` definition (the tokens come from the requested model's entry), so the
+    /// cost is the disagreement covered here. No record is edited by hand.
     #[test]
     fn a_result_whose_totals_disagree_with_model_usage_is_flagged_end_to_end() {
         let record = record_from(DISAGREEING);
