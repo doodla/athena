@@ -30,7 +30,8 @@
 //! - [`steward`]: the first role, run in the background every five finished tasks. It calls a model, read-only,
 //!   over a workspace of Athena's code, records and git log (and GitHub through `gh` reads), and queues the
 //!   work items the model reports after Athena has validated them; the requirements ladder decides, for each,
-//!   whether a request is queued or only a proposal;
+//!   whether a request is queued or only a proposal; [`steward::queued_work`] lists the queued requests that
+//!   `athena drain` (in the `athena-cli` crate) works, lands through the pull-request path, and rates after;
 //! - [`work_decisions`]: `athena approve-work` and `athena reject-work`, a person's decision on a steward
 //!   proposal, recorded as an appended work-decision record; approving submits a job whose request carries
 //!   the proposal's cited content in full;

@@ -40,6 +40,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `athena drain --budget <usd> [--rating-threshold N] [--job-limit N] [--json]`. It works the steward's queue
+  itself, so the queue no longer has to be run, landed and rated by hand: for each queued steward request it
+  reads and runs the job, lands it through the pull-request path of `athena land --pr` (only a merged, verified
+  pull request counts as landed), and then rates the live explainer page. A rating counts toward the target only
+  when it was taken after a landing in this run; a run that landed nothing says the page is unchanged and never
+  reports `target met`. Stop reasons: `target met`, `budget spent`, `repeated failure` (the same item failed
+  twice; it is named), `queue empty` (not success) and `job limit`. Before every model call, including the
+  re-reading of a retry, the money spent so far plus the call's cap must fit the budget. Open proposals that
+  need a person are listed as waiting and are never accepted, approved or landed. The budget, threshold and job
+  limit are command-line flags; there is no new `athena.toml` key (D98). The report, as text or `--json`,
+  gives the stop reason, each job with its outcome, cost and landing, the total spent, the latest rating
+  against the target and whether it followed a landing, and what is still queued or waiting.
 - A Pages watch after a merge. When `athena land --pr` lands a pull request, it finds the `pages.yml` run for the
   merged commit, waits for it for about ten minutes, and re-runs it once through the `gh` wrapper if it timed
   out or was cancelled. Each step is reported; a second failure is reported and not re-run, and a Pages problem

@@ -78,6 +78,7 @@ itself erred.
 | `athena correct <job> "<line>"` | Correct the latest reading, or answer its question, and read again |
 | `athena go <job>` | Run a proposed job, read a queued one, or retry the landing of a blocked one |
 | `athena land <job> --pr` | Push the job's locally landed commit as its branch (a rerun on an open pull request replaces the branch with one atomic conditional push, never a plain force), open a pull request with `gh api`, and wait for green checks. It stops at an open, green pull request unless `[landing] merge_via_rest = true` is set (off when absent). Run it again after the merge to land the job (exit 0 when landed, or open with green checks; 2 otherwise). Every GitHub call goes through one wrapper that tries at most 3 times, with exponential backoff and jitter, on a 5xx, a timeout or a connection reset, and prints a line for each retry; a 4xx or an auth error fails at once |
+| `athena drain --budget <usd> [--rating-threshold N] [--job-limit N] [--json]` | Work the steward's queue within your budget. For each queued request the steward made, it reads and runs the job, lands it through the pull-request path of `athena land --pr`, and only then rates the live explainer page as a newcomer would. It stops at the first of: `target met` (a rating taken after a landing in this run reached `--rating-threshold`, default 4), `budget spent`, `repeated failure` (one item failed twice; it is named), `queue empty` (not success), or `job limit` (`--job-limit`, default 5). Exit 0 only when the target was met; 2 for any other stop |
 | `athena close <job> --why "..."` | Close a job that will not run or finish |
 | `athena status [<job>] [--json]` | The state of the work, or one job's full trace |
 | `athena intervene "<what>" --why ... --class ... --category ... [--job <job>] [--with-staged]` | Record something you did beyond what a lazy user would; `--with-staged` commits your staged hand changes with it |
@@ -94,6 +95,29 @@ branch on the squash commit, keeping later landed jobs and records, so the next 
 
 Wherever a command takes `<job>`, it accepts a full id, a unique suffix, or `latest`. Every command except
 `stop` and `start` takes `--json`, so an agent can drive Athena through a shell as well as a person can.
+
+## What it does not decide
+
+`athena drain` runs, lands and rates the steward's queue for you, inside limits you set on the command line.
+You no longer run, land and rate each item yourself. What it leaves to you:
+
+- **Proposals above the steward's limit.** An open proposal (a work item on a rung the steward may not change)
+  is listed as *waiting* in the output. `drain` never accepts, approves, rejects or lands one; `athena
+  approve-work` and `athena reject-work` stay your decision.
+- **How much to spend and what is good enough.** The budget, the rating threshold and the job limit are flags of
+  the run. There is no `athena.toml` key for them, so a run's limits are never changed by a committed file.
+- **Whether a landing merges.** `drain` lands through the same pull-request path as `athena land --pr`: it
+  pushes the job's branch, opens the pull request, waits for green checks, and merges only when
+  `[landing] merge_via_rest = true` is set in `athena.toml`. With the setting off, the pull request stays open,
+  the item counts as not landed, and the run ends in `repeated failure` naming it.
+- **Reading a rating as success.** A rating counts toward the target only when it was taken after a landing in
+  this run. A run that landed nothing prints that the page is unchanged and shows the last recorded rating
+  marked as not taken after a landing; it never says `target met`.
+
+**Budget.** Before every model call (a reading, a run, the re-reading of a retry, a rating) `drain` checks that
+the money already spent, as the calls actually cost, plus that call's cap from `athena.toml` fits `--budget`.
+If it does not, nothing more starts, even when an earlier job cost more than its cap. A job starts only when
+its reading and its run both fit, so no request is left read and never run for want of money.
 
 ## Accepting v0 from a clean clone
 

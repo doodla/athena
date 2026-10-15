@@ -2194,3 +2194,45 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Reversal cost:** Low: remove `watch_pages` and its call.
 - **Provenance:** read: `gh.rs`, `pages.yml`; measured: the tests in `crates/athena-cli/tests/external_calls.rs`.
   The live behavior against GitHub was not run.
+
+## D98 · `athena drain` works the steward's queue, lands each item through the pull-request path, and rates only after a landing
+
+- **Case:** The steward queues requests and the audience rates the live page, but running each queued request,
+  landing it and rating the page was done by the owner one command at a time. A first attempt at a loop ran
+  and rated without a land step, so its rating could describe a page the loop had not changed, and could be
+  read as success.
+- **Decision:** (1) *Command:* `athena drain --budget <usd> [--rating-threshold N] [--job-limit N] [--json]`
+  (`crates/athena-cli/src/drain.rs`). The queue is the unread requests on the steward's channel
+  (`steward::queued_work`); a request the user deferred with `ask --later` is not taken. For each, the loop
+  reads and runs the job (accepted by the flag, as `--yes` accepts), lands it with `Athena::land_pr`, the
+  path of `athena land --pr`, and then rates the live page. Only a merged, verified pull request is a landing; an
+  open one is not. (2) *Rated after landing, by code:* the rating call sits behind a landing in the loop, and a
+  rating records `after_landing` from the run's own landed count. `target met` needs `after_landing` and a value
+  at or above the threshold. A run that landed nothing shows the last recorded rating marked as not taken after
+  a landing, says the page is unchanged, and cannot stop with `target met`. (3) *Budget:* before every model
+  call (a reading, a run, the re-reading of a retry, a rating) the money spent so far, by what the calls cost,
+  plus the call's cap from `athena.toml` (reader, job, verifier) must fit `--budget`. A job starts only when
+  its reading and its run caps both fit. A job that cost more than its cap leaves less room, never more.
+  (4) *Stop reasons:* `target met`; `budget spent`, with the rest still queued; `repeated failure`, when
+  one item fails twice, naming it; `queue empty`, stated as not success and spending nothing when the queue is
+  empty at the start; and `job limit`, which the flag name implies. An item has two attempts: after a
+  rejected or failed run the second reads the job again with `athena retry` and runs it; after a passed run
+  that did not land, the second lands again without running. (5) *People:* open proposals (work items above the
+  steward's limit) are listed as waiting; the loop's steps have no way to accept, approve, reject or land one.
+  (6) *No config key:* the budget, threshold and job limit are flags. They are per run and a committed key
+  would change what a run may spend without anyone choosing it for that run. The command exits 0 only when the
+  target was met, and 2 for every other stop.
+- **Alternatives:** (a) A `[drain]` table in `athena.toml`: governed content that needs a verified job to change,
+  for a per-run choice. (b) Rate before and after each landing: a stale rating then looks like a result.
+  (c) Count an open, green pull request as landed: the live page has not changed, so the rating would measure
+  nothing. (d) Check the budget only when a job starts: the retry's re-reading and the rating would spend past it.
+  (e) Take the audience's low-rating proposals as work: they need a person's decision like any proposal.
+- **Tradeoff:** With `[landing] merge_via_rest` off, a drain cannot land anything: the pull request stays open, the
+  item fails twice and the run ends in `repeated failure` naming it. Costs are read from the records after
+  each call, so a call that fails before it records anything is counted as free. The caps are upper bounds
+  from the config, so a budget can stop a drain earlier than the true cost would. The rating waits on the
+  Pages watch of D97 inside the land step, not on anything of its own.
+- **Reversal cost:** Low: remove `drain.rs`, its command and display, and `steward::queued_work`.
+- **Provenance:** measured: the drain unit tests and `crates/athena-cli/tests/drain.rs` (stubbed queue, land
+  step and ratings, and one end-to-end run with the fake agent). The live behavior against GitHub and the
+  live page was not run.
