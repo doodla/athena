@@ -1,0 +1,154 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261015-051600-458x",
+  "n": 1,
+  "at": "2026-10-15T05:16:45.35616498Z",
+  "invocation_seq": 1,
+  "base_commit": "e2b6502fe9be3240dc8c18b9ff26e6d1cff3b8f6",
+  "config_sha256": "36cc8236b906040fe507a6461dabd9eddad491a69739eeee2bf0d38753b1202e",
+  "defaults_sha256": "7ca3db44e78a075634195d4e9722ade9188c5268e963b636ac7b9c38d2bee2c6",
+  "defaults_version": 1,
+  "title": "Build the explainer page outside the verifier's work tree",
+  "summary": "`cargo run -p xtask -- site` must not write into the repository work tree. The default output moves to the cargo target directory (`$CARGO_TARGET_DIR/site`, else `target/site`), which Athena already points outside the snapshot. The Pages workflow and docs follow. Audience: the Athena owner, whose explainer jobs were rejected on the blocker \"the verifier changed its snapshot\".",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "root-cause",
+      "how": "Remove the write into the work tree at its source (the default output location) instead of weakening the verifier's snapshot check."
+    },
+    {
+      "id": "tested",
+      "how": "Add unit tests in xtask for the default output path and for refusing an --out inside the repository root. cargo test and clippy must pass."
+    },
+    {
+      "id": "mechanism",
+      "how": "The rule that building the page never writes into the tracked repository tree is enforced in code (the xtask refuses it) and by a test, not only stated in prose."
+    },
+    {
+      "id": "small",
+      "how": "One focused change to the xtask, the Pages workflow, and the docs that describe them."
+    },
+    {
+      "id": "verified",
+      "how": "A behavior criterion has the verifier run the site build and then check git status."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "The failing write was the verifier building the page with the default `site/` or an `--out` path inside its work tree. I could not confirm which path changed the hash, because the verifier's transcripts are not in the snapshot.",
+    "The producer should first reproduce the problem. Snapshot::work_tree_tree in crates/athena-git/src/snapshot.rs honours .gitignore, and /site is already ignored, so the offending path may be something else, such as an explicit --out.",
+    "Athena's verifier environment sets CARGO_TARGET_DIR to {job_dir}/target/{side}, outside the snapshot (crates/athena-agent/src/env.rs). Writing the page there leaves the verifier's work tree untouched.",
+    "Athena's own snapshot/verify code (crates/athena-core/src/run.rs, snapshot.rs) is not changed. The fix is in the page builder, not in loosening the snapshot-changed check.",
+    "The two rejected explainer jobs' content changes (glossary, CHANGELOG notes) are not part of this request."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "In a verifier-like setting, run `cargo run -p xtask -- site`, then `git status --short`. The status output is empty, and index.html exists under the cargo target directory's site/ folder rather than in the repository root.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`cargo test -p xtask` passes. It includes a test that the default output directory is not inside the repository work tree. It also has a test that `--out` pointing inside the repo root, apart from the ignored target directory, is refused with a clear error. The existing build_writes_index_html test still passes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`cargo clippy --all-targets` and `cargo fmt --check` are clean.",
+      "kind": "behavior"
+    },
+    {
+      "text": ".github/workflows/pages.yml uploads the new output directory, and its path matches the xtask default (for example `target/site`). The workflow stays a thin call into `cargo run --locked -p xtask -- site`.",
+      "kind": "content"
+    },
+    {
+      "text": "docs/design/explainer-site.md and the xtask usage text state where the page is written and why. The reason is that building must not change the verifier's snapshot. The old `/site` location is no longer described as the default.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md [Unreleased] has an entry saying building the explainer page no longer writes into the work tree, so a verifier's snapshot stays unchanged.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "xtask/src/site.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "xtask/src/main.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": ".github/workflows/pages.yml",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "docs/design/explainer-site.md",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": ".gitignore",
+      "action": "modify",
+      "p": 0.25
+    },
+    {
+      "path": "README.md",
+      "action": "modify",
+      "p": 0.1
+    }
+  ],
+  "out_of_scope": [
+    "Changing the explainer's content (glossary, claims, CHANGELOG notes from the rejected jobs).",
+    "Loosening or changing the verifier's snapshot-changed check in crates/athena-core or crates/athena-git.",
+    "Re-running the rejected jobs 20261015-031159-xx7n and 20261015-033631-x3a1.",
+    "Changes to athena.toml or defaults.toml."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.68,
+      "p_verification_passes": 0.65,
+      "p_user_intervenes": 0.12,
+      "cost_usd": {
+        "p10": 0.3,
+        "p50": 0.75,
+        "p90": 1.8
+      },
+      "wall_time_s": {
+        "p10": 330.0,
+        "p50": 720.0,
+        "p90": 1350.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7999999999999999,
+      "p_verification_passes": 0.7111111111111111,
+      "p_user_intervenes": 0.09777777777777778,
+      "cost_usd": {
+        "p10": 0.42419508332788347,
+        "p50": 0.8774205484223001,
+        "p90": 2.1591117569465226
+      },
+      "wall_time_s": {
+        "p10": 515.0193380461162,
+        "p50": 811.2653065320002,
+        "p90": 1359.5511902406606
+      }
+    }
+  },
+  "departures": "Slightly lower acceptance and pass odds than the reference. I could not confirm which path the verifier's build actually wrote, so the producer may have to reproduce the problem and adjust the fix."
+}
