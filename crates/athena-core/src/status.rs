@@ -70,6 +70,9 @@ pub struct StatusView {
     pub unreviewed_introspections: usize,
     /// Open defaults proposals (`athena.defaults-proposal/1`): pending ones only.
     pub proposals: Vec<ProposalView>,
+    /// Open steward proposals (work items of kind proposal with no decision), decided by id with
+    /// `athena approve-work` or `athena reject-work`.
+    pub work_proposals: Vec<WorkProposalView>,
     pub invalid_records: Vec<String>,
     pub next: Vec<String>,
 }
@@ -89,6 +92,32 @@ pub struct ProposalView {
     pub record: String,
     /// The introspections it cites, each with its job.
     pub sources: Vec<String>,
+}
+
+/// An open steward proposal as `athena status` lists it.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkProposalView {
+    pub id: String,
+    pub title: String,
+    pub rung: String,
+    /// The source and the evidence, each as `kind value`.
+    pub source: String,
+    pub evidence: Vec<String>,
+}
+
+fn work_proposal_views(records: &Records) -> Vec<WorkProposalView> {
+    let show =
+        |r: &athena_data::records::Reference| format!("{:?} {}", r.kind, r.value).to_lowercase();
+    crate::work_decisions::open_proposals(records)
+        .into_iter()
+        .map(|w| WorkProposalView {
+            id: w.id.to_string(),
+            title: w.title.clone(),
+            rung: w.rung.as_str().into(),
+            source: show(&w.source),
+            evidence: w.evidence.iter().map(show).collect(),
+        })
+        .collect()
 }
 
 fn proposal_views(records: &Records) -> Vec<ProposalView> {
@@ -429,6 +458,11 @@ impl Athena {
             let id = &p.id;
             next.push(format!("athena accept-proposal {id}   # runs a job that edits defaults.toml · or: athena reject-proposal {id} --why \"...\""));
         }
+        let work_proposals = work_proposal_views(&records);
+        for w in &work_proposals {
+            let id = &w.id;
+            next.push(format!("athena approve-work {id}   # submits a job that carries the proposal's cited content · or: athena reject-work {id} --why \"...\""));
+        }
         let unreviewed = crate::labeled::unreviewed(&records.introspections, &records.class_labels);
         if let Some(oldest) = unreviewed.first() {
             next.push(format!(
@@ -459,6 +493,7 @@ impl Athena {
             pending,
             unreviewed_introspections: unreviewed.len(),
             proposals,
+            work_proposals,
             invalid_records: records.invalid.clone(),
             next,
         })

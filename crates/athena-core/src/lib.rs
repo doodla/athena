@@ -31,6 +31,9 @@
 //!   over a workspace of Athena's code, records and git log (and GitHub through `gh` reads), and queues the
 //!   work items the model reports after Athena has validated them; the requirements ladder decides, for each,
 //!   whether a request is queued or only a proposal;
+//! - [`work_decisions`]: `athena approve-work` and `athena reject-work`, a person's decision on a steward
+//!   proposal, recorded as an appended work-decision record; approving submits a job whose request carries
+//!   the proposal's cited content in full;
 //! - [`pin`]: a study's repository ref resolved to a commit by the core, and mounted read-only.
 
 pub mod admission;
@@ -63,6 +66,7 @@ pub mod store;
 pub mod toolconfig;
 pub mod verify;
 pub mod watcher;
+pub mod work_decisions;
 
 use anyhow::{Result, anyhow, bail};
 use athena_agent::AgentDriver;

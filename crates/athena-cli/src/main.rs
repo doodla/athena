@@ -110,6 +110,25 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Approve an open steward proposal (a work item above the steward's limit) by its id, as `athena status`
+    /// lists it: submit an ordinary job whose request copies the proposal's title, rung, source and the
+    /// content of each cited record, then read it like any request. Enter runs it.
+    ApproveWork {
+        id: String,
+        /// Run without waiting at the prompt (the reading is printed, but its acceptance stays unresolved).
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Reject an open steward proposal by its id, with your reason. The decision is appended as a record.
+    RejectWork {
+        id: String,
+        #[arg(long)]
+        why: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Check a candidate `defaults.toml` against an open or accepted proposal and `defaults.toml` at HEAD:
     /// id, statement, version (base plus one) and parse. Exit 2 on a problem.
     CheckProposal {
@@ -520,6 +539,21 @@ fn run(cli: Cli) -> Result<u8> {
                     "rejected {}; it is not proposed again until new cases arrive",
                     rejected.id
                 );
+            }
+            Ok(0)
+        }
+        Command::ApproveWork { id, yes, json } => {
+            let athena = open(true)?;
+            let proposal = athena.approve_work(&id, &Terminal)?;
+            show_proposal(&athena, proposal, yes, json)
+        }
+        Command::RejectWork { id, why, json } => {
+            let athena = open(true)?;
+            let rejected = athena.reject_work(&id, &why)?;
+            if json {
+                print_json(&rejected)?;
+            } else {
+                println!("rejected work item {}", rejected.work_item);
             }
             Ok(0)
         }

@@ -193,6 +193,8 @@ pub struct Records {
     pub roles: Vec<athena_data::roles::RoleDefinition>,
     /// Every work item a role queued, in file order.
     pub work_items: Vec<athena_data::records::WorkItem>,
+    /// Every decision on a work item (`crate::work_decisions`), in file order.
+    pub work_decisions: Vec<athena_data::records::WorkDecision>,
     /// The steward's model invocations, oldest first. A steward run is no job, so its invocation is kept apart
     /// from `jobs` and never shows as work to do.
     pub steward_runs: Vec<Invocation>,
@@ -253,6 +255,7 @@ impl Records {
                 AnyRecord::ClassLabel(l) => records.class_labels.push(l),
                 AnyRecord::Role(r) => records.roles.push(*r),
                 AnyRecord::WorkItem(w) => records.work_items.push(*w),
+                AnyRecord::WorkDecision(d) => records.work_decisions.push(d),
                 AnyRecord::Invocation(i) if i.role == Role::Steward => {
                     records.steward_runs.push(*i);
                 }
@@ -355,6 +358,8 @@ impl Records {
             || self.introspections.iter().any(|r| &r.id == id)
             || self.classes.iter().any(|r| &r.id == id)
             || self.proposals.iter().any(|r| &r.record == id)
+            || self.work_items.iter().any(|r| &r.id == id)
+            || self.work_decisions.iter().any(|r| &r.id == id)
     }
 
     /// The current state of each decision, folded from its append-only state records.
