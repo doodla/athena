@@ -2257,3 +2257,54 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Reversal cost:** Low: remove `check_page`, `model_contradictions` and `held_back`.
 - **Provenance:** measured: the drain unit tests, `crates/athena-cli/tests/drain.rs`, and a unit test that the
   shipped firstmate model passes.
+
+## D100 · Drain's "target met" needs an outcome-changing landing and a model-backed check of all page text
+
+- **Case:** D99's check read only `model.json` for self-consistency, so a wrong statement in `claims.json`, in the
+  intro, in its transition or in a glossary entry could not hold drain back, and a run whose landings touched
+  only other files (docs, the loop's own code) could still stop on "target met" from a rating of a page it had
+  not changed. A rating by a reader who sees only the page, and a check that never reads the source, are both
+  blind to a wrong fact.
+- **Decision:** (1) *Outcome-changing landing, by code:* a landing returns the paths it changed, read from the
+  landed job's candidate record. `target met` needs at least one landing in the run that changed a path under
+  `studies/` (the page sources), `xtask/` (the site generator) or `.github/workflows/pages.yml` (what publishes
+  it) (`drain::OUTCOME_PATHS`). Otherwise the run goes on, the source check is not asked, and the report says no
+  landing changed the outcome (`outcome_changed`, and an `outcome` line). (2) *All page text against the
+  source:* `RealSteps::check_page` reads every file of every `studies/<name>/` at the head commit except
+  `pin.json` (the reference) and `validation.json` (rule names and pass flags) (`pin::STRUCTURAL_FILES`).
+  Everything else is page text and goes to the checker: `claims.json`, `intro.json` (intro, transition,
+  glossary), `rationales.json`, `findings.json`, `model.json` and any file added later, so a new text file is
+  covered without anyone listing it. The core pins the source at the study's `pin.json` sha through the
+  `Pinner` (and fails if the pin resolves to another commit), mounts it read-only beside the text, and asks
+  one model call per study (`Athena::check_study_text`). The checker reports each statement the source
+  contradicts and each fact it leaves out, with the file and the source lines, and lists the files it read; a
+  file it does not list, a report that does not parse, a pin that fails, or text over 400,000 bytes fails the
+  check. The failing statements are named in `held_back`. (3) *Floor:* each study's `model_contradictions`
+  check from D99 still runs first, costs nothing, and fails the check without a model call. (4) *Budget:* the
+  check is a model call per study, so `Steps::check_cap` is the verifier's cap times the number of studies
+  and must fit the budget before the check starts, or drain stops as `budget spent`; what the calls cost is
+  added to the spend whether the check passes or not. (5) *Role:* the checker runs as the verifier role, on the
+  verifier's model, cap and timeout, with `Read`, `Grep` and `Glob` only; it is not the audience, whose
+  stored prompt and rating records mean something else.
+- **Alternatives:** (a) Check only `claims.json`: the intro, transition and glossary are what a newcomer reads
+  first and would stay unchecked. (b) A list of the files to check: a file added later is silently
+  unchecked, so the list is of the exempt files instead, and the default is covered. (c) One call over all
+  studies: simpler to reserve, but one study's text can crowd out another's in one context, and the
+  reserve for one call cannot tell how many studies it covers; one call per study keeps the reserve exact.
+  (d) Count a landing outcome-changing by the job's declared deliverables: a producer can change more than it
+  declared; the candidate's change list is what landed. (e) Keep only the model-free floor: it finds a
+  model that contradicts itself and nothing the source contradicts. (f) A new role for the checker: a record
+  schema change for a call that is not a job.
+- **Tradeoff:** The check costs a model call per study on every rating at the target, and only a model
+  reads the source, so it can miss a wrong fact or report one that is not wrong; a person still decides
+  what to do with a held-back finding. The checker's invocation is not committed as a record (it belongs to
+  no job, and a verifier invocation without a job would appear as one), so its cost is in the drain report
+  and not in the records. A landing whose candidate record cannot be read counts as changing nothing. Paths
+  are matched by prefix, so a new site generator outside `xtask/` needs `OUTCOME_PATHS` extended.
+- **Reversal cost:** Low: remove `check_study_text`, the `Steps::check_cap` reserve and `OUTCOME_PATHS`; D99's floor
+  remains.
+- **Provenance:** measured: `crates/athena-cli/tests/drain.rs` (a wrong statement injected into the claims, the
+  intro, the transition and a glossary entry, plus an omitted fact, each failing the real `check_page` with a
+  fake agent and a stub pinner and holding drain back; a text file added to a study is covered; the reserve
+  scales with the study count; the cost is in the spend; a landing outside the page sources cannot meet the
+  target) and the unit tests in `drain.rs` and `pin.rs`. The live model was not run.

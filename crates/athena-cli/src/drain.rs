@@ -13,10 +13,24 @@
 //!   by what they were expected to cost, plus the call's cap must fit the budget ([`Budget::fits`]). That covers
 //!   a job's reading, its run, the re-reading of a retry, and the rating. A job is started only when its
 //!   reading and its run both fit, so a request is not left read and never run for want of money.
-//! - **A rating alone does not end the run.** A reader who sees only the page cannot catch a wrong fact, so a
-//!   rating at the target stops the run as "target met" only when [`Steps::check_page`] also passes. When it
-//!   fails, drain keeps running and the report says which check held it back ([`Report::held_back`]). The real
-//!   check ([`model_contradictions`]) reads the study models at the head commit.
+//! - **A rating alone does not end the run.** "Target met" needs two more things, both by code:
+//!   1. *An outcome-changing landing.* A rating after landings that touched only other paths (for example
+//!      docs or the loop's own code) rates a page that did not change. At least one landing in the run must
+//!      have changed a path in [`OUTCOME_PATHS`]: `studies/`, the site generator (`xtask/`) or the publish
+//!      workflow. Otherwise drain keeps running and the report says the landing did not change the outcome
+//!      ([`Report::outcome_changed`]). The paths come from the landed job's candidate record.
+//!   2. *A source check of all page text.* A reader who sees only the page cannot catch a wrong fact, so
+//!      [`Steps::check_page`] must pass. The real check first runs the model-free floor
+//!      ([`model_contradictions`] over each study's `model.json`), then reads every file of every study at the
+//!      head commit except the structural ones (`athena_core::pin::STRUCTURAL_FILES`: the pin and the rule
+//!      results) against that study's pinned source with one model call per study
+//!      (`athena_core::Athena::check_study_text`). That covers `claims.json`, `intro.json` (intro, transition
+//!      and glossary) and any text file added later. A contradicted or omitted statement fails it. When it
+//!      fails, drain keeps running and the report names the statement ([`Report::held_back`]).
+//!
+//!   The source check is a model call per study, so it is guarded like the others: the reserve is
+//!   [`Steps::check_cap`] (the verifier's cap times the number of studies), it must fit the budget or drain
+//!   stops as "budget spent", and what the calls cost is added to the spend ([`Check::cost`]).
 //! - **Retry.** An item gets two attempts. After a rejected or failed run the second attempt reads the job
 //!   again with `athena retry`, then runs it. After a run that passed but did not land, it lands again. Two
 //!   failures stop the loop, naming the item.
@@ -168,11 +182,23 @@ pub struct Run {
     pub cost: f64,
 }
 
+/// The paths whose change can change the explainer page: the studies it is written from (`studies/`, the
+/// page sources), the site generator (`xtask/`) and the workflow that publishes the page. A landing counts
+/// toward "target met" only if it changed at least one path under these.
+pub const OUTCOME_PATHS: [&str; 3] = ["studies/", "xtask/", ".github/workflows/pages.yml"];
+
+/// Whether a landing that changed `paths` can have changed the explainer page.
+pub fn changes_outcome(paths: &[String]) -> bool {
+    paths
+        .iter()
+        .any(|p| OUTCOME_PATHS.iter().any(|root| p.starts_with(root)))
+}
+
 /// The result of landing a verified job through the pull-request path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Landing {
-    /// Merged and verified: the change is on the default branch.
-    Landed,
+    /// Merged and verified: the change is on the default branch. `changed` is every path the change touched.
+    Landed { changed: Vec<String> },
     /// Anything short of that, with why. An open pull request is not a landing.
     NotLanded(String),
 }
@@ -187,11 +213,13 @@ pub struct Rate {
 
 /// The result of checking the page against the pinned source, which a rating cannot do: a reader who sees only
 /// the page cannot tell that a fact on it is wrong.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Check {
     pub passed: bool,
     /// What the check found, or what it covered when it passed.
     pub detail: String,
+    /// What the check's model calls cost, in US dollars; zero for a check that made none.
+    pub cost: f64,
 }
 
 impl Check {
@@ -199,6 +227,7 @@ impl Check {
         Check {
             passed: true,
             detail: detail.into(),
+            cost: 0.0,
         }
     }
 
@@ -206,7 +235,13 @@ impl Check {
         Check {
             passed: false,
             detail: detail.into(),
+            cost: 0.0,
         }
+    }
+
+    /// The same check, with what its model calls cost.
+    pub fn costing(self, cost: f64) -> Check {
+        Check { cost, ..self }
     }
 }
 
@@ -222,16 +257,26 @@ pub trait Steps {
     fn run(&self, job: &str) -> Run;
     fn land(&self, job: &str) -> Landing;
     fn rate(&self) -> Rate;
-    /// Checks the page against the pinned source. It costs nothing; it is asked only when a rating reaches the
-    /// target, and the target is met only if it passes.
+    /// Checks every text input of the page against the pinned source, with a model call per study. It is asked
+    /// only when a rating reaches the target after a landing that changed the outcome, and the target is met
+    /// only if it passes. It reports what it cost in [`Check::cost`].
     fn check_page(&self) -> Check;
+    /// The most [`Steps::check_page`] may cost: the cap of one call times the number of studies it checks. The
+    /// loop asks the budget for this much before it calls the check.
+    fn check_cap(&self) -> f64;
 }
 
 /// Why the loop stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Stop {
-    /// A rating taken after a landing reached the target.
+    /// A rating taken after a landing reached the target, and two more things hold. (1) At least one landing in
+    /// this run changed what the explainer is built from ([`OUTCOME_PATHS`]: `studies/`, the site generator or
+    /// the publish workflow); a landing that changed only other paths leaves the page as it was, so its rating
+    /// proves nothing. (2) Every text input of every study (all files but those in
+    /// `athena_core::pin::STRUCTURAL_FILES`: claims, the intro, its transition and glossary, and the rest)
+    /// passed a model-backed check against the pinned source, which fails on a contradicted or omitted
+    /// statement; the model-free self-consistency check of each model stays as a floor under it.
     TargetMet,
     /// The next call's cap did not fit what was left of the budget.
     BudgetSpent,
@@ -265,7 +310,7 @@ impl Stop {
     pub fn meaning(self) -> &'static str {
         match self {
             Stop::TargetMet => {
-                "a rating taken after a landing in this run reached the target rating and the page passed its check against the pinned source"
+                "a rating taken after a landing in this run reached the target rating, a landing in this run changed what the explainer is built from, and all of the page's text passed its check against the pinned source"
             }
             Stop::BudgetSpent => {
                 "spend plus the next model call's cap would exceed the budget; the rest stays queued"
@@ -317,6 +362,9 @@ pub struct Report {
     pub landed: u32,
     /// True when nothing landed, so the page is as it was.
     pub page_unchanged: bool,
+    /// Whether a landing in this run changed a path the explainer is built from ([`OUTCOME_PATHS`]). When
+    /// something landed and this is false, the landings did not change the outcome.
+    pub outcome_changed: bool,
     pub rating: Option<RatingLine>,
     /// Set when a rating reached the target but the check of the page against the pinned source failed, so
     /// drain kept running: what the check found.
@@ -345,6 +393,8 @@ struct Drain<'a> {
     jobs: Vec<JobLine>,
     started: u32,
     landed: Vec<String>,
+    /// Landings in this run that changed a path in [`OUTCOME_PATHS`].
+    outcome_landings: u32,
     rating: Option<RatingLine>,
     held_back: Option<String>,
     notes: Vec<String>,
@@ -450,8 +500,15 @@ impl Drain<'_> {
 
     fn land(&mut self, job: &str, at: usize) -> bool {
         match self.steps.land(job) {
-            Landing::Landed => {
+            Landing::Landed { changed } => {
                 self.jobs[at].landing = "landed".into();
+                if changes_outcome(&changed) {
+                    self.outcome_landings += 1;
+                } else {
+                    self.ui.line(&format!(
+                        "drain      {job} landed but changed nothing the explainer is built from"
+                    ));
+                }
                 true
             }
             Landing::NotLanded(why) => {
@@ -556,26 +613,47 @@ impl Drain<'_> {
                 // The only place a rating of this run is made, and it is made after a landing.
                 let after_landing = !self.landed.is_empty();
                 let rated_enough = after_landing && value >= self.limits.target_rating;
-                // A rating cannot catch a wrong fact, so it ends the run only with a passing source check.
                 self.held_back = None;
-                let met_target = rated_enough
-                    && {
-                        let check = self.steps.check_page();
-                        if !check.passed {
-                            self.ui.line(&format!(
-                            "drain      rating {value} reached the target but the source check failed: {}",
-                            check.detail
-                        ));
-                            self.held_back = Some(check.detail);
-                        }
-                        check.passed
-                    };
                 self.rating = Some(RatingLine {
                     value,
                     after_landing,
-                    met_target,
+                    met_target: false,
                 });
-                met_target.then_some(Stop::TargetMet)
+                if !rated_enough {
+                    return None;
+                }
+                // A rating after landings that left the page's sources alone says nothing new about the page.
+                if self.outcome_landings == 0 {
+                    self.ui.line(&format!(
+                        "drain      rating {value} reached the target but no landing changed the outcome"
+                    ));
+                    return None;
+                }
+                // A rating cannot catch a wrong fact, so it ends the run only with a passing source check. The
+                // check is a model call per study, so its whole cap must fit before it starts.
+                let cap = self.steps.check_cap();
+                if !self.budget.fits(cap) {
+                    self.notes.push(format!(
+                        "the source check was not made: its cap of ${cap:.2} does not fit what is left of the budget"
+                    ));
+                    return Some(Stop::BudgetSpent);
+                }
+                let check = self.steps.check_page();
+                self.budget.add(check.cost);
+                if !check.passed {
+                    self.ui.line(&format!(
+                        "drain      rating {value} reached the target but the source check failed: {}",
+                        check.detail
+                    ));
+                    self.held_back = Some(check.detail);
+                    return None;
+                }
+                self.rating = Some(RatingLine {
+                    value,
+                    after_landing,
+                    met_target: true,
+                });
+                Some(Stop::TargetMet)
             }
             None => {
                 self.notes.push(format!(
@@ -602,6 +680,7 @@ pub fn drain(steps: &dyn Steps, limits: Limits, ui: &dyn Ui) -> anyhow::Result<R
         jobs: Vec::new(),
         started: 0,
         landed: Vec::new(),
+        outcome_landings: 0,
         rating: None,
         held_back: None,
         notes: Vec::new(),
@@ -654,6 +733,7 @@ pub fn drain(steps: &dyn Steps, limits: Limits, ui: &dyn Ui) -> anyhow::Result<R
         target_rating: limits.target_rating,
         landed,
         page_unchanged: landed == 0,
+        outcome_changed: d.outcome_landings > 0,
         rating,
         held_back: d.held_back,
         queued: view
@@ -690,7 +770,10 @@ impl Lander for PrLander {
             ui,
         );
         match report {
-            Ok(report) if report.link.state == LinkState::Landed => Landing::Landed,
+            // The paths it changed are read from the job's candidate record by `RealSteps::land`.
+            Ok(report) if report.link.state == LinkState::Landed => Landing::Landed {
+                changed: Vec::new(),
+            },
             Ok(report) => Landing::NotLanded(format!(
                 "pull request {} is {:?}, checks {:?}; it is landed once it is merged",
                 report.link.pr_number, report.link.state, report.checks
@@ -742,6 +825,78 @@ pub fn model_contradictions(model: &serde_json::Value) -> Vec<String> {
         }
     }
     out
+}
+
+/// One study directory's files: each file's path relative to the directory, with its bytes.
+pub type StudyFiles = Vec<(String, Vec<u8>)>;
+
+/// The files of each study directory under `studies/` at `commit`, with the study's name. Studies are in name
+/// order.
+pub fn study_files(
+    git: &athena_git::Git,
+    commit: &str,
+) -> anyhow::Result<Vec<(String, StudyFiles)>> {
+    let mut studies: std::collections::BTreeMap<String, StudyFiles> =
+        std::collections::BTreeMap::new();
+    for entry in git.ls_tree_under(commit, "studies")? {
+        let Some((name, file)) = entry
+            .path
+            .strip_prefix("studies/")
+            .and_then(|rest| rest.split_once('/'))
+        else {
+            continue;
+        };
+        if let Some(bytes) = git.show_file(commit, &entry.path)? {
+            studies
+                .entry(name.to_string())
+                .or_default()
+                .push((file.to_string(), bytes));
+        }
+    }
+    Ok(studies.into_iter().collect())
+}
+
+/// A study's page text and pin, from its files. Every file but those in `athena_core::pin::STRUCTURAL_FILES`
+/// is page text, so a text file added to a study is checked without anyone listing it. Errs, saying why, when
+/// the study has no usable pin or a page file is not text.
+pub fn study_text(
+    name: &str,
+    files: &[(String, Vec<u8>)],
+) -> Result<athena_core::pin::StudyText, String> {
+    let pin = files
+        .iter()
+        .find(|(f, _)| f == "pin.json")
+        .ok_or("it has no pin.json, so there is no source to check against")?;
+    let pin: serde_json::Value =
+        serde_json::from_slice(&pin.1).map_err(|e| format!("pin.json is not valid JSON: {e}"))?;
+    let field = |key: &str| {
+        pin.get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .ok_or(format!("pin.json has no {key}"))
+    };
+    let sha = field("sha")?;
+    if !athena_core::pin::is_full_sha(&sha) {
+        return Err(format!("pin.json's sha {sha:?} is not a full commit id"));
+    }
+    let mut text = Vec::new();
+    for (file, bytes) in files
+        .iter()
+        .filter(|(f, _)| athena_core::pin::is_page_text(f))
+    {
+        let body = String::from_utf8(bytes.clone())
+            .map_err(|_| format!("{file} is not text, so it cannot be checked"))?;
+        text.push(athena_core::pin::TextFile {
+            name: file.clone(),
+            text: body,
+        });
+    }
+    Ok(athena_core::pin::StudyText {
+        name: name.to_string(),
+        repository_url: field("repository_url")?,
+        sha,
+        files: text,
+    })
 }
 
 /// The steps against a real repository.
@@ -913,42 +1068,93 @@ impl Steps for RealSteps<'_> {
     }
 
     fn land(&self, job: &str) -> Landing {
-        self.lander.land(self.athena, job, self.ui)
+        match self.lander.land(self.athena, job, self.ui) {
+            // What the landing changed is what the job's candidate changed; a landing whose candidate cannot be
+            // read is taken to have changed nothing the page is built from.
+            Landing::Landed { .. } => Landing::Landed {
+                changed: self
+                    .records()
+                    .ok()
+                    .and_then(|r| {
+                        r.jobs.get(job).and_then(|j| {
+                            j.candidate
+                                .as_ref()
+                                .map(|c| c.changes.iter().map(|e| e.path.clone()).collect())
+                        })
+                    })
+                    .unwrap_or_default(),
+            },
+            other => other,
+        }
+    }
+
+    fn check_cap(&self) -> f64 {
+        let studies = self
+            .athena
+            .head()
+            .and_then(|head| study_files(&self.athena.git, &head))
+            .map_or(1, |s| s.len().max(1));
+        let one = self.caps().map_or(0.0, |c| c.rate);
+        one * studies as f64
     }
 
     fn check_page(&self) -> Check {
-        let studies = self.athena.head().and_then(|head| {
-            let entries = self.athena.git.ls_tree_under(&head, "studies")?;
-            let mut models = Vec::new();
-            for e in entries.iter().filter(|e| e.path.ends_with("/model.json")) {
-                if let Some(bytes) = self.athena.git.show_file(&head, &e.path)? {
-                    models.push((e.path.clone(), bytes));
-                }
-            }
-            Ok(models)
-        });
-        let models = match studies {
-            Ok(models) => models,
+        let studies = match self
+            .athena
+            .head()
+            .and_then(|head| study_files(&self.athena.git, &head))
+        {
+            Ok(studies) => studies,
             Err(error) => return Check::fail(format!("the studies could not be read: {error:#}")),
         };
+        if studies.is_empty() {
+            return Check::fail(
+                "no study was found under studies/, so there is no page text to check",
+            );
+        }
+        // The floor: each model must be consistent with itself. It costs nothing, so it goes first.
         let mut problems = Vec::new();
-        for (path, bytes) in &models {
-            match serde_json::from_slice::<serde_json::Value>(bytes) {
-                Ok(model) => problems.extend(
-                    model_contradictions(&model)
-                        .into_iter()
-                        .map(|p| format!("{path}: {p}")),
-                ),
-                Err(error) => problems.push(format!("{path}: not valid JSON: {error}")),
+        for (name, files) in &studies {
+            if let Some((_, bytes)) = files.iter().find(|(f, _)| f == "model.json") {
+                match serde_json::from_slice::<serde_json::Value>(bytes) {
+                    Ok(model) => problems.extend(
+                        model_contradictions(&model)
+                            .into_iter()
+                            .map(|p| format!("studies/{name}/model.json: {p}")),
+                    ),
+                    Err(error) => problems.push(format!(
+                        "studies/{name}/model.json: not valid JSON: {error}"
+                    )),
+                }
             }
+        }
+        if !problems.is_empty() {
+            return Check::fail(problems.join("; "));
+        }
+        // The source check: every page text file of every study, against that study's pinned source.
+        let mut cost = 0.0;
+        let mut files_checked = 0;
+        for (name, files) in &studies {
+            let study = match study_text(name, files) {
+                Ok(study) => study,
+                Err(why) => {
+                    problems.push(format!("studies/{name}: {why}"));
+                    continue;
+                }
+            };
+            files_checked += study.files.len();
+            let report = self.athena.check_study_text(&study);
+            cost += report.cost_usd;
+            problems.extend(report.problems);
         }
         if problems.is_empty() {
             Check::pass(format!(
-                "{} study model(s) are consistent with themselves",
-                models.len()
+                "{} study(ies), {files_checked} page text file(s), match the pinned source and are consistent with themselves",
+                studies.len()
             ))
+            .costing(cost)
         } else {
-            Check::fail(problems.join("; "))
+            Check::fail(problems.join("; ")).costing(cost)
         }
     }
 
@@ -1029,10 +1235,15 @@ mod tests {
         }
         fn land(&self, job: &str) -> Landing {
             self.calls.borrow_mut().push(format!("land {job}"));
-            Landing::Landed
+            Landing::Landed {
+                changed: vec!["studies/s/claims.json".into()],
+            }
         }
         fn check_page(&self) -> Check {
             Check::pass("stub")
+        }
+        fn check_cap(&self) -> f64 {
+            0.5
         }
         fn rate(&self) -> Rate {
             self.calls.borrow_mut().push("rate".into());
@@ -1126,6 +1337,51 @@ mod tests {
         let text = include_str!("../../../studies/firstmate-work-handling/model.json");
         let model: serde_json::Value = serde_json::from_str(text).unwrap();
         assert_eq!(model_contradictions(&model), Vec::<String>::new());
+    }
+
+    #[test]
+    fn only_paths_the_explainer_is_built_from_change_the_outcome() {
+        let paths = |p: &[&str]| p.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        for yes in [
+            "studies/firstmate-work-handling/intro.json",
+            "xtask/src/site.rs",
+            ".github/workflows/pages.yml",
+        ] {
+            assert!(changes_outcome(&paths(&["README.md", yes])), "{yes}");
+        }
+        for no in [
+            "README.md",
+            "crates/athena-cli/src/drain.rs",
+            "docs/decisions.md",
+            "studies-notes.md",
+            ".github/workflows/ci.yml",
+        ] {
+            assert!(!changes_outcome(&paths(&[no])), "{no}");
+        }
+        assert!(!changes_outcome(&[]));
+    }
+
+    #[test]
+    fn a_study_file_added_later_is_page_text_and_a_study_without_a_pin_cannot_be_checked() {
+        let file = |name: &str, body: &str| (name.to_string(), body.as_bytes().to_vec());
+        let pin = format!(
+            r#"{{"repository_url": "https://example.com/r.git", "sha": "{}"}}"#,
+            "b".repeat(40)
+        );
+        let files = vec![
+            file("pin.json", &pin),
+            file("validation.json", "{}"),
+            file("claims.json", "[]"),
+            file("notes.md", "a new text file"),
+        ];
+        let study = study_text("s", &files).unwrap();
+        let names: Vec<&str> = study.files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["claims.json", "notes.md"]);
+        assert!(study_text("s", &files[1..]).is_err(), "no pin");
+        let bad = vec![file("pin.json", &pin), file("blob.bin", "")];
+        let mut bad = bad;
+        bad[1].1 = vec![0xff, 0xfe];
+        assert!(study_text("s", &bad).unwrap_err().contains("not text"));
     }
 
     #[test]
