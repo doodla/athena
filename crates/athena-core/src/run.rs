@@ -447,19 +447,44 @@ fn ran_full_tests(report: &ProducerReport) -> bool {
 }
 
 /// The accepted criteria the report does not show as met: marked unmet, or missing from `criteria_check`.
-/// A criterion matches an entry by its exact text.
-fn unmet_criteria(report: &ProducerOutput, accepted: &AcceptedReading) -> Vec<String> {
+/// A criterion matches an entry by its text with numbering, kind tag, case, spacing and trailing
+/// punctuation ignored (see [`criterion_key`]); any other difference in words is a different criterion.
+pub(crate) fn unmet_criteria(report: &ProducerOutput, accepted: &AcceptedReading) -> Vec<String> {
     accepted
         .criteria
         .iter()
         .map(|(text, _)| text)
         .filter(|text| {
+            let key = criterion_key(text);
             !report.criteria_check.iter().any(|c| {
-                c.criterion.trim() == text.trim() && c.status == CriterionStatusOutput::Met
+                c.status == CriterionStatusOutput::Met && criterion_key(&c.criterion) == key
             })
         })
         .cloned()
         .collect()
+}
+
+/// A criterion's text reduced for comparison: no leading number (`1.`, `2)`, `3:`), no leading `[kind]`
+/// tag, lowercase, single spaces, no trailing punctuation.
+fn criterion_key(text: &str) -> String {
+    let mut rest = text.trim();
+    let digits = rest.chars().take_while(char::is_ascii_digit).count();
+    if digits > 0
+        && let Some(after) = rest[digits..].strip_prefix(['.', ')', ':'])
+    {
+        rest = after.trim_start();
+    }
+    if let Some(inner) = rest.strip_prefix('[')
+        && let Some(end) = inner.find(']')
+        && inner[..end].chars().all(|c| c.is_ascii_alphabetic())
+    {
+        rest = inner[end + 1..].trim_start();
+    }
+    let words = rest.split_whitespace().collect::<Vec<_>>().join(" ");
+    words
+        .trim_end_matches(|c: char| c.is_ascii_punctuation() && c != '`' && c != ')')
+        .trim_end()
+        .to_lowercase()
 }
 
 impl Athena {
@@ -579,11 +604,28 @@ impl Athena {
                         .join("; ")
                 ));
             }
+            // Keep the redacted report that failed the check: the attempt's invocation record carries it
+            // in `detail`, so each attempt's report stays with the job's records.
+            let kept = {
+                let attempt = closing
+                    .new_invocations
+                    .last_mut()
+                    .expect("the attempt's invocation was just recorded");
+                attempt.detail = Some(format!(
+                    "self-check failed: {}; redacted report: {}",
+                    problems.join("; "),
+                    serde_json::to_string(&report)?
+                ));
+                format!(
+                    "the detail of {}",
+                    AnyRecord::Invocation(Box::new(attempt.clone())).canonical_path()
+                )
+            };
             if send_backs >= PRODUCER_SEND_BACKS {
                 closing.happened = self.failure(
                     ctx,
                     &format!(
-                        "the producer's report still had problems when sent back: {}",
+                        "the producer's report still had problems when sent back: {}; the report is kept in {kept}",
                         problems.join("; ")
                     ),
                 );

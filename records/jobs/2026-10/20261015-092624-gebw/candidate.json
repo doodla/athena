@@ -1,0 +1,105 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261015-092624-gebw",
+  "base_commit": "b14266b0ba2a2bb4193d39c5ca7d402b133fb360",
+  "base_fingerprint": "sha256:c27c121be4dc7a10b2e5a3fc51ca684ab8c43a2c380027c37d463c1f61e7a464",
+  "previous_job": "20261015-081918-ry8k",
+  "candidate_commit": "9ddbd9a79ba754766a7b565160c7b2d543d530e0",
+  "candidate_tree": "4aa65c7ac9ae1f6f8f885c965cea14f43d8de452",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 67374
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 73379
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 23562
+    }
+  ],
+  "fingerprint": "sha256:aaddd84e3b37869578253104151625a632fb48009e0038c43afe82679ddff70f",
+  "violations": [],
+  "producer_report": {
+    "summary": "Two changes to the producer self-check in run.rs. (1) Matching: `unmet_criteria` now compares criteria through `criterion_key`, which ignores a leading number (`1.`, `2)`, `3:`), a leading `[kind]` tag, letter case, repeated or surrounding whitespace, and trailing punctuation. A criterion that is absent, not marked met, or worded differently is still listed. The old test was exact-text equality, which I take to be the likely cause of the k2ej and 5qem failures, but I could not confirm that because the original reports are not recorded. (2) Persistence: when the self-check fails an attempt, the redacted report is stored, with the problems found, in the `detail` of that attempt's producer invocation record. This covers both the first attempt and the send-back. The final failure reason now ends with \"the report is kept in the detail of <invocation record path>\". I first tried separate `producer-report-N` files, but the gate refuses anything under records/ that is not a JSON record or a documented brief. Using `detail` avoids a new record schema. Tests and a CHANGELOG entry are added.",
+    "files": [
+      "crates/athena-core/src/run.rs",
+      "crates/athena-core/src/run_pin_tests.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "The run exited with no error. The output was too large to read in full, and I could not search the saved copy because it is outside the working directory. Separately, `cargo test --locked -p athena-core run_pin` showed 11 of 11 passing."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "When the self-check fails a job, both on the final send-back and on the first, the redacted producer report (summary, checks_run, criteria_check with statuses and evidence) is written under the job's directory or records, and the failure reason names where it is. Run cargo test to check a test that fails a job through a fake producer and finds the report.",
+        "status": "met",
+        "evidence": "The test `a_report_that_fails_the_self_check_is_kept_for_both_attempts_and_the_reason_names_it` in run_pin_tests.rs uses a fake producer that always marks a criterion unmet. It reads both producer invocation records from HEAD and parses the stored report, checking summary, criteria_check status and evidence. It also asserts the final failure reason contains the path of the second record. The test passes. The report is the serialized ProducerReport, which includes checks_run."
+      },
+      {
+        "criterion": "A report whose criteria_check entry differs from the accepted criterion only by a leading number, a [content]/[behavior] kind tag, letter case, surrounding or repeated whitespace, or trailing punctuation counts as reporting that criterion; cargo test has unit tests for unmet_criteria covering each variant.",
+        "status": "met",
+        "evidence": "The test `a_criterion_reported_with_only_cosmetic_differences_counts_as_reported` covers all of these variants, and a decorated accepted text. It passes."
+      },
+      {
+        "criterion": "A criterion absent from criteria_check, or reported with a status other than met, is still listed as unmet, and a different criterion with similar words is not matched; unit tests show it.",
+        "status": "met",
+        "evidence": "The test `a_missing_unmet_or_different_criterion_is_still_listed` covers an absent criterion, an unmet status, an empty report, and similar-worded criteria. It passes."
+      },
+      {
+        "criterion": "A plain criterion such as 'cargo test passes' reported as met with evidence is not failed by the check, shown in a test.",
+        "status": "met",
+        "evidence": "The test `a_plain_criterion_reported_met_with_evidence_is_not_failed` passes."
+      },
+      {
+        "criterion": "cargo fmt --check, cargo clippy --all-targets and cargo test pass for the workspace.",
+        "status": "met",
+        "evidence": "All three commands ran with no error (clippy with -D warnings and --locked)."
+      },
+      {
+        "criterion": "The kept report goes through the redactor and holds no secrets or personal data.",
+        "status": "met",
+        "evidence": "The kept value is the output of `redact_report`, which runs the redactor over the summary, lists, checks and criteria. The persisted JSON is serialized from that redacted `ProducerReport`, not from the raw output."
+      }
+    ],
+    "open_issues": [
+      "The deliverable list names crates/athena-core/src/records.rs, which does not exist (the records module is in athena-data), and none was needed, so it is unchanged.",
+      "The report is in the invocation `detail` as one line of JSON. A dedicated record type would be tidier but needs a schema change.",
+      "The kept report covers only failed attempts. A successful attempt after a send-back keeps its report in the candidate record, as before."
+    ],
+    "mistakes": [
+      "My first two designs wrote report files, `.json` and then `.txt`, under records/. The gate refused both. I switched to the invocation record's `detail` field."
+    ],
+    "learnings": [
+      "The gate refuses any non-record file under records/ except documented Markdown briefs, so extra artifacts must live inside existing records.",
+      "`Closing.files` are committed even when the job fails, and invocation records are rewritten from `closing.new_invocations` at close.",
+      "`clean_job` deletes the job directory on close, so nothing written there survives a failed job.",
+      "A pinned study (`pins_repo`) skips the full-test requirement, so the study fake works for self-check tests."
+    ],
+    "desires": [
+      "Bash could not run tail or grep, and the Grep tool could not read outside the working directory. I could not search the saved full cargo test output, so I could not confirm the summary lines."
+    ]
+  }
+}

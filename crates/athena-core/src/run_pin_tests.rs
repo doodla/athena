@@ -490,3 +490,143 @@ fn when_the_budget_runs_out_before_the_rerun_the_reason_reports_the_budget() {
         finished.reason
     );
 }
+
+fn accepted(criteria: &[&str]) -> athena_context::briefs::AcceptedReading {
+    athena_context::briefs::AcceptedReading {
+        n: 1,
+        title: "t".into(),
+        summary: "s".into(),
+        assumptions: vec![],
+        criteria: criteria
+            .iter()
+            .map(|c| (c.to_string(), athena_data::records::CriterionKind::Behavior))
+            .collect(),
+        deliverables: vec![],
+        out_of_scope: vec![],
+        defaults: vec![],
+    }
+}
+
+fn report(checks: &[(&str, &str)]) -> athena_context::outputs::ProducerOutput {
+    let checks: Vec<_> = checks
+        .iter()
+        .map(|(c, s)| json!({ "criterion": c, "status": s, "evidence": "ran it" }))
+        .collect();
+    serde_json::from_value(json!({
+        "summary": "done", "files": [], "checks_run": [], "criteria_check": checks,
+        "open_issues": [], "mistakes": [], "learnings": [], "desires": []
+    }))
+    .unwrap()
+}
+
+#[test]
+fn a_criterion_reported_with_only_cosmetic_differences_counts_as_reported() {
+    let text = "Run cargo test to check a test";
+    for variant in [
+        text,
+        "3. Run cargo test to check a test",
+        "3) Run cargo test to check a test",
+        "[behavior] Run cargo test to check a test",
+        "[content] Run cargo test to check a test",
+        "2. [behavior] Run cargo test to check a test",
+        "RUN CARGO TEST TO CHECK A TEST",
+        "  Run   cargo\ttest to  check a test  ",
+        "Run cargo test to check a test.",
+        "Run cargo test to check a test;",
+    ] {
+        let unmet = crate::run::unmet_criteria(&report(&[(variant, "met")]), &accepted(&[text]));
+        assert!(unmet.is_empty(), "{variant:?} was not matched: {unmet:?}");
+    }
+    // The accepted text itself may carry the decoration.
+    let unmet = crate::run::unmet_criteria(
+        &report(&[("cargo test passes", "met")]),
+        &accepted(&["Cargo test passes."]),
+    );
+    assert!(unmet.is_empty());
+}
+
+#[test]
+fn a_missing_unmet_or_different_criterion_is_still_listed() {
+    let two = accepted(&["cargo test passes", "the docs name the flag"]);
+    let unmet = crate::run::unmet_criteria(&report(&[("cargo test passes", "met")]), &two);
+    assert_eq!(unmet, vec!["the docs name the flag".to_string()]);
+    let unmet = crate::run::unmet_criteria(
+        &report(&[
+            ("cargo test passes", "unmet"),
+            ("the docs name the flag", "met"),
+        ]),
+        &two,
+    );
+    assert_eq!(unmet, vec!["cargo test passes".to_string()]);
+    // Similar words are a different criterion.
+    let unmet = crate::run::unmet_criteria(
+        &report(&[("cargo test fails", "met"), ("the docs name a flag", "met")]),
+        &two,
+    );
+    assert_eq!(unmet.len(), 2);
+    let unmet = crate::run::unmet_criteria(&report(&[]), &two);
+    assert_eq!(unmet.len(), 2);
+}
+
+#[test]
+fn a_plain_criterion_reported_met_with_evidence_is_not_failed() {
+    let unmet = crate::run::unmet_criteria(
+        &report(&[("cargo test passes", "met")]),
+        &accepted(&["cargo test passes"]),
+    );
+    assert!(unmet.is_empty(), "{unmet:?}");
+}
+
+#[test]
+fn a_report_that_fails_the_self_check_is_kept_for_both_attempts_and_the_reason_names_it() {
+    let (dir, git) = repo(&config(true));
+    let state = tempfile::tempdir().unwrap();
+    // The producer marks one criterion unmet on every attempt.
+    let tweak: Tweak = Arc::new(|spec, turn| {
+        if spec.role == Role::Producer {
+            turn.structured.as_mut().unwrap()["criteria_check"][1]["status"] = json!("unmet");
+        }
+    });
+    let athena = athena_with(
+        &dir,
+        &state,
+        CountingPinner::new(FAKE_SHA),
+        Arc::default(),
+        tweak,
+    );
+    let proposal = athena.ask("study the demo", &Quiet).unwrap();
+    let GoResult::Finished(finished) = athena
+        .go(proposal.job.as_str(), AcceptedBy::User, &Quiet)
+        .unwrap()
+    else {
+        panic!("expected the job to finish");
+    };
+    // The producer's invocation records, in order: one per attempt.
+    let prefix = format!("{}/invocations/", proposal.job.dir());
+    let mut producers = Vec::new();
+    for entry in git.ls_tree_under("HEAD", &prefix).unwrap() {
+        let bytes = git.show_file("HEAD", &entry.path).unwrap().unwrap();
+        if let Ok(athena_data::records::AnyRecord::Invocation(inv)) =
+            athena_data::records::AnyRecord::parse(&entry.path, &bytes)
+            && inv.role == Role::Producer
+        {
+            producers.push((entry.path.clone(), inv.detail.clone().unwrap_or_default()));
+        }
+    }
+    producers.sort();
+    assert_eq!(producers.len(), 2, "the first attempt and the send-back");
+    for (_, detail) in &producers {
+        assert!(detail.contains("self-check failed"), "{detail}");
+        let json = detail.split("redacted report: ").nth(1).unwrap();
+        let kept: athena_data::records::ProducerReport = serde_json::from_str(json).unwrap();
+        assert_eq!(kept.summary, "Described the demo.");
+        assert_eq!(kept.criteria_check.len(), 2);
+        assert_eq!(kept.criteria_check[1].status, "unmet");
+        assert_eq!(kept.criteria_check[1].evidence, "no tests in a study");
+    }
+    assert!(
+        finished.reason.contains(&producers[1].0),
+        "{}",
+        finished.reason
+    );
+}
