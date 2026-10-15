@@ -79,8 +79,9 @@ pub struct VerdictInputs<'a> {
     pub output: Option<&'a VerdictOutput>,
     /// The commands the core saw the verifier run.
     pub commands_run: &'a [String],
-    /// Set when the verifier changed its snapshot, which invalidates its verdict.
-    pub snapshot_changed: Option<String>,
+    /// Set when the verifier changed its snapshot. The core discarded that verdict and reran verification;
+    /// the fault is the system's, so it is recorded and never counted against the work.
+    pub system_fault: Option<String>,
     /// Set when the verifier did not complete.
     pub verifier_failure: Option<String>,
     /// `docs/design/requirements-map.md` at the base, if the file exists there.
@@ -88,6 +89,9 @@ pub struct VerdictInputs<'a> {
     /// The same file at the candidate, if it exists there.
     pub map_candidate: Option<&'a str>,
 }
+
+/// What a system fault's finding starts with.
+pub const SYSTEM_FAULT_PREFIX: &str = "System fault";
 
 /// The requirements map, relative to the repository root.
 pub const MAP_PATH: &str = "docs/design/requirements-map.md";
@@ -230,11 +234,10 @@ pub fn judge(inputs: &VerdictInputs<'_>) -> Judgment {
     if let Some(failure) = &inputs.verifier_failure {
         reasons.push(format!("the verifier did not complete: {failure}"));
     }
-    if let Some(change) = &inputs.snapshot_changed {
-        reasons.push("the verifier changed its snapshot".into());
+    if let Some(change) = &inputs.system_fault {
         findings.push(athena_finding(
-            Severity::Blocker,
-            "The verifier changed its snapshot, which invalidates its verdict".into(),
+            Severity::Minor,
+            format!("{SYSTEM_FAULT_PREFIX}: the verifier changed its snapshot; its verdict was discarded and verification reran"),
             change.clone(),
         ));
     }
@@ -368,7 +371,6 @@ pub fn judge(inputs: &VerdictInputs<'_>) -> Judgment {
         && unmet == 0
         && serious == 0
         && inputs.checks.iter().all(|c| c.passed)
-        && inputs.snapshot_changed.is_none()
         && inputs.verifier_failure.is_none();
     Judgment {
         criteria,
@@ -454,7 +456,7 @@ mod tests {
             checks,
             output: Some(out),
             commands_run: ran,
-            snapshot_changed: None,
+            system_fault: None,
             verifier_failure: None,
             map_base: None,
             map_candidate: None,
@@ -474,7 +476,7 @@ mod tests {
             checks: &[check(true)],
             output: Some(&output(vec!["cargo test"], vec![])),
             commands_run: &ran,
-            snapshot_changed: None,
+            system_fault: None,
             verifier_failure: None,
             map_base: Some(base),
             map_candidate: Some(candidate),
@@ -635,6 +637,49 @@ mod tests {
             "never matches inside quotes"
         );
         assert!(!passes_when_ran("", ran), "an empty citation");
+    }
+
+    fn judged_with_fault(fault: Option<&str>) -> Judgment {
+        let ran = ["cargo test".to_string()];
+        judge(&VerdictInputs {
+            criteria: &criteria(),
+            checks: &[check(true)],
+            output: Some(&output(vec!["cargo test"], vec![])),
+            commands_run: &ran,
+            system_fault: fault.map(String::from),
+            verifier_failure: None,
+            map_base: None,
+            map_candidate: None,
+        })
+    }
+
+    #[test]
+    fn a_system_fault_is_recorded_and_never_rejects_the_work() {
+        let clean = judged_with_fault(None);
+        assert_eq!(clean.final_verdict, Verdict::Pass);
+        assert!(clean.findings.is_empty());
+        let faulted = judged_with_fault(Some("snapshot HEAD None"));
+        assert_eq!(
+            faulted.final_verdict,
+            Verdict::Pass,
+            "{:?}",
+            faulted.reasons
+        );
+        assert!(faulted.reasons.is_empty(), "{:?}", faulted.reasons);
+        assert!(faulted.findings.iter().all(|f| {
+            !matches!(f.severity, Severity::Blocker | Severity::Major)
+                && !f
+                    .summary
+                    .contains("changed its snapshot, which invalidates")
+        }));
+        let fault: Vec<_> = faulted
+            .findings
+            .iter()
+            .filter(|f| f.summary.starts_with(SYSTEM_FAULT_PREFIX))
+            .collect();
+        assert_eq!(fault.len(), 1, "the fault is recorded once");
+        assert_eq!(fault[0].evidence, "snapshot HEAD None");
+        assert_eq!(fault[0].source, FindingSource::Athena);
     }
 
     #[test]

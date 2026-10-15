@@ -93,6 +93,8 @@ pub trait Capability: Send + Sync {
     fn verifier_section(&self) -> PromptAsset;
     /// Tools and permission rules for the executing roles, from the job's configuration.
     fn producer_grant(&self, config: &JobConfig) -> ToolGrant;
+    /// The verifier's grant must have `writes: false`: the agent policy then denies every write tool and
+    /// write command, and the core also locks the verifier's snapshot against all writes, even root's.
     fn verifier_grant(&self, config: &JobConfig) -> ToolGrant;
     /// Deterministic checks the core runs on the candidate before the verifier agent.
     fn checks(&self, config: &JobConfig) -> Vec<CheckSpec>;

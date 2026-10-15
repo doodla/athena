@@ -745,23 +745,8 @@ impl Athena {
         // The verifier's snapshot: its own two-commit repository, base then candidate, with the base's
         // check-tool configuration in the working tree.
         let verify_dir = job_dir.join("verify");
-        if verify_dir.exists() {
-            crate::pin::remove_tree(&verify_dir)?;
-        }
-        let vsnap = Snapshot::create(
-            &self.git,
-            &p,
-            &p,
-            &verify_dir,
-            SnapshotRepo::BaseAndCandidate {
-                candidate_commit: c.clone(),
-            },
-        )?;
-        if let Some(pin_dir) = &ctx.pin_dir {
-            mount(pin_dir, vsnap.dir())?;
-        }
-        let tool_config_from_base = crate::toolconfig::apply_base_tool_config(&vsnap)?;
-        let prepared = vsnap.work_tree_tree()?;
+        let (mut vsnap, tool_config_from_base, prepared) =
+            self.verifier_snapshot(&verify_dir, &p, &c, ctx.pin_dir.as_deref())?;
         let check_env = athena_agent::env::build(
             &EnvSpec {
                 agents: &jc.config.agents,
@@ -880,24 +865,31 @@ impl Athena {
         let mut verdict_output: Option<VerdictOutput> = None;
         let mut commands_run = Vec::new();
         let mut verifier_failure = None;
-        let mut snapshot_changed = None;
+        // Set when the verifier changed its snapshot: the system failed to keep it still, so the work is
+        // not at fault. The verdict is discarded and verification reruns once on a fresh snapshot.
+        let mut system_fault: Option<String> = None;
         if all_passed {
-            let spent = ctx.spent(&closing);
-            if let Err(e) = self.check_budget(jc, spent, jc.config.budget.verifier_usd, "verifier")
-            {
-                verifier_failure = Some(format!("{e}"));
-            } else {
+            closing.files.push(NewFile::text(
+                format!("{}/brief-verifier.md", id.dir()),
+                verifier_brief(&inputs, false),
+            ));
+            let vcomposed = compose(&[
+                CONTRACT.into(),
+                VERIFIER_FRAME.into(),
+                Component::from(ctx.capability.verifier_section()),
+            ]);
+            let vmodel = ctx.reading.verifier_model.clone();
+            let mut verifier_runs = 0;
+            loop {
+                verifier_runs += 1;
+                let spent = ctx.spent(&closing);
+                if let Err(e) =
+                    self.check_budget(jc, spent, jc.config.budget.verifier_usd, "verifier")
+                {
+                    verifier_failure = Some(format!("{e}"));
+                    break;
+                }
                 let vbrief = verifier_brief(&inputs, true);
-                closing.files.push(NewFile::text(
-                    format!("{}/brief-verifier.md", id.dir()),
-                    verifier_brief(&inputs, false),
-                ));
-                let vcomposed = compose(&[
-                    CONTRACT.into(),
-                    VERIFIER_FRAME.into(),
-                    Component::from(ctx.capability.verifier_section()),
-                ]);
-                let vmodel = ctx.reading.verifier_model.clone();
                 let vspec = self.agent_spec(
                     jc,
                     &id,
@@ -921,7 +913,18 @@ impl Athena {
                     config: &jc.config,
                     fake: self.is_fake(),
                 };
-                match self.invoke_and_record(&vfacts, ctx.redactor)? {
+                seq += 1;
+                // The snapshot refuses writes while the verifier runs, even from root; the grant's write
+                // deny stops its tools, and the lock stops everything else, such as a test it runs.
+                if let Err(e) = vsnap.lock() {
+                    let _ = vsnap.unlock();
+                    verifier_failure =
+                        Some(format!("the verifier's snapshot could not be locked: {e}"));
+                    break;
+                }
+                let invoked = self.invoke_and_record(&vfacts, ctx.redactor);
+                vsnap.unlock()?;
+                match invoked? {
                     Err(error) => {
                         verifier_failure = Some(format!("the verifier could not run: {error}"))
                     }
@@ -956,17 +959,38 @@ impl Athena {
                         closing.new_invocations.push(vrecord);
                     }
                 }
-                // A verifier that changed its snapshot invalidates its own verdict.
+                // A verifier that changed its snapshot invalidates its own verdict. That is a fault of the
+                // system, which should have kept the snapshot still, not of the work: discard the verdict
+                // and run the verifier once more on a fresh snapshot.
                 let head_now = vsnap.git().head()?;
                 let tree_now = vsnap.work_tree_tree()?;
-                if head_now.as_deref() != vsnap.candidate() || tree_now != prepared {
-                    snapshot_changed = Some(format!(
-                        "snapshot HEAD {:?}, work tree {} (expected {})",
-                        head_now,
-                        short(&tree_now),
-                        short(&prepared)
-                    ));
+                if head_now.as_deref() == vsnap.candidate() && tree_now == prepared {
+                    break;
                 }
+                let change = format!(
+                    "snapshot HEAD {:?}, work tree {} (expected {})",
+                    head_now,
+                    short(&tree_now),
+                    short(&prepared)
+                );
+                verdict_output = None;
+                verifier_failure = None;
+                commands_run.clear();
+                verifier_invocation = None;
+                system_fault = Some(change.clone());
+                if verifier_runs >= 2 {
+                    verifier_failure = Some(format!(
+                        "the verifier's snapshot changed on both runs, so no verdict could be trusted ({change})"
+                    ));
+                    break;
+                }
+                ctx.ui.line("fault      the verifier's snapshot changed; its verdict is discarded and verification reruns once");
+                let (fresh, _, fresh_tree) =
+                    self.verifier_snapshot(&verify_dir, &p, &c, ctx.pin_dir.as_deref())?;
+                if fresh_tree != prepared {
+                    bail!("a fresh verifier snapshot differs from the first one");
+                }
+                vsnap = fresh;
             }
         }
 
@@ -1015,7 +1039,7 @@ impl Athena {
             checks: &check_runs,
             output: verdict_output.as_ref(),
             commands_run: &redacted_commands,
-            snapshot_changed: snapshot_changed.clone(),
+            system_fault: system_fault.clone(),
             verifier_failure: verifier_failure.clone(),
             map_base: map_base.as_deref(),
             map_candidate: map_candidate.as_deref(),
@@ -1050,6 +1074,34 @@ impl Athena {
         closing.verified = verified(&judgment, &p, &c, &f);
         closing.verification = Some(verification);
         Ok(closing)
+    }
+
+    /// Creates the verifier's snapshot at `dir` (removing what is there): base then candidate as two commits,
+    /// the pinned tree mounted if there is one, and the base's check-tool configuration in the work tree.
+    /// Returns it with the tool-config paths and the work tree's tree as prepared.
+    fn verifier_snapshot(
+        &self,
+        dir: &std::path::Path,
+        base: &str,
+        candidate: &str,
+        pin_dir: Option<&std::path::Path>,
+    ) -> Result<(Snapshot, Vec<String>, String)> {
+        crate::pin::remove_tree(dir)?;
+        let snapshot = Snapshot::create(
+            &self.git,
+            base,
+            base,
+            dir,
+            SnapshotRepo::BaseAndCandidate {
+                candidate_commit: candidate.to_string(),
+            },
+        )?;
+        if let Some(pin_dir) = pin_dir {
+            mount(pin_dir, snapshot.dir())?;
+        }
+        let tool_config = crate::toolconfig::apply_base_tool_config(&snapshot)?;
+        let prepared = snapshot.work_tree_tree()?;
+        Ok((snapshot, tool_config, prepared))
     }
 
     /// Marks a failure before verification.

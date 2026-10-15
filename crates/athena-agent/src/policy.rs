@@ -1109,6 +1109,56 @@ mod tests {
     }
 
     #[test]
+    fn the_verifier_grant_denies_every_write_to_the_snapshot_whoever_runs_it() {
+        // The decision depends on the grant, never on the user id: a file this very process can write
+        // (as root can write anything) is still denied to the verifier by every route.
+        let dir = snapshot();
+        let target = dir.path().join("src/lib.rs");
+        assert!(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&target)
+                .is_ok(),
+            "the process itself can write the file"
+        );
+        let verifier = policy(Role::Verifier, dir.path());
+        assert!(!verifier.writes);
+        let path = target.to_str().unwrap();
+        let new_path = dir.path().join("src/new.rs");
+        for (tool, input) in [
+            ("Write", json!({ "file_path": path, "content": "x" })),
+            ("Edit", json!({ "file_path": path })),
+            ("MultiEdit", json!({ "file_path": path })),
+            ("NotebookEdit", json!({ "notebook_path": path })),
+            ("Write", json!({ "file_path": new_path.to_str().unwrap() })),
+        ] {
+            assert!(
+                matches!(evaluate(&verifier, tool, &input, None), Decision::Deny(_)),
+                "{tool} {input} must be denied to the verifier"
+            );
+        }
+        for command in [
+            "rm src/lib.rs",
+            "mv src/lib.rs src/old.rs",
+            "chmod u+w src/lib.rs",
+            "touch src/new.rs",
+            "cargo test > src/lib.rs",
+        ] {
+            assert!(
+                matches!(bash(&verifier, command), Decision::Deny(_)),
+                "{command} must be denied to the verifier"
+            );
+        }
+        // The same call is allowed under a writing grant, so the denial above is the grant's doing.
+        let producer = policy(Role::Producer, dir.path());
+        let edit = json!({ "file_path": path });
+        assert_eq!(
+            evaluate(&producer, "Edit", &edit, None),
+            Decision::NoObjection
+        );
+    }
+
+    #[test]
     fn symlinks_out_of_the_snapshot_are_resolved() {
         let dir = snapshot();
         let outside = tempfile::tempdir().unwrap();

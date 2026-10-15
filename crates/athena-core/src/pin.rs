@@ -218,6 +218,8 @@ pub fn remove_tree(path: &Path) -> std::io::Result<()> {
     if !path.exists() {
         return Ok(());
     }
+    // A locked verifier snapshot is immutable even for root until unlocked.
+    let _ = athena_git::snapshot::unlock_dir(path);
     make_writable(path);
     std::fs::remove_dir_all(path)
 }
