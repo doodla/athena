@@ -2333,3 +2333,23 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Provenance:** measured: `closing_a_job_with_a_legacy_usage_record_needs_the_flag_and_names_the_record`
   in `crates/athena-cli/tests/lifecycle.rs` and `legacy_invocations_are_excused_but_new_records_are_not` in
   `crates/athena-gate/src/reconcile.rs`.
+
+## D102 · A study job pins the commit its study's pin.json names; `repo_ref` is for a new study
+
+- **Case:** The core pinned a study job from athena.toml's `repo_url` and `repo_ref` (`main`) alone. Job
+  20261015-201650-cyvb mounted fc8972cd while `studies/firstmate-work-handling/pin.json` said 6407052f, so the
+  producer cited lines from newer code under the old label and the verifier rejected it.
+- **Decision:** `pin_repo` reads `studies/*/pin.json` in the committed head. A study whose `repository_url`
+  equals the configured `repo_url` fixes the commit: the job pins that full sha, and the pin must resolve to
+  the same sha. With several such studies the request must name exactly one study id; otherwise the job stops
+  before dispatch. A pin.json sha that is not 40-hex, or a pin that resolves elsewhere, stops the job with a
+  message naming the study; there is no fallback to `repo_ref`. With no study for the repository, `repo_ref`
+  applies as before.
+- **Alternatives:** (a) Set `repo_ref` in athena.toml to the sha: it would pin every future study to one
+  commit. (b) Fall back to `repo_ref` when the pin fails: that reproduces the fault silently. (c) Pick the
+  newest study when several match: a guess that can read the wrong commit.
+- **Tradeoff:** A repeated study of a repository with several studies needs its id in the request. Moving a
+  study to newer code means changing its pin.json, a separate user decision.
+- **Reversal cost:** Low: one lookup in the pinning step.
+- **Provenance:** measured: the tests in `crates/athena-core/src/run_pin_tests.rs` starting
+  `an_existing_studys_pin_overrides_the_configured_ref`.

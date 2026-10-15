@@ -321,6 +321,113 @@ fn a_study_without_a_configured_repository_stops_before_dispatch() {
     assert_eq!(git.head().unwrap(), head, "nothing was committed");
 }
 
+const STUDY_SHA: &str = "6407052f4c521e39401ce2305dfa45d201249827";
+
+/// Commits `studies/<id>/pin.json` for each `(id, url, sha)`.
+fn add_studies(git: &Git, dir: &tempfile::TempDir, studies: &[(&str, &str, &str)]) {
+    for (id, url, sha) in studies {
+        let path = dir.path().join(format!("studies/{id}/pin.json"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let pin =
+            json!({ "schema": "study.pin/1", "study_id": id, "repository_url": url, "sha": sha });
+        std::fs::write(path, pin.to_string()).unwrap();
+    }
+    git.run(["add", "-A"]).unwrap();
+    git.run(["commit", "-q", "-m", "Add studies\n\nAthena-Job: bootstrap"])
+        .unwrap();
+}
+
+/// Asks and dispatches a study job; returns the pinner, the dispatch result, and the job's record sha.
+fn go_with_studies(
+    studies: &[(&str, &str, &str)],
+    request: &str,
+) -> (CountingPinner, anyhow::Result<GoResult>, Option<String>) {
+    let (dir, git) = repo(&config(true));
+    add_studies(&git, &dir, studies);
+    let state = tempfile::tempdir().unwrap();
+    let pinner = CountingPinner::new(FAKE_SHA).echoing_full_shas();
+    let athena = athena(&dir, &state, pinner.clone(), Arc::default());
+    let proposal = athena.ask(request, &Quiet).unwrap();
+    let result = athena.go(proposal.job.as_str(), AcceptedBy::User, &Quiet);
+    let path = format!("{}/job.json", proposal.job.dir());
+    let recorded = git.show_file("HEAD", &path).unwrap().and_then(|b| {
+        match AnyRecord::parse(&path, &b).unwrap() {
+            AnyRecord::Job(job) => job.pin.map(|p| p.sha),
+            _ => None,
+        }
+    });
+    (pinner, result, recorded)
+}
+
+#[test]
+fn an_existing_studys_pin_overrides_the_configured_ref() {
+    let (pinner, result, recorded) =
+        go_with_studies(&[("demo", URL, STUDY_SHA)], "study the demo again");
+    assert!(matches!(result.unwrap(), GoResult::Finished(_)));
+    // The pinner was asked for the study's sha, not for `stable`, which resolves to FAKE_SHA.
+    assert_eq!(
+        pinner.requests(),
+        vec![(URL.to_string(), STUDY_SHA.to_string())]
+    );
+    assert_eq!(recorded.as_deref(), Some(STUDY_SHA));
+    assert_ne!(STUDY_SHA, FAKE_SHA);
+}
+
+#[test]
+fn a_study_of_another_repository_leaves_the_configured_ref_in_force() {
+    let (pinner, result, recorded) = go_with_studies(
+        &[("other", "https://example.com/other.git", STUDY_SHA)],
+        "study the demo",
+    );
+    assert!(matches!(result.unwrap(), GoResult::Finished(_)));
+    assert_eq!(pinner.requests(), vec![(URL.to_string(), REF.to_string())]);
+    assert_eq!(recorded.as_deref(), Some(FAKE_SHA));
+}
+
+#[test]
+fn with_several_studies_of_one_repository_the_request_names_the_one_to_pin() {
+    let other = "b".repeat(40);
+    let studies = [("alpha", URL, STUDY_SHA), ("beta", URL, other.as_str())];
+    let (pinner, result, recorded) = go_with_studies(&studies, "study the demo again for beta");
+    assert!(matches!(result.unwrap(), GoResult::Finished(_)));
+    assert_eq!(pinner.requests(), vec![(URL.to_string(), other.clone())]);
+    assert_eq!(recorded, Some(other.clone()));
+
+    // Naming none, or both, stops the job before it pins anything: it never picks a commit by chance.
+    for request in ["study the demo", "study the demo, alpha and beta"] {
+        let (pinner, result, _) = go_with_studies(&studies, request);
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("several studies"), "{error:#}");
+        assert_eq!(pinner.count(), 0, "{request}");
+    }
+}
+
+#[test]
+fn a_pin_that_is_not_a_full_sha_or_does_not_resolve_to_itself_stops_the_job_naming_the_study() {
+    for bad in ["main", "6407052f"] {
+        let (pinner, result, _) = go_with_studies(&[("demo", URL, bad)], "study the demo");
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("study demo"), "{error:#}");
+        assert!(error.to_string().contains("40-hex"), "{error:#}");
+        assert_eq!(pinner.count(), 0, "no fallback to the configured ref");
+    }
+
+    // A pinner that resolves the sha to a different commit.
+    let (dir, git) = repo(&config(true));
+    add_studies(&git, &dir, &[("demo", URL, STUDY_SHA)]);
+    let state = tempfile::tempdir().unwrap();
+    let pinner = CountingPinner::new(FAKE_SHA);
+    let athena = athena(&dir, &state, pinner.clone(), Arc::default());
+    let proposal = athena.ask("study the demo", &Quiet).unwrap();
+    let head = git.head().unwrap();
+    let error = athena
+        .go(proposal.job.as_str(), AcceptedBy::User, &Quiet)
+        .unwrap_err();
+    assert!(error.to_string().contains("study demo"), "{error:#}");
+    assert!(error.to_string().contains(STUDY_SHA), "{error:#}");
+    assert_eq!(git.head().unwrap(), head, "nothing was committed");
+}
+
 /// The file a faulty verifier run leaves in its snapshot.
 const TAMPERED: &str = "tampered.txt";
 
