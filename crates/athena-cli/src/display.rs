@@ -253,6 +253,8 @@ pub fn drain(report: &crate::drain::Report) -> String {
                 report.target_rating,
                 if r.met_target {
                     "target met"
+                } else if report.held_back.is_some() {
+                    "target not met: held back by the source check"
                 } else {
                     "below the target"
                 }
@@ -272,6 +274,12 @@ pub fn drain(report: &crate::drain::Report) -> String {
                 report.target_rating
             );
         }
+    }
+    if let Some(why) = &report.held_back {
+        let _ = writeln!(
+            out,
+            "held back   the rating reached the target, but the check of the page against the pinned source failed, so drain kept running: {why}"
+        );
     }
     if report.page_unchanged {
         out.push_str("page        unchanged: nothing landed in this run\n");

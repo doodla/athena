@@ -9,6 +9,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- `athena drain` no longer stops on "target met" from the audience rating alone, and the places-held counter in
+  the firstmate study is corrected. Root cause: the stop depended on a rating by a reader who sees only the
+  page, who cannot detect a wrong fact; the page said so wrongly for the work-slot counter (`changed_by` listed
+  the spawn and the ready-PR report but not cleanup, while the retry on t2 and claim c3 say a place is freed
+  when a worker records its ready PR or is cleaned up). Now a rating at the target ends the run only when a
+  model-free check of the study models also passes (`model_contradictions` in
+  `crates/athena-cli/src/drain.rs`: a counter named in a retry's changes must list a transition for taking a
+  place and one for each way it is freed). When the check fails, drain keeps running and its report says the
+  check held it back. `model.json` now lists t1, t3 and t4, and `intro.json` says a place is freed only by a
+  recorded PR or a cleanup (citing c3). The check is a floor: it finds a model that contradicts itself, not
+  every wrong fact; the pinned source stays the authority.
+
 - The explainer site now introduces Athena and firstmate to a newcomer. Root cause: the generator
   (`xtask/src/site.rs`) and `intro.json` assumed a reader who already knew firstmate and studies, so the page
   never named Athena, put the glossary first, printed sources as plain text, and showed an internal field name
