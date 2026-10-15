@@ -46,6 +46,14 @@ published to GitHub Pages from this repository and runs locally with one command
 | Adding the Pages steps to `ci.yml` | `ci.yml` stays read-only with no deploy permissions; a separate workflow keeps the broader token scope to one job file. |
 | Client-side rendering of the JSON in the browser | It would need JavaScript, which the repository's all-Rust rule disallows, and the page would not work without script. |
 
+## Watching the deploy
+
+After `athena land --pr` lands a pull request, it looks at the `pages` workflow run for the merged commit
+(D97). It waits up to about ten minutes for the run to finish. A run that `timed_out` or was `cancelled` is
+re-run once through the `gh` wrapper, and the re-run gets the same wait; a second failure is reported and not
+re-run. A commit with no Pages run is reported and is not an error. Every outcome is shown to the user, and none
+of them undoes the landing.
+
 ## Deferred
 
 - Enabling Pages in the repository settings (source: GitHub Actions) is an owner action. Until it is done the

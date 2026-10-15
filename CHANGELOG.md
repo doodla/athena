@@ -9,6 +9,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A Pages watch after a merge. When `athena land --pr` lands a pull request, it finds the `pages.yml` run for the
+  merged commit, waits for it for about ten minutes, and re-runs it once through the `gh` wrapper if it timed
+  out or was cancelled. Each step is reported; a second failure is reported and not re-run, and a Pages problem
+  never undoes the landing (D97).
 - A criteria check before verification. The producer's report gains a required `criteria_check` list: one entry
   per accepted acceptance criterion, with the criterion's exact text, a status of `met` or `unmet`, and its
   evidence. In the producer loop, a criterion marked `unmet` or missing from the list goes back to the

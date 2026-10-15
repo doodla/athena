@@ -2170,3 +2170,27 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Reversal cost:** Low: remove the four names.
 - **Provenance:** read: `env.rs`, `athena.toml`, `roles-and-ladder.md`. Whether the owner's shell has a token set
   was not checked.
+
+## D97 · After a merge, `land --pr` watches the Pages deploy and re-runs it once
+
+- **Case:** Transient 5xx and timeout retries with a per-retry report line already live in the one `gh`
+  wrapper (`GhClient::api`, `Retry::STANDARD`, three attempts). What was missing was the deploy after a merge:
+  the `pages` workflow can time out or be cancelled, and nothing looked.
+- **Decision:** When `athena land --pr` ends with the link `Landed`, `watch_pages` in `gh.rs` lists the
+  `pages.yml` runs for the merged commit (`GET actions/workflows/pages.yml/runs?head_sha=`), through the same
+  retrying client, so a 5xx on the listing is retried and reported like any other call. It waits for the
+  newest run to complete: at most 60 looks ten seconds apart, about ten minutes, and three looks for a run
+  that has not appeared. A `success` is left alone. A `timed_out` or `cancelled` run is re-run once
+  (`POST actions/runs/<id>/rerun`) and waited for with the same bound; if that try fails too it is reported
+  and not re-run. Any other conclusion is reported and not re-run. No run for the commit, or a run still
+  going at the bound, is reported and is not an error. Every step is a line to the user naming the run and its
+  conclusion. A failure of the watch itself is a warning line; the merge stays landed. Reads and the re-run are
+  logged under the existing `read-checks` host operation, because that list is closed.
+- **Alternatives:** (a) Add a workflow that re-runs itself: needs more token scope and is out of scope.
+  (b) Re-run until success: a loop with no bound. (c) Fail the landing on a Pages failure: undoes nothing and
+  blocks later work for a deploy problem. (d) A new record type for retries: the report line is enough.
+- **Tradeoff:** The wait can add ten minutes to a landing in a repository that has Pages. Running `land --pr`
+  again on an already landed job watches again and can re-run an old cancelled run once more.
+- **Reversal cost:** Low: remove `watch_pages` and its call.
+- **Provenance:** read: `gh.rs`, `pages.yml`; measured: the tests in `crates/athena-cli/tests/external_calls.rs`.
+  The live behavior against GitHub was not run.

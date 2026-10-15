@@ -6,8 +6,8 @@
 use anyhow::Result;
 use athena_core::Ui;
 use athena_core::gh::{
-    Checks, GhClient, GhFailure, LandPr, NewPr, Poll, PrDraft, PrHost, Remote, Retry, Runner,
-    land_pr,
+    Checks, GhClient, GhFailure, LandPr, NewPr, PagesHost, Poll, PrDraft, PrHost, Remote, Retry,
+    Runner, land_pr, watch_pages,
 };
 use athena_core::pr::{Ancestry, Content, Host, LinkState, PrLink};
 use athena_core::state::StateDir;
@@ -71,8 +71,11 @@ impl Runner for Injecting {
             r#"{"default_branch": "trunk", "allow_merge_commit": true}"#.to_string()
         } else if path.ends_with("/pulls") {
             r#"{"number": 7}"#.to_string()
-        } else if path.ends_with("/merge") {
+        } else if path.ends_with("/merge") || path.ends_with("/rerun") {
             "{}".to_string()
+        } else if path.contains("actions/workflows/") {
+            r#"{"workflow_runs": [{"id": 5, "status": "completed", "conclusion": "success", "run_attempt": 1}]}"#
+                .to_string()
         } else if path.contains("/pulls/") {
             // Merged only once the merge request has been made.
             if self.seen.borrow().keys().any(|p| p.ends_with("/merge")) {
@@ -154,6 +157,16 @@ fn operations() -> Vec<Operation> {
         ("merged commit", "repos/example/project/pulls/7", |c| {
             c.merged_commit(&link()).map(|_| ())
         }),
+        (
+            "list pages runs",
+            "repos/example/project/actions/workflows/pages.yml/runs?head_sha=abc&per_page=20",
+            |c| c.pages_runs("abc").map(|_| ()),
+        ),
+        (
+            "re-run pages",
+            "repos/example/project/actions/runs/5/rerun",
+            |c| c.rerun_pages(5),
+        ),
     ]
 }
 
@@ -197,6 +210,155 @@ fn persistent_500s_fail_after_three_attempts_naming_the_call_and_status() {
         assert!(message.contains("3 attempts"), "{name}: {message}");
         assert_eq!(lines.0.borrow().len(), 2, "{name}: one line per retry");
     }
+}
+
+// ---- the Pages watch after a merge ----
+
+/// A `gh` for the Pages workflow: the first try of run 5 concludes `first` (no run at all when none), and
+/// once it has been re-run the second try concludes `second`.
+struct PagesFake {
+    first: Option<&'static str>,
+    second: &'static str,
+    reruns: RefCell<u32>,
+    calls: RefCell<Vec<String>>,
+}
+
+impl PagesFake {
+    fn new(first: Option<&'static str>, second: &'static str) -> Self {
+        PagesFake {
+            first,
+            second,
+            reruns: RefCell::new(0),
+            calls: RefCell::new(vec![]),
+        }
+    }
+    fn rerun_calls(&self) -> usize {
+        self.calls
+            .borrow()
+            .iter()
+            .filter(|c| c.ends_with("/rerun"))
+            .count()
+    }
+}
+
+impl Runner for PagesFake {
+    fn gh(&self, args: &[String]) -> Result<String> {
+        let path = args[3].clone();
+        self.calls.borrow_mut().push(path.clone());
+        if path.ends_with("/rerun") {
+            assert_eq!(args[2], "POST");
+            *self.reruns.borrow_mut() += 1;
+            return Ok("{}".into());
+        }
+        assert!(path.contains("actions/workflows/pages.yml/runs?head_sha=m1"));
+        let Some(first) = self.first else {
+            return Ok(r#"{"workflow_runs": []}"#.into());
+        };
+        let (conclusion, attempt) = if *self.reruns.borrow() == 0 {
+            (first, 1)
+        } else {
+            (self.second, 2)
+        };
+        Ok(format!(
+            r#"{{"workflow_runs": [{{"id": 5, "status": "completed", "conclusion": "{conclusion}", "run_attempt": {attempt}}}]}}"#
+        ))
+    }
+}
+
+fn watch(runner: &PagesFake) -> (athena_core::gh::PagesReport, Vec<String>) {
+    let lines = Lines(RefCell::new(vec![]));
+    let nap = |_: Duration| {};
+    let poll = Poll {
+        attempts: 3,
+        delay: Duration::ZERO,
+        sleep: &nap,
+    };
+    let host = GhClient::new(runner, "example/project".into());
+    let report = watch_pages(&host, "m1", &poll, &lines).unwrap();
+    (report, lines.0.into_inner())
+}
+
+#[test]
+fn a_timed_out_pages_run_is_re_run_once_and_then_succeeds() {
+    let runner = PagesFake::new(Some("timed_out"), "success");
+    let (report, lines) = watch(&runner);
+    assert_eq!(runner.rerun_calls(), 1);
+    assert_eq!(
+        runner
+            .calls
+            .borrow()
+            .iter()
+            .find(|c| c.ends_with("/rerun"))
+            .unwrap(),
+        "repos/example/project/actions/runs/5/rerun"
+    );
+    assert_eq!(report.run, Some(5));
+    assert_eq!(report.reruns, 1);
+    assert_eq!(report.conclusion.as_deref(), Some("success"));
+    let naming: Vec<_> = lines
+        .iter()
+        .filter(|l| l.contains("run 5") && l.contains("timed_out"))
+        .collect();
+    assert_eq!(naming.len(), 1, "{lines:?}");
+}
+
+#[test]
+fn a_cancelled_pages_run_is_re_run_once_and_a_second_failure_is_not_re_run() {
+    let runner = PagesFake::new(Some("cancelled"), "timed_out");
+    let (report, lines) = watch(&runner);
+    assert_eq!(runner.rerun_calls(), 1);
+    assert_eq!(report.reruns, 1);
+    assert_eq!(report.conclusion.as_deref(), Some("timed_out"));
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("run 5") && l.contains("cancelled")),
+        "{lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("timed_out") && l.contains("not re-running")),
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn a_successful_pages_run_is_not_re_run() {
+    let runner = PagesFake::new(Some("success"), "success");
+    let (report, _) = watch(&runner);
+    assert_eq!(runner.rerun_calls(), 0);
+    assert_eq!(report.reruns, 0);
+    assert_eq!(report.conclusion.as_deref(), Some("success"));
+}
+
+#[test]
+fn a_commit_with_no_pages_run_is_not_an_error_and_nothing_is_re_run() {
+    let runner = PagesFake::new(None, "success");
+    let (report, lines) = watch(&runner);
+    assert_eq!(runner.rerun_calls(), 0);
+    assert_eq!(report.run, None);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+}
+
+#[test]
+fn a_5xx_on_the_runs_listing_is_retried_and_reported_during_the_watch() {
+    let runner = Injecting::one_off();
+    let lines = Lines(RefCell::new(vec![]));
+    let nap = |_: Duration| {};
+    let poll = Poll {
+        attempts: 3,
+        delay: Duration::ZERO,
+        sleep: &nap,
+    };
+    let report = watch_pages(&client(&runner, &lines), "m1", &poll, &lines).unwrap();
+    assert_eq!(report.conclusion.as_deref(), Some("success"));
+    assert_eq!(runner.calls.borrow().len(), 2);
+    let lines = lines.0.into_inner();
+    assert!(
+        lines[0].contains("HTTP 500") && lines[0].contains("pages.yml"),
+        "{lines:?}"
+    );
 }
 
 // ---- `athena land --pr`: the whole flow over the client ----
