@@ -26,7 +26,7 @@ use athena_context::outputs::{
 use athena_context::{Composed, steward_system_prompt};
 use athena_data::records::{
     AnyRecord, AudienceRating, Invocation, InvocationOutcome, OutcomeState, RefKind, Reference,
-    Request, Role, WorkItem, WorkItemKind,
+    Request, Role, WorkDecisionState, WorkItem, WorkItemKind,
 };
 use athena_data::roles::{Ladder, RoleDefinition, steward};
 use athena_data::{JobId, RecordId};
@@ -346,6 +346,33 @@ pub fn queued_work(records: &Records) -> Vec<QueuedWork> {
                     title: j.title(),
                 },
             ))
+        })
+        .collect();
+    found.sort_by(|a, b| (a.0, a.1.job.as_str()).cmp(&(b.0, b.1.job.as_str())));
+    found.into_iter().map(|(_, work)| work).collect()
+}
+
+/// The jobs that a work decision records as approved and that are still in state proposed: read, waiting for
+/// `go`. A job that has run or been closed is not listed. Oldest decision first.
+pub fn approved_work(records: &Records) -> Vec<QueuedWork> {
+    let mut found: Vec<(Timestamp, QueuedWork)> = records
+        .work_items
+        .iter()
+        .filter_map(|item| {
+            let decision = crate::work_decisions::decision_of(records, item)?;
+            let WorkDecisionState::Approved { job } = &decision.decision else {
+                return None;
+            };
+            let record = records.jobs.get(job.as_str())?;
+            (record.state() == JobState::Proposed).then(|| {
+                (
+                    decision.at,
+                    QueuedWork {
+                        job: job.clone(),
+                        title: record.title(),
+                    },
+                )
+            })
         })
         .collect();
     found.sort_by(|a, b| (a.0, a.1.job.as_str()).cmp(&(b.0, b.1.job.as_str())));

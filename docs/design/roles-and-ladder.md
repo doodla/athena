@@ -36,6 +36,12 @@ are not built.
   either the approving job or the rejection reason. An item with a decision is no longer open; a second
   decision, an unknown id and an empty reason are refused. Only proposals are decided this way; blind spots
   and repeated failures are not.
+- **What `athena drain` decides.** `drain` approves an open proposal itself only when the role that raised it
+  may change its rung (the role's newest recorded definition gives the limit, and the top two rungs are never
+  changed by a role). It approves as `approve-work` does, then runs the job that the decision records, and it
+  also runs any job a work decision records as approved that is still in state proposed (read once, never
+  read again; a closed job is not picked up). Rejecting a proposal, and approving one above its role's limit
+  or raised by a role with no recorded definition, stay with people: `drain` lists those as waiting.
 - **The ladder** (`Ladder`) has five rungs, highest first:
 
   | Rung | What it holds |
