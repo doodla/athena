@@ -21,6 +21,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- The introspection of a rejected or failed job now includes why the verification failed. Before, the model saw
+  only the outcome's one-line reason, so rejections were grouped by that line and not by cause. The event's
+  `what` now lists each unmet acceptance criterion, each blocker or major finding (severity, summary,
+  location), and, under a separate "Failed checks" heading, each failed check with the end of its output.
+  Lists are capped (8 entries, 400 characters per item, 600 per output tail); a job with no verification or a
+  passing one is unchanged, and a failed verdict with no detail says so. The text is read from the job's stored
+  `verification.json` and is not redacted again (the check output was redacted when stored). The system prompt
+  now says criteria and checks differ. Tests call `event_of_job` on stored records, and a fake-model test checks
+  the prompt for a rejected job.
 - Agents now receive `GH_TOKEN`, `GITHUB_TOKEN`, `GH_HOST` and `GH_ENTERPRISE_TOKEN` when set (D96). The
   steward's `gh` failed because an agent's environment held no GitHub variable. The owner should export a
   read-only token before running Athena; without one the `github` blind spot is still reported. A test in

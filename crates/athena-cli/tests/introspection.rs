@@ -228,6 +228,58 @@ fn a_rejected_job_is_introspected_and_the_class_is_proposed_by_code() {
 }
 
 #[test]
+fn the_prompt_for_a_rejected_job_names_the_unmet_criterion_and_the_major_finding() {
+    let model = Model::default();
+    model.say(reply(
+        "new",
+        "The verifier found the greeting criterion unmet and a major finding in the README.",
+        "No step checks the criteria before the verifier does, so an unmet one is found late.",
+    ));
+    let verdict = json!({
+        "verdict": "fail",
+        "criteria": [
+            { "criterion": "criterion 1", "met": false, "evidence": "no greeting found", "commands": [] },
+            { "criterion": "criterion 2", "met": true, "evidence": "checked", "commands": ["cargo test"] }
+        ],
+        "findings": [
+            { "severity": "major", "summary": "The greeting is missing", "evidence": "README.md has none",
+              "location": "README.md:3" },
+            { "severity": "minor", "summary": "A trailing space", "evidence": "line 1", "location": null }
+        ],
+        "request_reading_mismatch": null,
+        "summary": "The greeting is missing."
+    });
+    let scenario = Scenario {
+        verdict,
+        ..Scenario::default()
+    };
+    let (_fx, athena) = setup(scenario, &model);
+    let finished = run_job(&athena, "add a greeting");
+    assert_eq!(finished.state, OutcomeState::Rejected);
+
+    let prompts = model.prompts.lock().unwrap();
+    let [prompt] = prompts.as_slice() else {
+        panic!("one prompt, got {}", prompts.len())
+    };
+    let what = prompt["event"]["what"].as_str().unwrap();
+    assert!(
+        what.contains("Unmet acceptance criteria (1):"),
+        "missing the unmet criteria in:\n{what}"
+    );
+    assert!(
+        what.contains("README.md ends with a greeting line"),
+        "missing the criterion text in:\n{what}"
+    );
+    assert!(
+        what.contains("major: The greeting is missing at README.md:3"),
+        "missing the major finding in:\n{what}"
+    );
+    assert!(!what.contains("trailing space"), "{what}");
+    assert!(!what.contains("the tests still pass"), "{what}");
+    assert!(!what.contains("Failed checks"), "{what}");
+}
+
+#[test]
 fn a_failed_job_is_introspected() {
     let model = Model::default();
     model.say(reply(

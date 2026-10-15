@@ -313,6 +313,10 @@ failure, and records `failure_class`, `cause` and `prevention_kind` **(read)**. 
   decision's firing records include that introspection. The evidence standard is the one rule of §4: one event
   puts a decision under review; a `failure_class` repeating against one decision strengthens the review (the user
   sees the count) but is not needed to start it.
+- The event of a rejected or failed job carries the unmet criteria, blocker and major findings, and failed
+  checks from that job's stored verification **(design; defaults-loop §3.3)**, so a class is chosen from the real
+  cause of the rejection and not only from the outcome's one-line reason. Failed checks are kept apart from
+  unmet criteria.
 - When `prevention_kind` is `default`, the loop's candidate becomes a decision with `status = proposed`,
   `kind = expectation`, and its own assumptions and signals drafted by the language model; the proposal carries them
   (defaults-loop §8.1) and, on acceptance, they are stored in `athena.default-expectations/1` (§2). Defaults-loop
