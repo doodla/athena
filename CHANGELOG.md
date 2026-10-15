@@ -9,6 +9,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- The explainer site now introduces Athena and firstmate to a newcomer. Root cause: the generator
+  (`xtask/src/site.rs`) and `intro.json` assumed a reader who already knew firstmate and studies, so the page
+  never named Athena, put the glossary first, printed sources as plain text, and showed an internal field name
+  in a finding. Now the title and opening say what Athena is, what a study is and why this one was made; the
+  firstmate definition says its workers are AI coding agents and who uses it; the glossary follows the main
+  sections; the repository and each claim source link to the pinned commit on GitHub; a Next steps section
+  links to Athena and firstmate; and finding f2 is in plain language.
+
 - The verifier's snapshot now refuses writes even from root. Root cause: the verifier ran in a snapshot that
   only its tool policy protected, so a command it ran as root could change HEAD or the work tree, and the
   change was only detected afterwards and counted as a blocker against the work. Now the grant's write deny

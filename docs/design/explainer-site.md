@@ -19,9 +19,15 @@ published to GitHub Pages from this repository and runs locally with one command
   claim ids that support it, and the claims with their source paths and lines are listed at the end. A
   citation of a claim that does not exist, an element with no claim, or a missing or malformed study file is
   an error; no page is written from partial data.
-- The page opens with a "Start here" section for a reader who has never seen firstmate: what it is, one
-  piece of work from start to finish, and a glossary. Its text lives in `intro.json` beside the other study
-  files. Every sentence and every glossary term about firstmate cites claim ids from `claims.json`; a
+- The page is for a newcomer who knows neither Athena nor firstmate. Its title and heading name Athena, and
+  the opening paragraphs (`intro.json` `about`) say what Athena is, what a study is, and who made this one
+  and why, before firstmate appears. A "Start here" section then says what firstmate is (AI coding agents
+  as workers, who uses it, what problem it solves) and walks one piece of work from start to finish. The
+  glossary is its own section after the main sections (it is reference, not a prerequisite), followed by
+  "Next steps" with links to Athena and firstmate. When the pinned repository is on GitHub, the repository
+  URL and every claim source link to the pinned commit's file and lines (`blob/<sha>/<path>#Lstart-Lend`);
+  otherwise they are shown as text. Citation ids are small and muted so they do not break up the prose.
+  The text lives in `intro.json` beside the other study files. Every sentence and every glossary term about firstmate cites claim ids from `claims.json`; a
   glossary term about the page's own structure (state, transition, trigger, guard, counter, claim, pin,
   mark) is marked "about this page" and cites nothing. An entry with no claims and no such mark is an error.
 - Between the walk-through and the glossary, a list headed "When things go wrong, and what is not limited"
@@ -76,7 +82,8 @@ of them undoes the landing.
 ## Checks
 
 Unit tests in `xtask/src/site.rs` cover escaping, claim-id citation, the pinned commit, an unknown claim id,
-missing study data, the output location, the intro and glossary appearing before the states, and an uncited
+missing study data, the output location, the intro appearing before the states and the glossary after them, Athena being named
+before firstmate, the next-steps links, GitHub source links, and an uncited
 intro element being rejected, the lead-ins, deciders and transition summaries rendering, and a transition
 without a summary being rejected. `xtask/tests/policy.rs` and `docs/non-rust-files.md` list
 `pages.yml` as an allowed YAML workflow.

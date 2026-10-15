@@ -157,6 +157,8 @@ cargo run -p xtask -- site        # writes target/site/index.html; open it in a 
 
 The page goes to `site/` in the cargo target directory (`$CARGO_TARGET_DIR`, else `target/`), never into the
 work tree, so building it cannot change a verifier's snapshot. `--out` inside the work tree is refused.
+The page introduces Athena and the study first, then explains firstmate; claim sources link to the pinned
+commit when the studied repository is on GitHub.
 
 `.github/workflows/pages.yml` builds and deploys the same page on every push to `main`. The expected URL is
 `https://<owner>.github.io/<repository>/`. The repository owner must set **Settings → Pages → Source** to
