@@ -6,7 +6,7 @@
 //! argument lists), and reads stream-json events as they arrive. It refuses to start inside a nested run.
 
 use crate::procs::{GRACE, Registry, isolate, kill_group};
-use crate::stream::StreamState;
+use crate::stream::{ResultEvent, StreamState};
 use crate::{
     AgentDriver, AgentInvocation, AgentOutput, DriverError, UsageSink, nested_marker, refuse_nested,
 };
@@ -236,6 +236,56 @@ fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     file.write_all(bytes)
 }
 
+/// The output of an invocation that ended with a result event. Its tokens are the requested model's
+/// `modelUsage` tokens (see [`ResultEvent::requested_usage`]), the quantity the gate reconciles.
+pub fn output_from_result(
+    result: &ResultEvent,
+    model: &str,
+    started_at: jiff::Timestamp,
+    ended_at: jiff::Timestamp,
+    wall_s: f64,
+    commands_run: Vec<String>,
+) -> AgentOutput {
+    let ok = !result.is_error && result.subtype == "success";
+    AgentOutput {
+        outcome: if ok {
+            InvocationOutcome::Success
+        } else {
+            InvocationOutcome::Error
+        },
+        detail: (!ok).then(|| {
+            let text: String = result
+                .text
+                .clone()
+                .unwrap_or_default()
+                .chars()
+                .take(300)
+                .collect();
+            format!(
+                "{}: {}",
+                if result.subtype.is_empty() {
+                    "error"
+                } else {
+                    &result.subtype
+                },
+                text
+            )
+        }),
+        structured: result.structured.clone(),
+        started_at,
+        ended_at,
+        wall_s,
+        usage: result.requested_usage(model),
+        usage_measured: true,
+        models_used: result.models_used.clone(),
+        cost_usd: result.cost_usd,
+        turns: result.turns,
+        duration_api_ms: result.duration_api_ms,
+        commands_run,
+        denials: result.denials.clone(),
+    }
+}
+
 impl AgentDriver for ClaudeCodeDriver {
     fn info(&self) -> DriverInfo {
         DriverInfo {
@@ -344,46 +394,14 @@ impl AgentDriver for ClaudeCodeDriver {
         let commands_run = state.commands_run();
         let partial = state.partial_usage();
         let output = match (state.result.clone(), killed) {
-            (Some(result), _) => {
-                let ok = !result.is_error && result.subtype == "success";
-                AgentOutput {
-                    outcome: if ok {
-                        InvocationOutcome::Success
-                    } else {
-                        InvocationOutcome::Error
-                    },
-                    detail: (!ok).then(|| {
-                        let text: String = result
-                            .text
-                            .clone()
-                            .unwrap_or_default()
-                            .chars()
-                            .take(300)
-                            .collect();
-                        format!(
-                            "{}: {}",
-                            if result.subtype.is_empty() {
-                                "error"
-                            } else {
-                                &result.subtype
-                            },
-                            text
-                        )
-                    }),
-                    structured: result.structured.clone(),
-                    started_at,
-                    ended_at,
-                    wall_s,
-                    usage: result.usage,
-                    usage_measured: true,
-                    models_used: result.models_used.clone(),
-                    cost_usd: result.cost_usd,
-                    turns: result.turns,
-                    duration_api_ms: result.duration_api_ms,
-                    commands_run,
-                    denials: result.denials.clone(),
-                }
-            }
+            (Some(result), _) => output_from_result(
+                &result,
+                &spec.model,
+                started_at,
+                ended_at,
+                wall_s,
+                commands_run,
+            ),
             (None, reason) => AgentOutput {
                 outcome: if reason.is_some() {
                     InvocationOutcome::Killed

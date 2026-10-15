@@ -1,0 +1,115 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261015-181926-qc0v",
+  "base_commit": "08841b266ca71d08b8b91b7329f1be51bbff229b",
+  "base_fingerprint": "sha256:594146a258d66be1adf59f22ad66610f723d6eecf3a36851f108854aff25497c",
+  "previous_job": "20261015-095214-1egb",
+  "candidate_commit": "e03af2deaeb0b9838f5185122aa555376b893e71",
+  "candidate_tree": "857492071b59c6f272288b3b6bd1a94c1d1257ee",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 73949
+    },
+    {
+      "path": "crates/athena-agent/src/claude.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 26968
+    },
+    {
+      "path": "crates/athena-agent/src/stream.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 11689
+    },
+    {
+      "path": "crates/athena-core/src/invocation.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 17303
+    }
+  ],
+  "fingerprint": "sha256:7cf6723c7e3827a5a861c0a19f67c62fab0cd41f97237b5c0d89c863f4b57470",
+  "violations": [],
+  "producer_report": {
+    "summary": "Root cause: two definitions of what an invocation used. The record took the result event's top-level `usage`, which also counts subagents. The gate compared the requested model's `modelUsage` tokens. Now the record uses the requested model's `modelUsage` tokens, the quantity the gate checks. Top-level `usage` is only a fallback when `modelUsage` has no entry for the model. The change adds `ResultEvent::requested_usage` in stream.rs. It also extracts the driver's result-to-output step into `athena_agent::claude::output_from_result`, which calls it, so tests run the same path. The gate had no legacy exception, so it needed no change. I added two end-to-end tests in invocation.rs, which parse a real result-event line, build the output, build the record with `invocation_record`, and run `check_invocation`. One (subagent on the requested model, top-level 90/52656/3634696/134508 vs modelUsage 6/3136/275219/3821) passes with no violation. The negative one builds its record from an event whose reported total cost (0.75) disagrees with the per-model costs (0.10+0.20). Its token totals can't disagree once the record follows modelUsage, so the disagreement is in cost, which the gate also reconciles. It asserts the record differs from the modelUsage sum, then asserts exactly one Reconciliation violation. Mutation check: I disabled the gate's cost-sum guard, and the negative test failed (0 violations, expected 1). I then restored the guard. CHANGELOG has a Fixed entry.",
+    "files": [
+      "crates/athena-core/src/invocation.rs",
+      "crates/athena-agent/src/stream.rs",
+      "crates/athena-agent/src/claude.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "Run as `cargo test --locked -q` after the final edit. All suites ok, 0 failed. A plain `cargo test --locked` run earlier also compiled; its output was too long to read. Both run after the final code edits (the mutation was restored first)."
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "clean"
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "clean after cargo fmt --all"
+      },
+      {
+        "command": "cargo test --locked -p athena-core invocation::tests (guard disabled)",
+        "result": "fail",
+        "note": "Mutation check: with the cost-sum guard disabled in reconcile.rs, the negative test failed. The guard was restored."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Run cargo test. A positive end-to-end test passes: a result event whose top-level usage differs from modelUsage (main thread plus subagent on the requested model) goes through parsing, the invocation record and check_invocation with no Reconciliation violation.",
+        "status": "met",
+        "evidence": "invocation::tests::a_result_whose_top_level_usage_includes_a_subagent_reconciles_end_to_end passes (cargo test --locked -p athena-core invocation::tests, and full cargo test --locked -q). It asserts the record tokens are 6/3821/275219/3136 and that check_invocation returns an empty list."
+      },
+      {
+        "criterion": "Run cargo test. A named negative end-to-end test, a_result_whose_totals_disagree_with_model_usage_is_flagged_end_to_end, builds the record from a result event that has modelUsage for the requested model and really disagrees with it. It uses the same parse-and-record path as the positive test and does not edit the record by hand. It asserts check_invocation returns a Reconciliation violation.",
+        "status": "met",
+        "evidence": "The test exists in crates/athena-core/src/invocation.rs. It uses the same record_from helper as the positive test (StreamState::on_line, output_from_result, invocation_record) and does not edit the record. It asserts exactly one Reconciliation violation. With the cost-sum guard in reconcile.rs temporarily disabled it failed (left 0, right 1); with the guard restored it passes."
+      },
+      {
+        "criterion": "Before calling check_invocation, the negative test asserts that the built record's totals differ from the modelUsage sum. Its event is not one with no modelUsage, so it does not reach the 'no usage for the requested model' branch.",
+        "status": "met",
+        "evidence": "The test asserts models_used contains the requested model. It then asserts |reported cost - per-model cost sum| > 0.01 before calling check_invocation. It also asserts the violation detail contains 'per-model costs sum', which excludes the no-usage branch."
+      },
+      {
+        "criterion": "The invocation's measured tokens and the gate's reconciliation rule use one definition of what an invocation used (modelUsage). The code or the CHANGELOG states it. The legacy exception is either removed or limited to older records.",
+        "status": "met",
+        "evidence": "ResultEvent::requested_usage (stream.rs) and output_from_result (claude.rs) take the requested model's modelUsage. The invocation.rs module doc and the CHANGELOG Fixed entry state the single definition. The base gate has no legacy exception, so none remains."
+      },
+      {
+        "criterion": "Run cargo clippy --all-targets and cargo fmt --check. Both are clean, and the full cargo test passes.",
+        "status": "met",
+        "evidence": "cargo clippy --all-targets --locked -- -D warnings finished clean. cargo fmt --all --check printed nothing. cargo test --locked -q showed every result line ok with 0 failures."
+      },
+      {
+        "criterion": "The final report maps each criterion to a named test or command output.",
+        "status": "met",
+        "evidence": "This criteria_check list names the tests and commands for each criterion."
+      }
+    ],
+    "open_issues": [
+      "The negative case disagrees on cost, not tokens. Once the record follows modelUsage, token totals cannot disagree through the real path. This follows the reading's stated alternative.",
+      "The expected deliverables fake.rs, landing_tests.rs and reconcile.rs were not changed, because they needed no change. I temporarily edited reconcile.rs for the mutation check and then restored it."
+    ],
+    "mistakes": [
+      "My first CHANGELOG edit failed because the heading was not unique. I retried with more context."
+    ],
+    "learnings": [
+      "The base has no legacy exception in reconcile.rs. check_invocation compares the requested model's modelUsage tokens with the record's tokens.",
+      "fake.rs and landing_tests.rs already build consistent records, so they needed no change.",
+      "Building an Athena in a unit test needs a StateDir, Git, FakeAgentDriver, CountingPinner and Config::parse of athena.toml."
+    ],
+    "desires": [
+      "Read access to the cargo test output file, which was saved outside the working directory. I reran with -q instead."
+    ]
+  }
+}

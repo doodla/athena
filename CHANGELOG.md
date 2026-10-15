@@ -7,6 +7,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+- An invocation's recorded tokens are now the requested model's `modelUsage` tokens, the same quantity the
+  gate's `usage records reconcile` rule compares. Before, the record took the result event's top-level
+  `usage`, which also counts subagents, so a verified job could be refused at landing. The root cause was two
+  definitions of what an invocation used. `athena_agent::claude::output_from_result` builds the output (top-level
+  usage is the fallback only when `modelUsage` has no entry for the model). End-to-end tests in
+  `crates/athena-core/src/invocation.rs` run a result event through parsing, the record and `check_invocation`:
+  one with a subagent passes, and
+  `a_result_whose_totals_disagree_with_model_usage_is_flagged_end_to_end` builds its record from an event whose
+  reported cost disagrees with `modelUsage` and asserts a Reconciliation violation (it fails with the cost check
+  disabled). The gate had no legacy exception to remove.
+
 ### Added
 
 - Three standing defaults in `defaults.toml`, applying to every class: `outcome-check` (the outcome is the check

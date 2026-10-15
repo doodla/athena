@@ -28,6 +28,23 @@ pub struct ResultEvent {
     pub text: Option<String>,
 }
 
+impl ResultEvent {
+    /// What the invocation used, by the one definition the gate reconciles against: the requested model's
+    /// `modelUsage` tokens. The result's top-level `usage` also counts subagents on other terms, so it is
+    /// used only when `modelUsage` has no entry for the model.
+    pub fn requested_usage(&self, model: &str) -> Usage {
+        match self.models_used.get(model) {
+            Some(u) => Usage {
+                input: u.input,
+                output: u.output,
+                cache_read: u.cache_read,
+                cache_write: u.cache_write,
+            },
+            None => self.usage,
+        }
+    }
+}
+
 /// The state built from the events seen so far.
 #[derive(Debug, Clone, Default)]
 pub struct StreamState {
