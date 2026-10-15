@@ -9,6 +9,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- Agents now receive `GH_TOKEN`, `GITHUB_TOKEN`, `GH_HOST` and `GH_ENTERPRISE_TOKEN` when set (D96). The
+  steward's `gh` failed because an agent's environment held no GitHub variable. The owner should export a
+  read-only token before running Athena; without one the `github` blind spot is still reported. A test in
+  `env.rs` covers set, unset and empty values.
 - The reader frame now has the reader check whether the outcome needs `athena.toml`, `defaults.toml` or a
   workflow file, and list and name it, so admission does not refuse the reading later. The producer frame tells
   the producer to stop and report, not edit, a governance file the reading does not list. Both are guidance;

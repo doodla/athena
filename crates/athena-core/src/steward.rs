@@ -633,7 +633,7 @@ pub fn brief(
     }
     text.push_str(&format!(
         "\n## GitHub\n\nThe source `{GITHUB_SOURCE}` is CI runs, pull requests, and deploys, read with `gh`. If \
-         `gh` fails or has no access, report a blind spot with source `{GITHUB_SOURCE}`.\n"
+         `gh` fails or has no access (no `GH_TOKEN` or `GITHUB_TOKEN` set), report a blind spot with source `{GITHUB_SOURCE}`.\n"
     ));
     if !unreadable.is_empty() {
         text.push_str(&format!(
