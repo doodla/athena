@@ -25,6 +25,17 @@ are not built.
 - **A work item is a record** (`athena.work-item/1`). It names its source and cites its evidence by
   reference (a job id, a path, or a commit), never by copy. It has a kind (`blind-spot`,
   `repeated-failure`, `proposal`) and the rung it concerns.
+- **Deciding a proposal.** A work item of kind `proposal` is open until a person decides it, by its id,
+  which `athena status` lists. `athena approve-work <id>` submits an ordinary job through the usual reading.
+  Readers cannot see `records/`, so a request that only named the work item would be read blind; the request
+  is built from the work item instead: its title, rung, source and key, and the content of the source and of
+  each cited reference copied in as text (a job's request, reading and outcome; a file's text, clipped at
+  6,000 characters; a directory's file list; a commit's message). `athena reject-work <id> --why "..."`
+  records the reason. Work items are never edited, so each decision is an appended
+  `athena.work-decision/1` record (`records/work-decisions/<YYYY-MM>/<id>.json`) naming the work item and
+  either the approving job or the rejection reason. An item with a decision is no longer open; a second
+  decision, an unknown id and an empty reason are refused. Only proposals are decided this way; blind spots
+  and repeated failures are not.
 - **The ladder** (`Ladder`) has five rungs, highest first:
 
   | Rung | What it holds |

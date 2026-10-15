@@ -7,6 +7,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- `athena approve-work <id>` and `athena reject-work <id> --why "..."` decide a steward proposal (a work item
+  of kind `proposal`) by its id. `athena status` now lists open proposals with their ids. Approving was
+  impossible before: the work item only cites its evidence by reference into `records/`, which readers cannot
+  see, so asking Athena to do the work item gave a blind reading. The approved request is now built from the
+  work item: its title, rung and source, and the content of each cited job, file, directory or commit copied
+  into the text. The decision is recorded as an append-only `athena.work-decision/1` record, since work items
+  are never edited; an item with a decision is no longer open, and a second decision, an unknown id and an
+  empty reason are refused. Tests cover the record's round trip, the inlined request, both decisions and the
+  refusals.
+
 ### Changed
 
 - Agents now receive `GH_TOKEN`, `GITHUB_TOKEN`, `GH_HOST` and `GH_ENTERPRISE_TOKEN` when set (D96). The

@@ -1568,6 +1568,42 @@ impl WorkItem {
     }
 }
 
+/// How a person decided a work item.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+pub enum WorkDecisionState {
+    /// Approved: the job that carries the work out.
+    Approved { job: JobId },
+    /// Rejected, with the person's reason.
+    Rejected { reason: String },
+}
+
+/// `athena.work-decision/1`: a person's decision on one work item (`athena approve-work`,
+/// `athena reject-work`). Work items are never edited, so the decision is a record of its own that names the
+/// work item. A work item with a decision is no longer open.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkDecision {
+    /// This record's own id; it names the file.
+    pub id: RecordId,
+    pub at: Timestamp,
+    /// The work item decided.
+    pub work_item: RecordId,
+    pub decision: WorkDecisionState,
+}
+
+impl WorkDecision {
+    /// Why this record is not acceptable, if it is not.
+    pub fn validate(&self) -> Result<(), String> {
+        match &self.decision {
+            WorkDecisionState::Rejected { reason } if reason.trim().is_empty() => {
+                Err("a rejection gives a reason".into())
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------------
 // The envelope
 
@@ -1619,6 +1655,8 @@ pub enum AnyRecord {
     Role(Box<crate::roles::RoleDefinition>),
     #[serde(rename = "athena.work-item/1")]
     WorkItem(Box<WorkItem>),
+    #[serde(rename = "athena.work-decision/1")]
+    WorkDecision(WorkDecision),
 }
 
 /// Why a file under `records/` is not acceptable.
@@ -1696,6 +1734,7 @@ impl AnyRecord {
             }
             AnyRecord::Role(r) => r.validate().map_err(invalid)?,
             AnyRecord::WorkItem(w) => w.validate().map_err(invalid)?,
+            AnyRecord::WorkDecision(d) => d.validate().map_err(invalid)?,
             AnyRecord::DefaultsProposal(p) => p.validate().map_err(invalid)?, // Totals are what reconciliation checks an outcome against; only the bootstrap has none
             // (acceptance verification 2).
             AnyRecord::Outcome(o) if o.job.is_request() && o.totals.is_none() => {
@@ -1780,6 +1819,9 @@ impl AnyRecord {
             AnyRecord::WorkItem(r) => {
                 format!("records/work-items/{}/{}.json", r.id.month(), r.id)
             }
+            AnyRecord::WorkDecision(r) => {
+                format!("records/work-decisions/{}/{}.json", r.id.month(), r.id)
+            }
         }
     }
 
@@ -1807,6 +1849,7 @@ impl AnyRecord {
             AnyRecord::ClassLabel(_) => "athena.class-label/1",
             AnyRecord::Role(_) => crate::roles::ROLE_SCHEMA,
             AnyRecord::WorkItem(_) => "athena.work-item/1",
+            AnyRecord::WorkDecision(_) => "athena.work-decision/1",
         }
     }
 }
@@ -2384,6 +2427,43 @@ mod tests {
         assert!(json.contains("\"rung\": \"implementation\""));
         assert_eq!(AnyRecord::parse("x", json.as_bytes()).unwrap(), item);
         assert!(check_record_file(&item.canonical_path(), json.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn a_work_decision_has_a_path_a_schema_and_round_trips() {
+        let id = RecordId::parse("20261015-090000-2def").unwrap();
+        let approved = AnyRecord::WorkDecision(WorkDecision {
+            id: id.clone(),
+            at: ts(),
+            work_item: RecordId::parse("20261014-120000-1abc").unwrap(),
+            decision: WorkDecisionState::Approved { job: job() },
+        });
+        assert_eq!(approved.schema(), "athena.work-decision/1");
+        assert_eq!(
+            approved.canonical_path(),
+            "records/work-decisions/2026-10/20261015-090000-2def.json"
+        );
+        let json = approved.to_json();
+        assert!(json.contains("\"state\": \"approved\""));
+        assert_eq!(AnyRecord::parse("x", json.as_bytes()).unwrap(), approved);
+        assert!(check_record_file(&approved.canonical_path(), json.as_bytes()).is_ok());
+
+        let rejected = |reason: &str| {
+            AnyRecord::WorkDecision(WorkDecision {
+                id: id.clone(),
+                at: ts(),
+                work_item: RecordId::parse("20261014-120000-1abc").unwrap(),
+                decision: WorkDecisionState::Rejected {
+                    reason: reason.into(),
+                },
+            })
+        };
+        let good = rejected("Not now.");
+        assert_eq!(
+            AnyRecord::parse("x", good.to_json().as_bytes()).unwrap(),
+            good
+        );
+        assert!(AnyRecord::parse("x", rejected(" ").to_json().as_bytes()).is_err());
     }
 
     #[test]

@@ -468,10 +468,18 @@ pub fn status(v: &StatusView) -> String {
             let _ = writeln!(out, "{:<11}   source: {source}", "");
         }
     }
+    for (i, w) in v.work_proposals.iter().enumerate() {
+        let label = if i == 0 { "steward" } else { "" };
+        let _ = writeln!(out, "{label:<11} {} [{}] {}", w.id, w.rung, w.title);
+        let _ = writeln!(out, "{:<11}   source: {}", "", w.source);
+        for evidence in &w.evidence {
+            let _ = writeln!(out, "{:<11}   evidence: {evidence}", "");
+        }
+    }
     if !v.invalid_records.is_empty() {
         let _ = writeln!(
             out,
-            "invalid     {} (run athena check)",
+            "invalid    {} (run athena check)",
             v.invalid_records.join(", ")
         );
     }
