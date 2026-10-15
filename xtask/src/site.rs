@@ -171,6 +171,46 @@ fn cites(value: &Value, what: &str, known: &BTreeSet<String>) -> Result<String> 
     Ok(out)
 }
 
+/// Athena's own repository, linked from the next-steps section.
+const ATHENA_URL: &str = "https://github.com/doodla/athena";
+
+/// The web address of a GitHub repository given its clone URL (`https://github.com/<owner>/<name>[.git]`),
+/// or `None` when the repository is not on GitHub.
+fn github_base(repo: &str) -> Option<String> {
+    let rest = repo.strip_prefix("https://github.com/")?;
+    let rest = rest.trim_end_matches('/');
+    let rest = rest.strip_suffix(".git").unwrap_or(rest);
+    let mut parts = rest.split('/');
+    let (owner, name) = (parts.next()?, parts.next()?);
+    if owner.is_empty() || name.is_empty() || parts.next().is_some() {
+        return None;
+    }
+    Some(format!("https://github.com/{owner}/{name}"))
+}
+
+/// A link to a file and lines of the pinned commit on GitHub. Characters that would end the path early are
+/// percent-encoded. A start line of 0 means the claim names no line, so no anchor is added.
+fn source_url(base: &str, sha: &str, path: &str, start: u64, end: u64) -> String {
+    let path: String = path
+        .chars()
+        .map(|c| match c {
+            '%' => "%25".to_string(),
+            ' ' => "%20".to_string(),
+            '#' => "%23".to_string(),
+            '?' => "%3F".to_string(),
+            other => other.to_string(),
+        })
+        .collect();
+    let anchor = if start == 0 {
+        String::new()
+    } else if end <= start {
+        format!("#L{start}")
+    } else {
+        format!("#L{start}-L{end}")
+    };
+    format!("{base}/blob/{sha}/{path}{anchor}")
+}
+
 /// A claim's text starts with a bracketed tag such as `[mechanism]`; this splits it from the sentence.
 fn split_tag(text: &str) -> (Option<&str>, &str) {
     if let Some(rest) = text.strip_prefix('[')
@@ -190,26 +230,39 @@ pub fn render(study: &Study) -> Result<String> {
     let system = str_of(&study.pin, "system", "pin.json")?;
     let study_id = str_of(&study.pin, "study_id", "pin.json")?;
 
+    let github = github_base(repo);
+    let repo_link = match (&github, repo.starts_with("https://")) {
+        (Some(base), _) => format!("<a href=\"{}\">{}</a>", escape(base), escape(repo)),
+        (None, true) => format!("<a href=\"{0}\">{0}</a>", escape(repo)),
+        (None, false) => format!("<code>{}</code>", escape(repo)),
+    };
+    let about = study
+        .intro
+        .get("about")
+        .ok_or_else(|| anyhow!("intro.json has no `about`"))?;
+
     let mut body = String::new();
     let _ = write!(
         body,
-        "<header><h1>How {sys} handles work</h1>\
-         <p class=\"lede\">A reading of {sys} at one pinned commit, from the study <code>{id}</code>. \
-         Each statement below ends with the id of the claim that supports it; the claims, with their \
-         sources, are listed at the end.</p>\
-         <p class=\"pin\">Pinned {sys} commit: <code>{sha}</code> in <code>{repo}</code></p></header>",
+        "<header><h1>Athena explains how {sys} handles work</h1>\
+         <p class=\"lede\">{athena}</p>\
+         <p class=\"lede\">{study_text}</p>\
+         <p class=\"lede\">This page is that study of {sys}, from <code>{id}</code>. \
+         Each statement below ends with the id of the claim that supports it; the claims, with links to \
+         their sources, are listed at the end.</p>\
+         <p class=\"pin\">Pinned {sys} commit: <code>{sha}</code> in {repo_link}</p></header>",
         sys = escape(system),
+        athena = escape(str_of(about, "athena", "intro.json about")?),
+        study_text = escape(str_of(about, "study", "intro.json about")?),
         id = escape(study_id),
         sha = escape(sha),
-        repo = escape(repo),
     );
 
-    // Start here: what firstmate is, one piece of work end to end, and a glossary.
+    // Start here: what firstmate is and one piece of work end to end.
     body.push_str(
         "<section><h2>Start here</h2>\
-         <p>This page reads one system, firstmate, through a study of it. The four parts below \
-         say what it is, follow one piece of work, say what happens when something fails or has no limit, \
-         and define the words the rest of the page uses.</p>\
+         <p>The three parts below say what firstmate is, follow one piece of work, and say what happens \
+         when something fails or has no limit. A glossary of the words used follows the main sections.</p>\
          <h3>What firstmate is</h3><ul>",
     );
     for item in array_of(&study.intro, "what", "intro.json")? {
@@ -223,27 +276,7 @@ pub fn render(study: &Study) -> Result<String> {
     for item in array_of(&study.intro, "limits", "intro.json")? {
         intro_item(&mut body, item, "a failure or limit sentence", &known)?;
     }
-    body.push_str("</ul><h3>Glossary</h3><dl class=\"glossary\">");
-    for entry in array_of(&study.intro, "glossary", "intro.json")? {
-        let term = str_of(entry, "term", "a glossary entry")?;
-        let what = format!("glossary entry {term}");
-        let definition = escape(str_of(entry, "definition", &what)?);
-        // Terms about the page's own structure make no claim about firstmate and need no citation.
-        let cite = if entry.get("about").and_then(Value::as_str) == Some("page") {
-            String::from("<span class=\"tag\">about this page</span>")
-        } else {
-            cites(entry, &what, &known)?
-        };
-        let _ = write!(
-            body,
-            "<dt id=\"term-{}\">{}</dt><dd>{} {}</dd>",
-            escape(&term.replace(' ', "-")),
-            escape(term),
-            definition,
-            cite
-        );
-    }
-    body.push_str("</dl></section>");
+    body.push_str("</ul></section>");
 
     // States
     body.push_str("<section><h2>States of a piece of work</h2>");
@@ -375,6 +408,29 @@ pub fn render(study: &Study) -> Result<String> {
     }
     body.push_str("</div></section>");
 
+    // Glossary: after the walk-through and the sections that use its words.
+    body.push_str("<section><h2>Glossary</h2><dl class=\"glossary\">");
+    for entry in array_of(&study.intro, "glossary", "intro.json")? {
+        let term = str_of(entry, "term", "a glossary entry")?;
+        let what = format!("glossary entry {term}");
+        let definition = escape(str_of(entry, "definition", &what)?);
+        // Terms about the page's own structure make no claim about firstmate and need no citation.
+        let cite = if entry.get("about").and_then(Value::as_str) == Some("page") {
+            String::from("<span class=\"tag\">about this page</span>")
+        } else {
+            cites(entry, &what, &known)?
+        };
+        let _ = write!(
+            body,
+            "<dt id=\"term-{}\">{}</dt><dd>{} {}</dd>",
+            escape(&term.replace(' ', "-")),
+            escape(term),
+            definition,
+            cite
+        );
+    }
+    body.push_str("</dl></section>");
+
     // Findings: records of the study itself, not claims about the studied system.
     body.push_str(
         "<section><h2>Limits of this study</h2><p>These are the study's own findings, identified \
@@ -391,6 +447,24 @@ pub fn render(study: &Study) -> Result<String> {
         );
     }
     body.push_str("</ul></section>");
+
+    // Next steps: where to read more about Athena and firstmate.
+    let firstmate_url = github.clone().unwrap_or_else(|| repo.to_string());
+    let firstmate_link = if firstmate_url.starts_with("https://") {
+        format!("<a href=\"{0}\">{0}</a>", escape(&firstmate_url))
+    } else {
+        format!("<code>{}</code>", escape(&firstmate_url))
+    };
+    let _ = write!(
+        body,
+        "<section><h2>Next steps</h2><ul>\
+         <li>Learn about Athena, and how to install and try it: <a href=\"{a}\">{a}</a>.</li>\
+         <li>Learn about {sys}, the project studied here, and see how to use it: {firstmate_link}.</li>\
+         <li>Check a statement: follow a bracketed claim id to the claim, then its source link to the \
+         file and lines in {sys} at the pinned commit.</li></ul></section>",
+        a = ATHENA_URL,
+        sys = escape(system),
+    );
 
     // Claims and their sources
     body.push_str("<section><h2>Claims and sources</h2><ol class=\"claims\">");
@@ -413,13 +487,20 @@ pub fn render(study: &Study) -> Result<String> {
             let path = str_of(s, "path", &what)?;
             let start = s.get("start_line").and_then(Value::as_u64).unwrap_or(0);
             let end = s.get("end_line").and_then(Value::as_u64).unwrap_or(start);
-            let _ = write!(
-                body,
-                "<li><code>{}:{}-{}</code></li>",
-                escape(path),
-                start,
-                end
-            );
+            let text = format!("{path}:{start}-{end}");
+            match &github {
+                Some(base) => {
+                    let _ = write!(
+                        body,
+                        "<li><a href=\"{}\"><code>{}</code></a></li>",
+                        escape(&source_url(base, sha, path, start, end)),
+                        escape(&text)
+                    );
+                }
+                None => {
+                    let _ = write!(body, "<li><code>{}</code></li>", escape(&text));
+                }
+            }
         }
         body.push_str("</ul></li>");
     }
@@ -436,7 +517,7 @@ pub fn render(study: &Study) -> Result<String> {
     Ok(format!(
         "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
-         <title>How {sys} handles work</title><style>{CSS}</style></head><body><main>{body}</main></body></html>\n",
+         <title>Athena explains how {sys} handles work</title><style>{CSS}</style></head><body><main>{body}</main></body></html>\n",
         sys = escape(system)
     ))
 }
@@ -495,7 +576,7 @@ a{color:var(--accent)}code{font-family:ui-monospace,monospace;font-size:.9em;wor
 .card h3{margin:.2rem 0}.arrow{color:var(--muted);font-weight:normal}\
 dt{font-weight:600}dd{margin:0 0 .5rem}\
 .tag{display:inline-block;border:1px solid var(--line);border-radius:1rem;padding:0 .5rem;font-size:.8rem;color:var(--muted)}\
-.cites a,.cites{font-size:.85rem}.mark{color:var(--muted);font-size:.8rem}\
+.cites a,.cites{font-size:.75rem;color:var(--muted)}.mark{color:var(--muted);font-size:.8rem}\
 .leadin{font-size:1.05rem}.summary{font-weight:600;margin:.3rem 0}\
 .deciders{margin:1rem 0}\
 .sources{color:var(--muted);font-size:.85rem}\
@@ -546,7 +627,8 @@ mod tests {
         write(
             dir.path(),
             "intro.json",
-            r#"{"what":[{"text":"Firstmate does a thing.","claims":["c1"]}],
+            r#"{"about":{"athena":"Athena is a system.","study":"A study is a reading."},
+                "what":[{"text":"Firstmate does a thing.","claims":["c1"]}],
                 "walkthrough":[{"text":"First step.","claims":["c1"]}],
                 "limits":[{"text":"A limit.","claims":["c1"]}],
                 "leadins":{
@@ -566,19 +648,66 @@ mod tests {
     }
 
     #[test]
-    fn the_intro_and_glossary_come_before_the_states() {
+    fn the_intro_comes_before_the_states_and_the_glossary_after_them() {
         let dir = study_dir("[mechanism] A thing happens.", "c1");
         let html = render(&load(dir.path()).unwrap()).unwrap();
-        let start = html.find("<h2>Start here</h2>").unwrap();
-        assert!(start < html.find("<h2>States of a piece of work</h2>").unwrap());
+        let at = |needle: &str| html.find(needle).unwrap_or_else(|| panic!("{needle}"));
+        let start = at("<h2>Start here</h2>");
+        assert!(start < at("<h2>States of a piece of work</h2>"));
+        assert!(
+            at("<h3>One piece of work, start to finish</h3>")
+                < at("<h2>States of a piece of work</h2>")
+        );
+        assert!(at("<h2>Why it is built this way</h2>") < at("<h2>Glossary</h2>"));
+        assert!(at("<h2>Glossary</h2>") < at("<h2>Next steps</h2>"));
         assert!(html.contains("<h3>What firstmate is</h3>"));
         assert!(html.contains("<h3>One piece of work, start to finish</h3>"));
-        assert!(html.contains("<h3>Glossary</h3>"));
         assert!(html.contains("<li>Firstmate does a thing. <span class=\"cites\">"));
         assert!(html.contains(
             "<dt id=\"term-worker\">worker</dt><dd>Does the task. <span class=\"cites\">"
         ));
         assert!(html.contains("<dt id=\"term-guard\">guard</dt><dd>A condition. <span class=\"tag\">about this page</span>"));
+    }
+
+    #[test]
+    fn the_page_names_athena_before_firstmate_and_has_next_steps() {
+        let dir = study_dir("[mechanism] A thing happens.", "c1");
+        let html = render(&load(dir.path()).unwrap()).unwrap();
+        assert!(html.contains("<title>Athena explains how firstmate handles work</title>"));
+        let h1 = html.find("<h1>Athena explains").unwrap();
+        let athena = html.find("Athena is a system.").unwrap();
+        let study = html.find("A study is a reading.").unwrap();
+        let first = html.find("Firstmate does a thing.").unwrap();
+        assert!(h1 < athena && athena < study && study < first);
+        assert!(html.contains("<h2>Next steps</h2>"));
+        assert!(html.contains("<a href=\"https://github.com/doodla/athena\">"));
+    }
+
+    #[test]
+    fn a_github_pin_gives_linked_repository_and_sources_and_others_do_not() {
+        let dir = study_dir("[mechanism] A thing happens.", "c1");
+        let plain = render(&load(dir.path()).unwrap()).unwrap();
+        assert!(!plain.contains("/blob/"));
+        assert!(plain.contains("<code>a.md:3-4</code>"));
+        write(
+            dir.path(),
+            "pin.json",
+            r#"{"study_id":"s","system":"firstmate","repository_url":"https://github.com/o/f.git","sha":"abc123def"}"#,
+        );
+        let html = render(&load(dir.path()).unwrap()).unwrap();
+        assert!(
+            html.contains("in <a href=\"https://github.com/o/f\">https://github.com/o/f.git</a>")
+        );
+        assert!(html.contains(
+            "<a href=\"https://github.com/o/f/blob/abc123def/a.md#L3-L4\"><code>a.md:3-4</code></a>"
+        ));
+        assert!(html.contains("<li>Learn about firstmate, the project studied here, and see how to use it: <a href=\"https://github.com/o/f\">"));
+        assert_eq!(
+            source_url("https://github.com/o/f", "s", "a b#c.md", 5, 5),
+            "https://github.com/o/f/blob/s/a%20b%23c.md#L5"
+        );
+        assert_eq!(github_base("https://example.org/o/f.git"), None);
+        assert_eq!(github_base("https://github.com/o"), None);
     }
 
     #[test]
@@ -687,6 +816,7 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
         let html = render(&load(&root.join(STUDY_DIR)).unwrap()).unwrap();
         assert!(html.contains("<h3>When things go wrong, and what is not limited</h3>"));
+        assert!(!html.contains("guard_evaluated_by"));
         assert_eq!(html.matches("<dd>No guard applies</dd>").count(), 3);
         assert!(!html.contains("none (checked by"));
     }
