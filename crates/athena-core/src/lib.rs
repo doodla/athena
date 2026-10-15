@@ -34,9 +34,13 @@
 //! - [`work_decisions`]: `athena approve-work` and `athena reject-work`, a person's decision on a steward
 //!   proposal, recorded as an appended work-decision record; approving submits a job whose request carries
 //!   the proposal's cited content in full;
+//! - [`audience`]: `athena audience`, a role that reads the live explainer page as a newcomer, rates it from 1
+//!   to 5, and records the rating with findings that each cite their evidence; a rating of 2 or lower queues
+//!   a work item, and the steward's brief and `athena status` show the latest rating;
 //! - [`pin`]: a study's repository ref resolved to a commit by the core, and mounted read-only.
 
 pub mod admission;
+pub mod audience;
 pub mod capability;
 pub mod chain;
 pub mod checks;

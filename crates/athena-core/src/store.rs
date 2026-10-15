@@ -198,6 +198,10 @@ pub struct Records {
     /// The steward's model invocations, oldest first. A steward run is no job, so its invocation is kept apart
     /// from `jobs` and never shows as work to do.
     pub steward_runs: Vec<Invocation>,
+    /// Every audience rating, oldest first; the last is the latest.
+    pub audience_ratings: Vec<athena_data::records::AudienceRating>,
+    /// The audience's model invocations, oldest first, kept apart from `jobs` as the steward's are.
+    pub audience_runs: Vec<Invocation>,
     /// Files that are not acceptable records, by path.
     pub invalid: Vec<String>,
 }
@@ -256,8 +260,12 @@ impl Records {
                 AnyRecord::Role(r) => records.roles.push(*r),
                 AnyRecord::WorkItem(w) => records.work_items.push(*w),
                 AnyRecord::WorkDecision(d) => records.work_decisions.push(d),
+                AnyRecord::AudienceRating(a) => records.audience_ratings.push(*a),
                 AnyRecord::Invocation(i) if i.role == Role::Steward => {
                     records.steward_runs.push(*i);
+                }
+                AnyRecord::Invocation(i) if i.role == Role::Audience => {
+                    records.audience_runs.push(*i);
                 }
                 other => {
                     let job = job_of(&other)
@@ -273,6 +281,10 @@ impl Records {
             job.sort();
         }
         records.steward_runs.sort_by_key(|i| i.started_at);
+        records.audience_runs.sort_by_key(|i| i.started_at);
+        records
+            .audience_ratings
+            .sort_by(|a, b| (a.at, &a.id).cmp(&(b.at, &b.id)));
         records.interventions.sort_by_key(|i| i.at);
         records.restarts.sort_by_key(|r| r.at);
         records

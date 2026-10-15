@@ -138,12 +138,56 @@ pub fn steward(at: jiff::Timestamp) -> RoleDefinition {
     }
 }
 
+/// The audience's name.
+pub const AUDIENCE: &str = "audience";
+
+/// The audience's prompt. It stays fixed so that a change to it is a new recorded version.
+pub const AUDIENCE_PROMPT: &str = "You are Athena's audience. You only read: the page you are given, as the \
+reader named in your brief would meet it for the first time. Say whether that reader gets what they came \
+for. Give one rating from 1 (cannot use it) to 5 (got what they came for). Give findings, and cite the \
+evidence for every one: a quoted passage or the heading where you saw it. Copy no data beyond that. Change \
+nothing.";
+
+/// The one audience definition: it rates the live explainer page. It reads and records only, so it may change
+/// nothing above the implementation rung, and in practice changes nothing at all. The cadence is how many
+/// finished tasks should pass between runs; `athena audience` runs it on request.
+pub fn audience(at: jiff::Timestamp) -> RoleDefinition {
+    RoleDefinition {
+        name: AUDIENCE.into(),
+        version: 1,
+        at,
+        goal: "Read a shipped outcome as its audience would, rate how well it serves them, and cite the evidence for each finding."
+            .into(),
+        prompt: AUDIENCE_PROMPT.into(),
+        cadence_tasks: 20,
+        highest_rung: Ladder::Implementation,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn at() -> jiff::Timestamp {
         "2026-10-14T00:00:00Z".parse().unwrap()
+    }
+
+    #[test]
+    fn the_audience_is_valid_and_asks_for_a_rating_with_evidence() {
+        let role = audience(at());
+        assert_eq!(role.validate(), Ok(()));
+        assert_eq!(role.name, "audience");
+        assert_eq!(role.path(), "records/roles/audience-1.json");
+        assert!(role.cadence_tasks > 0);
+        assert!(!role.goal.is_empty());
+        for needle in ["1", "5", "rating", "evidence", "for the first time"] {
+            assert!(role.prompt.contains(needle), "{needle}");
+        }
+        assert!(
+            role.prompt.len() < 600,
+            "the prompt is short: {}",
+            role.prompt.len()
+        );
     }
 
     #[test]

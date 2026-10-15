@@ -247,6 +247,8 @@ pub fn deterministic_turn(spec: &AgentInvocation) -> FakeTurn {
         }
         // A nested run has nothing for the steward to report.
         Role::Steward => FakeTurn::output(json!({ "items": [] })),
+        // A nested run rates nothing: a middling rating with no findings raises no work item.
+        Role::Audience => FakeTurn::output(json!({ "rating": 3, "findings": [] })),
     }
 }
 

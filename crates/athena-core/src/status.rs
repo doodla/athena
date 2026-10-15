@@ -73,8 +73,37 @@ pub struct StatusView {
     /// Open steward proposals (work items of kind proposal with no decision), decided by id with
     /// `athena approve-work` or `athena reject-work`.
     pub work_proposals: Vec<WorkProposalView>,
+    /// The latest audience rating (`crate::audience`), if one is recorded.
+    pub audience: Option<AudienceView>,
     pub invalid_records: Vec<String>,
     pub next: Vec<String>,
+}
+
+/// The latest audience rating as `athena status` lists it.
+#[derive(Debug, Clone, Serialize)]
+pub struct AudienceView {
+    pub id: String,
+    pub target: String,
+    pub audience: String,
+    pub rating: u8,
+    pub at: String,
+    /// Each finding with the evidence it cites.
+    pub findings: Vec<String>,
+}
+
+fn audience_view(records: &Records) -> Option<AudienceView> {
+    crate::audience::latest(records).map(|r| AudienceView {
+        id: r.id.to_string(),
+        target: r.target.clone(),
+        audience: r.audience.clone(),
+        rating: r.rating,
+        at: r.at.to_string(),
+        findings: r
+            .findings
+            .iter()
+            .map(|f| format!("{} (evidence: {})", f.text, f.source))
+            .collect(),
+    })
 }
 
 /// An open defaults proposal as `athena status` lists it (`defaults-loop.md` section 9).
@@ -494,6 +523,7 @@ impl Athena {
             unreviewed_introspections: unreviewed.len(),
             proposals,
             work_proposals,
+            audience: audience_view(&records),
             invalid_records: records.invalid.clone(),
             next,
         })
