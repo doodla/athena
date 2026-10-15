@@ -22,6 +22,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- The producer self-check no longer fails producers on wording, and keeps the report that failed it. Root
+  cause: a criterion counted as reported only if its text equalled the accepted text exactly, so a leading
+  number, a `[behavior]` tag, different case, extra spaces or a trailing full stop failed even a plain
+  "cargo test passes", and the failing report was recorded nowhere, so jobs failed with no way to tell
+  whether the producer or the check was wrong. Now `unmet_criteria` (`crates/athena-core/src/run.rs`) ignores
+  those differences but still lists a criterion that is missing, not marked met, or worded differently. The
+  redacted report is kept in the `detail` of the attempt's invocation record, for the first attempt and the
+  send-back, and the failure reason names that record.
 - The firstmate explainer page now states the failure and limit behaviour the claims already record, and drops
   wording no claim supports. No new claim was added; every fact below reuses a claim in
   `studies/firstmate-work-handling/claims.json`, whose quote is in the pinned firstmate source at the path and
