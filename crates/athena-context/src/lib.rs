@@ -158,7 +158,7 @@ impl BudgetSet {
     pub fn budget(self) -> u64 {
         match self {
             BudgetSet::Contract => 350,
-            BudgetSet::Reader => 1_930,
+            BudgetSet::Reader => 2_000,
             BudgetSet::Producer => 1_300,
             BudgetSet::Verifier => 1_300,
             BudgetSet::Steward => 600,
