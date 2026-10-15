@@ -977,6 +977,37 @@ mod tests {
     }
 
     #[test]
+    fn an_explainer_page_request_gets_the_standing_defaults_without_a_question() {
+        // The reader's context is the system prompt (frame + rendered defaults) plus this brief.
+        let mut inputs = reader_inputs(&reading());
+        inputs.request = "write an explainer page".into();
+        inputs.history.clear();
+        let brief = reader_brief(&inputs);
+        assert!(brief.contains("> write an explainer page"));
+        assert!(!brief.contains("Question asked"));
+        let system = crate::compose(&[
+            crate::CONTRACT.into(),
+            crate::READER_FRAME.into(),
+            crate::Component::new("defaults", 1, defaults().render()),
+        ]);
+        for id in ["outcome-check", "no-empty-success", "thrash-stop"] {
+            assert!(system.text.contains(&format!("- {id} [*]:")), "no {id}");
+        }
+        assert!(
+            system
+                .text
+                .contains("record each applicable one as an acceptance criterion")
+        );
+        assert!(
+            system
+                .text
+                .contains("do not ask the user about them unless the request says otherwise")
+        );
+        // Rival: the wording lets a request that says otherwise opt out.
+        assert!(system.text.contains("unless the request says otherwise"));
+    }
+
+    #[test]
     fn reader_briefs_carry_an_earlier_attempt_only_when_set() {
         let mut inputs = reader_inputs(&reading());
         assert!(!reader_brief(&inputs).contains("# Earlier attempt"));

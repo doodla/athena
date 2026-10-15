@@ -145,6 +145,34 @@ source = "s"
     }
 
     #[test]
+    fn an_explainer_page_request_gets_the_three_standing_defaults() {
+        // An explainer page is class docs: select the defaults for docs the way the reader sees them.
+        let model = DefaultsModel::parse(REPO_DEFAULTS).unwrap();
+        let for_docs = DefaultsModel {
+            version: model.version,
+            defaults: model
+                .defaults
+                .iter()
+                .filter(|d| d.applies_to.iter().any(|c| c == "*" || c == "docs"))
+                .cloned()
+                .collect(),
+        };
+        let out = for_docs.render();
+        for line in [
+            "- outcome-check [*]: The outcome is the check behind the work, not the activity done.\n",
+            "- no-empty-success [*]: An empty queue or finished list never counts as success on its own.\n",
+            "- thrash-stop [*]: If the same item fails twice in a loop, the loop stops and reports thrashing.\n",
+        ] {
+            assert!(out.contains(line), "missing: {line}");
+        }
+        // A code-only default is not selected for docs, so the selection is real.
+        assert!(!out.contains("- rust ["));
+        let outcome = &model.get("outcome-check").unwrap().statement;
+        assert!(outcome.contains("fresh model reader that took no part in the work"));
+        assert!(outcome.contains("below 4 of 5 blocks completion"));
+    }
+
+    #[test]
     fn duplicates_are_refused() {
         let text = r#"
 version = 1

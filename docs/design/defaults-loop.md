@@ -16,8 +16,10 @@ person is named.
 
 ## 1. The problem
 
-`defaults.toml` is Athena's model of what its user expects without saying so. It has 12 entries today
-**(read: `defaults.toml`, counted)**. D26 says "eleven"; that text was written before `root-cause` was added and
+`defaults.toml` is Athena's model of what its user expects without saying so. It has 15 entries today
+**(read: `defaults.toml`, counted)**, including three cross-cutting standing defaults (`outcome-check`,
+`no-empty-success`, `thrash-stop`) that the reader records as acceptance criteria without asking. They are
+prose-only: no loop code computes the 4-of-5 fresh-reader rating or detects thrashing yet **(design)**. D26 says "eleven"; that text was written before `root-cause` was added and
 is corrected in the same change as this revision **(read: `docs/decisions.md` D26)**. The seed entries each cite
 `BRIEF.md`. Nothing yet turns what the user repeatedly has to say back into an entry. The roadmap names the gap
 in RM-4, "feed scored mispredictions back into `defaults.toml`" **(read: `docs/design/roadmap.md`)**. RM-3,

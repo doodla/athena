@@ -9,6 +9,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Three standing defaults in `defaults.toml`, applying to every class: `outcome-check` (the outcome is the check
+  behind the work; a fresh model reader rates audience-facing results as a newcomer, and below 4 of 5 blocks
+  completion), `no-empty-success` (an empty queue or finished list is never success alone) and `thrash-stop`
+  (the same item failing twice stops the loop and reports thrashing). The reader prompt now tells the reader
+  to record applicable ones as acceptance criteria without asking, unless the request says otherwise. Tests in
+  `crates/athena-data/src/defaults.rs` and `crates/athena-context/src/briefs.rs` show an explainer-page request
+  receives them. Prose-only: no loop code computes the rating or detects thrashing yet.
 - A `behavior-evidence` default in `defaults.toml`: acceptance criteria check the requested behavior happening,
   not that types, files or wiring exist, and a protection or denial test shows the action succeeding as root
   before the protection, then refused, and fails rather than skips if the environment cannot enforce it. A unit
