@@ -1,0 +1,169 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261015-163408-pwrv",
+  "n": 1,
+  "at": "2026-10-15T16:34:35.997976737Z",
+  "invocation_seq": 1,
+  "base_commit": "7bed528445d537ba40f96dab734a9180dde8201a",
+  "config_sha256": "36cc8236b906040fe507a6461dabd9eddad491a69739eeee2bf0d38753b1202e",
+  "defaults_sha256": "3dd89b93c1845b85a62b30afaa09cfa5038a7a2bb65ce240a3087f9428c418ac",
+  "defaults_version": 1,
+  "title": "Make drain count only outcome-changing landings and check all page text",
+  "summary": "Fix `athena drain` so \"target met\" needs (1) a landing whose diff touches what the explainer is built from, and (2) a model-backed check of every page text input (claims.json, intro.json intro/transition/glossary, any other text file) against the pinned source, failing on contradicted or omitted statements. Audience: the person running drain who trusts \"target met\". The retry starts from base, so it redoes both rules and covers the intro text the last attempt missed.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria inject a wrong statement into each page text input and assert drain does not stop as target met."
+    },
+    {
+      "id": "tested",
+      "how": "Tests added for drain rules and the source check; fmt, clippy and test must pass."
+    },
+    {
+      "id": "root-cause",
+      "how": "The check covers every text-bearing page input, not only claims.json."
+    },
+    {
+      "id": "mechanism",
+      "how": "A code check fails if a text-bearing page file is not covered by the source check."
+    },
+    {
+      "id": "strangers",
+      "how": "Add a decision in docs/decisions.md with alternatives and a CHANGELOG entry."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "The base has no source-vs-text check and no outcome-changing-landing rule; RealSteps::check_page in drain.rs only tests model.json for self-consistency (read).",
+    "Page text lives in studies/<name>/claims.json and intro.json (intro, transition, glossary); other studies/*.json files are structural or evidence, and the producer must enumerate which are text-bearing.",
+    "Landings count only if their changed paths include studies/, the site generator, or the page sources.",
+    "The model-backed check is guarded by the budget and its cost is added to spent_usd; the reserve must scale with the number of studies checked, or all studies be checked in one capped call.",
+    "The source-check agent is recorded under a role that matches its verifier model and cap, not Role::Audience.",
+    "Existing self-consistency check stays as a floor.",
+    "The real source-check path is tested end to end with a fake agent and a stub pinner."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "With a stubbed Steps, a drain whose only landing changed paths outside studies/, the site generator and the page sources, with the rating at the target, does not stop as \"target met\". The report says the landing did not change the outcome. Run `cargo test -p athena-cli --test drain`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A landing that changes a study file or the site generator, then a rating at the target and a passing source check, still stops as \"target met\". Run `cargo test -p athena-cli`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Tests inject one wrong statement into each of claims.json, the intro, the transition and a glossary entry (for example teardown closes instead of can reopen; yolo-on allows self-merge; wrong handoff frees a place), plus one omitted fact. With a fake agent and stub pinner, RealSteps::check_page fails each time and names the statement, and drain does not report \"target met\". Run `cargo test -p athena-cli`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A code check and test fail if any text-bearing file in a study directory is not covered by the source check. A page with correct text in every file passes. Run `cargo test`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The source check is budget-guarded: the reserve covers every model call it will make (one per study or a single call), drain stops as \"budget spent\" when it does not fit, and the cost is added to spent_usd. Run `cargo test -p athena-cli`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Stop::TargetMet docs, module docs, `athena drain --help`, a new decision in docs/decisions.md (with alternatives, covering all page text, and the self-consistency floor) and CHANGELOG.md state both rules.",
+      "kind": "content"
+    },
+    {
+      "text": "`cargo fmt --check`, `cargo clippy --workspace` and `cargo test --workspace` pass.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/pin.rs",
+      "action": "modify",
+      "p": 0.75
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.92
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "p": 0.25
+    },
+    {
+      "path": "README.md",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "athena.toml",
+      "action": "modify",
+      "p": 0.05
+    }
+  ],
+  "out_of_scope": [
+    "Rewriting the studies' content or fixing the wrong facts in the existing page",
+    "Changing the audience rating rubric or target value",
+    "Running the check against the live model as part of tests"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.78,
+      "p_verification_passes": 0.5,
+      "p_user_intervenes": 0.12,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.4,
+        "p90": 3.2
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 1300.0,
+        "p90": 2600.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.8113821138211382,
+      "p_verification_passes": 0.6698113207547169,
+      "p_user_intervenes": 0.08301886792452831,
+      "cost_usd": {
+        "p10": 0.42178970930058807,
+        "p50": 0.917859983636829,
+        "p90": 2.1618054454494464
+      },
+      "wall_time_s": {
+        "p10": 539.8880646620003,
+        "p50": 889.7180544170001,
+        "p90": 1651.0801215440001
+      }
+    }
+  },
+  "departures": "Larger than the reference: two rules plus a model-backed check over several page files, with fake-agent tests, and the last attempt failed on scope."
+}
