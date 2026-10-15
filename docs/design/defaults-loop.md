@@ -129,6 +129,13 @@ The reading code is a function of Athena itself, run before the agent is invoked
   `class_of_work`, `category`, job id, date, and for introspections the `failure_class` and `cause`; for host-error
   records the `status_code`, `operation`, `phase` and `message_class`; for check records the check name, its result
   and the job id (§5 lists the whole set).
+- **Also reads**, for a job that ended `rejected` or `failed`, that job's own stored `verification.json` (never
+  another job's): the text of each unmet criterion, each blocker or major finding (severity, summary,
+  location), and, under a separate "Failed checks" heading, each failed check's name and the end of its
+  `output_tail`. These are added to the event's `what`, capped at 8 entries per list, 400 characters per item
+  and 600 characters per output tail (estimates). A verification with a failing verdict and none of these says
+  so; a job with no verification, or a passing one, adds nothing. This text is not redacted again: the
+  `output_tail` was redacted when it was stored.
 - **Never reads** model transcripts, diffs, standard-error text, or files from other jobs.
 - **Selects** earlier cases in two steps: code narrows by `class_of_work` and `category`, then a Jev choice
   question assigns the event to a class (§3.4); the earlier cases are the records already in that class.

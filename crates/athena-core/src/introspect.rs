@@ -17,7 +17,13 @@
 //!    status or any outcome. A failed Jev call is stored as an error and blocks nothing.
 //!
 //! The reading code (section 3.3) is a function of Athena itself. It reads only the stored fields it lists:
-//! `what`, `why`, `class_of_work`, `category`, job id and date of the event; and for earlier cases the record
+//! `what`, `why`, `class_of_work`, `category`, job id and date of the event; for a rejected or failed job,
+//! `what` also carries the job's stored `verification.json` failures: each unmet criterion's text, each blocker
+//! or major finding (severity, summary, location), and, under a separate "Failed checks" heading, each failed
+//! check's name and the end of its output tail, capped at [`DETAIL_CAP`] entries of [`TEXT_CAP`] and
+//! [`TAIL_CAP`] characters (a verification with no failure detail says so; a job with none adds nothing).
+//! This text is not redacted again; the check output was redacted when it was stored. For earlier cases it
+//! reads the record
 //! id, job id, date, the one-line `what`, the class and the `cause`. It never reads transcripts, diffs,
 //! standard-error text or files of other jobs. It narrows earlier cases by `class_of_work` and `category`,
 //! caps them at [`CASE_CAP`], and passes only those fields to the model. On return, any id that was not on a
@@ -41,6 +47,9 @@ use athena_data::records::{
     INTROSPECTION_SCHEMA, InterventionCategory, IntrospectionEvidence, IntrospectionJev,
     IntrospectionRecord, IntrospectionStatus, IntrospectionTrigger, JevClassAnswer, OutcomeState,
     PreventionKind, ProposalRecord, Role,
+};
+use athena_data::records::{
+    CheckRun, CriterionResult, Finding as VerificationFinding, Severity, Verdict, Verification,
 };
 use athena_data::{JobId, RecordId};
 use jiff::Timestamp;
@@ -863,15 +872,124 @@ struct NewClass {
     description: String,
 }
 
+/// The most unmet criteria, blocker or major findings, and failed checks each listed in `what`.
+pub const DETAIL_CAP: usize = 8;
+/// The most characters of one criterion, finding summary or location in `what`.
+pub const TEXT_CAP: usize = 400;
+/// The most characters kept from the end of one failed check's output tail.
+pub const TAIL_CAP: usize = 600;
+
+/// `text` cut to at most `cap` characters, marked when cut.
+fn clip(text: &str, cap: usize) -> String {
+    let text = text.trim();
+    if text.chars().count() <= cap {
+        return text.to_string();
+    }
+    let cut: String = text.chars().take(cap).collect();
+    format!("{cut}...")
+}
+
+/// The last `cap` characters of `text`, marked when the start was cut.
+fn clip_tail(text: &str, cap: usize) -> String {
+    let text = text.trim();
+    let count = text.chars().count();
+    if count <= cap {
+        return text.to_string();
+    }
+    let kept: String = text.chars().skip(count - cap).collect();
+    format!("...{kept}")
+}
+
+fn more(total: usize) -> String {
+    if total > DETAIL_CAP {
+        format!("- ({} more not shown)\n", total - DETAIL_CAP)
+    } else {
+        String::new()
+    }
+}
+
+/// What a failed verification adds to an event's `what`: each unmet criterion, each blocker or major finding,
+/// and, under their own heading, each failed check. Counts and text are capped. Nothing is added when the
+/// verification passed. The text comes from the stored `verification.json` only; check output was redacted
+/// when it was stored, and this text is not redacted again.
+fn failure_details(v: &Verification) -> String {
+    if v.final_verdict == Verdict::Pass {
+        return String::new();
+    }
+    let unmet: Vec<&CriterionResult> = v.criteria.iter().filter(|c| !c.met).collect();
+    let findings: Vec<&VerificationFinding> = v
+        .findings
+        .iter()
+        .filter(|f| matches!(f.severity, Severity::Blocker | Severity::Major))
+        .collect();
+    let checks: Vec<&CheckRun> = v.checks.iter().filter(|c| !c.passed).collect();
+    if unmet.is_empty() && findings.is_empty() && checks.is_empty() {
+        return "\n\nThe stored verification lists no unmet criterion, blocker or major finding, or \
+                failed check, so the cause is not in the stored result."
+            .to_string();
+    }
+    let mut out = String::new();
+    if !unmet.is_empty() {
+        out.push_str(&format!(
+            "\n\nUnmet acceptance criteria ({}):\n",
+            unmet.len()
+        ));
+        for c in unmet.iter().take(DETAIL_CAP) {
+            out.push_str(&format!("- {}\n", clip(&c.criterion, TEXT_CAP)));
+        }
+        out.push_str(&more(unmet.len()));
+    }
+    if !findings.is_empty() {
+        out.push_str(&format!(
+            "\n\nBlocker and major findings ({}):\n",
+            findings.len()
+        ));
+        for f in findings.iter().take(DETAIL_CAP) {
+            let severity = if f.severity == Severity::Blocker {
+                "blocker"
+            } else {
+                "major"
+            };
+            let location = f
+                .location
+                .as_deref()
+                .map_or(String::new(), |l| format!(" at {}", clip(l, TEXT_CAP)));
+            out.push_str(&format!(
+                "- {severity}: {}{location}\n",
+                clip(&f.summary, TEXT_CAP)
+            ));
+        }
+        out.push_str(&more(findings.len()));
+    }
+    if !checks.is_empty() {
+        out.push_str(&format!(
+            "\n\nFailed checks (these are checks that ran, not acceptance criteria) ({}):\n",
+            checks.len()
+        ));
+        for c in checks.iter().take(DETAIL_CAP) {
+            out.push_str(&format!(
+                "- {}: {}\n",
+                clip(&c.name, TEXT_CAP),
+                clip_tail(&c.output_tail, TAIL_CAP)
+            ));
+        }
+        out.push_str(&more(checks.len()));
+    }
+    out.truncate(out.trim_end().len());
+    out
+}
+
 const SYSTEM_PROMPT: &str = "You write one introspection for the Athena work system. You are given the \
 stored fields of one event (a rejected or failed job, a correction, or an intervention), the class \
 registry, and up to five earlier cases. You have no tools and cannot read anything else. Say what happened \
-in plain words. Choose the failure class: the id of a registry class that fits, or `new` with a name and a \
-one-line description when none fits. List the ids of earlier cases that are in the same class, and the ids \
-of listed decisions the event matched; use only ids you were given. Give the cause beyond this instance: \
-why the system allowed it, which must not restate what happened. Choose the prevention kind (default, \
-code-check or design-change), say exactly what would have prevented the whole class, and write a complete \
-next request, ready to submit.";
+in plain words. For a rejected or failed job, the event may list unmet acceptance criteria, blocker and \
+major findings, and failed checks; criteria and checks are different things, so do not call a failed check \
+an unmet criterion. Choose the failure class: the id of a registry class that fits, or `new` with a name \
+and a one-line description when none fits. List the ids of earlier cases that are in the same class, and \
+the ids of listed decisions the event matched; use only ids you were given. Give the cause beyond this \
+instance: why the system allowed it, which must not restate what happened. Choose the prevention kind \
+(default, code-check or design-change), say exactly what would have prevented the whole class, and write a \
+complete next request, ready to submit.";
 
 fn answer_schema() -> serde_json::Value {
     let text = json!({ "type": "string" });
@@ -1064,7 +1182,16 @@ impl Athena {
             intervention: None,
             class_of_work: job_records.class().unwrap_or("unknown").to_string(),
             category: category.to_string(),
-            what: format!("{}: {}", job_records.title(), outcome.reason),
+            what: format!(
+                "{}: {}{}",
+                job_records.title(),
+                outcome.reason,
+                job_records
+                    .verification
+                    .as_ref()
+                    .map(failure_details)
+                    .unwrap_or_default()
+            ),
             why: format!("the job ended {category}"),
             at: outcome.at,
         }))
@@ -1377,6 +1504,241 @@ impl Athena {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::fake::CountingPinner;
+    use crate::state::StateDir;
+    use athena_agent::fake::{FakeAgentDriver, FakeTurn};
+    use athena_data::records::{Build, CriterionKind, FindingSource, Outcome};
+    use athena_data::{Quantity, Unit};
+    use athena_git::Git;
+
+    const JOB: &str = "20261014-170031-2r9b";
+
+    fn verification(
+        criteria: Vec<CriterionResult>,
+        findings: Vec<VerificationFinding>,
+        checks: Vec<CheckRun>,
+        verdict: Verdict,
+    ) -> Verification {
+        Verification {
+            job: JobId::parse(JOB).unwrap(),
+            candidate_commit: "0".repeat(40),
+            verified_fingerprint: "f".repeat(8),
+            tool_config_from_base: Vec::new(),
+            checks,
+            check_cleanup: Vec::new(),
+            verifier_invocation: None,
+            criteria,
+            findings,
+            request_reading_mismatch: None,
+            agent_verdict: None,
+            final_verdict: verdict,
+            reasons: Vec::new(),
+            inputs: Vec::new(),
+            summary: None,
+        }
+    }
+
+    fn criterion(text: &str, met: bool) -> CriterionResult {
+        CriterionResult {
+            criterion: text.into(),
+            kind: CriterionKind::Behavior,
+            met,
+            evidence: "evidence that must not be copied".into(),
+            commands: Vec::new(),
+            commands_verified: true,
+        }
+    }
+
+    fn finding(severity: Severity, summary: &str, location: Option<&str>) -> VerificationFinding {
+        VerificationFinding {
+            severity,
+            summary: summary.into(),
+            evidence: "evidence that must not be copied".into(),
+            location: location.map(String::from),
+            source: FindingSource::Verifier,
+        }
+    }
+
+    fn check(name: &str, passed: bool, tail: &str) -> CheckRun {
+        CheckRun {
+            name: name.into(),
+            command: vec!["cargo".into(), name.into()],
+            exit_code: Some(if passed { 0 } else { 101 }),
+            passed,
+            tests_ran: None,
+            duration: Quantity::measured(1.0, Unit::Seconds, "test"),
+            output_tail: tail.into(),
+            note: None,
+        }
+    }
+
+    /// An Athena over a new repository that holds the outcome (rejected) and, when given, the verification
+    /// of the job, committed as stored records.
+    fn athena_with(
+        verification: Option<Verification>,
+    ) -> (tempfile::TempDir, tempfile::TempDir, Athena) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let git = Git::at(dir.path());
+        git.run(["init", "-q", "-b", "main"]).unwrap();
+        for (key, value) in [
+            ("user.name", "Test User"),
+            ("user.email", "noreply@example.com"),
+            ("commit.gpgsign", "false"),
+            ("core.hooksPath", "/dev/null"),
+        ] {
+            git.run(["config", key, value]).unwrap();
+        }
+        std::fs::write(dir.path().join("README.md"), "# Demo\n").unwrap();
+        git.run(["add", "-A"]).unwrap();
+        git.run(["commit", "-q", "-m", "Start a demo repository"])
+            .unwrap();
+        let outcome = Outcome {
+            job: JobId::parse(JOB).unwrap(),
+            state: OutcomeState::Rejected,
+            reason: "verification failed".into(),
+            at: "2026-10-14T17:30:00Z".parse().unwrap(),
+            totals: Some(crate::scoring::totals(&[], None)),
+            branch: None,
+            base_commit: None,
+            candidate_commit: None,
+            after_blocked: false,
+            through_commit: None,
+        };
+        let mut files = vec![NewFile::record(&AnyRecord::Outcome(Box::new(outcome)))];
+        if let Some(v) = verification {
+            files.push(NewFile::record(&AnyRecord::Verification(Box::new(v))));
+        }
+        for file in &files {
+            let path = dir.path().join(&file.path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, &file.bytes).unwrap();
+        }
+        git.run(["add", "-A"]).unwrap();
+        git.run(["commit", "-q", "-m", "Record the job"]).unwrap();
+        let driver = FakeAgentDriver::new(Box::new(|_| FakeTurn::output(json!({}))));
+        let athena = Athena {
+            git,
+            state: StateDir::new(state.path().join("repo")),
+            driver: std::sync::Arc::new(driver),
+            capabilities: Vec::new(),
+            build: Build {
+                version: "0.1.0".into(),
+                source_commit: "0".repeat(40),
+                dirty: false,
+            },
+            athena_bin: "/bin/false".into(),
+            nested: None,
+            pinner: Box::new(CountingPinner::new(&"0".repeat(40))),
+            jev: None,
+        };
+        (dir, state, athena)
+    }
+
+    fn what_of(verification: Option<Verification>) -> String {
+        let (_dir, _state, athena) = athena_with(verification);
+        athena
+            .event_of_job(&JobId::parse(JOB).unwrap())
+            .unwrap()
+            .unwrap()
+            .what
+    }
+
+    #[test]
+    fn an_event_carries_the_unmet_criterion_and_the_major_finding() {
+        let what = what_of(Some(verification(
+            vec![
+                criterion("Tests call event_of_job itself", false),
+                criterion("The changelog has an entry", true),
+            ],
+            vec![
+                finding(
+                    Severity::Major,
+                    "No test reaches event_of_job",
+                    Some("crates/athena-core/src/introspect.rs"),
+                ),
+                finding(Severity::Minor, "A small wording slip", None),
+            ],
+            vec![check("test", true, "all fine")],
+            Verdict::Fail,
+        )));
+        assert!(what.starts_with(": verification failed"), "{what}");
+        assert!(what.contains("Unmet acceptance criteria (1):"), "{what}");
+        assert!(what.contains("- Tests call event_of_job itself"), "{what}");
+        assert!(!what.contains("changelog has an entry"), "{what}");
+        assert!(
+            what.contains(
+                "major: No test reaches event_of_job at crates/athena-core/src/introspect.rs"
+            ),
+            "{what}"
+        );
+        assert!(!what.contains("wording slip"), "{what}");
+        assert!(!what.contains("must not be copied"), "{what}");
+        assert!(!what.contains("Failed checks"), "{what}");
+    }
+
+    #[test]
+    fn a_failed_check_is_listed_apart_and_is_not_an_unmet_criterion() {
+        let what = what_of(Some(verification(
+            vec![criterion("The tests pass", true)],
+            Vec::new(),
+            vec![
+                check("fmt", true, "clean"),
+                check("test", false, "thread panicked: assertion failed"),
+            ],
+            Verdict::Fail,
+        )));
+        assert!(what.contains("Failed checks"), "{what}");
+        assert!(
+            what.contains("- test: thread panicked: assertion failed"),
+            "{what}"
+        );
+        assert!(!what.contains("Unmet acceptance criteria"), "{what}");
+        assert!(!what.contains("fmt"), "{what}");
+    }
+
+    #[test]
+    fn a_job_without_verification_or_without_failures_keeps_the_old_what() {
+        assert_eq!(what_of(None), ": verification failed");
+        let passing = verification(
+            vec![criterion("Fine", true)],
+            Vec::new(),
+            vec![check("test", true, "ok")],
+            Verdict::Pass,
+        );
+        assert_eq!(what_of(Some(passing)), ": verification failed");
+    }
+
+    #[test]
+    fn a_failed_verdict_without_details_says_so() {
+        let what = what_of(Some(verification(
+            Vec::new(),
+            vec![finding(Severity::Nit, "style", None)],
+            Vec::new(),
+            Verdict::Fail,
+        )));
+        assert!(what.contains("lists no unmet criterion"), "{what}");
+    }
+
+    #[test]
+    fn counts_and_text_are_capped() {
+        let long = "x".repeat(TEXT_CAP * 3);
+        let criteria = (0..DETAIL_CAP + 3)
+            .map(|n| criterion(&format!("criterion {n} {long}"), false))
+            .collect();
+        let tail = format!("{}END", "y".repeat(TAIL_CAP * 3));
+        let what = what_of(Some(verification(
+            criteria,
+            Vec::new(),
+            vec![check("test", false, &tail)],
+            Verdict::Fail,
+        )));
+        assert!(what.contains("- (3 more not shown)"), "{what}");
+        assert!(!what.contains(&"x".repeat(TEXT_CAP + 1)), "{what}");
+        assert!(what.contains("yEND"), "{what}");
+        assert!(!what.contains(&"y".repeat(TAIL_CAP + 1)), "{what}");
+    }
 
     #[test]
     fn normalising_ignores_case_punctuation_and_spacing() {
