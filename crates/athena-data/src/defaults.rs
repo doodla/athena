@@ -126,6 +126,16 @@ source = "s"
     }
 
     #[test]
+    fn behavior_evidence_default_leads_with_the_core_rule() {
+        let model = DefaultsModel::parse(REPO_DEFAULTS).unwrap();
+        let entry = model.get("behavior-evidence").unwrap();
+        assert_eq!(entry.applies_to, vec!["*".to_string()]);
+        assert!(model.render().contains(
+            "- behavior-evidence [*]: Acceptance criteria must check the requested behavior happening, not that types, files or wiring exist.\n"
+        ));
+    }
+
+    #[test]
     fn root_cause_default_leads_with_the_core_rule() {
         let model = DefaultsModel::parse(REPO_DEFAULTS).unwrap();
         assert!(model.get("root-cause").unwrap().statement.contains(". "));

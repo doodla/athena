@@ -609,8 +609,8 @@ amend earlier entries without rewriting them. All of these entries belong to the
 
 - **Decision:**
   - The contract has eight rules, measured at 294 tokens, and a budget of 350.
-  - Each role's always-loaded set also has a fixed budget: reader 1,930, producer 1,100, and verifier
-    1,300. The reader budget was 1,800 until the goal-preservation change (D93).
+  - Each role's always-loaded set also has a fixed budget: reader 2,000, producer 1,100, and verifier
+    1,300. The reader budget was 1,800 until D93, then 1,930 until the `behavior-evidence` default.
   - The live measurement, by the delta method, is the authority. CI uses ⌈bytes/3.0⌉ as a tripwire for
     prose.
   - Every asset is compiled in and hashed into each invocation record.

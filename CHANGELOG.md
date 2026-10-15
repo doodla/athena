@@ -7,6 +7,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- A `behavior-evidence` default in `defaults.toml`: acceptance criteria check the requested behavior happening,
+  not that types, files or wiring exist, and a protection or denial test shows the action succeeding as root
+  before the protection, then refused, and fails rather than skips if the environment cannot enforce it. A unit
+  test in `crates/athena-data/src/defaults.rs` pins the rendered line, and `docs/design/defaults-loop.md` §3.7
+  gives two worked examples (a read-only request, and a role that calls a model). The reader sees the rule's
+  first sentence, which pushed its set over 1,930 tokens, so the reader budget in
+  `crates/athena-context/src/lib.rs` is now 2,000 (`docs/decisions.md` D25 records it). The reader prompt
+  itself is unchanged.
+
 ### Changed
 
 - `athena drain` no longer stops on "target met" from the audience rating alone, and the places-held counter in

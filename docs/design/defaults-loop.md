@@ -188,6 +188,32 @@ the answer to the question the loop asks, and it is why `prevention_kind` is a f
 consumes the `default` ones, and the others are listed to the user as proposed code or design changes (§9). The
 root-cause default covers all seven: a fix at the place the fault arises, not the instance.
 
+### 3.7 Worked examples for the `behavior-evidence` default
+
+The `behavior-evidence` default says acceptance criteria must check the requested behavior happening, not that
+types, files or wiring exist. Two examples show the difference.
+
+**"Make X read-only."** Criteria that only say "X has mode 0444" or "a read-only flag is set" check wiring.
+Criteria that check the behavior:
+
+1. A write to X, made as the same user and in the same environment the real component runs as (root), succeeds
+   before the protection is applied.
+2. The same root write is refused after the protection is applied.
+3. The test fails, not skips and not passes silently, if the environment cannot enforce the protection. A file
+   mode that root bypasses is not proof: if the first write still succeeds after the mode change, the test
+   fails.
+
+Step 1 is what makes step 2 mean something: without it, a refusal could come from a path typo or a missing file.
+
+**"The review role calls a model."** Criteria that say "a client type exists" or "the config names a model" check
+wiring. Criteria that check the behavior:
+
+1. Run the role end to end, with the fake model client in place of the real one.
+2. The fake client observed a model request from the role; assert on what it received, not only that a client
+   was constructed.
+3. The role's output contains or is derived from the fake client's reply; assert on that content, so a role that
+   ignores the reply fails.
+
 ## 4. The loop in one view
 
 ```
