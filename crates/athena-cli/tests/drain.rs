@@ -9,8 +9,8 @@ mod common;
 
 use athena_cli::display;
 use athena_cli::drain::{
-    self, Approval, Caps, Item, Lander, Landing, Limits, QueueView, Rate, Read, ReadOf, RealSteps,
-    Run, Steps, Stop, Waiting,
+    self, Approval, Caps, Check, Item, Lander, Landing, Limits, QueueView, Rate, Read, ReadOf,
+    RealSteps, Run, Steps, Stop, Waiting,
 };
 use athena_core::audience::Page;
 use athena_core::commits::{Committer, message};
@@ -47,6 +47,8 @@ struct Stub {
     ratings: RefCell<Vec<u8>>,
     /// What a run costs; 0.5 when not set.
     run_cost: Option<f64>,
+    /// When set, the check of the page against the pinned source fails with this finding.
+    failing_check: Option<&'static str>,
     log: RefCell<Vec<String>>,
 }
 
@@ -126,6 +128,13 @@ impl Steps for Stub {
             Landing::Landed
         }
     }
+    fn check_page(&self) -> Check {
+        self.log.borrow_mut().push("check".into());
+        match &self.failing_check {
+            Some(why) => Check::fail(*why),
+            None => Check::pass("stub"),
+        }
+    }
     fn rate(&self) -> Rate {
         self.log.borrow_mut().push("rate".into());
         let mut ratings = self.ratings.borrow_mut();
@@ -171,7 +180,7 @@ fn two_items_are_landed_and_then_a_rating_of_four_meets_the_target() {
     assert_eq!(
         stub.log(),
         [
-            "read a", "run a", "land a", "rate", "read b", "run b", "land b", "rate"
+            "read a", "run a", "land a", "rate", "read b", "run b", "land b", "rate", "check"
         ]
     );
     assert_eq!(report.stop, Stop::TargetMet);
@@ -192,6 +201,57 @@ fn two_items_are_landed_and_then_a_rating_of_four_meets_the_target() {
     let text = display::drain(&report);
     assert!(text.contains("target met"), "{text}");
     assert!(text.contains("taken after a landing"), "{text}");
+}
+
+#[test]
+fn a_rating_at_the_target_stops_drain_only_with_a_passing_source_check() {
+    let run = |failing_check| {
+        let stub = Stub {
+            items: vec!["a", "b"],
+            outcomes: passing(),
+            ratings: RefCell::new(vec![4, 4]),
+            failing_check,
+            ..Stub::default()
+        };
+        let report = drain::drain(&stub, limits(5.0), &Quiet).unwrap();
+        (stub, report)
+    };
+
+    // A 4 with a passing check meets the target after the first landing.
+    let (stub, report) = run(None);
+    assert_eq!(report.stop, Stop::TargetMet);
+    assert!(report.target_met());
+    assert_eq!(report.held_back, None);
+    assert_eq!(stub.log(), ["read a", "run a", "land a", "rate", "check"]);
+
+    // A 4 with a failing check does not: drain goes on to the next item and ends for another reason.
+    let (stub, report) = run(Some("counter places-held omits t4"));
+    assert_eq!(report.stop, Stop::QueueEmpty);
+    assert!(!report.target_met());
+    assert_eq!(report.landed, 2, "drain kept working after the 4");
+    assert_eq!(
+        report.held_back.as_deref(),
+        Some("counter places-held omits t4")
+    );
+    assert!(!report.rating.unwrap().met_target);
+    assert_eq!(stub.log().iter().filter(|e| *e == "check").count(), 2);
+    let text = display::drain(&report);
+    assert!(text.contains("held back"), "{text}");
+    assert!(text.contains("places-held omits t4"), "{text}");
+    assert!(!text.contains("target met"), "{text}");
+}
+
+#[test]
+fn a_rating_below_the_target_does_not_ask_for_the_source_check() {
+    let stub = Stub {
+        items: vec!["a"],
+        outcomes: passing(),
+        ratings: RefCell::new(vec![3]),
+        ..Stub::default()
+    };
+    let report = drain::drain(&stub, limits(5.0), &Quiet).unwrap();
+    assert_eq!(report.held_back, None);
+    assert!(!stub.log().contains(&"check".to_string()));
 }
 
 #[test]

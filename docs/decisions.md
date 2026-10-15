@@ -2236,3 +2236,24 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Provenance:** measured: the drain unit tests and `crates/athena-cli/tests/drain.rs` (stubbed queue, land
   step and ratings, and one end-to-end run with the fake agent). The live behavior against GitHub and the
   live page was not run.
+
+## D99 · Drain's "target met" also needs a passing check of the page against the source
+
+- **Case:** Drain stopped on "target met" because the audience rated the explainer 4 of 5, while an independent
+  reader who checked the page against the pinned firstmate source rated it 3: the work-slot counter was wrong
+  and `model.json` contradicted itself about it. A reader who sees only the page cannot catch a wrong fact.
+- **Decision:** (1) `Steps::check_page` is asked whenever a rating taken after a landing reaches the target;
+  `target met` needs the rating and a passing check. (2) The real check, `model_contradictions`, reads each
+  `studies/*/model.json` at the head commit and fails when a counter named in a retry's `changes` lists too few
+  transitions in `changed_by`: one for taking a place and one for each way it is freed (the alternatives of
+  the text, split on " or "). It needs no model call. (3) When it fails, drain keeps running, the rating line
+  says the target was held back by the source check, and the report carries the finding (`held_back`, and a
+  `held back` line). (4) The other four stop reasons are unchanged.
+- **Alternatives:** (a) An independent reader inside drain: it costs a model call per rating and is more than
+  this fault needs. (b) Fix only the wrong sentence: the next wrong fact would end drain again.
+- **Tradeoff:** The check counts alternatives in a sentence, so it finds this kind of contradiction and not every
+  wrong fact; it does not read the source. A study whose model has no retry text naming a counter is never held
+  back by it.
+- **Reversal cost:** Low: remove `check_page`, `model_contradictions` and `held_back`.
+- **Provenance:** measured: the drain unit tests, `crates/athena-cli/tests/drain.rs`, and a unit test that the
+  shipped firstmate model passes.

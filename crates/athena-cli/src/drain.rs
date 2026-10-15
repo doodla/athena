@@ -13,6 +13,10 @@
 //!   by what they were expected to cost, plus the call's cap must fit the budget ([`Budget::fits`]). That covers
 //!   a job's reading, its run, the re-reading of a retry, and the rating. A job is started only when its
 //!   reading and its run both fit, so a request is not left read and never run for want of money.
+//! - **A rating alone does not end the run.** A reader who sees only the page cannot catch a wrong fact, so a
+//!   rating at the target stops the run as "target met" only when [`Steps::check_page`] also passes. When it
+//!   fails, drain keeps running and the report says which check held it back ([`Report::held_back`]). The real
+//!   check ([`model_contradictions`]) reads the study models at the head commit.
 //! - **Retry.** An item gets two attempts. After a rejected or failed run the second attempt reads the job
 //!   again with `athena retry`, then runs it. After a run that passed but did not land, it lands again. Two
 //!   failures stop the loop, naming the item.
@@ -181,6 +185,31 @@ pub struct Rate {
     pub error: Option<String>,
 }
 
+/// The result of checking the page against the pinned source, which a rating cannot do: a reader who sees only
+/// the page cannot tell that a fact on it is wrong.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Check {
+    pub passed: bool,
+    /// What the check found, or what it covered when it passed.
+    pub detail: String,
+}
+
+impl Check {
+    pub fn pass(detail: impl Into<String>) -> Check {
+        Check {
+            passed: true,
+            detail: detail.into(),
+        }
+    }
+
+    pub fn fail(detail: impl Into<String>) -> Check {
+        Check {
+            passed: false,
+            detail: detail.into(),
+        }
+    }
+}
+
 /// The world the loop acts on. Every method that can spend money says what it cost.
 pub trait Steps {
     fn caps(&self) -> anyhow::Result<Caps>;
@@ -193,6 +222,9 @@ pub trait Steps {
     fn run(&self, job: &str) -> Run;
     fn land(&self, job: &str) -> Landing;
     fn rate(&self) -> Rate;
+    /// Checks the page against the pinned source. It costs nothing; it is asked only when a rating reaches the
+    /// target, and the target is met only if it passes.
+    fn check_page(&self) -> Check;
 }
 
 /// Why the loop stopped.
@@ -233,7 +265,7 @@ impl Stop {
     pub fn meaning(self) -> &'static str {
         match self {
             Stop::TargetMet => {
-                "a rating taken after a landing in this run reached the target rating"
+                "a rating taken after a landing in this run reached the target rating and the page passed its check against the pinned source"
             }
             Stop::BudgetSpent => {
                 "spend plus the next model call's cap would exceed the budget; the rest stays queued"
@@ -286,6 +318,9 @@ pub struct Report {
     /// True when nothing landed, so the page is as it was.
     pub page_unchanged: bool,
     pub rating: Option<RatingLine>,
+    /// Set when a rating reached the target but the check of the page against the pinned source failed, so
+    /// drain kept running: what the check found.
+    pub held_back: Option<String>,
     /// Queued requests not landed, left for a later run.
     pub queued: Vec<Item>,
     /// Open proposals waiting for a person. The loop did not touch them.
@@ -311,6 +346,7 @@ struct Drain<'a> {
     started: u32,
     landed: Vec<String>,
     rating: Option<RatingLine>,
+    held_back: Option<String>,
     notes: Vec<String>,
 }
 
@@ -519,7 +555,21 @@ impl Drain<'_> {
             Some(value) => {
                 // The only place a rating of this run is made, and it is made after a landing.
                 let after_landing = !self.landed.is_empty();
-                let met_target = after_landing && value >= self.limits.target_rating;
+                let rated_enough = after_landing && value >= self.limits.target_rating;
+                // A rating cannot catch a wrong fact, so it ends the run only with a passing source check.
+                self.held_back = None;
+                let met_target = rated_enough
+                    && {
+                        let check = self.steps.check_page();
+                        if !check.passed {
+                            self.ui.line(&format!(
+                            "drain      rating {value} reached the target but the source check failed: {}",
+                            check.detail
+                        ));
+                            self.held_back = Some(check.detail);
+                        }
+                        check.passed
+                    };
                 self.rating = Some(RatingLine {
                     value,
                     after_landing,
@@ -553,6 +603,7 @@ pub fn drain(steps: &dyn Steps, limits: Limits, ui: &dyn Ui) -> anyhow::Result<R
         started: 0,
         landed: Vec::new(),
         rating: None,
+        held_back: None,
         notes: Vec::new(),
     };
     let mut view = view;
@@ -604,6 +655,7 @@ pub fn drain(steps: &dyn Steps, limits: Limits, ui: &dyn Ui) -> anyhow::Result<R
         landed,
         page_unchanged: landed == 0,
         rating,
+        held_back: d.held_back,
         queued: view
             .items
             .into_iter()
@@ -646,6 +698,50 @@ impl Lander for PrLander {
             Err(error) => Landing::NotLanded(format!("{error:#}")),
         }
     }
+}
+
+/// Where a study model contradicts itself about its counters, as one sentence each. A retry edge that says a
+/// counter changes (a text in `retry.changes` that names the counter) means the counter is taken by one
+/// transition and freed by each event the text names; the events are its alternatives, split on " or ". The
+/// counter's `changed_by` must then list at least one transition for taking and one for each such event. The
+/// check reads only the model, so it needs no model call and no network. It is a floor, not a proof: the
+/// pinned source is still the authority, and the study's own validation rules still apply.
+pub fn model_contradictions(model: &serde_json::Value) -> Vec<String> {
+    let list = |v: &serde_json::Value, key: &str| -> Vec<serde_json::Value> {
+        v.get(key)
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    };
+    let mut out = Vec::new();
+    for counter in list(model, "counters") {
+        let Some(id) = counter.get("id").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let changed_by = list(&counter, "changed_by").len();
+        for t in list(model, "transitions") {
+            let tid = t
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("?");
+            let Some(retry) = t.get("retry").filter(|r| !r.is_null()) else {
+                continue;
+            };
+            for text in list(retry, "changes")
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .filter(|text| text.contains(id))
+            {
+                let needed = 1 + text.split(" or ").count();
+                if changed_by < needed {
+                    out.push(format!(
+                        "counter {id} lists {changed_by} transition(s) in changed_by, but {tid}'s retry says \"{text}\", which needs {needed}: one that takes a place and one for each way it is freed"
+                    ));
+                }
+            }
+        }
+    }
+    out
 }
 
 /// The steps against a real repository.
@@ -820,6 +916,42 @@ impl Steps for RealSteps<'_> {
         self.lander.land(self.athena, job, self.ui)
     }
 
+    fn check_page(&self) -> Check {
+        let studies = self.athena.head().and_then(|head| {
+            let entries = self.athena.git.ls_tree_under(&head, "studies")?;
+            let mut models = Vec::new();
+            for e in entries.iter().filter(|e| e.path.ends_with("/model.json")) {
+                if let Some(bytes) = self.athena.git.show_file(&head, &e.path)? {
+                    models.push((e.path.clone(), bytes));
+                }
+            }
+            Ok(models)
+        });
+        let models = match studies {
+            Ok(models) => models,
+            Err(error) => return Check::fail(format!("the studies could not be read: {error:#}")),
+        };
+        let mut problems = Vec::new();
+        for (path, bytes) in &models {
+            match serde_json::from_slice::<serde_json::Value>(bytes) {
+                Ok(model) => problems.extend(
+                    model_contradictions(&model)
+                        .into_iter()
+                        .map(|p| format!("{path}: {p}")),
+                ),
+                Err(error) => problems.push(format!("{path}: not valid JSON: {error}")),
+            }
+        }
+        if problems.is_empty() {
+            Check::pass(format!(
+                "{} study model(s) are consistent with themselves",
+                models.len()
+            ))
+        } else {
+            Check::fail(problems.join("; "))
+        }
+    }
+
     fn rate(&self) -> Rate {
         let before = self.audience_cost();
         let result = self.athena.audience(self.page, &Target::explainer());
@@ -899,6 +1031,9 @@ mod tests {
             self.calls.borrow_mut().push(format!("land {job}"));
             Landing::Landed
         }
+        fn check_page(&self) -> Check {
+            Check::pass("stub")
+        }
         fn rate(&self) -> Rate {
             self.calls.borrow_mut().push("rate".into());
             Rate {
@@ -966,6 +1101,31 @@ mod tests {
         assert_eq!(report.stop, Stop::BudgetSpent);
         assert!(stub.calls.borrow().is_empty(), "{:?}", stub.calls.borrow());
         assert_eq!(report.spent_usd, 0.0);
+    }
+
+    fn model(changed_by: &[&str]) -> serde_json::Value {
+        serde_json::json!({
+            "counters": [{"id": "places-held", "changed_by": changed_by}],
+            "transitions": [
+                {"id": "t1", "retry": null},
+                {"id": "t2", "retry": {"changes": ["places-held falls when another worker records its ready PR or is cleaned up"]}}
+            ]
+        })
+    }
+
+    #[test]
+    fn a_counter_whose_changed_by_omits_a_transition_its_retry_changes_is_a_contradiction() {
+        let found = model_contradictions(&model(&["t1", "t3"]));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].contains("places-held") && found[0].contains("t2"));
+        assert!(model_contradictions(&model(&["t1", "t3", "t4"])).is_empty());
+    }
+
+    #[test]
+    fn the_shipped_firstmate_model_is_consistent() {
+        let text = include_str!("../../../studies/firstmate-work-handling/model.json");
+        let model: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(model_contradictions(&model), Vec::<String>::new());
     }
 
     #[test]
