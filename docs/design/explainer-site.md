@@ -21,6 +21,12 @@ published to GitHub Pages from this repository and runs locally with one command
   files. Every sentence and every glossary term about firstmate cites claim ids from `claims.json`; a
   glossary term about the page's own structure (state, transition, trigger, guard, counter, claim, pin,
   mark) is marked "about this page" and cites nothing. An entry with no claims and no such mark is an error.
+- Under each of States, Counters, Transitions and Why it is built this way, a lead-in says what the section
+  shows and how to read it. The Transitions lead-in is followed by a short explanation of the two deciders,
+  agent and code, and each transition card opens with a one-line plain summary. All of this is in
+  `intro.json` (`leadins`, `deciders`, `summaries`), each element citing claim ids. It is kept out of
+  `model.json` because the study model schema (`crates/athena-cap-study`) rejects unknown fields. A
+  transition with no summary, or a lead-in, decider or summary with no claim, is an error.
 - The page states the pinned firstmate commit from `pin.json` at the top and in the footer. The study's
   findings are shown under their own finding ids, in a section that says they are not claims about firstmate.
 - `.github/workflows/pages.yml` runs on a push to `main` and on manual dispatch. It builds with
@@ -55,5 +61,6 @@ published to GitHub Pages from this repository and runs locally with one command
 
 Unit tests in `xtask/src/site.rs` cover escaping, claim-id citation, the pinned commit, an unknown claim id,
 missing study data, the output location, the intro and glossary appearing before the states, and an uncited
-intro element being rejected. `xtask/tests/policy.rs` and `docs/non-rust-files.md` list
+intro element being rejected, the lead-ins, deciders and transition summaries rendering, and a transition
+without a summary being rejected. `xtask/tests/policy.rs` and `docs/non-rust-files.md` list
 `pages.yml` as an allowed YAML workflow.

@@ -178,7 +178,9 @@ pub fn render(study: &Study) -> Result<String> {
     body.push_str("</dl></section>");
 
     // States
-    body.push_str("<section><h2>States of a piece of work</h2><ul>");
+    body.push_str("<section><h2>States of a piece of work</h2>");
+    leadin(&mut body, &study.intro, "states", &known)?;
+    body.push_str("<ul>");
     for state in array_of(&study.model, "states", "model.json")? {
         let id = str_of(state, "id", "a state")?;
         let kind = str_of(state, "kind", &format!("state {id}"))?;
@@ -195,7 +197,9 @@ pub fn render(study: &Study) -> Result<String> {
     // Counters
     let counters = array_of(&study.model, "counters", "model.json")?;
     if !counters.is_empty() {
-        body.push_str("<section><h2>Counters</h2><ul>");
+        body.push_str("<section><h2>Counters</h2>");
+        leadin(&mut body, &study.intro, "counters", &known)?;
+        body.push_str("<ul>");
         for counter in counters {
             let id = str_of(counter, "id", "a counter")?;
             let changed: Vec<&str> = array_of(counter, "changed_by", &format!("counter {id}"))?
@@ -214,16 +218,39 @@ pub fn render(study: &Study) -> Result<String> {
     }
 
     // Transitions
-    body.push_str("<section><h2>Transitions</h2><div class=\"cards\">");
+    body.push_str("<section><h2>Transitions</h2>");
+    leadin(&mut body, &study.intro, "transitions", &known)?;
+    body.push_str("<dl class=\"deciders\">");
+    for d in array_of(&study.intro, "deciders", "intro.json")? {
+        let term = str_of(d, "term", "a decider")?;
+        let what = format!("decider {term}");
+        let _ = write!(
+            body,
+            "<dt>{}</dt><dd>{} {}</dd>",
+            escape(term),
+            escape(str_of(d, "text", &what)?),
+            cites(d, &what, &known)?
+        );
+    }
+    body.push_str("</dl><div class=\"cards\">");
+    let summaries = array_of(&study.intro, "summaries", "intro.json")?;
     for t in array_of(&study.model, "transitions", "model.json")? {
         let id = str_of(t, "id", "a transition")?;
         let what = format!("transition {id}");
+        let summary = summaries
+            .iter()
+            .find(|s| s.get("id").and_then(Value::as_str) == Some(id))
+            .ok_or_else(|| anyhow!("{what} has no summary in intro.json"))?;
+        let summary_what = format!("summary of {what}");
         let _ = write!(
             body,
-            "<article class=\"card\"><h3>{} <span class=\"arrow\">{} &rarr; {}</span></h3><dl>",
+            "<article class=\"card\"><h3>{} <span class=\"arrow\">{} &rarr; {}</span></h3>\
+             <p class=\"summary\">{} {}</p><dl>",
             escape(id),
             escape(str_of(t, "from", &what)?),
-            escape(str_of(t, "to", &what)?)
+            escape(str_of(t, "to", &what)?),
+            escape(str_of(summary, "text", &summary_what)?),
+            cites(summary, &summary_what, &known)?
         );
         let _ = write!(
             body,
@@ -245,7 +272,9 @@ pub fn render(study: &Study) -> Result<String> {
     body.push_str("</div></section>");
 
     // Rationales
-    body.push_str("<section><h2>Why it is built this way</h2><div class=\"cards\">");
+    body.push_str("<section><h2>Why it is built this way</h2>");
+    leadin(&mut body, &study.intro, "why", &known)?;
+    body.push_str("<div class=\"cards\">");
     for r in array_of_value(&study.rationales, "rationales.json")? {
         let id = str_of(r, "id", "a rationale")?;
         let what = format!("rationale {id}");
@@ -338,6 +367,23 @@ pub fn render(study: &Study) -> Result<String> {
     ))
 }
 
+/// A plain-language lead-in under a section heading, from `leadins.<key>` in `intro.json`.
+fn leadin(body: &mut String, intro: &Value, key: &str, known: &BTreeSet<String>) -> Result<()> {
+    let what = format!("the {key} lead-in");
+    let item = intro
+        .get("leadins")
+        .and_then(|l| l.get(key))
+        .ok_or_else(|| anyhow!("intro.json has no lead-in `{key}`"))?;
+    let text = escape(str_of(item, "text", &what)?);
+    let _ = write!(
+        body,
+        "<p class=\"leadin\">{} {}</p>",
+        text,
+        cites(item, &what, known)?
+    );
+    Ok(())
+}
+
 /// One sentence of the intro as a list item. It must cite at least one claim.
 fn intro_item(body: &mut String, item: &Value, what: &str, known: &BTreeSet<String>) -> Result<()> {
     let text = escape(str_of(item, "text", what)?);
@@ -376,6 +422,8 @@ a{color:var(--accent)}code{font-family:ui-monospace,monospace;font-size:.9em;wor
 dt{font-weight:600}dd{margin:0 0 .5rem}\
 .tag{display:inline-block;border:1px solid var(--line);border-radius:1rem;padding:0 .5rem;font-size:.8rem;color:var(--muted)}\
 .cites a,.cites{font-size:.85rem}.mark{color:var(--muted);font-size:.8rem}\
+.leadin{font-size:1.05rem}.summary{font-weight:600;margin:.3rem 0}\
+.deciders{margin:1rem 0}\
 .sources{color:var(--muted);font-size:.85rem}\
 @media (max-width:40rem){h1{font-size:1.5rem}main{padding:.6rem}}";
 
@@ -402,7 +450,7 @@ mod tests {
         write(dir.path(), "claims.json", &claims.to_string());
         let model = serde_json::json!({
             "states": [{"id": "queued", "kind": "initial", "claims": ["c1"]}],
-            "counters": [],
+            "counters": [{"id": "places", "start": 0, "changed_by": ["t1"], "claims": ["c1"]}],
             "transitions": [{
                 "id": "t1", "from": "queued", "to": "queued",
                 "trigger": "x", "trigger_evaluated_by": "agent",
@@ -426,6 +474,15 @@ mod tests {
             "intro.json",
             r#"{"what":[{"text":"Firstmate does a thing.","claims":["c1"]}],
                 "walkthrough":[{"text":"First step.","claims":["c1"]}],
+                "leadins":{
+                  "states":{"text":"States lead.","claims":["c1"]},
+                  "counters":{"text":"Counters lead.","claims":["c1"]},
+                  "transitions":{"text":"Transitions lead.","claims":["c1"]},
+                  "why":{"text":"Why lead.","claims":["c1"]}},
+                "deciders":[
+                  {"term":"agent","text":"Agent decides.","claims":["c1"]},
+                  {"term":"code","text":"Code decides.","claims":["c1"]}],
+                "summaries":[{"id":"t1","text":"Queued stays queued.","claims":["c1"]}],
                 "glossary":[
                   {"term":"guard","about":"page","definition":"A condition."},
                   {"term":"worker","definition":"Does the task.","claims":["c1"]}]}"#,
@@ -451,15 +508,69 @@ mod tests {
 
     #[test]
     fn an_uncited_intro_element_is_an_error() {
-        for bad in [
-            r#"{"what":[{"text":"x","claims":[]}],"walkthrough":[],"glossary":[]}"#,
-            r#"{"what":[],"walkthrough":[{"text":"x","claims":["c99"]}],"glossary":[]}"#,
-            r#"{"what":[],"walkthrough":[],"glossary":[{"term":"t","definition":"d"}]}"#,
+        for (path, bad) in [
+            ("/what/0/claims", serde_json::json!([])),
+            ("/walkthrough/0/claims", serde_json::json!(["c99"])),
+            ("/glossary/1/claims", serde_json::json!([])),
+            ("/leadins/states/claims", serde_json::json!([])),
+            ("/leadins/counters/claims", serde_json::json!(["c99"])),
+            ("/leadins/transitions/claims", serde_json::json!([])),
+            ("/leadins/why/claims", serde_json::json!([])),
+            ("/deciders/0/claims", serde_json::json!([])),
+            ("/summaries/0/claims", serde_json::json!([])),
         ] {
             let dir = study_dir("[mechanism] A thing happens.", "c1");
-            write(dir.path(), "intro.json", bad);
-            assert!(render(&load(dir.path()).unwrap()).is_err(), "{bad}");
+            let mut intro = read_intro(dir.path());
+            *intro.pointer_mut(path).unwrap() = bad;
+            write(dir.path(), "intro.json", &intro.to_string());
+            assert!(render(&load(dir.path()).unwrap()).is_err(), "{path}");
         }
+    }
+
+    fn read_intro(dir: &Path) -> Value {
+        serde_json::from_str(&std::fs::read_to_string(dir.join("intro.json")).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn each_section_has_a_lead_in_and_each_transition_a_summary() {
+        let dir = study_dir("[mechanism] A thing happens.", "c1");
+        let html = render(&load(dir.path()).unwrap()).unwrap();
+        for (heading, lead) in [
+            ("States of a piece of work", "States lead."),
+            ("Counters", "Counters lead."),
+            ("Transitions", "Transitions lead."),
+            ("Why it is built this way", "Why lead."),
+        ] {
+            let at = html
+                .find(&format!("<h2>{heading}</h2>"))
+                .unwrap_or_else(|| panic!("{heading}"));
+            let rest = &html[at..];
+            assert!(rest.contains(&format!(
+                "<p class=\"leadin\">{lead} <span class=\"cites\">"
+            )));
+        }
+        assert!(html.contains("<dt>agent</dt><dd>Agent decides. <span class=\"cites\">"));
+        assert!(html.contains("<dt>code</dt><dd>Code decides. <span class=\"cites\">"));
+        assert!(html.contains("<p class=\"summary\">Queued stays queued. <span class=\"cites\">"));
+    }
+
+    #[test]
+    fn a_transition_without_a_summary_is_an_error() {
+        let dir = study_dir("[mechanism] A thing happens.", "c1");
+        let mut intro = read_intro(dir.path());
+        intro["summaries"] = serde_json::json!([]);
+        write(dir.path(), "intro.json", &intro.to_string());
+        let err = render(&load(dir.path()).unwrap()).unwrap_err();
+        assert!(format!("{err:#}").contains("t1"));
+    }
+
+    #[test]
+    fn the_real_study_gives_every_transition_a_summary_and_both_deciders() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let html = render(&load(&root.join(STUDY_DIR)).unwrap()).unwrap();
+        assert_eq!(html.matches("<p class=\"summary\">").count(), 8);
+        assert_eq!(html.matches("<p class=\"leadin\">").count(), 4);
+        assert!(html.contains("<dt>agent</dt>") && html.contains("<dt>code</dt>"));
     }
 
     #[test]
