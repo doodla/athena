@@ -773,7 +773,7 @@ mod tests {
     fn the_real_study_gives_every_transition_a_summary_and_both_deciders() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
         let html = render(&load(&root.join(STUDY_DIR)).unwrap()).unwrap();
-        assert_eq!(html.matches("<p class=\"summary\">").count(), 8);
+        assert_eq!(html.matches("<p class=\"summary\">").count(), 11);
         assert_eq!(html.matches("<p class=\"leadin\">").count(), 4);
         assert!(html.contains("<dt>agent</dt>") && html.contains("<dt>code</dt>"));
     }

@@ -2,14 +2,15 @@
   "schema": "study.model/1",
   "study_id": "firstmate-work-handling",
   "states": [
-    {"id": "queued", "kind": "initial", "claims": ["c1", "c2"]},
+    {"id": "queued", "kind": "initial", "claims": ["c1", "c2", "c43"]},
     {"id": "in-flight", "kind": "active", "claims": ["c1", "c22"]},
-    {"id": "ready", "kind": "waiting", "claims": ["c10", "c11"]},
+    {"id": "ready", "kind": "waiting", "claims": ["c10", "c11", "c26", "c27"]},
     {"id": "close-pending", "kind": "waiting", "claims": ["c14"]},
-    {"id": "done", "kind": "terminal-success", "claims": ["c13"]}
+    {"id": "done", "kind": "terminal-success", "claims": ["c13"]},
+    {"id": "reopened", "kind": "terminal-success", "claims": ["c23", "c24", "c25"]}
   ],
   "counters": [
-    {"id": "places-held", "start": 0, "changed_by": ["t1", "t3", "t4"], "claims": ["c3"]}
+    {"id": "places-held", "start": 0, "changed_by": ["t1", "t3", "t4", "t9", "t11"], "claims": ["c3", "c31", "c32", "c33", "c34", "c35", "c36"]}
   ],
   "transitions": [
     {
@@ -27,23 +28,23 @@
       "retry": {
         "bound": null, "bound_absent_claims": ["c9"], "backoff": null,
         "changes": ["places-held falls when another worker records its ready PR or is cleaned up"],
-        "claims": ["c9"]
+        "claims": ["c9", "c32", "c33"]
       },
-      "claims": ["c3", "c4", "c7", "c9"]
+      "claims": ["c3", "c4", "c7", "c9", "c32", "c33"]
     },
     {
       "id": "t3", "from": "in-flight", "to": "ready",
       "trigger": "the worker reports a PR or a ready branch", "trigger_evaluated_by": "agent",
       "guard": "the named head is reachable outside the worker's disposable copy", "guard_evaluated_by": "code",
       "guard_counters": [], "actor": "agent", "failure": null, "retry": null,
-      "claims": ["c10", "c11"]
+      "claims": ["c10", "c11", "c32", "c37"]
     },
     {
       "id": "t4", "from": "ready", "to": "done",
-      "trigger": "the merge lands and the agent runs the teardown script", "trigger_evaluated_by": "agent",
-      "guard": "worktree clean and committed work landed", "guard_evaluated_by": "code",
+      "trigger": "the merge lands and the agent runs the teardown script; the captain approves the merge, or with yolo on firstmate merges green work itself, and a local-only ship lands by a guarded fast-forward", "trigger_evaluated_by": "agent",
+      "guard": "worktree clean and committed work landed; a local-only project also counts work merged into the local default branch, and a merge made under yolo may leave no recorded PR", "guard_evaluated_by": "code",
       "guard_counters": [], "actor": "process", "failure": null, "retry": null,
-      "claims": ["c12", "c13"]
+      "claims": ["c12", "c13", "c27", "c30", "c37", "c38"]
     },
     {
       "id": "t5", "from": "ready", "to": "close-pending",
@@ -80,9 +81,30 @@
       "retry": {
         "bound": null, "bound_absent_claims": ["c20"], "backoff": null,
         "changes": ["the running agent is replaced in the same worktree", "a progress note is appended to the instructions"],
-        "claims": ["c18", "c19", "c20"]
+        "claims": ["c18", "c19", "c20", "c36", "c40"]
       },
-      "claims": ["c17", "c18", "c19", "c20"]
+      "claims": ["c17", "c18", "c19", "c20", "c36", "c40", "c41", "c42"]
+    },
+    {
+      "id": "t9", "from": "ready", "to": "reopened",
+      "trigger": "the agent runs the teardown script while the backlog item is still an open captain call", "trigger_evaluated_by": "agent",
+      "guard": "the item reads as an open captain call; if teardown cannot tell, it refuses before any destructive step and --force does not lift that", "guard_evaluated_by": "code",
+      "guard_counters": [], "actor": "process", "failure": null, "retry": null,
+      "claims": ["c23", "c24", "c25"]
+    },
+    {
+      "id": "t10", "from": "ready", "to": "ready",
+      "trigger": "yolo is on and the work is green and in scope, so firstmate merges it itself", "trigger_evaluated_by": "agent",
+      "guard": "the merge script's pre-merge conditions hold, read live; a red PR or a required check that has not reported is never merged", "guard_evaluated_by": "code",
+      "guard_counters": [], "actor": "agent", "failure": null, "retry": null,
+      "claims": ["c26", "c28", "c29"]
+    },
+    {
+      "id": "t11", "from": "in-flight", "to": "done",
+      "trigger": "a scout's report exists at data/<id>/report.md and the agent runs the teardown script", "trigger_evaluated_by": "agent",
+      "guard": "the report exists and its captain-held inventory is verified; the landed-work check does not apply to a scout", "guard_evaluated_by": "code",
+      "guard_counters": [], "actor": "process", "failure": null, "retry": null,
+      "claims": ["c33", "c39"]
     }
   ],
   "unhandled": {
@@ -92,17 +114,17 @@
     "claims": ["c14", "c15"]
   },
   "concurrency": {
-    "shared_resources": ["the project's pool of worktrees", "one home's backlog and task records"],
+    "shared_resources": ["the project's pool of worktrees", "one home's backlog and task records", "a secondmate's home and the crewmate records inside it"],
     "serialized_by": ["one project lock per machine-local firstmate tree, taken for allocation and return"],
     "limit": null,
-    "on_conflict": "lock contention: the spawn exits 1 and does not wait; capacity full: the spawn exits 75 and the item stays queued",
-    "claims": ["c3", "c5", "c7", "c8"]
+    "on_conflict": "lock contention: the spawn exits 1 and does not wait; capacity full: the spawn exits 75 and the item stays queued; a normal secondmate teardown refuses while its home has in-flight crewmate records",
+    "claims": ["c3", "c5", "c7", "c8", "c44"]
   },
   "touchpoints": [
     {
       "id": "h1", "at": "ready",
-      "no_answer": "none found: the cited text sets no deadline or default for a captain who does not answer",
-      "claims": ["c11"]
+      "no_answer": "none found: the cited text sets no deadline or default for a captain who does not answer; with yolo on, firstmate merges green work without asking",
+      "claims": ["c11", "c26", "c27"]
     }
   ]
 }
