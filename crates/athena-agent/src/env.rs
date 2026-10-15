@@ -216,6 +216,40 @@ mod tests {
     }
 
     #[test]
+    fn github_credentials_pass_only_when_set_and_not_empty() {
+        // D96: `gh` authenticates from these variables; each passes only when set and non-empty.
+        let agents = agents();
+        let capability_env = BTreeMap::new();
+        let spec = EnvSpec {
+            agents: &agents,
+            job: "j",
+            job_dir: Path::new("/state/jobs/j"),
+            snapshot: Path::new("/state/jobs/j/work"),
+            side: Side::Read,
+            capability_env: &capability_env,
+        };
+        let set = build(&spec, |key| match key {
+            "GH_TOKEN" => Some("gh-value".into()),
+            "GITHUB_TOKEN" => Some("github-value".into()),
+            other => parent_env(other),
+        })
+        .unwrap();
+        assert_eq!(set["GH_TOKEN"], "gh-value");
+        assert_eq!(set["GITHUB_TOKEN"], "github-value");
+        for lookup in [
+            (|_: &str| None) as fn(&str) -> Option<String>,
+            |key: &str| match key {
+                "GH_TOKEN" | "GITHUB_TOKEN" => Some(String::new()),
+                _ => None,
+            },
+        ] {
+            let env = build(&spec, lookup).unwrap();
+            assert!(!env.contains_key("GH_TOKEN"));
+            assert!(!env.contains_key("GITHUB_TOKEN"));
+        }
+    }
+
+    #[test]
     fn athena_home_is_filled_in_beside_the_other_placeholders() {
         let out = expand(
             "{athena_home}/tools/sccache/1.0.0/bin/sccache",

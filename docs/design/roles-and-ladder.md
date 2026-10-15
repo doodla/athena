@@ -97,8 +97,10 @@ The steward never edits `defaults.toml`, `athena.toml`, `BRIEF.md`, or the owner
   (`[models] verifier`, `[budget] verifier_usd` and `verifier_timeout_s` in `athena.toml`). It is not charged
   to any job. A steward-specific model and budget is future work.
 - **GitHub.** `gh` needs a token the agent's environment carries. `athena.toml` `[agents] env_pass_if_set`
-  lists what is passed, and the steward is only as able to read GitHub as that list allows. Without access it
-  reports the `github` blind spot.
+  lists what is passed, and the steward is only as able to read GitHub as that list allows. It passes
+  `GH_TOKEN`, `GITHUB_TOKEN`, `GH_HOST` and `GH_ENTERPRISE_TOKEN`, each only when set (D96). The owner should
+  export a read-only token before running Athena; the token reaches every agent role, so it must not have
+  write scope. Without a token the steward reports the `github` blind spot.
 - **Not run live.** The tests drive the steward with the fake driver. The real driver and the real
   Claude Code hook have not run it.
 

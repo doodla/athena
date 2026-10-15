@@ -2151,3 +2151,22 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   command is sent back. The study set has a longer frame than it needs, and a higher budget for all producers.
 - **Reversal cost:** Low: remove the gate, the prompt line and restore the budget.
 - **Provenance:** read: `run.rs`, the producer frame; measured: the budgets test and the lifecycle tests.
+
+## D96 · Agents get GitHub credentials, when set, so the steward's `gh` can read
+
+- **Case:** The steward reported that `gh run list` exited 4 and asked for `gh auth login` or `GH_TOKEN`. Cause,
+  read from `crates/athena-agent/src/env.rs` and `athena.toml`: an agent starts from an empty environment, only
+  `HOME` and `PATH` always pass, and `env_pass_if_set` named no GitHub variable. `gh` therefore had no token
+  unless a `gh` config happened to sit under `HOME`.
+- **Decision:** Follows D04 and D53 in using the allow-list. `env_pass_if_set` includes `GH_TOKEN`, `GITHUB_TOKEN`, `GH_HOST` and
+  `GH_ENTERPRISE_TOKEN`. Each passes only when set and non-empty; a test in `env.rs` pins this. The owner
+  exports a read-only token before running Athena. Without one, the steward reports the `github` blind spot.
+  `GH_CONFIG_DIR` is not passed. The `gh` read-only command policy in `policy.rs` is unchanged.
+- **Alternatives:** (a) Rely on a `gh` config under `HOME`: it depends on the owner's machine, holds a login
+  that may carry write scope, and was absent here. (b) No access, with the blind spot recorded: safe but leaves
+  CI, pull requests and deploys unread.
+- **Tradeoff:** The token reaches every agent role's environment, not only the steward's, although policy lets
+  only the steward run `gh`. A read-only token limits the damage; a token with write scope should not be used.
+- **Reversal cost:** Low: remove the four names.
+- **Provenance:** read: `env.rs`, `athena.toml`, `roles-and-ladder.md`. Whether the owner's shell has a token set
+  was not checked.
