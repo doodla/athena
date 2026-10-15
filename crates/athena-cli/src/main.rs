@@ -1,10 +1,11 @@
 //! `athena`: an agent orchestration system's command line (design §3).
 //!
 //! Exit codes: 0 when the command did what it was asked (for `go`, the job landed); 2 when a job did not
-//! land (rejected, failed, stale, or blocked) or a check found violations; 1 when Athena itself erred.
+//! land (rejected, failed, stale, or blocked) or a check found violations; 1 when Athena itself erred. For
+//! `drain`, 0 means the target was met after a landing, and 2 any other stop.
 
 use anyhow::Result;
-use athena_cli::{display, hooks, wiring};
+use athena_cli::{display, drain, hooks, wiring};
 use athena_core::reading::Proposal;
 use athena_core::run::GoResult;
 use athena_core::{Athena, Ui};
@@ -174,6 +175,40 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Work the steward's queue within a budget: for each queued request, read and run the job, land it
+    /// through the pull-request path (as `athena land --pr` does), then rate the live page. Open proposals
+    /// that need a person are listed as waiting and are never accepted, approved or landed.
+    #[command(after_help = "\
+Budget: before every model call (a reading, a run, the re-reading of a retry, a rating) the money spent so far, \
+as the calls actually cost, plus the call's cap from athena.toml must fit --budget; otherwise nothing more starts.
+
+Landing: only a merged, verified pull request counts as landed. Without `[landing] merge_via_rest = true` in \
+athena.toml the pull request stays open and the item is not landed.
+
+A rating counts toward the target only when it is taken after a landing in this run. A run that landed \
+nothing says the page is unchanged and never reports `target met`.
+
+Stop reasons:
+  target met        a rating taken after a landing reached --rating-threshold
+  budget spent      spend plus the next call's cap would exceed --budget; the rest stays queued
+  repeated failure  the same item failed twice; it is named
+  queue empty       nothing was left to work; this is not success
+  job limit         --job-limit jobs were started
+
+Exit code: 0 only when the target was met; 2 for any other stop; 1 when Athena itself erred.")]
+    Drain {
+        /// The most to spend on model calls in this run, in US dollars.
+        #[arg(long, value_name = "USD", value_parser = parse_budget)]
+        budget: f64,
+        /// The audience rating, 1 to 5, at or above which the target is met.
+        #[arg(long, value_name = "N", default_value_t = drain::DEFAULT_TARGET_RATING, value_parser = clap::value_parser!(u8).range(1..=5))]
+        rating_threshold: u8,
+        /// The most jobs to start; a retry of an item is a job.
+        #[arg(long, value_name = "N", default_value_t = drain::DEFAULT_MAX_JOBS, value_parser = clap::value_parser!(u32).range(1..))]
+        job_limit: u32,
+        #[arg(long)]
+        json: bool,
+    },
     /// Close a job that will not run or finish.
     Close {
         job: String,
@@ -305,6 +340,14 @@ fn main() -> ExitCode {
             eprintln!("error: {error:#}");
             ExitCode::from(1)
         }
+    }
+}
+
+/// A budget in US dollars: a number above zero.
+fn parse_budget(text: &str) -> Result<f64, String> {
+    match text.trim().trim_start_matches('$').parse::<f64>() {
+        Ok(value) if value.is_finite() && value > 0.0 => Ok(value),
+        _ => Err(format!("{text:?} is not an amount above zero")),
     }
 }
 
@@ -647,6 +690,29 @@ fn run(cli: Cli) -> Result<u8> {
                 print!("{}", display::land_pr(&report));
             }
             Ok(land_pr_code(&report))
+        }
+        Command::Drain {
+            budget,
+            rating_threshold,
+            job_limit,
+            json,
+        } => {
+            let athena = open(true)?;
+            let report = drain::drain(
+                &drain::RealSteps::live(&athena, &Terminal),
+                drain::Limits {
+                    budget_usd: budget,
+                    target_rating: rating_threshold,
+                    max_jobs: job_limit,
+                },
+                &Terminal,
+            )?;
+            if json {
+                print_json(&report)?;
+            } else {
+                print!("{}", display::drain(&report));
+            }
+            Ok(if report.target_met() { 0 } else { 2 })
         }
         Command::Close { job, why, json } => {
             let athena = open(true)?;

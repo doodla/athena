@@ -1,0 +1,171 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261015-070754-zy4a",
+  "base_commit": "321253ecab23872c430f478836d7566811f65cb4",
+  "base_fingerprint": "sha256:dba4287cd992abe0af3af944e70311fc28cbb6eccface39fe7b5936a5417900b",
+  "previous_job": "20261015-060245-yqev",
+  "candidate_commit": "1fe34f86fef3c9868a2afdbfdda8715b6ac0f1e6",
+  "candidate_tree": "da84fc6b67731f97390b824b5a652322f626b508",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 65514
+    },
+    {
+      "path": "README.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 16800
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 32665
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "status": "added",
+      "mode": "100644",
+      "bytes": 28285
+    },
+    {
+      "path": "crates/athena-cli/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 273
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 32164
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "status": "added",
+      "mode": "100644",
+      "bytes": 19411
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 7533
+    },
+    {
+      "path": "crates/athena-core/src/steward.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 51405
+    },
+    {
+      "path": "docs/decisions.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 158247
+    }
+  ],
+  "fingerprint": "sha256:40ac1b130fc93cd05c3e789ecfd1acac8d79ee1dddcf57187f6f3eef5a14e76d",
+  "violations": [],
+  "producer_report": {
+    "summary": "I added `athena drain --budget <usd> [--rating-threshold N] [--job-limit N] [--json]`. All checks pass: `cargo test --locked`, clippy and fmt. The live paths (a real GitHub landing and the live page rating) were not run; stubs and the fake agent cover everything else.\n\n**What it does.** For each unread request the steward queued, drain:\n1. Reads and runs the job.\n2. Lands it through `Athena::land_pr`, the same path as `athena land --pr`.\n3. Rates the live page, but only after a landing.\n\nOnly a merged, verified pull request counts as landed. An open green pull request does not, because the page has not changed yet.\n\n**How the retry gap is fixed.** The rating call sits behind a landing in the loop. The rating records `after_landing` from the run's own landed count, and `target met` needs both that and a value at or above the threshold. A run that landed nothing shows the last recorded rating marked \"not taken after a landing\" and says the page is unchanged. It cannot stop with `target met`.\n\n**Budget.** Before every model call (a reading, a run, the retry's re-reading, a rating), money already spent plus that call's cap must fit `--budget`. Spent is what the calls actually cost, so an overrun leaves less room. A job starts only when its reading cap and run cap both fit.\n\n**Stop reasons.** Besides the four in the brief, I added `job limit`, which the `--job-limit` flag needs.\n- `target met`\n- `budget spent` (the rest stays queued)\n- `repeated failure` (names the item)\n- `queue empty` (stated as not success)\n- `job limit`\n\nAn item gets two attempts: after a failed run it re-reads with `athena retry` and runs again; after a passed run that did not land, it only lands again.\n\nThe command exits 0 only when the target was met, and 2 for any other stop.\n\n**People decide the rest.** Open proposals are listed as waiting. The loop's steps have no way to accept, approve, reject or land one.\n\n**Code layout.**\n- **Loop and traits:** the loop lives in the new `drain.rs`. It acts through a `Steps` trait and a `Lander` trait, so tests drive it with stubs.\n- **Queue source:** `steward::queued_work` lists the steward-channel requests. A request deferred with `ask --later` is not taken.\n- **Config:** no config key was added.\n\n**Docs.** README has a new \"What it does not decide\" section (the base had none), a command row and a Budget paragraph. CHANGELOG has an Added entry. `docs/decisions.md` has a new D98.\n\n**Root cause.** The earlier attempt rated without a land step, so a rating could describe a page it had not changed. The land step and the after-landing rule are now in code and pinned by tests.",
+    "files": [
+      "crates/athena-cli/src/drain.rs",
+      "crates/athena-cli/tests/drain.rs",
+      "crates/athena-cli/src/main.rs",
+      "crates/athena-cli/src/lib.rs",
+      "crates/athena-cli/src/display.rs",
+      "crates/athena-core/src/steward.rs",
+      "crates/athena-core/src/lib.rs",
+      "README.md",
+      "CHANGELOG.md",
+      "docs/decisions.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "Whole workspace, exit 0 after the final edit; includes the 13 tests in crates/athena-cli/tests/drain.rs, 4 drain unit tests, the queued_work unit test, and the policy and boundary tests."
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "First run flagged one manual_contains in tests/drain.rs; fixed and re-run clean."
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo run -q -p athena-cli -- drain --help",
+        "result": "pass",
+        "note": "Shows --budget, --rating-threshold, --job-limit, --json, the budget rule, and all five stop reasons."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "`cargo test` passes, including fake-agent drain tests with a stubbed queue and stubbed land step that show: (1) each worked item is landed through the land step, (2) the rating is taken only after landing, (3) a pass that landed nothing cannot report 'target met' from a stale rating and the output says the page was unchanged.",
+        "status": "met",
+        "evidence": "`cargo test --locked` passes. In tests/drain.rs: two_items_are_landed_and_then_a_rating_of_four_meets_the_target asserts the exact call log (read, run, land, rate for each item). a_rating_is_never_taken_before_a_landing checks that every rate follows a land. a_pass_that_landed_nothing_cannot_report_target_met_from_a_stale_rating uses a previous rating of 5, nothing lands, and the output says 'unchanged' and 'not taken after a landing'. the_real_steps_work_a_queued_request_land_it_and_only_then_rate_the_page runs the fake agent with a stub lander that sees 0 ratings when it is asked to land."
+      },
+      {
+        "criterion": "Tests cover: two items landed then rating 4+ gives 'target met'; budget too small for the next call gives 'budget spent' with remaining items still queued; empty queue stops at once with no spend and says empty, not success; same item failing twice gives 'repeated failure' naming the item; a landing failure does not lead to a rating being taken as success.",
+        "status": "met",
+        "evidence": "tests/drain.rs: two_items_are_landed_and_then_a_rating_of_four_meets_the_target; a_budget_too_small_for_the_next_call_stops_with_the_rest_still_queued (queued is [b, c]); a_rating_that_does_not_fit_the_budget_is_not_taken; an_empty_queue_stops_at_once_with_no_spend_and_is_not_success (empty log, spend 0, text has 'queue empty' and 'not success'); the_same_item_failing_twice_is_a_repeated_failure_naming_the_item; a_landing_failure_is_a_failure_and_no_rating_is_taken_as_success (log ends land, land; no rate; no rating). All pass."
+      },
+      {
+        "criterion": "A unit test pins that no job or model call (including the retry re-reading) starts when recorded spend plus its cap would exceed the budget, including when an earlier job's cost exceeded its estimate.",
+        "status": "met",
+        "evidence": "drain.rs unit tests: a_call_starts_only_when_spend_plus_its_cap_fits; nothing_starts_after_a_job_cost_more_than_its_cap_not_even_the_retry_reading (budget 3.0, the run cost 2.2 against a cap of 1.0, so the log is only 'read, run' with no retry re-reading); a_reading_that_used_up_the_room_for_the_run_stops_before_the_run. Run with `cargo test --locked -p athena-cli --lib drain`."
+      },
+      {
+        "criterion": "A test shows an above-ladder item needing a person is listed as waiting and left untouched, never accepted, approved or landed by the loop.",
+        "status": "met",
+        "evidence": "tests/drain.rs a_proposal_that_needs_a_person_is_listed_waiting_and_left_alone: the waiting proposal appears in report.waiting, the text and the JSON, and no logged call mentions it. The Steps trait has no accept, approve or land method for proposals. The empty-queue test also lists a waiting item untouched."
+      },
+      {
+        "criterion": "`cargo clippy --all-targets` and `cargo fmt --check` are clean; `cargo run -p athena-cli -- drain --help` documents the budget, rating-threshold and job-limit flags and lists the stop reasons.",
+        "status": "met",
+        "evidence": "Ran `cargo clippy --all-targets --locked -- -D warnings` (clean) and `cargo fmt --all --check` (clean). `cargo run -q -p athena-cli -- drain --help` prints --budget, --rating-threshold, --job-limit and all five stop reasons; drain_help_documents_the_flags_and_lists_every_stop_reason pins this."
+      },
+      {
+        "criterion": "The final output (text and --json) names the stop reason, jobs run with outcomes, costs and landing status, total spent, the latest rating against the target and whether it was taken after a landing, and the items still queued or waiting for a person.",
+        "status": "met",
+        "evidence": "display::drain prints the stop reason (naming the item on a repeated failure), each job with its outcome, cost and landing, spent of budget, the rating against the target with its after-landing wording, the unchanged-page line, and queued and waiting lines. Report derives Serialize and prints under --json. the_json_report_names_the_stop_the_money_the_rating_and_what_is_left checks the JSON fields and the text."
+      },
+      {
+        "criterion": "README.md 'What it does not decide', CHANGELOG.md and docs/decisions.md describe the command, that it lands through the PR path before rating, budget semantics, stop reasons, and the no-config-key decision; no text claims the owner must land by hand.",
+        "status": "met",
+        "evidence": "README.md has a new 'What it does not decide' section (the README had none), a drain row in the commands table, and a Budget paragraph. CHANGELOG.md has an Added entry. docs/decisions.md has D98 with Case, Decision, Alternatives, Tradeoff, Reversal cost and Provenance. A search of the *.md files for 'by hand' and similar phrases found no text saying the owner must land by hand."
+      }
+    ],
+    "open_issues": [
+      "Without `[landing] merge_via_rest = true`, drain cannot land anything. The pull request stays open, the item fails twice, and the run ends in 'repeated failure'. This is documented in the README, the --help text and D98.",
+      "The job limit is a fifth stop reason beyond the four in the reading. The flag requires it, and I listed it everywhere.",
+      "Cost is read from the records after each call. A reading or retry that errors before recording anything counts as free, and a retry that errors before returning a job id reports no cost.",
+      "The live paths (GitHub landing, live page rating) were not run. Only stubs and the fake agent were exercised.",
+      "Items are queued steward requests only. Audience low-rating proposals and every other open proposal are listed as waiting and never run, since approving them is out of scope."
+    ],
+    "mistakes": [
+      "I made a muddled first version of the rating-budget test and rewrote it cleanly with a run_cost knob before running anything.",
+      "I edited D97 in decisions.md by mistake and reverted it straight away; the diff does not touch D97.",
+      "I tried a cargo doc command with a redirect, which was denied; nothing came of it."
+    ],
+    "learnings": [
+      "README.md had no 'What it does not decide' heading at the base, so I created that section.",
+      "Records.jobs is keyed by id string, and JobRecords::state() == Queued with request.channel == 'steward' identifies the steward's unread requests; Athena::retry returns a new job through ask.",
+      "Only LinkState::Landed means the page has changed. With merge_via_rest off, land_pr stops at an open green pull request.",
+      "The AudienceRating.rating field is a u8; audience run cost is read from Records.audience_runs, not from Rated.",
+      "Reading cost is available on Proposal.spent_usd; go() returns Reread for a queued job and Finished after the second call.",
+      "Bash in this environment allows only cargo, git, ls and similar. grep, tail and redirects are denied."
+    ],
+    "desires": [
+      "A way to read saved tool output files; the test output was persisted outside the working directory and Grep refused it.",
+      "A real GitHub test repository to exercise land_pr with merge_via_rest on."
+    ]
+  }
+}

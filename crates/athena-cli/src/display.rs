@@ -210,6 +210,91 @@ pub fn land_pr(report: &athena_core::gh::PrReport) -> String {
     out
 }
 
+/// What `athena drain` prints: why it stopped, each job and whether it landed, the money, the rating against
+/// the target and whether it was taken after a landing, and what is still queued or waiting for a person.
+pub fn drain(report: &crate::drain::Report) -> String {
+    let mut out = match (report.stop, &report.failed_item) {
+        (crate::drain::Stop::RepeatedFailure, Some(item)) => {
+            format!("stopped     repeated failure: item {item} failed twice\n")
+        }
+        (stop, _) => format!("stopped     {}: {}\n", stop.label(), stop.meaning()),
+    };
+    if report.jobs.is_empty() {
+        out.push_str("jobs        none run\n");
+    }
+    for j in &report.jobs {
+        let _ = write!(
+            out,
+            "job         {} (item {}) {} · {} · {}",
+            j.job,
+            j.item,
+            j.outcome,
+            usd(j.cost_usd),
+            j.landing
+        );
+        if let Some(reason) = &j.reason {
+            let _ = write!(out, " · {reason}");
+        }
+        out.push('\n');
+    }
+    let _ = writeln!(
+        out,
+        "spent       {} of {}",
+        usd(report.spent_usd),
+        usd(report.budget_usd)
+    );
+    let _ = writeln!(out, "landed      {}", report.landed);
+    match report.rating {
+        Some(r) if r.after_landing => {
+            let _ = writeln!(
+                out,
+                "rating      {}/5 against a target of {}, taken after a landing: {}",
+                r.value,
+                report.target_rating,
+                if r.met_target {
+                    "target met"
+                } else {
+                    "below the target"
+                }
+            );
+        }
+        Some(r) => {
+            let _ = writeln!(
+                out,
+                "rating      {}/5 against a target of {}, an earlier rating, not taken after a landing in this run: it says nothing about this run",
+                r.value, report.target_rating
+            );
+        }
+        None => {
+            let _ = writeln!(
+                out,
+                "rating      none (target {}); no rating was taken after a landing",
+                report.target_rating
+            );
+        }
+    }
+    if report.page_unchanged {
+        out.push_str("page        unchanged: nothing landed in this run\n");
+    }
+    for note in &report.notes {
+        let _ = writeln!(out, "note        {note}");
+    }
+    if report.queued.is_empty() {
+        out.push_str("queued      nothing\n");
+    }
+    for i in &report.queued {
+        let _ = writeln!(out, "queued      {} · {}", i.job, i.title);
+    }
+    for w in &report.waiting {
+        let _ = writeln!(
+            out,
+            "waiting     {} · {} (rung {}); needs a person: `athena approve-work` or `athena reject-work`",
+            w.id, w.title, w.rung
+        );
+    }
+    out
+}
+
 /// What a non-interactive `ask` or `correct` prints after the reading.
 pub fn follow_up(p: &Proposal) -> String {
     let id = p.job.as_str();

@@ -17,7 +17,7 @@ use crate::Athena;
 use crate::capability::{JobConfig, ToolGrant};
 use crate::commits::{Committer, NewFile, message};
 use crate::state::StateDir;
-use crate::store::Records;
+use crate::store::{JobState, Records};
 use anyhow::{Context, Result, bail};
 use athena_agent::env::Side;
 use athena_context::outputs::{
@@ -317,6 +317,41 @@ pub trait Applier {
     fn apply(&self, change: &ProposedChange, taken: &BTreeSet<String>) -> Result<QueuedRequest>;
 }
 
+/// The channel of a request the steward queued. `athena drain` works the queued requests of this channel
+/// and no other, so a request the user deferred with `athena ask --later` is never taken from them.
+pub const REQUEST_CHANNEL: &str = "steward";
+
+/// A request the steward queued that has not been read yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedWork {
+    pub job: JobId,
+    pub title: String,
+}
+
+/// The requests the steward queued that no one has read yet, oldest first.
+pub fn queued_work(records: &Records) -> Vec<QueuedWork> {
+    let mut found: Vec<(Timestamp, QueuedWork)> = records
+        .jobs
+        .values()
+        .filter(|j| j.state() == JobState::Queued)
+        .filter_map(|j| {
+            let request = j
+                .request
+                .as_ref()
+                .filter(|r| r.channel == REQUEST_CHANNEL)?;
+            Some((
+                request.received_at,
+                QueuedWork {
+                    job: j.id().clone(),
+                    title: j.title(),
+                },
+            ))
+        })
+        .collect();
+    found.sort_by(|a, b| (a.0, a.1.job.as_str()).cmp(&(b.0, b.1.job.as_str())));
+    found.into_iter().map(|(_, work)| work).collect()
+}
+
 /// The real applier: a queued request, as `athena ask --later` writes one.
 #[derive(Debug)]
 pub struct RequestQueue;
@@ -332,7 +367,7 @@ impl Applier for RequestQueue {
             job: job.clone(),
             text: change.request.trim().to_string(),
             received_at: crate::now(),
-            channel: "steward".into(),
+            channel: REQUEST_CHANNEL.into(),
         };
         Ok(QueuedRequest {
             job,
@@ -1323,6 +1358,42 @@ mod tests {
         );
         assert!(!without.contains("- git-log: GIT-LOG.txt"));
         assert!(without.contains("No class of work"));
+    }
+
+    #[test]
+    fn only_unread_requests_of_the_steward_channel_are_queued_work_oldest_first() {
+        let mut records = Records::default();
+        let mut add = |id: &str, channel: &str, at: &str| {
+            let job = JobId::parse(id).unwrap();
+            records.jobs.insert(
+                id.to_string(),
+                crate::store::JobRecords {
+                    id: Some(job.clone()),
+                    request: Some(Request {
+                        job,
+                        text: format!("Do {id}."),
+                        received_at: at.parse().unwrap(),
+                        channel: channel.into(),
+                    }),
+                    ..Default::default()
+                },
+            );
+        };
+        add(
+            "20261014-120000-bbbb",
+            REQUEST_CHANNEL,
+            "2026-10-14T12:00:00Z",
+        );
+        add(
+            "20261013-120000-aaaa",
+            REQUEST_CHANNEL,
+            "2026-10-13T12:00:00Z",
+        );
+        add("20261012-120000-cccc", "cli", "2026-10-12T12:00:00Z");
+        let queued = queued_work(&records);
+        let ids: Vec<&str> = queued.iter().map(|q| q.job.as_str()).collect();
+        assert_eq!(ids, ["20261013-120000-aaaa", "20261014-120000-bbbb"]);
+        assert_eq!(queued[0].title, "Do 20261013-120000-aaaa.");
     }
 
     #[test]
