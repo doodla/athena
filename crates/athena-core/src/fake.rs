@@ -10,6 +10,8 @@ use std::sync::{Arc, Mutex};
 #[derive(Debug, Clone)]
 pub struct CountingPinner {
     sha: String,
+    /// Whether a ref that is itself a full commit id resolves to itself, as the real pinner does.
+    echo_full_sha: bool,
     calls: Arc<Mutex<Vec<(String, String)>>>,
 }
 
@@ -21,8 +23,15 @@ impl CountingPinner {
     pub fn new(sha: &str) -> CountingPinner {
         CountingPinner {
             sha: sha.to_string(),
+            echo_full_sha: false,
             calls: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Makes a full 40-hex ref resolve to itself; any other ref still resolves to the fixed sha.
+    pub fn echoing_full_shas(mut self) -> CountingPinner {
+        self.echo_full_sha = true;
+        self
     }
 
     /// How many times `pin` was called.
@@ -46,10 +55,12 @@ impl Pinner for CountingPinner {
             bail!("pin destination {} already exists", dest.display());
         }
         std::fs::create_dir_all(dest)?;
-        std::fs::write(
-            dest.join(FAKE_TREE_FILE),
-            format!("pinned at {}\n", self.sha),
-        )?;
-        Ok(self.sha.clone())
+        let sha = if self.echo_full_sha && crate::pin::is_full_sha(git_ref) {
+            git_ref.to_string()
+        } else {
+            self.sha.clone()
+        };
+        std::fs::write(dest.join(FAKE_TREE_FILE), format!("pinned at {sha}\n"))?;
+        Ok(sha)
     }
 }

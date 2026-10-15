@@ -209,7 +209,8 @@ impl Athena {
         let redactor = self.redactor(&jc.config, Some(&id))?;
 
         // A study's repository is pinned by the core, here, before anything is committed or any agent runs.
-        let pinned = self.pin_repo(capability, &jc, &id)?;
+        let request_text = job.request.as_ref().map(|r| r.text.as_str()).unwrap_or("");
+        let pinned = self.pin_repo(capability, &jc, &id, head, request_text)?;
 
         // The prediction commit: the accepted reading's job record and the producer brief, before any work.
         let producer_grant = capability.producer_grant(&jc);
@@ -309,14 +310,29 @@ impl Athena {
         self.close_dispatched(&ctx, closing)
     }
 
-    /// For a capability that pins, resolves the configured repository ref to a commit and checks the tree
-    /// out under the job's directory. Nothing is pinned for other capabilities. A pinning capability whose
-    /// configuration names no repository, or a ref that does not resolve, stops the job before dispatch.
+    /// For a capability that pins, resolves the commit to read and checks its tree out under the job's
+    /// directory. Nothing is pinned for other capabilities.
+    ///
+    /// The rule: an existing study's `studies/<id>/pin.json` overrides `repo_ref`. When the committed head holds
+    /// a study whose `repository_url` equals the configured `repo_url`, the job pins exactly that study's
+    /// `sha`; athena.toml's `repo_ref` (a branch such as `main`) is used only for a new study, one with no
+    /// pin.json for the repository. With several studies for the repository, the one whose `study_id` appears
+    /// in the request text is used; if none or more than one is named, the job stops rather than guess.
+    /// A pin.json whose `sha` is not a full 40-hex id, or a pin that does not resolve to that same sha, stops
+    /// the job before dispatch with a message naming the study; it never falls back to `repo_ref`.
+    ///
+    /// The cause this fixes: job 20261015-201650-cyvb mounted fc8972cd (the tip of `main`) while the study's
+    /// pin.json said 6407052f, so the producer cited lines of newer code under the older label.
+    ///
+    /// A pinning capability whose configuration names no repository, or a ref that does not resolve, also
+    /// stops the job before dispatch.
     fn pin_repo(
         &self,
         capability: &dyn Capability,
         jc: &JobConfig,
         id: &JobId,
+        head: &str,
+        request: &str,
     ) -> Result<Option<(PinnedRepo, PathBuf)>> {
         if !capability.pins_repo() {
             return Ok(None);
@@ -339,6 +355,25 @@ impl Athena {
         }
         let dir = self.state.job_dir(id).join("pin");
         crate::pin::remove_tree(&dir)?;
+        if let Some((study, wanted)) = self.study_pin(head, &url, request)? {
+            let sha = self
+                .pinner
+                .pin(&url, &wanted, &dir)
+                .with_context(|| format!("pinning study {study}'s commit {wanted} of {url}"))?;
+            if sha != wanted {
+                bail!(
+                    "study {study}: its pin.json names {wanted}, but the pin resolved to {sha}; the job would read a different commit"
+                );
+            }
+            return Ok(Some((
+                PinnedRepo {
+                    url,
+                    git_ref: wanted,
+                    sha,
+                },
+                dir,
+            )));
+        }
         let sha = self
             .pinner
             .pin(&url, &git_ref, &dir)
@@ -347,6 +382,61 @@ impl Athena {
             bail!("the pinner returned {sha:?}, which is not a full 40-hex commit id");
         }
         Ok(Some((PinnedRepo { url, git_ref, sha }, dir)))
+    }
+
+    /// The `(study id, sha)` an existing study of the repository at `url` pins, read from `studies/*/pin.json`
+    /// in the commit `head`; `None` when no study has a pin for that repository. See [`Self::pin_repo`].
+    fn study_pin(&self, head: &str, url: &str, request: &str) -> Result<Option<(String, String)>> {
+        let mut found: Vec<(String, String)> = Vec::new();
+        for entry in self.git.ls_tree_under(head, "studies/")? {
+            let Some(dir) = entry
+                .path
+                .strip_prefix("studies/")
+                .and_then(|p| p.strip_suffix("/pin.json"))
+                .filter(|d| !d.contains('/'))
+            else {
+                continue;
+            };
+            let bytes = self
+                .git
+                .show_file(head, &entry.path)?
+                .with_context(|| format!("{} vanished", entry.path))?;
+            let value: serde_json::Value = serde_json::from_slice(&bytes)
+                .with_context(|| format!("study {dir}: {} is not valid JSON", entry.path))?;
+            if value["repository_url"].as_str() != Some(url) {
+                continue;
+            }
+            let study = value["study_id"].as_str().unwrap_or(dir).to_string();
+            let sha = value["sha"].as_str().unwrap_or_default();
+            if !is_full_sha(sha) {
+                bail!(
+                    "study {study}: pin.json sha {sha:?} is not a full 40-hex commit id, so the job cannot pin it; fix the pin"
+                );
+            }
+            found.push((study, sha.to_string()));
+        }
+        match found.len() {
+            0 => Ok(None),
+            1 => Ok(found.pop()),
+            _ => {
+                let mut named: Vec<_> = found
+                    .into_iter()
+                    .filter(|(study, _)| request.contains(study.as_str()))
+                    .collect();
+                if named.len() == 1 {
+                    Ok(named.pop())
+                } else {
+                    bail!(
+                        "{url} has several studies and the request names {}; name exactly one study id so the job reads that study's pinned commit",
+                        if named.is_empty() {
+                            "none of them".to_string()
+                        } else {
+                            "more than one of them".to_string()
+                        }
+                    )
+                }
+            }
+        }
     }
 
     fn reread_after_configuration_change(

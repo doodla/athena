@@ -21,6 +21,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- A study job now reads exactly the commit its study's `pin.json` names. The rule: an existing study's
+  `studies/<id>/pin.json` overrides `repo_ref`; athena.toml's `repo_ref` is used only for a new study (no
+  pin.json for the repository). The cause: the core's pinning step (`pin_repo` in `crates/athena-core/src/run.rs`)
+  resolved only the configured `repo_ref` (`main`), so job 20261015-201650-cyvb mounted fc8972cd while the
+  study pin said 6407052f, and the producer cited newer code under the old label. With several studies for one
+  repository the request must name one study id, otherwise the job stops; a pin.json sha that is not a full
+  40-hex id, or a pin that does not resolve to that sha, stops the job before dispatch naming the study. The
+  existing study is not re-pinned. See decision D102. Tests are in `crates/athena-core/src/run_pin_tests.rs`.
 - Locking a snapshot no longer fails intermittently with `Spawn(NotFound)`. The root cause: the recursive
   permission walk in `crates/athena-git/src/snapshot.rs` (`set_tree_writable`) listed a directory and then
   examined each entry, and a transient file git had just written under `.git` could vanish in between; the
