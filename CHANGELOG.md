@@ -9,6 +9,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The firstmate study (`studies/firstmate-work-handling`) now records, each with a cited path and quote from the
+  pinned source: teardown reopening a backlog item that is still an open captain call instead of closing it;
+  firstmate merging green work itself when yolo is on, and not when it is off; that only a recorded PR or a
+  cleanup frees a worker place; and the separate handling of local-only ships, scouts, relaunches and
+  secondmates. The explainer page built from it shows three new transitions and a sixth state.
 - `athena close <job> --why "..." --allow-legacy-usage` closes an interrupted job whose already committed
   invocation record fails `usage records reconcile` (for example, one written before the usage fix below), which
   used to leave the job impossible to close or retry. The closing commit is gated under `Scope::CommitLegacyUsage`,
