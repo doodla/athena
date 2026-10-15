@@ -9,6 +9,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- The firstmate explainer page now states the failure and limit behaviour the claims already record, and drops
+  wording no claim supports. No new claim was added; every fact below reuses a claim in
+  `studies/firstmate-work-handling/claims.json`, whose quote is in the pinned firstmate source at the path and
+  lines given. A new "When things go wrong, and what is not limited" list in Start here (`intro.json` `limits`)
+  and the transition summaries say:
+  - a spawn that cannot take the project lock exits 1 and does not wait (c7, `bin/fm-spawn.sh` 3186-3192);
+  - an unreadable capacity declaration exits 1 (c4, `bin/fm-spawn.sh` 3173-3176), while a full capacity exits 75
+    (c3, `bin/fm-spawn.sh` 194-197 and 3201-3203);
+  - a failed relaunch restores the prior durable record (c19, `docs/agent-control.md` 150);
+  - no relaunch bound was found (c20, `bin/fm-control.sh` 134) and no bound on deferrals (c9, `AGENTS.md` 369,
+    `bin/fm-spawn.sh` 3202); no retry limit is stated for a failed close (c14, `bin/fm-teardown.sh` 22-23);
+  - the retry of a failed close is the next session start (c14, c15, `bin/fm-backlog-transition-lib.sh` 19), and
+    the cited text names no other, so a close is not replayed until a session starts (an inference from those
+    two claims, worded as such);
+  - merge authority is the configured merge authority, and with yolo off the captain approves every PR merge and
+    local-only landing (c11, `AGENTS.md` 229-230 and 234), with no deadline stated for the captain.
+  Glossary: `exit 1` is added and says only what c4 and c7 support; `ship` now says what c10
+  (`docs/architecture.md` 371-372) and c12 (`docs/architecture.md` 416) state; `captain` no longer carries words
+  no claim states. Transitions t5, t7 and t8 have guard `none` with a placeholder evaluator `agent`; the renderer
+  now shows "No guard applies" and names no checker. Corrected in `intro.json`, `model.json` and `findings.json`
+  (f2), and the renderer in `xtask/src/site.rs`.
+- Limit of the check: the study's source-quote test runs only when `pinned-source/` is mounted. In a checkout
+  without it, the test is skipped, so it does not always check the quotes against the pinned commit.
+
 - Building the explainer page no longer writes into the work tree, so a verifier's snapshot stays unchanged.
   `cargo run -p xtask -- site` now writes to `site/` in the cargo target directory (`$CARGO_TARGET_DIR`, else
   `target/site`), and refuses an `--out` inside the repository root other than under the target directory.
