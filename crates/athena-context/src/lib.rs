@@ -149,6 +149,8 @@ pub enum BudgetSet {
     Verifier,
     /// The contract and the steward's stored prompt (`athena_data::roles::STEWARD_PROMPT`).
     Steward,
+    /// The contract and the audience's stored prompt (`athena_data::roles::AUDIENCE_PROMPT`).
+    Audience,
 }
 
 impl BudgetSet {
@@ -160,6 +162,7 @@ impl BudgetSet {
             BudgetSet::Producer => 1_300,
             BudgetSet::Verifier => 1_300,
             BudgetSet::Steward => 600,
+            BudgetSet::Audience => 600,
         }
     }
     pub fn name(self) -> &'static str {
@@ -169,8 +172,17 @@ impl BudgetSet {
             BudgetSet::Producer => "producer",
             BudgetSet::Verifier => "verifier",
             BudgetSet::Steward => "steward",
+            BudgetSet::Audience => "audience",
         }
     }
+}
+
+/// The audience's system prompt: the contract, then the role's stored prompt.
+pub fn audience_system_prompt(prompt: &str, version: u32) -> Composed {
+    compose(&[
+        CONTRACT.into(),
+        Component::new("audience.prompt", version, prompt),
+    ])
 }
 
 /// The steward's system prompt: the contract, then the role's stored prompt. The stored prompt is the
@@ -243,6 +255,15 @@ mod tests {
             let composed = compose(&[CONTRACT.into(), frame.into()]);
             assert!(check_budget(set, &composed).is_ok(), "{} frame", set.name());
         }
+    }
+
+    #[test]
+    fn the_audience_prompt_follows_the_contract_and_fits_its_budget() {
+        let composed = audience_system_prompt("You are the audience.", 1);
+        assert_eq!(composed.components[1].id, "audience.prompt");
+        assert!(check_budget(BudgetSet::Audience, &composed).is_ok());
+        let long = audience_system_prompt(&"word ".repeat(2_000), 1);
+        assert!(check_budget(BudgetSet::Audience, &long).is_err());
     }
 
     #[test]

@@ -245,6 +245,10 @@ pub struct Scenario {
     /// Reads the fake steward claims to have made, from what it was given. Tests use it to record what the
     /// steward's brief and workspace offered.
     pub steward_reads: Option<StewardReads>,
+    /// What the audience reports (`{ "rating": n, "findings": [...] }`).
+    pub audience: Value,
+    /// Everything the audience was given: system prompt, brief, and its workspace's files.
+    pub seen_by_audience: Arc<Mutex<Vec<String>>>,
 }
 
 /// The commands a fake steward reports having run, given its invocation.
@@ -272,6 +276,8 @@ impl Default for Scenario {
             invocations: Arc::new(Mutex::new(Vec::new())),
             steward: json!({ "items": [] }),
             steward_reads: None,
+            audience: json!({ "rating": 3, "findings": [] }),
+            seen_by_audience: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -345,6 +351,14 @@ impl Scenario {
                         t.commands_run = reads(spec);
                     }
                     t
+                }
+                Role::Audience => {
+                    let mut seen = self.seen_by_audience.lock().unwrap();
+                    seen.push(spec.system_prompt.clone());
+                    seen.push(spec.user_prompt.clone());
+                    seen.push(snapshot_text(&spec.workdir));
+                    drop(seen);
+                    FakeTurn::output(self.audience.clone())
                 }
             };
             turn.cost_usd = self.cost;

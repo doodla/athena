@@ -12,7 +12,7 @@ use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// The agent roles: the three that work on a job, and the steward, which runs in the background beside them.
+/// The agent roles: the three that work on a job, and the steward and the audience, which run beside them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
@@ -20,6 +20,7 @@ pub enum Role {
     Producer,
     Verifier,
     Steward,
+    Audience,
 }
 
 impl Role {
@@ -29,6 +30,7 @@ impl Role {
             Role::Producer => "producer",
             Role::Verifier => "verifier",
             Role::Steward => "steward",
+            Role::Audience => "audience",
         }
     }
     pub fn parse(text: &str) -> Option<Role> {
@@ -37,6 +39,7 @@ impl Role {
             "producer" => Some(Role::Producer),
             "verifier" => Some(Role::Verifier),
             "steward" => Some(Role::Steward),
+            "audience" => Some(Role::Audience),
             _ => None,
         }
     }
@@ -1604,6 +1607,63 @@ impl WorkDecision {
     }
 }
 
+/// The schema tag of an audience rating.
+pub const AUDIENCE_RATING_SCHEMA: &str = "athena.audience-rating/1";
+
+/// The lowest and highest rating.
+pub const RATING_RANGE: std::ops::RangeInclusive<u8> = 1..=5;
+
+/// One finding of an audience rating: what the reader noticed, and where on the target they noticed it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudienceFinding {
+    /// One or two sentences.
+    pub text: String,
+    /// The evidence: a quoted passage, or the heading or place on the target where it was found.
+    pub source: String,
+}
+
+/// `athena.audience-rating/1`: how a reader of one kind rated a shipped outcome. Ratings are never edited; the
+/// latest one by `at` is the current one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudienceRating {
+    pub id: RecordId,
+    pub at: Timestamp,
+    /// What was read: the URL of the page.
+    pub target: String,
+    /// Who read it, such as `newcomer`.
+    pub audience: String,
+    /// 1 (the reader could not use it) to 5 (the reader got what they came for).
+    pub rating: u8,
+    pub findings: Vec<AudienceFinding>,
+}
+
+impl AudienceRating {
+    /// Why this record is not acceptable, if it is not.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.target.trim().is_empty() || self.audience.trim().is_empty() {
+            return Err("an audience rating names its target and its audience".into());
+        }
+        if !RATING_RANGE.contains(&self.rating) {
+            return Err(format!(
+                "a rating is from {} to {}, not {}",
+                RATING_RANGE.start(),
+                RATING_RANGE.end(),
+                self.rating
+            ));
+        }
+        if self
+            .findings
+            .iter()
+            .any(|f| f.text.trim().is_empty() || f.source.trim().is_empty())
+        {
+            return Err("every finding has text and cites its source".into());
+        }
+        Ok(())
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------------
 // The envelope
 
@@ -1657,6 +1717,8 @@ pub enum AnyRecord {
     WorkItem(Box<WorkItem>),
     #[serde(rename = "athena.work-decision/1")]
     WorkDecision(WorkDecision),
+    #[serde(rename = "athena.audience-rating/1")]
+    AudienceRating(Box<AudienceRating>),
 }
 
 /// Why a file under `records/` is not acceptable.
@@ -1735,6 +1797,7 @@ impl AnyRecord {
             AnyRecord::Role(r) => r.validate().map_err(invalid)?,
             AnyRecord::WorkItem(w) => w.validate().map_err(invalid)?,
             AnyRecord::WorkDecision(d) => d.validate().map_err(invalid)?,
+            AnyRecord::AudienceRating(a) => a.validate().map_err(invalid)?,
             AnyRecord::DefaultsProposal(p) => p.validate().map_err(invalid)?, // Totals are what reconciliation checks an outcome against; only the bootstrap has none
             // (acceptance verification 2).
             AnyRecord::Outcome(o) if o.job.is_request() && o.totals.is_none() => {
@@ -1822,6 +1885,9 @@ impl AnyRecord {
             AnyRecord::WorkDecision(r) => {
                 format!("records/work-decisions/{}/{}.json", r.id.month(), r.id)
             }
+            AnyRecord::AudienceRating(r) => {
+                format!("records/audience-ratings/{}/{}.json", r.id.month(), r.id)
+            }
         }
     }
 
@@ -1850,6 +1916,7 @@ impl AnyRecord {
             AnyRecord::Role(_) => crate::roles::ROLE_SCHEMA,
             AnyRecord::WorkItem(_) => "athena.work-item/1",
             AnyRecord::WorkDecision(_) => "athena.work-decision/1",
+            AnyRecord::AudienceRating(_) => AUDIENCE_RATING_SCHEMA,
         }
     }
 }
@@ -2464,6 +2531,63 @@ mod tests {
             good
         );
         assert!(AnyRecord::parse("x", rejected(" ").to_json().as_bytes()).is_err());
+    }
+
+    fn sample_rating() -> AudienceRating {
+        AudienceRating {
+            id: RecordId::parse("20261015-090000-2def").unwrap(),
+            at: ts(),
+            target: "https://example.invalid/page/".into(),
+            audience: "newcomer".into(),
+            rating: 4,
+            findings: vec![AudienceFinding {
+                text: "The first screen says what the page is for.".into(),
+                source: "heading: Start here".into(),
+            }],
+        }
+    }
+
+    #[test]
+    fn an_audience_rating_has_a_path_a_schema_and_round_trips() {
+        let record = AnyRecord::AudienceRating(Box::new(sample_rating()));
+        assert_eq!(record.schema(), "athena.audience-rating/1");
+        assert_eq!(
+            record.canonical_path(),
+            "records/audience-ratings/2026-10/20261015-090000-2def.json"
+        );
+        let json = record.to_json();
+        assert!(json.contains("\"schema\": \"athena.audience-rating/1\""));
+        assert_eq!(AnyRecord::parse("x", json.as_bytes()).unwrap(), record);
+        assert!(check_record_file(&record.canonical_path(), json.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn a_rating_outside_one_to_five_or_a_finding_without_evidence_is_refused() {
+        for rating in RATING_RANGE {
+            let ok = AudienceRating {
+                rating,
+                ..sample_rating()
+            };
+            assert_eq!(ok.validate(), Ok(()), "{rating}");
+        }
+        for rating in [0, 6, 255] {
+            let bad = AudienceRating {
+                rating,
+                ..sample_rating()
+            };
+            assert!(bad.validate().is_err(), "{rating}");
+            let record = AnyRecord::AudienceRating(Box::new(bad));
+            assert!(AnyRecord::parse("x", record.to_json().as_bytes()).is_err());
+        }
+        let mut no_source = sample_rating();
+        no_source.findings[0].source = "  ".into();
+        assert!(no_source.validate().is_err());
+        let mut no_text = sample_rating();
+        no_text.findings[0].text.clear();
+        assert!(no_text.validate().is_err());
+        let mut no_target = sample_rating();
+        no_target.target.clear();
+        assert!(no_target.validate().is_err());
     }
 
     #[test]

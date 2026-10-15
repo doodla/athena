@@ -286,6 +286,30 @@ impl HttpPost for CurlHttp {
     }
 }
 
+impl CurlHttp {
+    /// The text of the page at an `http` or `https` URL, following redirects. An `Err` means no page: the
+    /// URL is not http, the program could not run, the call timed out, or the server answered with an error
+    /// status. No credential is sent.
+    pub fn get_text(&self, url: &str) -> Result<String> {
+        if !(url.starts_with("https://") || url.starts_with("http://")) {
+            bail!("{url:?} is not an http or https URL");
+        }
+        let out = Command::new("curl")
+            .args(["--fail", "--silent", "--show-error", "--location"])
+            .args(["--max-time", &self.max_seconds.to_string(), "--"])
+            .arg(url)
+            .output()
+            .context("running curl; is it installed?")?;
+        if !out.status.success() {
+            bail!(
+                "could not fetch {url}: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+}
+
 /// The refusals of one landing run, kept in memory until the caller commits them as records. The client writes
 /// one for every refused call, retried or not.
 #[derive(Debug)]

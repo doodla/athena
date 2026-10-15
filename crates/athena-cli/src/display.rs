@@ -476,6 +476,16 @@ pub fn status(v: &StatusView) -> String {
             let _ = writeln!(out, "{:<11}   evidence: {evidence}", "");
         }
     }
+    if let Some(a) = &v.audience {
+        let _ = writeln!(
+            out,
+            "audience    {}/5 from a {} reading {} ({})",
+            a.rating, a.audience, a.target, a.at
+        );
+        for finding in &a.findings {
+            let _ = writeln!(out, "{:<11}   finding: {finding}", "");
+        }
+    }
     if !v.invalid_records.is_empty() {
         let _ = writeln!(
             out,

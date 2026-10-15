@@ -259,6 +259,26 @@ pub struct StewardItemOutput {
     pub request: Option<String>,
 }
 
+/// The audience's report: one rating and the findings behind it. Athena validates both before it records them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AudienceOutput {
+    /// 1 (the reader could not use it) to 5 (the reader got what they came for).
+    pub rating: u8,
+    /// Empty only when there is nothing to say.
+    pub findings: Vec<AudienceFindingOutput>,
+}
+
+/// One finding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AudienceFindingOutput {
+    /// One or two sentences.
+    pub text: String,
+    /// The evidence: a quoted passage, or the heading where it was found.
+    pub source: String,
+}
+
 /// The closed lists that narrow the reader's schema.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ReaderChoices {
@@ -341,9 +361,34 @@ pub fn steward_schema() -> Value {
     schema_of::<StewardOutput>()
 }
 
+/// The audience's schema.
+pub fn audience_schema() -> Value {
+    schema_of::<AudienceOutput>()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_audience_schema_requires_a_rating_and_findings_with_sources() {
+        let schema = audience_schema();
+        let required = |v: &Value| {
+            let mut names: Vec<String> = v["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|n| n.as_str().unwrap().to_string())
+                .collect();
+            names.sort();
+            names
+        };
+        assert_eq!(required(&schema), ["findings", "rating"]);
+        assert_eq!(
+            required(&schema["properties"]["findings"]["items"]),
+            ["source", "text"]
+        );
+    }
 
     fn choices() -> ReaderChoices {
         ReaderChoices {

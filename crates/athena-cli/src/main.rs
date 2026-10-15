@@ -129,6 +129,19 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Run the audience: fetch the live explainer page (or --url), have a model read it as a newcomer, and
+    /// record a 1 to 5 rating with findings that cite their evidence. A rating of 2 or lower queues a work
+    /// item. The page and the repository's files are not changed.
+    Audience {
+        /// Rate this page instead of the live explainer.
+        #[arg(long)]
+        url: Option<String>,
+        /// Who reads it; default `newcomer`.
+        #[arg(long)]
+        reader: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Check a candidate `defaults.toml` against an open or accepted proposal and `defaults.toml` at HEAD:
     /// id, statement, version (base plus one) and parse. Exit 2 on a problem.
     CheckProposal {
@@ -554,6 +567,37 @@ fn run(cli: Cli) -> Result<u8> {
                 print_json(&rejected)?;
             } else {
                 println!("rejected work item {}", rejected.work_item);
+            }
+            Ok(0)
+        }
+        Command::Audience { url, reader, json } => {
+            let athena = open(true)?;
+            let mut target = athena_core::audience::Target::explainer();
+            if let Some(url) = url {
+                target.url = url;
+            }
+            if let Some(reader) = reader {
+                target.audience = reader;
+            }
+            let Some(rated) = athena.audience(&athena_core::audience::LivePage, &target)? else {
+                return Ok(0);
+            };
+            if json {
+                print_json(&serde_json::json!({
+                    "rating": rated.rating,
+                    "work_item": rated.work_item,
+                }))?;
+            } else {
+                println!(
+                    "{}/5 from a {} reading {}",
+                    rated.rating.rating, rated.rating.audience, rated.rating.target
+                );
+                for f in &rated.rating.findings {
+                    println!("  - {} (evidence: {})", f.text, f.source);
+                }
+                if let Some(item) = &rated.work_item {
+                    println!("queued work item {}: {}", item.id, item.title);
+                }
             }
             Ok(0)
         }

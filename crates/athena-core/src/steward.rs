@@ -25,8 +25,8 @@ use athena_context::outputs::{
 };
 use athena_context::{Composed, steward_system_prompt};
 use athena_data::records::{
-    AnyRecord, Invocation, InvocationOutcome, OutcomeState, RefKind, Reference, Request, Role,
-    WorkItem, WorkItemKind,
+    AnyRecord, AudienceRating, Invocation, InvocationOutcome, OutcomeState, RefKind, Reference,
+    Request, Role, WorkItem, WorkItemKind,
 };
 use athena_data::roles::{Ladder, RoleDefinition, steward};
 use athena_data::{JobId, RecordId};
@@ -613,6 +613,7 @@ pub fn brief(
     unreadable: &[&str],
     failures: &BTreeMap<String, Vec<JobId>>,
     known_keys: &BTreeSet<String>,
+    audience: Option<&AudienceRating>,
 ) -> String {
     let mut text = String::from("# Steward run\n\n");
     text.push_str(
@@ -657,6 +658,8 @@ pub fn brief(
             ids.join(", ")
         ));
     }
+    text.push('\n');
+    text.push_str(&crate::audience::brief_section(audience));
     text.push_str("\n## Already queued (do not report these again)\n\n");
     if known_keys.is_empty() {
         text.push_str("Nothing yet.\n");
@@ -768,6 +771,7 @@ fn consult(
         &unreadable,
         &repeated_failures(records),
         &known_keys,
+        crate::audience::latest(records),
     );
     let composed: Composed = steward_system_prompt(&role.prompt, role.version);
     let grant = ToolGrant {
@@ -1289,7 +1293,9 @@ mod tests {
         )]);
         let known = BTreeSet::from(["blind-spot:github".to_string()]);
         let names: Vec<&str> = SOURCES.iter().map(|s| s.name).collect();
-        let text = brief(&role, &names, &["git-log"], &failures, &known);
+        let text = brief(&role, &names, &["git-log"], &failures, &known, None);
+        assert!(text.contains("## Audience rating"));
+        assert!(text.contains("No audience rating"));
         for name in [
             "jobs",
             "events",
@@ -1313,6 +1319,7 @@ mod tests {
             &["git-log"],
             &BTreeMap::new(),
             &BTreeSet::new(),
+            None,
         );
         assert!(!without.contains("- git-log: GIT-LOG.txt"));
         assert!(without.contains("No class of work"));

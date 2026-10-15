@@ -9,6 +9,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- An `audience` role beside the steward, and `athena audience` to run it. It fetches the live explainer page
+  (or `--url`), has a model read it as a newcomer (or `--reader`), and records an `athena.audience-rating/1`
+  record at `records/audience-ratings/<YYYY-MM>/<id>.json`: a rating from 1 to 5 and findings that each cite
+  their evidence. A rating outside 1 to 5 and a finding with no source are refused. The role only reads and
+  records. The steward's brief and `athena status` show the latest rating and its findings, and a rating of 2
+  or lower queues a proposal work item that cites the rating. The role is defined in code
+  (`athena_data::roles::audience`); `athena.toml` and the agent tool policy are unchanged. Tests cover the
+  role, the record, and a run with the fake agent over a stub page. See `docs/design/audience-role.md`.
 - `athena approve-work <id>` and `athena reject-work <id> --why "..."` decide a steward proposal (a work item
   of kind `proposal`) by its id. `athena status` now lists open proposals with their ids. Approving was
   impossible before: the work item only cites its evidence by reference into `records/`, which readers cannot
