@@ -258,7 +258,23 @@ pub fn unlock_dir(dir: &Path) -> Result<()> {
 
 /// Adds or removes the owner write bit (all write bits, when removing) on `path` and everything under it.
 /// Symlinks are left alone.
+///
+/// An entry that vanishes during the walk (git's own transient lock files and background housekeeping
+/// leftovers in `.git`) is already gone, so there is nothing left to change; any other error propagates.
 fn set_tree_writable(path: &Path, writable: bool) -> Result<()> {
+    walk_tree_writable(path, writable, &mut |_| {})
+}
+
+/// `set_tree_writable` with a hook called on each child path after its directory was listed and before the
+/// child is examined, so a test can remove entries in that window.
+fn walk_tree_writable(path: &Path, writable: bool, between: &mut dyn FnMut(&Path)) -> Result<()> {
+    match walk_one(path, writable, between) {
+        Err(crate::GitError::Spawn(e)) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    }
+}
+
+fn walk_one(path: &Path, writable: bool, between: &mut dyn FnMut(&Path)) -> Result<()> {
     let meta = std::fs::symlink_metadata(path)?;
     if meta.file_type().is_symlink() {
         return Ok(());
@@ -268,8 +284,12 @@ fn set_tree_writable(path: &Path, writable: bool) -> Result<()> {
         set_write_bits(path, true)?;
     }
     if meta.is_dir() {
-        for entry in std::fs::read_dir(path)? {
-            set_tree_writable(&entry?.path(), writable)?;
+        let children = std::fs::read_dir(path)?
+            .map(|e| e.map(|e| e.path()))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        for child in children {
+            between(&child);
+            walk_tree_writable(&child, writable, between)?;
         }
     }
     if !writable {
@@ -544,6 +564,29 @@ mod tests {
         snap.lock().unwrap();
         snap.unlock().unwrap();
         std::fs::remove_dir_all(snap.dir()).unwrap();
+    }
+
+    #[test]
+    fn a_walk_survives_entries_removed_after_the_directory_was_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        write_files(
+            dir.path(),
+            &[("a/one", "1"), ("a/two", "2"), ("b/three", "3"), ("c", "4")],
+        );
+        // Remove every file and the directory "b" just before the walk reaches them, as git does with its
+        // transient lock files.
+        let mut removed = 0;
+        walk_tree_writable(dir.path(), false, &mut |child| {
+            if child.is_file() || child.ends_with("b") {
+                let _ = std::fs::remove_file(child).or_else(|_| std::fs::remove_dir_all(child));
+                removed += 1;
+            }
+        })
+        .unwrap();
+        assert!(removed >= 3, "the hook removed entries mid-walk");
+        // A path that is already gone is nothing to do.
+        assert!(set_tree_writable(&dir.path().join("a/one/x"), true).is_ok());
+        unlock_dir(dir.path()).unwrap();
     }
 
     #[test]
