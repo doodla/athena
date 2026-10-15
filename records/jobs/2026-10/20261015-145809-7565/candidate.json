@@ -1,0 +1,94 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261015-145809-7565",
+  "base_commit": "b97bc76adc111008775ffeabdf54d0ef0745e875",
+  "base_fingerprint": "sha256:892d8d501aae927de2e8c7d263422347f930e8ba54a3d4dfd09a5571e0fad435",
+  "previous_job": "20261015-141831-hyb4",
+  "candidate_commit": "5ac0c3173627767a311aa2f8580c43944e10eded",
+  "candidate_tree": "57a6ba52ba6300fc798e1df64a53b1511318b6ee",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 71513
+    },
+    {
+      "path": "crates/athena-agent/src/stream.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 12682
+    },
+    {
+      "path": "crates/athena-gate/src/reconcile.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 13553
+    }
+  ],
+  "fingerprint": "sha256:afc88e2eb1394daeb803df79bc463b2a6671c410ed6d89d0fa4f8c887d35530f",
+  "violations": [],
+  "producer_report": {
+    "summary": "An invocation's recorded tokens are now the sum of the result event's modelUsage over all models, and the gate checks the same sum. Before, the tokens came from the top-level usage, which can cover less than modelUsage, while the gate compared the requested model's entry. That is the 2fsa mismatch. Top-level usage is now only the fallback when modelUsage is absent. I did not see the failing record; the cause is inferred from the code and the numbers in the request. I did not touch claude.rs, invocation.rs, fake.rs or landing_tests.rs, because the fix in parse_result flows through them unchanged.",
+    "files": [
+      "crates/athena-agent/src/stream.rs",
+      "crates/athena-gate/src/reconcile.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "The first run failed in xtask policy because I had renamed a test named in docs/enforcement.md. I restored the name, and `cargo test --locked -p xtask` then passed. All other targets passed in the earlier `--no-fail-fast` run. I did not rerun the full suite after the rename."
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Run cargo test: a new test feeds a result event whose top-level usage differs from modelUsage (a main thread plus subagent usage on the requested model). It shows the resulting invocation record passes check_invocation with no Reconciliation violation.",
+        "status": "met",
+        "evidence": "stream.rs test invocation_tokens_are_the_sum_of_model_usage_not_the_top_level_usage parses a 2fsa-shaped result event and asserts usage equals the modelUsage figures. reconcile.rs test job_2fsa_figures_disagree_but_the_all_model_sum_reconciles asserts check_invocation returns no violations for those figures. The two tests are not joined end to end: the stream test stops at the parsed usage."
+      },
+      {
+        "criterion": "Run cargo test: a reconcile test shows that an invocation whose measured tokens genuinely disagree with its per-model usage is still flagged.",
+        "status": "met",
+        "evidence": "requested_model_tokens_must_match and the 2fsa test's first assertion (6/3136/275219/3821 recorded against 90/52656/3634696/134508) both expect one violation. usage_split_over_several_models_is_summed also flags a mismatch."
+      },
+      {
+        "criterion": "The invocation's measured tokens and the gate's check use one definition. The definition is stated in a doc comment: either the sum of modelUsage over all models or the requested model's modelUsage. The gate compares like with like.",
+        "status": "met",
+        "evidence": "A comment in stream.rs parse_result and the module doc in reconcile.rs both state the sum over all models. check_invocation sums models_used over all models."
+      },
+      {
+        "criterion": "Run cargo clippy --all-targets and cargo fmt --check: both are clean. Existing stream and claude tests still pass.",
+        "status": "met",
+        "evidence": "clippy with -D warnings and fmt --check both produced no output. The athena-agent unit tests passed (37 passed, 1 ignored)."
+      },
+      {
+        "criterion": "The defect's numbers (90/52656/3634696/134508 against 6/3136/275219/3821) appear in a regression test fixture or comment, so the owner can see the job 2fsa failure is covered.",
+        "status": "met",
+        "evidence": "The numbers appear in comments and fixtures in both stream.rs and reconcile.rs, and in CHANGELOG.md."
+      }
+    ],
+    "open_issues": [
+      "Existing records that already carry top-level tokens that disagree with their modelUsage still fail the gate. I left them alone because re-landing job 2fsa and editing its records are out of scope."
+    ],
+    "mistakes": [
+      "I renamed requested_model_tokens_must_match, which docs/enforcement.md names. The policy test failed and I reverted the name."
+    ],
+    "learnings": [
+      "xtask policy test every_test_named_in_the_enforcement_map_exists requires tests named in docs/enforcement.md to keep their names, so do not rename them.",
+      "The invocation's tokens flow from ResultEvent.usage through claude.rs, so fixing parse_result covers the real driver. The fake driver is unchanged, so its path is not covered by this fix."
+    ],
+    "desires": []
+  }
+}
