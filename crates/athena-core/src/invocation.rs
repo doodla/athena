@@ -1,5 +1,9 @@
 //! Running one agent and recording it (design §10.2, M14).
 //!
+//! What an invocation used has one definition, shared with the gate's reconciliation rule: the requested
+//! model's `modelUsage` tokens (`athena_agent::stream::ResultEvent::requested_usage`). The result's
+//! top-level `usage` also counts subagents and is not what is recorded.
+//!
 //! Every invocation becomes an `athena.invocation/1` record, whatever happens: completed invocations
 //! record measured tokens and the reported cost; killed ones record the de-duplicated running sums as a
 //! lower bound and a cost bounded by the invocation's cap. Agent free text (commands, denials, details) is
@@ -163,7 +167,7 @@ impl Athena {
         let measured_basis = if facts.fake {
             "fake driver: no model call"
         } else {
-            "Claude Code result.usage"
+            "Claude Code result.modelUsage for the requested model"
         };
         let tokens = if output.usage_measured {
             tokens_measured(&output.usage, measured_basis)
@@ -319,5 +323,129 @@ pub fn interrupted_record(
         turns: None,
         commands_run: Vec::new(),
         policy_denials: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fake::CountingPinner;
+    use athena_agent::claude::output_from_result;
+    use athena_agent::fake::FakeAgentDriver;
+    use athena_agent::stream::StreamState;
+    use athena_data::records::{Build, Role};
+    use athena_gate::reconcile::check_invocation;
+    use athena_gate::{Rule, Violation};
+
+    const MODEL: &str = "claude-sonnet-5-5";
+
+    /// A result event: the main thread plus a subagent used the requested model, so the top-level totals
+    /// (90/52656/3634696/134508) exceed the requested model's own `modelUsage` (6/3136/275219/3821).
+    const AGREEING: &str = r#"{"type":"result","subtype":"success","is_error":false,"num_turns":4,"duration_api_ms":900,"total_cost_usd":0.30,"usage":{"input_tokens":90,"output_tokens":134508,"cache_read_input_tokens":3634696,"cache_creation_input_tokens":52656},"modelUsage":{"claude-sonnet-5-5":{"inputTokens":6,"outputTokens":3821,"cacheReadInputTokens":275219,"cacheCreationInputTokens":3136,"costUSD":0.10},"claude-haiku-5-5":{"inputTokens":84,"outputTokens":130687,"cacheReadInputTokens":3359477,"cacheCreationInputTokens":49520,"costUSD":0.20}},"permission_denials":[]}"#;
+
+    /// The same event, except that `total_cost_usd` (0.75) disagrees with the per-model `costUSD` sum
+    /// (0.10 + 0.20 = 0.30). The tokens are left alone on purpose: under the `modelUsage` definition the
+    /// record's tokens are the requested model's `modelUsage` entry, so a token disagreement cannot arise
+    /// through the parser. The cost is the only figure that can disagree end to end.
+    const DISAGREEING: &str = r#"{"type":"result","subtype":"success","is_error":false,"num_turns":4,"duration_api_ms":900,"total_cost_usd":0.75,"usage":{"input_tokens":90,"output_tokens":134508,"cache_read_input_tokens":3634696,"cache_creation_input_tokens":52656},"modelUsage":{"claude-sonnet-5-5":{"inputTokens":6,"outputTokens":3821,"cacheReadInputTokens":275219,"cacheCreationInputTokens":3136,"costUSD":0.10},"claude-haiku-5-5":{"inputTokens":84,"outputTokens":130687,"cacheReadInputTokens":3359477,"cacheCreationInputTokens":49520,"costUSD":0.20}},"permission_denials":[]}"#;
+
+    /// Parses a result event and builds the invocation record, as a real invocation does.
+    fn record_from(event: &str) -> Invocation {
+        let state_dir = tempfile::tempdir().unwrap();
+        let athena = Athena {
+            git: athena_git::Git::at(state_dir.path()),
+            state: StateDir::new(state_dir.path().join("repo")),
+            driver: std::sync::Arc::new(FakeAgentDriver::deterministic()),
+            capabilities: vec![],
+            build: Build {
+                version: "0.1.0".into(),
+                source_commit: "0".repeat(40),
+                dirty: false,
+            },
+            athena_bin: "/bin/false".into(),
+            nested: None,
+            pinner: Box::new(CountingPinner::new(&"0".repeat(40))),
+            jev: None,
+        };
+        let config = Config::parse(include_str!("../../../athena.toml")).unwrap();
+        let job = JobId::parse("20261010-153012-k7q2").unwrap();
+        let spec = AgentInvocation {
+            job: job.as_str().into(),
+            seq: 1,
+            role: Role::Producer,
+            model: MODEL.into(),
+            system_prompt: String::new(),
+            user_prompt: String::new(),
+            tools: vec![],
+            allowed_tools: vec![],
+            permission_mode: "dontAsk".into(),
+            workdir: state_dir.path().into(),
+            env: Default::default(),
+            hook: None,
+            max_budget_usd: 3.0,
+            timeout: std::time::Duration::from_secs(60),
+            json_schema: serde_json::json!({}),
+            scratch: state_dir.path().into(),
+        };
+        let composed = athena_context::compose(&[]);
+        let facts = InvocationFacts {
+            job: &job,
+            spec: &spec,
+            composed: &composed,
+            config: &config,
+            fake: false,
+        };
+        let mut stream = StreamState::default();
+        stream.on_line(event);
+        let result = stream.result.expect("the event parses as a result");
+        let now = crate::now();
+        let output = output_from_result(&result, MODEL, now, now, 1.0, vec![]);
+        let redactor = athena.redactor(&config, Some(&job)).unwrap();
+        athena
+            .invocation_record(&facts, &output, &redactor)
+            .unwrap()
+    }
+
+    fn reconciliation(violations: &[Violation]) -> Vec<&Violation> {
+        violations
+            .iter()
+            .filter(|v| v.rule == Rule::Reconciliation)
+            .collect()
+    }
+
+    fn measured_tokens(record: &Invocation) -> [f64; 4] {
+        let t = &record.tokens;
+        [&t.input, &t.output, &t.cache_read, &t.cache_write].map(|q| q.value().unwrap())
+    }
+
+    #[test]
+    fn a_result_whose_top_level_usage_includes_a_subagent_reconciles_end_to_end() {
+        let record = record_from(AGREEING);
+        // The top-level usage differs from modelUsage, and the record follows modelUsage.
+        assert_eq!(measured_tokens(&record), [6.0, 3821.0, 275219.0, 3136.0]);
+        assert_ne!(measured_tokens(&record)[0], 90.0);
+        assert_eq!(check_invocation("x", &record), vec![]);
+    }
+
+    /// Builds the record through the same parse and record path as the positive test, from an event whose
+    /// `total_cost_usd` really differs from the `costUSD` sum. Token disagreement cannot arise through the
+    /// parser under the `modelUsage` definition (the tokens come from the requested model's entry), so the
+    /// cost is the disagreement covered here. No record is edited by hand.
+    #[test]
+    fn a_result_whose_totals_disagree_with_model_usage_is_flagged_end_to_end() {
+        let record = record_from(DISAGREEING);
+        // The input is known to be bad: modelUsage is present for the requested model, and the reported
+        // total differs from the per-model sum.
+        assert!(record.models_used.contains_key(MODEL));
+        let per_model: f64 = record.models_used.values().map(|u| u.cost_usd).sum();
+        let reported = record.cost.value().unwrap();
+        assert!(
+            (reported - per_model).abs() > 0.01,
+            "reported {reported} must differ from the modelUsage sum {per_model}"
+        );
+        let violations = check_invocation("x", &record);
+        let found = reconciliation(&violations);
+        assert_eq!(found.len(), 1, "{violations:?}");
+        assert!(found[0].detail.contains("per-model costs sum"), "{found:?}");
     }
 }

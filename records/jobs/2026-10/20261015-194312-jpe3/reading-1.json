@@ -1,0 +1,127 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261015-194312-jpe3",
+  "n": 1,
+  "at": "2026-10-15T19:43:38.78073748Z",
+  "invocation_seq": 1,
+  "base_commit": "dbbc5b1683b9ce6d87a651528fe5322bb913c2c8",
+  "config_sha256": "36cc8236b906040fe507a6461dabd9eddad491a69739eeee2bf0d38753b1202e",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Fix snapshot lock flake from vanishing files during tree walk",
+  "summary": "The flaky error is an io NotFound (wrapped as GitError::Spawn) from lock()'s recursive set_tree_writable, which lists .git entries and then stats them; a transient git file (lock file or auto-gc/maintenance leftover from the preceding commit) vanishes in between. The fix makes the walk tolerate entries that disappear, and stops git from spawning background maintenance in snapshot commands. The audience is CI maintainers who need PRs #103 and #104 to pass reliably.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "root-cause",
+      "how": "Fix the unguarded walk race and the background git activity, not add a test retry."
+    },
+    {
+      "id": "tested",
+      "how": "Regression test plus cargo test and clippy clean."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check the walk surviving a vanished entry and the test passing repeatedly."
+    },
+    {
+      "id": "small",
+      "how": "Confined to the athena-git crate."
+    },
+    {
+      "id": "rust",
+      "how": "All changes are Rust."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Spawn(NotFound) is a misleading label: GitError::Spawn wraps any io::Error via #[from], and lock() spawns nothing but chattr (whose error is discarded), so the NotFound comes from symlink_metadata/read_dir/set_permissions in set_tree_writable.",
+    "The race is with a transient file in .git left by the preceding git add/commit in try_writes (index.lock, or detached gc --auto), which exists at read_dir time and is gone at stat time. I did not reproduce this.",
+    "Fixing the tolerance in the walk is the root cause fix; disabling auto-gc is a complementary measure."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "set_tree_writable in snapshot.rs treats an entry that disappears between read_dir and stat/chmod (io NotFound) as already handled, instead of returning an error; other errors still propagate.",
+      "kind": "content"
+    },
+    {
+      "text": "A regression test in snapshot.rs shows the cause: a walk over a tree where an entry is removed mid-walk (or an equivalent deterministic simulation) succeeds, rather than relying on timing.",
+      "kind": "content"
+    },
+    {
+      "text": "Git commands run in snapshots no longer start background gc/maintenance (e.g. gc.auto=0, maintenance.auto=false), with the reasoning commented, if the producer confirms this is a source of the vanishing files.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo test -p athena-git` (including a_locked_snapshot_refuses_edits_and_commits_and_keeps_head_and_tree) and it passes; the tests repeat passing across several runs.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo clippy --workspace --all-targets` and `cargo fmt --check`; both are clean.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-git/src/snapshot.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-git/src/lib.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.3
+    }
+  ],
+  "out_of_scope": [
+    "Changing CI workflows or retry settings",
+    "Rewriting the lock design or the immutable-attribute handling",
+    "Other flaky tests unrelated to snapshot locking"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.72,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.35,
+        "p50": 0.85,
+        "p90": 2.1
+      },
+      "wall_time_s": {
+        "p10": 400.0,
+        "p50": 850.0,
+        "p90": 1800.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.8144,
+      "p_verification_passes": 0.6759259259259259,
+      "p_user_intervenes": 0.08148148148148149,
+      "cost_usd": {
+        "p10": 0.422990686521118,
+        "p50": 0.921409551191,
+        "p90": 2.1687571598066717
+      },
+      "wall_time_s": {
+        "p10": 540.4818145636394,
+        "p50": 892.2108422240002,
+        "p90": 1658.1648516604448
+      }
+    }
+  },
+  "departures": "Root cause is inferred from reading code, not reproduced, so a bit lower acceptance and pass odds than the reference."
+}

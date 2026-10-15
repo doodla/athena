@@ -1,0 +1,148 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261015-181926-qc0v",
+  "n": 1,
+  "at": "2026-10-15T18:19:47.917208437Z",
+  "invocation_seq": 1,
+  "base_commit": "67283effdd7a2caad7c228feb87fe49f10f91693",
+  "config_sha256": "36cc8236b906040fe507a6461dabd9eddad491a69739eeee2bf0d38753b1202e",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Reconcile invocation tokens with modelUsage, with a real negative test",
+  "summary": "Retry of the rejected token reconciliation work. The base has no fix: the gate compares the requested model's modelUsage with top-level usage tokens, so they disagree. Make the record and the gate use one definition, and prove it with end-to-end tests whose negative case builds a truly disagreeing event through the same parse-and-record path. The audience is the Athena owner, who needs verified jobs to land.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "New tests plus passing cargo test and clean clippy."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria require the negative test to build a truly disagreeing record through the real path."
+    },
+    {
+      "id": "root-cause",
+      "how": "The record and the gate share one definition instead of patching the gate."
+    },
+    {
+      "id": "small",
+      "how": "One focused change to reconciliation and its tests."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "The base commit does not contain the earlier discarded reconciliation change, so the full change is redone. The proposal's 'change no other behavior' applies to the rest of the system.",
+    "Chosen definition: invocation tokens are the requested model's modelUsage sums, as the earlier retry intended. The verifier's suggestion of a cost disagreement is an alternative for the negative case.",
+    "The mutation check (disabling the guard and watching the test fail) is done by the producer and reported. It is not a new mechanism in the repository.",
+    "No governance files change."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Run cargo test. A positive end-to-end test passes: a result event whose top-level usage differs from modelUsage (main thread plus subagent on the requested model) goes through parsing, the invocation record and check_invocation with no Reconciliation violation.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run cargo test. A named negative end-to-end test, a_result_whose_totals_disagree_with_model_usage_is_flagged_end_to_end, builds the record from a result event that has modelUsage for the requested model and really disagrees with it. It uses the same parse-and-record path as the positive test and does not edit the record by hand. It asserts check_invocation returns a Reconciliation violation.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Before calling check_invocation, the negative test asserts that the built record's totals differ from the modelUsage sum. Its event is not one with no modelUsage, so it does not reach the 'no usage for the requested model' branch.",
+      "kind": "content"
+    },
+    {
+      "text": "The invocation's measured tokens and the gate's reconciliation rule use one definition of what an invocation used (modelUsage). The code or the CHANGELOG states it. The legacy exception is either removed or limited to older records.",
+      "kind": "content"
+    },
+    {
+      "text": "Run cargo clippy --all-targets and cargo fmt --check. Both are clean, and the full cargo test passes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The final report maps each criterion to a named test or command output.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/invocation.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-gate/src/reconcile.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-agent/src/stream.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-agent/src/claude.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-agent/src/fake.rs",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "crates/athena-gate/src/landing_tests.rs",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.6
+    }
+  ],
+  "out_of_scope": [
+    "Building a general mutation-testing check for named negative tests",
+    "The drain command and the explainer site",
+    "Changes to records/"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.75,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.4,
+        "p50": 0.95,
+        "p90": 2.3
+      },
+      "wall_time_s": {
+        "p10": 420.0,
+        "p50": 900.0,
+        "p90": 1900.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.8129032258064516,
+      "p_verification_passes": 0.6728971962616822,
+      "p_user_intervenes": 0.08224299065420561,
+      "cost_usd": {
+        "p10": 0.4223897710700373,
+        "p50": 0.9202356,
+        "p90": 2.1695193386494944
+      },
+      "wall_time_s": {
+        "p10": 540.1848580345153,
+        "p50": 890.9635765132545,
+        "p90": 1659.052577779254
+      }
+    }
+  },
+  "departures": "Lower pass probability and higher cost than the reference: this job has been rejected three times and needs a judgment-heavy rebuild from base."
+}

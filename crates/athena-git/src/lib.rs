@@ -174,6 +174,11 @@ impl Git {
             .with_env("GIT_COMMITTER_DATE", "2000-01-01T00:00:00Z")
             .with_config("commit.gpgsign", "false")
             .with_config("core.hooksPath", "/dev/null")
+            // git add/commit may otherwise start a detached `gc --auto` or maintenance run that creates and
+            // removes files under .git while a snapshot is being locked or unlocked.
+            .with_config("gc.auto", "0")
+            .with_config("gc.autoDetach", "false")
+            .with_config("maintenance.auto", "false")
     }
 
     pub fn dir(&self) -> &Path {

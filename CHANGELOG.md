@@ -7,6 +7,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+- Locking a snapshot no longer fails intermittently with `Spawn(NotFound)`. The root cause: the recursive
+  permission walk in `crates/athena-git/src/snapshot.rs` (`set_tree_writable`) listed a directory and then
+  examined each entry, and a transient file git had just written under `.git` could vanish in between; the
+  walk now treats a vanished entry as already handled (other errors still propagate). Snapshot git commands
+  also set `gc.auto=0`, `gc.autoDetach=false` and `maintenance.auto=false` so no background housekeeping runs.
+  The regression test `a_walk_survives_entries_removed_after_the_directory_was_listed` removes entries
+  mid-walk deterministically. The race itself was not reproduced.
+- An invocation's recorded tokens are now the requested model's `modelUsage` tokens, the same quantity the
+  gate's `usage records reconcile` rule compares. Before, the record took the result event's top-level
+  `usage`, which also counts subagents, so a verified job could be refused at landing. The root cause was two
+  definitions of what an invocation used. `athena_agent::claude::output_from_result` builds the output (top-level
+  usage is the fallback only when `modelUsage` has no entry for the model). End-to-end tests in
+  `crates/athena-core/src/invocation.rs` run a result event through parsing, the record and `check_invocation`:
+  one with a subagent passes, and
+  `a_result_whose_totals_disagree_with_model_usage_is_flagged_end_to_end` builds its record from an event whose
+  reported cost disagrees with `modelUsage` and asserts a Reconciliation violation (it fails with the cost check
+  disabled). The gate had no legacy exception to remove. The `modelUsage` definition: an invocation's tokens
+  are the requested model's `modelUsage` entry. So the end-to-end negative test covers only the cost
+  disagreement (`total_cost_usd` against the `costUSD` sum); a token disagreement cannot arise through the
+  parser, and it is not claimed to be covered end to end.
+
 ### Added
 
 - Three standing defaults in `defaults.toml`, applying to every class: `outcome-check` (the outcome is the check
