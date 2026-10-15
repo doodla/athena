@@ -1,0 +1,119 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261015-033543-6pe6",
+  "base_commit": "712aba17cef1a2e287d137f4a6b50412531db800",
+  "base_fingerprint": "sha256:fd80c48942424cecc49c427531efd59cf9c7fe3ff461e0a67460ab5f0b553e84",
+  "previous_job": "20261015-033543-jh5m",
+  "candidate_commit": "ce1e3008ce60339b0f8d1a6f8b44ab46e87838f3",
+  "candidate_tree": "3f820ce7c3ef61196ce3f3be0a7f14c2f7c56b23",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 61632
+    },
+    {
+      "path": "crates/athena-cli/tests/external_calls.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 14970
+    },
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 95920
+    },
+    {
+      "path": "docs/decisions.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 154158
+    },
+    {
+      "path": "docs/design/explainer-site.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 5823
+    }
+  ],
+  "fingerprint": "sha256:140ae6d2dce5d219723d829322d70088c28e957ec97572e9521f6423ac44fea7",
+  "violations": [],
+  "producer_report": {
+    "summary": "Added the missing post-merge Pages watch. After `athena land --pr` ends with the link Landed, `watch_pages` (gh.rs) lists pages.yml runs for the merged commit through the existing retrying GhClient. It waits up to about 10 minutes (60 looks, 10 s apart; 3 looks for a run to appear). `success` is left alone. `timed_out` or `cancelled` is re-run once via `POST actions/runs/<id>/rerun` and waited for with the same bound. A second failure is reported and not re-run. No run, or a failure of the watch itself, only prints a line and never undoes the landing. The existing 5xx retry code was reused unchanged. Tests, D97, CHANGELOG and the explainer-site note were added. run.rs and land.rs did not need changes.",
+    "files": [
+      "crates/athena-core/src/gh.rs",
+      "crates/athena-cli/tests/external_calls.rs",
+      "docs/decisions.md",
+      "CHANGELOG.md",
+      "docs/design/explainer-site.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "full workspace; the tool returned no error exit code. I could not read the saved output file to read the totals."
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "clean after fixing a filter().next() lint"
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Run `cargo test -p athena-core -p athena-cli`. A new test shows a Pages run that concludes `timed_out` after a merge is re-run exactly once via the gh wrapper and the run then succeeds. The test asserts that exactly one re-run call was made and that one report line names the run and the conclusion.",
+        "status": "met",
+        "evidence": "a_timed_out_pages_run_is_re_run_once_and_then_succeeds in external_calls.rs asserts one rerun call to .../actions/runs/5/rerun, final conclusion success, and exactly one line containing 'run 5' and 'timed_out'. The full cargo test --locked passed."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-cli`. A new test shows a Pages run concluding `cancelled` is re-run once, and that a second failure of the re-run is reported and not re-run again (no loop).",
+        "status": "met",
+        "evidence": "a_cancelled_pages_run_is_re_run_once_and_a_second_failure_is_not_re_run: rerun_calls()==1, conclusion timed_out, and a 'not re-running' line is present."
+      },
+      {
+        "criterion": "Run `cargo test`. A test shows a Pages run that concludes `success` is not re-run, and a merge in a repository with no Pages run for the merged commit does not fail the landing.",
+        "status": "met",
+        "evidence": "a_successful_pages_run_is_not_re_run (0 re-runs) and a_commit_with_no_pages_run_is_not_an_error_and_nothing_is_re_run. Landing never fails on a Pages problem, because the call site in Athena::land_pr turns a watch error into a warning line."
+      },
+      {
+        "criterion": "Run `cargo test`. The existing 5xx tests still pass: one is retried and succeeds, the other keeps failing until the three attempts run out. They cover the new Pages calls too (a 5xx on the runs listing is retried), and each retry is reported.",
+        "status": "met",
+        "evidence": "The one-off and persistent 5xx tests iterate operations(), which now includes list pages runs and re-run pages. A new test, a_5xx_on_the_runs_listing_is_retried_and_reported_during_the_watch, also covers the listing through watch_pages. All pass."
+      },
+      {
+        "criterion": "Run `cargo clippy --all-targets` and `cargo fmt --check`. Both are clean, and `external_calls_guard` still passes: all GitHub calls stay in crates/athena-core/src/gh.rs.",
+        "status": "met",
+        "evidence": "clippy with -D warnings and fmt --check were clean. All new gh calls are in gh.rs. external_calls_guard is part of the passing cargo test --locked."
+      },
+      {
+        "criterion": "A decisions entry or doc note says how the Pages watch works: the bound on waiting, a single re-run, and that the outcome is reported to the user.",
+        "status": "met",
+        "evidence": "D97 in docs/decisions.md and the 'Watching the deploy' section in docs/design/explainer-site.md describe the bound, the single re-run and the reporting."
+      }
+    ],
+    "open_issues": [
+      "Not run against live GitHub.",
+      "Re-running `land --pr` on an already landed job watches Pages again and could re-run an old cancelled run once more (noted in D97).",
+      "The Pages wait can add up to about ten minutes to a landing in a repository that has Pages.",
+      "Pages calls are logged as read-checks host errors."
+    ],
+    "mistakes": [
+      "The first draft of a test used filter().next(), which clippy rejected; fixed."
+    ],
+    "learnings": [
+      "HostOperation is a closed list stored in records, so the Pages calls are logged as read-checks rather than adding a variant.",
+      "Poll in gh.rs (attempts, delay, injected sleep) is reusable for the Pages wait.",
+      "The Injecting fake in external_calls.rs reads the API path from args[3]."
+    ],
+    "desires": [
+      "Read access to saved tool output outside the working directory, to confirm the test totals."
+    ]
+  }
+}
