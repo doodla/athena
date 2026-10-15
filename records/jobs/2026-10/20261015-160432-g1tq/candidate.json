@@ -1,0 +1,119 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261015-160432-g1tq",
+  "base_commit": "45a74b5328c8e7f8a2c6a8adc5f96ffd83c49bbe",
+  "base_fingerprint": "sha256:892d8d501aae927de2e8c7d263422347f930e8ba54a3d4dfd09a5571e0fad435",
+  "previous_job": "20261015-141831-hyb4",
+  "candidate_commit": "d398a30ff4d1cce0ebe3143b579f06ba65aa7c24",
+  "candidate_tree": "b95b35ca51144aaaea391cc9f959755443dc0a7a",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 71825
+    },
+    {
+      "path": "crates/athena-agent/src/claude.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 28268
+    },
+    {
+      "path": "crates/athena-agent/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 6111
+    },
+    {
+      "path": "crates/athena-agent/src/stream.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 13819
+    },
+    {
+      "path": "crates/athena-core/src/invocation.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 16731
+    },
+    {
+      "path": "crates/athena-gate/src/reconcile.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 13368
+    }
+  ],
+  "fingerprint": "sha256:526935ba49c9e8fc8504e11d9ab8d2fb196de36a8f2d9585c77645a0c42d1f66",
+  "violations": [],
+  "producer_report": {
+    "summary": "An invocation's measured tokens and the gate's reconciliation rule now use one definition: the sum of the result event's `modelUsage` over all models. Root cause: `parse_result` took tokens from the event's top-level `usage`, which counts the main thread only, while `check_invocation` compared them with `modelUsage`, which includes subagents. Job 2fsa recorded 6/3136/275219/3821 against a `modelUsage` of 90/52656/3634696/134508. Fixes: (1) `parse_result` in stream.rs sets `ResultEvent.usage` to the `modelUsage` sum and falls back to top-level `usage` only when `modelUsage` is absent. (2) The one definition is a doc comment on `ResultEvent.usage` and on `AgentOutput.usage`. (3) The result-to-`AgentOutput` mapping moved out of the driver's `invoke` into the new `claude::output_from_result`, so the driver and the end-to-end test share it. (4) `check_invocation` in reconcile.rs compares the record's tokens with the sum over all models. It still accepts the legacy shape, where only the requested model's entry was recorded, and it still flags a missing requested-model entry. (5) The record's token basis string now says `modelUsage`. (6) CHANGELOG.md records the fix. New tests: stream.rs (2), the claude.rs stand-in (1), reconcile.rs (1) and invocation.rs (2); the acceptance-criteria table is in criteria_check below. The end-to-end tests are in athena-core, which depends on agent and gate. They run the result line through `StreamState`, then `output_from_result`, `Athena::invocation_record` and `check_invocation`. The negative case is a result event with top-level usage and no `modelUsage`; I also tamper with the 2fsa record's output count. I did not touch landing_tests.rs or fake.rs: no change was needed there and the full suite passes.",
+    "files": [
+      "crates/athena-agent/src/stream.rs",
+      "crates/athena-agent/src/lib.rs",
+      "crates/athena-agent/src/claude.rs",
+      "crates/athena-gate/src/reconcile.rs",
+      "crates/athena-core/src/invocation.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "Clean before the last edits. I then ran cargo fmt --all, which printed nothing. I did not rerun --check afterwards."
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "clean"
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "Run twice: once in the normal output form and once with -q, because the output was too large to read. The -q run showed all results ok, 0 failed."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Run cargo test: a named end-to-end test feeds a result event through the stream parser and the claude driver (fake script) or the invocation constructor. Its top-level usage differs from modelUsage (main thread plus subagent usage on the requested model, using 90/52656/3634696/134508 against 6/3136/275219/3821). It then runs check_invocation on the resulting record and asserts there is no Reconciliation violation.",
+        "status": "met",
+        "evidence": "Test `a_result_with_subagent_usage_reconciles_end_to_end` in crates/athena-core/src/invocation.rs: StreamState::on_line, then claude::output_from_result, then Athena::invocation_record, then check_invocation. It asserts the record holds 90/52656/3634696/134508 and that there are no Reconciliation violations. Run: cargo test --locked -p athena-core --lib invocation::. Passed in the full `cargo test --locked -q` run."
+      },
+      {
+        "criterion": "Run cargo test: a named negative test builds the record from a result event whose totals really disagree with modelUsage, through the same path. It asserts that check_invocation returns a Reconciliation violation.",
+        "status": "met",
+        "evidence": "Test `a_result_whose_totals_disagree_with_model_usage_is_flagged_end_to_end` in invocation.rs. It uses a result event with top-level usage and no modelUsage, and the 2fsa record with its output count altered to 3136. Both give exactly one Reconciliation violation. Passed."
+      },
+      {
+        "criterion": "One definition of an invocation's measured tokens is stated in a doc comment (on ResultEvent.usage and AgentOutput.usage in lib.rs). The invocation record and the gate's reconcile rule both use it.",
+        "status": "met",
+        "evidence": "Doc comments are on `ResultEvent.usage` in stream.rs and `AgentOutput.usage` in lib.rs. `parse_result` sums modelUsage; `output_from_result` and `invocation_record` carry it; `check_invocation` in reconcile.rs sums per-model tokens. Tests: stream.rs `measured_usage_is_the_sum_of_model_usage_not_the_top_level_usage`, claude.rs `a_run_with_subagents_measures_the_model_usage_sum`, reconcile.rs `tokens_are_the_sum_over_all_models_and_the_legacy_shape_passes`."
+      },
+      {
+        "criterion": "The job 2fsa numbers (90/52656/3634696/134508 and 6/3136/275219/3821) appear in a regression test fixture or comment, and CHANGELOG.md records the fix.",
+        "status": "met",
+        "evidence": "Both sets of numbers are in the JOB_2FSA_RESULT fixture in invocation.rs, in RESULT_WITH_SUBAGENTS in stream.rs, and in the claude.rs stand-in script. CHANGELOG.md has a new entry under [Unreleased] / Changed."
+      },
+      {
+        "criterion": "Run cargo test, cargo clippy --all-targets and cargo fmt --check: all pass and are clean, including the existing stream, claude and landing tests.",
+        "status": "met",
+        "evidence": "`cargo fmt --all` was run, then `cargo fmt --all --check` was clean (checked before the last edits; cargo fmt was rerun afterwards). `cargo clippy --all-targets --locked -- -D warnings` finished clean. `cargo test --locked -q` showed every test result ok with 0 failed."
+      }
+    ],
+    "open_issues": [
+      "The legacy tolerance in `check_invocation` accepts a record whose tokens equal the requested model's entry alone, even when several models ran. A genuine single-model-only mismatch in that shape is not flagged, which is intentional. records/ was absent, so I could not check older records against the new rule.",
+      "landing_tests.rs and fake.rs were listed as deliverables but needed no change."
+    ],
+    "mistakes": [
+      "None noticed."
+    ],
+    "learnings": [
+      "A job's tests run under the nested-run marker, so a core test cannot use the real Claude driver. The end-to-end test uses `claude::output_from_result`, which the driver also uses.",
+      "`Athena` can be built in a core unit test with `FakeAgentDriver`, `CountingPinner`, `Config::parse(include_str!(\"../../../athena.toml\"))` and `Redactor::new(&builtin_config())`.",
+      "Once tokens are derived from modelUsage, a disagreement can only be reached by a result with no modelUsage, a missing requested-model entry, or a tampered record."
+    ],
+    "desires": [
+      "Read access to Bash tool-result files, so the full cargo test output can be searched for specific test names."
+    ]
+  }
+}
