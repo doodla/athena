@@ -525,3 +525,7 @@ Stopping: you're done when "How I'll judge it" passes. If you're blocked on ever
 * Jobs as in roles I guess.
 * Also don't want to become a database. Pull in data as needed if it lives somewhere else.
 * Let's also say that we're in active dev and everything can be revisited. Though I imagine that to be in some sort of ladder of requirements.
+
+### 2026-10-15: Interventions as a sensor, and zooming out and in
+
+* I want to think of interventions as signals for a sensor that wakes Athena up. Right now it's you, and the gap is logged. Eventually, it flows down to Athena to notice what's happening. Also, consider zoom out/zoom in thinking.
