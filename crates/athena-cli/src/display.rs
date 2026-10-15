@@ -288,7 +288,7 @@ pub fn drain(report: &crate::drain::Report) -> String {
     for w in &report.waiting {
         let _ = writeln!(
             out,
-            "waiting     {} · {} (rung {}); needs a person: `athena approve-work` or `athena reject-work`",
+            "waiting     {} · {} (rung {}); needs a person: above its role's limit or from an unknown role, so `athena approve-work` or `athena reject-work`",
             w.id, w.title, w.rung
         );
     }

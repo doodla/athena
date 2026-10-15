@@ -177,7 +177,8 @@ enum Command {
     },
     /// Work the steward's queue within a budget: for each queued request, read and run the job, land it
     /// through the pull-request path (as `athena land --pr` does), then rate the live page. Open proposals
-    /// that need a person are listed as waiting and are never accepted, approved or landed.
+    /// within their role's limit are approved and their jobs worked, as are jobs already approved. Proposals
+    /// above the limit, or from an unknown role, are listed as waiting for a person; drain never rejects one.
     #[command(after_help = "\
 Budget: before every model call (a reading, a run, the re-reading of a retry, a rating) the money spent so far, \
 as the calls actually cost, plus the call's cap from athena.toml must fit --budget; otherwise nothing more starts.

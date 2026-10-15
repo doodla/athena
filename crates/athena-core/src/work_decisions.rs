@@ -18,6 +18,7 @@ use athena_data::RecordId;
 use athena_data::records::{
     AnyRecord, RefKind, Reference, WorkDecision, WorkDecisionState, WorkItem, WorkItemKind,
 };
+use athena_data::roles::{Ladder, may_change};
 use athena_git::Git;
 use jiff::Timestamp;
 
@@ -45,6 +46,32 @@ pub fn open_proposals(records: &Records) -> Vec<&WorkItem> {
         .collect();
     open.sort_by(|a, b| (a.at, &a.id).cmp(&(b.at, &b.id)));
     open
+}
+
+/// The highest rung the role called `name` may change itself, by its newest recorded version. None when no
+/// definition of that role is recorded.
+pub fn role_limit(records: &Records, name: &str) -> Option<Ladder> {
+    records
+        .roles
+        .iter()
+        .filter(|r| r.name == name)
+        .max_by_key(|r| r.version)
+        .map(|r| r.highest_rung)
+}
+
+/// Whether the role that raised `item` may change the item's rung itself. A role with no recorded
+/// definition may not.
+pub fn in_limit(records: &Records, item: &WorkItem) -> bool {
+    role_limit(records, &item.role).is_some_and(|limit| may_change(limit, item.rung))
+}
+
+/// The open proposals, oldest first, split by the ladder: those the raising role may change itself, and those
+/// it may not (above its limit, or raised by a role with no recorded definition). Only the first kind is
+/// approved without a person.
+pub fn split_open(records: &Records) -> (Vec<&WorkItem>, Vec<&WorkItem>) {
+    open_proposals(records)
+        .into_iter()
+        .partition(|w| in_limit(records, w))
 }
 
 /// The id in `text`: a bare id, or the path of the work item's record (the form `athena status` and the
@@ -309,6 +336,22 @@ impl Athena {
         Ok(reading)
     }
 
+    /// Approves an open proposal like [`Athena::approve_work`], but only when the role that raised it may
+    /// change its rung itself; any other proposal is refused and stays open for a person.
+    pub fn approve_in_limit(&self, id: &str, ui: &dyn Ui) -> Result<crate::reading::Proposal> {
+        let known = Records::load(&self.git, &self.head()?)?;
+        let item = find_open(&known, id)?;
+        if !in_limit(&known, item) {
+            bail!(
+                "work item {} (rung {}, raised by {}) is above that role's limit, so a person decides it",
+                item.id,
+                item.rung.as_str(),
+                item.role
+            );
+        }
+        self.approve_work(id, ui)
+    }
+
     /// `athena reject-work`: appends a rejection record with the reason.
     pub fn reject_work(&self, id: &str, reason: &str) -> Result<WorkDecision> {
         let head = self.head()?;
@@ -390,6 +433,28 @@ mod tests {
         assert!(open_proposals(&records).is_empty());
         let error = find_open(&records, "20261015-003903-khz6").unwrap_err();
         assert!(error.to_string().contains("already rejected"), "{error}");
+    }
+
+    #[test]
+    fn a_proposal_is_in_limit_only_for_a_recorded_role_whose_limit_covers_its_rung() {
+        let mut records = Records::default();
+        let mut low = item(WorkItemKind::Proposal);
+        low.rung = Ladder::Implementation;
+        let mut high = item(WorkItemKind::Proposal);
+        high.id = RecordId::parse("20261015-003904-aaaa").unwrap();
+        let mut stranger = low.clone();
+        stranger.id = RecordId::parse("20261015-003905-bbbb").unwrap();
+        stranger.role = "ghost".into();
+        records.work_items.extend([low, high, stranger]);
+        // No role is recorded yet, so nothing is in limit.
+        let (within, above) = split_open(&records);
+        assert!(within.is_empty());
+        assert_eq!(above.len(), 3);
+        records.roles.push(athena_data::roles::steward(at()));
+        let (within, above) = split_open(&records);
+        assert_eq!(within.len(), 1);
+        assert_eq!(within[0].rung, Ladder::Implementation);
+        assert_eq!(above.len(), 2, "above the limit, and an unknown role");
     }
 
     #[test]

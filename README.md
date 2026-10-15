@@ -101,9 +101,10 @@ Wherever a command takes `<job>`, it accepts a full id, a unique suffix, or `lat
 `athena drain` runs, lands and rates the steward's queue for you, inside limits you set on the command line.
 You no longer run, land and rate each item yourself. What it leaves to you:
 
-- **Proposals above the steward's limit.** An open proposal (a work item on a rung the steward may not change)
-  is listed as *waiting* in the output. `drain` never accepts, approves, rejects or lands one; `athena
-  approve-work` and `athena reject-work` stay your decision.
+- **Proposals above a role's limit.** `drain` approves an open proposal on a rung the role that raised it may
+  change itself, and works the job that approval makes. An open proposal on a rung that role may not change,
+  or from a role with no recorded definition, is listed as *waiting* in the output. `drain` never rejects one
+  and never approves one above the limit; `athena approve-work` and `athena reject-work` stay your decision.
 - **How much to spend and what is good enough.** The budget, the rating threshold and the job limit are flags of
   the run. There is no `athena.toml` key for them, so a run's limits are never changed by a committed file.
 - **Whether a landing merges.** `drain` lands through the same pull-request path as `athena land --pr`: it

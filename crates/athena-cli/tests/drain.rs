@@ -9,15 +9,18 @@ mod common;
 
 use athena_cli::display;
 use athena_cli::drain::{
-    self, Caps, Item, Lander, Landing, Limits, QueueView, Rate, Read, ReadOf, RealSteps, Run,
-    Steps, Stop, Waiting,
+    self, Approval, Caps, Item, Lander, Landing, Limits, QueueView, Rate, Read, ReadOf, RealSteps,
+    Run, Steps, Stop, Waiting,
 };
 use athena_core::audience::Page;
 use athena_core::commits::{Committer, message};
 use athena_core::steward::{ProposedChange, RequestQueue};
-use athena_core::store::Records;
+use athena_core::store::{JobState, Records};
 use athena_core::{Athena, Quiet};
-use athena_data::records::{OutcomeState, Reference, WorkItemKind};
+use athena_data::RecordId;
+use athena_data::records::{
+    AnyRecord, OutcomeState, Reference, Role, WorkDecisionState, WorkItem, WorkItemKind,
+};
 use athena_data::roles::Ladder;
 use common::*;
 use serde_json::json;
@@ -30,7 +33,11 @@ use std::process::Command;
 #[derive(Default)]
 struct Stub {
     items: Vec<&'static str>,
+    /// Approved jobs already read, in state proposed.
+    read_items: Vec<&'static str>,
     waiting: Vec<Waiting>,
+    /// Open proposals within their role's limit.
+    approvable: Vec<Waiting>,
     previous: Option<u8>,
     /// Outcomes of runs, in order; a run after these are used up is rejected.
     outcomes: RefCell<Vec<OutcomeState>>,
@@ -58,17 +65,28 @@ impl Steps for Stub {
         })
     }
     fn queue(&self) -> anyhow::Result<QueueView> {
+        let item = |j: &&str, read: bool| Item {
+            read,
+            ..Item::queued(j, &format!("title of {j}"))
+        };
         Ok(QueueView {
             items: self
-                .items
+                .read_items
                 .iter()
-                .map(|j| Item {
-                    job: j.to_string(),
-                    title: format!("title of {j}"),
-                })
+                .map(|j| item(j, true))
+                .chain(self.items.iter().map(|j| item(j, false)))
                 .collect(),
             waiting: self.waiting.clone(),
+            approvable: self.approvable.clone(),
         })
+    }
+    fn approve(&self, proposal: &str) -> Approval {
+        self.log.borrow_mut().push(format!("approve {proposal}"));
+        Approval {
+            job: Some(format!("job-of-{proposal}")),
+            cost: 0.1,
+            error: None,
+        }
     }
     fn previous_rating(&self) -> Option<u8> {
         self.previous
@@ -364,7 +382,7 @@ fn a_proposal_that_needs_a_person_is_listed_waiting_and_left_alone() {
         ..Stub::default()
     };
     let report = drain::drain(&stub, limits(5.0), &Quiet).unwrap();
-    // Nothing the loop did names the proposal: the steps it calls have no way to accept, approve or land one.
+    // Nothing the loop did names the proposal: a proposal that needs a person is never approved or worked.
     assert!(
         stub.log().iter().all(|e| !e.contains("wait")),
         "{:?}",
@@ -566,4 +584,244 @@ fn the_real_steps_work_a_queued_request_land_it_and_only_then_rate_the_page() {
             .unwrap()
             .contains(&athena_data::records::Role::Audience)
     );
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Proposals and approved jobs
+
+fn in_limit_proposal() -> Waiting {
+    Waiting {
+        id: "20261015-130000-lowr".into(),
+        title: "Fix the typo in the README".into(),
+        rung: "implementation".into(),
+    }
+}
+
+#[test]
+fn an_in_limit_proposal_is_approved_then_its_job_is_run_and_landed_without_a_second_reading() {
+    let stub = Stub {
+        approvable: vec![in_limit_proposal()],
+        outcomes: passing(),
+        ratings: RefCell::new(vec![3]),
+        ..Stub::default()
+    };
+    let report = drain::drain(&stub, limits(5.0), &Quiet).unwrap();
+    assert_eq!(
+        stub.log(),
+        [
+            "approve 20261015-130000-lowr",
+            "run job-of-20261015-130000-lowr",
+            "land job-of-20261015-130000-lowr",
+            "rate"
+        ],
+        "approved, run and landed; the approval was the reading"
+    );
+    assert_eq!(report.landed, 1);
+    assert!(report.waiting.is_empty(), "{:?}", report.waiting);
+    assert_eq!(report.jobs[0].landing, "landed");
+    // 0.1 approval + 0.5 run + 0.2 rating
+    assert!(
+        (report.spent_usd - 0.8).abs() < 1e-9,
+        "{}",
+        report.spent_usd
+    );
+}
+
+#[test]
+fn an_approved_job_still_in_state_proposed_is_run_once_and_not_read_again() {
+    let stub = Stub {
+        read_items: vec!["approved-job"],
+        outcomes: passing(),
+        ratings: RefCell::new(vec![3]),
+        ..Stub::default()
+    };
+    let report = drain::drain(&stub, limits(5.0), &Quiet).unwrap();
+    assert_eq!(
+        stub.log(),
+        ["run approved-job", "land approved-job", "rate"],
+        "no reading, one run"
+    );
+    assert_eq!(report.landed, 1);
+    assert!(report.queued.is_empty());
+
+    // If that run fails, the second attempt reads it again as a retry does.
+    let stub = Stub {
+        read_items: vec!["approved-job"],
+        ..Stub::default()
+    };
+    let report = drain::drain(&stub, limits(5.0), &Quiet).unwrap();
+    assert_eq!(
+        stub.log(),
+        [
+            "run approved-job",
+            "reread approved-job",
+            "run approved-job-retry"
+        ]
+    );
+    assert_eq!(report.stop, Stop::RepeatedFailure);
+}
+
+#[test]
+fn an_approval_that_does_not_fit_the_budget_is_not_made_and_the_proposal_stays_open() {
+    let stub = Stub {
+        approvable: vec![in_limit_proposal()],
+        ..Stub::default()
+    };
+    // The reading and the run need 1.2 together.
+    let report = drain::drain(&stub, limits(1.1), &Quiet).unwrap();
+    assert!(stub.log().is_empty(), "{:?}", stub.log());
+    assert_eq!(report.waiting, vec![in_limit_proposal()]);
+    assert!(report.notes.iter().any(|n| n.contains("not approved")));
+}
+
+const LOW: &str = "20261015-130001-a1b2";
+const HIGH: &str = "20261015-130002-c3d4";
+const GHOST: &str = "20261015-130003-e5f6";
+
+fn proposal(id: &str, role: &str, rung: Ladder) -> AnyRecord {
+    AnyRecord::WorkItem(Box::new(WorkItem {
+        id: RecordId::parse(id).unwrap(),
+        at: "2026-10-15T01:00:00Z".parse().unwrap(),
+        role: role.into(),
+        kind: WorkItemKind::Proposal,
+        key: format!("proposal:{id}"),
+        title: format!("Proposal {id}"),
+        rung,
+        source: Reference::path("src/lib.rs"),
+        evidence: vec![Reference::path("README.md")],
+    }))
+}
+
+/// A repository with the steward's role recorded and three open proposals: one on the implementation rung
+/// from the steward, one on a design rung from the steward, and one on the implementation rung from a role
+/// that has no recorded definition.
+fn seeded_proposals(fx: &Fixture) {
+    let role = AnyRecord::Role(Box::new(athena_data::roles::steward(
+        "2026-10-15T00:00:00Z".parse().unwrap(),
+    )));
+    for record in [
+        role,
+        proposal(LOW, "steward", Ladder::Implementation),
+        proposal(HIGH, "steward", Ladder::DesignDecisions),
+        proposal(GHOST, "ghost", Ladder::Implementation),
+    ] {
+        write(fx.root(), &[(&record.canonical_path(), &record.to_json())]);
+    }
+    fx.git.run(["add", "-A"]).unwrap();
+    fx.git
+        .run(["commit", "-q", "-m", "Seed proposals"])
+        .unwrap();
+}
+
+fn rated_scenario() -> Scenario {
+    let mut scenario = Scenario::default();
+    scenario.audience = json!({
+        "rating": 4,
+        "findings": [{ "text": "Clear.", "source": "heading: Start here" }]
+    });
+    scenario
+}
+
+fn ids(list: &[Waiting]) -> Vec<&str> {
+    list.iter().map(|w| w.id.as_str()).collect()
+}
+
+#[test]
+fn the_real_steps_approve_only_the_in_limit_proposal_and_leave_the_others_waiting() {
+    let fx = Fixture::new();
+    seeded_proposals(&fx);
+    let athena = fx.athena(rated_scenario().script());
+    let lander = RecordingLander::default();
+    let steps = RealSteps {
+        athena: &athena,
+        ui: &Quiet,
+        page: &StubPage,
+        lander: &lander,
+    };
+    let queue = steps.queue().unwrap();
+    assert_eq!(ids(&queue.approvable), [LOW]);
+    assert_eq!(ids(&queue.waiting), [HIGH, GHOST]);
+    // The steps refuse to approve what is not in limit, whoever asks.
+    for id in [HIGH, GHOST] {
+        let refused = steps.approve(id);
+        assert!(
+            refused.job.is_none() && refused.error.is_some(),
+            "{refused:?}"
+        );
+    }
+    let before = Records::load(&fx.git, &fx.head()).unwrap();
+    assert!(before.work_decisions.is_empty());
+
+    let report = drain::drain(&steps, limits(50.0), &Quiet).unwrap();
+    assert_eq!(report.stop, Stop::TargetMet, "{}", display::drain(&report));
+    assert_eq!(report.landed, 1);
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    let [decision] = records.work_decisions.as_slice() else {
+        panic!("one decision: {:?}", records.work_decisions)
+    };
+    assert_eq!(decision.work_item.as_str(), LOW);
+    let WorkDecisionState::Approved { job } = &decision.decision else {
+        panic!("approved, not rejected")
+    };
+    // The approved job was run and landed; the land step was asked once.
+    assert_eq!(*lander.0.lock().unwrap(), [(job.as_str().to_string(), 0)]);
+    assert_eq!(report.jobs[0].job, job.as_str());
+    assert_eq!(report.jobs[0].outcome, "passed");
+    assert_eq!(
+        records.jobs[job.as_str()].state(),
+        JobState::Closed(OutcomeState::Landed)
+    );
+    assert_eq!(records.jobs[job.as_str()].readings.len(), 1);
+    // The two others are untouched and still waiting, with the text that says a person decides.
+    assert_eq!(ids(&report.waiting), [HIGH, GHOST]);
+    let text = display::drain(&report);
+    assert!(text.contains("needs a person"), "{text}");
+    assert!(!text.contains(LOW), "{text}");
+}
+
+#[test]
+fn an_approved_job_is_picked_up_once_and_a_closed_one_is_not_picked_up_again() {
+    let fx = Fixture::new();
+    seeded_proposals(&fx);
+    let scenario = rated_scenario();
+    let invocations = scenario.invocations.clone();
+    let athena = fx.athena(scenario.script());
+    // A person approved the proposal earlier; its job was read and waits in state proposed.
+    let reading = athena.approve_work(LOW, &Quiet).unwrap();
+    let job = reading.job.as_str().to_string();
+    let lander = RecordingLander::default();
+    let steps = RealSteps {
+        athena: &athena,
+        ui: &Quiet,
+        page: &StubPage,
+        lander: &lander,
+    };
+    let queue = steps.queue().unwrap();
+    assert!(queue.approvable.is_empty(), "it is decided already");
+    assert_eq!(queue.items.len(), 1);
+    assert_eq!(
+        (queue.items[0].job.as_str(), queue.items[0].read),
+        (job.as_str(), true)
+    );
+
+    let readers = || {
+        invocations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| **r == Role::Reader)
+            .count()
+    };
+    assert_eq!(readers(), 1, "the approval's reading");
+    let report = drain::drain(&steps, limits(50.0), &Quiet).unwrap();
+    assert_eq!(report.landed, 1, "{}", display::drain(&report));
+    assert_eq!(readers(), 1, "drain did not read it again");
+    assert_eq!(lander.0.lock().unwrap().len(), 1);
+
+    // Now the job is closed: a second drain finds nothing to work.
+    let again = steps.queue().unwrap();
+    assert!(again.items.is_empty(), "{:?}", again.items);
+    let report = drain::drain(&steps, limits(50.0), &Quiet).unwrap();
+    assert_eq!(report.stop, Stop::QueueEmpty);
+    assert_eq!(lander.0.lock().unwrap().len(), 1, "landed once, not twice");
 }

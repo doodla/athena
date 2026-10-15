@@ -22,6 +22,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- `athena drain` now approves in-limit proposals and works approved jobs. Root cause: the drain's queue view
+  listed every open proposal as waiting for a person, including ones on a rung the raising role may change
+  itself (such as the implementation rung), and it never looked at the job that `approve-work` creates, which
+  stayed in state proposed with nobody to run it. Now `work_decisions::split_open` separates proposals by the
+  raising role's recorded limit, `steward::approved_work` lists approved jobs still in state proposed, and
+  drain approves the first kind (`Athena::approve_in_limit`, guarded by the budget and the job limit), then
+  runs and lands those jobs without reading them twice. Proposals above the limit, or from an unknown role,
+  still wait for a person, and drain never rejects. The module docs, `athena drain --help`, the README and
+  `docs/design/roles-and-ladder.md` say so.
 - The producer self-check no longer fails producers on wording, and keeps the report that failed it. Root
   cause: a criterion counted as reported only if its text equalled the accepted text exactly, so a leading
   number, a `[behavior]` tag, different case, extra spaces or a trailing full stop failed even a plain

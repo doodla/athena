@@ -16,8 +16,15 @@
 //! - **Retry.** An item gets two attempts. After a rejected or failed run the second attempt reads the job
 //!   again with `athena retry`, then runs it. After a run that passed but did not land, it lands again. Two
 //!   failures stop the loop, naming the item.
-//! - **People decide the rest.** Open proposals (work items above the steward's limit) are listed as waiting.
-//!   [`Steps`] has no way to accept, approve or land one.
+//! - **In-limit proposals are approved, approved jobs are worked.** An open proposal whose rung the role that
+//!   raised it may change itself (its newest recorded definition decides; a role with no recorded definition
+//!   has no limit) is approved as `athena approve-work` would, which reads the job and records the decision.
+//!   Jobs that a work decision records as approved and that are still in state proposed are run, once, without
+//!   a second reading; a closed job is never picked up again. An approval is a model call, so it is guarded by
+//!   the budget and the job limit like any other.
+//! - **People decide the rest.** Rejecting a proposal, and approving one above its role's limit (or from an
+//!   unknown role), stay with people. Such proposals are listed as waiting, and [`Steps`] has no way to reject
+//!   one or to approve one that is not in limit.
 
 use athena_core::audience::{LivePage, Page, Target};
 use athena_core::gh::GhCli;
@@ -86,9 +93,24 @@ impl Budget {
 pub struct Item {
     pub job: String,
     pub title: String,
+    /// True when the job was already read (an approved job waiting in state proposed), so it is run without a
+    /// reading. A retry after a failed run still reads again.
+    #[serde(skip)]
+    pub read: bool,
 }
 
-/// An open proposal that needs a person.
+impl Item {
+    /// A queued request that has not been read.
+    pub fn queued(job: &str, title: &str) -> Item {
+        Item {
+            job: job.into(),
+            title: title.into(),
+            read: false,
+        }
+    }
+}
+
+/// An open proposal. It is waiting for a person unless its rung is within its role's limit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Waiting {
     pub id: String,
@@ -99,8 +121,20 @@ pub struct Waiting {
 /// What is in the queue when the loop starts.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct QueueView {
+    /// Jobs to work: approved jobs already read, then queued requests.
     pub items: Vec<Item>,
+    /// Open proposals above their role's limit, or from an unknown role: they need a person.
     pub waiting: Vec<Waiting>,
+    /// Open proposals within their role's limit: the loop approves them.
+    pub approvable: Vec<Waiting>,
+}
+
+/// The result of approving a proposal: the job that carries it out, which is read and waits to run.
+#[derive(Debug, Clone, Default)]
+pub struct Approval {
+    pub job: Option<String>,
+    pub cost: f64,
+    pub error: Option<String>,
 }
 
 /// What to read: a queued request for the first time, or a failed job again (`athena retry`).
@@ -154,6 +188,8 @@ pub trait Steps {
     /// The latest rating recorded before this run, if any. It is stale: never a result of this run.
     fn previous_rating(&self) -> Option<u8>;
     fn read(&self, what: ReadOf<'_>) -> Read;
+    /// Approves an in-limit open proposal by its id, as `athena approve-work` does. Refuses one that is not.
+    fn approve(&self, proposal: &str) -> Approval;
     fn run(&self, job: &str) -> Run;
     fn land(&self, job: &str) -> Landing;
     fn rate(&self) -> Rate;
@@ -308,11 +344,27 @@ impl Drain<'_> {
 
     /// Reads and runs one job. Starts only when the reading and the run both fit the budget.
     fn run_job(&mut self, item: &Item, from: ReadOf<'_>) -> RunStep {
-        if !self.budget.fits(self.caps.read + self.caps.run) {
+        // An approved job was read when it was approved; its first attempt is only a run.
+        let pre_read = item.read && matches!(from, ReadOf::Queued(_));
+        let needed = if pre_read {
+            self.caps.run
+        } else {
+            self.caps.read + self.caps.run
+        };
+        if !self.budget.fits(needed) {
             return RunStep::Budget;
         }
         self.started += 1;
-        let read = self.steps.read(from);
+        let read = if pre_read {
+            Read {
+                job: Some(item.job.clone()),
+                cost: 0.0,
+                runnable: true,
+                error: None,
+            }
+        } else {
+            self.steps.read(from)
+        };
         self.budget.add(read.cost);
         let mut line = JobLine {
             item: item.job.clone(),
@@ -414,6 +466,48 @@ impl Drain<'_> {
         }
     }
 
+    /// Approves the proposals the ladder lets their role change. Each approval reads a job, so it must leave
+    /// room for that job's run and stay under the job limit. Returns the jobs it made, and the proposals it
+    /// left open (with a note saying why).
+    fn approve_all(&mut self, proposals: Vec<Waiting>) -> (Vec<Item>, Vec<Waiting>) {
+        let mut approved = Vec::new();
+        let mut left = Vec::new();
+        for proposal in proposals {
+            if self.started + approved.len() as u32 >= self.limits.max_jobs
+                || !self.budget.fits(self.caps.read + self.caps.run)
+            {
+                self.notes.push(format!(
+                    "proposal {} is within its role's limit but was not approved: no room in the job limit or the budget",
+                    proposal.id
+                ));
+                left.push(proposal);
+                continue;
+            }
+            let approval = self.steps.approve(&proposal.id);
+            self.budget.add(approval.cost);
+            match (approval.job, approval.error) {
+                (Some(job), None) => {
+                    self.ui
+                        .line(&format!("drain      approved {} → {job}", proposal.id));
+                    approved.push(Item {
+                        job,
+                        title: proposal.title,
+                        read: true,
+                    });
+                }
+                (_, error) => {
+                    self.notes.push(format!(
+                        "proposal {} could not be approved: {}",
+                        proposal.id,
+                        error.unwrap_or_else(|| "no job was made".into())
+                    ));
+                    left.push(proposal);
+                }
+            }
+        }
+        (approved, left)
+    }
+
     /// Rates the page after a landing. Returns the stop reason when the rating ends the run.
     fn rate(&mut self) -> Option<Stop> {
         if !self.budget.fits(self.caps.rate) {
@@ -461,6 +555,12 @@ pub fn drain(steps: &dyn Steps, limits: Limits, ui: &dyn Ui) -> anyhow::Result<R
         rating: None,
         notes: Vec::new(),
     };
+    let mut view = view;
+    let (approved, left) = d.approve_all(std::mem::take(&mut view.approvable));
+    // Jobs already approved come first, then the ones approved now, then queued requests.
+    let (read, unread): (Vec<Item>, Vec<Item>) = view.items.drain(..).partition(|i| i.read);
+    view.items = read.into_iter().chain(approved).chain(unread).collect();
+    view.waiting.extend(left);
     let mut stop = Stop::QueueEmpty;
     let mut failed_item = None;
     for item in &view.items {
@@ -605,23 +705,51 @@ impl Steps for RealSteps<'_> {
 
     fn queue(&self) -> anyhow::Result<QueueView> {
         let records = self.records()?;
-        Ok(QueueView {
-            items: steward::queued_work(&records)
-                .into_iter()
-                .map(|w| Item {
-                    job: w.job.as_str().to_string(),
-                    title: w.title,
-                })
-                .collect(),
-            waiting: work_decisions::open_proposals(&records)
+        let waiting = |items: Vec<&athena_data::records::WorkItem>| -> Vec<Waiting> {
+            items
                 .into_iter()
                 .map(|w| Waiting {
                     id: w.id.to_string(),
                     title: w.title.clone(),
                     rung: w.rung.as_str().to_string(),
                 })
-                .collect(),
+                .collect()
+        };
+        let (within, above) = work_decisions::split_open(&records);
+        let item = |w: steward::QueuedWork, read: bool| Item {
+            job: w.job.as_str().to_string(),
+            title: w.title,
+            read,
+        };
+        let mut items: Vec<Item> = steward::approved_work(&records)
+            .into_iter()
+            .map(|w| item(w, true))
+            .collect();
+        items.extend(
+            steward::queued_work(&records)
+                .into_iter()
+                .map(|w| item(w, false)),
+        );
+        Ok(QueueView {
+            items,
+            waiting: waiting(above),
+            approvable: waiting(within),
         })
+    }
+
+    fn approve(&self, proposal: &str) -> Approval {
+        match self.athena.approve_in_limit(proposal, self.ui) {
+            Ok(p) => Approval {
+                job: Some(p.job.as_str().to_string()),
+                cost: p.spent_usd,
+                error: p.reader_error.clone(),
+            },
+            Err(error) => Approval {
+                job: None,
+                cost: 0.0,
+                error: Some(format!("{error:#}")),
+            },
+        }
     }
 
     fn previous_rating(&self) -> Option<u8> {
@@ -740,12 +868,12 @@ mod tests {
         }
         fn queue(&self) -> anyhow::Result<QueueView> {
             Ok(QueueView {
-                items: vec![Item {
-                    job: "j1".into(),
-                    title: "t".into(),
-                }],
-                waiting: Vec::new(),
+                items: vec![Item::queued("j1", "t")],
+                ..QueueView::default()
             })
+        }
+        fn approve(&self, _: &str) -> Approval {
+            Approval::default()
         }
         fn previous_rating(&self) -> Option<u8> {
             None
