@@ -1769,6 +1769,7 @@ never fed into a later context.
 summary        what changed and why, for the user
 files          [path]
 checks_run     [{command, result: pass|fail|not-run, note}]
+criteria_check [{criterion, status: met|unmet, evidence}]
 open_issues    [string]
 mistakes       [string]   (MLD telemetry: errors the producer noticed in its own work)
 learnings      [string]   (facts about the repository it had to discover)
@@ -1781,6 +1782,13 @@ If the report lists it as `not-run`, or lists no such check, the core does not b
 verification: it re-invokes the producer once, in the same working directory, with a message that explains
 why. A second report without the result fails the job before any check or verifier runs. A pinned study is
 exempt, since it has no test suite of its own.
+
+`criteria_check` is the producer's own check of its work: one entry per accepted acceptance criterion, with
+the criterion's exact text, a status of `met` or `unmet`, and evidence. A criterion that is `unmet`, or has no
+entry, goes back to the producer in the same send-back as the test problem, with every such criterion named in
+one message; one round covers both. A criterion still unmet after it fails the job before any verifier runs. The
+core checks that the list is complete and has no unmet entry; it does not judge the evidence. A pinned study is
+checked too when it has criteria.
 
 **B.3 Verifier → verdict**
 

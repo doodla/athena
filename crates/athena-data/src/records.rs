@@ -584,6 +584,15 @@ pub struct ReportedCheck {
     pub note: Option<String>,
 }
 
+/// The producer's own check of its work against one accepted criterion.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReportedCriterion {
+    pub criterion: String,
+    pub status: String,
+    pub evidence: String,
+}
+
 /// The producer's structured report: kept with its run, redacted, never shown to the verifier (D32).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -591,6 +600,9 @@ pub struct ProducerReport {
     pub summary: String,
     pub files: Vec<String>,
     pub checks_run: Vec<ReportedCheck>,
+    /// Absent in records made before the pre-verification criteria check.
+    #[serde(default)]
+    pub criteria_check: Vec<ReportedCriterion>,
     pub open_issues: Vec<String>,
     pub mistakes: Vec<String>,
     pub learnings: Vec<String>,

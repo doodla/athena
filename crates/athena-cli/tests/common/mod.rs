@@ -201,11 +201,29 @@ pub fn producer_report(summary: &str, commands: &[&str]) -> Value {
         "summary": summary,
         "files": ["README.md"],
         "checks_run": commands.iter().map(|c| json!({ "command": c, "result": "pass", "note": null })).collect::<Vec<_>>(),
+        "criteria_check": [],
         "open_issues": [],
         "mistakes": [],
         "learnings": [],
         "desires": []
     })
+}
+
+/// One `criteria_check` entry.
+pub fn criterion_check(criterion: &str, status: &str) -> Value {
+    json!({ "criterion": criterion, "status": status, "evidence": "checked by the producer" })
+}
+
+/// The text of each acceptance criterion in a reading, in order.
+pub fn criteria_texts(reading: &Value) -> Vec<String> {
+    reading["acceptance_criteria"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|c| c["text"].as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// A passing verdict with one entry per criterion; behavior criteria cite `cargo test`.
@@ -240,6 +258,8 @@ pub struct Scenario {
     /// Everything the verifier was given: system prompt, brief, and its snapshot's files.
     pub seen_by_verifier: Arc<Mutex<Vec<String>>>,
     pub invocations: Arc<Mutex<Vec<Role>>>,
+    /// The brief each producer run was given, in order.
+    pub seen_by_producer: Arc<Mutex<Vec<String>>>,
     /// What the steward reports (`{ "items": [...] }`); nothing, unless a test says otherwise.
     pub steward: Value,
     /// Reads the fake steward claims to have made, from what it was given. Tests use it to record what the
@@ -274,6 +294,7 @@ impl Default for Scenario {
             during_verification: None,
             seen_by_verifier: Arc::new(Mutex::new(Vec::new())),
             invocations: Arc::new(Mutex::new(Vec::new())),
+            seen_by_producer: Arc::new(Mutex::new(Vec::new())),
             steward: json!({ "items": [] }),
             steward_reads: None,
             audience: json!({ "rating": 3, "findings": [] }),
@@ -316,6 +337,10 @@ impl Scenario {
             let mut turn = match spec.role {
                 Role::Reader => FakeTurn::output(self.reading.clone()),
                 Role::Producer => {
+                    self.seen_by_producer
+                        .lock()
+                        .unwrap()
+                        .push(spec.user_prompt.clone());
                     let producer_runs = self
                         .invocations
                         .lock()
@@ -327,6 +352,20 @@ impl Scenario {
                         (Some(second), n) if n > 1 => second.clone(),
                         _ => self.report.clone(),
                     };
+                    // A report with an empty `criteria_check` reports every criterion of the scenario's
+                    // reading as met; a test that wants otherwise lists the entries itself.
+                    let mut report = report;
+                    if report["criteria_check"]
+                        .as_array()
+                        .is_some_and(|a| a.is_empty())
+                    {
+                        report["criteria_check"] = Value::Array(
+                            criteria_texts(&self.reading)
+                                .iter()
+                                .map(|c| criterion_check(c, "met"))
+                                .collect(),
+                        );
+                    }
                     let mut t = FakeTurn::output(report);
                     t.edits = self.edits.clone();
                     t.commands_run = self.producer_commands.clone();
