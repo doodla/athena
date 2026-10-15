@@ -255,6 +255,8 @@ pub fn drain(report: &crate::drain::Report) -> String {
                     "target met"
                 } else if report.held_back.is_some() {
                     "target not met: held back by the source check"
+                } else if r.value >= report.target_rating && !report.outcome_changed {
+                    "target not met: no landing changed the outcome"
                 } else {
                     "below the target"
                 }
@@ -283,6 +285,10 @@ pub fn drain(report: &crate::drain::Report) -> String {
     }
     if report.page_unchanged {
         out.push_str("page        unchanged: nothing landed in this run\n");
+    } else if !report.outcome_changed {
+        out.push_str(
+            "outcome     no landing changed the outcome: none touched studies/, the site generator or the publish workflow, so the page is as it was and a rating cannot meet the target\n",
+        );
     }
     for note in &report.notes {
         let _ = writeln!(out, "note        {note}");

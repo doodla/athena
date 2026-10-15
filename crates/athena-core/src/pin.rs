@@ -8,6 +8,10 @@
 //! the tree can be edited, created, or removed by a process that honors them) plus the agents' own policy;
 //! it is not an operating-system mount. The mount directory is listed in the working directory's git
 //! `info/exclude`, so it never appears in a candidate's change list.
+//!
+//! The same pinned tree backs the source check ([`crate::Athena::check_study_text`]): a model-backed read of a
+//! study's page text against the source it was written from, used by `athena drain`. Every file of a study
+//! directory is page text except those in [`STRUCTURAL_FILES`].
 
 use anyhow::{Context, Result, anyhow, bail};
 use std::path::{Path, PathBuf};
@@ -224,9 +228,315 @@ pub fn remove_tree(path: &Path) -> std::io::Result<()> {
     std::fs::remove_dir_all(path)
 }
 
+// ---------------------------------------------------------------------------------------------------------
+// The source check: the text of a study's page against the pinned source
+
+/// The directory, inside the checker's workspace, that holds a study's page text.
+pub const PAGE_TEXT_DIR: &str = "page-text";
+
+/// The files of a study directory that say nothing about the source, so the source check does not read them:
+/// `pin.json` is the pin itself (the reference the check is made against) and `validation.json` holds rule
+/// names with pass flags. Every other file in a study directory is page text and is checked, so a file added
+/// later is covered until someone makes the case here that it is not.
+pub const STRUCTURAL_FILES: [&str; 2] = ["pin.json", "validation.json"];
+
+/// The most page text one check reads, in bytes. A study over it fails the check; the text is never cut.
+pub const MAX_STUDY_TEXT_BYTES: usize = 400_000;
+
+/// Whether the source check reads `file` (a path relative to the study directory).
+pub fn is_page_text(file: &str) -> bool {
+    !STRUCTURAL_FILES.contains(&file)
+}
+
+/// The checker's stored prompt.
+pub const SOURCE_CHECK_PROMPT: &str = "You check the text of an explainer page against the source it explains. \
+You only read and report. A statement is supported only if the source says or shows it. You report what the \
+source contradicts and the facts the text leaves out; you do not judge style, and you report nothing you \
+cannot support from a path and lines of the source.";
+
+/// One file of page text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextFile {
+    /// The path relative to the study directory.
+    pub name: String,
+    pub text: String,
+}
+
+/// One study's page text and the pin it was written against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StudyText {
+    pub name: String,
+    pub repository_url: String,
+    pub sha: String,
+    pub files: Vec<TextFile>,
+}
+
+/// What a source check found. No problems means the text passed; a check that could not be made is a problem.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SourceReport {
+    pub problems: Vec<String>,
+    /// What the model call cost, even when the check failed.
+    pub cost_usd: f64,
+}
+
+/// The checker's report: the files it read and what it found.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CheckerOutput {
+    files_checked: Vec<String>,
+    problems: Vec<CheckerProblem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CheckerProblem {
+    file: String,
+    kind: String,
+    statement: String,
+    evidence: String,
+}
+
+fn checker_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["files_checked", "problems"],
+        "properties": {
+            "files_checked": { "type": "array", "items": { "type": "string" } },
+            "problems": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["file", "kind", "statement", "evidence"],
+                    "properties": {
+                        "file": { "type": "string" },
+                        "kind": { "type": "string", "enum": ["contradicted", "omitted"] },
+                        "statement": { "type": "string" },
+                        "evidence": { "type": "string" }
+                    }
+                }
+            }
+        }
+    })
+}
+
+/// The checker's user prompt.
+pub fn source_check_brief(study: &StudyText) -> String {
+    let files: Vec<String> = study
+        .files
+        .iter()
+        .map(|f| format!("- `{PAGE_TEXT_DIR}/{}`", f.name))
+        .collect();
+    format!(
+        "# Source check: {name}\n\nThe source is `{url}` at commit {sha}, mounted read-only in `{MOUNT_DIR}/`. \
+         The text of the page is in `{PAGE_TEXT_DIR}/`, one file per input:\n{files}\n\n\
+         Read every one of those files in full with Read, and search the source with Grep and Glob. Nothing \
+         may be changed. For each statement that says what the source does, decide whether the source \
+         supports it.\n\n## Your report\n\n`problems` lists each of:\n\
+         - kind `contradicted`: a statement the source contradicts; `evidence` says what the source says \
+         instead, with its path and lines;\n\
+         - kind `omitted`: a fact the source states that the text needs to be true and leaves out; \
+         `statement` names the fact and `evidence` cites the source.\n\
+         Every problem names its `file` (as listed above) and quotes the `statement`. `files_checked` lists \
+         every file you read in full, by the names above. An empty `problems` means you found none.\n",
+        name = study.name,
+        url = study.repository_url,
+        sha = study.sha,
+        files = files.join("\n"),
+    )
+}
+
+/// Removes a check's directory in the state directory when it ends, however it ends. The mount is read-only,
+/// so it is made writable first.
+struct Cleanup(PathBuf);
+
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        let _ = remove_tree(&self.0);
+    }
+}
+
+impl crate::Athena {
+    /// Checks one study's page text against its pinned source with one model call, on the verifier's model and
+    /// cap. The core pins the source; the checker reads it from a read-only mount and may not change anything.
+    /// The check passes only when the model reports no problem and says it read every file. A pin that does not
+    /// resolve to the study's sha, an unusable report, or a text over [`MAX_STUDY_TEXT_BYTES`] fails it.
+    /// Nothing is committed: the call is no job, and its cost is returned for the caller to count.
+    pub fn check_study_text(&self, study: &StudyText) -> SourceReport {
+        let mut report = SourceReport::default();
+        match self.check_study_text_inner(study, &mut report.cost_usd) {
+            Ok(problems) => report.problems = problems,
+            Err(error) => report.problems.push(format!(
+                "{}: the text could not be checked against the source: {error:#}",
+                study.name
+            )),
+        }
+        report
+    }
+
+    fn check_study_text_inner(&self, study: &StudyText, cost: &mut f64) -> Result<Vec<String>> {
+        use crate::capability::{JobConfig, ToolGrant};
+        use athena_agent::env::Side;
+        use athena_context::{Component, compose};
+        use athena_data::records::{InvocationOutcome, Role};
+        use athena_data::{JobId, RecordId};
+        use std::collections::BTreeMap;
+
+        if self.nested.is_some() {
+            bail!("a nested run makes no model call");
+        }
+        self.refuse_if_stopped()?;
+        if study.files.is_empty() {
+            bail!("the study has no page text to check");
+        }
+        let bytes: usize = study.files.iter().map(|f| f.text.len()).sum();
+        if bytes > MAX_STUDY_TEXT_BYTES {
+            bail!(
+                "the page text is {bytes} bytes, over the {MAX_STUDY_TEXT_BYTES} the check reads"
+            );
+        }
+        let head = self.head()?;
+        let jc = JobConfig::at(&self.git, &head)?;
+        let job = JobId::Id(RecordId::generate(crate::now()));
+        let job_dir = self.state.job_dir(&job);
+        let _cleanup = Cleanup(job_dir.clone());
+        let pinned = job_dir.join("pin");
+        remove_tree(&pinned)?;
+        let sha = self
+            .pinner
+            .pin(&study.repository_url, &study.sha, &pinned)
+            .with_context(|| format!("pinning {} of {}", study.sha, study.repository_url))?;
+        if sha != study.sha {
+            bail!("the pin resolved to {sha}, not the study's {}", study.sha);
+        }
+        let workspace = job_dir.join("workspace");
+        std::fs::create_dir_all(&workspace)?;
+        for file in &study.files {
+            let path = workspace.join(PAGE_TEXT_DIR).join(&file.name);
+            std::fs::create_dir_all(path.parent().expect("a file has a parent"))?;
+            std::fs::write(path, &file.text)?;
+        }
+        mount(&pinned, &workspace)?;
+
+        let composed = compose(&[
+            athena_context::CONTRACT.into(),
+            Component::new("source-check.prompt", 1, SOURCE_CHECK_PROMPT),
+        ]);
+        let grant = ToolGrant {
+            tools: vec!["Read".into(), "Grep".into(), "Glob".into()],
+            commands: BTreeMap::new(),
+            writes: false,
+            permission_mode: "dontAsk".into(),
+        };
+        // The checker is a verifier: it borrows the verifier's model, cap and timeout.
+        let spec = self.agent_spec(
+            &jc,
+            &job,
+            1,
+            Role::Verifier,
+            &jc.config.models.verifier,
+            &composed,
+            source_check_brief(study),
+            &grant,
+            &workspace,
+            Side::Read,
+            &BTreeMap::new(),
+            jc.config.budget.verifier_usd,
+            jc.config.budget.verifier_timeout_s,
+            checker_schema(),
+        )?;
+        let facts = crate::invocation::InvocationFacts {
+            job: &job,
+            spec: &spec,
+            composed: &composed,
+            config: &jc.config,
+            fake: self.is_fake(),
+        };
+        let redactor = self.redactor(&jc.config, Some(&job))?;
+        let (output, invocation) = match self.invoke_and_record(&facts, &redactor)? {
+            Ok(done) => done,
+            Err(error) => bail!("the checker could not run: {error}"),
+        };
+        *cost = invocation.cost.best_lower();
+        if output.outcome != InvocationOutcome::Success {
+            bail!(
+                "the checker did not complete: {}",
+                invocation.detail.as_deref().unwrap_or("no detail")
+            );
+        }
+        let found: CheckerOutput =
+            serde_json::from_value(output.structured.clone().unwrap_or_default())
+                .context("the checker returned no valid report")?;
+        let mut problems: Vec<String> = found
+            .problems
+            .iter()
+            .map(|p| {
+                format!(
+                    "{}/{}: {} statement \"{}\" ({})",
+                    study.name, p.file, p.kind, p.statement, p.evidence
+                )
+            })
+            .collect();
+        for file in &study.files {
+            if !found.files_checked.contains(&file.name) {
+                problems.push(format!(
+                    "{}/{}: the checker did not report reading this file",
+                    study.name, file.name
+                ));
+            }
+        }
+        Ok(problems)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_pin_and_the_rule_results_are_exempt_from_the_source_check() {
+        assert!(!is_page_text("pin.json") && !is_page_text("validation.json"));
+        for file in [
+            "claims.json",
+            "intro.json",
+            "model.json",
+            "rationales.json",
+            "findings.json",
+            "notes.md",
+            "extra/more.json",
+        ] {
+            assert!(is_page_text(file), "{file} is checked");
+        }
+    }
+
+    #[test]
+    fn the_brief_names_every_file_and_the_pin() {
+        let study = StudyText {
+            name: "demo".into(),
+            repository_url: "https://example.com/r.git".into(),
+            sha: "a".repeat(40),
+            files: vec![
+                TextFile {
+                    name: "claims.json".into(),
+                    text: "[]".into(),
+                },
+                TextFile {
+                    name: "intro.json".into(),
+                    text: "{}".into(),
+                },
+            ],
+        };
+        let brief = source_check_brief(&study);
+        for needle in [
+            "page-text/claims.json",
+            "page-text/intro.json",
+            "pinned-source",
+            &"a".repeat(40),
+        ] {
+            assert!(brief.contains(needle), "{needle}: {brief}");
+        }
+    }
 
     fn run(dir: &Path, args: &[&str]) -> String {
         git(Some(dir), args).unwrap()

@@ -180,7 +180,7 @@ enum Command {
     /// within their role's limit are approved and their jobs worked, as are jobs already approved. Proposals
     /// above the limit, or from an unknown role, are listed as waiting for a person; drain never rejects one.
     #[command(after_help = "\
-Budget: before every model call (a reading, a run, the re-reading of a retry, a rating) the money spent so far, \
+Budget: before every model call (a reading, a run, the re-reading of a retry, a rating, the source check) the money spent so far, \
 as the calls actually cost, plus the call's cap from athena.toml must fit --budget; otherwise nothing more starts.
 
 Landing: only a merged, verified pull request counts as landed. Without `[landing] merge_via_rest = true` in \
@@ -189,8 +189,17 @@ athena.toml the pull request stays open and the item is not landed.
 A rating counts toward the target only when it is taken after a landing in this run. A run that landed \
 nothing says the page is unchanged and never reports `target met`.
 
+`target met` needs two more things. (1) A landing in this run must have changed what the explainer is built \
+from: a path under studies/, the site generator (xtask/) or the publish workflow; otherwise the report says \
+the landing did not change the outcome. (2) All of the page's text (claims, the intro with its transition and \
+glossary, and every other study file but the pin and the rule results) must pass a model-backed check against \
+the pinned source, which fails on a contradicted or omitted statement and names it. That check is a model \
+call per study: the verifier's cap times the number of studies must fit --budget, and its cost counts. Each \
+study model's self-consistency check runs first, as a floor.
+
 Stop reasons:
-  target met        a rating taken after a landing reached --rating-threshold
+  target met        a rating taken after a landing reached --rating-threshold, a landing changed the outcome, \
+and the page text passed the source check
   budget spent      spend plus the next call's cap would exceed --budget; the rest stays queued
   repeated failure  the same item failed twice; it is named
   queue empty       nothing was left to work; this is not success

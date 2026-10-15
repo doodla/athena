@@ -114,11 +114,19 @@ You no longer run, land and rate each item yourself. What it leaves to you:
 - **Reading a rating as success.** A rating counts toward the target only when it was taken after a landing in
   this run. A run that landed nothing prints that the page is unchanged and shows the last recorded rating
   marked as not taken after a landing; it never says `target met`.
+- **Reading `target met` as a good page.** It needs two more things. A landing in the run must have changed what
+  the explainer is built from (a path under `studies/`, the site generator in `xtask/`, or the publish
+  workflow); otherwise the report says the landing did not change the outcome. And all of the page's text
+  (every study file but the pin and the rule results: claims, the intro with its transition and glossary,
+  and the rest) must pass a model-backed check against the pinned source, which fails on a contradicted or
+  omitted statement and names it. Each study model's self-consistency check runs first, as a floor.
 
-**Budget.** Before every model call (a reading, a run, the re-reading of a retry, a rating) `drain` checks that
-the money already spent, as the calls actually cost, plus that call's cap from `athena.toml` fits `--budget`.
-If it does not, nothing more starts, even when an earlier job cost more than its cap. A job starts only when
-its reading and its run both fit, so no request is left read and never run for want of money.
+**Budget.** Before every model call (a reading, a run, the re-reading of a retry, a rating, the source check)
+`drain` checks that the money already spent, as the calls actually cost, plus that call's cap from
+`athena.toml` fits `--budget`. If it does not, nothing more starts, even when an earlier job cost more than
+its cap. A job starts only when its reading and its run both fit, so no request is left read and never run for
+want of money. The source check is one call per study, so its reserve is the verifier's cap times the number of
+studies, and what it costs is added to the spend.
 
 ## Accepting v0 from a clean clone
 

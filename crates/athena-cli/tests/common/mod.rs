@@ -269,6 +269,34 @@ pub struct Scenario {
     pub audience: Value,
     /// Everything the audience was given: system prompt, brief, and its workspace's files.
     pub seen_by_audience: Arc<Mutex<Vec<String>>>,
+    /// What the source check reports, given the checker's workspace. None: it reads every file under
+    /// `page-text/` and finds nothing wrong.
+    pub source_check: Option<SourceJudge>,
+}
+
+/// A fake source checker: from the checker's workspace to its report.
+pub type SourceJudge = Arc<dyn Fn(&Path) -> Value + Send + Sync>;
+
+/// The files under `workspace/page-text/`, as paths relative to it.
+pub fn page_text_files(workspace: &Path) -> Vec<String> {
+    let root = workspace.join("page-text");
+    let mut out = Vec::new();
+    let mut stack = vec![root.clone()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if let Ok(rel) = path.strip_prefix(&root) {
+                out.push(rel.display().to_string());
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 /// The commands a fake steward reports having run, given its invocation.
@@ -299,6 +327,7 @@ impl Default for Scenario {
             steward_reads: None,
             audience: json!({ "rating": 3, "findings": [] }),
             seen_by_audience: Arc::new(Mutex::new(Vec::new())),
+            source_check: None,
         }
     }
 }
@@ -370,6 +399,16 @@ impl Scenario {
                     t.edits = self.edits.clone();
                     t.commands_run = self.producer_commands.clone();
                     t
+                }
+                Role::Verifier if spec.user_prompt.starts_with("# Source check") => {
+                    let report = match &self.source_check {
+                        Some(judge) => judge(&spec.workdir),
+                        None => json!({
+                            "files_checked": page_text_files(&spec.workdir),
+                            "problems": []
+                        }),
+                    };
+                    FakeTurn::output(report)
                 }
                 Role::Verifier => {
                     let mut seen = self.seen_by_verifier.lock().unwrap();

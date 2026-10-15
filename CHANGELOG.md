@@ -20,6 +20,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- `athena drain` now counts only outcome-changing landings and checks all page text against the source before
+  it says "target met" (`docs/decisions.md` D100). Root cause: the earlier source check read only `model.json`
+  for self-consistency, so a wrong statement in `claims.json`, the intro, its transition or a glossary entry
+  never held drain back, and landings that touched only other files could still end a run on a rating of a page
+  that had not changed. Now "target met" needs (1) a landing in the run whose changed paths include `studies/`,
+  the site generator (`xtask/`) or the publish workflow, else the report says the landing did not change the
+  outcome; and (2) a model-backed check of every page text file in every study (all but `pin.json` and
+  `validation.json`, so a text file added later is covered) against the pinned source, which fails on a
+  contradicted or omitted statement and names it (`Athena::check_study_text` in `crates/athena-core/src/pin.rs`,
+  run as the verifier role). The self-consistency check stays as a floor. The source check is a model call
+  per study: the verifier's cap times the study count must fit `--budget`, or drain stops as "budget spent",
+  and its cost is added to the spend. `Stop::TargetMet`, the module docs, `athena drain --help` and the README
+  state both rules.
+
 - `athena drain` no longer stops on "target met" from the audience rating alone, and the places-held counter in
   the firstmate study is corrected. Root cause: the stop depended on a rating by a reader who sees only the
   page, who cannot detect a wrong fact; the page said so wrongly for the work-slot counter (`changed_by` listed

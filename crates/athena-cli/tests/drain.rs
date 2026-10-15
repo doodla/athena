@@ -26,7 +26,9 @@ use common::*;
 use serde_json::json;
 use std::cell::RefCell;
 use std::collections::BTreeSet;
+use std::path::Path;
 use std::process::Command;
+use std::sync::Arc;
 
 /// A stub world: a scripted queue, outcomes, landings and ratings, and a log of every call in order.
 /// Each read costs 0.1, each run 0.5 and each rating 0.2; their caps are 0.2, 1.0 and 0.3.
@@ -49,6 +51,12 @@ struct Stub {
     run_cost: Option<f64>,
     /// When set, the check of the page against the pinned source fails with this finding.
     failing_check: Option<&'static str>,
+    /// What the source check costs, and the cap the loop must reserve for it; zero when not set.
+    check_cost: f64,
+    check_cap: f64,
+    /// Jobs whose landing changes only paths outside the explainer's sources; any other landing also changes a
+    /// study file.
+    unrelated: Vec<&'static str>,
     log: RefCell<Vec<String>>,
 }
 
@@ -125,7 +133,14 @@ impl Steps for Stub {
         if self.unlandable.contains(&job) {
             Landing::NotLanded("checks failed".into())
         } else {
-            Landing::Landed
+            let paths = if self.unrelated.contains(&job) {
+                vec!["README.md", "crates/athena-cli/src/drain.rs"]
+            } else {
+                vec!["README.md", "studies/demo/claims.json"]
+            };
+            Landing::Landed {
+                changed: paths.into_iter().map(String::from).collect(),
+            }
         }
     }
     fn check_page(&self) -> Check {
@@ -134,6 +149,10 @@ impl Steps for Stub {
             Some(why) => Check::fail(*why),
             None => Check::pass("stub"),
         }
+        .costing(self.check_cost)
+    }
+    fn check_cap(&self) -> f64 {
+        self.check_cap
     }
     fn rate(&self) -> Rate {
         self.log.borrow_mut().push("rate".into());
@@ -521,6 +540,15 @@ fn drain_help_documents_the_flags_and_lists_every_stop_reason() {
     for stop in Stop::ALL {
         assert!(help.contains(stop.label()), "{}: {help}", stop.label());
     }
+    // Both rules for "target met" are in the help text.
+    for needle in [
+        "did not change the outcome",
+        "studies/",
+        "pinned source",
+        "contradicted or omitted",
+    ] {
+        assert!(help.contains(needle), "{needle}: {help}");
+    }
     // The budget is required.
     let out = Command::new(env!("CARGO_BIN_EXE_athena"))
         .arg("drain")
@@ -551,7 +579,10 @@ impl Lander for RecordingLander {
             .audience_ratings
             .len();
         self.0.lock().unwrap().push((job.to_string(), ratings));
-        Landing::Landed
+        // `RealSteps` replaces this with the paths the job's candidate changed.
+        Landing::Landed {
+            changed: Vec::new(),
+        }
     }
 }
 
@@ -588,11 +619,7 @@ fn queue_steward_request(athena: &Athena, text: &str) -> String {
 #[test]
 fn the_real_steps_work_a_queued_request_land_it_and_only_then_rate_the_page() {
     let fx = Fixture::new();
-    let mut scenario = Scenario::default();
-    scenario.audience = json!({
-        "rating": 4,
-        "findings": [{ "text": "Clear.", "source": "heading: Start here" }]
-    });
+    let scenario = rated_scenario();
     let invocations = scenario.invocations.clone();
     let athena = fx.athena(scenario.script());
     let job = queue_steward_request(&athena, "Add a greeting to the README.");
@@ -773,12 +800,36 @@ fn seeded_proposals(fx: &Fixture) {
         .unwrap();
 }
 
+/// A scenario whose job adds a study (a pin, claims and an intro), so its landing changes what the explainer
+/// is built from, and whose audience rates the page 4. Its source checker finds nothing wrong.
 fn rated_scenario() -> Scenario {
     let mut scenario = Scenario::default();
     scenario.audience = json!({
         "rating": 4,
         "findings": [{ "text": "Clear.", "source": "heading: Start here" }]
     });
+    scenario.reading = reading(
+        &[
+            ("studies/demo/pin.json", "create"),
+            ("studies/demo/claims.json", "create"),
+            ("studies/demo/intro.json", "create"),
+        ],
+        &[
+            ("content", "the demo study has a pin, claims and an intro"),
+            ("behavior", "the tests still pass"),
+        ],
+    );
+    scenario.edits = Texts::correct()
+        .files()
+        .into_iter()
+        .filter(|(path, _)| ["pin.json", "claims.json", "intro.json"].contains(path))
+        .map(|(path, body)| (format!("studies/demo/{path}"), Some(body)))
+        .collect();
+    scenario.report["files"] = json!([
+        "studies/demo/pin.json",
+        "studies/demo/claims.json",
+        "studies/demo/intro.json"
+    ]);
     scenario
 }
 
@@ -884,4 +935,542 @@ fn an_approved_job_is_picked_up_once_and_a_closed_one_is_not_picked_up_again() {
     let report = drain::drain(&steps, limits(50.0), &Quiet).unwrap();
     assert_eq!(report.stop, Stop::QueueEmpty);
     assert_eq!(lander.0.lock().unwrap().len(), 1, "landed once, not twice");
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// "Target met" needs an outcome-changing landing
+
+#[test]
+fn a_landing_outside_the_explainers_sources_cannot_meet_the_target_even_at_the_rating() {
+    let stub = Stub {
+        items: vec!["a"],
+        outcomes: passing(),
+        ratings: RefCell::new(vec![5]),
+        unrelated: vec!["a"],
+        ..Stub::default()
+    };
+    let report = drain::drain(&stub, limits(5.0), &Quiet).unwrap();
+    assert_eq!(report.landed, 1);
+    assert_ne!(report.stop, Stop::TargetMet);
+    assert!(!report.target_met());
+    assert!(!report.outcome_changed);
+    // The rating was taken, but the source check, a model call, was not asked: nothing could use it.
+    assert_eq!(stub.log(), ["read a", "run a", "land a", "rate"]);
+    let text = display::drain(&report);
+    assert!(text.contains("no landing changed the outcome"), "{text}");
+    assert!(!text.contains("target met"), "{text}");
+    assert_eq!(
+        serde_json::to_value(&report).unwrap()["outcome_changed"],
+        false
+    );
+}
+
+#[test]
+fn a_later_landing_that_changes_a_study_meets_the_target_after_an_unrelated_one() {
+    let stub = Stub {
+        items: vec!["a", "b"],
+        outcomes: passing(),
+        ratings: RefCell::new(vec![4, 4]),
+        unrelated: vec!["a"],
+        ..Stub::default()
+    };
+    let report = drain::drain(&stub, limits(5.0), &Quiet).unwrap();
+    assert_eq!(report.stop, Stop::TargetMet);
+    assert!(report.target_met() && report.outcome_changed);
+    assert_eq!(
+        stub.log(),
+        [
+            "read a", "run a", "land a", "rate", "read b", "run b", "land b", "rate", "check"
+        ]
+    );
+}
+
+#[test]
+fn the_site_generator_is_an_outcome_changing_path() {
+    use drain::{OUTCOME_PATHS, changes_outcome};
+    assert!(changes_outcome(&["xtask/src/site.rs".to_string()]));
+    assert!(changes_outcome(&["studies/demo/intro.json".to_string()]));
+    assert!(!changes_outcome(&["docs/decisions.md".to_string()]));
+    assert!(OUTCOME_PATHS.contains(&"studies/") && OUTCOME_PATHS.contains(&"xtask/"));
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// The source check is guarded by the budget and counted in the spend
+
+#[test]
+fn the_source_check_runs_only_when_its_whole_cap_fits_and_otherwise_drain_stops_as_budget_spent() {
+    // One item costs 0.8 (read 0.1, run 0.5, rating 0.2). The check's cap of 1.0 does not fit a budget of 1.5.
+    let stub = Stub {
+        items: vec!["a"],
+        outcomes: passing(),
+        ratings: RefCell::new(vec![5]),
+        check_cap: 1.0,
+        ..Stub::default()
+    };
+    let report = drain::drain(&stub, limits(1.5), &Quiet).unwrap();
+    assert_eq!(report.stop, Stop::BudgetSpent);
+    assert!(!report.target_met());
+    assert!(
+        !stub.log().contains(&"check".to_string()),
+        "{:?}",
+        stub.log()
+    );
+    assert!(report.notes.iter().any(|n| n.contains("source check")));
+    // The same run with room for the cap meets the target.
+    let stub = Stub {
+        items: vec!["a"],
+        outcomes: passing(),
+        ratings: RefCell::new(vec![5]),
+        check_cap: 1.0,
+        ..Stub::default()
+    };
+    let report = drain::drain(&stub, limits(1.9), &Quiet).unwrap();
+    assert_eq!(report.stop, Stop::TargetMet);
+}
+
+#[test]
+fn what_the_source_check_costs_is_added_to_the_spend_even_when_it_fails() {
+    for failing_check in [None, Some("a statement is contradicted")] {
+        let stub = Stub {
+            items: vec!["a"],
+            outcomes: passing(),
+            ratings: RefCell::new(vec![5]),
+            check_cap: 1.0,
+            check_cost: 0.7,
+            failing_check,
+            ..Stub::default()
+        };
+        let report = drain::drain(&stub, limits(5.0), &Quiet).unwrap();
+        // 0.1 read + 0.5 run + 0.2 rating + 0.7 check
+        assert!(
+            (report.spent_usd - 1.5).abs() < 1e-9,
+            "{failing_check:?}: {}",
+            report.spent_usd
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// The real source check, against a fake agent and a stub pinner
+
+const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+/// The text of a demo study, one string per input: a claim, the intro, the transition, a glossary entry, and
+/// the fact the intro must state.
+#[derive(Clone)]
+struct Texts {
+    claim: &'static str,
+    intro: &'static str,
+    transition: &'static str,
+    glossary: &'static str,
+    fact: &'static str,
+}
+
+/// What the source says, as the fake checker knows it: a worker holds a place until its pull request is ready
+/// or it is cleaned up; with yolo off a person merges; teardown can be reopened; a full spawn exits at once.
+const FACT: &str = "holds a place until its pull request is ready or it is cleaned up";
+const WRONG_CLAIM: &str = "Teardown closes a task for good.";
+const WRONG_INTRO: &str = "With yolo on, a worker may merge its own pull request.";
+const WRONG_TRANSITION: &str = "A spawn at capacity waits and retries by itself.";
+const WRONG_GLOSSARY: &str = "A slot of capacity that is freed when the worker passes its task on.";
+
+impl Texts {
+    fn correct() -> Texts {
+        Texts {
+            claim: "Teardown closes a task, and a closed task can reopen.",
+            intro: "With yolo off, a person merges every pull request.",
+            transition: "A spawn at capacity exits at once and the task stays queued.",
+            glossary: "A slot of capacity that a worker holds until its pull request is ready or it is cleaned up.",
+            fact: FACT,
+        }
+    }
+
+    /// Every file of the study directory.
+    fn files(&self) -> Vec<(&'static str, String)> {
+        vec![
+            (
+                "pin.json",
+                json!({"schema": "study.pin/1", "study_id": "demo", "repository_url": "https://example.com/demo.git", "sha": SHA}).to_string(),
+            ),
+            (
+                "claims.json",
+                json!([{ "id": "c1", "text": self.claim }]).to_string(),
+            ),
+            (
+                "intro.json",
+                json!({
+                    "intro": format!("A worker {}. {}", self.fact, self.intro),
+                    "transition": self.transition,
+                    "glossary": [{ "term": "place", "definition": self.glossary }]
+                })
+                .to_string(),
+            ),
+            (
+                "model.json",
+                json!({ "counters": [], "transitions": [] }).to_string(),
+            ),
+            ("validation.json", json!({ "results": [] }).to_string()),
+        ]
+    }
+}
+
+/// The fake checker: reports every wrong statement it finds in the page text, names the file, and reports a
+/// fact the source requires when no file states it. It reads exactly what the real checker is given.
+fn judge(workspace: &Path) -> serde_json::Value {
+    let files = page_text_files(workspace);
+    let mut problems = Vec::new();
+    let mut all = String::new();
+    for file in &files {
+        let text = std::fs::read_to_string(workspace.join("page-text").join(file)).unwrap();
+        for wrong in [WRONG_CLAIM, WRONG_INTRO, WRONG_TRANSITION, WRONG_GLOSSARY] {
+            if text.contains(wrong) {
+                problems.push(json!({
+                    "file": file, "kind": "contradicted", "statement": wrong,
+                    "evidence": "pinned-source/bin/fm-spawn.sh lines 10-20"
+                }));
+            }
+        }
+        all.push_str(&text);
+    }
+    if !all.contains(FACT) {
+        problems.push(json!({
+            "file": "intro.json", "kind": "omitted", "statement": FACT,
+            "evidence": "pinned-source/bin/fm-backlog-transition-lib.sh lines 11-13"
+        }));
+    }
+    json!({ "files_checked": files, "problems": problems })
+}
+
+/// Commits `files` under `studies/<name>/`.
+fn commit_study(fx: &Fixture, name: &str, files: &[(&str, String)]) {
+    for (file, body) in files {
+        write(fx.root(), &[(&format!("studies/{name}/{file}"), body)]);
+    }
+    fx.git.run(["add", "-A"]).unwrap();
+    fx.git
+        .run(["commit", "-q", "-m", &format!("Add study {name}")])
+        .unwrap();
+}
+
+fn judged_scenario(judge: SourceJudge) -> Scenario {
+    let mut scenario = Scenario::default();
+    scenario.source_check = Some(judge);
+    scenario
+}
+
+/// Runs the real page check over a repository whose `demo` study has `texts`, with the fake checker.
+fn real_check(texts: &Texts) -> (Check, Vec<Role>) {
+    let fx = Fixture::new();
+    commit_study(&fx, "demo", &texts.files());
+    let scenario = judged_scenario(Arc::new(judge));
+    let invocations = scenario.invocations.clone();
+    let athena = fx.athena(scenario.script());
+    let steps = RealSteps {
+        athena: &athena,
+        ui: &Quiet,
+        page: &StubPage,
+        lander: &RecordingLander::default(),
+    };
+    let check = steps.check_page();
+    let roles = invocations.lock().unwrap().clone();
+    (check, roles)
+}
+
+#[test]
+fn a_page_with_correct_text_in_every_file_passes_the_source_check_with_one_verifier_call() {
+    let (check, roles) = real_check(&Texts::correct());
+    assert!(check.passed, "{}", check.detail);
+    // claims.json, intro.json and model.json; the pin and the rule results are not page text.
+    assert!(
+        check.detail.contains("3 page text file"),
+        "{}",
+        check.detail
+    );
+    // One call, as the verifier (its model and cap), not as the audience.
+    assert_eq!(roles, [Role::Verifier]);
+    assert!((check.cost - 0.01).abs() < 1e-9, "{}", check.cost);
+}
+
+#[test]
+fn a_wrong_statement_in_any_page_text_input_fails_the_check_and_is_named() {
+    let ok = Texts::correct();
+    let cases = [
+        (
+            "claims.json",
+            WRONG_CLAIM,
+            Texts {
+                claim: WRONG_CLAIM,
+                ..ok.clone()
+            },
+        ),
+        (
+            "intro.json",
+            WRONG_INTRO,
+            Texts {
+                intro: WRONG_INTRO,
+                ..ok.clone()
+            },
+        ),
+        (
+            "intro.json",
+            WRONG_TRANSITION,
+            Texts {
+                transition: WRONG_TRANSITION,
+                ..ok.clone()
+            },
+        ),
+        (
+            "intro.json",
+            WRONG_GLOSSARY,
+            Texts {
+                glossary: WRONG_GLOSSARY,
+                ..ok.clone()
+            },
+        ),
+        (
+            "intro.json",
+            FACT,
+            Texts {
+                fact: "runs for a while",
+                ..ok.clone()
+            },
+        ),
+    ];
+    for (file, statement, texts) in cases {
+        let (check, _) = real_check(&texts);
+        assert!(!check.passed, "{statement}: {}", check.detail);
+        assert!(check.detail.contains(statement), "{}", check.detail);
+        assert!(
+            check.detail.contains(&format!("demo/{file}")),
+            "{}",
+            check.detail
+        );
+        assert!(check.cost > 0.0, "a failed check still cost money");
+
+        // Drain, with the real check under a stubbed queue and a rating at the target, does not stop as met.
+        let fx = Fixture::new();
+        commit_study(&fx, "demo", &texts.files());
+        let athena = fx.athena(judged_scenario(Arc::new(judge)).script());
+        let real = RealSteps {
+            athena: &athena,
+            ui: &Quiet,
+            page: &StubPage,
+            lander: &RecordingLander::default(),
+        };
+        let steps = WithRealCheck {
+            stub: Stub {
+                items: vec!["a"],
+                outcomes: passing(),
+                ratings: RefCell::new(vec![5]),
+                ..Stub::default()
+            },
+            real,
+        };
+        let report = drain::drain(&steps, limits(50.0), &Quiet).unwrap();
+        assert_ne!(report.stop, Stop::TargetMet, "{statement}");
+        assert!(!report.target_met());
+        let held = report.held_back.as_deref().unwrap();
+        assert!(held.contains(statement), "{held}");
+        let text = display::drain(&report);
+        assert!(
+            text.contains(statement) && !text.contains("target met"),
+            "{text}"
+        );
+        assert!(report.spent_usd > 0.8, "the check's cost is in the spend");
+    }
+}
+
+/// Real source check and everything else stubbed.
+struct WithRealCheck<'a> {
+    stub: Stub,
+    real: RealSteps<'a>,
+}
+
+impl Steps for WithRealCheck<'_> {
+    fn caps(&self) -> anyhow::Result<Caps> {
+        self.stub.caps()
+    }
+    fn queue(&self) -> anyhow::Result<QueueView> {
+        self.stub.queue()
+    }
+    fn previous_rating(&self) -> Option<u8> {
+        None
+    }
+    fn read(&self, what: ReadOf<'_>) -> Read {
+        self.stub.read(what)
+    }
+    fn approve(&self, proposal: &str) -> Approval {
+        self.stub.approve(proposal)
+    }
+    fn run(&self, job: &str) -> Run {
+        self.stub.run(job)
+    }
+    fn land(&self, job: &str) -> Landing {
+        self.stub.land(job)
+    }
+    fn rate(&self) -> Rate {
+        self.stub.rate()
+    }
+    fn check_page(&self) -> Check {
+        self.real.check_page()
+    }
+    fn check_cap(&self) -> f64 {
+        self.real.check_cap()
+    }
+}
+
+#[test]
+fn a_file_the_checker_did_not_read_fails_the_check() {
+    let fx = Fixture::new();
+    commit_study(&fx, "demo", &Texts::correct().files());
+    // A checker that finds nothing wrong but reports reading only claims.json.
+    let skipping: SourceJudge =
+        Arc::new(|_| json!({ "files_checked": ["claims.json"], "problems": [] }));
+    let athena = fx.athena(judged_scenario(skipping).script());
+    let steps = RealSteps {
+        athena: &athena,
+        ui: &Quiet,
+        page: &StubPage,
+        lander: &RecordingLander::default(),
+    };
+    let check = steps.check_page();
+    assert!(!check.passed);
+    assert!(check.detail.contains("demo/intro.json"), "{}", check.detail);
+    assert!(
+        check.detail.contains("did not report reading"),
+        "{}",
+        check.detail
+    );
+}
+
+#[test]
+fn a_text_file_added_to_a_study_is_checked_without_anyone_listing_it() {
+    // A new file with a wrong statement fails the check; with correct text it passes.
+    let mut files = Texts::correct().files();
+    files.push(("notes.md", format!("# Notes\n\n{WRONG_CLAIM}\n")));
+    let fx = Fixture::new();
+    commit_study(&fx, "demo", &files);
+    let athena = fx.athena(judged_scenario(Arc::new(judge)).script());
+    let steps = RealSteps {
+        athena: &athena,
+        ui: &Quiet,
+        page: &StubPage,
+        lander: &RecordingLander::default(),
+    };
+    let check = steps.check_page();
+    assert!(!check.passed);
+    assert!(check.detail.contains("demo/notes.md"), "{}", check.detail);
+
+    let mut files = Texts::correct().files();
+    files.push(("notes.md", "# Notes\n\nNothing wrong here.\n".to_string()));
+    let fx = Fixture::new();
+    commit_study(&fx, "demo", &files);
+    let athena = fx.athena(judged_scenario(Arc::new(judge)).script());
+    let steps = RealSteps {
+        athena: &athena,
+        ui: &Quiet,
+        page: &StubPage,
+        lander: &RecordingLander::default(),
+    };
+    let check = steps.check_page();
+    assert!(check.passed, "{}", check.detail);
+    assert!(
+        check.detail.contains("4 page text file"),
+        "{}",
+        check.detail
+    );
+}
+
+#[test]
+fn every_file_of_the_shipped_study_is_page_text_except_the_two_structural_ones() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../studies/firstmate-work-handling");
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        files.push((
+            path.file_name().unwrap().to_string_lossy().into_owned(),
+            std::fs::read(&path).unwrap(),
+        ));
+    }
+    let study = drain::study_text("firstmate-work-handling", &files).unwrap();
+    let mut covered: Vec<&str> = study.files.iter().map(|f| f.name.as_str()).collect();
+    covered.sort_unstable();
+    let mut expected: Vec<&str> = files
+        .iter()
+        .map(|(n, _)| n.as_str())
+        .filter(|n| !athena_core::pin::STRUCTURAL_FILES.contains(n))
+        .collect();
+    expected.sort_unstable();
+    assert_eq!(covered, expected, "every other file is read by the check");
+    for text in ["claims.json", "intro.json"] {
+        assert!(covered.contains(&text), "{text} is page text");
+    }
+    assert_eq!(study.sha.len(), 40);
+}
+
+#[test]
+fn the_reserve_for_the_source_check_grows_with_the_number_of_studies() {
+    let fx = Fixture::new();
+    let athena = fx.athena(Scenario::default().script());
+    let steps = RealSteps {
+        athena: &athena,
+        ui: &Quiet,
+        page: &StubPage,
+        lander: &RecordingLander::default(),
+    };
+    let one_call = steps.caps().unwrap().rate;
+    assert!(one_call > 0.0);
+    commit_study(&fx, "one", &Texts::correct().files());
+    assert!((steps.check_cap() - one_call).abs() < 1e-9);
+    commit_study(&fx, "two", &Texts::correct().files());
+    commit_study(&fx, "three", &Texts::correct().files());
+    assert!((steps.check_cap() - 3.0 * one_call).abs() < 1e-9);
+}
+
+#[test]
+fn a_repository_with_no_study_cannot_pass_the_source_check() {
+    let fx = Fixture::new();
+    let athena = fx.athena(Scenario::default().script());
+    let steps = RealSteps {
+        athena: &athena,
+        ui: &Quiet,
+        page: &StubPage,
+        lander: &RecordingLander::default(),
+    };
+    let check = steps.check_page();
+    assert!(!check.passed);
+    assert_eq!(check.cost, 0.0);
+}
+
+#[test]
+fn a_study_whose_model_contradicts_itself_fails_the_floor_without_a_model_call() {
+    let fx = Fixture::new();
+    let mut files = Texts::correct().files();
+    files.retain(|(n, _)| *n != "model.json");
+    files.push((
+        "model.json",
+        json!({
+            "counters": [{ "id": "places-held", "changed_by": ["t1"] }],
+            "transitions": [{ "id": "t2", "retry": { "changes": ["places-held falls when a PR is ready or it is cleaned up"] } }]
+        })
+        .to_string(),
+    ));
+    commit_study(&fx, "demo", &files);
+    let scenario = judged_scenario(Arc::new(judge));
+    let invocations = scenario.invocations.clone();
+    let athena = fx.athena(scenario.script());
+    let steps = RealSteps {
+        athena: &athena,
+        ui: &Quiet,
+        page: &StubPage,
+        lander: &RecordingLander::default(),
+    };
+    let check = steps.check_page();
+    assert!(!check.passed);
+    assert!(check.detail.contains("places-held"), "{}", check.detail);
+    assert!(
+        invocations.lock().unwrap().is_empty(),
+        "the floor came first"
+    );
+    assert_eq!(check.cost, 0.0);
 }
