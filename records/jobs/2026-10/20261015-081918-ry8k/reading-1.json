@@ -1,0 +1,175 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261015-081918-ry8k",
+  "n": 1,
+  "at": "2026-10-15T08:19:40.620110145Z",
+  "invocation_seq": 1,
+  "base_commit": "e6af212cd91d7a9083b4419117aa75bd6c1f715f",
+  "config_sha256": "36cc8236b906040fe507a6461dabd9eddad491a69739eeee2bf0d38753b1202e",
+  "defaults_sha256": "7ca3db44e78a075634195d4e9722ade9188c5268e963b636ac7b9c38d2bee2c6",
+  "defaults_version": 1,
+  "title": "Make verifier snapshot unwritable even for root; rerun once on change",
+  "summary": "The verifier runs against a snapshot it cannot write to even as root (a write deny in its grant enforced by the agent policy, plus a root-proof lock such as the immutable attribute where available). If HEAD or the tree still differs, the verdict is discarded, verification reruns once on a fresh snapshot, and a system fault is recorded instead of rejecting the work. Audience: Athena maintainers. Protection tests must prove they can fail: the write succeeds unlocked, is refused locked, and fail loudly rather than skip when the lock cannot be enforced.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "All changes are Rust."
+    },
+    {
+      "id": "tested",
+      "how": "New tests for lock, rerun, fault and budget paths; fmt, clippy and test must pass."
+    },
+    {
+      "id": "mechanism",
+      "how": "Write protection is enforced by a grant deny and a lock, not by prose."
+    },
+    {
+      "id": "root-cause",
+      "how": "Prevent the write rather than only detecting it, and make tests prove they can fail."
+    },
+    {
+      "id": "verified",
+      "how": "Tests exercise the write attempt behavior directly."
+    },
+    {
+      "id": "buy-first",
+      "how": "Prefer existing OS facilities (immutable attribute, policy deny) over new machinery."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Athena's agents run as root, so permission bits alone do not stop writes; the enforcing mechanism must be the grant's write deny in crates/athena-agent/src/policy.rs (and/or an immutable attribute or unprivileged user).",
+    "The previous attempt's work is discarded; this starts from the base and keeps the same rerun-once and system-fault semantics.",
+    "When the budget runs out before the rerun, the job's reason must report the budget failure, not 'changed its snapshot twice'.",
+    "Tests run as the same user as the verifier and never silently return early when a write succeeds."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A test first shows a file edit and a git commit succeed in an unlocked snapshot under the current user, then shows both are refused once the verifier's lock/grant is applied, and that HEAD and work-tree tree are unchanged. It fails (not skips or returns early) if the write is not refused. Run: cargo test -p athena-git and cargo test -p athena-core.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The verifier-grant write deny is tested in policy: a write tool call against the snapshot path is denied even when the process is root. Run: cargo test -p athena-agent.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A fake-agent test shows a changed snapshot fingerprint after the first verifier run triggers exactly one more verifier invocation on a freshly created snapshot, and the first verdict is discarded. Run: cargo test -p athena-core.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test shows that after a changed fingerprint the outcome is recorded as a system fault and the judgment has no 'verifier changed its snapshot' blocker and does not reject the work; an unchanged snapshot runs the verifier once and uses its verdict. Run: cargo test -p athena-core.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test shows that when the budget is exhausted before the rerun, the job's reason reports the budget failure rather than 'snapshot changed twice'. Run: cargo test -p athena-core.",
+      "kind": "behavior"
+    },
+    {
+      "text": "cargo fmt --check, cargo clippy --all-targets and cargo test pass on the workspace.",
+      "kind": "behavior"
+    },
+    {
+      "text": "verify.rs no longer turns snapshot_changed into a blocker against the work, and run.rs near the old snapshot_changed branch discards the verdict and reruns once.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-git/src/snapshot.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-agent/src/policy.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/pin.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-core/src/capability.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-cap-change/src/lib.rs",
+      "action": "modify",
+      "p": 0.25
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "p": 0.3
+    }
+  ],
+  "out_of_scope": [
+    "Changing producer snapshot handling",
+    "Changes to records/ or governance files such as athena.toml and defaults.toml",
+    "Redesigning the verifier's command allow-list"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.78,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.12,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.2,
+        "p90": 2.8
+      },
+      "wall_time_s": {
+        "p10": 500.0,
+        "p50": 1000.0,
+        "p90": 1900.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7999999999999999,
+      "p_verification_passes": 0.6947368421052632,
+      "p_user_intervenes": 0.09263157894736843,
+      "cost_usd": {
+        "p10": 0.4211905,
+        "p50": 0.8838176999999998,
+        "p90": 2.1710445000000003
+      },
+      "wall_time_s": {
+        "p10": 529.042078312907,
+        "p50": 835.6332324173236,
+        "p90": 1424.0825370463956
+      }
+    }
+  },
+  "departures": "Larger than the reference: multi-crate change, root-proof enforcement, and a prior rejection raise cost and verification risk."
+}
