@@ -70,6 +70,20 @@ fn short(id: &str) -> &str {
 impl Athena {
     /// `athena close`: closes a job that will not run or finish.
     pub fn close(&self, job_ref: &str, why: &str, ui: &dyn Ui) -> Result<Closed> {
+        self.close_with(job_ref, why, false, ui)
+    }
+
+    /// [`Athena::close`]. With `allow_legacy_usage`, invocation records already committed that fail
+    /// "usage records reconcile" (written before a usage fix) do not block the closing commit; each is
+    /// named on `ui`. The records are not modified, and the closing outcome's totals are summed from
+    /// them, so the outcome itself reconciles. New invocation records are still reconciled.
+    pub fn close_with(
+        &self,
+        job_ref: &str,
+        why: &str,
+        allow_legacy_usage: bool,
+        ui: &dyn Ui,
+    ) -> Result<Closed> {
         if why.trim().is_empty() {
             bail!("say why the job is being closed with --why");
         }
@@ -162,7 +176,18 @@ impl Athena {
         }
         // The score reads the interventions on the commit it is built on (M27).
         let scored_at = crate::now();
-        let commit = self.commit_records_with(
+        let scope = if allow_legacy_usage {
+            for v in reconcile::committed_invocation_violations(&self.git, &head)? {
+                ui.line(&format!(
+                    "letting a legacy usage record through: {}",
+                    v.detail
+                ));
+            }
+            Scope::CommitLegacyUsage
+        } else {
+            Scope::Commit
+        };
+        let commit = self.commit_records_in(
             &|head: &str| {
                 let records = Records::load(&self.git, head)?;
                 let score = score(
@@ -185,7 +210,17 @@ impl Athena {
                 &why,
                 &trailers,
             ),
-        )?;
+            scope,
+        )
+        .map_err(|e| {
+            if !allow_legacy_usage && e.to_string().contains("usage records reconcile") {
+                e.context(
+                    "if the failing records were written before a usage fix, run `athena close` again with --allow-legacy-usage",
+                )
+            } else {
+                e
+            }
+        })?;
         self.state.clean_job(&id);
         ui.line(&format!("{:<10} {id} · {}", state.as_str(), short(&commit)));
         Ok(Closed {

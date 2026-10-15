@@ -945,6 +945,123 @@ fn a_killed_invocation_is_recorded_with_bounds() {
     );
 }
 
+/// An interrupted job: the history of a killed run cut back to just before its closing commit, with the
+/// producer's invocation record rewritten into the shape written before the usage fix (per-model costs
+/// that do not sum to the reported total) and committed by hand. Returns the job and the invocation path.
+fn interrupted_job_with_legacy_record(
+    fx: &Fixture,
+    athena: &athena_core::Athena,
+) -> (athena_data::JobId, String) {
+    let proposal = athena.ask("add a greeting", &Lines::default()).unwrap();
+    let f = finished(
+        athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(f.state, OutcomeState::Failed);
+    let dir = proposal.job.dir();
+    // The closing commit follows the dispatch commit, and an introspection of the failure follows it.
+    let closing = fx
+        .git
+        .run(["rev-parse", "HEAD~1"])
+        .unwrap()
+        .trim()
+        .to_string();
+    fx.git.run(["reset", "-q", "--hard", "HEAD~2"]).unwrap();
+    assert!(record_at(fx, &closing, &format!("{dir}/outcome.json")).is_some());
+    assert!(record_at(fx, &fx.head(), &format!("{dir}/outcome.json")).is_none());
+    let path = format!("{dir}/invocations/02-producer.json");
+    let Some(AnyRecord::Invocation(mut inv)) = record_at(fx, &closing, &path) else {
+        panic!("the producer's invocation is in the closing commit")
+    };
+    inv.cost = athena_data::Quantity::reported(1.0, athena_data::Unit::Usd, "legacy total");
+    inv.models_used.insert(
+        inv.model.clone(),
+        athena_data::records::ModelUsage {
+            input: 1,
+            output: 1,
+            cache_read: 0,
+            cache_write: 0,
+            cost_usd: 0.25,
+        },
+    );
+    write(fx.root(), &[(&path, &AnyRecord::Invocation(inv).to_json())]);
+    commit_by_hand(
+        fx,
+        &format!("Legacy usage\n\nAthena-Job: {}\n", proposal.job),
+    );
+    (proposal.job, path)
+}
+
+fn killed_producer() -> athena_agent::fake::Script {
+    let base = Scenario::default().script();
+    Box::new(move |spec| {
+        let mut turn = base(spec);
+        if spec.role == Role::Producer {
+            turn.outcome = athena_data::records::InvocationOutcome::Killed;
+            turn.structured = None;
+        }
+        turn
+    })
+}
+
+#[test]
+fn closing_a_job_with_a_legacy_usage_record_needs_the_flag_and_names_the_record() {
+    // M15 (allows, legacy): an interrupted job whose committed invocation fails reconciliation is closed
+    // with --allow-legacy-usage; without the flag the gate still refuses.
+    let fx = Fixture::new();
+    let athena = fx.athena(killed_producer());
+    let (job, path) = interrupted_job_with_legacy_record(&fx, &athena);
+    let before = fx.head();
+    let invocation_blob = |rev: &str| fx.git.show_file(rev, &path).unwrap();
+
+    let err = athena
+        .close(job.as_str(), "stuck", &Lines::default())
+        .unwrap_err();
+    assert!(
+        format!("{err:#}").contains("usage records reconcile"),
+        "{err:#}"
+    );
+    assert!(
+        format!("{err:#}").contains("--allow-legacy-usage"),
+        "{err:#}"
+    );
+    assert_eq!(fx.head(), before, "a refused close commits nothing");
+
+    let ui = Lines::default();
+    let closed = athena.close_with(job.as_str(), "stuck", true, &ui).unwrap();
+    assert!(matches!(
+        closed.state,
+        OutcomeState::Abandoned | OutcomeState::Failed
+    ));
+    assert_ne!(fx.head(), before);
+    let dir = job.dir();
+    let Some(AnyRecord::Outcome(outcome)) =
+        record_at(&fx, &fx.head(), &format!("{dir}/outcome.json"))
+    else {
+        panic!("an outcome")
+    };
+    assert_eq!(outcome.totals.unwrap().invocations, 2);
+    assert!(
+        fx.git
+            .ls_tree_under(&fx.head(), &dir)
+            .unwrap()
+            .iter()
+            .any(|e| e.path.contains("score")),
+        "a score is written"
+    );
+    assert_eq!(
+        invocation_blob(&fx.head()),
+        invocation_blob(&before),
+        "the legacy record is left unmodified"
+    );
+    let said = ui.0.lock().unwrap().join("\n");
+    assert!(
+        said.contains("legacy usage record") && said.contains("per-model costs sum"),
+        "the close names what it let through: {said}"
+    );
+}
+
 /// A producer report whose only check is the full test run, with the given result.
 fn full_test_report(result: &str) -> serde_json::Value {
     let mut report = producer_report("Added a greeting line.", &[]);

@@ -1,0 +1,153 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261015-205805-kdqd",
+  "base_commit": "1c1504d93dcef058396be2bde1b984b0a92f8be1",
+  "base_fingerprint": "sha256:ec90f129587da8833c37bebd7901500a8f8b308af52b9ea6060eb1af467ff356",
+  "previous_job": "20261015-194312-jpe3",
+  "candidate_commit": "503a4dc0e7175800a85a060db83e0bfd12d58a32",
+  "candidate_tree": "314a7406f811d077aff314fa9e80b68f1f9abbf9",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 75935
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 33461
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 70266
+    },
+    {
+      "path": "crates/athena-core/src/commits.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 8937
+    },
+    {
+      "path": "crates/athena-core/src/manage.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 24369
+    },
+    {
+      "path": "crates/athena-gate/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 14431
+    },
+    {
+      "path": "crates/athena-gate/src/reconcile.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 15206
+    },
+    {
+      "path": "docs/decisions.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 167190
+    },
+    {
+      "path": "docs/design/athena-v0.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 150149
+    }
+  ],
+  "fingerprint": "sha256:614e058f04b92a55eb62d5c977a12a3af1569f74ef85a6a8bf5448c12cbeb5df",
+  "violations": [],
+  "producer_report": {
+    "summary": "Added `athena close <job> --why ... --allow-legacy-usage`. The root cause is that the gate reconciles every record in the tree on each Athena commit, so one old invocation record that fails reconciliation blocks even the commit that closes its own job. With the flag, the closing commit is gated under a new `Scope::CommitLegacyUsage`. That scope excuses only invocation records byte-identical in the parent commit. New or altered invocation records and all outcomes are still fully reconciled. The outcome's totals are summed from the actual invocation records, and the legacy record is left untouched. `close` prints each record it let through. Without the flag, the refusal message now names the flag. Added tests: an end-to-end lifecycle test (close refused without the flag, succeeds with it, score and outcome written, record unchanged, record named in output) and a gate unit test (legacy excused; new bad invocation and bad outcome still refused). Docs: decision D101, a CHANGELOG entry and the close row in athena-v0.md. Full cargo test, clippy and fmt pass.",
+    "files": [
+      "crates/athena-core/src/manage.rs",
+      "crates/athena-core/src/commits.rs",
+      "crates/athena-gate/src/reconcile.rs",
+      "crates/athena-gate/src/lib.rs",
+      "crates/athena-cli/src/main.rs",
+      "crates/athena-cli/tests/lifecycle.rs",
+      "docs/decisions.md",
+      "docs/design/athena-v0.md",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "Full run passed (run with --quiet). Docs edited afterwards (D59 renamed to D101 in two files); re-ran the backtest and decisions tests, which pass."
+      },
+      {
+        "command": "cargo test --locked -p athena-gate",
+        "result": "pass",
+        "note": "73 passed, includes legacy_invocations_are_excused_but_new_records_are_not"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A new test builds a dispatched, interrupted job whose committed invocation record has a per-model cost sum that disagrees with its reported total (the pre-fix shape). `athena close <job> --why ...` then succeeds and writes outcome-abandoned or outcome-failed, a score record and a commit. Run `cargo test`.",
+        "status": "met",
+        "evidence": "Test closing_a_job_with_a_legacy_usage_record_needs_the_flag_and_names_the_record in crates/athena-cli/tests/lifecycle.rs. It cuts a killed run's history back to the dispatch commit and hand-commits a producer invocation with reported total 1.0 and per-model cost 0.25. Without the flag, close is refused with 'usage records reconcile'. With the flag it commits an outcome with 2 invocations and a score. Passes in cargo test --locked. Note: the outcome is written as outcome.json with state abandoned; the test accepts Abandoned or Failed."
+      },
+      {
+        "criterion": "A companion test shows the gate still rejects a new invocation record that fails reconciliation, and a new outcome whose totals do not match its invocations. Run `cargo test -p athena-gate`.",
+        "status": "met",
+        "evidence": "reconcile::tests::legacy_invocations_are_excused_but_new_records_are_not: strict check refuses the legacy record, the excusing check passes it, and a mismatched new outcome and a new bad invocation are still flagged. 73 gate tests pass."
+      },
+      {
+        "criterion": "The closing outcome's totals are computed from the job's actual invocation records, so the outcome itself reconciles. The legacy record is left unmodified (records stay append-only).",
+        "status": "met",
+        "evidence": "close uses totals(&invocations, None) as before. The lifecycle test asserts totals.invocations == 2 and that the invocation blob is byte-identical before and after. The gate's outcome check passes on that commit."
+      },
+      {
+        "criterion": "The exemption is narrow and visible: it covers only records already committed before the close, or needs an explicit flag, and `athena close` prints which legacy records it let through.",
+        "status": "met",
+        "evidence": "It needs the explicit --allow-legacy-usage flag AND only excuses invocation records byte-identical in the parent commit (Scope::CommitLegacyUsage, check_tree_excusing_committed). close_with prints 'letting a legacy usage record through: <detail>' per record; the test asserts the output."
+      },
+      {
+        "criterion": "docs/decisions.md has a new decision entry with alternatives (flag vs automatic exemption vs rewriting records), and CHANGELOG.md mentions the change, so an operator can find how to close a stuck job.",
+        "status": "met",
+        "evidence": "D101 added at the end of docs/decisions.md with alternatives (automatic exemption, rewriting, retry on dispatched, loosening outcomes). CHANGELOG.md Unreleased/Added entry; the athena-v0.md command table row for close mentions the flag."
+      },
+      {
+        "criterion": "`cargo clippy` is clean and `cargo fmt --check` passes.",
+        "status": "met",
+        "evidence": "cargo clippy --all-targets --locked -- -D warnings and cargo fmt --all --check both ran clean."
+      }
+    ],
+    "open_issues": [
+      "Only the Dispatched-state close path honours --allow-legacy-usage; the flag is ignored on the dropped/declined/blocked paths, which still use plain commit_records.",
+      "The tests build the pre-fix record by hand-committing a modified invocation, not from a real pre-fix run.",
+      "After the close, `athena check` / the history check still reports the legacy record at the tip; that is not changed here.",
+      "Job 20261015-131540-2fsa has not been closed; after this lands, run `athena close 20261015-131540-2fsa --why \"...\" --allow-legacy-usage`."
+    ],
+    "mistakes": [
+      "First inserted the decision as D59 in the middle of docs/decisions.md because my earlier grep was truncated; the backtest caught the clash. Moved it to D101 at the end."
+    ],
+    "learnings": [
+      "The gate (Scope::Commit) reconciles the whole record tree on every Athena commit, so one bad old invocation record blocks every later commit, not just the close.",
+      "A killed run's invocation record is committed in the same commit as its outcome, so an interrupted-job test must hand-commit the invocation after the dispatch commit.",
+      "docs/decisions.md was at D100 (about 2300 lines); a backtest in crates/athena-cli/tests/backtest.rs pins line numbers and 'amends' phrases there, so entries must be appended at the end and avoid the word 'Amends' unless confirmed.",
+      "The history check at the tip will still report the legacy record after close; only the closing commit is excused."
+    ],
+    "desires": [
+      "A way to run `grep`/`tail` over saved tool output, since large cargo output was truncated and Grep on it was blocked."
+    ]
+  }
+}
