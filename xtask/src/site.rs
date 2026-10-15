@@ -207,8 +207,9 @@ pub fn render(study: &Study) -> Result<String> {
     // Start here: what firstmate is, one piece of work end to end, and a glossary.
     body.push_str(
         "<section><h2>Start here</h2>\
-         <p>This page reads one system, firstmate, through a study of it. The three parts below \
-         say what it is, follow one piece of work, and define the words the rest of the page uses.</p>\
+         <p>This page reads one system, firstmate, through a study of it. The four parts below \
+         say what it is, follow one piece of work, say what happens when something fails or has no limit, \
+         and define the words the rest of the page uses.</p>\
          <h3>What firstmate is</h3><ul>",
     );
     for item in array_of(&study.intro, "what", "intro.json")? {
@@ -218,7 +219,11 @@ pub fn render(study: &Study) -> Result<String> {
     for item in array_of(&study.intro, "walkthrough", "intro.json")? {
         intro_item(&mut body, item, "a walk-through step", &known)?;
     }
-    body.push_str("</ol><h3>Glossary</h3><dl class=\"glossary\">");
+    body.push_str("</ol><h3>When things go wrong, and what is not limited</h3><ul>");
+    for item in array_of(&study.intro, "limits", "intro.json")? {
+        intro_item(&mut body, item, "a failure or limit sentence", &known)?;
+    }
+    body.push_str("</ul><h3>Glossary</h3><dl class=\"glossary\">");
     for entry in array_of(&study.intro, "glossary", "intro.json")? {
         let term = str_of(entry, "term", "a glossary entry")?;
         let what = format!("glossary entry {term}");
@@ -321,12 +326,18 @@ pub fn render(study: &Study) -> Result<String> {
             escape(str_of(t, "trigger", &what)?),
             escape(str_of(t, "trigger_evaluated_by", &what)?)
         );
-        let _ = write!(
-            body,
-            "<dt>Guard</dt><dd>{} (checked by {})</dd>",
-            escape(str_of(t, "guard", &what)?),
-            escape(str_of(t, "guard_evaluated_by", &what)?)
-        );
+        // A guard of "none" is a placeholder: nothing checks it, so no checker is named.
+        let guard = str_of(t, "guard", &what)?;
+        if guard == "none" {
+            body.push_str("<dt>Guard</dt><dd>No guard applies</dd>");
+        } else {
+            let _ = write!(
+                body,
+                "<dt>Guard</dt><dd>{} (checked by {})</dd>",
+                escape(guard),
+                escape(str_of(t, "guard_evaluated_by", &what)?)
+            );
+        }
         if let Some(failure) = t.get("failure").and_then(Value::as_str) {
             let _ = write!(body, "<dt>Failure</dt><dd>{}</dd>", escape(failure));
         }
@@ -537,6 +548,7 @@ mod tests {
             "intro.json",
             r#"{"what":[{"text":"Firstmate does a thing.","claims":["c1"]}],
                 "walkthrough":[{"text":"First step.","claims":["c1"]}],
+                "limits":[{"text":"A limit.","claims":["c1"]}],
                 "leadins":{
                   "states":{"text":"States lead.","claims":["c1"]},
                   "counters":{"text":"Counters lead.","claims":["c1"]},
@@ -574,6 +586,7 @@ mod tests {
         for (path, bad) in [
             ("/what/0/claims", serde_json::json!([])),
             ("/walkthrough/0/claims", serde_json::json!(["c99"])),
+            ("/limits/0/claims", serde_json::json!([])),
             ("/glossary/1/claims", serde_json::json!([])),
             ("/leadins/states/claims", serde_json::json!([])),
             ("/leadins/counters/claims", serde_json::json!(["c99"])),
@@ -651,6 +664,31 @@ mod tests {
         ] {
             assert!(html.contains(&format!("<dt id=\"term-{term}\">")), "{term}");
         }
+    }
+
+    #[test]
+    fn a_placeholder_guard_is_shown_as_no_guard_and_a_real_guard_names_its_checker() {
+        let dir = study_dir("[mechanism] A thing happens.", "c1");
+        let html = render(&load(dir.path()).unwrap()).unwrap();
+        assert!(html.contains("<dt>Guard</dt><dd>y (checked by code)</dd>"));
+        let mut model: Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join("model.json")).unwrap())
+                .unwrap();
+        model["transitions"][0]["guard"] = serde_json::json!("none");
+        model["transitions"][0]["guard_evaluated_by"] = serde_json::json!("agent");
+        write(dir.path(), "model.json", &model.to_string());
+        let html = render(&load(dir.path()).unwrap()).unwrap();
+        assert!(html.contains("<dt>Guard</dt><dd>No guard applies</dd>"));
+        assert!(!html.contains("checked by agent"));
+    }
+
+    #[test]
+    fn the_real_study_shows_failures_and_limits_and_no_placeholder_guard() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let html = render(&load(&root.join(STUDY_DIR)).unwrap()).unwrap();
+        assert!(html.contains("<h3>When things go wrong, and what is not limited</h3>"));
+        assert_eq!(html.matches("<dd>No guard applies</dd>").count(), 3);
+        assert!(!html.contains("none (checked by"));
     }
 
     #[test]

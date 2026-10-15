@@ -24,6 +24,11 @@ published to GitHub Pages from this repository and runs locally with one command
   files. Every sentence and every glossary term about firstmate cites claim ids from `claims.json`; a
   glossary term about the page's own structure (state, transition, trigger, guard, counter, claim, pin,
   mark) is marked "about this page" and cites nothing. An entry with no claims and no such mark is an error.
+- Between the walk-through and the glossary, a list headed "When things go wrong, and what is not limited"
+  comes from `intro.json` `limits`: lock contention and an unreadable capacity both exit 1, a failed relaunch
+  restores the record, no retry or relaunch bound was found, and a close is replayed only at a session start.
+  Each item cites claim ids, and an uncited item is an error. A transition whose guard is the placeholder
+  `none` is shown as "No guard applies", with no checker named.
 - Under each of States, Counters, Transitions and Why it is built this way, a lead-in says what the section
   shows and how to read it. The Transitions lead-in is followed by a short explanation of the two deciders,
   agent and code, and each transition card opens with a one-line plain summary. All of this is in
