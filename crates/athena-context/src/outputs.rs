@@ -109,6 +109,8 @@ pub struct ProducerOutput {
     pub summary: String,
     pub files: Vec<String>,
     pub checks_run: Vec<CheckRunOutput>,
+    /// One entry per accepted acceptance criterion: your own check of your work against it.
+    pub criteria_check: Vec<CriterionCheckOutput>,
     pub open_issues: Vec<String>,
     /// Errors you noticed in your own work.
     pub mistakes: Vec<String>,
@@ -142,6 +144,33 @@ pub struct CheckRunOutput {
     pub command: String,
     pub result: CheckResultOutput,
     pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum CriterionStatusOutput {
+    Met,
+    Unmet,
+}
+
+impl CriterionStatusOutput {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CriterionStatusOutput::Met => "met",
+            CriterionStatusOutput::Unmet => "unmet",
+        }
+    }
+}
+
+/// The producer's self-check against one acceptance criterion.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CriterionCheckOutput {
+    /// The criterion's text exactly as the accepted reading gives it, without its number or kind tag.
+    pub criterion: String,
+    pub status: CriterionStatusOutput,
+    /// What you read or ran to decide the status.
+    pub evidence: String,
 }
 
 /// B.3: the verifier's verdict.
@@ -453,6 +482,14 @@ mod tests {
                 .is_some()
         );
         assert!(producer_schema()["properties"]["checks_run"].is_object());
+        assert!(producer_schema()["properties"]["criteria_check"].is_object());
+        assert!(
+            producer_schema()["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f == "criteria_check")
+        );
     }
 
     #[test]

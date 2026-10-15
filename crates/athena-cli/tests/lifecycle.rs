@@ -1050,6 +1050,120 @@ fn a_report_with_no_full_test_check_is_sent_back_and_a_failing_run_is_not() {
     assert!(roles.contains(&Role::Verifier), "{roles:?}");
 }
 
+/// A producer report that marks the second default criterion unmet and the first met.
+fn unmet_criterion_report() -> serde_json::Value {
+    let texts = criteria_texts(&default_reading());
+    let mut report = full_test_report("pass");
+    report["criteria_check"] = serde_json::json!([
+        criterion_check(&texts[0], "met"),
+        criterion_check(&texts[1], "unmet"),
+    ]);
+    report
+}
+
+#[test]
+fn a_criterion_unmet_before_verification_goes_back_to_the_producer_not_the_verifier() {
+    let texts = criteria_texts(&default_reading());
+    let fx = Fixture::new();
+    let mut scenario = Scenario::default();
+    scenario.report = unmet_criterion_report();
+    scenario.report_when_sent_back = Some(full_test_report("pass")); // empty criteria_check: all met
+    let calls = scenario.invocations.clone();
+    let briefs = scenario.seen_by_producer.clone();
+    let seen_by_verifier = scenario.seen_by_verifier.clone();
+    let athena = fx.athena(scenario.script());
+    let proposal = athena.ask("add a greeting", &Lines::default()).unwrap();
+    let ui = Lines::default();
+    let f = finished(
+        athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &ui)
+            .unwrap(),
+    );
+    assert_eq!(f.state, OutcomeState::Landed, "{}", f.reason);
+    let roles = calls.lock().unwrap().clone();
+    let first_verifier = roles.iter().position(|r| *r == Role::Verifier).unwrap();
+    assert_eq!(
+        roles[..first_verifier]
+            .iter()
+            .filter(|r| **r == Role::Producer)
+            .count(),
+        2,
+        "both producer runs come before verification: {roles:?}"
+    );
+    let briefs = briefs.lock().unwrap().clone();
+    assert_eq!(briefs.len(), 2);
+    assert!(!briefs[0].contains("## Sent back"));
+    assert!(briefs[1].contains("## Sent back"), "{}", briefs[1]);
+    assert!(
+        briefs[1].contains(&format!("- {}", texts[1])),
+        "{}",
+        briefs[1]
+    );
+    assert!(
+        !briefs[1].contains(&format!("- {}", texts[0])),
+        "a met criterion is not listed: {}",
+        briefs[1]
+    );
+    assert!(
+        ui.0.lock()
+            .unwrap()
+            .iter()
+            .any(|l| l.contains("sent back") && l.contains(&texts[1]))
+    );
+    // The verifier never saw the producer's report, so it was not the first to find the unmet criterion.
+    assert!(
+        seen_by_verifier
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|s| !s.contains("## Sent back") && !s.contains("criteria_check"))
+    );
+}
+
+#[test]
+fn a_criterion_still_unmet_after_the_send_back_fails_the_job_unverified() {
+    let texts = criteria_texts(&default_reading());
+    let fx = Fixture::new();
+    let mut scenario = Scenario::default();
+    scenario.report = unmet_criterion_report();
+    let calls = scenario.invocations.clone();
+    let athena = fx.athena(scenario.script());
+    let proposal = athena.ask("add a greeting", &Lines::default()).unwrap();
+    let f = finished(
+        athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(f.state, OutcomeState::Failed, "{}", f.reason);
+    assert!(f.reason.contains(&texts[1]), "{}", f.reason);
+    let roles = calls.lock().unwrap().clone();
+    assert_eq!(
+        roles.iter().filter(|r| **r == Role::Producer).count(),
+        2,
+        "{roles:?}"
+    );
+    assert!(!roles.contains(&Role::Verifier), "{roles:?}");
+}
+
+#[test]
+fn a_criterion_missing_from_the_report_counts_as_unmet() {
+    let texts = criteria_texts(&default_reading());
+    let fx = Fixture::new();
+    let mut scenario = Scenario::default();
+    let mut report = full_test_report("pass");
+    report["criteria_check"] = serde_json::json!([criterion_check(&texts[0], "met")]);
+    scenario.report = report;
+    let athena = fx.athena(scenario.script());
+    let proposal = athena.ask("add a greeting", &Lines::default()).unwrap();
+    let f = finished(
+        athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(f.state, OutcomeState::Failed, "{}", f.reason);
+    assert!(f.reason.contains(&texts[1]), "{}", f.reason);
+}
+
 #[test]
 fn a_job_over_budget_is_refused_before_its_next_invocation() {
     // M13 (blocks): a job over budget fails before its next invocation.

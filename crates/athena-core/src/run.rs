@@ -19,12 +19,15 @@ use athena_context::briefs::{
     AcceptedReading, CandidateView, CheckResultView, CheckView, ProducerInputs, VerifierInputs,
     producer_brief, verifier_brief,
 };
-use athena_context::outputs::{ProducerOutput, VerdictOutput, producer_schema, verdict_schema};
+use athena_context::outputs::{
+    CriterionStatusOutput, ProducerOutput, VerdictOutput, producer_schema, verdict_schema,
+};
 use athena_context::{CONTRACT, Component, PRODUCER_FRAME, VERIFIER_FRAME, compose};
 use athena_data::records::{
     AcceptedBy, AnyRecord, Build, Candidate, Caps, ChangeEntry, ChangeStatus, CheckRun, Invocation,
     InvocationOutcome, Job, JobKind, Outcome, OutcomeState, Owner, PinnedRepo, PolicyViolation,
-    ProducerReport, Reading, ReportedCheck, Role, Score, Totals, Verdict, Verification,
+    ProducerReport, Reading, ReportedCheck, ReportedCriterion, Role, Score, Totals, Verdict,
+    Verification,
 };
 use athena_data::{JobId, sha256_hex};
 use athena_gate::redact::Redactor;
@@ -443,6 +446,22 @@ fn ran_full_tests(report: &ProducerReport) -> bool {
     })
 }
 
+/// The accepted criteria the report does not show as met: marked unmet, or missing from `criteria_check`.
+/// A criterion matches an entry by its exact text.
+fn unmet_criteria(report: &ProducerOutput, accepted: &AcceptedReading) -> Vec<String> {
+    accepted
+        .criteria
+        .iter()
+        .map(|(text, _)| text)
+        .filter(|text| {
+            !report.criteria_check.iter().any(|c| {
+                c.criterion.trim() == text.trim() && c.status == CriterionStatusOutput::Met
+            })
+        })
+        .cloned()
+        .collect()
+}
+
 impl Athena {
     fn produce_and_verify(
         &self,
@@ -529,40 +548,73 @@ impl Athena {
                 );
                 return Ok(closing);
             }
-            let report = match output
+            let raw = match output
                 .structured
                 .clone()
                 .map(serde_json::from_value::<ProducerOutput>)
             {
-                Some(Ok(report)) => self.redact_report(report, ctx.redactor)?,
+                Some(Ok(raw)) => raw,
                 _ => {
                     closing.happened = self.failure(ctx, "the producer returned no valid report");
                     return Ok(closing);
                 }
             };
-            if !enforce_tests || ran_full_tests(&report) {
+            let unmet = unmet_criteria(&raw, accepted);
+            let report = self.redact_report(raw, ctx.redactor)?;
+            let tests_missing = enforce_tests && !ran_full_tests(&report);
+            if !tests_missing && unmet.is_empty() {
                 break Some(report);
+            }
+            let mut problems = Vec::new();
+            if tests_missing {
+                problems.push(format!("no real full `{FULL_TEST_COMMAND}` result"));
+            }
+            if !unmet.is_empty() {
+                problems.push(format!(
+                    "acceptance criteria not met or not reported: {}",
+                    unmet
+                        .iter()
+                        .map(|c| format!("\"{c}\""))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ));
             }
             if send_backs >= PRODUCER_SEND_BACKS {
                 closing.happened = self.failure(
                     ctx,
                     &format!(
-                        "the producer did not run the full `{FULL_TEST_COMMAND}` even when sent back"
+                        "the producer's report still had problems when sent back: {}",
+                        problems.join("; ")
                     ),
                 );
                 return Ok(closing);
             }
             send_backs += 1;
-            ctx.ui.line(&format!(
-                "producer   sent back: no real `{FULL_TEST_COMMAND}` result in its report"
-            ));
-            attempt_brief = format!(
-                "{brief}\n\n## Sent back\n\nYour previous report did not show a real result for the full \
-                 `{FULL_TEST_COMMAND}`: it was missing or `not-run`. Your edits are still in your working \
-                 directory. Run it now, even though this change touches only docs, TOML or data: policy and \
-                 config tests read tracked non-Rust files. Fix what fails, then report its real pass or fail \
-                 result in checks_run under the command `{FULL_TEST_COMMAND}`.\n"
-            );
+            ctx.ui
+                .line(&format!("producer   sent back: {}", problems.join("; ")));
+            let mut sent_back = format!("{brief}\n\n## Sent back\n\n");
+            if tests_missing {
+                sent_back.push_str(&format!(
+                    "Your previous report did not show a real result for the full \
+                     `{FULL_TEST_COMMAND}`: it was missing or `not-run`. Your edits are still in your working \
+                     directory. Run it now, even though this change touches only docs, TOML or data: policy and \
+                     config tests read tracked non-Rust files. Fix what fails, then report its real pass or fail \
+                     result in checks_run under the command `{FULL_TEST_COMMAND}`.\n\n"
+                ));
+            }
+            if !unmet.is_empty() {
+                sent_back.push_str(
+                    "Your previous report did not show every acceptance criterion as met in criteria_check. \
+                     Your edits are still in your working directory. Fix the work for each criterion below, \
+                     then report every acceptance criterion in criteria_check, with its text exactly as given \
+                     (without its number or kind tag), its status and your evidence. This is the only send-back: \
+                     a criterion still unmet or missing after it fails the job.\n\nCriteria not met or not reported:\n\n",
+                );
+                for criterion in &unmet {
+                    sent_back.push_str(&format!("- {criterion}\n"));
+                }
+            }
+            attempt_brief = sent_back;
         };
 
         // The candidate: the snapshot's change list, applied to the base's full tree in the user's repository.
@@ -1028,6 +1080,10 @@ impl Athena {
             text.push(check.command.clone());
             text.push(check.note.clone().unwrap_or_default());
         }
+        for check in &report.criteria_check {
+            text.push(check.criterion.clone());
+            text.push(check.evidence.clone());
+        }
         redactor.redact_all(&mut text)?;
         let mut it = text.into_iter();
         let summary = it.next().unwrap_or_default();
@@ -1046,10 +1102,21 @@ impl Athena {
                 note: (!note.trim().is_empty()).then_some(note),
             });
         }
+        let mut criteria_check = Vec::new();
+        for check in &report.criteria_check {
+            let criterion = take(1).pop().unwrap_or_default();
+            let evidence = take(1).pop().unwrap_or_default();
+            criteria_check.push(ReportedCriterion {
+                criterion,
+                status: check.status.as_str().into(),
+                evidence,
+            });
+        }
         Ok(ProducerReport {
             summary,
             files: report.files,
             checks_run,
+            criteria_check,
             open_issues,
             mistakes,
             learnings,

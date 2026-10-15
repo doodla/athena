@@ -215,10 +215,22 @@ pub fn deterministic_turn(spec: &AgentInvocation) -> FakeTurn {
         }
         Role::Producer => {
             let request = section(&spec.user_prompt, "## Request");
+            let criteria_check: Vec<Value> = section(&spec.user_prompt, "## Acceptance criteria")
+                .lines()
+                .filter_map(|l| {
+                    l.split_once(". ")
+                        .filter(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+                        .map(|(_, rest)| rest)
+                })
+                // The brief gives "[kind] text"; the report names the text alone.
+                .map(|rest| rest.split_once("] ").map_or(rest, |(_, text)| text))
+                .map(|text| json!({ "criterion": text, "status": "met", "evidence": "fake producer: nothing was checked" }))
+                .collect();
             let mut turn = FakeTurn::output(json!({
                 "summary": format!("Wrote the request to {FAKE_DELIVERABLE} (fake producer, no model call)."),
                 "files": [FAKE_DELIVERABLE],
                 "checks_run": [{ "command": "cargo test --locked", "result": "pass", "note": "fake producer: nothing was run" }],
+                "criteria_check": criteria_check,
                 "open_issues": [],
                 "mistakes": [],
                 "learnings": [],

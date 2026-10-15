@@ -167,6 +167,10 @@ fn athena(
                     "summary": "Described the demo.",
                     "files": ["README.md"],
                     "checks_run": [],
+                    "criteria_check": [
+                        { "criterion": "README.md describes the demo", "status": "met", "evidence": "read it" },
+                        { "criterion": "the tests still pass", "status": "met", "evidence": "no tests in a study" }
+                    ],
                     "open_issues": [], "mistakes": [], "learnings": [], "desires": []
                 }));
                 t.edits = vec![("README.md".into(), Some("# Demo\n\nA demo.\n".into()))];

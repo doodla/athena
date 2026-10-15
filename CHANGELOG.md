@@ -9,6 +9,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A criteria check before verification. The producer's report gains a required `criteria_check` list: one entry
+  per accepted acceptance criterion, with the criterion's exact text, a status of `met` or `unmet`, and its
+  evidence. In the producer loop, a criterion marked `unmet` or missing from the list goes back to the
+  producer, in the same working directory, with every such criterion named in one brief; the send-back budget
+  is the one the full-test check already uses, so one round covers both problems. A criterion still unmet or
+  missing after it fails the job before the verifier runs. Athena checks that the list is complete and has
+  no unmet entry; it does not judge whether the evidence is true. A pinned study is checked too when it has
+  criteria. Records made earlier have no `criteria_check` and still read. Lifecycle tests cover an unmet
+  criterion that is sent back and fixed before the verifier's first run, one still unmet after the send-back,
+  and one missing from the list.
 - An `audience` role beside the steward, and `athena audience` to run it. It fetches the live explainer page
   (or `--url`), has a model read it as a newcomer (or `--reader`), and records an `athena.audience-rating/1`
   record at `records/audience-ratings/<YYYY-MM>/<id>.json`: a rating from 1 to 5 and findings that each cite
