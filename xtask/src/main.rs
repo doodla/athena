@@ -15,6 +15,10 @@ use std::process::{Command, ExitCode, Stdio};
 
 mod site;
 
+const SITE_USAGE: &str = "cargo run -p xtask -- site [--out <dir>]\n       \
+     writes <dir>/index.html; the default <dir> is site/ in the cargo target directory ($CARGO_TARGET_DIR, else target/),\n       \
+     so building never changes the work tree (a verifier's snapshot stays unchanged); an --out inside the work tree is refused";
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
@@ -23,7 +27,7 @@ fn main() -> ExitCode {
         Some("site") => site_command(&args[1..]),
         _ => {
             eprintln!(
-                "usage: cargo run -p xtask -- setup [--ci] [--force] [--allow-dirty]\n       cargo run -p xtask -- ci\n       cargo run -p xtask -- site [--out <dir>]"
+                "usage: cargo run -p xtask -- setup [--ci] [--force] [--allow-dirty]\n       cargo run -p xtask -- ci\n       {SITE_USAGE}"
             );
             return ExitCode::from(2);
         }
@@ -37,14 +41,21 @@ fn main() -> ExitCode {
     }
 }
 
-/// `site [--out <dir>]`: renders the explainer page to `<dir>/index.html` (default `site/`, gitignored).
+/// `site [--out <dir>]`: renders the explainer page to `<dir>/index.html`. The default is `site/` in the
+/// cargo target directory (`$CARGO_TARGET_DIR`, else `target/`), so building never writes into the work
+/// tree and a verifier's snapshot stays unchanged. An `--out` inside the work tree (other than under the
+/// target directory) is refused.
 fn site_command(args: &[String]) -> Result<()> {
     let root = repo_root();
+    let cwd = std::env::current_dir().context("cannot read the current directory")?;
+    let env = std::env::var_os("CARGO_TARGET_DIR");
+    let target = site::target_dir(&root, env.clone(), &cwd);
     let out = match args {
-        [] => root.join(site::DEFAULT_OUT),
+        [] => site::default_out(&root, env, &cwd),
         [flag, dir] if flag == "--out" => PathBuf::from(dir),
-        _ => bail!("usage: cargo run -p xtask -- site [--out <dir>]"),
+        _ => bail!("{SITE_USAGE}"),
     };
+    site::check_out(&root, &out, &target, &cwd)?;
     site::build(&root, &out)
 }
 

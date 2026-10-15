@@ -127,8 +127,11 @@ A page explaining how firstmate handles work, rendered from `studies/firstmate-w
 statement on it cites a claim id, and it states the pinned firstmate commit. Build it locally with one command:
 
 ```sh
-cargo run -p xtask -- site        # writes site/index.html (gitignored); open it in a browser
+cargo run -p xtask -- site        # writes target/site/index.html; open it in a browser
 ```
+
+The page goes to `site/` in the cargo target directory (`$CARGO_TARGET_DIR`, else `target/`), never into the
+work tree, so building it cannot change a verifier's snapshot. `--out` inside the work tree is refused.
 
 `.github/workflows/pages.yml` builds and deploys the same page on every push to `main`. The expected URL is
 `https://<owner>.github.io/<repository>/`. The repository owner must set **Settings → Pages → Source** to

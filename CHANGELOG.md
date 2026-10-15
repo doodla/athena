@@ -7,6 +7,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+- Building the explainer page no longer writes into the work tree, so a verifier's snapshot stays unchanged.
+  `cargo run -p xtask -- site` now writes to `site/` in the cargo target directory (`$CARGO_TARGET_DIR`, else
+  `target/site`), and refuses an `--out` inside the repository root other than under the target directory.
+  The Pages workflow uploads `target/site`.
+
 ### Added
 
 - A Pages watch after a merge. When `athena land --pr` lands a pull request, it finds the `pages.yml` run for the

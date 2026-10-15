@@ -1,0 +1,88 @@
+# Job 20261015-051600-458x: verify "Build the explainer page outside the verifier's work tree"
+
+## Request (verbatim)
+
+> Two explainer jobs (20261015-031159-xx7n, 20261015-033631-x3a1) were rejected only because 'the verifier changed its snapshot': building the site in the verifier's working copy writes into it. Building the page must not invalidate verification.
+
+## Reading (accepted by the user)
+
+`cargo run -p xtask -- site` must not write into the repository work tree. The default output moves to the cargo target directory (`$CARGO_TARGET_DIR/site`, else `target/site`), which Athena already points outside the snapshot. The Pages workflow and docs follow. Audience: the Athena owner, whose explainer jobs were rejected on the blocker "the verifier changed its snapshot".
+
+Assumptions:
+- The failing write was the verifier building the page with the default `site/` or an `--out` path inside its work tree. I could not confirm which path changed the hash, because the verifier's transcripts are not in the snapshot.
+- The producer should first reproduce the problem. Snapshot::work_tree_tree in crates/athena-git/src/snapshot.rs honours .gitignore, and /site is already ignored, so the offending path may be something else, such as an explicit --out.
+- Athena's verifier environment sets CARGO_TARGET_DIR to {job_dir}/target/{side}, outside the snapshot (crates/athena-agent/src/env.rs). Writing the page there leaves the verifier's work tree untouched.
+- Athena's own snapshot/verify code (crates/athena-core/src/run.rs, snapshot.rs) is not changed. The fix is in the page builder, not in loosening the snapshot-changed check.
+- The two rejected explainer jobs' content changes (glossary, CHANGELOG notes) are not part of this request.
+
+## Acceptance criteria
+
+1. [behavior] In a verifier-like setting, run `cargo run -p xtask -- site`, then `git status --short`. The status output is empty, and index.html exists under the cargo target directory's site/ folder rather than in the repository root.
+2. [behavior] `cargo test -p xtask` passes. It includes a test that the default output directory is not inside the repository work tree. It also has a test that `--out` pointing inside the repo root, apart from the ignored target directory, is refused with a clear error. The existing build_writes_index_html test still passes.
+3. [behavior] `cargo clippy --all-targets` and `cargo fmt --check` are clean.
+4. [content] .github/workflows/pages.yml uploads the new output directory, and its path matches the xtask default (for example `target/site`). The workflow stays a thin call into `cargo run --locked -p xtask -- site`.
+5. [content] docs/design/explainer-site.md and the xtask usage text state where the page is written and why. The reason is that building must not change the verifier's snapshot. The old `/site` location is no longer described as the default.
+6. [content] CHANGELOG.md [Unreleased] has an entry saying building the explainer page no longer writes into the work tree, so a verifier's snapshot stays unchanged.
+
+## Expected deliverables
+
+- xtask/src/site.rs (modify)
+- xtask/src/main.rs (modify)
+- .github/workflows/pages.yml (modify) (a governance file: allowed because the reading lists it)
+- docs/design/explainer-site.md (modify)
+- CHANGELOG.md (modify)
+- .gitignore (modify)
+- README.md (modify)
+
+## Out of scope
+
+- Changing the explainer's content (glossary, claims, CHANGELOG notes from the rejected jobs).
+- Loosening or changing the verifier's snapshot-changed check in crates/athena-core or crates/athena-git.
+- Re-running the rejected jobs 20261015-031159-xx7n and 20261015-033631-x3a1.
+- Changes to athena.toml or defaults.toml.
+
+## User defaults that apply
+
+- root-cause: Fix the root cause, not the symptom or the one instance that surfaced. The fault is fixed where it originates; when that lies outside the job's scope, name it and propose the fix rather than working around it. The change description names the root cause and why the change addresses it. The root-cause fix is the one focused change. Here: Remove the write into the work tree at its source (the default output location) instead of weakening the verifier's snapshot check.
+- tested: Every module has passing tests; cargo test passes and clippy is clean. Here: Add unit tests in xtask for the default output path and for refusing an --out inside the repository root. cargo test and clippy must pass.
+- mechanism: Rules that matter are enforced by mechanism, or explicitly marked prose-only. Here: The rule that building the page never writes into the tracked repository tree is enforced in code (the xtask refuses it) and by a test, not only stated in prose.
+- small: Prefer one focused change; size is a design choice, not a wish list. Here: One focused change to the xtask, the Pages workflow, and the docs that describe them.
+- verified: Done means independently verified, and user-facing behavior is verified by exercising it. Here: A behavior criterion has the verifier run the site build and then check git status.
+- changelog: (not in the defaults model) Here: BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md.
+
+## Scope
+
+The expected deliverables list is the one statement of scope. A changed file that is not on that list is the scope finding, judged against the list and not against the wording of a criterion.
+
+## The change
+
+Base 7c57720ab500 → candidate 0a81518f1b88. In your working directory, `git diff HEAD~1` shows it.
+
+```text
+ .github/workflows/pages.yml   |   4 +-
+ .gitignore                    |   3 +-
+ CHANGELOG.md                  |   7 +++
+ README.md                     |   5 +-
+ docs/design/explainer-site.md |   9 ++--
+ xtask/src/main.rs             |  19 ++++++--
+ xtask/src/site.rs             | 109 +++++++++++++++++++++++++++++++++++++++++-
+ 7 files changed, 142 insertions(+), 14 deletions(-)
+```
+
+(The diff was inlined for the verifier; it is elided in this record.)
+
+## Checks Athena ran on this tree
+
+- fmt: `cargo fmt --all --check` passed
+- clippy: `cargo clippy --all-targets --locked -- -D warnings` passed
+- test: `cargo test --locked` passed (639 tests ran)
+
+## Commands Bash may run
+
+- cargo build | check | test | clippy | fmt | run | metadata | tree
+- git status | diff | log | show
+- ls (paths inside your working directory)
+
+## Verdict
+
+End with the verdict as your structured output: one criteria entry per acceptance criterion, in order.

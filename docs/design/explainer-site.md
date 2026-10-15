@@ -6,8 +6,11 @@ published to GitHub Pages from this repository and runs locally with one command
 
 ## What is built
 
-- `cargo run -p xtask -- site [--out <dir>]` renders one self-contained file, `index.html`, into `site/` (or
-  `<dir>`). The directory is gitignored, so building never changes tracked files.
+- `cargo run -p xtask -- site [--out <dir>]` renders one self-contained file, `index.html`, into `site/` in
+  the cargo target directory (`$CARGO_TARGET_DIR`, else `target/`), or into `<dir>`. The default is outside
+  the work tree on purpose: a verifier builds the page to check it, and a write into its work tree would
+  change the snapshot it is verifying. The xtask enforces this: an `--out` inside the repository root,
+  other than under the target directory, is refused with an error. Unit tests cover both rules.
 - The only content source is `studies/firstmate-work-handling`: `pin.json`, `claims.json`, `model.json`,
   `rationales.json`, `findings.json` and `intro.json`. The renderer lives in `xtask/src/site.rs`.
 - The page has inline CSS, a viewport meta tag, a responsive grid, and a dark theme through
@@ -33,7 +36,7 @@ published to GitHub Pages from this repository and runs locally with one command
   `cargo run --locked -p xtask -- site`, then deploys with `actions/configure-pages`,
   `actions/upload-pages-artifact` and `actions/deploy-pages`. Permissions are `contents: read`,
   `pages: write` and `id-token: write`, and a `pages` concurrency group stops two deploys overlapping.
-  Because `index.html` sits at the root of the uploaded directory, the Pages URL serves it directly.
+  The workflow uploads `target/site`, the xtask default. Because `index.html` sits at the root of the uploaded directory, the Pages URL serves it directly.
 
 ## Alternatives considered
 
