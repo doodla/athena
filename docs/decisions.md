@@ -2308,3 +2308,28 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   fake agent and a stub pinner and holding drain back; a text file added to a study is covered; the reserve
   scales with the study count; the cost is in the spend; a landing outside the page sources cannot meet the
   target) and the unit tests in `drain.rs` and `pin.rs`. The live model was not run.
+
+## D101 · `athena close --allow-legacy-usage` lets unchanged, already committed usage records through
+
+- **Case:** The gate checks every record in the tree of each commit Athena builds, so one invocation record
+  that fails `usage records reconcile` blocks every later commit on its branch, including the commit that
+  closes its own job. That strands an interrupted job whose record was written before a usage fix:
+  `athena close` is refused, and `athena retry` does not take a dispatched job (D52 names `close` as the way
+  out).
+- **Decision:** `athena close <job> --why "..." --allow-legacy-usage` builds the closing commit under a gate
+  scope (`Scope::CommitLegacyUsage`) that excuses a failing invocation record only when its bytes are
+  identical in the parent commit. A new or altered invocation record, and every outcome, are still
+  reconciled in full. The closing outcome's totals are summed from the job's actual invocation records, so
+  the outcome reconciles. The command prints each record it let through, and the legacy record is not
+  touched. Without the flag the refusal stands and its message names the flag.
+- **Alternatives:** (a) Excuse already committed records automatically in every commit: it hides records
+  that need attention, and the user never sees that it happened. (b) Rewrite or delete the legacy record:
+  records are append-only (D06), and history would no longer show what was recorded. (c) Let `athena retry`
+  take dispatched jobs: it changes the meaning of a retry. (d) Loosen the rule for outcomes too: an
+  outcome's totals are computed by Athena, so a mismatch there is a real fault.
+- **Tradeoff:** The user has to pass the flag and read the printed list to know what was excused. The
+  history check still reports the legacy record at the tip, since the record is still wrong.
+- **Reversal cost:** Low: one gate scope, one flag.
+- **Provenance:** measured: `closing_a_job_with_a_legacy_usage_record_needs_the_flag_and_names_the_record`
+  in `crates/athena-cli/tests/lifecycle.rs` and `legacy_invocations_are_excused_but_new_records_are_not` in
+  `crates/athena-gate/src/reconcile.rs`.

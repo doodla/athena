@@ -7,6 +7,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- `athena close <job> --why "..." --allow-legacy-usage` closes an interrupted job whose already committed
+  invocation record fails `usage records reconcile` (for example, one written before the usage fix below), which
+  used to leave the job impossible to close or retry. The closing commit is gated under `Scope::CommitLegacyUsage`,
+  which excuses only invocation records unchanged from the parent commit; new invocation records and all outcomes
+  are still reconciled. The closing outcome's totals are summed from the job's real invocation records, the
+  legacy record is not modified, and the command prints each record it let through. Without the flag the refusal
+  message names the flag. See decision D101. Tests: `closing_a_job_with_a_legacy_usage_record_needs_the_flag_and_names_the_record`
+  (`crates/athena-cli/tests/lifecycle.rs`) and `legacy_invocations_are_excused_but_new_records_are_not`
+  (`crates/athena-gate/src/reconcile.rs`).
+
 ### Fixed
 
 - Locking a snapshot no longer fails intermittently with `Spawn(NotFound)`. The root cause: the recursive

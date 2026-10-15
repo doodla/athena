@@ -283,6 +283,10 @@ pub enum Scope {
     CommitMsg,
     /// Athena's own plumbing commits: every check.
     Commit,
+    /// As [`Scope::Commit`], except that an invocation record already committed in the parent and left
+    /// unchanged may fail reconciliation (records written before a usage fix). New or altered
+    /// invocation records and every outcome are still reconciled. Only an explicit close asks for it.
+    CommitLegacyUsage,
 }
 
 /// The gate: every check that applies in `scope`, judged by the parent's rules. One decision point.
@@ -308,7 +312,7 @@ pub fn gate(git: &Git, change: &Change, scope: Scope) -> Result<Vec<Violation>> 
             violations.extend(invariant::check(git, change, &judged, None)?);
             violations.extend(jobs::check(git, change, &judged, None)?);
         }
-        Scope::Commit => {
+        Scope::Commit | Scope::CommitLegacyUsage => {
             let commit = change
                 .commit
                 .as_deref()
@@ -322,7 +326,15 @@ pub fn gate(git: &Git, change: &Change, scope: Scope) -> Result<Vec<Violation>> 
             violations.extend(content::check(git, change, &judged, None)?);
             violations.extend(invariant::check(git, change, &judged, None)?);
             violations.extend(jobs::check(git, change, &judged, None)?);
-            violations.extend(reconcile::check_tree(git, &change.tree)?);
+            if scope == Scope::CommitLegacyUsage {
+                violations.extend(reconcile::check_tree_excusing_committed(
+                    git,
+                    &change.tree,
+                    change.parents.first().map(String::as_str),
+                )?);
+            } else {
+                violations.extend(reconcile::check_tree(git, &change.tree)?);
+            }
         }
     }
     Ok(violations)

@@ -112,6 +112,16 @@ impl Athena {
     ) -> Result<String> {
         self.committer().commit_records_with(files, message)
     }
+
+    /// [`Athena::commit_records_with`], gated under `scope`.
+    pub fn commit_records_in(
+        &self,
+        files: &dyn Fn(&str) -> Result<Vec<NewFile>>,
+        message: &str,
+        scope: Scope,
+    ) -> Result<String> {
+        self.committer().commit_records_in(files, message, scope)
+    }
 }
 
 impl Committer<'_> {
@@ -133,6 +143,18 @@ impl Committer<'_> {
         files: &[NewFile],
         message: &str,
     ) -> Result<String> {
+        self.build_commit_in(tree, parent, files, message, Scope::Commit)
+    }
+
+    /// [`Committer::build_commit`], gated under `scope`.
+    fn build_commit_in(
+        &self,
+        tree: &str,
+        parent: &str,
+        files: &[NewFile],
+        message: &str,
+        scope: Scope,
+    ) -> Result<String> {
         let index = TempIndex::from_tree(self.git, tree)?;
         let mut edits = Vec::new();
         for file in files {
@@ -147,11 +169,7 @@ impl Committer<'_> {
         let new_tree = index.write_tree()?;
         let sign = self.git.signs_commits()?;
         let commit = self.git.commit_tree(&new_tree, &[parent], message, sign)?;
-        let violations = gate(
-            self.git,
-            &Change::of_commit(self.git, &commit)?,
-            Scope::Commit,
-        )?;
+        let violations = gate(self.git, &Change::of_commit(self.git, &commit)?, scope)?;
         if !violations.is_empty() {
             let list = violations
                 .iter()
@@ -200,11 +218,21 @@ impl Committer<'_> {
         files: &dyn Fn(&str) -> Result<Vec<NewFile>>,
         message: &str,
     ) -> Result<String> {
+        self.commit_records_in(files, message, Scope::Commit)
+    }
+
+    /// [`Committer::commit_records_with`], gated under `scope`.
+    pub fn commit_records_in(
+        &self,
+        files: &dyn Fn(&str) -> Result<Vec<NewFile>>,
+        message: &str,
+        scope: Scope,
+    ) -> Result<String> {
         let _lock = self.state.lock_repository()?;
         for _attempt in 0..3 {
             let head = self.head()?;
             let files = files(&head)?;
-            let commit = self.build_commit(&head, &head, &files, message)?;
+            let commit = self.build_commit_in(&head, &head, &files, message, scope)?;
             match self.advance(&commit, &head)? {
                 Ok(()) => return Ok(commit),
                 Err(Refusal::Moved) => continue,

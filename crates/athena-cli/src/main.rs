@@ -224,6 +224,10 @@ Exit code: 0 only when the target was met; 2 for any other stop; 1 when Athena i
         job: String,
         #[arg(long)]
         why: String,
+        /// Let invocation records already committed that fail "usage records reconcile" (written
+        /// before a usage fix) through the closing commit; they are named and left unmodified.
+        #[arg(long)]
+        allow_legacy_usage: bool,
         #[arg(long)]
         json: bool,
     },
@@ -724,9 +728,14 @@ fn run(cli: Cli) -> Result<u8> {
             }
             Ok(if report.target_met() { 0 } else { 2 })
         }
-        Command::Close { job, why, json } => {
+        Command::Close {
+            job,
+            why,
+            allow_legacy_usage,
+            json,
+        } => {
             let athena = open(true)?;
-            let closed = athena.close(&job, &why, &Terminal)?;
+            let closed = athena.close_with(&job, &why, allow_legacy_usage, &Terminal)?;
             if json {
                 print_json(
                     &serde_json::json!({ "job": closed.job.as_str(), "state": closed.state.as_str(), "commit": closed.commit }),

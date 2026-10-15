@@ -187,6 +187,50 @@ pub fn check_tree(git: &Git, treeish: &str) -> Result<Vec<Violation>> {
     Ok(check_records(&RecordSet::load(git, treeish)?))
 }
 
+/// The per-invocation violations of records already committed in `parent`: the legacy records a close
+/// may let through. Outcome totals are never excused.
+pub fn committed_invocation_violations(git: &Git, parent: &str) -> Result<Vec<Violation>> {
+    let set = RecordSet::load(git, parent)?;
+    Ok(set
+        .records()
+        .filter_map(|(path, record)| match record {
+            AnyRecord::Invocation(inv) => Some(check_invocation(path, inv)),
+            _ => None,
+        })
+        .flatten()
+        .collect())
+}
+
+/// Like [`check_tree`], but a per-invocation violation at a path whose record is byte-identical in
+/// `parent` is excused: it was committed before this change. A new or altered invocation record, and
+/// every outcome, is still fully reconciled.
+pub fn check_tree_excusing_committed(
+    git: &Git,
+    treeish: &str,
+    parent: Option<&str>,
+) -> Result<Vec<Violation>> {
+    let tree = RecordSet::load(git, treeish)?;
+    let violations = check_records(&tree);
+    let Some(parent) = parent else {
+        return Ok(violations);
+    };
+    let before = RecordSet::load(git, parent)?;
+    // Invocation violations carry the invocation's path; outcome violations carry the outcome's.
+    let unchanged = |path: &str| {
+        before
+            .bytes(path)
+            .is_some_and(|old| tree.bytes(path) == Some(old))
+            && matches!(
+                before.records().find(|(p, _)| *p == path),
+                Some((_, AnyRecord::Invocation(_)))
+            )
+    };
+    Ok(violations
+        .into_iter()
+        .filter(|v| !v.path.as_deref().is_some_and(unchanged))
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,6 +347,57 @@ mod tests {
         let inv = invocation(0.41, 0.41);
         assert!(!check_outcome("o", &outcome(0.50, 1), &[&inv]).is_empty());
         assert!(!check_outcome("o", &outcome(0.41, 2), &[&inv]).is_empty());
+    }
+
+    fn put(git: &Git, dir: &tempfile::TempDir, records: &[AnyRecord], message: &str) -> String {
+        for r in records {
+            let path = r.canonical_path();
+            crate::testutil::write(dir.path(), &[(path.as_str(), r.to_json().as_str())]);
+        }
+        crate::testutil::commit(git, message)
+    }
+
+    #[test]
+    fn legacy_invocations_are_excused_but_new_records_are_not() {
+        // M15 (blocks): the legacy exemption covers only unchanged, already committed invocation records.
+        let (dir, git) = crate::testutil::repo(&[]);
+        let legacy = AnyRecord::Invocation(Box::new(invocation(0.41, 0.40)));
+        let parent = put(&git, &dir, &[legacy], "legacy\n\nAthena-Job: x\n");
+        let strict = |tree: &str| check_tree(&git, tree).unwrap();
+        let excusing =
+            |tree: &str| check_tree_excusing_committed(&git, tree, Some(&parent)).unwrap();
+
+        // The legacy record alone: the strict gate refuses it, the close scope lets it through.
+        assert_eq!(strict(&parent).len(), 1);
+        assert_eq!(excusing(&parent), vec![]);
+        assert_eq!(
+            committed_invocation_violations(&git, &parent)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // An outcome whose totals do not match the invocations is refused even so.
+        let bad_outcome = AnyRecord::Outcome(Box::new(outcome(9.0, 1)));
+        let child = put(&git, &dir, &[bad_outcome], "outcome\n\nAthena-Job: x\n");
+        assert_eq!(excusing(&child).len(), 1, "{:?}", excusing(&child));
+
+        // A new invocation record that fails reconciliation is refused even so.
+        let mut second = invocation(0.41, 0.40);
+        second.seq = 2;
+        let child = put(
+            &git,
+            &dir,
+            &[AnyRecord::Invocation(Box::new(second))],
+            "new\n\nAthena-Job: x\n",
+        );
+        assert!(
+            excusing(&child)
+                .iter()
+                .any(|v| v.path.as_deref().is_some_and(|p| p.contains("02-"))),
+            "{:?}",
+            excusing(&child)
+        );
     }
 
     #[test]
