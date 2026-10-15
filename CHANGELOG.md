@@ -71,6 +71,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   a work item for each repeated failure and for each thing it could not read, applies a change on a rung it
   may change by queueing a request, and queues anything above its limit as a proposal with evidence. The
   design note is `docs/design/roles-and-ladder.md`.
+- The explainer page is easier for a newcomer to follow: a cited plain-language lead-in under States,
+  Counters, Transitions and Why it is built this way; a one-line summary at the top of each transition card;
+  an explanation of the two deciders, agent and code; and glossary entries for the state names, the
+  places-held counter, exit 75, PR and session start. The text is in `studies/firstmate-work-handling/intro.json`
+  (`leadins`, `deciders`, `summaries`), not in `model.json`, whose schema rejects unknown fields. Each new
+  sentence cites claim ids, and the renderer rejects an uncited one or a transition with no summary.
 - The explainer page opens with a "Start here" section for readers new to firstmate: what it is, a walk-through
   of one piece of work, and a glossary of the page's terms. The text is in
   `studies/firstmate-work-handling/intro.json`; each sentence cites claim ids, and the renderer rejects an
