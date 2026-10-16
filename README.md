@@ -119,7 +119,8 @@ You no longer run, land and rate each item yourself. What it leaves to you:
   workflow); otherwise the report says the landing did not change the outcome. And all of the page's text
   (every study file but the pin and the rule results: claims, the intro with its transition and glossary,
   and the rest) must pass a model-backed check against the pinned source, which fails on a contradicted or
-  omitted statement and names it. Each study model's self-consistency check runs first, as a floor.
+  omitted statement, or on a model whose behavior differs from the code or a page that contradicts itself,
+  and names it. Each study model's self-consistency check runs first, as a floor.
 
 **Budget.** Before every model call (a reading, a run, the re-reading of a retry, a rating, the source check)
 `drain` checks that the money already spent, as the calls actually cost, plus that call's cap from

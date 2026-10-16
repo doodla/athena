@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The drain's page source check now judges the study's model against the pinned code. The checker traces each
+  state, transition, counter and rule of `model.json` through the source and compares the page's rules with
+  each other, and reports a new problem kind `behavior` that fails the check and holds back "target met". Why:
+  the check scored the page 4 against an independent reader's 3 four times, and the reader found a reopened
+  item shown as finished (the source returns it to Queued), a counter that missed a failed close freeing the
+  place, and a red-PR rule contradicting a waiver. Prompt `source-check.prompt` is now version 2. See D100.
 - The firstmate study (`studies/firstmate-work-handling`) now records, each with a cited path and quote from the
   pinned source: teardown reopening a backlog item that is still an open captain call instead of closing it;
   firstmate merging green work itself when yolo is on, and not when it is off; that only a recorded PR or a
