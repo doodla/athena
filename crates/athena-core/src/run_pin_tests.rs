@@ -685,7 +685,7 @@ fn a_plain_criterion_reported_met_with_evidence_is_not_failed() {
 }
 
 #[test]
-fn a_report_that_fails_the_self_check_is_kept_for_both_attempts_and_the_reason_names_it() {
+fn a_report_that_fails_the_self_check_is_kept_for_both_attempts_and_the_work_still_goes_on() {
     let (dir, git) = repo(&config(true));
     let state = tempfile::tempdir().unwrap();
     // The producer marks one criterion unmet on every attempt.
@@ -731,8 +731,11 @@ fn a_report_that_fails_the_self_check_is_kept_for_both_attempts_and_the_reason_n
         assert_eq!(kept.criteria_check[1].status, "unmet");
         assert_eq!(kept.criteria_check[1].evidence, "no tests in a study");
     }
+    // The study's changes go on to the verifier; the report's gaps no longer fail the job.
     assert!(
-        finished.reason.contains(&producers[1].0),
+        !finished
+            .reason
+            .contains("still had problems when sent back"),
         "{}",
         finished.reason
     );

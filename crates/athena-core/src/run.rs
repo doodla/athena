@@ -613,6 +613,9 @@ impl Athena {
         let enforce_tests = !ctx.capability.pins_repo();
         let mut attempt_brief = brief.to_string();
         let mut send_backs = 0;
+        // What the last report still lacked after the send-back, and where that report is kept.
+        let mut report_gaps: Vec<String> = Vec::new();
+        let mut report_kept_in = String::new();
         let report = loop {
             let spec = self.agent_spec(
                 jc,
@@ -712,14 +715,15 @@ impl Athena {
                 )
             };
             if send_backs >= PRODUCER_SEND_BACKS {
-                closing.happened = self.failure(
-                    ctx,
-                    &format!(
-                        "the producer's report still had problems when sent back: {}; the report is kept in {kept}",
-                        problems.join("; ")
-                    ),
-                );
-                return Ok(closing);
+                // The work may be finished even though the report is not: the verifier judges it. A run
+                // that changed nothing still fails, below, after the loop.
+                ctx.ui.line(&format!(
+                    "producer   report still incomplete after the send-back: {}; the verifier will judge it",
+                    problems.join("; ")
+                ));
+                report_gaps = problems;
+                report_kept_in = kept;
+                break Some(report);
             }
             send_backs += 1;
             ctx.ui
@@ -740,7 +744,9 @@ impl Athena {
                      Your edits are still in your working directory. Fix the work for each criterion below, \
                      then report every acceptance criterion in criteria_check, with its text exactly as given \
                      (without its number or kind tag), its status and your evidence. This is the only send-back: \
-                     a criterion still unmet or missing after it fails the job.\n\nCriteria not met or not reported:\n\n",
+                     if your changes are still in place afterwards, they go to the verifier with the criteria \
+                     your report still leaves unmet or unreported flagged, and the verifier judges them. \
+                     A run that leaves no change fails.\n\nCriteria not met or not reported:\n\n",
                 );
                 for criterion in &unmet {
                     sent_back.push_str(&format!("- {criterion}\n"));
@@ -769,7 +775,15 @@ impl Athena {
         };
         if changes.is_empty() {
             closing.candidate = Some(candidate);
-            closing.happened = self.failure(ctx, "the producer made no change");
+            let reason = if report_gaps.is_empty() {
+                "the producer made no change".to_string()
+            } else {
+                format!(
+                    "the producer made no change, and its report still had problems when sent back: {}; the report is kept in {report_kept_in}",
+                    report_gaps.join("; ")
+                )
+            };
+            closing.happened = self.failure(ctx, &reason);
             return Ok(closing);
         }
         let new_blobs: Vec<String> = changes
@@ -966,7 +980,7 @@ impl Athena {
             stat: vsnap.git().run(["diff", "--stat", "HEAD~1", "HEAD"])?,
             diff: vsnap.git().run(["diff", "HEAD~1", "HEAD"])?,
         };
-        let inputs = VerifierInputs {
+        let mut inputs = VerifierInputs {
             job: id.as_str().to_string(),
             request: ctx
                 .job
@@ -993,6 +1007,21 @@ impl Athena {
             tool_config_from_base: tool_config_from_base.clone(),
             pin: ctx.job.job.as_ref().and_then(|j| j.pin.clone()),
         };
+        // What the producer's report still lacked after the send-back goes to the verifier as one more
+        // entry under the checks. It is not a check and fails nothing; it names what the self-check
+        // could not confirm, so the verifier judges those items itself. Only the gaps are passed, not the report.
+        if !report_gaps.is_empty() {
+            inputs.checks.push(CheckResultView {
+                name: "producer-report-gaps".into(),
+                command: "not a check".into(),
+                passed: true,
+                detail: format!(
+                    "the producer's report was still incomplete after its send-back, so these were not confirmed \
+                     by it; judge them yourself and run `{FULL_TEST_COMMAND}` if a test result is missing: {}",
+                    report_gaps.join("; ")
+                ),
+            });
+        }
         let mut verifier_invocation = None;
         let mut verdict_output: Option<VerdictOutput> = None;
         let mut commands_run = Vec::new();
