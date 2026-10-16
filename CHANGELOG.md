@@ -9,6 +9,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- Planning no longer fills fields by default. Root cause: plan entries took the first line of an unread request
+  as its acceptance and defaulted the rung to Implementation, so the refusal gate almost never fired. Now
+  acceptance comes only from explicit bullets or a reading's criteria, the rung from a proposal or from
+  evidence in the request or reading (else flagged), and open questions are filled by lookup (a touched path
+  that does not exist, a referenced job not in the records). A flagged item names what is missing and why.
+  Drain's planning pass reads an unread request whose own words leave the plan incomplete (within the budget
+  and job limit) and plans it again from the reading, so a vague request is refused with a reason and a
+  specifiable one runs, instead of unread requests being refused and left queued. The pass is deterministic
+  code, not a model call; `plan::trace` and `GapLog` are still not wired to the records. Touched outside
+  `plan.rs`, `reading.rs` and `drain.rs`: `display.rs` (refusal reason, `athena plan` output) and `main.rs`
+  (the `plan` command and drain's help). See D105.
 - `athena drain` plans before it works: the open requests are fleshed out (goal, ladder rung, acceptance, open
   questions, dependencies, touched paths) and planned together, and drain works them in plan order (higher rung
   first, a dependent after what it needs, age as the tiebreak) instead of oldest first. The report shows the
@@ -21,6 +32,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `athena plan [--budget USD] [--json]` prints the coordinated plan without working anything: order, parallel
+  groups, each item's goal, rung, acceptance, open questions, dependencies and touched paths, then the flagged
+  items with reasons; it says so when nothing is open. It runs the same planning pass as drain, including the
+  reading of underspecified unread requests, capped by `--budget` (default $2; 0 reads nothing).
 - `docs/design/ci-routing.md`: a design, planned first, for moving checks to CI with per-job routing, warm
   caches, one check run per commit SHA reused by the verifier, unchanged verification strength, and wall time
   per verified result measured before and after. Design only; review 1 is requested

@@ -210,6 +210,97 @@ pub fn land_pr(report: &athena_core::gh::PrReport) -> String {
     out
 }
 
+/// What `athena plan` prints: the order, the parallel groups, each planned item's goal, rung, acceptance, open
+/// questions, dependencies and touched paths, then the items held back with the reason. With nothing open it
+/// says so.
+pub fn plan(report: &crate::drain::PlanReport) -> String {
+    let mut out = String::new();
+    if report.entries.is_empty() {
+        out.push_str("plan        nothing is open: no queued request is waiting to be planned\n");
+        return out;
+    }
+    let list = |items: &[String]| {
+        if items.is_empty() {
+            "none".to_string()
+        } else {
+            items.join("; ")
+        }
+    };
+    let p = &report.plan;
+    let _ = writeln!(
+        out,
+        "plan        {} open, {} planned, {} held back",
+        report.entries.len(),
+        p.order.len(),
+        p.refused.len()
+    );
+    let _ = writeln!(out, "order       {}", list(&p.order).replace("; ", " → "));
+    for (n, group) in p.groups.iter().enumerate() {
+        let _ = writeln!(
+            out,
+            "group {}     {}{}",
+            n + 1,
+            group.join(", "),
+            if group.len() > 1 {
+                " (could run in parallel)"
+            } else {
+                ""
+            }
+        );
+    }
+    if !p.cyclic.is_empty() {
+        let _ = writeln!(
+            out,
+            "cyclic      {} wait on each other",
+            p.cyclic.join(", ")
+        );
+    }
+    let entry_lines = |out: &mut String, e: &athena_core::plan::PlanEntry| {
+        let _ = writeln!(out, "item        {} · {}", e.id, e.title);
+        let _ = writeln!(
+            out,
+            "  goal        {}",
+            if e.goal.is_empty() { "none" } else { &e.goal }
+        );
+        let _ = writeln!(
+            out,
+            "  rung        {}",
+            e.rung.map_or("none", athena_data::roles::Ladder::as_str)
+        );
+        let _ = writeln!(out, "  acceptance  {}", list(&e.acceptance));
+        let _ = writeln!(out, "  questions   {}", list(&e.open_questions));
+        let _ = writeln!(out, "  depends on  {}", list(&e.depends_on));
+        let _ = writeln!(out, "  touches     {}", list(&e.touches));
+    };
+    for id in &p.order {
+        if let Some(e) = report.entries.iter().find(|e| &e.id == id) {
+            entry_lines(&mut out, e);
+        }
+    }
+    for r in &p.refused {
+        if let Some(e) = report.entries.iter().find(|e| e.id == r.id) {
+            entry_lines(&mut out, e);
+        }
+        let _ = writeln!(
+            out,
+            "flagged     {} · {} lacks {}: {}",
+            r.id,
+            r.title,
+            r.missing.join(", "),
+            r.reason
+        );
+    }
+    for note in &report.notes {
+        let _ = writeln!(out, "note        {note}");
+    }
+    let _ = writeln!(
+        out,
+        "read        ${:.2} spent reading unread requests; nothing was run",
+        report.spent_usd
+    );
+    out
+}
+
 /// What `athena drain` prints: why it stopped, each job and whether it landed, the money, the rating against
 /// the target and whether it was taken after a landing, and what is still queued or waiting for a person.
 pub fn drain(report: &crate::drain::Report) -> String {
@@ -304,13 +395,7 @@ pub fn drain(report: &crate::drain::Report) -> String {
         );
     }
     for r in &report.refused {
-        let _ = writeln!(
-            out,
-            "refused     {} · {}: the plan lacks {}",
-            r.id,
-            r.title,
-            r.missing.join(", ")
-        );
+        let _ = writeln!(out, "refused     {} · {}: {}", r.id, r.title, r.reason);
     }
     for note in &report.notes {
         let _ = writeln!(out, "note        {note}");

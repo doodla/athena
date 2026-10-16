@@ -7,6 +7,7 @@
 
 mod common;
 
+use athena_agent::fake::Script;
 use athena_cli::display;
 use athena_cli::drain::{
     self, Approval, Caps, Check, Item, Lander, Landing, Limits, QueueView, Rate, Read, ReadOf,
@@ -60,6 +61,8 @@ struct Stub {
     unrelated: Vec<&'static str>,
     /// Plan entries of the open requests, oldest first; empty means no planning data.
     plan: Vec<PlanEntry>,
+    /// Plan entries as they stand once the item has been read (what a reading adds to the request's words).
+    after_read: Vec<PlanEntry>,
     /// When set, a stop is asked for as soon as this job is run (the user types `athena drain-stop` mid-run).
     stop_when_running: Option<&'static str>,
     stop: Cell<bool>,
@@ -99,6 +102,9 @@ impl Steps for Stub {
     }
     fn stop_requested(&self) -> bool {
         self.stop.get()
+    }
+    fn plan_entry(&self, job: &str) -> Option<PlanEntry> {
+        self.after_read.iter().find(|e| e.id == job).cloned()
     }
     fn approve(&self, proposal: &str) -> Approval {
         self.log.borrow_mut().push(format!("approve {proposal}"));
@@ -264,7 +270,13 @@ fn an_item_whose_plan_lacks_goal_rung_or_acceptance_is_not_worked_and_is_reporte
         ..Stub::default()
     };
     let report = drain::drain(&stub, limits(9.0), &Quiet).unwrap();
-    assert_eq!(stub.log(), ["read d", "run d", "land d", "rate"]);
+    // The pass reads the three underspecified items (the stub's readings add nothing), then d is worked.
+    assert_eq!(
+        stub.log(),
+        [
+            "read a", "read b", "read c", "read d", "run d", "land d", "rate"
+        ]
+    );
     let refused: Vec<(String, Vec<String>)> = report
         .refused
         .iter()
@@ -282,6 +294,132 @@ fn an_item_whose_plan_lacks_goal_rung_or_acceptance_is_not_worked_and_is_reporte
     assert_eq!(queued, ["a", "b", "c"], "they stay queued");
     let text = display::drain(&report);
     assert!(text.contains("the plan lacks acceptance"), "{text}");
+}
+
+/// What planning finds in an unread "make it better": a goal and nothing else.
+fn vague(id: &str) -> PlanEntry {
+    PlanEntry {
+        goal: "make it better".into(),
+        ..PlanEntry::bare(id, "make it better")
+    }
+}
+
+#[test]
+fn an_unread_vague_request_is_read_by_the_pass_then_refused_with_a_reason_and_the_specified_one_runs()
+ {
+    let stub = Stub {
+        items: vec!["vague", "spec"],
+        outcomes: passing(),
+        ratings: RefCell::new(vec![1]),
+        plan: vec![
+            vague("vague"),
+            planned("spec", Ladder::Implementation, &["src/a.rs"], &[]),
+        ],
+        // The reading adds nothing to the vague request.
+        after_read: vec![vague("vague")],
+        ..Stub::default()
+    };
+    let report = drain::drain(&stub, limits(9.0), &Quiet).unwrap();
+    // The vague item was read (not refused merely for being unread) and never run; the specified one ran.
+    assert_eq!(
+        stub.log(),
+        ["read vague", "read spec", "run spec", "land spec", "rate"]
+    );
+    assert_eq!(report.refused.len(), 1);
+    assert_eq!(report.refused[0].id, "vague");
+    assert_eq!(report.refused[0].missing, ["ladder rung", "acceptance"]);
+    assert!(report.refused[0].reason.contains("acceptance"));
+    assert_eq!(report.jobs.len(), 1);
+    assert_eq!(report.jobs[0].item, "spec");
+    assert_eq!(report.landed, 1);
+    let text = display::drain(&report);
+    assert!(text.contains("refused     vague"), "{text}");
+    assert!(text.contains("is not worked"), "{text}");
+}
+
+#[test]
+fn an_unread_but_specifiable_request_is_read_once_and_then_runs() {
+    let stub = Stub {
+        items: vec!["x"],
+        outcomes: passing(),
+        ratings: RefCell::new(vec![1]),
+        plan: vec![vague("x")],
+        // Its reading supplies the goal, the rung and the acceptance.
+        after_read: vec![planned("x", Ladder::Implementation, &["src/x.rs"], &[])],
+        ..Stub::default()
+    };
+    let report = drain::drain(&stub, limits(9.0), &Quiet).unwrap();
+    assert_eq!(
+        stub.log(),
+        ["read x", "run x", "land x", "rate"],
+        "read by the pass, run without a second reading"
+    );
+    assert!(report.refused.is_empty(), "{:?}", report.refused);
+    assert_eq!(report.landed, 1);
+    // The pass's reading is charged to the job: 0.1 read + 0.5 run.
+    assert!((report.jobs[0].cost_usd - 0.6).abs() < 1e-9);
+}
+
+#[test]
+fn the_pass_reads_only_within_the_budget() {
+    let stub = Stub {
+        items: vec!["vague"],
+        plan: vec![vague("vague")],
+        ..Stub::default()
+    };
+    // A read (cap 0.2) plus a run (cap 1.0) does not fit 1.0.
+    let report = drain::drain(&stub, limits(1.0), &Quiet).unwrap();
+    assert!(stub.log().is_empty(), "{:?}", stub.log());
+    assert_eq!(report.refused.len(), 1);
+    assert!(report.notes.iter().any(|n| n.contains("no room")));
+}
+
+#[test]
+fn plan_prints_order_groups_details_and_flagged_items_and_says_so_when_nothing_is_open() {
+    let mut a = planned("a", Ladder::Implementation, &["src/a.rs"], &[]);
+    a.open_questions = vec!["the touched path src/a.rs does not exist at the base commit".into()];
+    let stub = Stub {
+        items: vec!["a", "b", "vague"],
+        plan: vec![
+            a,
+            planned("b", Ladder::DesignDecisions, &["docs/b.md"], &["a"]),
+            vague("vague"),
+        ],
+        ..Stub::default()
+    };
+    let report = drain::plan(&stub, 5.0, &Quiet).unwrap();
+    assert_eq!(report.plan.order, ["a", "b"]);
+    assert_eq!(
+        stub.log(),
+        ["read vague"],
+        "only the underspecified one is read"
+    );
+    let text = display::plan(&report);
+    for needle in [
+        "order       a → b",
+        "group 1     a",
+        "group 2     b",
+        "goal        goal of a",
+        "rung        implementation",
+        "acceptance  a works",
+        "questions   the touched path src/a.rs does not exist",
+        "depends on  a",
+        "touches     docs/b.md",
+        "flagged     vague · make it better lacks ladder rung, acceptance",
+    ] {
+        assert!(text.contains(needle), "{needle}\n{text}");
+    }
+    let none = drain::plan(&Stub::default(), 5.0, &Quiet).unwrap();
+    assert!(display::plan(&none).contains("nothing is open"));
+    // With no budget nothing is read; the unread item is flagged all the same.
+    let unread = Stub {
+        items: vec!["vague"],
+        plan: vec![vague("vague")],
+        ..Stub::default()
+    };
+    let report = drain::plan(&unread, 0.0, &Quiet).unwrap();
+    assert!(unread.log().is_empty());
+    assert_eq!(report.plan.refused.len(), 1);
 }
 
 #[test]
@@ -843,6 +981,135 @@ fn a_request_deferred_with_ask_later_is_listed_and_worked_like_a_steward_item() 
         records.jobs[deferred.as_str()].state().name(),
         "queued",
         "the deferred request was read and run"
+    );
+}
+
+/// The rated scenario, except that the reader declines any request that says "make it better".
+fn declining_vague(scenario: Scenario) -> Script {
+    let inner = scenario.script();
+    Box::new(move |spec| {
+        if spec.role == Role::Reader && spec.user_prompt.contains("make it better") {
+            let mut declined = reading(&[], &[]);
+            declined["capability"] = json!(null);
+            declined["decline_reason"] = json!("it does not say what to improve");
+            declined["title"] = json!("Make it better");
+            declined["summary"] = json!("Make something better.");
+            declined["defaults_applied"] = json!([]);
+            return athena_agent::fake::FakeTurn::output(declined);
+        }
+        inner(spec)
+    })
+}
+
+#[test]
+fn real_steps_read_an_unread_vague_request_and_refuse_it_while_the_specified_one_runs() {
+    let fx = Fixture::new();
+    let scenario = rated_scenario();
+    let invocations = scenario.invocations.clone();
+    let athena = fx.athena(declining_vague(scenario));
+    let (vague_job, _) = athena.queue("make it better").unwrap();
+    let (spec_job, _) = athena
+        .queue(
+            "Add the demo study to studies/demo/\n- the demo study has a pin, claims and an intro",
+        )
+        .unwrap();
+
+    let lander = RecordingLander::default();
+    let steps = RealSteps {
+        athena: &athena,
+        ui: &Quiet,
+        page: &StubPage,
+        lander: &lander,
+    };
+    // Before the pass: the vague request has a goal and nothing else.
+    let queue = steps.queue().unwrap();
+    let vague_entry = queue
+        .plan
+        .iter()
+        .find(|e| e.id == vague_job.as_str())
+        .unwrap();
+    assert_eq!(vague_entry.missing(), ["ladder rung", "acceptance"]);
+
+    let report = drain::drain(&steps, limits(50.0), &Quiet).unwrap();
+    let text = display::drain(&report);
+    // The vague request was read by the pass, not refused for being unread...
+    let readers = invocations
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| **r == Role::Reader)
+        .count();
+    // (The declining reader of the vague request answers outside the scenario, so only the other is counted.)
+    assert_eq!(readers, 1, "the specified request was read once: {text}");
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    assert_eq!(records.jobs[vague_job.as_str()].readings.len(), 1);
+    // ...then refused with a reason, and never run as a job.
+    assert_eq!(report.refused.len(), 1, "{text}");
+    assert_eq!(report.refused[0].id, vague_job.as_str());
+    assert!(report.refused[0].reason.contains("acceptance"), "{text}");
+    assert!(report.jobs.iter().all(|j| j.item != vague_job.as_str()));
+    assert!(
+        records.jobs[vague_job.as_str()].job.is_none(),
+        "not dispatched"
+    );
+    // The specified request ran and landed.
+    assert_eq!(report.landed, 1, "{text}");
+    assert_eq!(report.jobs.len(), 1);
+    assert_eq!(report.jobs[0].item, spec_job.as_str());
+}
+
+#[test]
+fn real_steps_read_an_unread_but_specifiable_request_once_and_then_run_it() {
+    let fx = Fixture::new();
+    let scenario = rated_scenario();
+    let invocations = scenario.invocations.clone();
+    let athena = fx.athena(scenario.script());
+    // No bullets: its own words give no acceptance, so the pass reads it; the reading gives some.
+    let (job, _) = athena
+        .queue("Add the demo study to the studies directory.")
+        .unwrap();
+    let steps = RealSteps {
+        athena: &athena,
+        ui: &Quiet,
+        page: &StubPage,
+        lander: &RecordingLander::default(),
+    };
+    let report = drain::drain(&steps, limits(50.0), &Quiet).unwrap();
+    let text = display::drain(&report);
+    assert!(report.refused.is_empty(), "{text}");
+    assert_eq!(report.landed, 1, "{text}");
+    assert_eq!(report.jobs[0].item, job.as_str());
+    let readers = invocations
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| **r == Role::Reader)
+        .count();
+    assert_eq!(readers, 1, "read by the pass, not again to run");
+}
+
+#[test]
+fn the_plan_of_a_read_job_names_a_missing_path_and_an_unresolved_referenced_job() {
+    let fx = Fixture::new();
+    let athena = fx.athena(Scenario::default().script());
+    let (job, _) = athena
+        .queue("Edit crates/gone/lib.rs and README.md after 20261012-075824-1x28\n- it is edited")
+        .unwrap();
+    let steps = RealSteps {
+        athena: &athena,
+        ui: &Quiet,
+        page: &StubPage,
+        lander: &RecordingLander::default(),
+    };
+    let queue = steps.queue().unwrap();
+    let entry = queue.plan.iter().find(|e| e.id == job.as_str()).unwrap();
+    assert_eq!(entry.rung, Some(Ladder::Implementation));
+    assert_eq!(
+        entry.open_questions,
+        [
+            "the touched path crates/gone/lib.rs does not exist at the base commit",
+            "the referenced job 20261012-075824-1x28 is not among the records"
+        ]
     );
 }
 

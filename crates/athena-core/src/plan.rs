@@ -11,7 +11,11 @@
 //!   never grouped with another, because nothing is known about what it changes. The drain still runs one job
 //!   at a time, in plan order; running a group concurrently is follow-up work.
 //! - **Gate.** An item whose plan has no goal, no ladder rung or no acceptance is refused for design or code
-//!   ([`PlanEntry::missing`], [`Plan::refused`]), so planning cannot be skipped.
+//!   ([`PlanEntry::missing`], [`Plan::refused`]), so planning cannot be skipped. Nothing is filled in by
+//!   default: acceptance comes only from explicit bullets in the request or from a reading's criteria, and
+//!   the rung only from the caller or from evidence in the request or reading
+//!   (`reading::plan_entry`). A vague request such as "make it better" therefore has neither, is flagged
+//!   with the missing fields named, and is not in [`Plan::order`].
 //!
 //! The second half of the module is the first slice of the plan-stage audit: every logged gap (an
 //! intervention, an introspection, a rejection, a rating) is traced to the planning stage that let it
@@ -77,7 +81,27 @@ impl PlanEntry {
 pub struct Refusal {
     pub id: String,
     pub title: String,
+    /// The fields the plan lacks: `goal`, `ladder rung`, `acceptance` (or `reading`, when the request could not
+    /// be read).
     pub missing: Vec<String>,
+    /// Why the item is held back, in a sentence.
+    pub reason: String,
+}
+
+impl Refusal {
+    /// A refusal for an incomplete plan.
+    pub fn lacking(id: &str, title: &str, missing: Vec<String>) -> Refusal {
+        let reason = format!(
+            "the plan lacks {}; say it in the request (acceptance as bullets, the files it changes) and plan again",
+            missing.join(", ")
+        );
+        Refusal {
+            id: id.into(),
+            title: title.into(),
+            missing,
+            reason,
+        }
+    }
 }
 
 /// The coordinated plan of all open requests.
@@ -124,11 +148,11 @@ impl Plan {
             if missing.is_empty() {
                 pending.push((age, entry));
             } else {
-                plan.refused.push(Refusal {
-                    id: entry.id.clone(),
-                    title: entry.title.clone(),
-                    missing: missing.into_iter().map(String::from).collect(),
-                });
+                plan.refused.push(Refusal::lacking(
+                    &entry.id,
+                    &entry.title,
+                    missing.into_iter().map(String::from).collect(),
+                ));
             }
         }
         let known: Vec<&str> = pending.iter().map(|(_, e)| e.id.as_str()).collect();
@@ -385,6 +409,42 @@ mod tests {
         assert_eq!(plan.order, ["ok"]);
         let lacks: Vec<_> = plan.refused.iter().map(|r| r.missing.clone()).collect();
         assert_eq!(lacks, [["goal"], ["ladder rung"], ["acceptance"]]);
+    }
+
+    #[test]
+    fn a_vague_entry_is_flagged_with_its_missing_fields_and_left_out_of_the_order() {
+        let (_, low) = rungs();
+        // What reading::plan_entry gives "make it better": a goal and nothing else.
+        let vague = PlanEntry {
+            goal: "make it better".into(),
+            ..PlanEntry::bare("vague", "make it better")
+        };
+        let plan = Plan::build(&[vague, entry("ok", low, &["ok.md"], &[])]);
+        assert_eq!(plan.order, ["ok"]);
+        assert!(!plan.order.contains(&"vague".to_string()));
+        assert_eq!(plan.refused.len(), 1);
+        assert_eq!(plan.refused[0].missing, ["ladder rung", "acceptance"]);
+        assert!(plan.refused[0].reason.contains("acceptance"));
+    }
+
+    #[test]
+    fn two_items_naming_the_same_path_are_in_different_groups_and_disjoint_ones_share_one() {
+        let (_, low) = rungs();
+        let plan = Plan::build(&[
+            entry("one", low, &["crates/x/src/lib.rs"], &[]),
+            entry("two", low, &["crates/x/src/lib.rs"], &[]),
+            entry("three", low, &["docs/a.md"], &[]),
+            entry("four", low, &["README.md"], &[]),
+        ]);
+        let group_of = |id: &str| {
+            plan.groups
+                .iter()
+                .position(|g| g.iter().any(|i| i == id))
+                .unwrap()
+        };
+        assert_ne!(group_of("one"), group_of("two"));
+        assert_eq!(group_of("one"), group_of("three"));
+        assert_eq!(group_of("three"), group_of("four"));
     }
 
     #[test]

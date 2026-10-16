@@ -2430,11 +2430,39 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   (c) Keep oldest first and only add a priority field: does not order by dependency or find parallel work.
   (d) Stop by signal: kills the job in progress, which is what the stop must not do.
 - **Tradeoff:** Before a request is read its plan rests on its own words, so a vague request is planned loosely
-  until the reading; the refusal gate is weak for unread requests (the first line stands in as acceptance), and
-  strong for read ones. A stop is only seen between jobs, so a long job delays it.
+  until the reading. A stop is only seen between jobs, so a long job delays it. (Revised below: the first
+  version let the first line stand in as acceptance, which left the gate nearly silent.)
+- **Revision (planning pass reads, nothing is defaulted).** The first version defaulted acceptance to the
+  request's first line and the rung to Implementation, so the refusal gate almost never fired: a request like
+  "make it better" passed. Root cause: defaulting at plan-entry construction. Now `reading::plan_entry` fills
+  nothing by default: acceptance is only explicit bullets or a reading's criteria (a declined reading has none);
+  the rung is the proposal's rung, else inferred from evidence (a phrase naming a higher rung; for
+  Implementation a touched path, a reading for the `change` capability, or a word such as test, docs, fix), else
+  missing; open questions are filled by lookup (a touched path absent at the base commit, except a file a
+  reading creates; a referenced job id not in the records). A flagged item is not in `Plan::order`, and the
+  refusal names the missing fields and gives a reason. The pass is deterministic code and calls no model.
+  Refusing an unread item for being unread would leave it queued forever, so the pass first reads each unread
+  request whose own words leave the plan incomplete, within the budget and job limit, and plans it again from
+  the reading: a specifiable request is then run without a second reading, a vague one is refused with a reason.
+  Unread requests that are already complete from their own words are read when worked, in plan order, as before.
+  `athena plan` runs the same pass (`--budget` caps the reading; 0 reads nothing) and prints the plan.
+- **Tradeoff of the revision:** The gate now fires on vague requests, but only as well as the heuristics: the
+  rung inference is keyword and path evidence, so an unusual wording is flagged and needs a bullet or a
+  correction; a reading from the model can still invent criteria for a vague request, which the gate cannot
+  see. Reading costs money for requests that end up refused, and a refused request has been read, so it leaves
+  the queue (it stays visible as a read job; `athena correct` answers it). The refusal is reported by drain, not
+  yet written to a record. The plan-stage audit (`plan::trace`, `GapLog`) is still not wired to the records.
+- **Files touched beyond `plan.rs`, `reading.rs`, `drain.rs`:** `display.rs` (the refusal reason and the
+  `athena plan` output), `main.rs` (the `plan` command, drain's help) and the docs (README, architecture,
+  changelog).
 - **Reversal cost:** Low: drain falls back to the old order when a queue view carries no plan entries; remove the
   file check to drop the stop.
 - **Provenance:** read: `crates/athena-cli/src/drain.rs` and `reading.rs` before the change; measured: the drain
   tests `items_are_worked_in_plan_order_not_oldest_first`,
-  `an_item_whose_plan_lacks_goal_rung_or_acceptance_is_not_worked_and_is_reported` and
-  `a_stop_asked_for_mid_run_finishes_the_current_job_and_starts_no_other`, and the unit tests in `plan.rs`.
+  `an_item_whose_plan_lacks_goal_rung_or_acceptance_is_not_worked_and_is_reported`,
+  `an_unread_vague_request_is_read_by_the_pass_then_refused_with_a_reason_and_the_specified_one_runs`,
+  `real_steps_read_an_unread_vague_request_and_refuse_it_while_the_specified_one_runs`,
+  `real_steps_read_an_unread_but_specifiable_request_once_and_then_run_it`,
+  `plan_prints_order_groups_details_and_flagged_items_and_says_so_when_nothing_is_open` and
+  `a_stop_asked_for_mid_run_finishes_the_current_job_and_starts_no_other`, and the unit tests in `plan.rs` and
+  `reading.rs`.

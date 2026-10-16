@@ -210,8 +210,12 @@ Order: planning comes first. Every open request is fleshed out (goal, requiremen
 open questions, dependencies, the paths it touches) and all of them are planned together. Drain works the \
 items in plan order (higher rung first, a dependent after what it needs, age as the tiebreak), not oldest \
 first, and the report shows the plan's groups: items in one group have no dependency and touch disjoint paths, \
-so they could run in parallel; drain still runs one job at a time. An item whose plan lacks a goal, a rung or \
-acceptance is not worked and is reported.
+so they could run in parallel; drain still runs one job at a time. Nothing is defaulted into a plan: acceptance \
+comes only from explicit bullets in the request or a reading's criteria, and the rung from the proposal that made \
+the job or from evidence in the request. The planning pass is deterministic code, not a model call. An unread \
+request whose own words leave the plan incomplete is read first (within the budget) and planned again from its \
+reading. An item whose plan still lacks a goal, a rung or acceptance is not worked and is reported with the \
+reason. `athena plan` prints this plan without working anything.
 
 Exit code: 0 only when the target was met; 2 for any other stop; 1 when Athena itself erred.")]
     Drain {
@@ -224,6 +228,18 @@ Exit code: 0 only when the target was met; 2 for any other stop; 1 when Athena i
         /// The most jobs to start; a retry of an item is a job.
         #[arg(long, value_name = "N", default_value_t = drain::DEFAULT_MAX_JOBS, value_parser = clap::value_parser!(u32).range(1..))]
         job_limit: u32,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print the coordinated plan of the open requests without working any: the order, the parallel groups, and
+    /// for each item its goal, requirements-ladder rung, acceptance, open questions, dependencies and touched
+    /// paths, then the items held back, each with its reason. The planning pass is deterministic code, not a
+    /// model call. It does read unread requests whose own words leave the plan incomplete (a reading is a model
+    /// call, capped by `[budget] reader_usd` each and by --budget in all); `--budget 0` reads nothing.
+    Plan {
+        /// The most to spend reading unread requests, in US dollars.
+        #[arg(long, value_name = "USD", default_value_t = 2.0, value_parser = parse_read_budget)]
+        budget: f64,
         #[arg(long)]
         json: bool,
     },
@@ -374,6 +390,14 @@ fn parse_budget(text: &str) -> Result<f64, String> {
     match text.trim().trim_start_matches('$').parse::<f64>() {
         Ok(value) if value.is_finite() && value > 0.0 => Ok(value),
         _ => Err(format!("{text:?} is not an amount above zero")),
+    }
+}
+
+/// Like `parse_budget`, but zero is allowed: it means "read nothing".
+fn parse_read_budget(text: &str) -> Result<f64, String> {
+    match text.trim().trim_start_matches('$').parse::<f64>() {
+        Ok(value) if value.is_finite() && value >= 0.0 => Ok(value),
+        _ => Err(format!("{text:?} is not an amount of zero or more")),
     }
 }
 
@@ -741,6 +765,20 @@ fn run(cli: Cli) -> Result<u8> {
                 print!("{}", display::drain(&report));
             }
             Ok(if report.target_met() { 0 } else { 2 })
+        }
+        Command::Plan { budget, json } => {
+            let athena = open(true)?;
+            let report = drain::plan(
+                &drain::RealSteps::live(&athena, &Terminal),
+                budget,
+                &Terminal,
+            )?;
+            if json {
+                print_json(&report)?;
+            } else {
+                print!("{}", display::plan(&report));
+            }
+            Ok(0)
         }
         Command::DrainStop => {
             let athena = open(false)?;
