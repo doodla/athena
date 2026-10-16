@@ -1,6 +1,10 @@
 # Athena's CI (docs/design/athena-v0.md §11.2): a thin call into Rust. Both jobs check out the full
 # history and start with `./setup.sh --ci`. Actions are pinned by commit SHA, the token is read-only, and
 # nothing is deployed. Tests that call real models are opt-in and never run here.
+#
+# Cache layers (docs/design/ci-routing.md §4.1): toolchain, registry and target, keyed on the content of
+# rust-toolchain.toml and Cargo.lock. Every run restores them; only a push to the default branch saves them, so
+# an unreviewed branch cannot fill or poison the shared entries. Each job reports exact, restore key or miss.
 name: ci
 
 on:
@@ -8,7 +12,7 @@ on:
   pull_request:
   workflow_dispatch:
   schedule:
-    # Weekly, so that new gitleaks rules reach old commits.
+    # Weekly, so that new gitleaks rules reach old commits, and so the default branch's cache entries stay fresh.
     - cron: "17 6 * * 1"
 
 permissions:
@@ -25,10 +29,72 @@ jobs:
           persist-credentials: false
           # For pull requests, check the commits that would land, not GitHub's merge commit.
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Restore the toolchain cache
+        id: cache-toolchain
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.rustup/toolchains
+          key: rustup-${{ hashFiles('rust-toolchain.toml') }}
+      - name: Restore the registry cache
+        id: cache-registry
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: registry-${{ hashFiles('Cargo.lock') }}
+          restore-keys: registry-
+      - name: Restore the target cache
+        id: cache-target
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: target
+          key: target-checks-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: target-checks-${{ hashFiles('rust-toolchain.toml') }}-
+      - name: Report the cache outcome (exact, restore key, miss)
+        env:
+          TOOLCHAIN_HIT: ${{ steps.cache-toolchain.outputs.cache-hit }}
+          TOOLCHAIN_KEY: ${{ steps.cache-toolchain.outputs.cache-matched-key }}
+          REGISTRY_HIT: ${{ steps.cache-registry.outputs.cache-hit }}
+          REGISTRY_KEY: ${{ steps.cache-registry.outputs.cache-matched-key }}
+          TARGET_HIT: ${{ steps.cache-target.outputs.cache-hit }}
+          TARGET_KEY: ${{ steps.cache-target.outputs.cache-matched-key }}
+        run: |
+          outcome() {
+            if [ "$1" = "true" ]; then echo "exact"
+            elif [ -n "$2" ]; then echo "restore key"
+            else echo "miss"; fi
+          }
+          {
+            echo "cache outcome (job checks):"
+            echo "- toolchain: $(outcome "$TOOLCHAIN_HIT" "$TOOLCHAIN_KEY")"
+            echo "- registry: $(outcome "$REGISTRY_HIT" "$REGISTRY_KEY")"
+            echo "- target: $(outcome "$TARGET_HIT" "$TARGET_KEY")"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Set up (pinned toolchain, gitleaks, athena)
         run: ./setup.sh --ci
       - name: cargo fmt --check, cargo clippy -D warnings, cargo test
         run: cargo run --locked -p xtask -- ci
+      - name: Save the toolchain cache (default branch only)
+        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && steps.cache-toolchain.outputs.cache-hit != 'true'
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.rustup/toolchains
+          key: rustup-${{ hashFiles('rust-toolchain.toml') }}
+      - name: Save the registry cache (default branch only)
+        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && steps.cache-registry.outputs.cache-hit != 'true'
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: registry-${{ hashFiles('Cargo.lock') }}
+      - name: Save the target cache (default branch only)
+        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && steps.cache-target.outputs.cache-hit != 'true'
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: target
+          key: target-checks-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
 
   history:
     name: the full history
@@ -39,7 +105,69 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Restore the toolchain cache
+        id: cache-toolchain
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.rustup/toolchains
+          key: rustup-${{ hashFiles('rust-toolchain.toml') }}
+      - name: Restore the registry cache
+        id: cache-registry
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: registry-${{ hashFiles('Cargo.lock') }}
+          restore-keys: registry-
+      - name: Restore the target cache
+        id: cache-target
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: target
+          key: target-history-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: target-history-${{ hashFiles('rust-toolchain.toml') }}-
+      - name: Report the cache outcome (exact, restore key, miss)
+        env:
+          TOOLCHAIN_HIT: ${{ steps.cache-toolchain.outputs.cache-hit }}
+          TOOLCHAIN_KEY: ${{ steps.cache-toolchain.outputs.cache-matched-key }}
+          REGISTRY_HIT: ${{ steps.cache-registry.outputs.cache-hit }}
+          REGISTRY_KEY: ${{ steps.cache-registry.outputs.cache-matched-key }}
+          TARGET_HIT: ${{ steps.cache-target.outputs.cache-hit }}
+          TARGET_KEY: ${{ steps.cache-target.outputs.cache-matched-key }}
+        run: |
+          outcome() {
+            if [ "$1" = "true" ]; then echo "exact"
+            elif [ -n "$2" ]; then echo "restore key"
+            else echo "miss"; fi
+          }
+          {
+            echo "cache outcome (job history):"
+            echo "- toolchain: $(outcome "$TOOLCHAIN_HIT" "$TOOLCHAIN_KEY")"
+            echo "- registry: $(outcome "$REGISTRY_HIT" "$REGISTRY_KEY")"
+            echo "- target: $(outcome "$TARGET_HIT" "$TARGET_KEY")"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Set up (pinned toolchain, gitleaks, athena)
         run: ./setup.sh --ci
       - name: athena check --history
         run: '"$HOME/.local/bin/athena" check --history'
+      - name: Save the toolchain cache (default branch only)
+        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && steps.cache-toolchain.outputs.cache-hit != 'true'
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.rustup/toolchains
+          key: rustup-${{ hashFiles('rust-toolchain.toml') }}
+      - name: Save the registry cache (default branch only)
+        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && steps.cache-registry.outputs.cache-hit != 'true'
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: registry-${{ hashFiles('Cargo.lock') }}
+      - name: Save the target cache (default branch only)
+        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && steps.cache-target.outputs.cache-hit != 'true'
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: target
+          key: target-history-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}

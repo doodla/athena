@@ -7,6 +7,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- CI cache layers and a wall-time baseline command (`docs/design/ci-routing.md` build-plan items 2 and 3).
+  `cargo run --locked -p xtask -- walltime` reads job records and prints the median and p90 of
+  dispatch-to-outcome time per job kind, with failed and rejected jobs reported separately, a caveat when fewer
+  than 20 jobs exist, and an explicit `UNAVAILABLE` when the records lack timestamps (tests in
+  `xtask/tests/walltime.rs`). `docs/design/ci-routing-baseline.md` records the "before" figures with each marked
+  measured, given or estimate, and how to compute "after". **Governance path changed: `.github/workflows/ci.yml`**
+  now restores toolchain, registry and target caches keyed on `rust-toolchain.toml` and `Cargo.lock`
+  (`actions/cache` pinned by SHA), saves them only on the default branch, and reports exact, restore key or
+  miss; the jobs, their commands and the permissions are unchanged. The design is still not accepted and its
+  review is unchanged. Not built: the SHA-keyed result reuse and local fallback (item 4), per-kind routing (5),
+  the after comparison (6), the README and decisions entry (7), per-phase timestamps, and `timeout-minutes`.
+
 ### Changed
 
 - A request that `athena plan` has read stays in the plan and in `athena drain`'s queue. Root cause:

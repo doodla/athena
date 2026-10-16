@@ -1,8 +1,9 @@
 # Moving compute to CI with per-job routing
 
 **Status:** proposed; review 1 requested (`docs/design/reviews/ci-routing-review-1.md`), not yet done. Design
-only: no workflow, setting or code is built by this document, and it does not mark itself accepted. No build
-starts before the review is recorded.
+only: this document builds nothing and does not mark itself accepted. The review is not recorded, and the
+design is not accepted. Build-plan items 2 and 3 were built anyway at the owner's request (section 10); items
+4 to 7 are not built.
 
 **Reader:** the owner and the design reviewers. Someone new to the repository should be able to follow it from
 this file plus the files it names. Paths are relative to the repository root.
@@ -304,10 +305,18 @@ equal checks, not by the existence of a workflow.
 
 Each item is a separate later job, after review.
 
-1. **Review** (requested; section 12). Nothing below starts before it is recorded.
+1. **Review** (requested; section 12). Nothing below starts before it is recorded. Items 2 and 3 were built
+   before it, at the owner's request; the review is still open.
 2. **Baseline job.** Compute the 9.2 baseline from the records; add any missing timestamps; no routing change.
+   *Built in part:* `cargo run --locked -p xtask -- walltime` computes the median and p90 of dispatch-to-outcome
+   time by job kind (`docs/design/ci-routing-baseline.md`). Not done: running it on the real records, and adding
+   per-phase timestamps.
 3. **Cache job.** Add the three cache layers and exact/restore/miss reporting to `ci.yml`; measure the cold and
    warm build time and the target size; set `timeout-minutes`.
+   *Built in part:* the three layers and the report are in `ci.yml`, with the `actions/cache` restore and save
+   actions pinned by SHA; the target and the other layers are saved only by non-pull-request runs on the default
+   branch. The two jobs keep separate target entries (`target-checks-` and `target-history-`), since they build
+   different things. Not done: the cold and warm timing, the target size, and `timeout-minutes`.
 4. **Result-reuse job.** The record of 5.2, the SHA check of 5.3, the local fallback, and tests that fail
    without it: a result for a different SHA is ignored; a missing result runs locally; a red result fails; a
    stale record never marks a job verified.

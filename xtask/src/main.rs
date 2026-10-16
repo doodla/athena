@@ -3,6 +3,7 @@
 //! - `cargo run -p xtask -- setup [--ci] [--force] [--allow-dirty]`: takes a machine to a working Athena.
 //!   Every step is idempotent. `./setup.sh` installs rustup if needed and then runs this.
 //! - `cargo run -p xtask -- ci`: the checks CI runs (fmt, clippy, tests), runnable locally.
+//! - `cargo run -p xtask -- walltime`: wall time per verified result from the job records.
 //!
 //! Setup reads every pin from `athena.toml`, reads credentials only to report whether they work, and never
 //! stores them.
@@ -14,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
 mod site;
+mod walltime;
 
 const SITE_USAGE: &str = "cargo run -p xtask -- site [--out <dir>]\n       \
      writes <dir>/index.html; the default <dir> is site/ in the cargo target directory ($CARGO_TARGET_DIR, else target/),\n       \
@@ -25,9 +27,11 @@ fn main() -> ExitCode {
         Some("setup") => setup(&Flags::parse(&args[1..])),
         Some("ci") => ci(),
         Some("site") => site_command(&args[1..]),
+        Some("walltime") => walltime::command(&args[1..], &repo_root()),
         _ => {
             eprintln!(
-                "usage: cargo run -p xtask -- setup [--ci] [--force] [--allow-dirty]\n       cargo run -p xtask -- ci\n       {SITE_USAGE}"
+                "usage: cargo run -p xtask -- setup [--ci] [--force] [--allow-dirty]\n       cargo run -p xtask -- ci\n       {SITE_USAGE}\n       {}",
+                walltime::USAGE
             );
             return ExitCode::from(2);
         }
