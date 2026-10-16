@@ -540,3 +540,9 @@ Stopping: you're done when "How I'll judge it" passes. If you're blocked on ever
 * Move compute to ci then, with intelligent routing.
 * Maybe also mandate that things are fleshed out in planning properly. Get the planning updates in first, then design.
 * Also, for velocity, there's no reason we need to drive initiatives in serial. Why not plan everything and coordinate?
+
+### 2026-10-16: An auditor and a warden
+
+* Why would Athena grading it's work be a bad thing? Internally, it's still an independent agent, no?
+* Let's also have a warden then
+* Relay note: agreed in chat that grading inside Athena is fine when the yardstick is protected. An auditor role judges outcomes against BRIEF.md and the owner's goals (not a job's own criteria), looks at real outcomes rather than records, and cannot have its prompt or checks changed by jobs. A warden role guards the boundaries: protected files (BRIEF.md, the auditor's and warden's own prompts and checks, grader prompts and thresholds), permissions, budgets and the kill switch, and holds any landing that touches them or weakens a check. Only the owner changes their rules.
