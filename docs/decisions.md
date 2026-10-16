@@ -2366,3 +2366,26 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Reversal cost:** Low: one lookup in the pinning step.
 - **Provenance:** measured: the tests in `crates/athena-core/src/run_pin_tests.rs` starting
   `an_existing_studys_pin_overrides_the_configured_ref`.
+
+## D103 · A report still incomplete after the send-back goes to the verifier with its gaps flagged, unless nothing changed
+
+- **Case:** Job 20261016-005953-582g: the producer had done the work, but on the send-back pass (D95) its
+  report covered 3 of the 5 criteria, so the job failed over the unreported ones. Five other jobs failed at the
+  same self-check. The self-check judges the producer's report, not the work, so the job failed over a gap that
+  the verifier is built to judge.
+- **Decision:** After the one send-back (`PRODUCER_SEND_BACKS`, unchanged), `produce_and_verify` no longer fails
+  the job over a report that still lacks a real full `cargo test --locked` result or leaves criteria unmet or
+  unreported. If the producer left changes, they go on through admission, checks and the verifier. The last
+  report stays in the attempt invocation's `detail`, and the verifier's brief gets one entry,
+  `producer-report-gaps`, under the checks. It is not a check and fails nothing; it lists the gaps and tells
+  the verifier to judge them itself and run the tests if a result is missing. The verifier gets the gaps only, not
+  the report. A run that leaves no change still fails, with a reason that includes the gaps. A study
+  job follows the same rule. The send-back prompt and producer prompt now say this.
+- **Alternatives:** (a) Raise the send-back count (more cost, same give-up). (b) Fail only when criteria are
+  missing and pass on a missing test result (still fails finished work). (c) Pass the whole report to the
+  verifier (breaks D32's rule that the verifier does not see it).
+- **Tradeoff:** A producer that never reports its checks now reaches the verifier, which spends a run on it; the
+  verifier's own criteria checks and Athena's checks remain the gate. The send-back no longer enforces the report format.
+- **Reversal cost:** Low: restore the failure in the send-back branch.
+- **Provenance:** read: job 582g's request text and `run.rs`; measured: the lifecycle tests starting
+  `a_producer_that_still_has_no_full_test_result` and `a_criterion_still_unmet_after_the_send_back`.

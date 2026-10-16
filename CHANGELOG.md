@@ -32,6 +32,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- A producer whose report is still incomplete after the one send-back no longer fails the job when it left
+  changes: the change goes to the verifier, which is told which criteria were unmet or unreported and whether the
+  full test result was missing, and judges them itself. Only a run that leaves no change fails. The root cause
+  was the send-back's give-up policy (`produce_and_verify` in `crates/athena-core/src/run.rs`), which failed
+  finished work over a report gap: in job 20261016-005953-582g the producer had done the work, but its second
+  report covered 3 of 5 criteria. The number of send-backs is unchanged. See decision D103. Tests are in
+  `crates/athena-cli/tests/lifecycle.rs` and `crates/athena-core/src/run_pin_tests.rs`.
 - A study job now reads exactly the commit its study's `pin.json` names. The rule: an existing study's
   `studies/<id>/pin.json` overrides `repo_ref`; athena.toml's `repo_ref` is used only for a new study (no
   pin.json for the repository). The cause: the core's pinning step (`pin_repo` in `crates/athena-core/src/run.rs`)

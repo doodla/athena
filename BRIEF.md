@@ -529,3 +529,7 @@ Stopping: you're done when "How I'll judge it" passes. If you're blocked on ever
 ### 2026-10-15: Interventions as a sensor, and zooming out and in
 
 * I want to think of interventions as signals for a sensor that wakes Athena up. Right now it's you, and the gap is logged. Eventually, it flows down to Athena to notice what's happening. Also, consider zoom out/zoom in thinking.
+
+### 2026-10-16: Gaps audit and refine the planning pipeline
+
+* I want to also have these gaps audit and refine the planning pipeline. Athena should do that.
