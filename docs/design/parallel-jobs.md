@@ -526,6 +526,13 @@ authority.
 
 (Processes versus threads, the daemon and async options are in section 4.1.)
 
+## 12a. Related design: CI routing
+
+`docs/design/ci-routing.md` (review requested, not built) moves the checks to CI with caches shared by content
+key. It affects this design in three ways: parallel pull-request runs share cache entries and only the default
+branch writes them; the worker bound of 4.3 also bounds how many commits wait for CI; and CI minutes are a
+second spend beside the per-job agent budgets of 5.2. Neither design depends on the other's build.
+
 ## 13. Out of scope
 
 Implementation; the review file and `docs/design/native-pr-landing.md`; the thread-safety spike; README,

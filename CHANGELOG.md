@@ -21,6 +21,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `docs/design/ci-routing.md`: a design, planned first, for moving checks to CI with per-job routing, warm
+  caches, one check run per commit SHA reused by the verifier, unchanged verification strength, and wall time
+  per verified result measured before and after. Design only; review 1 is requested
+  (`docs/design/reviews/ci-routing-review-1.md`) and not done. Why: the owner's 2026-10-16 addendum asks to move
+  compute to CI with intelligent routing.
 - `athena drain-stop` asks a running drain to stop at the next job boundary: the job in progress is finished,
   landed and rated, no further job starts, and drain ends with the new stop reason `stop requested` (exit code
   2). Why: the only way to end a drain was to kill it mid-job. See D105.

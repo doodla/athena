@@ -42,6 +42,10 @@ moved into RM-0, and the other numbers did not change. The rows AD-12 to AD-15 w
   3. *Native pull-request landing,* from `docs/design/native-pr-landing.md`. Owned mode is built
      (`athena land --pr`, D86 to D88); what remains is the mode that leaves no Athena files in a third-party
      repository (stealth).
+  3a. *CI routing.* Per-job routing of checks to CI, warm caches keyed on `Cargo.lock` and the toolchain, one
+     check run per commit SHA reused by the verifier, and wall time per verified result measured before and
+     after. Designed in `docs/design/ci-routing.md` (the brief's 2026-10-16 addendum); review 1 is requested,
+     not done, and nothing is built.
   4. *Timings fed back.* Report invocation and job wall time per class of work, and use them to change
      routing, ordering or the cache, so a recorded timing leads to a recorded change (AD-11).
   Mechanism rows are added to `docs/enforcement.md` when the tests exist.
