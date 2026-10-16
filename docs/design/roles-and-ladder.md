@@ -77,7 +77,8 @@ are not built.
    from error text, so the same failure on the next run has the same key.
 5. **Every item goes through `decide()`.** The ladder decides it:
    - at or below the role's limit, the change is applied by queueing a request (the same record
-     `athena ask --later` writes). It is not run by the steward: it runs when someone runs `athena go`, under
+     `athena ask --later` writes, on the channel `steward` instead of `cli`). It is not run by the steward: it
+     runs when someone runs `athena go` or `athena drain`, under
      the same checks and the independent verifier as any job. The work item cites the queued request. A
      blind spot is on the lowest rung, so its request asks for the source to be made readable;
    - above the limit, only the work item is queued, as a proposal with its evidence. Nothing is applied.

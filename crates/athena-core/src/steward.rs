@@ -317,18 +317,25 @@ pub trait Applier {
     fn apply(&self, change: &ProposedChange, taken: &BTreeSet<String>) -> Result<QueuedRequest>;
 }
 
-/// The channel of a request the steward queued. `athena drain` works the queued requests of this channel
-/// and no other, so a request the user deferred with `athena ask --later` is never taken from them.
+/// The channel of a request the steward queued.
 pub const REQUEST_CHANNEL: &str = "steward";
 
-/// A request the steward queued that has not been read yet.
+/// The channel `athena ask --later` records for a request the user deferred.
+pub const USER_QUEUE_CHANNEL: &str = "cli";
+
+/// The channels whose queued requests `athena drain` works: the steward's and the user's own deferred
+/// requests. A request on any other channel is left alone.
+pub const DRAINED_CHANNELS: [&str; 2] = [REQUEST_CHANNEL, USER_QUEUE_CHANNEL];
+
+/// A request queued for the drain (see [`DRAINED_CHANNELS`]) that has not been read yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueuedWork {
     pub job: JobId,
     pub title: String,
 }
 
-/// The requests the steward queued that no one has read yet, oldest first.
+/// The queued requests of the drained channels (the steward's and `ask --later`'s) that no one has read yet,
+/// oldest first, ties by job id.
 pub fn queued_work(records: &Records) -> Vec<QueuedWork> {
     let mut found: Vec<(Timestamp, QueuedWork)> = records
         .jobs
@@ -338,7 +345,7 @@ pub fn queued_work(records: &Records) -> Vec<QueuedWork> {
             let request = j
                 .request
                 .as_ref()
-                .filter(|r| r.channel == REQUEST_CHANNEL)?;
+                .filter(|r| DRAINED_CHANNELS.contains(&r.channel.as_str()))?;
             Some((
                 request.received_at,
                 QueuedWork {
@@ -1388,10 +1395,22 @@ mod tests {
     }
 
     #[test]
-    fn only_unread_requests_of_the_steward_channel_are_queued_work_oldest_first() {
+    fn unread_steward_and_cli_requests_are_queued_work_oldest_first() {
         let mut records = Records::default();
-        let mut add = |id: &str, channel: &str, at: &str| {
+        let mut add = |id: &str, channel: &str, at: &str, closed: bool| {
             let job = JobId::parse(id).unwrap();
+            let outcome = closed.then(|| athena_data::records::Outcome {
+                job: job.clone(),
+                state: athena_data::records::OutcomeState::Abandoned,
+                reason: "closed".into(),
+                at: at.parse().unwrap(),
+                totals: None,
+                branch: None,
+                base_commit: None,
+                candidate_commit: None,
+                after_blocked: false,
+                through_commit: None,
+            });
             records.jobs.insert(
                 id.to_string(),
                 crate::store::JobRecords {
@@ -1402,25 +1421,56 @@ mod tests {
                         received_at: at.parse().unwrap(),
                         channel: channel.into(),
                     }),
+                    outcome,
                     ..Default::default()
                 },
             );
         };
         add(
-            "20261014-120000-bbbb",
+            "20261016-120000-bbbb",
             REQUEST_CHANNEL,
-            "2026-10-14T12:00:00Z",
+            "2026-10-16T12:00:00Z",
+            false,
         );
         add(
-            "20261013-120000-aaaa",
+            "20261015-120000-aaaa",
             REQUEST_CHANNEL,
-            "2026-10-13T12:00:00Z",
+            "2026-10-15T12:00:00Z",
+            false,
         );
-        add("20261012-120000-cccc", "cli", "2026-10-12T12:00:00Z");
+        add(
+            "20261014-120000-cccc",
+            USER_QUEUE_CHANNEL,
+            "2026-10-14T12:00:00Z",
+            false,
+        );
+        // Same time as the cli request above: the tie goes by job id.
+        add(
+            "20261014-120000-cccb",
+            USER_QUEUE_CHANNEL,
+            "2026-10-14T12:00:00Z",
+            false,
+        );
+        // Not queued any more, and another channel: both left out.
+        add(
+            "20261013-120000-dddd",
+            USER_QUEUE_CHANNEL,
+            "2026-10-13T12:00:00Z",
+            true,
+        );
+        add("20261012-120000-eeee", "web", "2026-10-12T12:00:00Z", false);
         let queued = queued_work(&records);
         let ids: Vec<&str> = queued.iter().map(|q| q.job.as_str()).collect();
-        assert_eq!(ids, ["20261013-120000-aaaa", "20261014-120000-bbbb"]);
-        assert_eq!(queued[0].title, "Do 20261013-120000-aaaa.");
+        assert_eq!(
+            ids,
+            [
+                "20261014-120000-cccb",
+                "20261014-120000-cccc",
+                "20261015-120000-aaaa",
+                "20261016-120000-bbbb",
+            ]
+        );
+        assert_eq!(queued[2].title, "Do 20261015-120000-aaaa.");
     }
 
     #[test]
