@@ -455,6 +455,12 @@ will serialize them.
    the host merged it. The files are never merged by hand into unverified content: `plan` refuses to land when
    the landed fingerprint differs from the verified one (`land.rs` lines 75-81).
 
+**Plan grouping (built).** `plan.rs` leaves these three files out of the overlap test when it splits a wave
+into parallel groups (`SHARED_APPEND_ONLY`), because nearly every item lists `CHANGELOG.md`, and without the
+exception every group was a single item. An item whose only touched paths are shared files names nothing else,
+so it is still not grouped. This changes grouping only; the landing check (rule 4) remains the authority for
+conflicting edits to a shared file, and rules 1 to 3 are unchanged.
+
 **What is enforced and what is a hint:**
 
 | Rule | Status |

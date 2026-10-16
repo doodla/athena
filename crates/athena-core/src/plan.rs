@@ -8,7 +8,11 @@
 //!   rung first), then age (oldest first) as the tiebreak. A dependent item always comes after what it needs.
 //! - **Parallel groups.** A wave is split into groups of items that no dependency links and whose touched
 //!   paths are disjoint; the items of one group could run side by side. An item that names no touched path is
-//!   never grouped with another, because nothing is known about what it changes. The drain works the groups in
+//!   never grouped with another, because nothing is known about what it changes. The shared append-only files
+//!   (`SHARED_APPEND_ONLY`: `CHANGELOG.md`, `docs/decisions.md`, `README.md`; `docs/design/parallel-jobs.md`
+//!   section 9) are left out of the overlap test, since nearly every item touches them; an item whose only
+//!   paths are shared files therefore names nothing else and is not grouped. The landing check stays the
+//!   authority for conflicting edits to a shared file; this changes only the grouping. The drain works the groups in
 //!   plan order and runs the items of one group at once, up to `[parallel] max_concurrency` (default 1: one
 //!   job at a time).
 //! - **Gate.** An item whose plan has no goal, no ladder rung or no acceptance is refused for design or code
@@ -128,14 +132,25 @@ fn overlap(a: &str, b: &str) -> bool {
     inside(a, b) || inside(b, a)
 }
 
-/// Whether two entries may run side by side: both name what they touch, and nothing they touch overlaps.
+/// The shared append-only files that many jobs edit (`docs/design/parallel-jobs.md` section 9). Touching one
+/// is not a clash when grouping: a conflicting edit is caught by the landing check, not by the plan.
+const SHARED_APPEND_ONLY: [&str; 3] = ["CHANGELOG.md", "docs/decisions.md", "README.md"];
+
+/// The paths of `entry` that count for grouping: its touched paths without the shared append-only files.
+fn grouping_paths(entry: &PlanEntry) -> Vec<&str> {
+    entry
+        .touches
+        .iter()
+        .map(String::as_str)
+        .filter(|p| !SHARED_APPEND_ONLY.contains(p))
+        .collect()
+}
+
+/// Whether two entries may run side by side: both name some path besides the shared append-only files, and
+/// nothing of that they touch overlaps.
 fn disjoint(a: &PlanEntry, b: &PlanEntry) -> bool {
-    !a.touches.is_empty()
-        && !b.touches.is_empty()
-        && !a
-            .touches
-            .iter()
-            .any(|x| b.touches.iter().any(|y| overlap(x, y)))
+    let (pa, pb) = (grouping_paths(a), grouping_paths(b));
+    !pa.is_empty() && !pb.is_empty() && !pa.iter().any(|x| pb.iter().any(|y| overlap(x, y)))
 }
 
 impl Plan {
@@ -367,7 +382,7 @@ mod tests {
         let (top, low) = rungs();
         let plan = Plan::build(&[
             entry("base", low, &["crates/core/"], &[]),
-            entry("docs", low, &["README.md"], &[]),
+            entry("docs", low, &["docs/a.md"], &[]),
             entry("clash", low, &["crates/core/src/x.rs"], &[]),
             entry("after", top, &["crates/cli/"], &["base"]),
         ]);
@@ -435,7 +450,7 @@ mod tests {
             entry("one", low, &["crates/x/src/lib.rs"], &[]),
             entry("two", low, &["crates/x/src/lib.rs"], &[]),
             entry("three", low, &["docs/a.md"], &[]),
-            entry("four", low, &["README.md"], &[]),
+            entry("four", low, &["docs/b.md"], &[]),
         ]);
         let group_of = |id: &str| {
             plan.groups
@@ -446,6 +461,32 @@ mod tests {
         assert_ne!(group_of("one"), group_of("two"));
         assert_eq!(group_of("one"), group_of("three"));
         assert_eq!(group_of("three"), group_of("four"));
+    }
+
+    #[test]
+    fn shared_append_only_files_are_not_a_clash_but_other_shared_paths_and_lone_shared_entries_are()
+    {
+        let (_, low) = rungs();
+        fn with(p: &str) -> [&str; 3] {
+            [p, "CHANGELOG.md", "docs/decisions.md"]
+        }
+        let plan = Plan::build(&[
+            entry("one", low, &with("crates/a/src/lib.rs"), &[]),
+            entry("two", low, &with("crates/b/src/lib.rs"), &[]),
+            entry("same", low, &with("crates/a/src/lib.rs"), &[]),
+            entry("only", low, &["CHANGELOG.md"], &[]),
+            entry("only2", low, &["CHANGELOG.md"], &[]),
+        ]);
+        let group_of = |id: &str| {
+            plan.groups
+                .iter()
+                .position(|g| g.iter().any(|i| i == id))
+                .unwrap()
+        };
+        assert_eq!(group_of("one"), group_of("two"));
+        assert_ne!(group_of("one"), group_of("same"));
+        assert_eq!(plan.groups[group_of("only")], ["only"]);
+        assert_eq!(plan.groups[group_of("only2")], ["only2"]);
     }
 
     #[test]

@@ -7,6 +7,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+- Plan grouping ignores the shared append-only files `CHANGELOG.md`, `docs/decisions.md` and `README.md`
+  (`docs/design/parallel-jobs.md` section 9). Root cause: `plan.rs` `disjoint` counted them as touched paths, and
+  almost every item touches `CHANGELOG.md`, so every parallel group was one item. An item whose only paths are
+  shared files is still not grouped. The landing check is unchanged. Decision D106.
+
 ### Added
 
 - A bounded parallel drain. `athena drain` runs the independent items of one plan group (no dependency, disjoint
