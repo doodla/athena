@@ -1,6 +1,15 @@
 //! `athena drain`: works the queue itself (requests the steward queued and requests deferred with `athena ask --later`), within a budget the user sets. For each queued request
 //! it reads and runs the job, lands it through the pull-request path (`athena land --pr`), and only then
-//! rates the live page as its audience would. It stops at the first of five reasons ([`Stop`]).
+//! rates the live page as its audience would. It stops at the first of six reasons ([`Stop`]).
+//!
+//! - **Planning comes first.** The open requests are fleshed out and planned together
+//!   ([`athena_core::plan`]): goal, requirements-ladder rung, acceptance, open questions, dependencies and
+//!   touched paths. The loop works the items in plan order (higher rung first, a dependent after what it
+//!   needs, age as the tiebreak), not oldest first. An item whose plan lacks a goal, a rung or acceptance is
+//!   refused and reported ([`Report::refused`]). The plan also groups items that could run in parallel
+//!   ([`Report::plan_groups`]); the loop itself runs one job at a time.
+//! - **Stop at a job boundary.** [`Steps::stop_requested`] is asked before every job. A job that has started
+//!   is finished (landed and rated) and no further job starts: [`Stop::Requested`]. Nothing is killed.
 //!
 //! The loop ([`drain`]) holds every rule and calls the world through [`Steps`], so tests drive it with a
 //! stub and no model, no GitHub and no network:
@@ -52,6 +61,7 @@
 
 use athena_core::audience::{LivePage, Page, Target};
 use athena_core::gh::GhCli;
+use athena_core::plan::{Plan, PlanEntry, Refusal};
 use athena_core::pr::LinkState;
 use athena_core::store::Records;
 use athena_core::{Athena, Ui, steward, work_decisions};
@@ -151,6 +161,10 @@ pub struct QueueView {
     pub waiting: Vec<Waiting>,
     /// Open proposals within their role's limit: the loop approves them.
     pub approvable: Vec<Waiting>,
+    /// The fleshed-out plan entry of each open request, oldest first (see [`athena_core::plan`]). The loop
+    /// plans them together and works their items in plan order. An item with no entry keeps its place ahead
+    /// of the planned items.
+    pub plan: Vec<PlanEntry>,
 }
 
 /// The result of approving a proposal: the job that carries it out, which is read and waits to run.
@@ -270,6 +284,17 @@ pub trait Steps {
     /// The most [`Steps::check_page`] may cost: the cap of one call times the number of studies it checks. The
     /// loop asks the budget for this much before it calls the check.
     fn check_cap(&self) -> f64;
+    /// Whether the user asked the loop to stop. It is asked only between jobs, never during one, so a job
+    /// that has started is finished (and landed and rated) first. Not asking to stop is the default.
+    fn stop_requested(&self) -> bool {
+        false
+    }
+}
+
+/// The file whose presence asks a running drain to stop at the next job boundary, inside the repository's
+/// state directory. `athena drain-stop` creates it and the next `athena drain` removes any left over.
+pub fn stop_file(state_root: &std::path::Path) -> std::path::PathBuf {
+    state_root.join("drain.stop")
 }
 
 /// Why the loop stopped.
@@ -292,15 +317,19 @@ pub enum Stop {
     QueueEmpty,
     /// The job limit was reached.
     JobLimit,
+    /// The user asked the loop to stop (`athena drain-stop`). The job in progress was finished first and no
+    /// further job was started; nothing was killed.
+    Requested,
 }
 
 impl Stop {
-    pub const ALL: [Stop; 5] = [
+    pub const ALL: [Stop; 6] = [
         Stop::TargetMet,
         Stop::BudgetSpent,
         Stop::RepeatedFailure,
         Stop::QueueEmpty,
         Stop::JobLimit,
+        Stop::Requested,
     ];
 
     pub fn label(self) -> &'static str {
@@ -310,6 +339,7 @@ impl Stop {
             Stop::RepeatedFailure => "repeated failure",
             Stop::QueueEmpty => "queue empty",
             Stop::JobLimit => "job limit",
+            Stop::Requested => "stop requested",
         }
     }
 
@@ -324,6 +354,9 @@ impl Stop {
             Stop::RepeatedFailure => "the same item failed twice; the item is named",
             Stop::QueueEmpty => "nothing was left to work; this is not success",
             Stop::JobLimit => "the job limit was reached",
+            Stop::Requested => {
+                "a stop was asked for; the job in progress was finished and no further job was started, so the rest stays queued"
+            }
         }
     }
 }
@@ -379,6 +412,11 @@ pub struct Report {
     pub queued: Vec<Item>,
     /// Open proposals waiting for a person. The loop did not touch them.
     pub waiting: Vec<Waiting>,
+    /// The plan the loop followed: the planned items in groups. Items of one group could run in parallel
+    /// (no dependency, disjoint touched paths); the loop still runs one job at a time, in this order.
+    pub plan_groups: Vec<Vec<String>>,
+    /// Items refused for design or code because their plan lacks a goal, a ladder rung or acceptance.
+    pub refused: Vec<Refusal>,
     /// Anything that went wrong beside the stop reason, such as a rating that could not be taken.
     pub notes: Vec<String>,
 }
@@ -411,6 +449,8 @@ enum ItemEnd {
     Failed,
     Budget,
     JobLimit,
+    /// A stop was asked for and no further job was started.
+    Stop,
 }
 
 enum RunStep {
@@ -533,6 +573,10 @@ impl Drain<'_> {
         let mut failures = 0;
         loop {
             if passed.is_none() {
+                // A job boundary: the previous attempt, if any, is over and the next has not started.
+                if self.steps.stop_requested() {
+                    return ItemEnd::Stop;
+                }
                 if self.started >= self.limits.max_jobs {
                     return ItemEnd::JobLimit;
                 }
@@ -697,9 +741,37 @@ pub fn drain(steps: &dyn Steps, limits: Limits, ui: &dyn Ui) -> anyhow::Result<R
     let (read, unread): (Vec<Item>, Vec<Item>) = view.items.drain(..).partition(|i| i.read);
     view.items = read.into_iter().chain(approved).chain(unread).collect();
     view.waiting.extend(left);
+    // Planning comes first: the open requests are planned together, and the items are worked in plan order,
+    // not oldest first. Items with no plan entry keep their place ahead of the planned ones; items whose plan
+    // is incomplete, or that wait on each other in a loop, are not worked.
+    let plan = Plan::build(&view.plan);
+    let mut to_work: Vec<Item> = view
+        .items
+        .iter()
+        .filter(|i| !view.plan.iter().any(|e| e.id == i.job))
+        .cloned()
+        .collect();
+    to_work.extend(
+        plan.order
+            .iter()
+            .filter_map(|id| view.items.iter().find(|i| &i.job == id).cloned()),
+    );
+    for refusal in &plan.refused {
+        d.notes.push(format!(
+            "item {} is not worked: its plan lacks {}; add it to the request and plan again",
+            refusal.id,
+            refusal.missing.join(", ")
+        ));
+    }
+    if !plan.cyclic.is_empty() {
+        d.notes.push(format!(
+            "items {} wait on each other, so none of them is worked",
+            plan.cyclic.join(", ")
+        ));
+    }
     let mut stop = Stop::QueueEmpty;
     let mut failed_item = None;
-    for item in &view.items {
+    for item in &to_work {
         match d.work(item) {
             ItemEnd::Landed => {
                 if let Some(reason) = d.rate() {
@@ -718,6 +790,10 @@ pub fn drain(steps: &dyn Steps, limits: Limits, ui: &dyn Ui) -> anyhow::Result<R
             }
             ItemEnd::JobLimit => {
                 stop = Stop::JobLimit;
+                break;
+            }
+            ItemEnd::Stop => {
+                stop = Stop::Requested;
                 break;
             }
         }
@@ -748,6 +824,8 @@ pub fn drain(steps: &dyn Steps, limits: Limits, ui: &dyn Ui) -> anyhow::Result<R
             .filter(|i| !d.landed.contains(&i.job))
             .collect(),
         waiting: view.waiting,
+        plan_groups: plan.groups,
+        refused: plan.refused,
         notes: d.notes,
         jobs: d.jobs,
     })
@@ -987,11 +1065,39 @@ impl Steps for RealSteps<'_> {
                 .into_iter()
                 .map(|w| item(w, false)),
         );
+        // Planning: every open request is fleshed out. A job that came from a steward proposal serves the
+        // proposal's rung; any other request is work on the code, tests and docs.
+        let mut rungs: std::collections::BTreeMap<String, athena_data::roles::Ladder> =
+            std::collections::BTreeMap::new();
+        for work in &records.work_items {
+            if let Some(decision) = work_decisions::decision_of(&records, work)
+                && let athena_data::records::WorkDecisionState::Approved { job } =
+                    &decision.decision
+            {
+                rungs.insert(job.as_str().to_string(), work.rung);
+            }
+        }
+        let plan = items
+            .iter()
+            .filter_map(|i| {
+                let job = records.jobs.get(&i.job)?;
+                let rung = rungs
+                    .get(&i.job)
+                    .copied()
+                    .unwrap_or(athena_data::roles::Ladder::Implementation);
+                Some(athena_core::reading::plan_entry(job, rung))
+            })
+            .collect();
         Ok(QueueView {
             items,
             waiting: waiting(above),
             approvable: waiting(within),
+            plan,
         })
+    }
+
+    fn stop_requested(&self) -> bool {
+        stop_file(self.athena.state.root()).exists()
     }
 
     fn approve(&self, proposal: &str) -> Approval {

@@ -14,6 +14,7 @@ use athena_cli::drain::{
 };
 use athena_core::audience::Page;
 use athena_core::commits::{Committer, message};
+use athena_core::plan::PlanEntry;
 use athena_core::steward::{ProposedChange, RequestQueue};
 use athena_core::store::{JobState, Records};
 use athena_core::{Athena, Quiet};
@@ -24,7 +25,7 @@ use athena_data::records::{
 use athena_data::roles::Ladder;
 use common::*;
 use serde_json::json;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::Command;
@@ -57,6 +58,11 @@ struct Stub {
     /// Jobs whose landing changes only paths outside the explainer's sources; any other landing also changes a
     /// study file.
     unrelated: Vec<&'static str>,
+    /// Plan entries of the open requests, oldest first; empty means no planning data.
+    plan: Vec<PlanEntry>,
+    /// When set, a stop is asked for as soon as this job is run (the user types `athena drain-stop` mid-run).
+    stop_when_running: Option<&'static str>,
+    stop: Cell<bool>,
     log: RefCell<Vec<String>>,
 }
 
@@ -88,7 +94,11 @@ impl Steps for Stub {
                 .collect(),
             waiting: self.waiting.clone(),
             approvable: self.approvable.clone(),
+            plan: self.plan.clone(),
         })
+    }
+    fn stop_requested(&self) -> bool {
+        self.stop.get()
     }
     fn approve(&self, proposal: &str) -> Approval {
         self.log.borrow_mut().push(format!("approve {proposal}"));
@@ -116,6 +126,9 @@ impl Steps for Stub {
     }
     fn run(&self, job: &str) -> Run {
         self.log.borrow_mut().push(format!("run {job}"));
+        if self.stop_when_running == Some(job) {
+            self.stop.set(true);
+        }
         let mut outcomes = self.outcomes.borrow_mut();
         let outcome = if outcomes.is_empty() {
             OutcomeState::Rejected
@@ -183,6 +196,133 @@ fn waiting_proposal() -> Waiting {
         title: "The brief should say the README is never deleted".into(),
         rung: "brief-requirements".into(),
     }
+}
+
+fn planned(id: &str, rung: Ladder, touches: &[&str], deps: &[&str]) -> PlanEntry {
+    PlanEntry {
+        goal: format!("goal of {id}"),
+        rung: Some(rung),
+        acceptance: vec![format!("{id} works")],
+        depends_on: deps.iter().map(|d| d.to_string()).collect(),
+        touches: touches.iter().map(|t| t.to_string()).collect(),
+        ..PlanEntry::bare(id, &format!("title of {id}"))
+    }
+}
+
+#[test]
+fn items_are_worked_in_plan_order_not_oldest_first() {
+    // a is oldest, c is newest; c serves a higher rung, and b needs a.
+    let stub = Stub {
+        items: vec!["a", "b", "c"],
+        outcomes: passing(),
+        ratings: RefCell::new(vec![1, 1, 1]),
+        plan: vec![
+            planned("a", Ladder::Implementation, &["src/a.rs"], &[]),
+            planned("b", Ladder::Implementation, &["src/b.rs"], &["a"]),
+            planned("c", Ladder::DesignDecisions, &["docs/c.md"], &[]),
+        ],
+        ..Stub::default()
+    };
+    let report = drain::drain(&stub, limits(9.0), &Quiet).unwrap();
+    let reads: Vec<String> = stub
+        .log()
+        .into_iter()
+        .filter(|e| e.starts_with("read "))
+        .collect();
+    assert_eq!(reads, ["read c", "read a", "read b"]);
+    assert_eq!(report.stop, Stop::QueueEmpty);
+    // c and a share no dependency and touch different paths, so they form one group; b waits for a.
+    assert_eq!(
+        report.plan_groups,
+        [
+            vec!["c".to_string(), "a".to_string()],
+            vec!["b".to_string()]
+        ]
+    );
+    let text = display::drain(&report);
+    assert!(text.contains("could run in parallel"), "{text}");
+}
+
+#[test]
+fn an_item_whose_plan_lacks_goal_rung_or_acceptance_is_not_worked_and_is_reported() {
+    let mut no_goal = planned("a", Ladder::Implementation, &["a"], &[]);
+    no_goal.goal.clear();
+    let mut no_rung = planned("b", Ladder::Implementation, &["b"], &[]);
+    no_rung.rung = None;
+    let mut no_acceptance = planned("c", Ladder::Implementation, &["c"], &[]);
+    no_acceptance.acceptance.clear();
+    let stub = Stub {
+        items: vec!["a", "b", "c", "d"],
+        outcomes: passing(),
+        ratings: RefCell::new(vec![1]),
+        plan: vec![
+            no_goal,
+            no_rung,
+            no_acceptance,
+            planned("d", Ladder::Implementation, &["d"], &[]),
+        ],
+        ..Stub::default()
+    };
+    let report = drain::drain(&stub, limits(9.0), &Quiet).unwrap();
+    assert_eq!(stub.log(), ["read d", "run d", "land d", "rate"]);
+    let refused: Vec<(String, Vec<String>)> = report
+        .refused
+        .iter()
+        .map(|r| (r.id.clone(), r.missing.clone()))
+        .collect();
+    assert_eq!(
+        refused,
+        [
+            ("a".to_string(), vec!["goal".to_string()]),
+            ("b".to_string(), vec!["ladder rung".to_string()]),
+            ("c".to_string(), vec!["acceptance".to_string()]),
+        ]
+    );
+    let queued: Vec<&str> = report.queued.iter().map(|i| i.job.as_str()).collect();
+    assert_eq!(queued, ["a", "b", "c"], "they stay queued");
+    let text = display::drain(&report);
+    assert!(text.contains("the plan lacks acceptance"), "{text}");
+}
+
+#[test]
+fn a_stop_asked_for_mid_run_finishes_the_current_job_and_starts_no_other() {
+    let stub = Stub {
+        items: vec!["a", "b", "c"],
+        outcomes: passing(),
+        ratings: RefCell::new(vec![1, 1, 1]),
+        stop_when_running: Some("a"),
+        ..Stub::default()
+    };
+    let report = drain::drain(&stub, limits(9.0), &Quiet).unwrap();
+    // a was already running when the stop came: it is landed and rated. Neither b nor c is read.
+    assert_eq!(stub.log(), ["read a", "run a", "land a", "rate"]);
+    assert_eq!(report.stop, Stop::Requested);
+    assert_eq!(report.jobs.len(), 1);
+    assert_eq!(report.jobs[0].landing, "landed", "the job was not killed");
+    assert_eq!(report.landed, 1);
+    let queued: Vec<&str> = report.queued.iter().map(|i| i.job.as_str()).collect();
+    assert_eq!(queued, ["b", "c"]);
+    assert!(!report.target_met());
+    let text = display::drain(&report);
+    assert!(text.contains("stop requested"), "{text}");
+}
+
+#[test]
+fn a_stop_asked_for_before_any_job_starts_runs_nothing() {
+    let stub = Stub {
+        items: vec!["a"],
+        stop: Cell::new(true),
+        ..Stub::default()
+    };
+    let report = drain::drain(&stub, limits(9.0), &Quiet).unwrap();
+    assert!(stub.log().is_empty(), "{:?}", stub.log());
+    assert_eq!(report.stop, Stop::Requested);
+}
+
+#[test]
+fn the_stop_file_is_in_the_state_directory() {
+    let dir = Path::new("/state/repo");
+    assert_eq!(drain::stop_file(dir), dir.join("drain.stop"));
 }
 
 #[test]

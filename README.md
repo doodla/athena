@@ -122,6 +122,19 @@ You no longer run, land and rate each item yourself. What it leaves to you:
   omitted statement, or on a model whose behavior differs from the code or a page that contradicts itself,
   and names it. Each study model's self-consistency check runs first, as a floor.
 
+**Planning comes first.** `drain` does not work the queue oldest first. Every open request is first fleshed out
+in a plan: its goal, the requirements-ladder rung it serves, its acceptance, its open questions, what it depends
+on and which paths it touches. All open requests are then planned together into one ordered plan: a higher rung
+goes first, an item that depends on another comes after it, and age only breaks ties. The report prints the
+plan's groups; the items of one group depend on nothing in each other and touch different paths, so they could
+run in parallel (drain itself still runs one job at a time). A request whose plan has no goal, no rung or no
+acceptance is not worked: the report lists it as *refused* and says what is missing, and it stays queued.
+
+**Stopping a drain.** Run `athena drain-stop` from another terminal. The drain finishes the job it is on (it is
+landed and rated as usual), starts no further job, and ends with the stop reason `stop requested`, exit code 2.
+Nothing is killed, and the rest stays queued. To kill running work instead, use `athena stop`. A stop asked for
+before a drain starts belongs to an earlier run and is cleared when the next drain begins.
+
 **Budget.** Before every model call (a reading, a run, the re-reading of a retry, a rating, the source check)
 `drain` checks that the money already spent, as the calls actually cost, plus that call's cap from
 `athena.toml` fits `--budget`. If it does not, nothing more starts, even when an earlier job cost more than

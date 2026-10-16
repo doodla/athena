@@ -9,12 +9,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- `athena drain` plans before it works: the open requests are fleshed out (goal, ladder rung, acceptance, open
+  questions, dependencies, touched paths) and planned together, and drain works them in plan order (higher rung
+  first, a dependent after what it needs, age as the tiebreak) instead of oldest first. The report shows the
+  plan's parallel groups; drain still runs one job at a time. A request whose plan lacks a goal, rung or
+  acceptance is refused and reported. Why: the owner's 2026-10-16 addendum asks for planning first and for
+  open initiatives to be planned together. See D105.
 - `athena drain` now also works requests deferred with `athena ask --later` (channel `cli`), not only the
   steward's. Why: those requests were listed as open work but no command that works the queue took them. The
   selection is one channel-set filter in `steward::queued_work`; ordering and retry are unchanged. See D104.
 
 ### Added
 
+- `athena drain-stop` asks a running drain to stop at the next job boundary: the job in progress is finished,
+  landed and rated, no further job starts, and drain ends with the new stop reason `stop requested` (exit code
+  2). Why: the only way to end a drain was to kill it mid-job. See D105.
+- The plan-stage audit, first slice (`athena_core::plan`): each logged gap is traced to a stage (reading,
+  decomposition, assumptions, criteria, outcome check) and a check says whether later gaps of a stage fell after
+  it was changed. Reading gaps from records automatically is follow-up.
 - `athena status` lists interventions that call for follow-up under open work (`open_interventions` in the JSON,
   a `follow-up` line in text, and a command in `next`), each until a later request job's text names its record
   id. Why: the acceptance review (m6) found that status only counted interventions, so a fresh reader had to

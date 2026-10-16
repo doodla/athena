@@ -204,6 +204,14 @@ and the page text passed the source check
   repeated failure  the same item failed twice; it is named
   queue empty       nothing was left to work; this is not success
   job limit         --job-limit jobs were started
+  stop requested    `athena drain-stop` was run; the job in progress was finished and no further job was started
+
+Order: planning comes first. Every open request is fleshed out (goal, requirements-ladder rung, acceptance, \
+open questions, dependencies, the paths it touches) and all of them are planned together. Drain works the \
+items in plan order (higher rung first, a dependent after what it needs, age as the tiebreak), not oldest \
+first, and the report shows the plan's groups: items in one group have no dependency and touch disjoint paths, \
+so they could run in parallel; drain still runs one job at a time. An item whose plan lacks a goal, a rung or \
+acceptance is not worked and is reported.
 
 Exit code: 0 only when the target was met; 2 for any other stop; 1 when Athena itself erred.")]
     Drain {
@@ -219,6 +227,10 @@ Exit code: 0 only when the target was met; 2 for any other stop; 1 when Athena i
         #[arg(long)]
         json: bool,
     },
+    /// Ask a running `athena drain` to stop at the next job boundary: the job in progress is finished (landed and
+    /// rated as usual), no further job is started, and the drain reports `stop requested`. Nothing is killed;
+    /// to kill running work use `athena stop`.
+    DrainStop,
     /// Close a job that will not run or finish.
     Close {
         job: String,
@@ -712,6 +724,8 @@ fn run(cli: Cli) -> Result<u8> {
             json,
         } => {
             let athena = open(true)?;
+            // A stop asked for before this run started belongs to an earlier run.
+            let _ = std::fs::remove_file(drain::stop_file(athena.state.root()));
             let report = drain::drain(
                 &drain::RealSteps::live(&athena, &Terminal),
                 drain::Limits {
@@ -727,6 +741,16 @@ fn run(cli: Cli) -> Result<u8> {
                 print!("{}", display::drain(&report));
             }
             Ok(if report.target_met() { 0 } else { 2 })
+        }
+        Command::DrainStop => {
+            let athena = open(false)?;
+            let file = drain::stop_file(athena.state.root());
+            std::fs::create_dir_all(athena.state.root())?;
+            std::fs::write(&file, "stop at the next job boundary\n")?;
+            println!(
+                "stop asked for: a running drain finishes its current job and starts no further one"
+            );
+            Ok(0)
         }
         Command::Close {
             job,

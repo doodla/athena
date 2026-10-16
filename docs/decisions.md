@@ -2408,3 +2408,33 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Provenance:** read: `Athena::queue` in `reading.rs` (channel `cli`); measured: the unit test
   `unread_steward_and_cli_requests_are_queued_work_oldest_first` and the drain test
   `a_request_deferred_with_ask_later_is_listed_and_worked_like_a_steward_item`.
+
+## D105 · Planning comes first: one coordinated plan orders the drain, and a stop ends it at a job boundary
+
+- **Case:** The owner's 2026-10-16 addendum asks for planning before design or code, and for open initiatives to
+  be planned together, which can run in parallel and in what order, instead of working the queue one at a time,
+  oldest first. The drain also had no way to end except killing it mid-job.
+- **Decision:** `athena_core::plan` builds one plan from the open requests. Each is a plan entry (goal, ladder
+  rung, acceptance, open questions, dependencies, touched paths), taken from its reading once read and from the
+  request's own words before. Ordering: dependency waves; within a wave, ladder rung (top first), then age.
+  Parallel groups: items of a wave with disjoint touched paths (an item naming no path is never grouped).
+  An entry lacking goal, rung or acceptance is refused for design or code and reported; a dependency loop is not
+  scheduled. `drain` works the items in plan order and still runs one job at a time. A stop (`athena
+  drain-stop`, a file in the state directory) is asked before every job, never during one, and ends the drain
+  with the new stop reason `stop requested`. The plan-stage audit from queued item n2qb is delivered as a first
+  slice: tracing a gap to a stage and a before/after check; reading gaps from records and the proposing role are
+  follow-up. Moving compute to CI is design that comes after this change and is not part of it.
+- **Alternatives:** (a) A model-written plan: costs a call per drain and is not testable without a model; the
+  entries here come from data the records already hold. (b) Run groups concurrently now: needs isolation of
+  snapshots, landing and budget across jobs, a larger change; the groups are reported so it can follow.
+  (c) Keep oldest first and only add a priority field: does not order by dependency or find parallel work.
+  (d) Stop by signal: kills the job in progress, which is what the stop must not do.
+- **Tradeoff:** Before a request is read its plan rests on its own words, so a vague request is planned loosely
+  until the reading; the refusal gate is weak for unread requests (the first line stands in as acceptance), and
+  strong for read ones. A stop is only seen between jobs, so a long job delays it.
+- **Reversal cost:** Low: drain falls back to the old order when a queue view carries no plan entries; remove the
+  file check to drop the stop.
+- **Provenance:** read: `crates/athena-cli/src/drain.rs` and `reading.rs` before the change; measured: the drain
+  tests `items_are_worked_in_plan_order_not_oldest_first`,
+  `an_item_whose_plan_lacks_goal_rung_or_acceptance_is_not_worked_and_is_reported` and
+  `a_stop_asked_for_mid_run_finishes_the_current_job_and_starts_no_other`, and the unit tests in `plan.rs`.

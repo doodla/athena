@@ -42,6 +42,27 @@ are not built.
   also runs any job a work decision records as approved that is still in state proposed (read once, never
   read again; a closed job is not picked up). Rejecting a proposal, and approving one above its role's limit
   or raised by a role with no recorded definition, stay with people: `drain` lists those as waiting.
+- **Planning comes first, and the drain follows one plan** (`athena_core::plan`, D105). Before design or code,
+  each open request is fleshed out as a plan entry: goal, ladder rung, acceptance, open questions, dependencies
+  and touched paths. Once a request is read, these come from its reading (summary, criteria, question,
+  deliverables); before that, the request's own words stand in (first line as goal; bullet lines, else the first
+  line, as acceptance; path-like words as touches; full job ids it names as dependencies). All open entries
+  are planned together: items whose dependencies are done form a wave; a wave is ordered by rung (top first),
+  then age; within it, items with no shared dependency and disjoint touched paths form a parallel group (an item
+  that names no path is never grouped). Items that wait on each other in a loop are not scheduled. An entry
+  without a goal, a rung or acceptance is refused for design or code and reported. `drain` works the items in
+  plan order, one job at a time; running a group concurrently is follow-up.
+- **Stopping a drain.** `drain` asks before every job whether a stop was requested (`athena drain-stop` creates
+  a file in the repository's state directory). A job that has started is finished, landed and rated; no further
+  job starts. The stop reason is `stop requested`, distinct from the kill switch (`athena stop`), which ends
+  running work.
+- **The plan-stage audit (first slice).** Every logged gap (an intervention, an introspection, a rejection, a
+  rating) is traced to the stage that let it through: reading, decomposition, assumptions, criteria or outcome
+  check (`plan::trace`, by the words of the gap's account; a person can overrule it). `plan::GapLog::fell`
+  then compares gaps of a stage per job before and after a change to that stage, so a change counts as working
+  only if later gaps of that kind fell. Follow-up: reading the gaps and their accounts from the records
+  automatically, a report on `athena status`, and a role that proposes the stage changes; none of that is built
+  yet.
 - **The ladder** (`Ladder`) has five rungs, highest first:
 
   | Rung | What it holds |
