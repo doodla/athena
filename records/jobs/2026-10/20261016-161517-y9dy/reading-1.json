@@ -1,0 +1,147 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261016-161517-y9dy",
+  "n": 1,
+  "at": "2026-10-16T16:15:45.935590665Z",
+  "invocation_seq": 1,
+  "base_commit": "cb94fe3b057803fbb8ffcabe5009d197673a3679",
+  "config_sha256": "5570e4f9425ce1beb6f41799c80193739787f2fc95ee3ce8cdead671d06c980b",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Keep read requests in the plan and drain queue",
+  "summary": "Reading a queued request (state Queued to Proposed) drops it from `athena plan` and `athena drain`, because `steward::queued_work` only lists state Queued. I will make the queue also include requests on the drained channels that have been read but not run, as Items with read=true, so plan and drain keep seeing them after a read.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "Tests for the plan and drain queue are added, with cargo test and clippy clean."
+    },
+    {
+      "id": "root-cause",
+      "how": "The fix is in how the queue is derived from job state, not in each caller."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check that read requests remain in the plan and are worked by drain."
+    },
+    {
+      "id": "verified",
+      "how": "Behavior criteria name the cargo commands to run."
+    },
+    {
+      "id": "small",
+      "how": "One focused change to the queue selection."
+    },
+    {
+      "id": "no-empty-success",
+      "how": "A test asserts the plan is non-empty after reading, not just that nothing errors."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "The goal is for operators using `athena plan` and `athena drain`: a request that has been read but not yet run stays in the plan and in the drain's queue.",
+    "'Read' means state Proposed on the steward or `ask --later` channels; jobs approved through work decisions are already listed by approved_work and must not be listed twice.",
+    "The 'default --budget 2 read none' remark is read as a symptom to check: if the room check is wrong, fix it. Otherwise it is left as is, and this change makes it harmless because unread requests stay queued.",
+    "Declined requests stay out of the queue, since they wait for a correction or close.",
+    "The default plan budget and the plan's read-by-default behavior are not changed."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A test queues requests on a drained channel, runs `plan` with a budget that reads some of them (stub reader), and then shows that the read requests are still in the plan entries and in `queue()` with read=true. Run `cargo test`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test shows that after a plan that reads requests, `drain` still works them: they are in its queue, are not read a second time, and are run in plan order. Run `cargo test`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A second `plan` after the first one reads requests prints the same open requests, not 'nothing is open'. The test checks this with the stub-backed plan output.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Read requests on channels other than the drained ones, jobs that are running or closed, and declined jobs do not enter the queue. A test covers each. `cargo test`, `cargo clippy` and `cargo fmt --check` pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The misleading test name `the_plan_of_a_read_job_names_a_missing_path_and_an_unresolved_referenced_job` in crates/athena-cli/tests/drain.rs is replaced or backed by a test that really reads the job before checking its plan.",
+      "kind": "content"
+    },
+    {
+      "text": "The doc comment of `queued_work` and the module text of drain.rs describe the new rule: read requests stay queued for the drain until they run or close.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/steward.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "README.md",
+      "action": "modify",
+      "p": 0.2
+    }
+  ],
+  "out_of_scope": [
+    "Making `athena plan` read-only by default.",
+    "Changing JobState semantics or the state machine in store.rs.",
+    "Drain behavior for other channels or declined jobs."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.75,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.1,
+        "p90": 2.5
+      },
+      "wall_time_s": {
+        "p10": 500.0,
+        "p50": 1000.0,
+        "p90": 2100.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.8271428571428571,
+      "p_verification_passes": 0.6612903225806451,
+      "p_user_intervenes": 0.07903225806451614,
+      "cost_usd": {
+        "p10": 0.40225607969551186,
+        "p50": 0.867979869927696,
+        "p90": 2.164189706477451
+      },
+      "wall_time_s": {
+        "p10": 544.215646591689,
+        "p50": 946.1332570769999,
+        "p90": 1882.6036088512978
+      }
+    }
+  },
+  "departures": "The change touches core queue selection and the drain's tests, so cost and time are slightly above the reference."
+}
