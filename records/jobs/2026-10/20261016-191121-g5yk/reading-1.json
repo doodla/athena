@@ -1,0 +1,166 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261016-191121-g5yk",
+  "n": 1,
+  "at": "2026-10-16T19:11:56.984414619Z",
+  "invocation_seq": 1,
+  "base_commit": "0395abdb2186d75ade7c495500a2f2e7c472dfa2",
+  "config_sha256": "5570e4f9425ce1beb6f41799c80193739787f2fc95ee3ce8cdead671d06c980b",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Admit athena.toml changes by the candidate's own Config schema",
+  "summary": "Admission parses a changed athena.toml with the running Athena's compiled `Config`, so a job that adds a section and its schema field together is always refused (jobs q0xy and qcrz hit this on `[parallel]`). Change admission so the candidate's config is checked against the candidate's own schema, while a config with a genuinely unknown field is still refused. The audience is Athena's operator and future jobs that extend the config.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "New admission tests cover the admitted, still-refused, and fail-closed cases; cargo test and clippy must pass."
+    },
+    {
+      "id": "root-cause",
+      "how": "Fix the rule that checks the config against the wrong schema, not just the `[parallel]` instance."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run admission on a config-plus-schema change and check the outcome."
+    },
+    {
+      "id": "outcome-check",
+      "how": "A criterion reproduces the exact failure of the two named jobs."
+    },
+    {
+      "id": "no-empty-success",
+      "how": "The fail-closed criterion prevents an unrunnable candidate check from counting as a pass."
+    },
+    {
+      "id": "rust",
+      "how": "The change is Rust in athena-core."
+    },
+    {
+      "id": "small",
+      "how": "One focused change in admission.rs; defaults.toml handled only if it falls out of the same mechanism."
+    },
+    {
+      "id": "mechanism",
+      "how": "The rule is enforced by admission tests, not prose."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Read from crates/athena-core/src/admission.rs lines 215-238: the 'configuration' rule calls Config::parse (the base binary's athena_data::Config, which uses deny_unknown_fields in config.rs) on the candidate's athena.toml.",
+    "Candidate commit C is a tree in the user's git repo, not built before admission (run.rs ~846), so the candidate's schema must be exercised by checking out/building the candidate's athena-data crate, e.g. in a temporary tree, and running a small check against it.",
+    "Where the candidate does not change the schema (crates/athena-data/src/config.rs), behavior stays as today: parse with the running Config.",
+    "The candidate's schema check must fail closed: if the candidate's own check cannot be built or run, or reports an error, admission yields a 'configuration' violation with the real message, never silent success.",
+    "defaults.toml (DefaultsModel) has the same shape of problem; fix it the same way only if it falls out of the same mechanism, otherwise leave it.",
+    "Landing still re-parses the config with the base Config where it does today; if landing has the same flaw it is noted rather than silently left. Check crates/athena-gate/src/lib.rs line 140 for that."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new admission test shows a candidate that adds a new `[section]` to athena.toml together with the matching field in athena-data's Config is admitted with no 'configuration' violation. Run `cargo test -p athena-core admission`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A new admission test shows a candidate that adds an unknown `[section]` to athena.toml without changing the schema is still refused with a 'configuration' violation naming the unknown field. Run `cargo test -p athena-core admission`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test shows that when the candidate's own schema check cannot run or fails, admission reports a 'configuration' violation instead of passing. Run `cargo test -p athena-core admission`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "admission.rs documents (module comment and rule comment) that a changed athena.toml is judged by the candidate's schema, and states how the candidate's schema is obtained.",
+      "kind": "content"
+    },
+    {
+      "text": "The existing admission tests (bad athena.toml, defaults.toml, docs/athena.toml) still pass; `cargo test` passes and `cargo clippy --all-targets` and `cargo fmt --check` are clean.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Outcome check: the failure text from jobs 20261016-071202-q0xy and 20261016-185517-qcrz (`unknown field parallel` when athena.toml and the schema change together) is reproduced by a test and no longer occurs.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has an entry describing the admission change, if the repository's CHANGELOG convention covers behavior changes.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/admission.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "p": 0.15
+    },
+    {
+      "path": "crates/athena-core/Cargo.toml",
+      "action": "modify",
+      "p": 0.15
+    },
+    {
+      "path": "docs/design/parallel-jobs.md",
+      "action": "modify",
+      "p": 0.05
+    }
+  ],
+  "out_of_scope": [
+    "Building parallel jobs themselves (job q0xy's request) and the [parallel] config section.",
+    "Changing athena.toml or defaults.toml.",
+    "Relaxing deny_unknown_fields in Config.",
+    "Retrying jobs q0xy or qcrz."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.75,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.12,
+      "cost_usd": {
+        "p10": 0.4,
+        "p50": 0.95,
+        "p90": 2.3
+      },
+      "wall_time_s": {
+        "p10": 420.0,
+        "p50": 960.0,
+        "p90": 2000.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.8273972602739725,
+      "p_verification_passes": 0.6434108527131783,
+      "p_user_intervenes": 0.08372093023255814,
+      "cost_usd": {
+        "p10": 0.411494627210041,
+        "p50": 0.9154905,
+        "p90": 2.156940892160377
+      },
+      "wall_time_s": {
+        "p10": 546.8681592802664,
+        "p50": 965.011725149064,
+        "p90": 1851.3812574073297
+      }
+    }
+  },
+  "departures": "Slightly lower pass odds and higher cost than the reference: the fix needs the candidate's schema built and exercised from admission, which is a design choice with fail-closed edge cases."
+}
