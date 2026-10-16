@@ -23,6 +23,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- Admission judges a changed `athena.toml` or `defaults.toml` by the candidate's own schema. Root cause: the
+  `configuration` rule parsed the file with the running Athena's compiled `Config`, so a job that added a
+  section and its schema field together was always refused with `unknown field` (jobs 20261016-071202-q0xy and
+  20261016-185517-qcrz, `[parallel]`). When the candidate changes `crates/athena-data/`, admission now writes
+  that crate, the root `Cargo.toml` and `Cargo.lock` from the candidate commit to a temporary directory,
+  builds a small checker against it offline and runs it on the file; a checker that cannot be built or run is a
+  `configuration` violation carrying the real message. Without a schema change the running schema still
+  judges. Landing (`athena_gate::config_at`) still parses with the running binary, so a landed schema change
+  takes effect for the next run only once Athena is rebuilt. Tests in `admission.rs`.
 - A request that `athena plan` has read stays in the plan and in `athena drain`'s queue. Root cause:
   `steward::queued_work` listed only requests in state queued, so reading one (state proposed) dropped it from
   the plan, from the next `athena plan` ("nothing is open") and from drain. It now lists the open requests of
