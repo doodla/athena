@@ -1117,6 +1117,86 @@ pub fn job_ids_in(text: &str) -> Vec<RecordId> {
     ids
 }
 
+/// Whether a word of a request looks like a repository path: it has a directory part or a file extension.
+fn looks_like_path(word: &str) -> bool {
+    let w = word.trim_matches(|c: char| !(c.is_ascii_alphanumeric() || "/._-".contains(c)));
+    !w.is_empty()
+        && !w.starts_with('/')
+        && !w.contains("..")
+        && (w.contains('/')
+            || [".rs", ".md", ".toml", ".json", ".yml"]
+                .iter()
+                .any(|ext| w.ends_with(ext)))
+}
+
+/// Planning, the first stage: fleshes out one open request into a plan entry (design: planning first).
+///
+/// - Once the request has been read, the goal is the reading's summary, the acceptance is its criteria, the
+///   open question is its question and what it touches is its deliverables.
+/// - Before it is read, the request's own words stand in: the first line is the goal; the lines that start
+///   with `-`, `*` or a number are the acceptance, and without any, the first line is; path-like words are
+///   what it touches.
+/// - A request depends on every other job whose full id it names (a retry, or "after <job>").
+///
+/// `rung` is the requirements-ladder rung the request serves, which the caller knows (a steward proposal
+/// carries it).
+pub fn plan_entry(job: &JobRecords, rung: athena_data::roles::Ladder) -> crate::plan::PlanEntry {
+    let text = job.request.as_ref().map_or("", |r| r.text.as_str());
+    let first = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    let mut entry = crate::plan::PlanEntry::bare(job.id().as_str(), &job.title());
+    entry.rung = Some(rung);
+    entry.depends_on = job_ids_in(text)
+        .into_iter()
+        .map(|id| id.as_str().to_string())
+        .filter(|id| id != job.id().as_str())
+        .collect();
+    match job.latest_reading() {
+        Some(reading) => {
+            entry.goal = reading.summary.clone();
+            entry.acceptance = reading
+                .acceptance_criteria
+                .iter()
+                .map(|c| c.text.clone())
+                .collect();
+            entry.open_questions = reading.question.iter().cloned().collect();
+            entry.touches = reading
+                .deliverables
+                .iter()
+                .map(|d| d.path.clone())
+                .collect();
+        }
+        None => {
+            entry.goal = first.trim().to_string();
+            let bullets: Vec<String> = text
+                .lines()
+                .map(str::trim)
+                .filter(|l| {
+                    l.starts_with("- ")
+                        || l.starts_with("* ")
+                        || l.split_once(". ").is_some_and(|(n, _)| {
+                            !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())
+                        })
+                })
+                .map(String::from)
+                .collect();
+            entry.acceptance = if bullets.is_empty() && !first.trim().is_empty() {
+                vec![first.trim().to_string()]
+            } else {
+                bullets
+            };
+            for word in text.split_whitespace().filter(|w| looks_like_path(w)) {
+                let path = word
+                    .trim_matches(|c: char| !(c.is_ascii_alphanumeric() || "/._-".contains(c)))
+                    .to_string();
+                if !entry.touches.contains(&path) {
+                    entry.touches.push(path);
+                }
+            }
+        }
+    }
+    entry
+}
+
 /// The jobs a request names by full id, other than `skip` (the retried job): each one's request and
 /// final findings, redacted. Ids that match no job (or a job without a request) are ignored. At most
 /// [`MAX_REFERENCED_JOBS`] are carried.
@@ -1647,6 +1727,45 @@ mod tests {
         let job = job_with_checks(vec![check("fmt", true, "PASSING-OUTPUT")]);
         let carried = carry(&job, &redactor).unwrap().unwrap();
         assert_eq!(carried.findings, ["reason: a check failed"]);
+    }
+
+    #[test]
+    fn an_unread_request_is_planned_from_its_own_words_and_a_read_one_from_its_reading() {
+        use athena_data::roles::Ladder;
+        let mut job = job_with_checks(vec![]);
+        job.request.as_mut().unwrap().text =
+            "Add a greeting to crates/cli/src/main.rs after 20261012-075824-1x28\n- it prints hello\n- cargo test passes"
+                .into();
+        let entry = plan_entry(&job, Ladder::Implementation);
+        assert_eq!(
+            entry.goal,
+            job.request.as_ref().unwrap().text.lines().next().unwrap()
+        );
+        assert_eq!(
+            entry.acceptance,
+            ["- it prints hello", "- cargo test passes"]
+        );
+        assert_eq!(entry.touches, ["crates/cli/src/main.rs"]);
+        assert_eq!(entry.depends_on, ["20261012-075824-1x28"]);
+        assert_eq!(entry.rung, Some(Ladder::Implementation));
+        assert!(entry.missing().is_empty());
+
+        job.readings = vec![final_reading(&job)];
+        let entry = plan_entry(&job, Ladder::DesignDecisions);
+        assert_eq!(entry.goal, "Print a greeting.");
+        assert_eq!(
+            entry.acceptance,
+            ["greeting.rs exists", "cargo test passes"]
+        );
+        assert_eq!(entry.touches, ["greeting.rs"]);
+
+        job.request.as_mut().unwrap().text = "  ".into();
+        job.readings.clear();
+        assert_eq!(
+            plan_entry(&job, Ladder::Implementation).missing(),
+            ["goal", "acceptance"],
+            "an empty request has nothing to plan"
+        );
     }
 
     #[test]

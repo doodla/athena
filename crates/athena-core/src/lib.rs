@@ -38,7 +38,10 @@
 //! - [`audience`]: `athena audience`, a role that reads the live explainer page as a newcomer, rates it from 1
 //!   to 5, and records the rating with findings that each cite their evidence; a rating of 2 or lower queues
 //!   a work item, and the steward's brief and `athena status` show the latest rating;
-//! - [`pin`]: a study's repository ref resolved to a commit by the core, and mounted read-only.
+//! - [`pin`]: a study's repository ref resolved to a commit by the core, and mounted read-only;
+//! - [`plan`]: planning, the first stage: every open request fleshed out and all of them planned together into
+//!   one ordered plan with parallel groups, which `athena drain` follows; and the plan-stage audit's tracing
+//!   of logged gaps to stages.
 
 pub mod admission;
 pub mod audience;
@@ -56,6 +59,7 @@ pub mod land;
 pub mod manage;
 pub mod nested;
 pub mod pin;
+pub mod plan;
 pub mod pr;
 pub mod proposals;
 pub mod reading;

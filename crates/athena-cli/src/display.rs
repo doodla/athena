@@ -290,6 +290,28 @@ pub fn drain(report: &crate::drain::Report) -> String {
             "outcome     no landing changed the outcome: none touched studies/, the site generator or the publish workflow, so the page is as it was and a rating cannot meet the target\n",
         );
     }
+    for (n, group) in report.plan_groups.iter().enumerate() {
+        let _ = writeln!(
+            out,
+            "plan        group {}: {}{}",
+            n + 1,
+            group.join(", "),
+            if group.len() > 1 {
+                " (could run in parallel)"
+            } else {
+                ""
+            }
+        );
+    }
+    for r in &report.refused {
+        let _ = writeln!(
+            out,
+            "refused     {} · {}: the plan lacks {}",
+            r.id,
+            r.title,
+            r.missing.join(", ")
+        );
+    }
     for note in &report.notes {
         let _ = writeln!(out, "note        {note}");
     }
