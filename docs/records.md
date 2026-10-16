@@ -157,6 +157,14 @@ and commit it with the trailer `Athena-Record: records/resolutions/<YYYY-MM>/<id
 verifies that the target exists, that the field is pending, and that only one resolution targets it.
 `athena status` lists pending quantities and the resolutions that settle them.
 
+## Following up an intervention
+
+`athena status` lists each intervention recorded by the user (`source` `user`) as open work, with its id,
+category and a next command, until it is cited. An intervention is cited when a request job received at or
+after the intervention was recorded has request text that names the intervention's record id, for example
+`athena ask "fix the greeting left by intervention <id>"`. Interventions Athena observed itself (a correction
+of a reading) are not listed. The list is the `open_interventions` field of `athena status --json`.
+
 ## Closing the bootstrap
 
 Until `records/jobs/bootstrap/outcome.json` exists, a commit labeled `Athena-Job: bootstrap` may change

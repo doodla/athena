@@ -1562,6 +1562,87 @@ fn a_governed_change_on_the_branch_makes_the_job_stale() {
     assert!(athena.check_history().unwrap().violations.is_empty());
 }
 
+fn intervene_on_latest(athena: &athena_core::Athena) -> athena_data::RecordId {
+    athena
+        .intervene(
+            &athena_core::manage::InterveneArgs {
+                what: "Reworded the greeting by hand".into(),
+                why: "The landed wording was off".into(),
+                class: "docs".into(),
+                category: "corrected-output".into(),
+                job: Some("latest".into()),
+                with_staged: false,
+            },
+            &Lines::default(),
+        )
+        .unwrap()
+        .intervention
+        .id
+}
+
+#[test]
+fn status_lists_an_uncited_intervention_as_open_work_with_a_next_command() {
+    let fx = Fixture::new();
+    let athena = fx.athena(Scenario::default().script());
+    assert!(athena.status().unwrap().open_interventions.is_empty());
+    let proposal = athena.ask("add a greeting", &Lines::default()).unwrap();
+    let f = finished(
+        athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(f.state, OutcomeState::Landed);
+    let id = intervene_on_latest(&athena);
+
+    let status = athena.status().unwrap();
+    let [open] = status.open_interventions.as_slice() else {
+        panic!("one open intervention, got {:?}", status.open_interventions)
+    };
+    assert_eq!(open.id, id.to_string());
+    assert_eq!(open.category, "corrected-output");
+    assert_eq!(open.job.as_deref(), Some(proposal.job.as_str()));
+    assert_eq!(
+        open.next,
+        format!("athena ask \"<request that addresses intervention {id}>\"")
+    );
+    assert!(
+        status.next.iter().any(|n| n.contains(&open.next)),
+        "{:?}",
+        status.next
+    );
+    // The counts are unchanged by the new list.
+    assert_eq!(status.interventions_by_category["corrected-output"], 1);
+}
+
+#[test]
+fn an_intervention_leaves_open_work_once_a_later_request_cites_its_id() {
+    let fx = Fixture::new();
+    let athena = fx.athena(Scenario::default().script());
+    let proposal = athena.ask("add a greeting", &Lines::default()).unwrap();
+    finished(
+        athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    let id = intervene_on_latest(&athena);
+    assert_eq!(athena.status().unwrap().open_interventions.len(), 1);
+
+    // A request that does not name the id does not clear it.
+    athena.ask("tidy the docs", &Lines::default()).unwrap();
+    assert_eq!(athena.status().unwrap().open_interventions.len(), 1);
+
+    athena
+        .ask(
+            &format!("address intervention {id}: reword the greeting"),
+            &Lines::default(),
+        )
+        .unwrap();
+    let status = athena.status().unwrap();
+    assert!(status.open_interventions.is_empty());
+    assert!(!status.next.iter().any(|n| n.contains(id.as_str())));
+    assert_eq!(status.interventions_by_category["corrected-output"], 1);
+}
+
 #[test]
 fn hand_work_is_declared_with_staged_changes_and_rescores_the_job() {
     // M6 (allows): an intervention commit with its record. §9.5: a late intervention re-scores a job.

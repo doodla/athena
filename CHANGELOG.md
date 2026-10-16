@@ -15,6 +15,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `athena status` lists interventions that call for follow-up under open work (`open_interventions` in the JSON,
+  a `follow-up` line in text, and a command in `next`), each until a later request job's text names its record
+  id. Why: the acceptance review (m6) found that status only counted interventions, so a fresh reader had to
+  open records to find them. Interventions Athena observed itself are not listed.
 - The drain's page source check now judges the study's model against the pinned code. The checker traces each
   state, transition, counter and rule of `model.json` through the source and compares the page's rules with
   each other, and reports a new problem kind `behavior` that fails the check and holds back "target met". Why:
