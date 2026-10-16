@@ -23,7 +23,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
-- Admission judges a changed `athena.toml` or `defaults.toml` by the candidate's own schema. Root cause: the
+- The landing gate and admission judge a changed `athena.toml` or `defaults.toml` by the candidate's schema
+  without building candidate code on the host. Root cause: the landing gate parsed the file with the running
+  Athena's compiled schema, so a commit adding a section together with its schema field was refused (job
+  20261016-200605-xh54), and the earlier admission fix compiled the candidate's `athena-data` on the host. Now
+  `crates/athena-data/tests/repo_config.rs` parses the repository's two files with that crate's own schema; it
+  runs in the candidate's own `cargo test`. When a commit changes `crates/athena-data/`, both checks skip
+  their parse and rely on that test (one shared rule, `athena_gate::defers_to_schema_test`); otherwise they
+  parse with the running schema, which is then the parent's. The host-side builder in admission is removed.
+  Design note in `docs/design/roles-and-ladder.md`. Tests in `athena-gate` (`content.rs`) and `athena-core`
+  (`admission.rs`).
+- Admission judges (superseded by the entry above: the host build was removed) a changed `athena.toml` or `defaults.toml` by the candidate's own schema. Root cause: the
   `configuration` rule parsed the file with the running Athena's compiled `Config`, so a job that added a
   section and its schema field together was always refused with `unknown field` (jobs 20261016-071202-q0xy and
   20261016-185517-qcrz, `[parallel]`). When the candidate changes `crates/athena-data/`, admission now writes

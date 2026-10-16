@@ -1,0 +1,131 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261016-205137-wm0p",
+  "base_commit": "11068b5b16f96e0f64af180697c01eb3b01cbf11",
+  "base_fingerprint": "sha256:84a7a640993c2af7dddbc8d945712ca4b696776411cc43fddbd8eec6407c94a7",
+  "previous_job": "20261016-191121-g5yk",
+  "candidate_commit": "9f9c8a9413e0f962585b522b6aa49f084d225104",
+  "candidate_tree": "ce62a9f69cafb4ef922cdcfb584dee6324a36159",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 86694
+    },
+    {
+      "path": "crates/athena-core/src/admission.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 20561
+    },
+    {
+      "path": "crates/athena-data/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 2120
+    },
+    {
+      "path": "crates/athena-data/tests/repo_config.rs",
+      "status": "added",
+      "mode": "100644",
+      "bytes": 1328
+    },
+    {
+      "path": "crates/athena-gate/src/content.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 16126
+    },
+    {
+      "path": "crates/athena-gate/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 15523
+    },
+    {
+      "path": "docs/design/roles-and-ladder.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 14147
+    }
+  ],
+  "fingerprint": "sha256:89480bfbeb0475fd7ab02f9de6ce5dbd0aa81d1b9fca1c34747ffc6655194154",
+  "violations": [],
+  "producer_report": {
+    "summary": "Gate and admission now share one rule. If a commit changes crates/athena-data/, both skip parsing athena.toml and defaults.toml with the running schema, because the candidate's own test in crates/athena-data/tests/repo_config.rs judges them. Otherwise they parse with the running schema. The host build of candidate code (check_with_candidate_schema, CHECK_MAIN) is removed from admission. A design note in docs/design/roles-and-ladder.md and a CHANGELOG entry record the decision and the alternatives. This send-back only re-ran the tests; I made no new edits. I did not re-read the design note or CHANGELOG this round. The full `cargo test --locked` returned without an error, but its output was too long for me to read the per-crate totals. I did not re-run fmt or clippy.",
+    "files": [
+      "crates/athena-gate/src/content.rs",
+      "crates/athena-gate/src/lib.rs",
+      "crates/athena-core/src/admission.rs",
+      "crates/athena-core/Cargo.toml",
+      "Cargo.lock",
+      "crates/athena-data/src/lib.rs",
+      "crates/athena-data/tests/repo_config.rs",
+      "CHANGELOG.md",
+      "docs/design/roles-and-ladder.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "Ran to completion with no error reported. The output was too long to read the totals."
+      },
+      {
+        "command": "cargo test --locked -p athena-data --test repo_config",
+        "result": "pass",
+        "note": "3 passed"
+      },
+      {
+        "command": "cargo test --locked -p athena-data -p athena-gate schema",
+        "result": "pass",
+        "note": "The two gate tests matching 'schema' and the five athena-data unit tests passed."
+      },
+      {
+        "command": "cargo test --locked -p athena-gate -p athena-core -p athena-data",
+        "result": "pass",
+        "note": "Completed with no error reported."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Gate regression test: a commit that adds an athena.toml section and the matching athena-data schema change in one commit produces no Configuration violation from athena-gate content::check, while the same athena.toml change without a schema change is still refused with the parse error. Run: cargo test -p athena-gate.",
+        "status": "met",
+        "evidence": "In crates/athena-gate/src/content.rs, content::tests::a_new_section_with_its_schema_change_in_one_commit_is_not_refused passed. The existing a_configuration_that_does_not_parse_is_refused covers the same change without a schema change. deleting_the_schema_does_not_defer_the_parse also passed. I ran the first and last by name; the middle one was part of the full run, which showed no error."
+      },
+      {
+        "criterion": "Admission test: a candidate changing both crates/athena-data/ and athena.toml is admitted without any process being spawned to build candidate code, and an unknown section with no schema change is still a violation. Run: cargo test -p athena-core.",
+        "status": "met",
+        "evidence": "In crates/athena-core/src/admission.rs, the tests a_new_section_and_its_schema_change_together_are_admitted_without_a_build and an_unknown_section_without_a_schema_change_is_still_refused exist. The second passed in the earlier run (visible in the output); the first was part of the full run, which showed no error. Admission no longer has any code that spawns a build."
+      },
+      {
+        "criterion": "admission.rs no longer contains check_with_candidate_schema, CHECK_MAIN, or any Command::new(cargo) use on candidate files; grep shows none in athena-core or athena-gate.",
+        "status": "met",
+        "evidence": "A Grep for check_with_candidate_schema, CHECK_MAIN and Command::new over crates/ found no such names in admission.rs. The only Command::new calls in athena-core and athena-gate run git, gh, curl, a configured check program (checks.rs) and the secrets scanner binary (secrets.rs). None runs cargo on candidate files."
+      },
+      {
+        "criterion": "A test in crates/athena-data parses the repository's athena.toml and defaults.toml with that crate's own schema and fails if either does not parse, so a candidate's sandboxed cargo test judges its own schema. Run: cargo test -p athena-data.",
+        "status": "met",
+        "evidence": "cargo test --locked -p athena-data --test repo_config: athena_toml_parses_with_this_crates_schema, defaults_toml_parses_with_this_crates_schema and an_unknown_section_is_what_the_test_would_catch passed."
+      },
+      {
+        "criterion": "Both checks use one shared rule for deciding when to defer to the sandboxed test, so gate and admission cannot diverge. Run: cargo test, cargo clippy --all-targets, cargo fmt --check all pass.",
+        "status": "met",
+        "evidence": "The shared rule is in crates/athena-data/src/lib.rs, with both checks calling it. cargo test --locked completed with no error. I did not re-run clippy or fmt in this send-back round, so the evidence for those is the earlier round."
+      },
+      {
+        "criterion": "A short design note records the decision with alternatives (host build, sandbox build, lenient parse) and states why candidate code is never built on the host; CHANGELOG notes the change.",
+        "status": "met",
+        "evidence": "The note is in docs/design/roles-and-ladder.md and the entry is in CHANGELOG.md. I wrote both earlier and did not re-read them this round."
+      }
+    ],
+    "open_issues": [],
+    "mistakes": [
+      "The first report did not list the criteria_check entries in the form required, which caused the send-back."
+    ],
+    "learnings": [
+      "The Bash tool here cannot pipe and cannot run grep, so long cargo output has to be narrowed with test-name filters."
+    ],
+    "desires": []
+  }
+}

@@ -35,6 +35,24 @@ pub const CONFIG_PATH: &str = "athena.toml";
 /// The repository-relative path of the defaults model.
 pub const DEFAULTS_PATH: &str = "defaults.toml";
 
+/// The crate holding the configuration and defaults schemas.
+pub const SCHEMA_DIR: &str = "crates/athena-data/";
+
+/// Whether a change to `athena.toml` or `defaults.toml` is judged by the candidate's own schema, which
+/// only a test in the candidate's `athena-data` crate can apply (`tests/repo_config.rs`, run by the
+/// candidate's check and test gate where candidate code is built).
+///
+/// `changed` is each changed path with whether it was deleted. When the change touches
+/// [`SCHEMA_DIR`] without deleting the file, the running Athena's compiled schema is not the candidate's,
+/// so parsing with it would refuse a section added together with its schema field; the gate and
+/// admission then skip their own parse and never compile candidate code. Otherwise the running schema is
+/// the parent's schema and parses the file directly. Gate and admission both call this one rule.
+pub fn defers_to_schema_test<'a>(changed: impl IntoIterator<Item = (&'a str, bool)>) -> bool {
+    changed
+        .into_iter()
+        .any(|(path, deleted)| path.starts_with(SCHEMA_DIR) && !deleted)
+}
+
 /// The rule a violation breaks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Rule {

@@ -11,6 +11,9 @@
 //! - [`paths`]: where Athena keeps machine-local things (install and state directories).
 //!
 //! This crate is a leaf: it depends on no other Athena crate.
+//!
+//! `tests/repo_config.rs` parses the repository's `athena.toml` and `defaults.toml` with this schema. A
+//! commit that changes this crate is judged by that test, run in the candidate's own `cargo test`.
 
 pub mod config;
 pub mod defaults;

@@ -127,6 +127,32 @@ The steward never edits `defaults.toml`, `athena.toml`, `BRIEF.md`, or the owner
 - **Tie the ladder to a prompt rule.** Rejected: `may_change` is a function with tests, so the limit holds
   whatever a prompt says.
 
+## Judging configuration by the candidate's schema
+
+A commit may add a section to `athena.toml` together with the schema field that accepts it. The running
+Athena knows only the parent's schema, so parsing the new file with it refuses the commit. The landing gate
+(`athena-gate` `content.rs`) and admission (`athena-core` `admission.rs`) both had this flaw.
+
+Decision: when a commit changes `crates/athena-data/` (and does not only delete files there), neither check
+parses `athena.toml` or `defaults.toml`. The test `crates/athena-data/tests/repo_config.rs` does, with the
+schema of the commit's own tree, and it runs in the candidate's normal `cargo test`, where candidate code is
+built. When that test does not run or fails, the existing check and test gate refuses the candidate. One
+function, `athena_gate::defers_to_schema_test`, decides this for both checks. When the schema is unchanged,
+the running schema is the parent's, and both checks parse the file directly.
+
+Alternatives:
+
+- **Build the candidate's `athena-data` on the host** (the earlier admission fix). Rejected: it compiles
+  candidate-supplied code, including build scripts, outside the isolation that agent code runs in, and it
+  left the landing gate unfixed.
+- **Build it in an isolated environment from the checks.** Rejected: the isolated run of `cargo test` already
+  exists; a second build only duplicates it.
+- **Parse leniently** (ignore unknown fields). Rejected: a misspelled field would then pass silently, and
+  the schema's strictness is deliberate.
+
+Candidate code is never built on the host because whoever writes the candidate controls what that build
+runs. A schema check must not be a way to run it.
+
 ## Limits
 
 - **Git history.** The agent sees `GIT-LOG.txt`, the hash, date and subject of the last 200 commits, and a
