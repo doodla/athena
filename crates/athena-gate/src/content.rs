@@ -393,7 +393,8 @@ mod tests {
     #[test]
     fn a_new_section_with_its_schema_change_in_one_commit_is_not_refused() {
         let config = include_str!("../../../athena.toml");
-        let with_section = format!("{config}\n[parallel]\nmax_jobs = 2\n");
+        // A section no schema knows (`[parallel]` was this example until the schema gained it).
+        let with_section = format!("{config}\n[telemetry]\nsample_rate = 2\n");
         // The running schema rejects the section; that is the refusal this change removes.
         assert!(Config::parse(&with_section).is_err());
 

@@ -9,6 +9,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A bounded parallel drain. `athena drain` runs the independent items of one plan group (no dependency, disjoint
+  touched paths) at once, up to the new `[parallel] max_concurrency` in `athena.toml`. The default is 1, which
+  is the previous one-job-at-a-time drain, with the same order and retry rules; the schema ceiling is 8. The
+  `[parallel]` section in `athena.toml` and its `Parallel` field in `crates/athena-data/src/config.rs` land in
+  this one change, and a test (`the_real_athena_toml_parses_with_its_parallel_section`) parses the repository's
+  real `athena.toml` through `Config`; the section is set to 1, so it changes no behavior until the user raises
+  it. Landing and rating stay one at a time; a failure or refusal stops no sibling already in flight; a stop
+  starts no further job; model-call caps in flight are held against the budget. A worker panic is not isolated.
+  **Trait changes:** `jev::Evaluate` and `gh::HttpPost` now require `Send + Sync`, so the Athena handle can be
+  shared by workers; `RealSteps` takes `Sync` UI and lander references. Two tests that used `[parallel]` as an
+  example of an unknown section now use another name. Not built: multi-job `athena go` and the `--pr` phase of
+  `docs/design/parallel-jobs.md`.
 - CI cache layers and a wall-time baseline command (`docs/design/ci-routing.md` build-plan items 2 and 3).
   `cargo run --locked -p xtask -- walltime` reads job records and prints the median and p90 of
   dispatch-to-outcome time per job kind, with failed and rejected jobs reported separately, a caveat when fewer

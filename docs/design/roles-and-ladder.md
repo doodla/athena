@@ -51,7 +51,8 @@ are not built.
   then age; within it, items with no shared dependency and disjoint touched paths form a parallel group (an item
   that names no path is never grouped). Items that wait on each other in a loop are not scheduled. An entry
   without a goal, a rung or acceptance is refused for design or code and reported. `drain` works the items in
-  plan order, one job at a time; running a group concurrently is follow-up.
+  plan order; the items of one group run at once, up to `[parallel] max_concurrency` (default 1, one job at a
+  time), and the next group starts when the group before it is done.
 - **Stopping a drain.** `drain` asks before every job whether a stop was requested (`athena drain-stop` creates
   a file in the repository's state directory). A job that has started is finished, landed and rated; no further
   job starts. The stop reason is `stop requested`, distinct from the kill switch (`athena stop`), which ends

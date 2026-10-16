@@ -26,6 +26,38 @@ pub struct Config {
     /// Pull-request landing. Absent from `athena.toml` means every setting is off.
     #[serde(default)]
     pub landing: Landing,
+    /// How many jobs one drain may run at once. Absent from `athena.toml` means one at a time.
+    #[serde(default)]
+    pub parallel: Parallel,
+}
+
+/// The most jobs `[parallel] max_concurrency` may allow at once. A drain runs a model and a build per job, so
+/// the ceiling keeps one setting from starting an unbounded number of them.
+pub const MAX_CONCURRENCY_CEILING: u32 = 8;
+
+/// `[parallel]`: how `athena drain` runs the independent items of one plan group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Parallel {
+    /// The most jobs a drain runs at the same time, from 1 to [`MAX_CONCURRENCY_CEILING`]. The default, 1, is
+    /// the serial drain: one job at a time, in plan order. Only items of one plan group (no dependency, disjoint
+    /// touched paths) ever run side by side.
+    #[serde(default = "Parallel::default_max_concurrency")]
+    pub max_concurrency: u32,
+}
+
+impl Parallel {
+    fn default_max_concurrency() -> u32 {
+        1
+    }
+}
+
+impl Default for Parallel {
+    fn default() -> Self {
+        Parallel {
+            max_concurrency: Self::default_max_concurrency(),
+        }
+    }
 }
 
 /// `[landing]`: how `athena land --pr` treats the merge.
@@ -266,6 +298,8 @@ pub enum ConfigError {
         "[history] exempt entry {0:?} is not a full commit id; an exemption names exactly one commit, by all 40 (or, in a SHA-256 repository, 64) hexadecimal characters"
     )]
     Exempt(String),
+    #[error("[parallel] max_concurrency {0} must be from 1 to {MAX_CONCURRENCY_CEILING}")]
+    Parallel(u32),
 }
 
 impl Config {
@@ -340,6 +374,9 @@ impl Config {
             if !(hex && (entry.len() == 40 || entry.len() == 64)) {
                 return Err(ConfigError::Exempt(entry.clone()));
             }
+        }
+        if !(1..=MAX_CONCURRENCY_CEILING).contains(&self.parallel.max_concurrency) {
+            return Err(ConfigError::Parallel(self.parallel.max_concurrency));
         }
         Ok(())
     }
@@ -495,6 +532,49 @@ pub(crate) mod tests {
     fn unknown_keys_are_rejected() {
         let text = format!("{REPO_CONFIG}\n[surprise]\nkey = 1\n");
         assert!(matches!(Config::parse(&text), Err(ConfigError::Parse(_))));
+        let text = REPO_CONFIG.replacen("[parallel]\n", "[parallel]\nsurprise = 1\n", 1);
+        assert!(matches!(Config::parse(&text), Err(ConfigError::Parse(_))));
+    }
+
+    #[test]
+    fn the_real_athena_toml_parses_with_its_parallel_section() {
+        // The schema field and the athena.toml section must agree: this reads the file the repository ships.
+        assert!(
+            REPO_CONFIG.contains("\n[parallel]\n"),
+            "athena.toml has a [parallel] section"
+        );
+        let config = Config::parse(REPO_CONFIG).expect("athena.toml parses under Config");
+        assert!((1..=MAX_CONCURRENCY_CEILING).contains(&config.parallel.max_concurrency));
+    }
+
+    #[test]
+    fn without_a_parallel_section_the_drain_is_serial() {
+        let (stripped, _) = REPO_CONFIG
+            .split_once("[parallel]")
+            .expect("athena.toml has a parallel table");
+        let config = Config::parse(stripped).expect("a config without [parallel] parses");
+        assert_eq!(config.parallel.max_concurrency, 1);
+        let empty = format!("{stripped}\n[parallel]\n");
+        assert_eq!(Config::parse(&empty).unwrap().parallel.max_concurrency, 1);
+    }
+
+    #[test]
+    fn max_concurrency_must_lie_between_one_and_the_ceiling() {
+        let (stripped, _) = REPO_CONFIG.split_once("[parallel]").unwrap();
+        let with =
+            |n: u32| Config::parse(&format!("{stripped}\n[parallel]\nmax_concurrency = {n}\n"));
+        assert_eq!(
+            with(MAX_CONCURRENCY_CEILING)
+                .unwrap()
+                .parallel
+                .max_concurrency,
+            MAX_CONCURRENCY_CEILING
+        );
+        assert!(matches!(with(0), Err(ConfigError::Parallel(0))));
+        assert!(matches!(
+            with(MAX_CONCURRENCY_CEILING + 1),
+            Err(ConfigError::Parallel(_))
+        ));
     }
 
     #[test]

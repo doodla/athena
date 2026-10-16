@@ -127,7 +127,8 @@ in a plan: its goal, the requirements-ladder rung it serves, its acceptance, its
 on and which paths it touches. All open requests are then planned together into one ordered plan: a higher rung
 goes first, an item that depends on another comes after it, and age only breaks ties. The report prints the
 plan's groups; the items of one group depend on nothing in each other and touch different paths, so they could
-run in parallel (drain itself still runs one job at a time). Nothing is filled in by default: acceptance comes
+run in parallel: drain runs up to `[parallel] max_concurrency` of a group at once (`athena.toml`; the default 1
+is one job at a time), while landing and rating stay one at a time. Nothing is filled in by default: acceptance comes
 only from explicit bullets in the request or from a reading's criteria (the first line is never copied into
 it), and the rung from the proposal that made the job or from evidence in the request or reading, otherwise
 it is flagged. The planning pass is deterministic code, not a model call. A request whose own words leave the

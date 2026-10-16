@@ -1,0 +1,190 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261016-214725-zt1a",
+  "base_commit": "02b794e70fac1390d6ffd3c6df01672de1b4129f",
+  "base_fingerprint": "sha256:89480bfbeb0475fd7ab02f9de6ce5dbd0aa81d1b9fca1c34747ffc6655194154",
+  "previous_job": "20261016-205137-wm0p",
+  "candidate_commit": "b528574ae2d4b805bec482bf2256b0e193bf94ef",
+  "candidate_tree": "9e18f32174ed8cc2401f0a348f6564f18c299174",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 87950
+    },
+    {
+      "path": "README.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 21134
+    },
+    {
+      "path": "athena.toml",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 8425
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 75455
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 37781
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 96351
+    },
+    {
+      "path": "crates/athena-core/src/admission.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 20664
+    },
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 96080
+    },
+    {
+      "path": "crates/athena-core/src/jev.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 28647
+    },
+    {
+      "path": "crates/athena-core/src/plan.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 18599
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 23177
+    },
+    {
+      "path": "crates/athena-gate/src/content.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 16227
+    },
+    {
+      "path": "docs/design/parallel-jobs.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 41991
+    },
+    {
+      "path": "docs/design/roles-and-ladder.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 14250
+    }
+  ],
+  "fingerprint": "sha256:75ffd281cdb817227726d50e269bf66c571bb87ce8046095fbd47cb6d600ee3a",
+  "violations": [],
+  "producer_report": {
+    "summary": "`athena drain` now runs the independent items of one plan group at the same time, up to a new `[parallel] max_concurrency` setting. The default is 1, which is the old one-job-at-a-time drain. `cargo test --locked`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo fmt --all --check` all pass.\n\n**Root cause of the earlier failure.** The earlier attempt edited `athena.toml` without adding the schema field, so the config no longer parsed. Here the `[parallel]` section in `athena.toml` and the `Parallel` field in `crates/athena-data/src/config.rs` are in one change. The test `the_real_athena_toml_parses_with_its_parallel_section` parses the real `athena.toml` through `Config`.\n\n**The `athena.toml` change.** The change is a new `[parallel]` section with `max_concurrency = 1`, placed at the end of the file. The value is 1 on purpose: the section adds the knob but changes no behaviour until the user raises it. The schema accepts 1 to 8; the ceiling is `MAX_CONCURRENCY_CEILING` in `config.rs`. The default and the ceiling are documented where they are defined, and in the `athena.toml` comment.\n\n**The drain** (`crates/athena-cli/src/drain.rs`):\n- `drain()` keeps its signature and stays serial. The new `drain_concurrent(steps, limits, ui, max_concurrency)` is what `athena drain` calls, with the value read from the head commit's `athena.toml` (`main.rs`).\n- Worker threads take items from a plan group. The next group starts only when the group before it is done, so a dependent item starts only after the item it needs has finished.\n- Landing and rating are serialized by one lock.\n- A model call's cap is held against the budget while the call is in flight, so jobs running side by side cannot overspend it. With bound 1 nothing is held across jobs.\n- The first reason to stop wins. Once it is set, no worker starts another job, but jobs already started finish. Because it also stops siblings that have not yet started, a failed item at bound 2 or more can leave later items in the group unstarted.\n- A worker panic is not isolated: the drain ends with that panic once the other workers finish. This is documented.\n\n**Send + Sync changes (to disclose).**\n- `jev::Evaluate` and `gh::HttpPost` now require `Send + Sync`, so the Athena handle can be shared between workers.\n- The `ScriptedHttp` test double in `jev.rs` moved from `RefCell`/`Rc` to a mutex for the same reason.\n- `RealSteps` now takes `Sync` UI and lander references. Existing call sites compiled unchanged.\n\n**Tests:**\n- In `crates/athena-cli/tests/drain.rs`, a `parallel` module covers five cases: bound 1 runs strictly in plan order; at bound 2 two independent items are in flight together (the barrier gives up after 5 s, so a serial drain fails with a peak of 1 rather than hanging); a dependent item starts after its dependency ends; a failure or a refusal leaves a sibling landing; the worker bound is never exceeded; a stop starts no further item; and in-flight caps stop a second job from overspending the budget.\n- In `config.rs`: the real `athena.toml` parses, a config with no `[parallel]` gives 1, values 0 and 9 are rejected, and an unknown key inside `[parallel]` is rejected. The existing test already rejects an unknown top-level section.\n\n**Docs.** The module and `Report` docs in `drain.rs`, the `plan.rs` module doc, the `athena drain --help` text in `main.rs`, `README.md` and `docs/design/roles-and-ladder.md` no longer say one job at a time. `docs/design/parallel-jobs.md` and `CHANGELOG.md` state what this slice built and what remains (multi-job `athena go`, the `--pr` phase). They also disclose the trait changes.",
+    "files": [
+      "athena.toml",
+      "crates/athena-data/src/config.rs",
+      "crates/athena-cli/src/drain.rs",
+      "crates/athena-cli/tests/drain.rs",
+      "crates/athena-cli/src/main.rs",
+      "crates/athena-core/src/plan.rs",
+      "crates/athena-core/src/gh.rs",
+      "crates/athena-core/src/jev.rs",
+      "crates/athena-core/src/admission.rs",
+      "crates/athena-gate/src/content.rs",
+      "README.md",
+      "docs/design/roles-and-ladder.md",
+      "docs/design/parallel-jobs.md",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "Exit 0 on the final tree: every test result line reads ok, with 0 failures. The drain suite has 66 tests."
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "Finished with no warnings."
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "No output, after one `cargo fmt --all`."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A test loads the repository's real athena.toml (with its [parallel] section) through Config and passes. A config without [parallel] yields max_concurrency 1. A config with an unknown top-level section is rejected. Run `cargo test`.",
+        "status": "met",
+        "evidence": "In crates/athena-data/src/config.rs tests, the_real_athena_toml_parses_with_its_parallel_section, without_a_parallel_section_the_drain_is_serial and unknown_keys_are_rejected pass in the full `cargo test --locked` run."
+      },
+      {
+        "criterion": "A drain test with bound 1 shows items run strictly in the existing order, and all existing drain tests pass unchanged. Run `cargo test -p athena-cli`.",
+        "status": "met",
+        "evidence": "parallel::with_a_bound_of_one_items_run_strictly_in_plan_order_and_alone asserts the exact start/end/land log order. All 66 tests in crates/athena-cli/tests/drain.rs pass, and the 59 existing ones were not edited."
+      },
+      {
+        "criterion": "A drain test with bound 2 and two independent items in one group has both in flight at once (barrier; fails if serial). An item that depends on another starts only after it finishes. Run `cargo test -p athena-cli`.",
+        "status": "met",
+        "evidence": "parallel::with_a_bound_of_two_two_independent_items_are_in_flight_at_once asserts peak 2; each run waits for a second run in flight, so a serial drain falls through after the deadline with peak 1 and the test fails. parallel::an_item_that_depends_on_another_starts_only_after_it_has_finished asserts the order of the start and end log entries."
+      },
+      {
+        "criterion": "Tests show one item's failure or refusal does not stop its siblings, the worker bound is never exceeded, and Stop starts no further item. Run `cargo test`.",
+        "status": "met",
+        "evidence": "parallel::one_items_failure_or_refusal_does_not_stop_its_siblings, the_worker_bound_is_never_exceeded (6 items, bound 2, peak exactly 2), a_stop_starts_no_further_item_and_finishes_those_in_flight, and jobs_side_by_side_hold_their_caps_so_they_cannot_overspend_the_budget all pass."
+      },
+      {
+        "criterion": "Ordering and retry rules are unchanged; `cargo test`, `cargo clippy --all-targets` and `cargo fmt --check` all pass.",
+        "status": "met",
+        "evidence": "`cargo test --locked` exits 0; `cargo clippy --all-targets --locked -- -D warnings` finishes clean; `cargo fmt --all --check` prints nothing. The existing retry and ordering tests pass unchanged."
+      },
+      {
+        "criterion": "The [parallel] section in athena.toml and its schema field in crates/athena-data/src/config.rs are in the same change. The field, its default (1) and its ceiling are documented where defined. The final report names and justifies the athena.toml change.",
+        "status": "met",
+        "evidence": "athena.toml gains [parallel] max_concurrency = 1; config.rs gains the Parallel struct, a serde default of 1, MAX_CONCURRENCY_CEILING = 8 (documented on each), and validation. The summary above names and justifies the athena.toml change."
+      },
+      {
+        "criterion": "The Drain and Report docs no longer say the loop runs one job at a time. docs/design/parallel-jobs.md and CHANGELOG.md state what this slice built and what remains (multi-job `athena go`, the --pr phase), and disclose the Send+Sync trait changes.",
+        "status": "met",
+        "evidence": "Edited the drain.rs module doc and the Report::plan_groups doc, plan.rs, the main.rs help text, README.md and roles-and-ladder.md. parallel-jobs.md has a 'First slice built' block and CHANGELOG.md has an Added entry; both list the unbuilt parts and the Send+Sync changes."
+      }
+    ],
+    "open_issues": [
+      "`crates/athena-gate/src/content.rs` is not on the brief's deliverable list. I edited one test there (the `[parallel]` example became `[telemetry]`) because that test cannot pass otherwise. Please confirm that was allowed.",
+      "Scheduling is by plan group, so a later group in the same wave waits for earlier groups even if it would not conflict. Dependents are therefore conservative, not maximal.",
+      "Rating waits for the landing lock, so ratings can be queued behind landings. The budget-hold rule can also report `budget spent` slightly earlier at bound 2 or more than a serial run would, because in-flight caps count against the budget.",
+      "A worker panic is not isolated, as the brief allowed. It ends the drain after the other workers finish.",
+      "Parallel drain through `RealSteps` is only compile-checked: the new concurrency tests use a stub, because the fake-agent fixtures are single-job."
+    ],
+    "mistakes": [
+      "The first build failed on two things: the `jev.rs` test double used `Rc<RefCell>`, and a comparison of the form `x as u32 < y` is parsed as generics. Both were fixed before finishing."
+    ],
+    "learnings": [
+      "`Athena` was already Sync apart from `jev::Evaluate`, which holds `Box<dyn HttpPost>`. `Capability`, `Pinner` and `AgentDriver` were already `Send + Sync`, so only those two traits needed the bound.",
+      "`Plan::groups` flattened equals `Plan::order`, so scheduling by group keeps the existing order exactly.",
+      "Two existing tests used `[parallel]` as an example of an unknown section: `admission.rs` and `crates/athena-gate/src/content.rs`. Both break once the real file has `[parallel]` (a duplicate table), and neither is on the brief's deliverable list in the gate case.",
+      "The Bash hook allows only cargo, chmod, git, ls, mv and rm, and Grep and Read are limited to the working directory. The saved tool-result file for large output can't be read back, so use `cargo test -q`."
+    ],
+    "desires": [
+      "A way to read saved tool output, or a quieter `cargo test` summary mode inside the allowed commands.",
+      "A fake-agent fixture that can run two jobs at once, to exercise `drain_concurrent` end to end through `RealSteps`."
+    ]
+  }
+}

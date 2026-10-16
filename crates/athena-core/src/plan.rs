@@ -8,8 +8,9 @@
 //!   rung first), then age (oldest first) as the tiebreak. A dependent item always comes after what it needs.
 //! - **Parallel groups.** A wave is split into groups of items that no dependency links and whose touched
 //!   paths are disjoint; the items of one group could run side by side. An item that names no touched path is
-//!   never grouped with another, because nothing is known about what it changes. The drain still runs one job
-//!   at a time, in plan order; running a group concurrently is follow-up work.
+//!   never grouped with another, because nothing is known about what it changes. The drain works the groups in
+//!   plan order and runs the items of one group at once, up to `[parallel] max_concurrency` (default 1: one
+//!   job at a time).
 //! - **Gate.** An item whose plan has no goal, no ladder rung or no acceptance is refused for design or code
 //!   ([`PlanEntry::missing`], [`Plan::refused`]), so planning cannot be skipped. Nothing is filled in by
 //!   default: acceptance comes only from explicit bullets in the request or from a reading's criteria, and

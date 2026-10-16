@@ -207,7 +207,10 @@ pub struct HttpReply {
 /// Posts a JSON body and returns the reply, whatever its status. An `Err` means no reply was received (the
 /// connection failed, timed out, or the client program could not run). The bearer token, when there is one, is
 /// the caller's secret: an implementation never writes it to a file, a log or an error.
-pub trait HttpPost {
+///
+/// `Send + Sync` so that a client holding one (the Jev client inside [`crate::Athena`]) can be shared by the
+/// workers of a parallel drain.
+pub trait HttpPost: Send + Sync {
     fn post_json(&self, url: &str, bearer: Option<&str>, body: &str) -> Result<HttpReply>;
 }
 
