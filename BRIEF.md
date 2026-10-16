@@ -533,3 +533,10 @@ Stopping: you're done when "How I'll judge it" passes. If you're blocked on ever
 ### 2026-10-16: Gaps audit and refine the planning pipeline
 
 * I want to also have these gaps audit and refine the planning pipeline. Athena should do that.
+
+### 2026-10-16: Speed, planning first, and initiatives in parallel
+
+* Prioritize some speed through the system.
+* Move compute to ci then, with intelligent routing.
+* Maybe also mandate that things are fleshed out in planning properly. Get the planning updates in first, then design.
+* Also, for velocity, there's no reason we need to drive initiatives in serial. Why not plan everything and coordinate?
