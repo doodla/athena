@@ -2203,7 +2203,7 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   read as success.
 - **Decision:** (1) *Command:* `athena drain --budget <usd> [--rating-threshold N] [--job-limit N] [--json]`
   (`crates/athena-cli/src/drain.rs`). The queue is the unread requests on the steward's channel
-  (`steward::queued_work`); a request the user deferred with `ask --later` is not taken. For each, the loop
+  (`steward::queued_work`; D104 adds the `ask --later` channel). For each, the loop
   reads and runs the job (accepted by the flag, as `--yes` accepts), lands it with `Athena::land_pr`, the
   path of `athena land --pr`, and then rates the live page. Only a merged, verified pull request is a landing; an
   open one is not. (2) *Rated after landing, by code:* the rating call sits behind a landing in the loop, and a
@@ -2389,3 +2389,22 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Reversal cost:** Low: restore the failure in the send-back branch.
 - **Provenance:** read: job 582g's request text and `run.rs`; measured: the lifecycle tests starting
   `a_producer_that_still_has_no_full_test_result` and `a_criterion_still_unmet_after_the_send_back`.
+
+## D104 · `athena drain` also works requests deferred with `ask --later`
+
+- **Case:** D98 limited the drain to the steward's channel on purpose, so that a deferred request was never
+  taken. In use that left the user's own queued requests (channel `cli`) sitting unread, listed as open work
+  but never worked by the command meant to work the queue.
+- **Decision:** `steward::queued_work`, the one function that selects the drain's queue, now keeps a request
+  whose channel is in `DRAINED_CHANNELS`: `steward` and `cli` (the channel `ask --later` records). Ordering
+  (oldest first, ties by job id), the unread-only rule, and the retry and repeated-failure rules are unchanged.
+  Any other channel is still left alone. D98's sentence that a deferred request is not taken is superseded.
+- **Alternatives:** (a) Special-case the stuck job ids: fixes one instance, not the selection. (b) Drain every
+  channel: takes requests whose source nobody chose to put in the drain. (c) A flag to include `cli`: one more
+  switch for what the user already asked for by queuing.
+- **Tradeoff:** A user who defers a request to read it by hand later now has it worked by the next drain; they
+  should use `athena ask` without `--later`, or close it, to keep it out.
+- **Reversal cost:** Low: remove `"cli"` from `DRAINED_CHANNELS`.
+- **Provenance:** read: `Athena::queue` in `reading.rs` (channel `cli`); measured: the unit test
+  `unread_steward_and_cli_requests_are_queued_work_oldest_first` and the drain test
+  `a_request_deferred_with_ask_later_is_listed_and_worked_like_a_steward_item`.

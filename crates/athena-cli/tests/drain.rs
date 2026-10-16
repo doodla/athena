@@ -623,8 +623,6 @@ fn the_real_steps_work_a_queued_request_land_it_and_only_then_rate_the_page() {
     let invocations = scenario.invocations.clone();
     let athena = fx.athena(scenario.script());
     let job = queue_steward_request(&athena, "Add a greeting to the README.");
-    // A request the user deferred is not the steward's, and is left alone.
-    let (deferred, _) = athena.queue("Something the user deferred.").unwrap();
 
     let lander = RecordingLander::default();
     let steps = RealSteps {
@@ -659,17 +657,52 @@ fn the_real_steps_work_a_queued_request_land_it_and_only_then_rate_the_page() {
     assert!(report.rating.unwrap().after_landing);
     assert!(report.spent_usd > 0.0);
     assert_eq!(report.jobs[0].outcome, "passed");
-    // The deferred request was never read.
-    assert_eq!(
-        records.jobs[deferred.as_str()].state().name(),
-        "queued",
-        "the user's own deferred request is untouched"
-    );
     assert!(
         invocations
             .lock()
             .unwrap()
             .contains(&athena_data::records::Role::Audience)
+    );
+}
+
+#[test]
+fn a_request_deferred_with_ask_later_is_listed_and_worked_like_a_steward_item() {
+    let fx = Fixture::new();
+    let scenario = rated_scenario();
+    let athena = fx.athena(scenario.script());
+    // `ask --later` records the request on the "cli" channel.
+    let (deferred, _) = athena.queue("Add a greeting to the README.").unwrap();
+
+    let lander = RecordingLander::default();
+    let steps = RealSteps {
+        athena: &athena,
+        ui: &Quiet,
+        page: &StubPage,
+        lander: &lander,
+    };
+    let queue = steps.queue().unwrap();
+    assert_eq!(
+        queue
+            .items
+            .iter()
+            .map(|i| i.job.as_str())
+            .collect::<Vec<_>>(),
+        [deferred.as_str()]
+    );
+
+    let report = drain::drain(&steps, limits(50.0), &Quiet).unwrap();
+    assert_eq!(report.stop, Stop::TargetMet, "{}", display::drain(&report));
+    assert_eq!(report.landed, 1);
+    assert_eq!(
+        *lander.0.lock().unwrap(),
+        [(deferred.as_str().to_string(), 0)]
+    );
+    assert_eq!(report.jobs[0].outcome, "passed");
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    assert_ne!(
+        records.jobs[deferred.as_str()].state().name(),
+        "queued",
+        "the deferred request was read and run"
     );
 }
 

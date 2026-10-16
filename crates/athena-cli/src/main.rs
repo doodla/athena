@@ -175,7 +175,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Work the steward's queue within a budget: for each queued request, read and run the job, land it
+    /// Work the queue (the steward's requests and those deferred with `ask --later`) within a budget: for each queued request, read and run the job, land it
     /// through the pull-request path (as `athena land --pr` does), then rate the live page. Open proposals
     /// within their role's limit are approved and their jobs worked, as are jobs already approved. Proposals
     /// above the limit, or from an unknown role, are listed as waiting for a person; drain never rejects one.

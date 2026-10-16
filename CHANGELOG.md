@@ -7,6 +7,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- `athena drain` now also works requests deferred with `athena ask --later` (channel `cli`), not only the
+  steward's. Why: those requests were listed as open work but no command that works the queue took them. The
+  selection is one channel-set filter in `steward::queued_work`; ordering and retry are unchanged. See D104.
+
 ### Added
 
 - The drain's page source check now judges the study's model against the pinned code. The checker traces each

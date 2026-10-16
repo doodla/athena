@@ -1,4 +1,4 @@
-//! `athena drain`: works the steward's queue itself, within a budget the user sets. For each queued request
+//! `athena drain`: works the queue itself (requests the steward queued and requests deferred with `athena ask --later`), within a budget the user sets. For each queued request
 //! it reads and runs the job, lands it through the pull-request path (`athena land --pr`), and only then
 //! rates the live page as its audience would. It stops at the first of five reasons ([`Stop`]).
 //!
