@@ -2466,3 +2466,19 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   `plan_prints_order_groups_details_and_flagged_items_and_says_so_when_nothing_is_open` and
   `a_stop_asked_for_mid_run_finishes_the_current_job_and_starts_no_other`, and the unit tests in `plan.rs` and
   `reading.rs`.
+
+## D106 · Plan grouping ignores the shared append-only files
+
+- **Case:** Nearly every planned item lists `CHANGELOG.md`, and many list `docs/decisions.md`, so the overlap
+  test put every item in a group of its own and the drain's parallel groups were all single items.
+- **Decision:** `plan.rs` leaves `CHANGELOG.md`, `docs/decisions.md` and `README.md` (the constant
+  `SHARED_APPEND_ONLY`, from `docs/design/parallel-jobs.md` section 9) out of `disjoint`. An item whose only
+  paths are shared files names nothing else and is still not grouped. The landing check stays the authority for
+  conflicting edits to a shared file; the docs-job and number-allocation rules of section 9 are not built here.
+- **Alternatives:** (a) Drop `CHANGELOG.md` from each item's touches: a per-item workaround, and the root cause
+  stays. (b) Serialize shared-file writers in the pool only: groups would still be single items.
+- **Tradeoff:** Two grouped items may both edit one shared file; the second then lands stale or is refused, and
+  is retried, instead of being kept apart in advance.
+- **Reversal cost:** Low: empty the constant.
+- **Provenance:** read: `plan.rs` `overlap` and `disjoint`, and section 9; measured: the `plan.rs` unit test
+  `shared_append_only_files_are_not_a_clash_but_other_shared_paths_and_lone_shared_entries_are`.
