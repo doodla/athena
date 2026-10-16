@@ -74,5 +74,12 @@ depends on another, and `athena-data` and `athena-git` are leaves.
   fake driver runs every test of the lifecycle and every nested run.
 - **The gate.** `athena_gate::gate` is the one decision point for commits: the hooks, the core's commit
   path, and `athena check --history` all call it.
+- **Planning.** `athena_core::plan` orders and groups plan entries and holds back incomplete ones;
+  `athena_core::reading::plan_entry` builds an entry from a request and its reading, filling nothing by
+  default (acceptance only from explicit bullets or a reading's criteria; the rung from a proposal's rung or
+  from evidence, else flagged). Both are deterministic code and call no model. `athena_cli::drain` runs the
+  pass (`drain::plan`, behind `athena plan`, and the start of `athena drain`): it reads unread requests whose
+  own words leave the plan incomplete, so the reading can complete it, and refuses what stays incomplete.
+  The plan-stage audit in `plan.rs` (`trace`, `GapLog`) is not yet wired to the records; that is follow-up.
 - **Records.** `athena_data::records::AnyRecord` parses every record with unknown fields denied, and
   `canonical_path` says where each one lives. [`records.md`](records.md) documents them.

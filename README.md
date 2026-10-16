@@ -127,8 +127,19 @@ in a plan: its goal, the requirements-ladder rung it serves, its acceptance, its
 on and which paths it touches. All open requests are then planned together into one ordered plan: a higher rung
 goes first, an item that depends on another comes after it, and age only breaks ties. The report prints the
 plan's groups; the items of one group depend on nothing in each other and touch different paths, so they could
-run in parallel (drain itself still runs one job at a time). A request whose plan has no goal, no rung or no
-acceptance is not worked: the report lists it as *refused* and says what is missing, and it stays queued.
+run in parallel (drain itself still runs one job at a time). Nothing is filled in by default: acceptance comes
+only from explicit bullets in the request or from a reading's criteria (the first line is never copied into
+it), and the rung from the proposal that made the job or from evidence in the request or reading, otherwise
+it is flagged. The planning pass is deterministic code, not a model call. A request whose own words leave the
+plan incomplete is first read (a reading is a model call, guarded by the budget like any other) and planned
+again from its reading, so a specifiable request runs and the queue does not fill with unread refused items.
+One that is still missing a goal, rung or acceptance after that is not worked: the report lists it as
+*refused* with the missing fields and a reason, and it is no longer queued (it has been read; correct it with
+`athena correct`). `athena plan` prints the same plan without working anything: the order, the parallel
+groups, each item's goal, rung, acceptance, open questions (a touched path that does not exist, a referenced
+job that is not in the records), dependencies and touched paths, and the flagged items with reasons. It says
+so when nothing is open. `--budget` caps what it spends reading (default $2; 0 reads nothing). The plan-stage
+audit in `athena_core::plan` (`trace`, `GapLog`) is still not wired to the records; that is follow-up.
 
 **Stopping a drain.** Run `athena drain-stop` from another terminal. The drain finishes the job it is on (it is
 landed and rated as usual), starts no further job, and ends with the stop reason `stop requested`, exit code 2.

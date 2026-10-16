@@ -1129,61 +1129,156 @@ fn looks_like_path(word: &str) -> bool {
                 .any(|ext| w.ends_with(ext)))
 }
 
+/// What planning looks up in the repository and its records, so `plan_entry` stays free of I/O.
+pub struct Lookup<'a> {
+    /// Whether a job with this full id is among the records.
+    pub job_exists: &'a dyn Fn(&str) -> bool,
+    /// Whether this path (a directory ends with `/`) exists at the base commit.
+    pub path_exists: &'a dyn Fn(&str) -> bool,
+}
+
+impl std::fmt::Debug for Lookup<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Lookup").finish_non_exhaustive()
+    }
+}
+
+/// Words that show a request is about the code, tests or docs. They are evidence for the Implementation rung;
+/// without any of them (and without a touched path or a reading that makes a change) the rung is not known.
+const IMPLEMENTATION_WORDS: [&str; 18] = [
+    "readme",
+    "changelog",
+    "docs",
+    "test",
+    "tests",
+    "code",
+    "bug",
+    "fix",
+    "typo",
+    "refactor",
+    "rename",
+    "function",
+    "command",
+    "crate",
+    "module",
+    "clippy",
+    "lint",
+    "cli",
+];
+
+/// The rung a request serves, found from its words and its reading; `None` when nothing in them says.
+/// Deterministic and cheap, and a heuristic: a higher rung needs a phrase naming it, Implementation needs
+/// evidence that code, tests or docs change (a touched path, a reading for the `change` capability, or one of
+/// [`IMPLEMENTATION_WORDS`]). It is never the answer by default.
+pub fn infer_rung(
+    text: &str,
+    reading: Option<&Reading>,
+    touches: &[String],
+) -> Option<athena_data::roles::Ladder> {
+    use athena_data::roles::Ladder;
+    let mut hay = text.to_lowercase();
+    if let Some(r) = reading {
+        hay.push(' ');
+        hay.push_str(&r.summary.to_lowercase());
+    }
+    let has = |phrases: &[&str]| phrases.iter().any(|p| hay.contains(p));
+    if has(&["owner goal", "owner's goal"]) {
+        Some(Ladder::OwnerGoals)
+    } else if has(&[
+        "brief requirement",
+        "change the brief",
+        "amend the brief",
+        "update the brief",
+    ]) {
+        Some(Ladder::BriefRequirements)
+    } else if has(&["design decision", "record a decision", "new decision"]) {
+        Some(Ladder::DesignDecisions)
+    } else if has(&["user default", "defaults-conventions"]) {
+        Some(Ladder::DefaultsConventions)
+    } else if !touches.is_empty()
+        || reading.is_some_and(|r| r.capability.as_deref() == Some("change"))
+        || hay
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|w| IMPLEMENTATION_WORDS.contains(&w))
+    {
+        Some(Ladder::Implementation)
+    } else {
+        None
+    }
+}
+
+/// Whether a line of a request is an explicit acceptance bullet: it starts with `-`, `*` or a number and a dot.
+fn is_bullet(line: &str) -> bool {
+    line.starts_with("- ")
+        || line.starts_with("* ")
+        || line
+            .split_once(". ")
+            .is_some_and(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+}
+
 /// Planning, the first stage: fleshes out one open request into a plan entry (design: planning first).
+/// Deterministic code; it calls no model and fills nothing in by default.
 ///
-/// - Once the request has been read, the goal is the reading's summary, the acceptance is its criteria, the
-///   open question is its question and what it touches is its deliverables.
-/// - Before it is read, the request's own words stand in: the first line is the goal; the lines that start
-///   with `-`, `*` or a number are the acceptance, and without any, the first line is; path-like words are
-///   what it touches.
+/// - Once the request has been read, the goal is the reading's summary, the acceptance is its criteria (only
+///   when the reading chose a capability: a declined reading has no acceptance), the open question is its
+///   question and what it touches is its deliverables.
+/// - Before it is read, the request's own words stand in: the first line is the goal; only the lines that
+///   start with `-`, `*` or a number are the acceptance (the first line is **not** copied into it); path-like
+///   words are what it touches.
+/// - The rung is `rung_hint` when the caller knows it (a steward proposal carries it), else [`infer_rung`]
+///   from the request and the reading, else `None`, which the plan flags.
 /// - A request depends on every other job whose full id it names (a retry, or "after <job>").
-///
-/// `rung` is the requirements-ladder rung the request serves, which the caller knows (a steward proposal
-/// carries it).
-pub fn plan_entry(job: &JobRecords, rung: athena_data::roles::Ladder) -> crate::plan::PlanEntry {
+/// - Open questions are also filled by lookup: every touched path that does not exist (a file a reading
+///   creates is excepted), and every referenced job that is not among the records.
+pub fn plan_entry(
+    job: &JobRecords,
+    rung_hint: Option<athena_data::roles::Ladder>,
+    lookup: &Lookup<'_>,
+) -> crate::plan::PlanEntry {
     let text = job.request.as_ref().map_or("", |r| r.text.as_str());
     let first = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
     let mut entry = crate::plan::PlanEntry::bare(job.id().as_str(), &job.title());
-    entry.rung = Some(rung);
     entry.depends_on = job_ids_in(text)
         .into_iter()
         .map(|id| id.as_str().to_string())
         .filter(|id| id != job.id().as_str())
         .collect();
+    let mut creates: Vec<String> = Vec::new();
     match job.latest_reading() {
         Some(reading) => {
-            entry.goal = reading.summary.clone();
-            entry.acceptance = reading
-                .acceptance_criteria
-                .iter()
-                .map(|c| c.text.clone())
-                .collect();
+            entry.goal = if reading.summary.trim().is_empty() {
+                first.trim().to_string()
+            } else {
+                reading.summary.clone()
+            };
+            if reading.capability.is_some() {
+                entry.acceptance = reading
+                    .acceptance_criteria
+                    .iter()
+                    .map(|c| c.text.clone())
+                    .collect();
+            }
             entry.open_questions = reading.question.iter().cloned().collect();
             entry.touches = reading
                 .deliverables
                 .iter()
                 .map(|d| d.path.clone())
                 .collect();
+            creates = reading
+                .deliverables
+                .iter()
+                .filter(|d| d.action == DeliverableAction::Create)
+                .map(|d| d.path.clone())
+                .collect();
         }
         None => {
             entry.goal = first.trim().to_string();
-            let bullets: Vec<String> = text
+            entry.acceptance = text
                 .lines()
                 .map(str::trim)
-                .filter(|l| {
-                    l.starts_with("- ")
-                        || l.starts_with("* ")
-                        || l.split_once(". ").is_some_and(|(n, _)| {
-                            !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())
-                        })
-                })
+                .filter(|l| is_bullet(l))
                 .map(String::from)
                 .collect();
-            entry.acceptance = if bullets.is_empty() && !first.trim().is_empty() {
-                vec![first.trim().to_string()]
-            } else {
-                bullets
-            };
             for word in text.split_whitespace().filter(|w| looks_like_path(w)) {
                 let path = word
                     .trim_matches(|c: char| !(c.is_ascii_alphanumeric() || "/._-".contains(c)))
@@ -1192,6 +1287,21 @@ pub fn plan_entry(job: &JobRecords, rung: athena_data::roles::Ladder) -> crate::
                     entry.touches.push(path);
                 }
             }
+        }
+    }
+    entry.rung = rung_hint.or_else(|| infer_rung(text, job.latest_reading(), &entry.touches));
+    for path in &entry.touches {
+        if !creates.contains(path) && !(lookup.path_exists)(path) {
+            entry.open_questions.push(format!(
+                "the touched path {path} does not exist at the base commit"
+            ));
+        }
+    }
+    for id in &entry.depends_on {
+        if !(lookup.job_exists)(id) {
+            entry
+                .open_questions
+                .push(format!("the referenced job {id} is not among the records"));
         }
     }
     entry
@@ -1736,7 +1846,11 @@ mod tests {
         job.request.as_mut().unwrap().text =
             "Add a greeting to crates/cli/src/main.rs after 20261012-075824-1x28\n- it prints hello\n- cargo test passes"
                 .into();
-        let entry = plan_entry(&job, Ladder::Implementation);
+        let everything = Lookup {
+            job_exists: &|_| true,
+            path_exists: &|_| true,
+        };
+        let entry = plan_entry(&job, None, &everything);
         assert_eq!(
             entry.goal,
             job.request.as_ref().unwrap().text.lines().next().unwrap()
@@ -1747,24 +1861,160 @@ mod tests {
         );
         assert_eq!(entry.touches, ["crates/cli/src/main.rs"]);
         assert_eq!(entry.depends_on, ["20261012-075824-1x28"]);
-        assert_eq!(entry.rung, Some(Ladder::Implementation));
+        assert_eq!(
+            entry.rung,
+            Some(Ladder::Implementation),
+            "inferred from the path"
+        );
         assert!(entry.missing().is_empty());
 
         job.readings = vec![final_reading(&job)];
-        let entry = plan_entry(&job, Ladder::DesignDecisions);
+        let entry = plan_entry(&job, Some(Ladder::DesignDecisions), &everything);
         assert_eq!(entry.goal, "Print a greeting.");
         assert_eq!(
             entry.acceptance,
             ["greeting.rs exists", "cargo test passes"]
         );
         assert_eq!(entry.touches, ["greeting.rs"]);
+        assert_eq!(entry.rung, Some(Ladder::DesignDecisions), "the hint wins");
 
         job.request.as_mut().unwrap().text = "  ".into();
         job.readings.clear();
         assert_eq!(
-            plan_entry(&job, Ladder::Implementation).missing(),
-            ["goal", "acceptance"],
+            plan_entry(&job, None, &everything).missing(),
+            ["goal", "ladder rung", "acceptance"],
             "an empty request has nothing to plan"
+        );
+    }
+
+    fn nothing_known() -> Lookup<'static> {
+        Lookup {
+            job_exists: &|_| false,
+            path_exists: &|_| false,
+        }
+    }
+
+    #[test]
+    fn a_vague_request_after_reading_is_flagged_and_names_what_is_missing() {
+        let mut job = job_with_checks(vec![]);
+        job.request.as_mut().unwrap().text = "make it better".into();
+        // The reader read it and declined: no capability, no criteria.
+        let mut reading = final_reading(&job);
+        reading.capability = None;
+        reading.decline_reason = Some("it does not say what to improve".into());
+        reading.acceptance_criteria.clear();
+        reading.deliverables.clear();
+        reading.summary = "Make something better.".into();
+        job.readings = vec![reading];
+        let entry = plan_entry(&job, None, &nothing_known());
+        assert_eq!(entry.missing(), ["ladder rung", "acceptance"]);
+        let plan = crate::plan::Plan::build(&[entry]);
+        assert!(plan.order.is_empty(), "{plan:?}");
+        assert_eq!(plan.refused[0].missing, ["ladder rung", "acceptance"]);
+    }
+
+    #[test]
+    fn the_first_line_is_not_copied_into_acceptance() {
+        let mut job = job_with_checks(vec![]);
+        job.request.as_mut().unwrap().text = "Fix the typo in README.md".into();
+        let entry = plan_entry(&job, None, &nothing_known());
+        assert!(entry.acceptance.is_empty(), "{:?}", entry.acceptance);
+        assert_eq!(entry.missing(), ["acceptance"]);
+        // Explicit bullets fill it, and a reading's criteria fill it once read.
+        job.request.as_mut().unwrap().text = "Fix the typo in README.md\n* it reads 'the'".into();
+        assert_eq!(
+            plan_entry(&job, None, &nothing_known()).acceptance,
+            ["* it reads 'the'"]
+        );
+        job.readings = vec![final_reading(&job)];
+        assert_eq!(
+            plan_entry(&job, None, &nothing_known()).acceptance,
+            ["greeting.rs exists", "cargo test passes"]
+        );
+    }
+
+    #[test]
+    fn a_rung_is_inferred_from_evidence_or_flagged_never_defaulted_to_implementation() {
+        use athena_data::roles::Ladder;
+        let rung_of = |text: &str| {
+            let mut job = job_with_checks(vec![]);
+            job.request.as_mut().unwrap().text = text.into();
+            plan_entry(&job, None, &nothing_known()).rung
+        };
+        assert_eq!(rung_of("make it better"), None);
+        assert_eq!(rung_of("tidy things up a bit"), None);
+        assert_eq!(
+            rung_of("fix the typo in the intro"),
+            Some(Ladder::Implementation)
+        );
+        assert_eq!(
+            rung_of("record a decision about retries"),
+            Some(Ladder::DesignDecisions)
+        );
+        assert_eq!(
+            rung_of("amend the brief to require a changelog"),
+            Some(Ladder::BriefRequirements)
+        );
+        // A reading for the `change` capability is evidence too.
+        let mut job = job_with_checks(vec![]);
+        job.request.as_mut().unwrap().text = "make it better".into();
+        let mut reading = final_reading(&job);
+        reading.deliverables.clear();
+        job.readings = vec![reading];
+        assert_eq!(
+            plan_entry(&job, None, &nothing_known()).rung,
+            Some(Ladder::Implementation)
+        );
+        // No hint and no evidence: the plan flags the rung, so the item is refused.
+        let mut job = job_with_checks(vec![]);
+        job.request.as_mut().unwrap().text = "make it better\n- it is better".into();
+        let entry = plan_entry(&job, None, &nothing_known());
+        assert_eq!(entry.missing(), ["ladder rung"]);
+        assert!(crate::plan::Plan::build(&[entry]).order.is_empty());
+    }
+
+    #[test]
+    fn open_questions_name_a_missing_path_and_an_unresolved_job_for_read_and_unread_requests() {
+        let mut job = job_with_checks(vec![]);
+        job.request.as_mut().unwrap().text =
+            "Update crates/gone/src/x.rs and docs/here.md after 20261012-075824-1x28\n- it works"
+                .into();
+        let lookup = Lookup {
+            job_exists: &|_| false,
+            path_exists: &|p| p == "docs/here.md",
+        };
+        let unread = plan_entry(&job, None, &lookup);
+        assert_eq!(
+            unread.open_questions,
+            [
+                "the touched path crates/gone/src/x.rs does not exist at the base commit",
+                "the referenced job 20261012-075824-1x28 is not among the records"
+            ]
+        );
+        // Read: a deliverable that is created may be absent; one that is modified may not.
+        let mut reading = final_reading(&job);
+        reading.deliverables = vec![
+            Deliverable {
+                path: "new.rs".into(),
+                action: DeliverableAction::Create,
+                p: 0.9,
+            },
+            Deliverable {
+                path: "old.rs".into(),
+                action: DeliverableAction::Modify,
+                p: 0.9,
+            },
+        ];
+        reading.question = Some("Which greeting?".into());
+        job.readings = vec![reading];
+        let read = plan_entry(&job, None, &lookup);
+        assert_eq!(
+            read.open_questions,
+            [
+                "Which greeting?",
+                "the touched path old.rs does not exist at the base commit",
+                "the referenced job 20261012-075824-1x28 is not among the records"
+            ]
         );
     }
 

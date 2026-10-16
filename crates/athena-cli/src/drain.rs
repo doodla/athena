@@ -6,8 +6,15 @@
 //!   ([`athena_core::plan`]): goal, requirements-ladder rung, acceptance, open questions, dependencies and
 //!   touched paths. The loop works the items in plan order (higher rung first, a dependent after what it
 //!   needs, age as the tiebreak), not oldest first. An item whose plan lacks a goal, a rung or acceptance is
-//!   refused and reported ([`Report::refused`]). The plan also groups items that could run in parallel
-//!   ([`Report::plan_groups`]); the loop itself runs one job at a time.
+//!   refused and reported with a reason ([`Report::refused`]). The plan also groups items that could run in
+//!   parallel ([`Report::plan_groups`]); the loop itself runs one job at a time. The pass is deterministic
+//!   code and calls no model of its own; nothing is defaulted into a plan.
+//! - **The pass reads unread requests that are underspecified.** An unread request whose own words give no
+//!   acceptance (or no rung) is read first, within the budget and job limit, and planned again from its
+//!   reading. If the plan is still incomplete it is refused with the reason, so the queue
+//!   does not fill with unread items that are refused merely for being unread; one that is specified after
+//!   its reading runs without a second reading. [`plan`] runs the same pass for `athena plan` and works
+//!   nothing.
 //! - **Stop at a job boundary.** [`Steps::stop_requested`] is asked before every job. A job that has started
 //!   is finished (landed and rated) and no further job starts: [`Stop::Requested`]. Nothing is killed.
 //!
@@ -284,6 +291,12 @@ pub trait Steps {
     /// The most [`Steps::check_page`] may cost: the cap of one call times the number of studies it checks. The
     /// loop asks the budget for this much before it calls the check.
     fn check_cap(&self) -> f64;
+    /// The plan entry of `job` as the records stand now. The planning pass asks for it after it has read an
+    /// unread request, because a reading gives the entry its goal, acceptance and touched paths. None (the
+    /// default) keeps the entry the queue view carried.
+    fn plan_entry(&self, _job: &str) -> Option<PlanEntry> {
+        None
+    }
     /// Whether the user asked the loop to stop. It is asked only between jobs, never during one, so a job
     /// that has started is finished (and landed and rated) first. Not asking to stop is the default.
     fn stop_requested(&self) -> bool {
@@ -442,6 +455,8 @@ struct Drain<'a> {
     rating: Option<RatingLine>,
     held_back: Option<String>,
     notes: Vec<String>,
+    /// What the planning pass spent reading an item, charged to that item's job line when it runs.
+    read_cost: std::collections::BTreeMap<String, f64>,
 }
 
 enum ItemEnd {
@@ -503,7 +518,7 @@ impl Drain<'_> {
             job: read.job.clone().unwrap_or_else(|| item.job.clone()),
             outcome: "not read".into(),
             reason: None,
-            cost_usd: read.cost,
+            cost_usd: read.cost + self.read_cost.remove(&item.job).unwrap_or(0.0),
             landing: "not attempted".into(),
         };
         let job = match (&read.job, &read.error, read.runnable) {
@@ -651,6 +666,80 @@ impl Drain<'_> {
         (approved, left)
     }
 
+    /// The planning pass. Reads every unread request whose plan from its own words is incomplete, so that the
+    /// reading (not a default) can fill the plan: without this an unread vague request would be refused for
+    /// being unread and stay in the queue forever. Each such read must fit the budget and the job limit like
+    /// any other. An item whose plan is still incomplete after its reading is refused with the reason; one
+    /// whose plan is complete is marked read and runs without a second reading. Unread items whose plan is
+    /// already complete are left for the loop to read when it works them, in plan order.
+    ///
+    /// Returns the coordinated plan; its `refused` also holds the items that could not be read.
+    fn prepare(&mut self, view: &mut QueueView) -> Plan {
+        let mut forced: Vec<Refusal> = Vec::new();
+        for idx in 0..view.items.len() {
+            if view.items[idx].read {
+                continue;
+            }
+            let id = view.items[idx].job.clone();
+            let Some(pos) = view.plan.iter().position(|e| e.id == id) else {
+                continue;
+            };
+            if view.plan[pos].missing().is_empty() {
+                continue;
+            }
+            if self.steps.stop_requested() {
+                break;
+            }
+            if self.started >= self.limits.max_jobs
+                || !self.budget.fits(self.caps.read + self.caps.run)
+            {
+                self.notes.push(format!(
+                    "item {id} was not read to fill its plan: no room in the job limit or the budget"
+                ));
+                continue;
+            }
+            self.ui.line(&format!(
+                "plan       {id} is underspecified ({}); reading it",
+                view.plan[pos].missing().join(", ")
+            ));
+            let read = self.steps.read(ReadOf::Queued(&id));
+            self.budget.add(read.cost);
+            self.read_cost.insert(id.clone(), read.cost);
+            if let Some(entry) = self.steps.plan_entry(&id) {
+                view.plan[pos] = entry;
+            }
+            let title = view.plan[pos].title.clone();
+            if read.job.is_none() || read.error.is_some() {
+                let why = read.error.as_deref().unwrap_or("no job was made");
+                let mut r = Refusal::lacking(&id, &title, vec!["reading".into()]);
+                r.reason = format!("the request could not be read: {why}");
+                forced.push(r);
+                continue;
+            }
+            view.items[idx].read = read.runnable;
+            if !read.runnable && view.plan[pos].missing().is_empty() {
+                let mut r = Refusal::lacking(&id, &title, vec!["capability".into()]);
+                r.reason =
+                    "it was read, but no capability fits the request, so there is nothing to run"
+                        .into();
+                forced.push(r);
+            } else if !view.plan[pos].missing().is_empty() {
+                self.notes.push(format!(
+                    "item {id} was read, so it is no longer queued, but its plan is still incomplete; correct or answer it with `athena correct {id}`"
+                ));
+            }
+        }
+        let entries: Vec<PlanEntry> = view
+            .plan
+            .iter()
+            .filter(|e| !forced.iter().any(|f| f.id == e.id))
+            .cloned()
+            .collect();
+        let mut plan = Plan::build(&entries);
+        plan.refused.extend(forced);
+        plan
+    }
+
     /// Rates the page after a landing. Returns the stop reason when the rating ends the run.
     fn rate(&mut self) -> Option<Stop> {
         if !self.budget.fits(self.caps.rate) {
@@ -734,6 +823,7 @@ pub fn drain(steps: &dyn Steps, limits: Limits, ui: &dyn Ui) -> anyhow::Result<R
         rating: None,
         held_back: None,
         notes: Vec::new(),
+        read_cost: Default::default(),
     };
     let mut view = view;
     let (approved, left) = d.approve_all(std::mem::take(&mut view.approvable));
@@ -744,7 +834,7 @@ pub fn drain(steps: &dyn Steps, limits: Limits, ui: &dyn Ui) -> anyhow::Result<R
     // Planning comes first: the open requests are planned together, and the items are worked in plan order,
     // not oldest first. Items with no plan entry keep their place ahead of the planned ones; items whose plan
     // is incomplete, or that wait on each other in a loop, are not worked.
-    let plan = Plan::build(&view.plan);
+    let plan = d.prepare(&mut view);
     let mut to_work: Vec<Item> = view
         .items
         .iter()
@@ -758,9 +848,8 @@ pub fn drain(steps: &dyn Steps, limits: Limits, ui: &dyn Ui) -> anyhow::Result<R
     );
     for refusal in &plan.refused {
         d.notes.push(format!(
-            "item {} is not worked: its plan lacks {}; add it to the request and plan again",
-            refusal.id,
-            refusal.missing.join(", ")
+            "item {} is not worked: {}",
+            refusal.id, refusal.reason
         ));
     }
     if !plan.cyclic.is_empty() {
@@ -828,6 +917,58 @@ pub fn drain(steps: &dyn Steps, limits: Limits, ui: &dyn Ui) -> anyhow::Result<R
         refused: plan.refused,
         notes: d.notes,
         jobs: d.jobs,
+    })
+}
+
+/// The coordinated plan of the open requests, as `athena plan` prints it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PlanReport {
+    /// Every open request's entry, oldest first.
+    pub entries: Vec<PlanEntry>,
+    /// The order, the parallel groups, the flagged items and any loop of dependencies.
+    pub plan: Plan,
+    /// What the planning pass spent reading unread requests, in US dollars.
+    pub spent_usd: f64,
+    pub notes: Vec<String>,
+}
+
+/// `athena plan`: runs the same planning pass as `drain` (reading the unread requests whose plan is incomplete,
+/// within `read_budget_usd`) and returns the plan without working anything.
+pub fn plan(steps: &dyn Steps, read_budget_usd: f64, ui: &dyn Ui) -> anyhow::Result<PlanReport> {
+    let caps = steps.caps()?;
+    let mut view = steps.queue()?;
+    let limits = Limits {
+        budget_usd: read_budget_usd,
+        target_rating: DEFAULT_TARGET_RATING,
+        max_jobs: u32::MAX,
+    };
+    let mut d = Drain {
+        steps,
+        ui,
+        caps,
+        limits,
+        budget: Budget::new(read_budget_usd),
+        jobs: Vec::new(),
+        started: 0,
+        landed: Vec::new(),
+        outcome_landings: 0,
+        rating: None,
+        held_back: None,
+        notes: Vec::new(),
+        read_cost: Default::default(),
+    };
+    let plan = d.prepare(&mut view);
+    if !plan.cyclic.is_empty() {
+        d.notes.push(format!(
+            "items {} wait on each other, so none of them is worked",
+            plan.cyclic.join(", ")
+        ));
+    }
+    Ok(PlanReport {
+        entries: view.plan,
+        plan,
+        spent_usd: d.budget.spent(),
+        notes: d.notes,
     })
 }
 
@@ -1021,6 +1162,34 @@ impl<'a> RealSteps<'a> {
             .unwrap_or(0.0)
     }
 
+    /// The plan entry of `job` at `head`: the rung of the proposal that made it when there is one, and lookups
+    /// of the paths and referenced jobs it names.
+    fn entry_of(&self, records: &Records, head: &str, job: &str) -> Option<PlanEntry> {
+        let record = records.jobs.get(job)?;
+        let hint = records.work_items.iter().find_map(|work| {
+            let decision = work_decisions::decision_of(records, work)?;
+            match &decision.decision {
+                athena_data::records::WorkDecisionState::Approved { job: made }
+                    if made.as_str() == job =>
+                {
+                    Some(work.rung)
+                }
+                _ => None,
+            }
+        });
+        let job_exists = |id: &str| records.jobs.contains_key(id);
+        // A lookup that fails counts the path as present, so a git error never invents an open question.
+        let path_exists = |path: &str| self.athena.git.path_exists(head, path).unwrap_or(true);
+        Some(athena_core::reading::plan_entry(
+            record,
+            hint,
+            &athena_core::reading::Lookup {
+                job_exists: &job_exists,
+                path_exists: &path_exists,
+            },
+        ))
+    }
+
     fn audience_cost(&self) -> f64 {
         self.records()
             .map(|r| r.audience_runs.iter().map(|i| i.cost.best_lower()).sum())
@@ -1065,28 +1234,12 @@ impl Steps for RealSteps<'_> {
                 .into_iter()
                 .map(|w| item(w, false)),
         );
-        // Planning: every open request is fleshed out. A job that came from a steward proposal serves the
-        // proposal's rung; any other request is work on the code, tests and docs.
-        let mut rungs: std::collections::BTreeMap<String, athena_data::roles::Ladder> =
-            std::collections::BTreeMap::new();
-        for work in &records.work_items {
-            if let Some(decision) = work_decisions::decision_of(&records, work)
-                && let athena_data::records::WorkDecisionState::Approved { job } =
-                    &decision.decision
-            {
-                rungs.insert(job.as_str().to_string(), work.rung);
-            }
-        }
+        // Planning: every open request is fleshed out. Nothing is defaulted: a job that came from a steward
+        // proposal serves the proposal's rung; any other request's rung is inferred or flagged.
+        let head = self.athena.head()?;
         let plan = items
             .iter()
-            .filter_map(|i| {
-                let job = records.jobs.get(&i.job)?;
-                let rung = rungs
-                    .get(&i.job)
-                    .copied()
-                    .unwrap_or(athena_data::roles::Ladder::Implementation);
-                Some(athena_core::reading::plan_entry(job, rung))
-            })
+            .filter_map(|i| self.entry_of(&records, &head, &i.job))
             .collect();
         Ok(QueueView {
             items,
@@ -1098,6 +1251,12 @@ impl Steps for RealSteps<'_> {
 
     fn stop_requested(&self) -> bool {
         stop_file(self.athena.state.root()).exists()
+    }
+
+    fn plan_entry(&self, job: &str) -> Option<PlanEntry> {
+        let records = self.records().ok()?;
+        let head = self.athena.head().ok()?;
+        self.entry_of(&records, &head, job)
     }
 
     fn approve(&self, proposal: &str) -> Approval {
