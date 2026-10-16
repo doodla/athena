@@ -2303,6 +2303,19 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   are matched by prefix, so a new site generator outside `xtask/` needs `OUTCOME_PATHS` extended.
 - **Reversal cost:** Low: remove `check_study_text`, the `Steps::check_cap` reserve and `OUTCOME_PATHS`; D99's floor
   remains.
+- **Amendment (model behavior):** The check judges the study's model against the pinned code, not only
+  statements and quotes. Why: for the fourth time Athena's own outcome check scored the page one point above an
+  independent reader (4 against 3), and that reader had found behavior errors the quote check cannot see: a
+  reopened backlog item shown as finished although the source returns it to Queued, a counter that missed that
+  a failed close already freed the place, and a red-PR rule that contradicts a waiver on the same page.
+  `SOURCE_CHECK_PROMPT` (component `source-check.prompt`, version 2) and `source_check_brief` now tell the
+  checker to trace each state, transition (where it ends), counter (every event that changes it) and rule with
+  its waivers from `model.json` through the code, and to compare the page's rules with each other. The report
+  has a third problem kind, `behavior`, distinct from `contradicted` and `omitted`; it fails the check and is
+  named in `held_back` like the others. `model.json` still has to appear in `files_checked`. Still one call
+  per study; the checker reads more, so a call may cost more, within the verifier cap and the reserve. The
+  model-free floor is unchanged: a rule/waiver contradiction cannot be found mechanically without a rule
+  grammar, so only the model judges it. Tested with the fake agent only; the live model was not run.
 - **Provenance:** measured: `crates/athena-cli/tests/drain.rs` (a wrong statement injected into the claims, the
   intro, the transition and a glossary entry, plus an omitted fact, each failing the real `check_page` with a
   fake agent and a stub pinner and holding drain back; a text file added to a study is covered; the reserve

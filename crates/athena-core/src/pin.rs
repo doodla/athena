@@ -252,7 +252,14 @@ pub fn is_page_text(file: &str) -> bool {
 pub const SOURCE_CHECK_PROMPT: &str = "You check the text of an explainer page against the source it explains. \
 You only read and report. A statement is supported only if the source says or shows it. You report what the \
 source contradicts and the facts the text leaves out; you do not judge style, and you report nothing you \
-cannot support from a path and lines of the source.";
+cannot support from a path and lines of the source. Quotes and single statements are not enough. The page \
+also carries a model (`model.json`: states, transitions, counters, rules and their waivers). Trace every \
+state, transition, counter and rule of that model through the pinned code. A model that behaves \
+differently from the code is a behavior error: a transition that ends in a different state than the code \
+leaves it in (a reopened item that the code returns to its queue, shown as finished), a counter that misses \
+an event that changes it (a failed close that already freed the place), or a rule or waiver the code does not \
+implement as written. Also compare the rules and statements of the page with each other: a rule that \
+contradicts a waiver or another statement on the same page is an inconsistency, even if each is true alone.";
 
 /// One file of page text.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -311,7 +318,7 @@ fn checker_schema() -> serde_json::Value {
                     "required": ["file", "kind", "statement", "evidence"],
                     "properties": {
                         "file": { "type": "string" },
-                        "kind": { "type": "string", "enum": ["contradicted", "omitted"] },
+                        "kind": { "type": "string", "enum": ["contradicted", "omitted", "behavior"] },
                         "statement": { "type": "string" },
                         "evidence": { "type": "string" }
                     }
@@ -337,7 +344,14 @@ pub fn source_check_brief(study: &StudyText) -> String {
          - kind `contradicted`: a statement the source contradicts; `evidence` says what the source says \
          instead, with its path and lines;\n\
          - kind `omitted`: a fact the source states that the text needs to be true and leaves out; \
-         `statement` names the fact and `evidence` cites the source.\n\
+         `statement` names the fact and `evidence` cites the source;\n\
+         - kind `behavior`: the model, or the page against itself, is wrong about behavior. Trace each state, \
+         each transition (where it ends, including a reopen or a failed step), each counter (every event that \
+         raises or lowers it, including a failed close that frees the place) and each rule with its waivers \
+         from `{PAGE_TEXT_DIR}/model.json` through the source. Report a model that behaves differently from the \
+         code, and a rule that contradicts a waiver or another statement on the page. `statement` quotes the \
+         model entry or the conflicting statements, and `evidence` says what the code does, with path and lines.\n\
+         If the page has a `model.json`, you must read it and list it in `files_checked`.\n\
          Every problem names its `file` (as listed above) and quotes the `statement`. `files_checked` lists \
          every file you read in full, by the names above. An empty `problems` means you found none.\n",
         name = study.name,
@@ -421,7 +435,7 @@ impl crate::Athena {
 
         let composed = compose(&[
             athena_context::CONTRACT.into(),
-            Component::new("source-check.prompt", 1, SOURCE_CHECK_PROMPT),
+            Component::new("source-check.prompt", 2, SOURCE_CHECK_PROMPT),
         ]);
         let grant = ToolGrant {
             tools: vec!["Read".into(), "Grep".into(), "Glob".into()],

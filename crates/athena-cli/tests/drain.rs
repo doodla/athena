@@ -1280,6 +1280,103 @@ fn a_wrong_statement_in_any_page_text_input_fails_the_check_and_is_named() {
     }
 }
 
+const WRONG_MODEL: &str = "reopened -> Done";
+
+/// A study whose model.json shows a reopened item as finished; the source returns it to Queued.
+fn behavior_files() -> Vec<(&'static str, String)> {
+    let mut files = Texts::correct().files();
+    for (name, body) in files.iter_mut() {
+        if *name == "model.json" {
+            *body = json!({ "counters": [], "transitions": [WRONG_MODEL] }).to_string();
+        }
+    }
+    files
+}
+
+/// A checker that reads every file, finds every quote true, and reports only a behavior error in the model.
+fn behavior_judge(workspace: &Path) -> serde_json::Value {
+    let files = page_text_files(workspace);
+    let model = std::fs::read_to_string(workspace.join("page-text/model.json")).unwrap();
+    let problems = if model.contains(WRONG_MODEL) {
+        vec![json!({
+            "file": "model.json", "kind": "behavior", "statement": WRONG_MODEL,
+            "evidence": "pinned-source/bin/fm-backlog-transition-lib.sh returns a reopened item to Queued"
+        })]
+    } else {
+        vec![]
+    };
+    json!({ "files_checked": files, "problems": problems })
+}
+
+#[test]
+fn a_model_whose_behavior_differs_from_the_code_fails_the_check_and_holds_drain_back() {
+    // The same checker passes the correct model, so the behavior kind is what fails the wrong one.
+    let fx = Fixture::new();
+    commit_study(&fx, "demo", &Texts::correct().files());
+    let athena = fx.athena(judged_scenario(Arc::new(behavior_judge)).script());
+    let steps = RealSteps {
+        athena: &athena,
+        ui: &Quiet,
+        page: &StubPage,
+        lander: &RecordingLander::default(),
+    };
+    let check = steps.check_page();
+    assert!(check.passed, "{}", check.detail);
+
+    let fx = Fixture::new();
+    commit_study(&fx, "demo", &behavior_files());
+    let athena = fx.athena(judged_scenario(Arc::new(behavior_judge)).script());
+    let real = RealSteps {
+        athena: &athena,
+        ui: &Quiet,
+        page: &StubPage,
+        lander: &RecordingLander::default(),
+    };
+    let check = real.check_page();
+    assert!(!check.passed, "{}", check.detail);
+    assert!(check.detail.contains("behavior"), "{}", check.detail);
+    assert!(check.detail.contains(WRONG_MODEL), "{}", check.detail);
+    assert!(check.detail.contains("demo/model.json"), "{}", check.detail);
+
+    let steps = WithRealCheck {
+        stub: Stub {
+            items: vec!["a"],
+            outcomes: passing(),
+            ratings: RefCell::new(vec![5]),
+            ..Stub::default()
+        },
+        real,
+    };
+    let report = drain::drain(&steps, limits(50.0), &Quiet).unwrap();
+    assert_ne!(report.stop, Stop::TargetMet);
+    assert!(!report.target_met());
+    let held = report.held_back.as_deref().unwrap();
+    assert!(held.contains(WRONG_MODEL), "{held}");
+}
+
+#[test]
+fn a_checker_that_skips_model_json_is_rejected_even_with_no_problems() {
+    let fx = Fixture::new();
+    commit_study(&fx, "demo", &Texts::correct().files());
+    let skipping: SourceJudge =
+        Arc::new(|_| json!({ "files_checked": ["claims.json", "intro.json"], "problems": [] }));
+    let athena = fx.athena(judged_scenario(skipping).script());
+    let steps = RealSteps {
+        athena: &athena,
+        ui: &Quiet,
+        page: &StubPage,
+        lander: &RecordingLander::default(),
+    };
+    let check = steps.check_page();
+    assert!(!check.passed);
+    assert!(check.detail.contains("demo/model.json"), "{}", check.detail);
+    assert!(
+        check.detail.contains("did not report reading"),
+        "{}",
+        check.detail
+    );
+}
+
 /// Real source check and everything else stubbed.
 struct WithRealCheck<'a> {
     stub: Stub,

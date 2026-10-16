@@ -25,8 +25,14 @@
 //!      head commit except the structural ones (`athena_core::pin::STRUCTURAL_FILES`: the pin and the rule
 //!      results) against that study's pinned source with one model call per study
 //!      (`athena_core::Athena::check_study_text`). That covers `claims.json`, `intro.json` (intro, transition
-//!      and glossary) and any text file added later. A contradicted or omitted statement fails it. When it
-//!      fails, drain keeps running and the report names the statement ([`Report::held_back`]).
+//!      and glossary) and any text file added later. A contradicted or omitted statement fails it. So does a
+//!      `behavior` problem: the checker also traces the study's model (`model.json`: states, where transitions
+//!      end, every event that changes a counter, rules and their waivers) through the pinned code, and
+//!      compares the page's rules with each other. Quote existence was not enough: an independent reader
+//!      scored the page 3 where Athena's own check allowed 4, four times running, and found model errors
+//!      (a reopened backlog item shown as finished although the source returns it to Queued, a counter
+//!      that missed a failed close freeing the place, a red-PR rule contradicting a waiver on the same page).
+//!      When it fails, drain keeps running and the report names the statement ([`Report::held_back`]).
 //!
 //!   The source check is a model call per study, so it is guarded like the others: the reserve is
 //!   [`Steps::check_cap`] (the verifier's cap times the number of studies), it must fit the budget or drain
