@@ -210,7 +210,9 @@ Order: planning comes first. Every open request is fleshed out (goal, requiremen
 open questions, dependencies, the paths it touches) and all of them are planned together. Drain works the \
 items in plan order (higher rung first, a dependent after what it needs, age as the tiebreak), not oldest \
 first, and the report shows the plan's groups: items in one group have no dependency and touch disjoint paths, \
-so they could run in parallel; drain still runs one job at a time. Nothing is defaulted into a plan: acceptance \
+so they can run in parallel: drain runs up to `[parallel] max_concurrency` of them at once (athena.toml; \
+default 1, which is one job at a time; at most 8). Landing and rating stay one at a time, and a group starts \
+only when the group before it is done. Nothing is defaulted into a plan: acceptance \
 comes only from explicit bullets in the request or a reading's criteria, and the rung from the proposal that made \
 the job or from evidence in the request. The planning pass is deterministic code, not a model call. An unread \
 request whose own words leave the plan incomplete is read first (within the budget) and planned again from its \
@@ -751,7 +753,13 @@ fn run(cli: Cli) -> Result<u8> {
             let athena = open(true)?;
             // A stop asked for before this run started belongs to an earlier run.
             let _ = std::fs::remove_file(drain::stop_file(athena.state.root()));
-            let report = drain::drain(
+            // `[parallel] max_concurrency` from the head commit's athena.toml; 1 is one job at a time.
+            let max_concurrency =
+                athena_core::capability::JobConfig::at(&athena.git, &athena.head()?)?
+                    .config
+                    .parallel
+                    .max_concurrency;
+            let report = drain::drain_concurrent(
                 &drain::RealSteps::live(&athena, &Terminal),
                 drain::Limits {
                     budget_usd: budget,
@@ -759,6 +767,7 @@ fn run(cli: Cli) -> Result<u8> {
                     max_jobs: job_limit,
                 },
                 &Terminal,
+                max_concurrency,
             )?;
             if json {
                 print_json(&report)?;

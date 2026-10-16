@@ -2374,3 +2374,311 @@ fn a_study_whose_model_contradicts_itself_fails_the_floor_without_a_model_call()
     );
     assert_eq!(check.cost, 0.0);
 }
+
+// ---------------------------------------------------------------------------------------------------------
+// Parallel drain: `drain_concurrent` with `[parallel] max_concurrency`
+
+mod parallel {
+    use super::*;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+
+    /// A stub world that can be shared between threads. Each read costs 0.1, each run 0.5 and each rating
+    /// 0.2; their caps are 0.2, 1.0 and 0.3. Every run is logged as `start <job>` and `end <job>`.
+    #[derive(Default)]
+    struct Shared {
+        items: Vec<&'static str>,
+        plan: Vec<PlanEntry>,
+        /// Jobs whose run is rejected (a retry is `<job>-retry`).
+        failing: Vec<&'static str>,
+        /// Runs of these jobs wait, for up to five seconds, until two runs are in flight at once.
+        meet: Vec<&'static str>,
+        /// How long a run takes, in milliseconds.
+        run_ms: u64,
+        /// Asks for a stop as soon as this job is running, after it has met its sibling.
+        stop_at: Option<&'static str>,
+        stop: AtomicBool,
+        active: AtomicUsize,
+        peak: AtomicUsize,
+        log: Mutex<Vec<String>>,
+    }
+
+    impl Shared {
+        fn log(&self) -> Vec<String> {
+            self.log.lock().unwrap().clone()
+        }
+        fn position(&self, entry: &str) -> usize {
+            self.log()
+                .iter()
+                .position(|e| e == entry)
+                .unwrap_or_else(|| panic!("{entry} is not in {:?}", self.log()))
+        }
+    }
+
+    impl Steps for Shared {
+        fn caps(&self) -> anyhow::Result<Caps> {
+            Ok(Caps {
+                read: 0.2,
+                run: 1.0,
+                rate: 0.3,
+            })
+        }
+        fn queue(&self) -> anyhow::Result<QueueView> {
+            Ok(QueueView {
+                items: self
+                    .items
+                    .iter()
+                    .map(|j| Item::queued(j, &format!("title of {j}")))
+                    .collect(),
+                plan: self.plan.clone(),
+                ..QueueView::default()
+            })
+        }
+        fn previous_rating(&self) -> Option<u8> {
+            None
+        }
+        fn approve(&self, _: &str) -> Approval {
+            Approval::default()
+        }
+        fn stop_requested(&self) -> bool {
+            self.stop.load(Ordering::SeqCst)
+        }
+        fn read(&self, what: ReadOf<'_>) -> Read {
+            let job = match what {
+                ReadOf::Queued(j) => j.to_string(),
+                ReadOf::Retry(j) => format!("{j}-retry"),
+            };
+            Read {
+                job: Some(job),
+                cost: 0.1,
+                runnable: true,
+                error: None,
+            }
+        }
+        fn run(&self, job: &str) -> Run {
+            let now = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(now, Ordering::SeqCst);
+            self.log.lock().unwrap().push(format!("start {job}"));
+            if self.meet.contains(&job) {
+                // A barrier that gives up: a serial drain never gets a second run in flight, so it falls
+                // through after the deadline with a peak of one instead of hanging.
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while self.active.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            }
+            if self.stop_at == Some(job) {
+                self.stop.store(true, Ordering::SeqCst);
+            }
+            std::thread::sleep(Duration::from_millis(self.run_ms));
+            self.log.lock().unwrap().push(format!("end {job}"));
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            let outcome = if self.failing.iter().any(|f| job.starts_with(f)) {
+                OutcomeState::Rejected
+            } else {
+                OutcomeState::Landed
+            };
+            Run {
+                outcome: Some(outcome),
+                reason: String::new(),
+                cost: 0.5,
+            }
+        }
+        fn land(&self, job: &str) -> Landing {
+            // Landings go one at a time: none starts while another is in progress.
+            let mut log = self.log.lock().unwrap();
+            log.push(format!("land {job}"));
+            Landing::Landed {
+                changed: vec!["README.md".into()],
+            }
+        }
+        fn check_page(&self) -> Check {
+            Check::pass("stub")
+        }
+        fn check_cap(&self) -> f64 {
+            0.0
+        }
+        fn rate(&self) -> Rate {
+            Rate {
+                rating: Some(2),
+                cost: 0.2,
+                error: None,
+            }
+        }
+    }
+
+    fn independent(ids: &[&str]) -> Vec<PlanEntry> {
+        ids.iter()
+            .map(|id| planned(id, Ladder::Implementation, &[&format!("src/{id}.rs")], &[]))
+            .collect()
+    }
+
+    fn run_with(shared: &Shared, bound: u32, budget: f64) -> drain::Report {
+        drain::drain_concurrent(shared, limits(budget), &Quiet, bound).unwrap()
+    }
+
+    fn landed_jobs(report: &drain::Report) -> Vec<&str> {
+        let mut jobs: Vec<&str> = report
+            .jobs
+            .iter()
+            .filter(|j| j.landing == "landed")
+            .map(|j| j.item.as_str())
+            .collect();
+        jobs.sort();
+        jobs
+    }
+
+    #[test]
+    fn with_a_bound_of_one_items_run_strictly_in_plan_order_and_alone() {
+        // c serves the higher rung, so the plan order is c, a, b; a and c share a group.
+        let shared = Shared {
+            items: vec!["a", "b", "c"],
+            plan: vec![
+                planned("a", Ladder::Implementation, &["src/a.rs"], &[]),
+                planned("b", Ladder::Implementation, &["src/b.rs"], &["a"]),
+                planned("c", Ladder::DesignDecisions, &["docs/c.md"], &[]),
+            ],
+            run_ms: 5,
+            ..Shared::default()
+        };
+        let report = run_with(&shared, 1, 9.0);
+        assert_eq!(
+            shared.log(),
+            [
+                "start c", "end c", "land c", "start a", "end a", "land a", "start b", "end b",
+                "land b"
+            ]
+        );
+        assert_eq!(shared.peak.load(Ordering::SeqCst), 1);
+        assert_eq!(report.stop, Stop::QueueEmpty);
+        assert_eq!(landed_jobs(&report), ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn with_a_bound_of_two_two_independent_items_are_in_flight_at_once() {
+        let shared = Shared {
+            items: vec!["a", "b"],
+            plan: independent(&["a", "b"]),
+            meet: vec!["a", "b"],
+            run_ms: 5,
+            ..Shared::default()
+        };
+        let report = run_with(&shared, 2, 9.0);
+        assert_eq!(
+            shared.peak.load(Ordering::SeqCst),
+            2,
+            "both runs were in flight together: {:?}",
+            shared.log()
+        );
+        assert_eq!(landed_jobs(&report), ["a", "b"]);
+        assert_eq!(report.stop, Stop::QueueEmpty);
+        // The same two items with a bound of one are never together (the barrier gives up after its deadline
+        // only in a serial drain, so keep that check short by not using it here).
+        let serial = Shared {
+            items: vec!["a", "b"],
+            plan: independent(&["a", "b"]),
+            run_ms: 5,
+            ..Shared::default()
+        };
+        run_with(&serial, 1, 9.0);
+        assert_eq!(serial.peak.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn an_item_that_depends_on_another_starts_only_after_it_has_finished() {
+        let shared = Shared {
+            items: vec!["a", "b", "c"],
+            plan: vec![
+                planned("a", Ladder::Implementation, &["src/a.rs"], &[]),
+                planned("b", Ladder::Implementation, &["src/b.rs"], &[]),
+                planned("c", Ladder::Implementation, &["src/c.rs"], &["a"]),
+            ],
+            run_ms: 30,
+            ..Shared::default()
+        };
+        let report = run_with(&shared, 3, 9.0);
+        assert!(shared.position("end a") < shared.position("start c"));
+        assert!(shared.position("end b") < shared.position("start c"));
+        assert_eq!(landed_jobs(&report), ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn one_items_failure_or_refusal_does_not_stop_its_siblings() {
+        let mut vague = planned("v", Ladder::Implementation, &["src/v.rs"], &[]);
+        vague.acceptance.clear();
+        let mut plan = independent(&["a", "b"]);
+        plan.push(vague);
+        let shared = Shared {
+            items: vec!["a", "b", "v"],
+            plan,
+            failing: vec!["a"],
+            meet: vec!["a", "b"],
+            run_ms: 5,
+            ..Shared::default()
+        };
+        let report = run_with(&shared, 2, 9.0);
+        // a is rejected twice (its retry runs alone), b lands beside it, and v is refused with its reason.
+        assert_eq!(report.stop, Stop::RepeatedFailure);
+        assert_eq!(report.failed_item.as_deref(), Some("a"));
+        assert_eq!(landed_jobs(&report), ["b"]);
+        assert_eq!(report.refused.len(), 1);
+        assert_eq!(report.refused[0].id, "v");
+        assert_eq!(shared.peak.load(Ordering::SeqCst), 2);
+        assert!(shared.log().contains(&"end a-retry".to_string()));
+    }
+
+    #[test]
+    fn the_worker_bound_is_never_exceeded() {
+        let ids = ["a", "b", "c", "d", "e", "f"];
+        let shared = Shared {
+            items: ids.to_vec(),
+            plan: independent(&ids),
+            run_ms: 20,
+            ..Shared::default()
+        };
+        let report = run_with(&shared, 2, 20.0);
+        assert_eq!(shared.peak.load(Ordering::SeqCst), 2, "{:?}", shared.log());
+        assert_eq!(landed_jobs(&report), ids);
+        assert_eq!(report.stop, Stop::QueueEmpty);
+    }
+
+    #[test]
+    fn a_stop_starts_no_further_item_and_finishes_those_in_flight() {
+        let shared = Shared {
+            items: vec!["a", "b", "c", "d"],
+            plan: independent(&["a", "b", "c", "d"]),
+            meet: vec!["a", "b"],
+            stop_at: Some("a"),
+            run_ms: 10,
+            ..Shared::default()
+        };
+        let report = run_with(&shared, 2, 20.0);
+        assert_eq!(report.stop, Stop::Requested);
+        let started: Vec<String> = shared
+            .log()
+            .into_iter()
+            .filter(|e| e.starts_with("start "))
+            .collect();
+        assert_eq!(started.len(), 2, "{started:?}");
+        assert_eq!(landed_jobs(&report), ["a", "b"], "both in flight finished");
+        let queued: Vec<&str> = report.queued.iter().map(|i| i.job.as_str()).collect();
+        assert_eq!(queued, ["c", "d"]);
+    }
+
+    #[test]
+    fn jobs_side_by_side_hold_their_caps_so_they_cannot_overspend_the_budget() {
+        // One job holds 0.2 + 1.0 while it works; a second would need 1.2 more, over 2.0 in all.
+        let shared = Shared {
+            items: vec!["a", "b"],
+            plan: independent(&["a", "b"]),
+            run_ms: 300,
+            ..Shared::default()
+        };
+        let report = run_with(&shared, 2, 2.0);
+        assert_eq!(shared.peak.load(Ordering::SeqCst), 1, "{:?}", shared.log());
+        assert_eq!(report.stop, Stop::BudgetSpent);
+        assert!(report.spent_usd <= 2.0, "{}", report.spent_usd);
+        assert_eq!(landed_jobs(&report).len(), 1);
+    }
+}

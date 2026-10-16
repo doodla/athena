@@ -7,8 +7,16 @@
 //!   touched paths. The loop works the items in plan order (higher rung first, a dependent after what it
 //!   needs, age as the tiebreak), not oldest first. An item whose plan lacks a goal, a rung or acceptance is
 //!   refused and reported with a reason ([`Report::refused`]). The plan also groups items that could run in
-//!   parallel ([`Report::plan_groups`]); the loop itself runs one job at a time. The pass is deterministic
-//!   code and calls no model of its own; nothing is defaulted into a plan.
+//!   parallel ([`Report::plan_groups`]); [`drain_concurrent`] runs the items of one group side by side, up to
+//!   `[parallel] max_concurrency` (default 1, which is [`drain`]'s one job at a time). The pass is
+//!   deterministic code and calls no model of its own; nothing is defaulted into a plan.
+//! - **Concurrency.** A group is worked by up to `max_concurrency` workers; the next group starts only when
+//!   the group before it is done, so an item that depends on another starts after it has finished. Landing
+//!   and rating go one at a time (a lock), and every model call's cap is held against the budget while it is
+//!   in flight, so jobs side by side cannot overspend it. The first reason to stop ends the run: no worker
+//!   starts another job, jobs already started are finished (a failure or a refusal stops no sibling that is
+//!   in flight), and the first reason found is the one reported. A worker that panics is not isolated: the
+//!   drain ends with the panic once the other workers have finished.
 //! - **The pass reads unread requests that are underspecified.** An unread request whose own words give no
 //!   acceptance (or no rung) is read first, within the budget and job limit, and planned again from its
 //!   reading. If the plan is still incomplete it is refused with the reason, so the queue
@@ -79,6 +87,8 @@ use athena_core::store::Records;
 use athena_core::{Athena, Ui, steward, work_decisions};
 use athena_data::records::{AcceptedBy, OutcomeState};
 use serde::Serialize;
+use std::collections::VecDeque;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 /// The rating at which the page counts as good enough, unless the user says otherwise.
 pub const DEFAULT_TARGET_RATING: u8 = 4;
@@ -113,20 +123,38 @@ pub struct Caps {
 pub struct Budget {
     total: f64,
     spent: f64,
+    /// Caps reserved by calls that are in flight and have not yet reported their cost. With one job at a time
+    /// this is zero whenever a call is about to start.
+    held: f64,
 }
 
 impl Budget {
     pub fn new(total: f64) -> Budget {
-        Budget { total, spent: 0.0 }
+        Budget {
+            total,
+            spent: 0.0,
+            held: 0.0,
+        }
     }
 
-    /// Whether a call capped at `cap` may start: what is spent plus the cap must not exceed the budget.
+    /// Whether a call capped at `cap` may start: what is spent, plus the caps of the calls in flight, plus
+    /// this cap must not exceed the budget.
     pub fn fits(&self, cap: f64) -> bool {
-        self.spent + cap <= self.total + 1e-9
+        self.spent + self.held + cap <= self.total + 1e-9
     }
 
     pub fn add(&mut self, cost: f64) {
         self.spent += cost.max(0.0);
+    }
+
+    /// Reserves the cap of a call that is starting, so a call running beside it counts it in [`Budget::fits`].
+    pub fn hold(&mut self, cap: f64) {
+        self.held += cap;
+    }
+
+    /// Gives a reservation back once the call has ended and its real cost was added.
+    pub fn release(&mut self, cap: f64) {
+        self.held = (self.held - cap).max(0.0);
     }
 
     pub fn spent(&self) -> f64 {
@@ -430,8 +458,9 @@ pub struct Report {
     pub queued: Vec<Item>,
     /// Open proposals waiting for a person. The loop did not touch them.
     pub waiting: Vec<Waiting>,
-    /// The plan the loop followed: the planned items in groups. Items of one group could run in parallel
-    /// (no dependency, disjoint touched paths); the loop still runs one job at a time, in this order.
+    /// The plan the loop followed: the planned items in groups. Items of one group have no dependency and
+    /// touch disjoint paths; they run side by side up to `[parallel] max_concurrency`, group after group in
+    /// this order (one job at a time when the bound is 1).
     pub plan_groups: Vec<Vec<String>>,
     /// Items refused for design or code because their plan lacks a goal, a ladder rung or acceptance.
     pub refused: Vec<Refusal>,
@@ -446,11 +475,9 @@ impl Report {
     }
 }
 
-struct Drain<'a> {
-    steps: &'a dyn Steps,
-    ui: &'a dyn Ui,
-    caps: Caps,
-    limits: Limits,
+/// Everything the workers of one drain share, behind one lock. A lock is never held across a call into
+/// [`Steps`], so a slow model call never blocks another worker's bookkeeping.
+struct State {
     budget: Budget,
     jobs: Vec<JobLine>,
     started: u32,
@@ -462,6 +489,21 @@ struct Drain<'a> {
     notes: Vec<String>,
     /// What the planning pass spent reading an item, charged to that item's job line when it runs.
     read_cost: std::collections::BTreeMap<String, f64>,
+    /// Why the run is ending, once any worker has found a reason (the first reason found stands), and the
+    /// item that failed twice when that is the reason. No worker starts a job once this is set; jobs already
+    /// started are finished.
+    stop: Option<(Stop, Option<String>)>,
+}
+
+struct Drain<'a, S: ?Sized, U: ?Sized> {
+    steps: &'a S,
+    ui: &'a U,
+    caps: Caps,
+    limits: Limits,
+    state: Mutex<State>,
+    /// Held while a job is landed and while the page is rated: landings and ratings go one at a time even
+    /// when jobs run side by side, because each pushes a branch and rates the page as it then stands.
+    landing: Mutex<()>,
 }
 
 enum ItemEnd {
@@ -471,6 +513,8 @@ enum ItemEnd {
     JobLimit,
     /// A stop was asked for and no further job was started.
     Stop,
+    /// Another worker had already ended the run, so nothing was started.
+    Idle,
 }
 
 enum RunStep {
@@ -482,20 +526,45 @@ enum RunStep {
         ran: bool,
     },
     Budget,
+    JobLimit,
+    /// Another worker had already ended the run.
+    Ended,
 }
 
-impl Drain<'_> {
-    fn push(&mut self, line: JobLine) -> usize {
+impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
+    fn st(&self) -> MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn push(&self, line: JobLine) -> usize {
         self.ui.line(&format!(
             "drain      {} → {} ({})",
             line.item, line.job, line.outcome
         ));
-        self.jobs.push(line);
-        self.jobs.len() - 1
+        let mut st = self.st();
+        st.jobs.push(line);
+        st.jobs.len() - 1
     }
 
-    /// Reads and runs one job. Starts only when the reading and the run both fit the budget.
-    fn run_job(&mut self, item: &Item, from: ReadOf<'_>) -> RunStep {
+    fn note(&self, text: String) {
+        self.st().notes.push(text);
+    }
+
+    /// Ends the run for `stop`, unless another worker already found a reason.
+    fn set_stop(&self, stop: Stop, failed: Option<String>) {
+        let mut st = self.st();
+        if st.stop.is_none() {
+            st.stop = Some((stop, failed));
+        }
+    }
+
+    fn stopped(&self) -> bool {
+        self.st().stop.is_some()
+    }
+
+    /// Reads and runs one job. Starts only when the reading and the run both fit the budget, counting the
+    /// caps that jobs already in flight hold.
+    fn run_job(&self, item: &Item, from: ReadOf<'_>) -> RunStep {
         // An approved job was read when it was approved; its first attempt is only a run.
         let pre_read = item.read && matches!(from, ReadOf::Queued(_));
         let needed = if pre_read {
@@ -503,10 +572,20 @@ impl Drain<'_> {
         } else {
             self.caps.read + self.caps.run
         };
-        if !self.budget.fits(needed) {
-            return RunStep::Budget;
+        {
+            let mut st = self.st();
+            if st.stop.is_some() {
+                return RunStep::Ended;
+            }
+            if st.started >= self.limits.max_jobs {
+                return RunStep::JobLimit;
+            }
+            if !st.budget.fits(needed) {
+                return RunStep::Budget;
+            }
+            st.started += 1;
+            st.budget.hold(needed);
         }
-        self.started += 1;
         let read = if pre_read {
             Read {
                 job: Some(item.job.clone()),
@@ -517,13 +596,28 @@ impl Drain<'_> {
         } else {
             self.steps.read(from)
         };
-        self.budget.add(read.cost);
+        let runnable = matches!(
+            (&read.job, &read.error, read.runnable),
+            (Some(_), None, true)
+        );
+        let (planned_read_cost, room) = {
+            let mut st = self.st();
+            st.budget.release(needed);
+            st.budget.add(read.cost);
+            let planned = st.read_cost.remove(&item.job).unwrap_or(0.0);
+            // The reading's real cost may have used up the room the run needs.
+            let room = runnable && st.budget.fits(self.caps.run);
+            if room {
+                st.budget.hold(self.caps.run);
+            }
+            (planned, room)
+        };
         let mut line = JobLine {
             item: item.job.clone(),
             job: read.job.clone().unwrap_or_else(|| item.job.clone()),
             outcome: "not read".into(),
             reason: None,
-            cost_usd: read.cost + self.read_cost.remove(&item.job).unwrap_or(0.0),
+            cost_usd: read.cost + planned_read_cost,
             landing: "not attempted".into(),
         };
         let job = match (&read.job, &read.error, read.runnable) {
@@ -539,15 +633,18 @@ impl Drain<'_> {
                 };
             }
         };
-        // The reading's real cost may have used up the room the run needs.
-        if !self.budget.fits(self.caps.run) {
+        if !room {
             line.outcome = "not run".into();
             line.reason = Some("the budget did not leave room for the run".into());
             self.push(line);
             return RunStep::Budget;
         }
         let run = self.steps.run(&job);
-        self.budget.add(run.cost);
+        {
+            let mut st = self.st();
+            st.budget.release(self.caps.run);
+            st.budget.add(run.cost);
+        }
         line.cost_usd += run.cost;
         line.reason = (!run.reason.is_empty()).then(|| run.reason.clone());
         match run.outcome {
@@ -564,13 +661,19 @@ impl Drain<'_> {
         }
     }
 
-    fn land(&mut self, job: &str, at: usize) -> bool {
+    fn land(&self, job: &str, at: usize) -> bool {
+        let _one_at_a_time = self.landing.lock().unwrap_or_else(PoisonError::into_inner);
         match self.steps.land(job) {
             Landing::Landed { changed } => {
-                self.jobs[at].landing = "landed".into();
-                if changes_outcome(&changed) {
-                    self.outcome_landings += 1;
-                } else {
+                let outcome = changes_outcome(&changed);
+                {
+                    let mut st = self.st();
+                    st.jobs[at].landing = "landed".into();
+                    if outcome {
+                        st.outcome_landings += 1;
+                    }
+                }
+                if !outcome {
                     self.ui.line(&format!(
                         "drain      {job} landed but changed nothing the explainer is built from"
                     ));
@@ -579,14 +682,14 @@ impl Drain<'_> {
             }
             Landing::NotLanded(why) => {
                 self.ui.line(&format!("drain      {job} not landed: {why}"));
-                self.jobs[at].landing = format!("not landed: {why}");
+                self.st().jobs[at].landing = format!("not landed: {why}");
                 false
             }
         }
     }
 
     /// Works one item through its attempts: read and run, land, and on a failure try once more.
-    fn work(&mut self, item: &Item) -> ItemEnd {
+    fn work(&self, item: &Item) -> ItemEnd {
         let mut last_job = item.job.clone();
         let mut retry = false;
         let mut passed: Option<(String, usize)> = None;
@@ -597,9 +700,6 @@ impl Drain<'_> {
                 if self.steps.stop_requested() {
                     return ItemEnd::Stop;
                 }
-                if self.started >= self.limits.max_jobs {
-                    return ItemEnd::JobLimit;
-                }
                 let from = if retry {
                     ReadOf::Retry(&last_job)
                 } else {
@@ -607,6 +707,8 @@ impl Drain<'_> {
                 };
                 match self.run_job(item, from) {
                     RunStep::Budget => return ItemEnd::Budget,
+                    RunStep::JobLimit => return ItemEnd::JobLimit,
+                    RunStep::Ended => return ItemEnd::Idle,
                     RunStep::Passed(job, at) => passed = Some((job, at)),
                     RunStep::Failed { job, ran } => {
                         retry = ran;
@@ -619,7 +721,7 @@ impl Drain<'_> {
             if let Some((job, at)) = passed.clone()
                 && self.land(&job, at)
             {
-                self.landed.push(item.job.clone());
+                self.st().landed.push(item.job.clone());
                 return ItemEnd::Landed;
             }
             failures += 1;
@@ -632,14 +734,17 @@ impl Drain<'_> {
     /// Approves the proposals the ladder lets their role change. Each approval reads a job, so it must leave
     /// room for that job's run and stay under the job limit. Returns the jobs it made, and the proposals it
     /// left open (with a note saying why).
-    fn approve_all(&mut self, proposals: Vec<Waiting>) -> (Vec<Item>, Vec<Waiting>) {
+    fn approve_all(&self, proposals: Vec<Waiting>) -> (Vec<Item>, Vec<Waiting>) {
         let mut approved = Vec::new();
         let mut left = Vec::new();
         for proposal in proposals {
-            if self.started + approved.len() as u32 >= self.limits.max_jobs
-                || !self.budget.fits(self.caps.read + self.caps.run)
-            {
-                self.notes.push(format!(
+            let room = {
+                let st = self.st();
+                (st.started as usize + approved.len()) < self.limits.max_jobs as usize
+                    && st.budget.fits(self.caps.read + self.caps.run)
+            };
+            if !room {
+                self.note(format!(
                     "proposal {} is within its role's limit but was not approved: no room in the job limit or the budget",
                     proposal.id
                 ));
@@ -647,7 +752,7 @@ impl Drain<'_> {
                 continue;
             }
             let approval = self.steps.approve(&proposal.id);
-            self.budget.add(approval.cost);
+            self.st().budget.add(approval.cost);
             match (approval.job, approval.error) {
                 (Some(job), None) => {
                     self.ui
@@ -659,7 +764,7 @@ impl Drain<'_> {
                     });
                 }
                 (_, error) => {
-                    self.notes.push(format!(
+                    self.note(format!(
                         "proposal {} could not be approved: {}",
                         proposal.id,
                         error.unwrap_or_else(|| "no job was made".into())
@@ -683,7 +788,7 @@ impl Drain<'_> {
     /// `reserve` is what must fit the budget besides what is spent before an item is read: the read cap plus
     /// the run cap for `drain`, which goes on to run the item, and the read cap alone for `plan`, which runs
     /// nothing.
-    fn prepare(&mut self, view: &mut QueueView, reserve: f64) -> Plan {
+    fn prepare(&self, view: &mut QueueView, reserve: f64) -> Plan {
         let mut forced: Vec<Refusal> = Vec::new();
         for idx in 0..view.items.len() {
             if view.items[idx].read {
@@ -699,8 +804,12 @@ impl Drain<'_> {
             if self.steps.stop_requested() {
                 break;
             }
-            if self.started >= self.limits.max_jobs || !self.budget.fits(reserve) {
-                self.notes.push(format!(
+            let room = {
+                let st = self.st();
+                st.started < self.limits.max_jobs && st.budget.fits(reserve)
+            };
+            if !room {
+                self.note(format!(
                     "item {id} was not read to fill its plan: no room in the job limit or the budget"
                 ));
                 continue;
@@ -710,8 +819,11 @@ impl Drain<'_> {
                 view.plan[pos].missing().join(", ")
             ));
             let read = self.steps.read(ReadOf::Queued(&id));
-            self.budget.add(read.cost);
-            self.read_cost.insert(id.clone(), read.cost);
+            {
+                let mut st = self.st();
+                st.budget.add(read.cost);
+                st.read_cost.insert(id.clone(), read.cost);
+            }
             if let Some(entry) = self.steps.plan_entry(&id) {
                 view.plan[pos] = entry;
             }
@@ -731,7 +843,7 @@ impl Drain<'_> {
                         .into();
                 forced.push(r);
             } else if !view.plan[pos].missing().is_empty() {
-                self.notes.push(format!(
+                self.note(format!(
                     "item {id} was read, but its plan is still incomplete; correct or answer it with `athena correct {id}`"
                 ));
             }
@@ -748,28 +860,41 @@ impl Drain<'_> {
     }
 
     /// Rates the page after a landing. Returns the stop reason when the rating ends the run.
-    fn rate(&mut self) -> Option<Stop> {
-        if !self.budget.fits(self.caps.rate) {
-            return Some(Stop::BudgetSpent);
+    fn rate(&self) -> Option<Stop> {
+        let _one_at_a_time = self.landing.lock().unwrap_or_else(PoisonError::into_inner);
+        {
+            let mut st = self.st();
+            if !st.budget.fits(self.caps.rate) {
+                return Some(Stop::BudgetSpent);
+            }
+            st.budget.hold(self.caps.rate);
         }
         let rate = self.steps.rate();
-        self.budget.add(rate.cost);
+        {
+            let mut st = self.st();
+            st.budget.release(self.caps.rate);
+            st.budget.add(rate.cost);
+        }
         match rate.rating {
             Some(value) => {
                 // The only place a rating of this run is made, and it is made after a landing.
-                let after_landing = !self.landed.is_empty();
+                let (after_landing, outcome_landings) = {
+                    let mut st = self.st();
+                    let after_landing = !st.landed.is_empty();
+                    st.held_back = None;
+                    st.rating = Some(RatingLine {
+                        value,
+                        after_landing,
+                        met_target: false,
+                    });
+                    (after_landing, st.outcome_landings)
+                };
                 let rated_enough = after_landing && value >= self.limits.target_rating;
-                self.held_back = None;
-                self.rating = Some(RatingLine {
-                    value,
-                    after_landing,
-                    met_target: false,
-                });
                 if !rated_enough {
                     return None;
                 }
                 // A rating after landings that left the page's sources alone says nothing new about the page.
-                if self.outcome_landings == 0 {
+                if outcome_landings == 0 {
                     self.ui.line(&format!(
                         "drain      rating {value} reached the target but no landing changed the outcome"
                     ));
@@ -778,23 +903,31 @@ impl Drain<'_> {
                 // A rating cannot catch a wrong fact, so it ends the run only with a passing source check. The
                 // check is a model call per study, so its whole cap must fit before it starts.
                 let cap = self.steps.check_cap();
-                if !self.budget.fits(cap) {
-                    self.notes.push(format!(
-                        "the source check was not made: its cap of ${cap:.2} does not fit what is left of the budget"
-                    ));
-                    return Some(Stop::BudgetSpent);
+                {
+                    let mut st = self.st();
+                    if !st.budget.fits(cap) {
+                        st.notes.push(format!(
+                            "the source check was not made: its cap of ${cap:.2} does not fit what is left of the budget"
+                        ));
+                        return Some(Stop::BudgetSpent);
+                    }
+                    st.budget.hold(cap);
                 }
                 let check = self.steps.check_page();
-                self.budget.add(check.cost);
+                {
+                    let mut st = self.st();
+                    st.budget.release(cap);
+                    st.budget.add(check.cost);
+                }
                 if !check.passed {
                     self.ui.line(&format!(
                         "drain      rating {value} reached the target but the source check failed: {}",
                         check.detail
                     ));
-                    self.held_back = Some(check.detail);
+                    self.st().held_back = Some(check.detail);
                     return None;
                 }
-                self.rating = Some(RatingLine {
+                self.st().rating = Some(RatingLine {
                     value,
                     after_landing,
                     met_target: true,
@@ -802,7 +935,7 @@ impl Drain<'_> {
                 Some(Stop::TargetMet)
             }
             None => {
-                self.notes.push(format!(
+                self.note(format!(
                     "the page could not be rated: {}",
                     rate.error.as_deref().unwrap_or("no rating")
                 ));
@@ -812,26 +945,127 @@ impl Drain<'_> {
     }
 }
 
-/// Works the queue within `limits`. See the module text for the rules.
+impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
+    fn new<'a>(steps: &'a S, ui: &'a U, caps: Caps, limits: Limits) -> Drain<'a, S, U> {
+        Drain {
+            steps,
+            ui,
+            caps,
+            limits,
+            state: Mutex::new(State {
+                budget: Budget::new(limits.budget_usd),
+                jobs: Vec::new(),
+                started: 0,
+                landed: Vec::new(),
+                outcome_landings: 0,
+                rating: None,
+                held_back: None,
+                notes: Vec::new(),
+                read_cost: Default::default(),
+                stop: None,
+            }),
+            landing: Mutex::new(()),
+        }
+    }
+
+    /// What a worker does when its item has ended: a landed item is followed by a rating, and a reason to
+    /// stop ends the run for every worker. One item's failure stops no job already in flight.
+    fn finish(&self, item: &Item, end: ItemEnd) {
+        match end {
+            ItemEnd::Landed => {
+                if let Some(reason) = self.rate() {
+                    self.set_stop(reason, None);
+                }
+            }
+            ItemEnd::Failed => self.set_stop(Stop::RepeatedFailure, Some(item.job.clone())),
+            ItemEnd::Budget => self.set_stop(Stop::BudgetSpent, None),
+            ItemEnd::JobLimit => self.set_stop(Stop::JobLimit, None),
+            ItemEnd::Stop => self.set_stop(Stop::Requested, None),
+            ItemEnd::Idle => {}
+        }
+    }
+
+    /// Takes items from `queue`, oldest first, until it is empty or the run has ended.
+    fn take_until_done(&self, queue: &Mutex<VecDeque<Item>>) {
+        loop {
+            if self.stopped() {
+                return;
+            }
+            let next = queue
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .pop_front();
+            let Some(item) = next else { return };
+            let end = self.work(&item);
+            self.finish(&item, end);
+        }
+    }
+
+    /// One job at a time, in order, on the calling thread.
+    fn run_serial(&self, batches: Vec<Vec<Item>>) {
+        for batch in batches {
+            self.take_until_done(&Mutex::new(VecDeque::from(batch)));
+        }
+    }
+}
+
+impl<S: Steps + Sync + ?Sized, U: Ui + Sync + ?Sized> Drain<'_, S, U> {
+    /// Runs each batch with up to `workers` jobs at once; the next batch starts when the batch before it is
+    /// done. A batch holds items that no dependency links and whose touched paths are disjoint.
+    fn run_parallel(&self, batches: Vec<Vec<Item>>, workers: usize) {
+        for batch in batches {
+            if self.stopped() {
+                return;
+            }
+            let count = workers.min(batch.len()).max(1);
+            let queue = Mutex::new(VecDeque::from(batch));
+            std::thread::scope(|scope| {
+                for _ in 0..count {
+                    scope.spawn(|| self.take_until_done(&queue));
+                }
+            });
+        }
+    }
+}
+
+/// Works the queue within `limits`, one job at a time. See the module text for the rules.
 pub fn drain(steps: &dyn Steps, limits: Limits, ui: &dyn Ui) -> anyhow::Result<Report> {
     let caps = steps.caps()?;
+    let d = Drain::new(steps, ui, caps, limits);
+    drain_with(&d, steps, |d, batches| d.run_serial(batches))
+}
+
+/// Works the queue like [`drain`], running up to `max_concurrency` jobs at once. The jobs of one group of the
+/// plan (no dependency between them, disjoint touched paths) run side by side; the next group starts when
+/// the group before it is done, so an item that depends on another starts only after it has finished. Landing
+/// and rating stay one at a time. With `max_concurrency` 1 this is [`drain`]. A worker that panics ends the
+/// drain with that panic once the other workers have finished their jobs; its item is not isolated.
+pub fn drain_concurrent(
+    steps: &(dyn Steps + Sync),
+    limits: Limits,
+    ui: &(dyn Ui + Sync),
+    max_concurrency: u32,
+) -> anyhow::Result<Report> {
+    let caps = steps.caps()?;
+    let d = Drain::new(steps, ui, caps, limits);
+    let workers = max_concurrency.max(1) as usize;
+    drain_with(&d, steps, move |d, batches| {
+        if workers == 1 {
+            d.run_serial(batches);
+        } else {
+            d.run_parallel(batches, workers);
+        }
+    })
+}
+
+fn drain_with<'a, S: Steps + ?Sized, U: Ui + ?Sized>(
+    d: &Drain<'a, S, U>,
+    steps: &S,
+    run: impl FnOnce(&Drain<'a, S, U>, Vec<Vec<Item>>),
+) -> anyhow::Result<Report> {
+    let limits = d.limits;
     let view = steps.queue()?;
     let previous = steps.previous_rating();
-    let mut d = Drain {
-        steps,
-        ui,
-        caps,
-        limits,
-        budget: Budget::new(limits.budget_usd),
-        jobs: Vec::new(),
-        started: 0,
-        landed: Vec::new(),
-        outcome_landings: 0,
-        rating: None,
-        held_back: None,
-        notes: Vec::new(),
-        read_cost: Default::default(),
-    };
     let mut view = view;
     let (approved, left) = d.approve_all(std::mem::take(&mut view.approvable));
     // Jobs already approved come first, then the ones approved now, then queued requests.
@@ -843,61 +1077,39 @@ pub fn drain(steps: &dyn Steps, limits: Limits, ui: &dyn Ui) -> anyhow::Result<R
     // is incomplete, or that wait on each other in a loop, are not worked.
     let reserve = d.caps.read + d.caps.run;
     let plan = d.prepare(&mut view, reserve);
-    let mut to_work: Vec<Item> = view
+    // Items with no plan entry keep their place ahead of the planned ones, each alone in its batch. The
+    // planned items follow, one batch per plan group; the groups, flattened, are the plan order.
+    let mut batches: Vec<Vec<Item>> = view
         .items
         .iter()
         .filter(|i| !view.plan.iter().any(|e| e.id == i.job))
         .cloned()
+        .map(|i| vec![i])
         .collect();
-    to_work.extend(
-        plan.order
+    batches.extend(plan.groups.iter().map(|group| {
+        group
             .iter()
-            .filter_map(|id| view.items.iter().find(|i| &i.job == id).cloned()),
-    );
+            .filter_map(|id| view.items.iter().find(|i| &i.job == id).cloned())
+            .collect()
+    }));
     for refusal in &plan.refused {
-        d.notes.push(format!(
+        d.note(format!(
             "item {} is not worked: {}",
             refusal.id, refusal.reason
         ));
     }
     if !plan.cyclic.is_empty() {
-        d.notes.push(format!(
+        d.note(format!(
             "items {} wait on each other, so none of them is worked",
             plan.cyclic.join(", ")
         ));
     }
-    let mut stop = Stop::QueueEmpty;
-    let mut failed_item = None;
-    for item in &to_work {
-        match d.work(item) {
-            ItemEnd::Landed => {
-                if let Some(reason) = d.rate() {
-                    stop = reason;
-                    break;
-                }
-            }
-            ItemEnd::Failed => {
-                stop = Stop::RepeatedFailure;
-                failed_item = Some(item.job.clone());
-                break;
-            }
-            ItemEnd::Budget => {
-                stop = Stop::BudgetSpent;
-                break;
-            }
-            ItemEnd::JobLimit => {
-                stop = Stop::JobLimit;
-                break;
-            }
-            ItemEnd::Stop => {
-                stop = Stop::Requested;
-                break;
-            }
-        }
-    }
-    let landed = d.landed.len() as u32;
+    run(d, batches);
+    let st = d.st();
+    let (stop, failed_item) = st.stop.clone().unwrap_or((Stop::QueueEmpty, None));
+    let landed = st.landed.len() as u32;
     // With nothing landed the only rating there is, if any, is the stale one, and it says so.
-    let rating = d.rating.or_else(|| {
+    let rating = st.rating.or_else(|| {
         previous.map(|value| RatingLine {
             value,
             after_landing: false,
@@ -907,24 +1119,24 @@ pub fn drain(steps: &dyn Steps, limits: Limits, ui: &dyn Ui) -> anyhow::Result<R
     Ok(Report {
         stop,
         failed_item,
-        spent_usd: d.budget.spent(),
+        spent_usd: st.budget.spent(),
         budget_usd: limits.budget_usd,
         target_rating: limits.target_rating,
         landed,
         page_unchanged: landed == 0,
-        outcome_changed: d.outcome_landings > 0,
+        outcome_changed: st.outcome_landings > 0,
         rating,
-        held_back: d.held_back,
+        held_back: st.held_back.clone(),
         queued: view
             .items
             .into_iter()
-            .filter(|i| !d.landed.contains(&i.job))
+            .filter(|i| !st.landed.contains(&i.job))
             .collect(),
         waiting: view.waiting,
         plan_groups: plan.groups,
         refused: plan.refused,
-        notes: d.notes,
-        jobs: d.jobs,
+        notes: st.notes.clone(),
+        jobs: st.jobs.clone(),
     })
 }
 
@@ -950,35 +1162,22 @@ pub fn plan(steps: &dyn Steps, read_budget_usd: f64, ui: &dyn Ui) -> anyhow::Res
         target_rating: DEFAULT_TARGET_RATING,
         max_jobs: u32::MAX,
     };
-    let mut d = Drain {
-        steps,
-        ui,
-        caps,
-        limits,
-        budget: Budget::new(read_budget_usd),
-        jobs: Vec::new(),
-        started: 0,
-        landed: Vec::new(),
-        outcome_landings: 0,
-        rating: None,
-        held_back: None,
-        notes: Vec::new(),
-        read_cost: Default::default(),
-    };
+    let d = Drain::new(steps, ui, caps, limits);
     // Planning runs nothing, so only the read has to fit `--budget`.
     let reserve = d.caps.read;
     let plan = d.prepare(&mut view, reserve);
     if !plan.cyclic.is_empty() {
-        d.notes.push(format!(
+        d.note(format!(
             "items {} wait on each other, so none of them is worked",
             plan.cyclic.join(", ")
         ));
     }
+    let st = d.st();
     Ok(PlanReport {
         entries: view.plan,
         plan,
-        spent_usd: d.budget.spent(),
-        notes: d.notes,
+        spent_usd: st.budget.spent(),
+        notes: st.notes.clone(),
     })
 }
 
@@ -1137,9 +1336,10 @@ pub fn study_text(
 /// The steps against a real repository.
 pub struct RealSteps<'a> {
     pub athena: &'a Athena,
-    pub ui: &'a dyn Ui,
+    // `Sync` so that [`drain_concurrent`] can share the steps between workers.
+    pub ui: &'a (dyn Ui + Sync),
     pub page: &'a dyn Page,
-    pub lander: &'a dyn Lander,
+    pub lander: &'a (dyn Lander + Sync),
 }
 
 impl std::fmt::Debug for RealSteps<'_> {
@@ -1152,7 +1352,7 @@ impl std::fmt::Debug for RealSteps<'_> {
 
 impl<'a> RealSteps<'a> {
     /// The live explainer page, landed through the pull-request path.
-    pub fn live(athena: &'a Athena, ui: &'a dyn Ui) -> RealSteps<'a> {
+    pub fn live(athena: &'a Athena, ui: &'a (dyn Ui + Sync)) -> RealSteps<'a> {
         RealSteps {
             athena,
             ui,

@@ -243,7 +243,9 @@ impl std::fmt::Display for JevError {
 impl std::error::Error for JevError {}
 
 /// Asks Jev. [`JevClient`] is the real one and [`FakeJev`] the fake.
-pub trait Evaluate {
+///
+/// `Send + Sync` so that an [`crate::Athena`] holding one can be shared by the workers of a parallel drain.
+pub trait Evaluate: Send + Sync {
     /// Puts every question to Jev in one call over the text `state`.
     fn evaluate(
         &self,
@@ -466,7 +468,6 @@ mod tests {
     use crate::gh::HttpReply;
     use anyhow::Result;
     use serde_json::{Value, json};
-    use std::cell::RefCell;
     use std::time::Duration;
 
     const SECRET: &str = "sk-test-very-secret-1234";
@@ -521,12 +522,28 @@ mod tests {
 
     /// An HTTP transport that answers from a script and records what it was sent.
     struct ScriptedHttp {
-        replies: RefCell<VecDeque<Result<HttpReply>>>,
+        replies: Locked<VecDeque<Result<HttpReply>>>,
         sent: Sent,
     }
 
+    /// A value behind a mutex, read like a `RefCell` (the transport must be `Send + Sync`).
+    #[derive(Default)]
+    struct Locked<T>(std::sync::Mutex<T>);
+
+    impl<T> Locked<T> {
+        fn new(value: T) -> Self {
+            Locked(std::sync::Mutex::new(value))
+        }
+        fn borrow(&self) -> std::sync::MutexGuard<'_, T> {
+            self.0.lock().unwrap()
+        }
+        fn borrow_mut(&self) -> std::sync::MutexGuard<'_, T> {
+            self.0.lock().unwrap()
+        }
+    }
+
     /// `(url, bearer, body)` of each post.
-    type Sent = std::rc::Rc<RefCell<Vec<(String, Option<String>, String)>>>;
+    type Sent = std::sync::Arc<Locked<Vec<(String, Option<String>, String)>>>;
 
     impl HttpPost for ScriptedHttp {
         fn post_json(&self, url: &str, bearer: Option<&str>, body: &str) -> Result<HttpReply> {
@@ -545,7 +562,7 @@ mod tests {
     fn client(replies: Vec<Result<HttpReply>>, key: Option<&str>) -> (JevClient, Sent) {
         let sent = Sent::default();
         let http = ScriptedHttp {
-            replies: RefCell::new(replies.into()),
+            replies: Locked::new(replies.into()),
             sent: sent.clone(),
         };
         let mut client = JevClient::new(Box::new(http), key.map(|k| ApiKey(k.to_string())));

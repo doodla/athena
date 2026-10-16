@@ -5,6 +5,29 @@ and again after review 2 (`docs/design/reviews/parallel-jobs-review-2.md`, findi
 revision pending. Design only: no code is built by this document. Every finding is answered in the text; the
 tables map each one to its section. The revision does not mark itself accepted.
 
+**First slice built: a bounded parallel drain.** `athena drain` now runs the independent items of one plan group
+at the same time, up to `[parallel] max_concurrency` in `athena.toml` (default 1, which is the old serial drain;
+the schema allows 1 to 8, `MAX_CONCURRENCY_CEILING` in `crates/athena-data/src/config.rs`). What it is, and is
+not, as built **(read, `crates/athena-cli/src/drain.rs`)**:
+
+- It runs in one process with one thread per worker; it is not the process-per-job launcher of sections 4 and 5.
+  The reading, the run and the verification of a job overlap; the plan groups already guarantee no dependency
+  and disjoint touched paths between the items that run together. A group starts when the group before it is
+  done, so a dependent item starts only after the item it needs has finished.
+- Landing (the `--pr` path) and the audience rating stay one at a time, behind one lock. A model call's cap is
+  held against the budget while it is in flight, so jobs side by side cannot overspend it; with a bound of 1
+  nothing is held across jobs and the counting is unchanged.
+- The first reason to stop ends the run. A failed item (two failures) stops no job already in flight, and starts
+  no further one. A refused item is only reported. A stop request (`athena drain-stop`) is read before every job
+  and starts no further job.
+- A worker that panics is not isolated: the drain ends with that panic once the other workers finish.
+- To share the Athena handle between workers, `jev::Evaluate` and `gh::HttpPost` are now `Send + Sync`
+  (`crates/athena-core/src/jev.rs`, `gh.rs`), and `RealSteps` holds `Sync` UI and lander references. The test
+  doubles in `jev.rs` moved from `RefCell` to a mutex for the same reason.
+- **Not built:** multi-job `athena go` (sections 5 and 6), per-job processes, the lock and kill-switch changes of
+  section 5.1, and the `--pr` phase of sections 7 and 8, including the landing queue. Parallel landing is not
+  attempted: landings are serialized instead.
+
 | Finding | Answered in |
 |---|---|
 | F1 disjoint jobs do not land through local replay | sections 7, 8, 10 (build order) and question 2 in section 11 |

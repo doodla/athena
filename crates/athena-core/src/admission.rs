@@ -418,16 +418,17 @@ mod tests {
 
     #[test]
     fn a_new_section_and_its_schema_change_together_are_admitted_without_a_build() {
-        let text = format!("{BASE_CONFIG}\n[parallel]\nmax_jobs = 2\n");
+        // A section no schema knows (`[parallel]` was this example until the schema gained it).
+        let text = format!("{BASE_CONFIG}\n[telemetry]\nsample_rate = 2\n");
         // The running Athena's schema is the wrong judge: it reproduces the refusal jobs
         // 20261016-071202-q0xy and 20261016-185517-qcrz met.
         let old = Config::parse(&text).unwrap_err().to_string();
-        assert!(old.contains("unknown field `parallel`"), "{old}");
+        assert!(old.contains("unknown field `telemetry`"), "{old}");
         // The test repository has no Cargo.toml or lock file, so any attempt to build the candidate's
         // schema would fail and show up as a violation: none is the proof that nothing was built.
         let found = configuration(admit_files(&[
             ("athena.toml", &text),
-            (SCHEMA_FILE, "// adds [parallel]\n"),
+            (SCHEMA_FILE, "// adds [telemetry]\n"),
         ]));
         assert!(found.is_empty(), "{found:?}");
     }
