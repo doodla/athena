@@ -1,0 +1,169 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261016-205137-wm0p",
+  "n": 1,
+  "at": "2026-10-16T20:52:08.397489707Z",
+  "invocation_seq": 1,
+  "base_commit": "4d814f6cb6832d56cf82575dbb2502b7bd7d3374",
+  "config_sha256": "5570e4f9425ce1beb6f41799c80193739787f2fc95ee3ce8cdead671d06c980b",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Judge athena.toml by the candidate's schema without host builds",
+  "summary": "The landing gate (content.rs) parses a changed athena.toml/defaults.toml with the running schema, so a commit that adds a section together with its schema is refused; admission fixed this by building the candidate's athena-data on the host. Fix both at the root: add a test in the candidate's own athena-data that parses the repo's athena.toml and defaults.toml, which runs only in the agent sandbox. When the commit changes crates/athena-data/, gate and admission rely on that sandboxed test and never compile candidate code. Otherwise they parse with the running schema. Audience: Athena operators and the verifier of parallel jobs.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "Regression tests for gate and admission plus an athena-data config test; cargo test and clippy must pass."
+    },
+    {
+      "id": "root-cause",
+      "how": "Fix the gate and admission with one shared rule instead of patching the gate alone."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check that schema-plus-config commits pass and bad configs still fail, by running tests."
+    },
+    {
+      "id": "strangers",
+      "how": "Design note and CHANGELOG written for outside readers."
+    },
+    {
+      "id": "mechanism",
+      "how": "The rule is enforced by a test in the repo, not prose."
+    },
+    {
+      "id": "small",
+      "how": "One focused change on the two checks and their shared helper."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "The agent sandbox runs cargo test on the candidate, so a repo test is the way to judge the candidate's schema without host compilation.",
+    "Reading at base: gate content.rs lines 84-104 use Config::parse and DefaultsModel::parse (running schema); admission.rs check_with_candidate_schema builds candidate code with cargo run on the host.",
+    "The host-side builder (check_with_candidate_schema, CHECK_MAIN) is removed, not kept as a fallback.",
+    "When crates/athena-data/ is unchanged, the running schema equals the parent's, so host parsing is safe and still catches bad files.",
+    "A schema-changing commit whose sandboxed test does not run or fails is caught by the existing check/test gate; the decision is recorded in docs/design and CHANGELOG.",
+    "Governance files athena.toml, defaults.toml and workflows need no change."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Gate regression test: a commit that adds an athena.toml section and the matching athena-data schema change in one commit produces no Configuration violation from athena-gate content::check, while the same athena.toml change without a schema change is still refused with the parse error. Run: cargo test -p athena-gate.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Admission test: a candidate changing both crates/athena-data/ and athena.toml is admitted without any process being spawned to build candidate code, and an unknown section with no schema change is still a violation. Run: cargo test -p athena-core.",
+      "kind": "behavior"
+    },
+    {
+      "text": "admission.rs no longer contains check_with_candidate_schema, CHECK_MAIN, or any Command::new(cargo) use on candidate files; grep shows none in athena-core or athena-gate.",
+      "kind": "content"
+    },
+    {
+      "text": "A test in crates/athena-data parses the repository's athena.toml and defaults.toml with that crate's own schema and fails if either does not parse, so a candidate's sandboxed cargo test judges its own schema. Run: cargo test -p athena-data.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Both checks use one shared rule for deciding when to defer to the sandboxed test, so gate and admission cannot diverge. Run: cargo test, cargo clippy --all-targets, cargo fmt --check all pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A short design note records the decision with alternatives (host build, sandbox build, lenient parse) and states why candidate code is never built on the host; CHANGELOG notes the change.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-gate/src/content.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/admission.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-data/src/lib.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-data/tests/repo_config.rs",
+      "action": "create",
+      "p": 0.4
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "docs/design/roles-and-ladder.md",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-gate/src/lib.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-core/Cargo.toml",
+      "action": "modify",
+      "p": 0.25
+    },
+    {
+      "path": "Cargo.lock",
+      "action": "modify",
+      "p": 0.2
+    }
+  ],
+  "out_of_scope": [
+    "Parallel drain behavior, panic isolation, and the '(could run in parallel)' label from job xh54.",
+    "Re-running job qcrz or landing the [parallel] section.",
+    "Changing the schema fields themselves.",
+    "Sandboxing or changing the agent sandbox."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.75,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.4,
+        "p50": 0.9,
+        "p90": 2.2
+      },
+      "wall_time_s": {
+        "p10": 450.0,
+        "p50": 950.0,
+        "p90": 1900.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.8297297297297297,
+      "p_verification_passes": 0.648854961832061,
+      "p_user_intervenes": 0.08244274809160305,
+      "cost_usd": {
+        "p10": 0.4139777373327592,
+        "p50": 0.9154905,
+        "p90": 2.166472229478807
+      },
+      "wall_time_s": {
+        "p10": 550.3832372796329,
+        "p50": 983.5657154401974,
+        "p90": 1943.5330934516112
+      }
+    }
+  },
+  "departures": "Slightly higher cost than reference: two crates, a design decision, and new tests across gate and admission."
+}

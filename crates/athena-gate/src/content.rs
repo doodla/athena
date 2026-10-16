@@ -1,7 +1,9 @@
 //! Content checks on a change (design §7.4 checks 2–5): append-only records, valid records in place,
 //! file size, personal data on added lines, and configuration that parses.
 
-use crate::{CONFIG_PATH, Change, DEFAULTS_PATH, Judged, Result, Rule, Violation};
+use crate::{
+    CONFIG_PATH, Change, DEFAULTS_PATH, Judged, Result, Rule, Violation, defers_to_schema_test,
+};
 use athena_data::config::PersonalData;
 use athena_data::records::check_record_file;
 use athena_data::{Config, DefaultsModel};
@@ -31,6 +33,13 @@ pub fn check(
         .map(|d| d.new_oid.clone())
         .collect();
     let sizes = git.blob_sizes(&new_blobs)?;
+
+    let defer_to_schema_test = defers_to_schema_test(
+        judged
+            .diff
+            .iter()
+            .map(|d| (d.path.as_str(), d.status == 'D')),
+    );
 
     for d in &judged.diff {
         let class = judged.class(&d.path);
@@ -83,7 +92,10 @@ pub fn check(
         }
         if d.path == CONFIG_PATH || d.path == DEFAULTS_PATH {
             let text = String::from_utf8_lossy(&git.cat_blob(&d.new_oid)?).into_owned();
-            let problem = if d.path == CONFIG_PATH {
+            let problem = if defer_to_schema_test {
+                // The candidate's own athena-data test judges the file; the running schema would not.
+                None
+            } else if d.path == CONFIG_PATH {
                 Config::parse(&text).err().map(|e| e.to_string())
             } else {
                 DefaultsModel::parse(&text).err().map(|e| e.to_string())
@@ -376,6 +388,60 @@ mod tests {
                 .iter()
                 .any(|v| v.rule == Rule::Configuration)
         );
+    }
+
+    #[test]
+    fn a_new_section_with_its_schema_change_in_one_commit_is_not_refused() {
+        let config = include_str!("../../../athena.toml");
+        let with_section = format!("{config}\n[parallel]\nmax_jobs = 2\n");
+        // The running schema rejects the section; that is the refusal this change removes.
+        assert!(Config::parse(&with_section).is_err());
+
+        let (dir, git) = repo(&[
+            ("athena.toml", config),
+            ("crates/athena-data/src/lib.rs", ""),
+        ]);
+        write(
+            dir.path(),
+            &[
+                ("athena.toml", &with_section),
+                ("crates/athena-data/src/lib.rs", "// parallel section\n"),
+            ],
+        );
+        commit(&git, "schema and section\n\nAthena-Job: bootstrap\n");
+        assert!(
+            !gate_last(&git)
+                .iter()
+                .any(|v| v.rule == Rule::Configuration)
+        );
+
+        // The same section without a schema change is still refused with the parse error.
+        let (dir, git) = repo(&[
+            ("athena.toml", config),
+            ("crates/athena-data/src/lib.rs", ""),
+        ]);
+        write(dir.path(), &[("athena.toml", &with_section)]);
+        commit(&git, "section only\n\nAthena-Job: bootstrap\n");
+        let found = gate_last(&git);
+        assert!(
+            found
+                .iter()
+                .any(|v| v.rule == Rule::Configuration && v.detail.contains("unknown field")),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn deleting_the_schema_does_not_defer_the_parse() {
+        assert!(defers_to_schema_test([(
+            "crates/athena-data/src/a.rs",
+            false
+        )]));
+        assert!(!defers_to_schema_test([(
+            "crates/athena-data/src/a.rs",
+            true
+        )]));
+        assert!(!defers_to_schema_test([("athena.toml", false)]));
     }
 
     #[test]

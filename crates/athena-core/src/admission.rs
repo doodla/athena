@@ -8,12 +8,12 @@
 //! - an added line contains an email address outside the allow-list, or gitleaks finds a secret;
 //! - the candidate would change how any path is classified;
 //! - a changed `athena.toml` or `defaults.toml` does not parse (rule `configuration`), so an unknown field
-//!   fails here with a repairable finding instead of at landing. The file is judged by the candidate's
-//!   schema: when the candidate changes `crates/athena-data/`, its own `athena-data` is written from the
-//!   candidate commit to a temporary directory, built offline with the candidate's `Cargo.lock` and run on
-//!   the file, so a job may add a section and its schema field together. If that check cannot be built or
-//!   run, the result is a `configuration` violation, never a pass. Otherwise the running Athena's schema
-//!   is the candidate's schema and parses the file directly;
+//!   fails here with a repairable finding instead of at landing. When the candidate changes
+//!   `crates/athena-data/`, the file is left to the test in the candidate's own `athena-data`
+//!   (`tests/repo_config.rs`), which runs where the candidate is built; candidate code is never built
+//!   here, so a job may add a section and its schema field together. Otherwise the running Athena's
+//!   schema is the parent's schema and parses the file directly (`athena_gate::defers_to_schema_test`
+//!   decides, for admission and the landing gate alike);
 //! - a governance file changed without the accepted reading listing it as a deliverable and naming it in
 //!   an acceptance criterion. For a `Cargo.toml`, only its `[lints]` and `[workspace.lints]` tables are
 //!   governance content.
@@ -23,108 +23,10 @@ use athena_data::config::PersonalData;
 use athena_data::records::{ChangeStatus, PolicyViolation, Reading};
 use athena_data::{Config, DefaultsModel};
 use athena_gate::content::disallowed_emails;
-use athena_gate::{CONFIG_PATH, DEFAULTS_PATH};
+use athena_gate::{CONFIG_PATH, DEFAULTS_PATH, defers_to_schema_test};
 use athena_git::Git;
 use athena_git::attrs::{PathClass, classification_changes, classify};
 use std::collections::BTreeSet;
-
-/// The crate holding the configuration and defaults schemas.
-const SCHEMA_DIR: &str = "crates/athena-data/";
-
-/// The program built against the candidate's `athena-data`: parses the file named by its second argument
-/// as `config` (athena.toml) or `defaults` (defaults.toml), prints the error and exits 1 if it fails.
-const CHECK_MAIN: &str = r#"fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    let text = std::fs::read_to_string(&args[2]).expect("read the file to check");
-    let result = match args[1].as_str() {
-        "config" => athena_data::Config::parse(&text).map(|_| ()).map_err(|e| e.to_string()),
-        _ => athena_data::DefaultsModel::parse(&text).map(|_| ()).map_err(|e| e.to_string()),
-    };
-    if let Err(e) = result {
-        eprintln!("{e}");
-        std::process::exit(1);
-    }
-}
-"#;
-
-/// Parses `text` (`kind` is `config` or `defaults`) with the schema of `candidate`'s own `athena-data`.
-///
-/// The candidate's tree is written to a temporary directory and a small crate depending on its
-/// `athena-data` is built offline with the candidate's `Cargo.lock`, then run on the file. The error
-/// is the parse error, or the reason the check could not be built or run; it never reads as success.
-fn check_with_candidate_schema(
-    git: &Git,
-    candidate: &str,
-    kind: &str,
-    text: &str,
-) -> std::result::Result<(), String> {
-    let fail = |what: &str, e: &dyn std::fmt::Display| format!("{what}: {e}");
-    let dir =
-        tempfile::tempdir().map_err(|e| fail("the candidate schema check has no workspace", &e))?;
-    let tree = dir.path().join("tree");
-    let entries = git
-        .ls_tree(candidate)
-        .map_err(|e| fail("cannot list the candidate's files", &e))?;
-    for entry in entries {
-        let wanted = entry.path.starts_with(SCHEMA_DIR)
-            || entry.path == "Cargo.toml"
-            || entry.path == "Cargo.lock";
-        if !wanted || entry.mode == "160000" {
-            continue;
-        }
-        let bytes = git
-            .cat_blob(&entry.oid)
-            .map_err(|e| fail("cannot read the candidate's files", &e))?;
-        let target = tree.join(&entry.path);
-        std::fs::create_dir_all(target.parent().unwrap_or(&tree))
-            .and_then(|()| std::fs::write(&target, bytes))
-            .map_err(|e| fail("cannot write the candidate's files", &e))?;
-    }
-    let check = dir.path().join("check");
-    let write = |path: std::path::PathBuf, body: String| {
-        std::fs::create_dir_all(path.parent().unwrap_or(&check))
-            .and_then(|()| std::fs::write(path, body))
-            .map_err(|e| fail("cannot write the schema check", &e))
-    };
-    write(
-        check.join("Cargo.toml"),
-        format!(
-            "[package]\nname = \"candidate-schema-check\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n\
-             [dependencies]\nathena-data = {{ path = {:?} }}\n\n[workspace]\n",
-            tree.join("crates/athena-data").display().to_string()
-        ),
-    )?;
-    write(check.join("src/main.rs"), CHECK_MAIN.to_string())?;
-    if let Ok(lock) = std::fs::read_to_string(tree.join("Cargo.lock")) {
-        write(check.join("Cargo.lock"), lock)?;
-    }
-    let input = dir.path().join("input.toml");
-    std::fs::write(&input, text).map_err(|e| fail("cannot write the file to check", &e))?;
-    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| dir.path().join("target"));
-    let output =
-        std::process::Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
-            .args(["run", "--quiet", "--offline", "--manifest-path"])
-            .arg(check.join("Cargo.toml"))
-            .arg("--")
-            .arg(kind)
-            .arg(&input)
-            .env("CARGO_TARGET_DIR", target_dir)
-            .env_remove("RUSTFLAGS")
-            .current_dir(dir.path())
-            .output()
-            .map_err(|e| fail("the candidate schema check could not start", &e))?;
-    if output.status.success() {
-        return Ok(());
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    Err(format!(
-        "under the candidate's own schema ({}): {}",
-        SCHEMA_DIR.trim_end_matches('/'),
-        stderr.trim()
-    ))
-}
 
 /// Root files that govern how Athena works in this repository.
 const ROOT_GOVERNANCE: [&str; 4] = [
@@ -315,15 +217,18 @@ fn admit_without_secrets(input: &AdmissionInput<'_>) -> Result<Vec<PolicyViolati
         ));
     }
 
-    // Configuration: a changed athena.toml or defaults.toml must parse under the candidate's own schema, so
-    // an unknown field fails the job here with a finding the producer can repair, instead of at landing.
-    // When the candidate changes `crates/athena-data/`, the running Athena's compiled schema is the wrong
-    // judge (a job adding a section and its field together would always be refused), so the file is
-    // checked by a build of the candidate's own `athena-data`; a check that cannot run is a violation.
-    let schema_changed = input
-        .changes
-        .iter()
-        .any(|c| c.path.starts_with(SCHEMA_DIR) && c.status != ChangeStatus::Deleted);
+    // Configuration: a changed athena.toml or defaults.toml must parse, so an unknown field fails the job
+    // here with a finding the producer can repair, instead of at landing. When the candidate changes
+    // `crates/athena-data/`, the running Athena's compiled schema is the wrong judge (a job adding a
+    // section and its field together would always be refused) and candidate code is never built here:
+    // the test in the candidate's own `athena-data` (`tests/repo_config.rs`) judges the file where the
+    // candidate is built. The same rule, `defers_to_schema_test`, decides this at landing.
+    let schema_changed = defers_to_schema_test(
+        input
+            .changes
+            .iter()
+            .map(|c| (c.path.as_str(), c.status == ChangeStatus::Deleted)),
+    );
     for change in input.changes {
         let path = change.path.as_str();
         if change.status == ChangeStatus::Deleted || ![CONFIG_PATH, DEFAULTS_PATH].contains(&path) {
@@ -334,12 +239,7 @@ fn admit_without_secrets(input: &AdmissionInput<'_>) -> Result<Vec<PolicyViolati
         };
         let text = String::from_utf8_lossy(&bytes);
         let problem = if schema_changed {
-            let kind = if path == CONFIG_PATH {
-                "config"
-            } else {
-                "defaults"
-            };
-            check_with_candidate_schema(git, input.candidate, kind, &text).err()
+            None
         } else if path == CONFIG_PATH {
             Config::parse(&text).err().map(|e| e.to_string())
         } else {
@@ -482,7 +382,8 @@ mod tests {
         std::fs::write(dir.path().join("athena.toml"), BASE_CONFIG).unwrap();
         std::fs::write(dir.path().join("defaults.toml"), BASE_DEFAULTS).unwrap();
         std::fs::write(dir.path().join("a.txt"), "a\n").unwrap();
-        write_schema_crate(dir.path());
+        std::fs::create_dir_all(dir.path().join("crates/athena-data/src")).unwrap();
+        std::fs::write(dir.path().join(SCHEMA_FILE), "// schema\n").unwrap();
         git.run(["add", "-A"]).unwrap();
         git.run(["commit", "-q", "-m", "base"]).unwrap();
         let base = git.head().unwrap().unwrap();
@@ -513,91 +414,33 @@ mod tests {
         .unwrap()
     }
 
-    /// Copies the real workspace manifest, lock file and `athena-data` crate into a test repository, so a
-    /// candidate can change the schema and the check can build it.
-    fn write_schema_crate(dest: &std::path::Path) {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        for file in ["Cargo.toml", "Cargo.lock", "crates/athena-data/Cargo.toml"] {
-            let to = dest.join(file);
-            std::fs::create_dir_all(to.parent().unwrap()).unwrap();
-            std::fs::copy(root.join(file), to).unwrap();
-        }
-        let src = dest.join("crates/athena-data/src");
-        std::fs::create_dir_all(&src).unwrap();
-        for entry in std::fs::read_dir(root.join("crates/athena-data/src")).unwrap() {
-            let entry = entry.unwrap();
-            std::fs::copy(entry.path(), src.join(entry.file_name())).unwrap();
-        }
-    }
-
-    const CONFIG_RS: &str = include_str!("../../athena-data/src/config.rs");
-    const CONFIG_RS_PATH: &str = "crates/athena-data/src/config.rs";
-    const FIELD_ANCHOR: &str = "    pub personal_data: PersonalData,\n";
-
-    /// The schema with a new optional `[parallel]` section added.
-    fn config_rs_with_parallel() -> String {
-        assert!(CONFIG_RS.contains(FIELD_ANCHOR));
-        CONFIG_RS.replacen(
-            FIELD_ANCHOR,
-            &format!(
-                "{FIELD_ANCHOR}    #[serde(default)]\n    pub parallel: Option<toml::Value>,\n"
-            ),
-            1,
-        )
-    }
+    const SCHEMA_FILE: &str = "crates/athena-data/src/config.rs";
 
     #[test]
-    fn a_new_section_and_its_schema_field_together_are_admitted() {
+    fn a_new_section_and_its_schema_change_together_are_admitted_without_a_build() {
         let text = format!("{BASE_CONFIG}\n[parallel]\nmax_jobs = 2\n");
         // The running Athena's schema is the wrong judge: it reproduces the refusal jobs
         // 20261016-071202-q0xy and 20261016-185517-qcrz met.
         let old = Config::parse(&text).unwrap_err().to_string();
         assert!(old.contains("unknown field `parallel`"), "{old}");
+        // The test repository has no Cargo.toml or lock file, so any attempt to build the candidate's
+        // schema would fail and show up as a violation: none is the proof that nothing was built.
         let found = configuration(admit_files(&[
             ("athena.toml", &text),
-            (CONFIG_RS_PATH, &config_rs_with_parallel()),
+            (SCHEMA_FILE, "// adds [parallel]\n"),
         ]));
         assert!(found.is_empty(), "{found:?}");
     }
 
     #[test]
-    fn an_unknown_section_without_a_schema_change_is_still_refused_by_the_candidate_schema() {
+    fn an_unknown_section_without_a_schema_change_is_still_refused() {
         let text = format!("{BASE_CONFIG}\n[bogus]\nfield = 1\n");
-        // A candidate that touches the schema (here only a comment) is judged by its own build.
-        let schema = format!("// touched\n{CONFIG_RS}");
-        let found = configuration(admit_files(&[
-            ("athena.toml", &text),
-            (CONFIG_RS_PATH, &schema),
-        ]));
-        assert_eq!(found.len(), 1, "{found:?}");
-        assert!(
-            found[0].detail.contains("unknown field `bogus`"),
-            "{found:?}"
-        );
-        assert!(
-            found[0].detail.contains("candidate's own schema"),
-            "{found:?}"
-        );
-        // And with no schema change the section is refused as before.
         let found = configuration(admit_files(&[("athena.toml", &text)]));
         assert_eq!(found.len(), 1, "{found:?}");
         assert!(
             found[0].detail.contains("unknown field `bogus`"),
             "{found:?}"
         );
-    }
-
-    #[test]
-    fn a_candidate_schema_check_that_cannot_run_is_a_configuration_violation() {
-        let text = format!("{BASE_CONFIG}\n# edited\n");
-        let broken = format!("{CONFIG_RS}\nthis is not rust;\n");
-        let found = configuration(admit_files(&[
-            ("athena.toml", &text),
-            (CONFIG_RS_PATH, &broken),
-        ]));
-        assert_eq!(found.len(), 1, "{found:?}");
-        assert!(found[0].detail.contains("does not parse"), "{found:?}");
-        assert!(found[0].detail.contains("error"), "{found:?}");
     }
 
     fn configuration(violations: Vec<PolicyViolation>) -> Vec<PolicyViolation> {
