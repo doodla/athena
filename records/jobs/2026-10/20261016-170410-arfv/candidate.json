@@ -1,0 +1,148 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261016-170410-arfv",
+  "base_commit": "e57794a29eabe18b9c82a804c20e8520809bad89",
+  "base_fingerprint": "sha256:2df6709ab055b7f703572141524c8377e39658dfd289c30cd404bb38b6a9010b",
+  "previous_job": "20261016-060424-614b",
+  "candidate_commit": "ff521978cb5c42296fb505023e9fe85b50a5527f",
+  "candidate_tree": "3194048cd4ab68dce0a04c1d1b1ec8c19a0a7983",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 83500
+    },
+    {
+      "path": "README.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 21015
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 66661
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 37227
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 84955
+    },
+    {
+      "path": "crates/athena-core/src/steward.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 54833
+    }
+  ],
+  "fingerprint": "sha256:372494b94aced332ee813d63d5ccfc1505037e067df1759a11ce9ddedb432920",
+  "violations": [],
+  "producer_report": {
+    "summary": "A request that `athena plan` has read now stays in the plan and in drain's queue. Plan's `--budget` now only has to cover the reader cap, so the default `--budget 2` reads. Root cause 1: `steward::queued_work` listed only requests in state Queued, so a read request (Proposed) fell out of the plan, the next plan and drain. It now lists drained-channel requests that are Queued or Proposed, with a new `read` flag on `QueuedWork`. Declined, dispatched, blocked, closed and other-channel requests stay out. `RealSteps::queue` uses the flag and lists a job once when `approved_work` also lists it. Root cause 2: `Drain::prepare` always reserved read cap plus run cap (0.5 + 8.0 = 8.5 with athena.toml), so plan at 2.0 never read. `prepare` now takes the reserve as a parameter: drain passes read+run, plan passes read only. Docs updated: `queued_work` doc comment, drain.rs module text, README (rewrapped to the neighbouring ~110-column width, plus a new paragraph), CHANGELOG, and the `plan` help text in main.rs. Tests: new tests over real records and Stub, and the misnamed test is split in two (see criteria).",
+    "files": [
+      "crates/athena-core/src/steward.rs",
+      "crates/athena-cli/src/drain.rs",
+      "crates/athena-cli/tests/drain.rs",
+      "crates/athena-cli/src/main.rs",
+      "CHANGELOG.md",
+      "README.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "Run on the final state. The shell showed no error exit. The output was too large to display and I could not read the saved file, so I have no output tail. The drain test binary passes in full (59 tests)."
+      },
+      {
+        "command": "cargo test --locked -p athena-cli --test drain -- queue plan",
+        "result": "pass",
+        "note": "Exit 0. Tail: 'test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 42 filtered out; finished in 23.10s'."
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "Exit 0. Tail: 'Finished `dev` profile [unoptimized + debuginfo] target(s) in 18.88s'."
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "Exit 0, no output."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A test queues requests on a drained channel, runs plan with a budget that reads some (stub reader), and shows the read requests remain in the plan entries and in queue() with read=true. Run cargo test.",
+        "status": "met",
+        "evidence": "`a_plan_that_reads_requests_leaves_them_in_the_plan_and_in_the_queue` queues two cli-channel requests, runs plan at 2.0 and checks entries, Proposed state and queue items with read=true. It uses real steps with a fake reader script, not a Stub. It passed."
+      },
+      {
+        "criterion": "A test shows that after a plan that reads requests, drain still works them: they are in its queue, not read again, and run in plan order. Run cargo test.",
+        "status": "met",
+        "evidence": "`drain_works_the_requests_a_plan_read_in_plan_order_without_reading_them_again` checks each job still has exactly 1 reading after drain, and that the worked items equal `planned.plan.order`. It passed."
+      },
+      {
+        "criterion": "A second plan after the first lists the same open requests, not 'nothing is open'. Run cargo test.",
+        "status": "met",
+        "evidence": "`a_second_plan_lists_the_same_open_requests_and_reads_nothing_again` checks same entry ids, same order, no 'nothing is open', no new reads and zero spend. It passed."
+      },
+      {
+        "criterion": "A test runs plan at the default budget (2.0) with the repo's reader_usd/job_usd values, shows it reads at least one request and keeps it queued; Drain::prepare's room check reserves only the read cap for plan. Run cargo test.",
+        "status": "met",
+        "evidence": "`the_default_plan_budget_affords_a_read_where_drain_would_need_a_read_and_a_run` asserts caps (0.5, 8.0) from athena.toml. Drain at 2.0 reads nothing; plan at 2.0 reads once and the request stays in queue() with read=true. `plan_reserves_only_the_read_cap_with_the_stub_caps` covers the stub. `prepare(view, reserve)` is called with `caps.read` from plan and read+run from drain."
+      },
+      {
+        "criterion": "Separate named tests through queued_work over real records show these stay out of the queue: a read request on a non-drained channel, a closed job, a declined job, and a running job. The running-job test uses a genuinely dispatched-but-unfinished record, not outcome fields cleared in memory. Run cargo test.",
+        "status": "met",
+        "evidence": "Four tests: `a_read_request_on_a_channel_drain_does_not_work_stays_out_of_the_queue` (web channel, state Proposed), `a_closed_job_stays_out_of_the_queue` (athena.close), `a_declined_job_stays_out_of_the_queue` (declining reader, state Declined) and `a_running_job_stays_out_of_the_queue`. The running-job test inspects the committed records from inside the verifier's turn: state Dispatched, queued_work empty. All passed."
+      },
+      {
+        "criterion": "A test over real records with a work decision approving a Proposed job on a drained channel shows it is listed exactly once. Run cargo test.",
+        "status": "met",
+        "evidence": "`a_job_a_work_decision_approved_is_listed_once` uses athena.approve_work. It asserts the job's request channel is in DRAINED_CHANNELS, queued_work lists it once, and RealSteps::queue lists it once with read=true. It passed."
+      },
+      {
+        "criterion": "cargo test, cargo clippy and cargo fmt --check all pass, and the handover cites each exact command that ran with its exit status and output tail.",
+        "status": "met",
+        "evidence": "checks_run lists all three commands, each exit 0. The tail for the full `cargo test --locked` could not be shown; see its note. Tails are given for the targeted drain run and for clippy."
+      },
+      {
+        "criterion": "The misleading test name in crates/athena-cli/tests/drain.rs (the_plan_of_a_read_job_names_a_missing_path_...) is replaced or backed by a test that really reads the job first.",
+        "status": "met",
+        "evidence": "The old test is renamed `the_plan_of_an_unread_request_...`. A new test keeps the old name plus `_after_the_reading`. It calls athena.go to read the job, asserts state Proposed and 1 reading, and checks queue() holds it with read=true. It also checks both open questions."
+      },
+      {
+        "criterion": "queued_work doc comment, drain.rs module text, README and CHANGELOG describe the new queue rule and the corrected --budget meaning; README paragraphs are re-wrapped to the neighbouring line width with no early breaks.",
+        "status": "met",
+        "evidence": "I updated all four plus the `plan` help in main.rs. The README plan paragraph is rewrapped to about 110 columns and a new 'A read request stays in the queue' paragraph was added. I checked wrapping by eye, not with a tool."
+      }
+    ],
+    "open_issues": [
+      "crates/athena-cli/src/main.rs was edited (the `plan` help text) although it is not in the expected deliverables. It is a doc-string change only.",
+      "A request that was read and is still incomplete after its reading now stays in the queue (state Proposed) and is refused again on each plan or drain until it is corrected. I changed the note to say so. This follows from the new queue rule.",
+      "docs/decisions.md D104 still describes queued_work as unread only. I did not edit it because it is not a listed deliverable; it may need a note."
+    ],
+    "mistakes": [
+      "My first draft of the drain-after-plan test counted Reader calls and expected two landings, and failed. A second identical job makes no change, and a failed job triggers a reader-role introspection. I rewrote it to count readings and cap max_jobs at 2.",
+      "I could not capture an output tail for the full `cargo test --locked` run."
+    ],
+    "learnings": [
+      "`JobState::state()` is Dispatched as soon as the prediction commit (Job record) exists, so a test hook in `Scenario.during_verification` sees a genuinely running job.",
+      "`introspect_job` after a rejected or failed run makes a Reader-role call, so counting Reader invocations overstates readings; count `JobRecords.readings` instead.",
+      "The reader's deliverables get CHANGELOG.md added to a job's plan touches, so a read job's open questions can include extra paths.",
+      "`athena approve-work` jobs carry a request on the cli channel, so they appear in both approved_work and queued_work.",
+      "In this environment, bash accepts no pipes or tail, and tool-result files outside the working directory cannot be read."
+    ],
+    "desires": [
+      "Bash allowing `tail` or reading saved tool output, so a command's output tail can be cited."
+    ]
+  }
+}

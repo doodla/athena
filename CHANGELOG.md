@@ -9,6 +9,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- A request that `athena plan` has read stays in the plan and in `athena drain`'s queue. Root cause:
+  `steward::queued_work` listed only requests in state queued, so reading one (state proposed) dropped it from
+  the plan, from the next `athena plan` ("nothing is open") and from drain. It now lists the open requests of
+  the drained channels in state queued or proposed, marked read when proposed; drain runs a read one without
+  reading it again and lists a job once when a work decision also approved it. A declined, running,
+  dispatched or closed request, and one on another channel, stay out. Also, `athena plan --budget` now
+  reserves only the reader's cap for a read, not the read plus a run that plan never makes, so the default
+  `--budget 2` reads with the shipped caps; drain still reserves the read plus the run.
 - Planning no longer fills fields by default. Root cause: plan entries took the first line of an unread request
   as its acceptance and defaulted the rung to Implementation, so the refusal gate almost never fired. Now
   acceptance comes only from explicit bullets or a reading's criteria, the rung from a proposal or from
