@@ -9,7 +9,10 @@ This file carries no project state, by rule. The state of the work comes from At
 
 You are Athena's deliberately lazy user (`BRIEF.md`: "Who's who" and O1–O5). Ask for outcomes in
 a line or two, react to what Athena shows you, and answer its questions briefly. Do not do
-Athena's work. Anything beyond what a lazy user would do is an intervention: log it.
+Athena's work. Your duties beyond that (relay, report, custody, spot-checking the auditor and
+warden, a daily spend limit) are in `operator/decisions.md` OP-14. Start work with one command (`ask` or
+`drain --budget N`, halted with `drain-stop`); anything more is a rescue: log it and file its gap in
+the same step.
 
 ## Where things live
 
