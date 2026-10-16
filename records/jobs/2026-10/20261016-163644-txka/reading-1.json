@@ -1,0 +1,150 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261016-163644-txka",
+  "n": 1,
+  "at": "2026-10-16T16:37:01.228347356Z",
+  "invocation_seq": 1,
+  "base_commit": "89782ac9dc622d15f91e03f0e2605cce24e74bc9",
+  "config_sha256": "5570e4f9425ce1beb6f41799c80193739787f2fc95ee3ce8cdead671d06c980b",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Keep read requests in plan and drain queue; fix plan room check",
+  "summary": "Fix plan/drain so requests read by `athena plan` stay in the queue (queued_work currently lists only Queued state). Also fix Drain::prepare's room check (drain.rs ~694), which requires read+run cap, so the default --budget 2 can never read; plan should reserve room only for the read.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "New tests per case; cargo test, clippy, fmt --check pass."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria exercise plan/drain behavior with the stub reader."
+    },
+    {
+      "id": "root-cause",
+      "how": "Fix queue rule and room check, not one instance."
+    },
+    {
+      "id": "small",
+      "how": "Limited to steward.rs, drain.rs, their tests, and docs."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Audience: the maintainer running athena plan/drain; verifier runs cargo test, clippy, fmt.",
+    "In plan (not drain) the read needs room only for caps.read; drain still needs read+run before reading and running.",
+    "Approved jobs in Proposed state on drained channels are listed once in queued_work.",
+    "Request symptoms: (1) read requests vanish from plan and drain; (2) default budget 2 reads none; both are mapped to criteria."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A test queues requests on a drained channel, runs plan with a budget that reads some (stub reader), and shows the read requests remain in the plan entries and in queue() with read=true. Run cargo test.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test shows that after a plan that reads requests, drain still works them: they are in its queue, not read again, run in plan order. cargo test.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A second plan after the first prints the same open requests, not 'nothing is open'. cargo test.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test runs plan at the default budget (2.0) with the repo's reader_usd/job_usd config values and shows it reads at least one request and keeps it in the queue; the room check in Drain::prepare reserves only the read cap for plan. cargo test.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Separate named tests, through queued_work over real records, show these stay out of the queue: a read request on a non-drained channel, a running job, a closed job, a declined job. cargo test.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test over real records with a work decision approving a Proposed job on a drained channel shows it is listed exactly once. cargo test.",
+      "kind": "behavior"
+    },
+    {
+      "text": "cargo test, cargo clippy and cargo fmt --check pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The misleading test name in crates/athena-cli/tests/drain.rs (the_plan_of_a_read_job_names_a_missing_path_...) is replaced or backed by a test that really reads the job first.",
+      "kind": "content"
+    },
+    {
+      "text": "queued_work doc comment, drain.rs module text, README (lines wrapped to neighbouring width) and CHANGELOG describe the new queue rule and the corrected --budget meaning.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/steward.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "README.md",
+      "action": "modify",
+      "p": 0.7
+    }
+  ],
+  "out_of_scope": [
+    "Changing reader_usd or job_usd values in athena.toml",
+    "Changing the default --budget value",
+    "Changes to other channels' behavior or job state machine"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.85,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.4,
+        "p90": 3.2
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 1300.0,
+        "p90": 2600.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.8283687943262411,
+      "p_verification_passes": 0.656,
+      "p_user_intervenes": 0.07840000000000001,
+      "cost_usd": {
+        "p10": 0.406573,
+        "p50": 0.8710697000000001,
+        "p90": 2.1634293999999996
+      },
+      "wall_time_s": {
+        "p10": 544.4413564344397,
+        "p50": 952.0994361461347,
+        "p90": 1878.5276497441025
+      }
+    }
+  },
+  "departures": "Two-part fix with several per-case tests and a prior failed attempt; costs and time above the reference."
+}
