@@ -21,7 +21,7 @@ use athena_core::store::{JobState, Records};
 use athena_core::{Athena, Quiet};
 use athena_data::RecordId;
 use athena_data::records::{
-    AnyRecord, OutcomeState, Reference, Role, WorkDecisionState, WorkItem, WorkItemKind,
+    AcceptedBy, AnyRecord, OutcomeState, Reference, Role, WorkDecisionState, WorkItem, WorkItemKind,
 };
 use athena_data::roles::Ladder;
 use common::*;
@@ -1088,13 +1088,21 @@ fn real_steps_read_an_unread_but_specifiable_request_once_and_then_run_it() {
     assert_eq!(readers, 1, "read by the pass, not again to run");
 }
 
+const GONE_REQUEST: &str =
+    "Edit crates/gone/lib.rs and README.md after 20261012-075824-1x28\n- it is edited";
+
+fn gone_questions() -> [&'static str; 2] {
+    [
+        "the touched path crates/gone/lib.rs does not exist at the base commit",
+        "the referenced job 20261012-075824-1x28 is not among the records",
+    ]
+}
+
 #[test]
-fn the_plan_of_a_read_job_names_a_missing_path_and_an_unresolved_referenced_job() {
+fn the_plan_of_an_unread_request_names_a_missing_path_and_an_unresolved_referenced_job() {
     let fx = Fixture::new();
     let athena = fx.athena(Scenario::default().script());
-    let (job, _) = athena
-        .queue("Edit crates/gone/lib.rs and README.md after 20261012-075824-1x28\n- it is edited")
-        .unwrap();
+    let (job, _) = athena.queue(GONE_REQUEST).unwrap();
     let steps = RealSteps {
         athena: &athena,
         ui: &Quiet,
@@ -1104,13 +1112,368 @@ fn the_plan_of_a_read_job_names_a_missing_path_and_an_unresolved_referenced_job(
     let queue = steps.queue().unwrap();
     let entry = queue.plan.iter().find(|e| e.id == job.as_str()).unwrap();
     assert_eq!(entry.rung, Some(Ladder::Implementation));
-    assert_eq!(
-        entry.open_questions,
-        [
-            "the touched path crates/gone/lib.rs does not exist at the base commit",
-            "the referenced job 20261012-075824-1x28 is not among the records"
-        ]
+    assert_eq!(entry.open_questions, gone_questions());
+}
+
+#[test]
+fn the_plan_of_a_read_job_names_a_missing_path_and_an_unresolved_referenced_job_after_the_reading()
+{
+    let fx = Fixture::new();
+    let mut scenario = Scenario::default();
+    // The reading names the same deliverables the request does.
+    scenario.reading = reading(
+        &[("crates/gone/lib.rs", "modify"), ("README.md", "modify")],
+        &[("content", "it is edited")],
     );
+    let athena = fx.athena(scenario.script());
+    let (job, _) = athena.queue(GONE_REQUEST).unwrap();
+    // Read it for real first: it is in state proposed afterwards.
+    athena.go(job.as_str(), AcceptedBy::Flag, &Quiet).unwrap();
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    assert_eq!(records.jobs[job.as_str()].state(), JobState::Proposed);
+    assert_eq!(records.jobs[job.as_str()].readings.len(), 1);
+    let steps = RealSteps {
+        athena: &athena,
+        ui: &Quiet,
+        page: &StubPage,
+        lander: &RecordingLander::default(),
+    };
+    let queue = steps.queue().unwrap();
+    assert_eq!(
+        queue.items,
+        [Item {
+            read: true,
+            ..Item::queued(job.as_str(), &queue.items[0].title)
+        }]
+    );
+    let entry = queue.plan.iter().find(|e| e.id == job.as_str()).unwrap();
+    assert_eq!(entry.rung, Some(Ladder::Implementation));
+    // The reading's deliverables are planned too, so there may be more questions than the request's own.
+    for question in gone_questions() {
+        assert!(
+            entry.open_questions.iter().any(|q| q == question),
+            "{question}: {:?}",
+            entry.open_questions
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// A request that has been read stays in the plan and in the queue
+
+fn real_steps<'a>(athena: &'a Athena, lander: &'a RecordingLander) -> RealSteps<'a> {
+    RealSteps {
+        athena,
+        ui: &Quiet,
+        page: &StubPage,
+        lander,
+    }
+}
+
+fn readers(invocations: &std::sync::Mutex<Vec<Role>>) -> usize {
+    invocations
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| **r == Role::Reader)
+        .count()
+}
+
+fn queued_ids(fx: &Fixture) -> Vec<String> {
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    athena_core::steward::queued_work(&records)
+        .into_iter()
+        .map(|w| w.job.as_str().to_string())
+        .collect()
+}
+
+/// Limits that do not stop at the first rating, so every queued item is worked.
+fn work_everything() -> Limits {
+    Limits {
+        budget_usd: 50.0,
+        target_rating: 5,
+        max_jobs: 10,
+    }
+}
+
+const FIRST: &str = "Add the demo study to the studies directory.";
+const SECOND: &str = "Add the demo study to the studies folder.";
+
+#[test]
+fn a_plan_that_reads_requests_leaves_them_in_the_plan_and_in_the_queue() {
+    let fx = Fixture::new();
+    let scenario = rated_scenario();
+    let invocations = scenario.invocations.clone();
+    let athena = fx.athena(scenario.script());
+    let (first, _) = athena.queue(FIRST).unwrap();
+    let (second, _) = athena.queue(SECOND).unwrap();
+    let lander = RecordingLander::default();
+    let steps = real_steps(&athena, &lander);
+    assert!(steps.queue().unwrap().items.iter().all(|i| !i.read));
+
+    let report = drain::plan(&steps, 2.0, &Quiet).unwrap();
+    assert_eq!(readers(&invocations), 2, "both were read by the plan");
+    assert!(report.spent_usd > 0.0);
+    let in_plan: Vec<&str> = report.entries.iter().map(|e| e.id.as_str()).collect();
+    assert_eq!(in_plan, [first.as_str(), second.as_str()]);
+    assert_eq!(report.plan.order.len(), 2, "{:?}", report.plan);
+    assert!(report.plan.refused.is_empty(), "{:?}", report.plan.refused);
+
+    // The records now say they were read, and the queue still holds them, marked read.
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    for job in [&first, &second] {
+        assert_eq!(records.jobs[job.as_str()].state(), JobState::Proposed);
+    }
+    let queue = steps.queue().unwrap();
+    let held: Vec<(&str, bool)> = queue
+        .items
+        .iter()
+        .map(|i| (i.job.as_str(), i.read))
+        .collect();
+    assert_eq!(held, [(first.as_str(), true), (second.as_str(), true)]);
+    assert_eq!(queue.plan.len(), 2);
+}
+
+#[test]
+fn a_second_plan_lists_the_same_open_requests_and_reads_nothing_again() {
+    let fx = Fixture::new();
+    let scenario = rated_scenario();
+    let invocations = scenario.invocations.clone();
+    let athena = fx.athena(scenario.script());
+    athena.queue(FIRST).unwrap();
+    athena.queue(SECOND).unwrap();
+    let lander = RecordingLander::default();
+    let steps = real_steps(&athena, &lander);
+
+    let one = drain::plan(&steps, 2.0, &Quiet).unwrap();
+    let two = drain::plan(&steps, 2.0, &Quiet).unwrap();
+    let ids =
+        |r: &drain::PlanReport| -> Vec<String> { r.entries.iter().map(|e| e.id.clone()).collect() };
+    assert_eq!(ids(&one).len(), 2);
+    assert_eq!(ids(&two), ids(&one));
+    assert_eq!(two.plan.order, one.plan.order);
+    assert!(!display::plan(&two).contains("nothing is open"));
+    assert_eq!(readers(&invocations), 2, "the second plan read nothing");
+    assert_eq!(two.spent_usd, 0.0);
+}
+
+#[test]
+fn drain_works_the_requests_a_plan_read_in_plan_order_without_reading_them_again() {
+    let fx = Fixture::new();
+    let scenario = rated_scenario();
+    let invocations = scenario.invocations.clone();
+    let athena = fx.athena(scenario.script());
+    athena.queue(FIRST).unwrap();
+    athena.queue(SECOND).unwrap();
+    let lander = RecordingLander::default();
+    let steps = real_steps(&athena, &lander);
+
+    let planned = drain::plan(&steps, 2.0, &Quiet).unwrap();
+    assert_eq!(readers(&invocations), 2);
+    // Two jobs may start, so a failed second attempt (a re-reading) is not made.
+    let limits = Limits {
+        max_jobs: 2,
+        ..work_everything()
+    };
+    let report = drain::drain(&steps, limits, &Quiet).unwrap();
+    let text = display::drain(&report);
+    // (A failed job is introspected by a reader-role call, so count readings, not reader calls.)
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    for job in &planned.plan.order {
+        assert_eq!(records.jobs[job].readings.len(), 1, "read once: {text}");
+    }
+    assert_eq!(report.jobs.len(), 2, "{text}");
+    let worked: Vec<&str> = report.jobs.iter().map(|j| j.item.as_str()).collect();
+    assert_eq!(worked, planned.plan.order, "{text}");
+    assert_eq!(report.landed, 1, "the first landed: {text}");
+    assert_eq!(lander.0.lock().unwrap()[0].0, report.jobs[0].job);
+}
+
+#[test]
+fn the_default_plan_budget_affords_a_read_where_drain_would_need_a_read_and_a_run() {
+    let fx = Fixture::new();
+    let scenario = rated_scenario();
+    let invocations = scenario.invocations.clone();
+    let athena = fx.athena(scenario.script());
+    let (job, _) = athena.queue(FIRST).unwrap();
+    let lander = RecordingLander::default();
+    let steps = real_steps(&athena, &lander);
+    // With the repository's own caps (athena.toml) a read plus a run does not fit the default budget of 2.
+    let caps = steps.caps().unwrap();
+    assert_eq!((caps.read, caps.run), (0.5, 8.0));
+    assert!(caps.read + caps.run > 2.0 && caps.read <= 2.0);
+
+    // Drain at that budget reads nothing: the run would not fit.
+    let refused = drain::drain(
+        &steps,
+        Limits {
+            budget_usd: 2.0,
+            ..work_everything()
+        },
+        &Quiet,
+    )
+    .unwrap();
+    assert_eq!(readers(&invocations), 0, "{}", display::drain(&refused));
+
+    // Plan at the same budget reads, and the request stays queued.
+    let report = drain::plan(&steps, 2.0, &Quiet).unwrap();
+    assert_eq!(readers(&invocations), 1, "{:?}", report.notes);
+    assert_eq!(queued_ids(&fx), [job.as_str()]);
+    let queue = steps.queue().unwrap();
+    assert_eq!(queue.items.len(), 1);
+    assert!(queue.items[0].read);
+}
+
+#[test]
+fn plan_reserves_only_the_read_cap_with_the_stub_caps() {
+    // Stub caps: read 0.2, run 1.0. A budget of 0.3 fits a read, not a read and a run.
+    let stub = Stub {
+        items: vec!["vague"],
+        plan: vec![vague("vague")],
+        ..Stub::default()
+    };
+    drain::plan(&stub, 0.3, &Quiet).unwrap();
+    assert_eq!(stub.log(), ["read vague"]);
+    let stub = Stub {
+        items: vec!["vague"],
+        plan: vec![vague("vague")],
+        ..Stub::default()
+    };
+    drain::drain(&stub, limits(0.3), &Quiet).unwrap();
+    assert!(stub.log().is_empty(), "{:?}", stub.log());
+}
+
+// What stays out of the queue, over real records.
+
+/// Commits a request on `channel` and returns its job id.
+fn request_on(athena: &Athena, channel: &str, text: &str) -> String {
+    let id = RecordId::generate(athena_core::now());
+    let job = athena_data::JobId::Id(id);
+    let request = athena_data::records::Request {
+        job: job.clone(),
+        text: text.into(),
+        received_at: athena_core::now(),
+        channel: channel.into(),
+    };
+    let file = athena_core::commits::NewFile::record(&AnyRecord::Request(request));
+    Committer {
+        git: &athena.git,
+        state: &athena.state,
+    }
+    .commit_records(
+        std::slice::from_ref(&file),
+        &message(
+            "Queue a request",
+            "A request.",
+            &[("Athena-Job", job.as_str().to_string())],
+        ),
+    )
+    .unwrap();
+    job.as_str().to_string()
+}
+
+#[test]
+fn a_read_request_on_a_channel_drain_does_not_work_stays_out_of_the_queue() {
+    let fx = Fixture::new();
+    let athena = fx.athena(rated_scenario().script());
+    let web = request_on(&athena, "web", FIRST);
+    athena.go(&web, AcceptedBy::Flag, &Quiet).unwrap();
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    assert_eq!(records.jobs[&web].state(), JobState::Proposed);
+    assert!(queued_ids(&fx).is_empty());
+    // A read request of a drained channel is listed beside it.
+    let (cli, _) = athena.queue(SECOND).unwrap();
+    athena.go(cli.as_str(), AcceptedBy::Flag, &Quiet).unwrap();
+    assert_eq!(queued_ids(&fx), [cli.as_str()]);
+}
+
+#[test]
+fn a_closed_job_stays_out_of_the_queue() {
+    let fx = Fixture::new();
+    let athena = fx.athena(rated_scenario().script());
+    let (job, _) = athena.queue(FIRST).unwrap();
+    athena.go(job.as_str(), AcceptedBy::Flag, &Quiet).unwrap();
+    assert_eq!(queued_ids(&fx), [job.as_str()], "read, so far");
+    athena
+        .close(job.as_str(), "no longer wanted", &Quiet)
+        .unwrap();
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    assert!(matches!(
+        records.jobs[job.as_str()].state(),
+        JobState::Closed(_)
+    ));
+    assert!(queued_ids(&fx).is_empty());
+}
+
+#[test]
+fn a_declined_job_stays_out_of_the_queue() {
+    let fx = Fixture::new();
+    let athena = fx.athena(declining_vague(rated_scenario()));
+    let (job, _) = athena.queue("make it better").unwrap();
+    assert_eq!(queued_ids(&fx), [job.as_str()], "unread, so far");
+    athena.go(job.as_str(), AcceptedBy::Flag, &Quiet).unwrap();
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    assert_eq!(records.jobs[job.as_str()].state(), JobState::Declined);
+    assert!(queued_ids(&fx).is_empty());
+}
+
+#[test]
+fn a_running_job_stays_out_of_the_queue() {
+    let fx = Fixture::new();
+    let mut scenario = rated_scenario();
+    // The hook runs inside the verifier's turn: the job is dispatched (its prediction commit is made) and has
+    // no outcome yet, as a running job does.
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let during = seen.clone();
+    let root = fx.root().to_path_buf();
+    scenario.during_verification = Some(Arc::new(move || {
+        let git = athena_git::Git::at(&root);
+        let records = Records::load(&git, &git.head().unwrap().unwrap()).unwrap();
+        let states: Vec<JobState> = records.jobs.values().map(|j| j.state()).collect();
+        let queued: Vec<String> = athena_core::steward::queued_work(&records)
+            .into_iter()
+            .map(|w| w.job.as_str().to_string())
+            .collect();
+        during.lock().unwrap().push((states, queued));
+    }));
+    let athena = fx.athena(scenario.script());
+    let (job, _) = athena.queue(FIRST).unwrap();
+    athena.go(job.as_str(), AcceptedBy::Flag, &Quiet).unwrap();
+    assert_eq!(queued_ids(&fx), [job.as_str()], "read and waiting");
+    athena.go(job.as_str(), AcceptedBy::Flag, &Quiet).unwrap();
+
+    let seen = seen.lock().unwrap();
+    assert!(!seen.is_empty(), "the verifier ran");
+    let (states, queued) = &seen[0];
+    assert_eq!(states, &[JobState::Dispatched], "dispatched, not finished");
+    assert!(queued.is_empty(), "{queued:?}");
+}
+
+#[test]
+fn a_job_a_work_decision_approved_is_listed_once() {
+    let fx = Fixture::new();
+    seeded_proposals(&fx);
+    let athena = fx.athena(rated_scenario().script());
+    let reading = athena.approve_work(LOW, &Quiet).unwrap();
+    let job = reading.job.as_str().to_string();
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    assert_eq!(records.jobs[&job].state(), JobState::Proposed);
+    let request = records.jobs[&job].request.as_ref().unwrap();
+    assert!(
+        athena_core::steward::DRAINED_CHANNELS.contains(&request.channel.as_str()),
+        "its request is on {}",
+        request.channel
+    );
+    assert_eq!(queued_ids(&fx), [job.as_str()]);
+    let lander = RecordingLander::default();
+    let steps = real_steps(&athena, &lander);
+    let queue = steps.queue().unwrap();
+    let held: Vec<(&str, bool)> = queue
+        .items
+        .iter()
+        .map(|i| (i.job.as_str(), i.read))
+        .collect();
+    assert_eq!(held, [(job.as_str(), true)], "once, and read");
 }
 
 // ---------------------------------------------------------------------------------------------------------

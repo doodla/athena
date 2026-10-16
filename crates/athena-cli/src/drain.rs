@@ -14,7 +14,12 @@
 //!   reading. If the plan is still incomplete it is refused with the reason, so the queue
 //!   does not fill with unread items that are refused merely for being unread; one that is specified after
 //!   its reading runs without a second reading. [`plan`] runs the same pass for `athena plan` and works
-//!   nothing.
+//!   nothing, so its `--budget` only has to fit each read's cap, not a run after it.
+//! - **A read request stays queued.** A request is open until it is run or closed. One that `athena plan` (or
+//!   a person) has read waits in state proposed and is still in the queue, marked read: [`drain`] runs it
+//!   without reading it again, in plan order, and a second `athena plan` lists it again. Only a request
+//!   that was declined, is running, or has ended, and one on another channel, is left out
+//!   ([`athena_core::steward::queued_work`]).
 //! - **Stop at a job boundary.** [`Steps::stop_requested`] is asked before every job. A job that has started
 //!   is finished (landed and rated) and no further job starts: [`Stop::Requested`]. Nothing is killed.
 //!
@@ -674,7 +679,11 @@ impl Drain<'_> {
     /// already complete are left for the loop to read when it works them, in plan order.
     ///
     /// Returns the coordinated plan; its `refused` also holds the items that could not be read.
-    fn prepare(&mut self, view: &mut QueueView) -> Plan {
+    ///
+    /// `reserve` is what must fit the budget besides what is spent before an item is read: the read cap plus
+    /// the run cap for `drain`, which goes on to run the item, and the read cap alone for `plan`, which runs
+    /// nothing.
+    fn prepare(&mut self, view: &mut QueueView, reserve: f64) -> Plan {
         let mut forced: Vec<Refusal> = Vec::new();
         for idx in 0..view.items.len() {
             if view.items[idx].read {
@@ -690,9 +699,7 @@ impl Drain<'_> {
             if self.steps.stop_requested() {
                 break;
             }
-            if self.started >= self.limits.max_jobs
-                || !self.budget.fits(self.caps.read + self.caps.run)
-            {
+            if self.started >= self.limits.max_jobs || !self.budget.fits(reserve) {
                 self.notes.push(format!(
                     "item {id} was not read to fill its plan: no room in the job limit or the budget"
                 ));
@@ -725,7 +732,7 @@ impl Drain<'_> {
                 forced.push(r);
             } else if !view.plan[pos].missing().is_empty() {
                 self.notes.push(format!(
-                    "item {id} was read, so it is no longer queued, but its plan is still incomplete; correct or answer it with `athena correct {id}`"
+                    "item {id} was read, but its plan is still incomplete; correct or answer it with `athena correct {id}`"
                 ));
             }
         }
@@ -834,7 +841,8 @@ pub fn drain(steps: &dyn Steps, limits: Limits, ui: &dyn Ui) -> anyhow::Result<R
     // Planning comes first: the open requests are planned together, and the items are worked in plan order,
     // not oldest first. Items with no plan entry keep their place ahead of the planned ones; items whose plan
     // is incomplete, or that wait on each other in a loop, are not worked.
-    let plan = d.prepare(&mut view);
+    let reserve = d.caps.read + d.caps.run;
+    let plan = d.prepare(&mut view, reserve);
     let mut to_work: Vec<Item> = view
         .items
         .iter()
@@ -957,7 +965,9 @@ pub fn plan(steps: &dyn Steps, read_budget_usd: f64, ui: &dyn Ui) -> anyhow::Res
         notes: Vec::new(),
         read_cost: Default::default(),
     };
-    let plan = d.prepare(&mut view);
+    // Planning runs nothing, so only the read has to fit `--budget`.
+    let reserve = d.caps.read;
+    let plan = d.prepare(&mut view, reserve);
     if !plan.cyclic.is_empty() {
         d.notes.push(format!(
             "items {} wait on each other, so none of them is worked",
@@ -1220,20 +1230,22 @@ impl Steps for RealSteps<'_> {
                 .collect()
         };
         let (within, above) = work_decisions::split_open(&records);
-        let item = |w: steward::QueuedWork, read: bool| Item {
+        let item = |w: steward::QueuedWork| Item {
             job: w.job.as_str().to_string(),
             title: w.title,
-            read,
+            read: w.read,
         };
         let mut items: Vec<Item> = steward::approved_work(&records)
             .into_iter()
-            .map(|w| item(w, true))
+            .map(item)
             .collect();
-        items.extend(
-            steward::queued_work(&records)
-                .into_iter()
-                .map(|w| item(w, false)),
-        );
+        // A job a work decision approved can also sit on a drained channel: it is listed once.
+        let queued: Vec<Item> = steward::queued_work(&records)
+            .into_iter()
+            .map(item)
+            .filter(|i| !items.iter().any(|a| a.job == i.job))
+            .collect();
+        items.extend(queued);
         // Planning: every open request is fleshed out. Nothing is defaulted: a job that came from a steward
         // proposal serves the proposal's rung; any other request's rung is inferred or flagged.
         let head = self.athena.head()?;

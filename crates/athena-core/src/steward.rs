@@ -327,21 +327,30 @@ pub const USER_QUEUE_CHANNEL: &str = "cli";
 /// requests. A request on any other channel is left alone.
 pub const DRAINED_CHANNELS: [&str; 2] = [REQUEST_CHANNEL, USER_QUEUE_CHANNEL];
 
-/// A request queued for the drain (see [`DRAINED_CHANNELS`]) that has not been read yet.
+/// A job waiting to be worked: a request queued for the drain (see [`DRAINED_CHANNELS`]), or a job a work
+/// decision approved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueuedWork {
     pub job: JobId,
     pub title: String,
+    /// True when the job has been read (it waits in state proposed), so it is run without a second reading.
+    pub read: bool,
 }
 
-/// The queued requests of the drained channels (the steward's and `ask --later`'s) that no one has read yet,
-/// oldest first, ties by job id.
+/// The open requests of the drained channels (the steward's and `ask --later`'s), oldest first, ties by job
+/// id. A request stays open until it is run or closed, so one that `athena plan` or a person has already read
+/// is listed too, marked [`QueuedWork::read`]: reading does not take it out of the queue. A request that no
+/// capability fits (declined), one that is running or has run (dispatched, blocked or closed), and one on any
+/// other channel are left out.
 pub fn queued_work(records: &Records) -> Vec<QueuedWork> {
     let mut found: Vec<(Timestamp, QueuedWork)> = records
         .jobs
         .values()
-        .filter(|j| j.state() == JobState::Queued)
         .filter_map(|j| {
+            let state = j.state();
+            if !matches!(state, JobState::Queued | JobState::Proposed) {
+                return None;
+            }
             let request = j
                 .request
                 .as_ref()
@@ -351,6 +360,7 @@ pub fn queued_work(records: &Records) -> Vec<QueuedWork> {
                 QueuedWork {
                     job: j.id().clone(),
                     title: j.title(),
+                    read: state == JobState::Proposed,
                 },
             ))
         })
@@ -377,6 +387,7 @@ pub fn approved_work(records: &Records) -> Vec<QueuedWork> {
                     QueuedWork {
                         job: job.clone(),
                         title: record.title(),
+                        read: true,
                     },
                 )
             })

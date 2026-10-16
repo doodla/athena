@@ -235,7 +235,8 @@ Exit code: 0 only when the target was met; 2 for any other stop; 1 when Athena i
     /// for each item its goal, requirements-ladder rung, acceptance, open questions, dependencies and touched
     /// paths, then the items held back, each with its reason. The planning pass is deterministic code, not a
     /// model call. It does read unread requests whose own words leave the plan incomplete (a reading is a model
-    /// call, capped by `[budget] reader_usd` each and by --budget in all); `--budget 0` reads nothing.
+    /// call, capped by `[budget] reader_usd` each and by --budget in all, with no run reserved); `--budget 0` reads
+    /// nothing. A request it reads stays queued for `athena drain`.
     Plan {
         /// The most to spend reading unread requests, in US dollars.
         #[arg(long, value_name = "USD", default_value_t = 2.0, value_parser = parse_read_budget)]

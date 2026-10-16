@@ -134,12 +134,20 @@ it is flagged. The planning pass is deterministic code, not a model call. A requ
 plan incomplete is first read (a reading is a model call, guarded by the budget like any other) and planned
 again from its reading, so a specifiable request runs and the queue does not fill with unread refused items.
 One that is still missing a goal, rung or acceptance after that is not worked: the report lists it as
-*refused* with the missing fields and a reason, and it is no longer queued (it has been read; correct it with
-`athena correct`). `athena plan` prints the same plan without working anything: the order, the parallel
-groups, each item's goal, rung, acceptance, open questions (a touched path that does not exist, a referenced
-job that is not in the records), dependencies and touched paths, and the flagged items with reasons. It says
-so when nothing is open. `--budget` caps what it spends reading (default $2; 0 reads nothing). The plan-stage
-audit in `athena_core::plan` (`trace`, `GapLog`) is still not wired to the records; that is follow-up.
+*refused* with the missing fields and a reason (it has been read; correct it with `athena correct`).
+`athena plan` prints the same plan without working anything: the order, the parallel groups, each item's goal,
+rung, acceptance, open questions (a touched path that does not exist, a referenced job that is not in the
+records), dependencies and touched paths, and the flagged items with reasons. It says so when nothing is open.
+`--budget` caps what it spends reading (default $2; 0 reads nothing). Planning runs nothing, so each read only
+has to fit the reader's cap from `athena.toml`, not a run after it.
+
+**A read request stays in the queue.** A request is open until it is run or closed. One that `athena plan` has
+read waits in state proposed and is still in the plan and in `drain`'s queue: a second `athena plan` lists it
+again, and `drain` runs it in plan order without reading it a second time. Only a request that no capability
+fits (declined), one that is running or has ended, and one on a channel `drain` does not work are left out.
+
+The plan-stage audit in `athena_core::plan` (`trace`, `GapLog`) is still not wired to the records; that is
+follow-up.
 
 **Stopping a drain.** Run `athena drain-stop` from another terminal. The drain finishes the job it is on (it is
 landed and rated as usual), starts no further job, and ends with the stop reason `stop requested`, exit code 2.
