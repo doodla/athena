@@ -1,0 +1,33 @@
+{
+  "schema": "athena.introspection/1",
+  "id": "20261016-205039-fqgx",
+  "at": "2026-10-16T20:50:39.855269346Z",
+  "trigger": "failure",
+  "job": "20261016-200605-xh54",
+  "intervention": null,
+  "class_of_work": "code",
+  "category": "failed",
+  "what_happened": "The job \"Build bounded parallel drain with schema and athena.toml landing together\" ended failed at landing. The gate refused Athena's own commit c59652679152 because athena.toml does not parse. The `[parallel]` table at line 166 is not a field the config schema knows. The schema accepts only athena, models, budget, agents, capabilities, classes, forecast, secrets, tools, history, records, personal_data and landing. The job was meant to land the schema change and the config change together, but the commit still contained the config table without a working schema field. No acceptance criteria, blocker or major findings, or failed checks are listed. Nothing was delivered. This is the same parse error as the earlier jobs 20261016-071202-q0xy and 20261016-185517-qcrz, and this time it was caught at the landing gate, not at admission.",
+  "failure_class": "20261016-185439-64ke",
+  "new_class": false,
+  "earlier_cases": [
+    "20261016-191018-b44f",
+    "20261016-185428-8vdd"
+  ],
+  "decisions_matched": [],
+  "cause": "Nothing ties the schema and the config file into one checked unit. The committed athena.toml already had the `[parallel]` table. The parser's schema in the landed tree did not accept it. The request asked for both to land together, but no check ran the parser from the tree being committed against the config in that same tree before the commit. The gate only caught it at the last step. The broken config had already been in place for two earlier failures, and nothing blocked new work against it or forced the repair first. A job that has to fix the config-versus-schema mismatch is in a deadlock, because admission needs the config to parse before the job can run. A request that says \"together\" is only a wish, since no code enforces it.",
+  "prevention_kind": "code-check",
+  "prevention": "Add a code check that runs before any commit that touches athena.toml or the config schema, and before landing. It builds the parser from the working tree being committed and parses the athena.toml in that same tree, and it refuses the commit with the unknown field named if parsing fails. Run the same check at submit and enqueue time against the current main, so a known-broken config blocks new jobs. Provide one recovery path that is allowed to run while the config is broken. That path may only add the schema field, or revert the config table, and the check is applied to its result. With this in place, the config and the schema can only change in a state where they parse together, and the whole class goes away.",
+  "proposed_request": "Repair the broken athena.toml and prevent config/schema mismatches. Outcome: (1) On main, athena.toml parses and the config schema accepts the `[parallel]` table, with fields for the bounded parallel drain (for example a maximum number of concurrent items, with a safe default of 1 when the table is absent). (2) Athena has a check, run before every commit that touches athena.toml or the config schema and again before landing, that parses the athena.toml of the tree being committed using the schema of that same tree, and refuses the commit with the unknown field and line named when it fails. (3) Job submit and enqueue refuse new work, with a clear message, while main's athena.toml does not parse, except for a repair job that only changes the schema or the config. (4) Tests show that a config with an unknown table is refused at commit time, that a config with a table the schema accepts passes, and that the repair job is admitted while the config is broken. Do not build the parallel drain in this job. Done when the config parses on main, `cargo test`, `cargo clippy --all-targets` and `cargo fmt --check` pass, and then the earlier request \"Run independent plan-group items in parallel in the drain loop\" can be resubmitted and admitted.",
+  "evidence": {
+    "model": "claude-sonnet-5-5",
+    "cost_usd": 0.045278,
+    "input_tokens": 2,
+    "output_tokens": 1345
+  },
+  "status": "recorded",
+  "failure": null,
+  "flags": [],
+  "dropped_ids": [],
+  "from_jev": false
+}
