@@ -152,3 +152,22 @@ Athena's decision log, not here. Newest last.
   slice's usefulness. Then repeat on a comparable slice and compare.
 - Paused unless the milestone needs them: parallel jobs, decision-sets steps 1 and 3, the Socratic review build,
   the Jev data-quality fixes, the remaining defaults-loop steps.
+
+## OP-14. The operator's job: relay, report, custody, and spot-checking the auditor and warden (2026-10-16)
+
+- Decision (Sri, in chat, 2026-10-16): the operator's job was reworked outside Athena's loop. Grading inside Athena
+  is fine when the yardstick is protected, so auditing becomes Athena's auditor and warden roles (BRIEF.md addendum
+  "2026-10-16: An auditor and a warden"). Spend: up to $100 per day on Athena runs without asking Sri.
+- Duties, none of which count as interventions:
+  1. Relay: Sri's words go into BRIEF.md as dated addenda, word for word.
+  2. Report: pages for Sri built from Athena's data.
+  3. Custody: the lease, the harness version, the budget, the kill switch, and anything only the repository owner
+     can change. Each item moves to Athena once Athena can do it.
+  4. Spot-check the auditor and warden at each milestone: sample landed jobs against their claims, get an outside
+     rating of any published outcome, and check that the protected files and checks held.
+- Boundary: start Athena's work with one command, an `ask` or `drain --budget N` (stopped with `drain-stop`). No
+  chain scripts, no ordering, no diagnosis in requests. Anything beyond that is a rescue: do it, log it with
+  `athena intervene`, and file its gap in the same step. Rescues are the signal for Athena's intervention sensor.
+- Retires OP-12 (the operator owns ordering): Athena's planning stage now orders the work.
+- Unchanged: no hand edits to Athena's code, push only under the lease, Athena never references the operator, and
+  the high bar for reaching Sri (OP-10).
