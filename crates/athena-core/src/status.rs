@@ -5,7 +5,7 @@ use crate::Athena;
 use crate::manage::pending_quantities;
 use crate::store::{JobRecords, JobState, Records};
 use anyhow::Result;
-use athena_data::records::{Build, Invocation, OutcomeState, Reading};
+use athena_data::records::{Build, InterventionSource, Invocation, OutcomeState, Reading};
 use athena_gate::invariant::{BOOTSTRAP_OUTCOME, BootstrapRange, bootstrap_range};
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -62,6 +62,9 @@ pub struct StatusView {
     pub open: Vec<JobLine>,
     pub interventions_by_category: BTreeMap<String, usize>,
     pub interventions_by_class: BTreeMap<String, usize>,
+    /// Interventions that call for follow-up and that no later request job cites yet (see
+    /// [`open_interventions`]). They are not in `open`, which lists jobs.
+    pub open_interventions: Vec<OpenIntervention>,
     pub restarts: usize,
     pub forecasts: Vec<ClassHeadline>,
     pub pending: Vec<Pending>,
@@ -77,6 +80,48 @@ pub struct StatusView {
     pub audience: Option<AudienceView>,
     pub invalid_records: Vec<String>,
     pub next: Vec<String>,
+}
+
+/// An intervention that still calls for follow-up, as `athena status` lists it under open work.
+#[derive(Debug, Clone, Serialize)]
+pub struct OpenIntervention {
+    pub id: String,
+    pub what: String,
+    pub category: String,
+    /// The job the intervention was recorded against, if any.
+    pub job: Option<String>,
+    /// The command that starts the follow-up.
+    pub next: String,
+}
+
+/// The interventions that call for follow-up: those recorded by the user (`source` `user`) that no later
+/// request job cites. A request job cites an intervention when its request text names the intervention's
+/// record id and it was received at or after the intervention was recorded. Interventions Athena observed
+/// itself (a correction of a reading) are already applied to the job that took them, so they are not listed.
+/// Oldest first.
+pub fn open_interventions(records: &Records) -> Vec<OpenIntervention> {
+    records
+        .interventions
+        .iter()
+        .filter(|i| i.source == InterventionSource::User)
+        .filter(|i| {
+            !records.request_jobs().iter().any(|job| {
+                job.request
+                    .as_ref()
+                    .is_some_and(|r| r.received_at >= i.at && r.text.contains(i.id.as_str()))
+            })
+        })
+        .map(|i| OpenIntervention {
+            id: i.id.to_string(),
+            what: i.what.clone(),
+            category: i.category.as_str().into(),
+            job: i.job.as_ref().map(|j| j.as_str().to_string()),
+            next: format!(
+                "athena ask \"<request that addresses intervention {}>\"",
+                i.id
+            ),
+        })
+        .collect()
 }
 
 /// The latest audience rating as `athena status` lists it.
@@ -476,6 +521,13 @@ impl Athena {
                 _ => {}
             }
         }
+        let open_interventions = open_interventions(&records);
+        for i in &open_interventions {
+            next.push(format!(
+                "{}   # follow up intervention {} ({})",
+                i.next, i.id, i.category
+            ));
+        }
         if bootstrap.range_open {
             next.push(format!("close the bootstrap range: commit {BOOTSTRAP_OUTCOME} (docs/records.md, \"Closing the bootstrap\")"));
         }
@@ -517,6 +569,7 @@ impl Athena {
             open,
             interventions_by_category: by_category,
             interventions_by_class: by_class,
+            open_interventions,
             restarts: records.restarts.len(),
             forecasts,
             pending,

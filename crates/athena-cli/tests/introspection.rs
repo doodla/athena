@@ -144,6 +144,41 @@ fn athena_bin(fx: &Fixture) -> Command {
 }
 
 #[test]
+fn the_status_command_lists_an_uncited_intervention_and_drops_it_once_cited() {
+    let (fx, athena) = setup(Scenario::default(), &Model::default());
+    let status_text = |fx: &Fixture| {
+        let out = athena_bin(fx).arg("status").output().unwrap();
+        assert!(out.status.success());
+        String::from_utf8(out.stdout).unwrap()
+    };
+    assert!(!status_text(&fx).contains("follow-up"));
+    let id = intervene(&athena, "Edited the README by hand").to_string();
+
+    let text = status_text(&fx);
+    for needle in [
+        "follow-up",
+        id.as_str(),
+        "[other]",
+        "athena ask \"<request that addresses intervention",
+    ] {
+        assert!(text.contains(needle), "missing {needle:?} in:\n{text}");
+    }
+    let out = athena_bin(&fx).args(["status", "--json"]).output().unwrap();
+    let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["open_interventions"][0]["id"], id.as_str());
+    assert_eq!(json["interventions_by_category"]["other"], 1);
+
+    athena
+        .ask(&format!("address intervention {id}"), &Lines::default())
+        .unwrap();
+    let text = status_text(&fx);
+    assert!(!text.contains("follow-up"), "{text}");
+    let out = athena_bin(&fx).args(["status", "--json"]).output().unwrap();
+    let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["open_interventions"], json!([]));
+}
+
+#[test]
 fn a_rejected_job_is_introspected_and_the_class_is_proposed_by_code() {
     let model = Model::default();
     model.say(reply(

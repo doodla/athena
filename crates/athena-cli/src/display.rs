@@ -503,6 +503,14 @@ pub fn status(v: &StatusView) -> String {
         let label = if i == 0 { "open" } else { "" };
         let _ = writeln!(out, "{label:<11} {} {} · {}", j.id, j.state, j.title);
     }
+    for (i, n) in v.open_interventions.iter().enumerate() {
+        let label = if i == 0 { "follow-up" } else { "" };
+        let _ = writeln!(
+            out,
+            "{label:<11} {} [{}] {} · {}",
+            n.id, n.category, n.what, n.next
+        );
+    }
     let total: usize = v.interventions_by_category.values().sum();
     if total > 0 {
         let cats: Vec<String> = v

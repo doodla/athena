@@ -794,6 +794,9 @@ pub struct Score {
 }
 
 /// `athena.intervention/1`: something the user did beyond what a lazy user would (O3).
+///
+/// A record has no field that says it was followed up. `athena status` lists a `user` intervention as open
+/// work until a later request job's request text names its id.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Intervention {
