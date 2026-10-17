@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- The verifier is told that `records/`, private files and history are absent from its snapshot by design, and
+  that their absence is not a finding. Root cause: the verifier prompt named the absent paths but did not say
+  their absence was expected, and the verifier brief did not mention them at all, so a verifier could report a
+  missing `records/` as a defect. Both now say it, worded as the producer and reader prompts word it. A unit
+  test in `crates/athena-context/src/briefs.rs` asserts the brief's statement.
+
 - Drain works its queue after an `athena.toml` change that does not bear on a reading. Root cause, two faults:
   a reading was valid only for the raw bytes of `athena.toml`, so changing `[parallel] max_concurrency` read
   every proposed item again; and when that reading needed accepting, drain recorded "no outcome" and then ran
