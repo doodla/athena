@@ -18,8 +18,9 @@
 //! - **Gate.** An item whose plan has no goal, no ladder rung or no acceptance is refused for design or code
 //!   ([`PlanEntry::missing`], [`Plan::refused`]), so planning cannot be skipped. Nothing is filled in by
 //!   default: acceptance comes only from explicit bullets in the request or from a reading's criteria, and
-//!   the rung only from the caller or from evidence in the request or reading
-//!   (`reading::plan_entry`). A vague request such as "make it better" therefore has neither, is flagged
+//!   the rung only from the caller or from what the request serves in BRIEF.md and its addenda
+//!   (`reading::plan_entry`, `reading::infer_rung`); a word such as "fix" or "code" is not a rung. A request
+//!   that serves the owner's latest addendum therefore ranks above plain implementation work, whatever its age. A vague request such as "make it better" therefore has neither, is flagged
 //!   with the missing fields named, and is not in [`Plan::order`].
 //!
 //! The second half of the module is the first slice of the plan-stage audit: every logged gap (an

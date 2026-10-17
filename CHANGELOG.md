@@ -9,6 +9,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- A request's ladder rung comes from what it serves in BRIEF.md and the owner's addenda, not a word list.
+  Root cause: `reading::infer_rung` took any touched path, the `change` capability or a word such as "code" or
+  "ci" as Implementation, so nearly every request got that rung and age alone ordered the plan, which put the
+  2026-10-16 speed priorities last. Now `Lookup` carries the brief's sections (`reading::brief_topics`); a request
+  sharing at least two significant words with a requirement heading or an addendum ranks as a brief requirement,
+  and a word such as "fix a bug" is no rung alone. Alternatives rejected: a model-chosen rung, and keeping the
+  word list. Decision D107.
+
 - Plan grouping ignores the shared append-only files `CHANGELOG.md`, `docs/decisions.md` and `README.md`
   (`docs/design/parallel-jobs.md` section 9). Root cause: `plan.rs` `disjoint` counted them as touched paths, and
   almost every item touches `CHANGELOG.md`, so every parallel group was one item. An item whose only paths are
