@@ -1,0 +1,141 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261017-155259-7mjc",
+  "base_commit": "1e06017947c9ca95b5c316a6f008991e18fe6d90",
+  "base_fingerprint": "sha256:5b0bb8edc06622a66fb62918d3bb2f4f86d88fafa76f3857e7cf20ad58663689",
+  "previous_job": "20261016-152050-4kgd",
+  "candidate_commit": "ff409f8fc02eeed76b929fe01708c4c08df6d537",
+  "candidate_tree": "499a5de7c63b08194c35d99e58322a5e39e016f7",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 97492
+    },
+    {
+      "path": "crates/athena-core/src/ci_result.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 19131
+    },
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 110713
+    },
+    {
+      "path": "crates/athena-core/src/routing.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 31327
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 86631
+    },
+    {
+      "path": "crates/athena-core/src/run_ci_tests.rs",
+      "status": "added",
+      "mode": "100644",
+      "bytes": 6379
+    },
+    {
+      "path": "docs/design/ci-routing.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 30081
+    }
+  ],
+  "fingerprint": "sha256:cb3e123c95cf779ff1dafe08afdf4006b57b7e072b6ce75a4e5c4e7a53c2ec36",
+  "violations": [],
+  "producer_report": {
+    "summary": "The checks step now pushes the candidate, waits a bounded time for CI on that exact SHA, reuses a green run, and falls back to the local run otherwise. The push goes to its own ref, `athena/<job>-ci`, not the work branch `athena/<job>`, so a later `athena land --pr` is not refused.\n\nRoot cause of the rejected attempt: landing's `publish` pushes the landed commit to `athena/<job>`. That commit does not descend from the candidate, because landing builds its own commit. A candidate on that branch made the land push a non-fast-forward. The separate ref removes the conflict. `check_push` is still used, with the candidate ref as the only allowed branch. A candidate ref that already holds unrelated work is refused, never forced over.\n\nWhat changed:\n- **`ci_result.rs`**: adds `CI_WAIT`, 30 reads 20 seconds apart. The doc comment gives the basis. It is an estimate, not a measurement: local checks take about 29 minutes and CI with warm caches is assumed to finish within 10 minutes. It also states the cost when CI never reports: about 9 minutes 40 seconds of waiting, then the local run.\n- **`gh.rs`**: adds `candidate_branch` and `push_candidate`.\n- **`routing.rs`**: adds `Checked`, which carries the source, the run address and any push failure. It also adds `run_pushed`. It pushes first, then reads CI for the same SHA. A failed push skips the CI read and runs the checks locally once. A build route neither pushes nor reads CI. `run_routed` still works as before.\n- **`run.rs`**: adds `CiWiring`. `CiWiring::platform` builds a GitHub-backed CI source from the `origin` URL and uses `CI_WAIT`. The checks step calls it instead of the no-CI source and a single read. The run prints whether checks came from CI or ran locally. The candidate commit message no longer says \"Not on any branch\".\n- **Docs**: `ci-routing.md` section 10 items 4 and 5 now say push and wait are built. The verifier's reuse is still listed as not done, and no speedup is claimed. `CHANGELOG.md` has an entry.\n- **`athena.toml`**: unchanged, because the wait is a constant rather than a config field. `pr.rs` is unchanged because `check_push` already did what was needed.\n\nTests:\n- **`run_ci_tests.rs`** (run.rs wiring): the wiring has `CI_WAIT` with more than one read, pushes before the first platform call, and reads for the candidate SHA. Polling continues past one read. A missing or invalid `origin` pushes nothing and runs the checks locally once.\n- **`routing.rs`**: the push comes before the CI read and the same SHA is used for both. A green run runs nothing locally and records the run address. A run for another SHA, no run within the wait, or a push failure each run the three checks locally exactly once. A red run fails with no local run.\n- **`gh.rs`** (real git, bare remote): push the candidate, read CI green, then `land_pr` is accepted. A second test shows that a candidate placed on the work branch is refused as a non-fast-forward, with the remote left as it was. A third shows the guard refuses to force over unrelated work and refuses any other branch.",
+    "files": [
+      "crates/athena-core/src/run.rs",
+      "crates/athena-core/src/run_ci_tests.rs",
+      "crates/athena-core/src/routing.rs",
+      "crates/athena-core/src/gh.rs",
+      "crates/athena-core/src/ci_result.rs",
+      "docs/design/ci-routing.md",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "Run with --quiet; every crate's tests pass (athena-core: 272 passed, 1 ignored, which is a live-service test that was already ignored)."
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Run `cargo test --locked`: passes. A test on the run.rs wiring (not only routing::run_pushed with a test-only bound) shows the checks step gets a platform-backed CI source, not NoCi, and uses the CI_WAIT bound rather than one poll; it fails if run.rs reverts to NoCi or one poll.",
+        "status": "met",
+        "evidence": "`cargo test --locked` passes. `run::ci_wiring_tests::the_checks_step_gets_a_platform_source_and_the_ci_wait_bound` builds the production `CiWiring::platform` and asserts `wait == CI_WAIT` with `polls > 1`. It then asserts that the runner receives `actions/runs?head_sha=<sha>` after the push, which a no-CI source would never send. `the_checks_step_keeps_polling_past_one_read_until_ci_finishes` shows three reads. The run.rs call site goes through `CiWiring::platform` and `checks`. The wiring tests do not run `run_job` itself, so a revert made inside that function body would not be caught."
+      },
+      {
+        "criterion": "Run `cargo test`: with fake push and CI sources, the candidate is pushed before CI is read and the same SHA is used for both. A green run for that SHA runs no local check and records CI provenance with the run address. A run for another SHA, no run after the bounded wait, or a push failure each run the three checks locally exactly once. A red run fails without running locally.",
+        "status": "met",
+        "evidence": "The routing tests `pushed_green_run_for_the_sha_is_read_after_the_push_and_runs_nothing_locally`, `pushed_run_for_another_sha_or_none_within_the_wait_runs_the_checks_locally_once`, `pushed_push_failure_reads_no_ci_and_runs_the_checks_locally_once` and `pushed_red_run_fails_without_running_locally` check the order, the SHA and the run address, and that the fallback runs exactly once. All pass."
+      },
+      {
+        "criterion": "Run `cargo test`: an integration test on one job branch runs candidate push, then CI read, then publish/land --pr, and shows the land push is accepted, not refused as a non-fast-forward (cf. pr::tests::the_guard_refuses_a_non_fast_forward_push). Landing does not force-push over unrelated work.",
+        "status": "met",
+        "evidence": "`gh::tests::landing_after_the_candidate_push_and_ci_read_is_accepted_not_a_non_fast_forward` runs `push_candidate`, then `resolve` against a green CI source, then `land_pr` on real git with a bare remote. The landed commit ends up on `athena/bootstrap`, and the candidate ref is untouched. `a_candidate_on_the_work_branch_would_make_landing_refuse_the_push` shows the refusal for the old placement, with the remote unchanged. `the_candidate_push_uses_the_guard_and_never_the_default_branch` shows unrelated work on the ref is not forced over."
+      },
+      {
+        "criterion": "Run `cargo clippy --all-targets --locked -- -D warnings` and `cargo fmt --all --check`: both are clean.",
+        "status": "met",
+        "evidence": "Both commands ran with no output errors, after moving the wiring tests out of run.rs to satisfy the `items_after_test_module` lint."
+      },
+      {
+        "criterion": "The push uses the existing guarded path (check_push), never the default branch. It targets a ref landing's publish does not conflict with, or publish handles the existing branch safely. The candidate commit message no longer says 'Not on any branch'.",
+        "status": "met",
+        "evidence": "`gh::push_candidate` calls `check_push` with `athena/<job>-ci` as the only allowed branch. The ref is separate from the work branch that `publish` uses. The message in run.rs now reads \"Pushed to the candidate ref so CI can check it; landing builds its own commit.\", and a search found no \"Not on any branch\" left."
+      },
+      {
+        "criterion": "The wait bound is a named, documented value with a stated basis; run output says whether checks came from CI or ran locally. The cost of waiting when CI never reports is documented. If athena.toml gets a field, it is named and the schema/load tests are updated.",
+        "status": "met",
+        "evidence": "`CI_WAIT` is a documented constant in ci_result.rs with its basis marked as an estimate. The wait cost is documented there and in ci-routing.md and the changelog. The run prints `checks     from CI run <address>` or `ran locally`, with the reason when the push failed. `athena.toml` is unchanged, so no schema work was needed."
+      },
+      {
+        "criterion": "docs/design/ci-routing.md section 10 items on push and wait are no longer 'not done'; the verifier's reuse is still listed as not done, and no speedup is claimed without measurement. The fmt, clippy and test check definitions, verifier input and prompts are unchanged.",
+        "status": "met",
+        "evidence": "Items 4 and 5 are rewritten. The push and wait are marked built, while the verifier's use of the record and the measured bound stay under \"Not done\", and \"No speedup is claimed or measured\" stays. I did not touch check definitions, verifier input or prompts."
+      }
+    ],
+    "open_issues": [
+      "The wait bound (30 reads at 20 seconds) is an unmeasured estimate. A CI that never reports adds up to about 10 minutes before the local run. It should be tuned once section 9 timing data exists.",
+      "A rerun of the same job produces a new candidate commit that does not contain the earlier one. The guard then refuses the push to `athena/<job>-ci`, the CI read is skipped, and the checks run locally with the refusal reason shown. Making reruns reuse CI would need a new ref name per attempt or a guarded replace. I left it out of scope.",
+      "The wiring tests call `CiWiring::checks`, not the whole `run_job` path, because no existing test drives a full job with a GitHub origin. A revert inside the `run_job` body would not be caught by them.",
+      "The first output line says \"pushing the candidate ... waiting up to N s\" even when `origin` turns out to be unusable. The next line then reports `ran locally (the candidate was not pushed: ...)`."
+    ],
+    "mistakes": [
+      "My first draft put the wiring tests in an inline test module in the middle of run.rs, which failed clippy. I moved them into `run_ci_tests.rs`."
+    ],
+    "learnings": [
+      "Clippy denies items after a `#[cfg(test)]` module (`items_after_test_module`), and run.rs has none of its own. The wiring tests live in `run_ci_tests.rs`, included at the end of run.rs with `#[path]`, which keeps them as a child module that can see private items.",
+      "`crates/athena-core/tests/external_calls_guard.rs` allows `Command::new(\"gh\")` and HTTP client names only in gh.rs, so GitHub access from run.rs has to go through gh.rs types such as `GhCli` and `GhClient`.",
+      "`GhClient` already implemented `CiSource`, and `ci.yml` triggers on `push` for any branch, so a separate candidate ref gets a CI run without a workflow change.",
+      "`landed_commit` and landing build their own commit that does not descend from the verified candidate, so any ref shared by candidate and landed pushes will conflict.",
+      "The Bash hook only allows listed commands, so `tail`, `wc` and `grep` are refused. A large `cargo test` output cannot be read back from the tool-results file either, since that path is outside the working directory."
+    ],
+    "desires": [
+      "A way to read a long test output saved by the tool, so that a failing test name can be found without re-running with --quiet.",
+      "An existing end-to-end test that runs a whole job against a fake GitHub origin, so the run.rs call site could be covered directly."
+    ]
+  }
+}
