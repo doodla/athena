@@ -21,9 +21,49 @@ use athena_data::records::{
 use athena_data::{JobId, Quantity, RecordId};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// The rules and their version, recorded in every score.
-pub const RULES: &str =
+/// The first rules: a cost known only as a bound is scored like any other cost (never provisional).
+pub const RULES_V1: &str =
     "brier events; brier-sum deliverables; wis-log 80% (alpha 0.2) quantities; v1";
+/// The second rules: a cost known only as a bound (a killed or lost producer) scores provisional.
+pub const RULES_V2: &str =
+    "brier events; brier-sum deliverables; wis-log 80% (alpha 0.2) quantities; v2";
+/// The rules new scores are written under, recorded in every score.
+pub const RULES: &str = RULES_V2;
+
+/// A version of the scoring rules. A score records the rules string of the version it was written under,
+/// and is recomputed under that same version, so changing the rules never invalidates an older score.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RulesVersion {
+    /// [`RULES_V1`].
+    V1,
+    /// [`RULES_V2`].
+    V2,
+}
+
+impl RulesVersion {
+    /// The version new scores are written under.
+    pub const CURRENT: RulesVersion = RulesVersion::V2;
+
+    /// The version whose rules string is `recorded`; `None` for a string no version of this scorer has.
+    pub fn from_recorded(recorded: &str) -> Option<RulesVersion> {
+        [RulesVersion::V1, RulesVersion::V2]
+            .into_iter()
+            .find(|v| v.as_str() == recorded)
+    }
+
+    /// The rules string a score written under this version records.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RulesVersion::V1 => RULES_V1,
+            RulesVersion::V2 => RULES_V2,
+        }
+    }
+
+    /// Whether a cost known only as a bound scores provisional under this version.
+    fn marks_bound_cost_provisional(self) -> bool {
+        self != RulesVersion::V1
+    }
+}
 /// Floors applied before taking logs, so a job that cost nothing still scores (M4).
 pub const COST_FLOOR_USD: f64 = 0.001;
 pub const TIME_FLOOR_S: f64 = 1.0;
@@ -175,8 +215,10 @@ pub struct ReadingForecasts {
     pub deliverables: Vec<(String, f64)>,
 }
 
-/// Scores a job. `readings` holds every reading; `accepted` names the one that was dispatched, if any.
+/// Scores a job under `rules`. `readings` holds every reading; `accepted` names the one that was
+/// dispatched, if any.
 pub fn score_job(
+    rules: RulesVersion,
     job: &JobId,
     at: jiff::Timestamp,
     cause: Option<RecordId>,
@@ -281,7 +323,7 @@ pub fn score_job(
         quantity(
             "cost_usd",
             resolution.cost_execution_usd,
-            resolution.cost_provisional,
+            resolution.cost_provisional && rules.marks_bound_cost_provisional(),
             COST_FLOOR_USD,
             |f| f.cost_usd,
         );
@@ -311,7 +353,7 @@ pub fn score_job(
     Score {
         job: job.clone(),
         at,
-        rules: RULES.to_string(),
+        rules: rules.as_str().to_string(),
         cause,
         events,
         deliverables,
@@ -345,8 +387,14 @@ pub struct JobFacts<'a> {
     pub interventions: &'a [&'a Intervention],
 }
 
-/// Scores a job from its records. `cause` is set for a re-score; see also [`rescore`].
-pub fn score_records(facts: &JobFacts<'_>, cause: Option<RecordId>, at: jiff::Timestamp) -> Score {
+/// Scores a job from its records under `rules`. `cause` is set for a re-score; see also [`rescore`], which
+/// keeps the rules of the score it re-scores.
+pub fn score_records(
+    rules: RulesVersion,
+    facts: &JobFacts<'_>,
+    cause: Option<RecordId>,
+    at: jiff::Timestamp,
+) -> Score {
     let readings: Vec<ReadingForecasts> = facts
         .readings
         .iter()
@@ -433,7 +481,15 @@ pub fn score_records(facts: &JobFacts<'_>, cause: Option<RecordId>, at: jiff::Ti
         models_expected: expected,
         models_observed: observed.into_iter().collect(),
     };
-    score_job(facts.job, at, cause, &readings, accepted, &resolution)
+    score_job(
+        rules,
+        facts.job,
+        at,
+        cause,
+        &readings,
+        accepted,
+        &resolution,
+    )
 }
 
 /// A re-score after an intervention against a closed job: the closing score with `user_intervenes`
@@ -665,6 +721,10 @@ mod tests {
     }
 
     fn score_with_costs(costs: &[Quantity]) -> Score {
+        score_with_costs_under(RulesVersion::CURRENT, costs)
+    }
+
+    fn score_with_costs_under(rules: RulesVersion, costs: &[Quantity]) -> Score {
         let resolution = Resolution {
             reading_accepted: BTreeMap::from([(1, Some(true))]),
             verification_passed: Some(false),
@@ -680,6 +740,7 @@ mod tests {
         let job = JobId::parse("20261010-153012-k7q2").unwrap();
         let at: jiff::Timestamp = "2026-10-10T16:00:00Z".parse().unwrap();
         score_job(
+            rules,
             &job,
             at,
             None,
@@ -687,6 +748,46 @@ mod tests {
             Some(1),
             &resolution,
         )
+    }
+
+    fn bound_cost() -> Quantity {
+        Quantity::estimated(
+            None,
+            athena_data::Unit::Usd,
+            "bounded by the cap",
+            Some(0.0),
+            Some(3.0),
+        )
+        .unwrap()
+    }
+
+    fn cost_of(s: &Score) -> QuantityScore {
+        s.quantities
+            .iter()
+            .find(|q| q.quantity == "cost_usd")
+            .cloned()
+            .unwrap()
+    }
+
+    #[test]
+    fn v1_scores_a_bound_only_cost_as_not_provisional_and_records_v1() {
+        let v1 = score_with_costs_under(RulesVersion::V1, &[bound_cost()]);
+        assert_eq!(v1.rules, RULES_V1);
+        assert!(!cost_of(&v1).provisional);
+        let v2 = score_with_costs_under(RulesVersion::V2, &[bound_cost()]);
+        assert_eq!(v2.rules, RULES_V2);
+        assert!(cost_of(&v2).provisional);
+        assert_eq!(RULES, RulesVersion::CURRENT.as_str());
+    }
+
+    #[test]
+    fn a_rules_string_selects_its_version_and_an_unknown_one_selects_none() {
+        for v in [RulesVersion::V1, RulesVersion::V2] {
+            assert_eq!(RulesVersion::from_recorded(v.as_str()), Some(v));
+        }
+        assert_ne!(RULES_V1, RULES_V2);
+        assert_eq!(RulesVersion::from_recorded("v3"), None);
+        assert_eq!(RulesVersion::from_recorded(""), None);
     }
 
     #[test]
@@ -768,7 +869,15 @@ mod tests {
         };
         let job = JobId::parse("20261010-153012-k7q2").unwrap();
         let at: jiff::Timestamp = "2026-10-10T16:00:00Z".parse().unwrap();
-        let score = score_job(&job, at, None, &[reading], Some(1), &resolution);
+        let score = score_job(
+            RulesVersion::CURRENT,
+            &job,
+            at,
+            None,
+            &[reading],
+            Some(1),
+            &resolution,
+        );
         assert_eq!(score.events.len(), 3);
         assert!(
             score

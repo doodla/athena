@@ -366,6 +366,7 @@ fn squash_with_intervention(forge: bool) -> Vec<Violation> {
         &job_id(),
         None,
         ts("2026-10-10T15:08:30Z"),
+        athena_score::RulesVersion::CURRENT,
     )
     .unwrap();
     let cause = RecordId::parse("20261011-090000-abcd").unwrap();
@@ -414,6 +415,95 @@ fn a_squash_with_a_forged_rescore_is_still_refused() {
         found
             .iter()
             .any(|v| v.rule == Rule::JobRecords && v.detail.contains("does not follow")),
+        "{found:?}"
+    );
+}
+
+/// A landing whose producer was killed, so its cost is only a bound, with a closing score computed under
+/// `version` and then changed by `edit`. Returns the job-record violations and the score written.
+fn landing_with_bound_cost(
+    version: athena_score::RulesVersion,
+    edit: impl Fn(&mut athena_data::records::Score),
+) -> (Vec<Violation>, athena_data::records::Score) {
+    let (dir, git) = owner_repo();
+    let base = git.head().unwrap().unwrap();
+    let fp = stage_landing(dir.path(), &git, &base, &HONEST);
+    let mut killed = invocation(
+        2,
+        Role::Producer,
+        PRODUCER,
+        "2026-10-10T15:03:00Z",
+        "2026-10-10T15:05:00Z",
+    );
+    killed.cost =
+        Quantity::estimated(None, Unit::Usd, "bounded by the cap", Some(0.1), Some(3.0)).unwrap();
+    write_records(dir.path(), &[AnyRecord::Invocation(Box::new(killed))]);
+    git.run(["add", "-A"]).unwrap();
+    let tree = git.write_index_tree().unwrap();
+    assert_eq!(fingerprint(&git, &tree, &base).unwrap(), fp);
+    let mut score = crate::jobs::expected_score(
+        &git,
+        &tree,
+        &job_id(),
+        None,
+        ts("2026-10-10T15:08:30Z"),
+        version,
+    )
+    .unwrap();
+    edit(&mut score);
+    write_records(dir.path(), &[AnyRecord::Score(Box::new(score.clone()))]);
+    commit(&git, "Change a (#1)\n");
+    assert_eq!(judge(&git, "HEAD"), vec![]);
+    (job_records_of(&git, "HEAD"), score)
+}
+
+fn bound_cost_is_provisional(score: &athena_data::records::Score) -> bool {
+    score
+        .quantities
+        .iter()
+        .find(|q| q.quantity == "cost_usd")
+        .expect("a cost quantity")
+        .provisional
+}
+
+#[test]
+fn a_score_written_under_v1_is_accepted_with_its_bound_cost_not_provisional() {
+    let (found, score) = landing_with_bound_cost(athena_score::RulesVersion::V1, |_| {});
+    assert_eq!(score.rules, athena_score::RULES_V1);
+    assert!(!bound_cost_is_provisional(&score));
+    assert_eq!(found, vec![]);
+}
+
+#[test]
+fn a_score_written_under_the_current_rules_marks_a_bound_cost_provisional() {
+    let (found, score) = landing_with_bound_cost(athena_score::RulesVersion::CURRENT, |_| {});
+    assert_eq!(score.rules, athena_score::RULES);
+    assert!(bound_cost_is_provisional(&score));
+    assert_eq!(found, vec![]);
+}
+
+#[test]
+fn a_score_labelled_v1_but_computed_under_v2_is_refused() {
+    let (found, _) = landing_with_bound_cost(athena_score::RulesVersion::V2, |s| {
+        s.rules = athena_score::RULES_V1.to_string();
+    });
+    assert!(
+        found
+            .iter()
+            .any(|v| v.rule == Rule::JobRecords && v.detail.contains("does not follow")),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn a_score_under_an_unknown_rules_version_is_refused() {
+    let (found, _) = landing_with_bound_cost(athena_score::RulesVersion::CURRENT, |s| {
+        s.rules = "brier events; v99".to_string();
+    });
+    assert!(
+        found
+            .iter()
+            .any(|v| v.rule == Rule::JobRecords && v.detail.contains("cannot recompute")),
         "{found:?}"
     );
 }

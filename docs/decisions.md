@@ -2502,3 +2502,28 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Provenance:** measured: the `reading.rs` unit tests
   `a_request_serving_the_speed_addendum_ranks_above_implementation`,
   `a_plan_orders_a_speed_request_before_an_older_typo_fix` and `a_word_like_fix_or_bug_alone_is_no_rung`.
+
+## D108 · Scoring rules are versioned, and a score is recomputed under the version it records
+
+- **Case:** The scorer had one `RULES` string, and the commit gate refused any score whose `rules` differed
+  from it, or recomputed it under today's behavior. Marking a cost known only as a bound `provisional` changed
+  what the same records score to, so `athena check --history` flagged the 8 older `score.json` files written
+  before that rule. Records are append-only, so they cannot be edited to match.
+- **Decision:** `athena_score::RulesVersion` names each version (`V1`, `V2`) with its rules string
+  (`RULES_V1`, `RULES_V2`). `V1` is the behavior before the bound-only cost rule; `V2`, the current version
+  (`RULES`), marks a bound-only cost provisional. `score_records` and `score_job` take the version and write
+  `Score.rules` from it; new scores use `RulesVersion::CURRENT`. The gate's job-record check maps the recorded
+  `rules` string to a version with `RulesVersion::from_recorded`, recomputes under it, and refuses a string no
+  version has. A re-score keeps the rules of the score it re-scores.
+- **Alternatives:** (a) Skip the check for the 8 files: fixes the instance and leaves the cause. (b) Edit the
+  records: forbidden. (c) Gate every future rules change on history: a separate request.
+- **Tradeoff:** The scorer keeps every old version's behavior for as long as scores written under it exist,
+  and a change to the rules now needs a new version rather than an edit in place.
+- **Reversal cost:** Low: drop `V1` once no score carries it.
+- **Provenance:** read: `athena-score` `score_job`, and `jobs::check` and `expected_score` in `athena-gate`;
+  measured: the `athena-score` tests `v1_scores_a_bound_only_cost_as_not_provisional_and_records_v1` and
+  `a_rules_string_selects_its_version_and_an_unknown_one_selects_none`, and the gate tests
+  `a_score_written_under_v1_is_accepted_with_its_bound_cost_not_provisional`,
+  `a_score_written_under_the_current_rules_marks_a_bound_cost_provisional`,
+  `a_score_labelled_v1_but_computed_under_v2_is_refused` and
+  `a_score_under_an_unknown_rules_version_is_refused`.
