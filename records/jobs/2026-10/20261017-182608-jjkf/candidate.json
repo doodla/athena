@@ -1,0 +1,107 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261017-182608-jjkf",
+  "base_commit": "2d4f2b7263a2fa832713e64c12caff19052b902f",
+  "base_fingerprint": "sha256:ac538f787844fcdf4588937512d2ff623f0180c2079c25fe86a2197d4265c093",
+  "previous_job": "20261017-184933-epht",
+  "candidate_commit": "3717591b9a6de062fbf66d873264096aaeec44ed",
+  "candidate_tree": "8a2aca0003ce980d3909dc06e8f83cf18f5ef985",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 97420
+    },
+    {
+      "path": "crates/athena-cli/tests/auditor.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 8943
+    },
+    {
+      "path": "crates/athena-core/src/auditor.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 18191
+    },
+    {
+      "path": "crates/athena-git/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 47249
+    }
+  ],
+  "fingerprint": "sha256:cca904b4bde46911670d0857a1fd04505feabb95235cb818f312e8c9e87cd04f",
+  "violations": [],
+  "producer_report": {
+    "summary": "`athena audit` now reads a landed job's changed files from the candidate commit if it exists. If it doesn't, it reads them from the newest commit on HEAD's history that has the trailer `Athena-Job: <id>` and holds at least one changed file. If the job changed files and none can be read, it stops before any model call with an error naming the job and the commits tried, and records nothing. Root cause: `show_file` treats a missing commit like a missing path, so the auditor wrote an empty outcome/ folder and still paid for the audit. I added `Git::commit_exists` and left `show_file` as it was. The change is in `crates/athena-core/src/auditor.rs`, `crates/athena-git/src/lib.rs`, `crates/athena-cli/tests/auditor.rs` and `CHANGELOG.md`. `cargo test --locked` passes, and clippy and `cargo fmt --all --check` are clean.",
+    "files": [
+      "crates/athena-core/src/auditor.rs",
+      "crates/athena-git/src/lib.rs",
+      "crates/athena-cli/tests/auditor.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "Ran as `cargo test --locked -q`: every suite passed. A few tests are ignored in the existing suites."
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "Ran `cargo fmt --all` first, then the check was clean."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Run `cargo test`: in a test repository where the candidate commit is absent but a squash commit with the `Athena-Job: <id>` trailer exists, the auditor's outcome/ folder holds the changed files' contents from the squash commit (asserted on file content) and exactly one audit is recorded.",
+        "status": "met",
+        "evidence": "New test `a_missing_candidate_commit_is_read_from_the_squash_commit_with_the_job_trailer` in crates/athena-cli/tests/auditor.rs passes (`cargo test --locked --test auditor`). It deletes the candidate's loose object, then asserts the auditor workspace text contains 'Hello, reader.' and that exactly one audit and one auditor run are recorded."
+      },
+      {
+        "criterion": "Run `cargo test`: with neither commit present, `athena audit <job>` fails with a message naming the job and the commits tried, the fake driver records zero invocations, and no audit or invocation record is written.",
+        "status": "met",
+        "evidence": "New test `with_no_commit_to_read_the_audit_refuses_before_paying` passes. It deletes the candidate object and flattens history so no commit carries the trailer. It asserts the error contains the job id and the candidate oid, the driver's invocation count is unchanged, HEAD is unchanged, and audits and auditor_runs are empty."
+      },
+      {
+        "criterion": "Run `cargo test`, `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check`: existing auditor tests pass unchanged and all are clean.",
+        "status": "met",
+        "evidence": "`cargo test --locked -q` ran with no failures, the 4 existing auditor tests included and unmodified. `cargo clippy --all-targets --locked -- -D warnings` and `cargo fmt --all --check` produced no warnings or diffs."
+      },
+      {
+        "criterion": "athena-git gains a small helper telling whether a commit exists; Git::show_file's behavior for a missing path is unchanged.",
+        "status": "met",
+        "evidence": "`Git::commit_exists` is added in crates/athena-git/src/lib.rs, and `show_file` is not edited. A new unit test checks `commit_exists` for a present commit, an absent oid and a path, and that `show_file` still returns None for a missing path and a missing commit."
+      },
+      {
+        "criterion": "auditor.rs resolves the commit (candidate, then the trailer-matched commit on the base, then none) and refuses before any model call when the job changed files and none can be read.",
+        "status": "met",
+        "evidence": "`read_changed_files` in auditor.rs is called before `JobConfig::at`, workspace creation and `agent_spec`/invoke. It tries the candidate if `commit_exists`, then the `log_grep(head, \"^Athena-Job: <id>$\")` matches, then bails with a message naming the job and the commits tried."
+      },
+      {
+        "criterion": "CHANGELOG.md [Unreleased] states that audits of jobs whose candidate commit is missing read nothing, and what changed; bullets have no blank lines between them.",
+        "status": "met",
+        "evidence": "A new `### Fixed` section with one bullet was added under [Unreleased] in CHANGELOG.md. It states the fault (missing candidate commit meant nothing was read, yet the audit was paid for and recorded) and the fix."
+      }
+    ],
+    "open_issues": [
+      "Behavior change to note: if the candidate commit exists but none of the job's changed files can be read from it (for example, all were deleted), the audit now refuses instead of running with an empty outcome/ folder. This follows the plan's 'none of its changed files can be read'."
+    ],
+    "mistakes": [
+      "A first draft used the wrong id type (RecordId instead of JobId) in the new helper's signature; the compiler caught it and it is fixed.",
+      "The scripts' output went through `cargo test` once in full; the output was too large to read, so I reran it with -q."
+    ],
+    "learnings": [
+      "`athena.head()` in the auditor is the checked-out base branch, so `log_grep` on it finds the squash commit. Records commits also carry `Athena-Job: <id>`, so a trailer match is only used when it actually holds a changed file.",
+      "Test candidate commits are loose objects, so the test can remove them with std::fs::remove_file. Flattening history with `git commit-tree` plus `reset --hard` removes the trailer commits while keeping the same tree and records."
+    ],
+    "desires": []
+  }
+}
