@@ -206,6 +206,7 @@ fn athena_with(
             }
             Role::Steward => FakeTurn::output(json!({ "items": [] })),
             Role::Audience => FakeTurn::output(json!({ "rating": 3, "findings": [] })),
+            Role::Auditor => FakeTurn::output(json!({ "summary": "Fine.", "findings": [] })),
         };
         if spec.role != Role::Reader {
             let readonly = std::fs::metadata(mount.join(FAKE_TREE_FILE))

@@ -42,6 +42,10 @@
 //! - [`audience`]: `athena audience`, a role that reads the live explainer page as a newcomer, rates it from 1
 //!   to 5, and records the rating with findings that each cite their evidence; a rating of 2 or lower queues
 //!   a work item, and the steward's brief and `athena status` show the latest rating;
+//! - [`auditor`]: `athena audit`, a role that judges a job's real outcome against `BRIEF.md` and the owner's
+//!   goals, never against the job's own acceptance criteria, and records findings that each cite their
+//!   evidence; the prompt is a fixed constant, protected from jobs by nothing else until the warden request
+//!   (prose-only);
 //! - [`pin`]: a study's repository ref resolved to a commit by the core, and mounted read-only;
 //! - [`plan`]: planning, the first stage: every open request fleshed out and all of them planned together into
 //!   one ordered plan with parallel groups, which `athena drain` follows; and the plan-stage audit's tracing
@@ -49,6 +53,7 @@
 
 pub mod admission;
 pub mod audience;
+pub mod auditor;
 pub mod capability;
 pub mod chain;
 pub mod checks;

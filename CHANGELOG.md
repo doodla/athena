@@ -9,6 +9,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The auditor role and `athena audit [JOB]`. A model judges a job's real outcome (its request, how it ended,
+  and the files it changed as they stood in its commit) against `BRIEF.md` and the owner's goals, never
+  against the job's own acceptance criteria, which it is not given. It reads with `Read`, `Grep` and `Glob`
+  only. The report is a summary and findings, each citing its evidence; a finding with no evidence refuses
+  the report, and the paid invocation is still recorded. A good report is recorded as `athena.audit/1` at
+  `records/audits/<YYYY-MM>/<id>.json`, beside the auditor's invocation and role definition; `athena audit`
+  prints the findings and the invocation record's path, and `athena status` shows the latest audit. The
+  auditor's prompt is protected from jobs only by being a fixed constant (`AUDITOR_PROMPT`); the warden
+  request will enforce that by mechanism, and until then the protection is prose-only.
 - Routing of the checks by the plan's job kind (item 5 of `docs/design/ci-routing.md` section 10), in
   `athena-core::routing`, called from the job run. The path rule `skip_when_only` still decides what is
   skipped, so a docs, design or study job that changes Rust, `Cargo.toml` or `Cargo.lock` still runs `fmt` and

@@ -269,6 +269,10 @@ pub struct Scenario {
     pub audience: Value,
     /// Everything the audience was given: system prompt, brief, and its workspace's files.
     pub seen_by_audience: Arc<Mutex<Vec<String>>>,
+    /// What the auditor reports (`{ "summary": "...", "findings": [...] }`).
+    pub auditor: Value,
+    /// Everything the auditor was given: system prompt, brief, and its workspace's files.
+    pub seen_by_auditor: Arc<Mutex<Vec<String>>>,
     /// What the source check reports, given the checker's workspace. None: it reads every file under
     /// `page-text/` and finds nothing wrong.
     pub source_check: Option<SourceJudge>,
@@ -327,6 +331,8 @@ impl Default for Scenario {
             steward_reads: None,
             audience: json!({ "rating": 3, "findings": [] }),
             seen_by_audience: Arc::new(Mutex::new(Vec::new())),
+            auditor: json!({ "summary": "The outcome serves the goals.", "findings": [] }),
+            seen_by_auditor: Arc::new(Mutex::new(Vec::new())),
             source_check: None,
         }
     }
@@ -437,6 +443,14 @@ impl Scenario {
                     seen.push(snapshot_text(&spec.workdir));
                     drop(seen);
                     FakeTurn::output(self.audience.clone())
+                }
+                Role::Auditor => {
+                    let mut seen = self.seen_by_auditor.lock().unwrap();
+                    seen.push(spec.system_prompt.clone());
+                    seen.push(spec.user_prompt.clone());
+                    seen.push(snapshot_text(&spec.workdir));
+                    drop(seen);
+                    FakeTurn::output(self.auditor.clone())
                 }
             };
             turn.cost_usd = self.cost;

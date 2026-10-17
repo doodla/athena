@@ -56,7 +56,7 @@ impl Model {
             match spec.role {
                 Role::Reader => model.briefs.lock().unwrap().push(spec.user_prompt.clone()),
                 Role::Producer => *model.producers.lock().unwrap() += 1,
-                Role::Verifier | Role::Steward | Role::Audience => {}
+                Role::Verifier | Role::Steward | Role::Audience | Role::Auditor => {}
             }
             inner(spec)
         })

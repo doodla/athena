@@ -261,6 +261,10 @@ pub fn deterministic_turn(spec: &AgentInvocation) -> FakeTurn {
         Role::Steward => FakeTurn::output(json!({ "items": [] })),
         // A nested run rates nothing: a middling rating with no findings raises no work item.
         Role::Audience => FakeTurn::output(json!({ "rating": 3, "findings": [] })),
+        // A nested run audits nothing: a summary with no findings.
+        Role::Auditor => FakeTurn::output(
+            json!({ "summary": "A fake audit made without a model call.", "findings": [] }),
+        ),
     }
 }
 

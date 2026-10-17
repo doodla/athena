@@ -143,6 +143,16 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Run the auditor on a job: a model judges the job's real outcome (its request and the files it changed)
+    /// against BRIEF.md and the owner's goals, not against the job's own criteria, and records findings that
+    /// each cite their evidence. Nothing is changed. Defaults to the latest job.
+    Audit {
+        /// The job to audit: a full id, a unique suffix, or `latest`.
+        #[arg(default_value = "latest")]
+        job: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Check a candidate `defaults.toml` against an open or accepted proposal and `defaults.toml` at HEAD:
     /// id, statement, version (base plus one) and parse. Exit 2 on a problem.
     CheckProposal {
@@ -694,6 +704,21 @@ fn run(cli: Cli) -> Result<u8> {
                 if let Some(item) = &rated.work_item {
                     println!("queued work item {}: {}", item.id, item.title);
                 }
+            }
+            Ok(0)
+        }
+        Command::Audit { job, json } => {
+            let athena = open(true)?;
+            let Some(audited) = athena.audit(&job)? else {
+                return Ok(0);
+            };
+            if json {
+                print_json(&serde_json::json!({
+                    "audit": audited.audit,
+                    "invocation": audited.invocation_path(),
+                }))?;
+            } else {
+                print!("{}", display::audit(&audited));
             }
             Ok(0)
         }

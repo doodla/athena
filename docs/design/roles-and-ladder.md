@@ -157,6 +157,29 @@ Alternatives:
 Candidate code is never built on the host because whoever writes the candidate controls what that build
 runs. A schema check must not be a way to run it.
 
+## The auditor
+
+The verifier judges a change against the acceptance criteria the reader wrote for that job, so a job is partly
+graded by a yardstick its own reading set. The auditor is a second grader whose yardstick a job cannot set.
+`athena audit [JOB]` (default `latest`) judges a job's real outcome against `BRIEF.md` and the owner's goals.
+
+- **What it is given.** `BRIEF.md` in its brief, `OUTCOME.md` (the request and how the job ended), and the
+  files the job changed, as they stood in its commit, under `outcome/`. It is not given the job's acceptance
+  criteria, its verification, its findings or any other record about it, so it looks at what the job did, not
+  at what records say about it.
+- **What it may do.** Read, with `Read`, `Grep` and `Glob`; no commands; it changes nothing. It borrows the
+  verifier's model and budget, as the steward and the audience do, and its run is charged to no job.
+- **What it returns.** A summary and findings, each with `text` and `evidence`. A finding with no evidence
+  refuses the whole report, and the invocation is still recorded because it cost money. A good report becomes
+  an `athena.audit/1` record (`records/audits/<YYYY-MM>/<id>.json`), committed with the auditor's invocation
+  and, the first time, its role definition. `athena audit` prints the findings and the path of the recorded
+  invocation; `athena status` shows the latest audit.
+- **How its prompt is protected.** Only by being a fixed constant (`AUDITOR_PROMPT` in
+  `crates/athena-data/src/roles.rs`), stored with the role as a versioned record. Nothing stops a job from
+  editing that file and so changing the yardstick it is judged by. The warden request will enforce this by
+  mechanism. Until then the protection is **prose-only**: written here and in the module comment, and checked
+  by no code.
+
 ## Limits
 
 - **Git history.** The agent sees `GIT-LOG.txt`, the hash, date and subject of the last 200 commits, and a

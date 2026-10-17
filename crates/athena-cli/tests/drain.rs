@@ -1098,9 +1098,16 @@ fn drain_after_config_change(
 
 #[test]
 fn a_change_to_max_concurrency_alone_does_not_invalidate_a_reading() {
-    // The 01:48 sequence: items were read, then `[parallel] max_concurrency` went from 1 to 2.
-    let before = test_config().replace("max_concurrency = 2", "max_concurrency = 1");
-    let after = test_config().replace("max_concurrency = 2", "max_concurrency = 3");
+    // The 01:48 sequence: items were read, then `[parallel] max_concurrency` was raised. The values are built
+    // from the one `athena.toml` carries (1), so the two configurations differ whatever that value is changed
+    // to: if the text being replaced were absent, `before` and `after` would be equal and this would fail.
+    let current = "max_concurrency = 1";
+    assert!(
+        test_config().contains(current),
+        "athena.toml no longer sets {current}; update this test"
+    );
+    let before = test_config().replace(current, "max_concurrency = 2");
+    let after = test_config().replace(current, "max_concurrency = 3");
     assert_ne!(before, after);
     let fx = Fixture::with_config(&before);
     let scenario = Scenario::default();
