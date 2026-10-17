@@ -365,13 +365,7 @@ impl Athena {
                 rescored = Some(s);
             }
         }
-        let subject: String = format!(
-            "Record an intervention: {}",
-            intervention.what.lines().next().unwrap_or("")
-        )
-        .chars()
-        .take(72)
-        .collect();
+        let subject = intervention_subject(&intervention.what);
         let body = format!(
             "Why: {}\nClass: {}. Category: {}.",
             intervention.why,
@@ -538,6 +532,17 @@ impl Athena {
     }
 }
 
+/// The commit subject for a recorded intervention, cut at a word boundary.
+fn intervention_subject(what: &str) -> String {
+    crate::truncate_at_word(
+        &format!(
+            "Record an intervention: {}",
+            what.lines().next().unwrap_or("")
+        ),
+        crate::SUBJECT_MAX,
+    )
+}
+
 /// Resolutions must target an existing pending quantity, one resolution per target (design §5.3).
 pub fn check_resolutions(set: &athena_gate::records::RecordSet) -> Vec<Violation> {
     let mut violations = Vec::new();
@@ -627,4 +632,23 @@ pub fn pending_quantities(set: &athena_gate::records::RecordSet) -> Vec<(String,
         }
     }
     found
+}
+
+#[cfg(test)]
+mod subject_tests {
+    use super::intervention_subject;
+
+    #[test]
+    fn a_long_intervention_subject_is_cut_at_a_word_boundary() {
+        let what =
+            "I rewrote the generated subject so that it never tells outside readers a half word";
+        let subject = intervention_subject(what);
+        let full = format!("Record an intervention: {what}");
+        assert!(subject.chars().count() <= 72, "{subject:?}");
+        assert!(full.starts_with(&subject));
+        assert!(
+            full[subject.len()..].starts_with(' '),
+            "ends mid-word: {subject:?}"
+        );
+    }
 }

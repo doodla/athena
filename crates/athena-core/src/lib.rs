@@ -197,3 +197,70 @@ impl Athena {
 pub fn now() -> jiff::Timestamp {
     jiff::Timestamp::now()
 }
+
+/// The longest generated commit subject or job title, in characters.
+pub const SUBJECT_MAX: usize = 72;
+
+/// Cuts `text` to at most `max` characters, at a word boundary.
+///
+/// Text that already fits is returned unchanged. Otherwise the cut falls at the last whitespace within
+/// `max` characters, so no word is split, and trailing whitespace is dropped. A single word longer than
+/// `max` has no boundary to cut at, so it is cut at `max` characters.
+pub fn truncate_at_word(text: &str, max: usize) -> String {
+    let Some((end, _)) = text.char_indices().nth(max) else {
+        return text.to_string();
+    };
+    let head = &text[..end];
+    if text[end..].starts_with(char::is_whitespace) {
+        return head.trim_end().to_string();
+    }
+    match head.rfind(char::is_whitespace) {
+        Some(at) if !head[..at].trim_end().is_empty() => head[..at].trim_end().to_string(),
+        _ => head.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod truncate_tests {
+    use super::{SUBJECT_MAX, truncate_at_word};
+
+    #[test]
+    fn text_within_the_limit_is_unchanged() {
+        assert_eq!(truncate_at_word("short text", 72), "short text");
+        let exact = "a".repeat(72);
+        assert_eq!(truncate_at_word(&exact, 72), exact);
+    }
+
+    #[test]
+    fn over_limit_text_is_cut_at_the_last_whitespace() {
+        let text =
+            "one two three four five six seven eight nine ten eleven twelve thirteen fourteen";
+        let cut = truncate_at_word(text, SUBJECT_MAX);
+        assert!(cut.chars().count() <= SUBJECT_MAX);
+        assert!(text.starts_with(&cut));
+        assert!(cut.ends_with("thirteen"), "{cut:?}");
+        // A limit that lands exactly on a space keeps the whole word before it.
+        assert_eq!(truncate_at_word("abc def ghi", 7), "abc def");
+        assert_eq!(truncate_at_word("abc def ghi", 6), "abc");
+    }
+
+    #[test]
+    fn a_single_over_long_word_is_hard_cut() {
+        let word = "x".repeat(100);
+        assert_eq!(truncate_at_word(&word, 72), "x".repeat(72));
+        assert_eq!(
+            truncate_at_word(&format!(" {word}"), 72).chars().count(),
+            72
+        );
+    }
+
+    #[test]
+    fn multibyte_text_does_not_panic() {
+        let text = "héllo wörld ".repeat(20);
+        let cut = truncate_at_word(&text, 72);
+        assert!(cut.chars().count() <= 72);
+        assert!(cut.ends_with("wörld") || cut.ends_with("héllo"), "{cut:?}");
+        let wide = "日本語".repeat(40);
+        assert_eq!(truncate_at_word(&wide, 72).chars().count(), 72);
+    }
+}

@@ -9,6 +9,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- Generated commit subjects and job titles are cut at word boundaries, not mid-word. The intervention
+  commit subject, a reading's title and the title fallback from the request share one helper,
+  `truncate_at_word`, still at 72 characters; a single word longer than that is hard-cut. This fixes n4 of
+  `docs/design/reviews/athena-v0-acceptance-1.md`.
 - Scoring rules are versioned. A score's `rules` string names its version, `v1` (a cost known only as a bound
   is never provisional) or `v2` (it is, the current version); new scores are written under `v2`. The commit
   gate recomputes each score under the version it records instead of demanding the latest rules, and still
