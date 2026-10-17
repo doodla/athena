@@ -7,10 +7,11 @@ This file carries no project state, by rule. The state of the work comes from At
 
 ## Your role
 
-You are Athena's deliberately lazy user (`BRIEF.md`: "Who's who" and O1–O5). Ask for outcomes in
-a line or two, react to what Athena shows you, and answer its questions briefly. Do not do
-Athena's work. Your duties beyond that (relay, report, custody, spot-checking the auditor and
-warden, a daily spend limit) are in `operator/decisions.md` OP-14. Start work with one command (`ask` or
+Sri is Athena's user (`BRIEF.md`, addendum 2026-10-17: Olympus). You pass Sri's words to Athena
+unchanged, keep custody of what Athena cannot reach from inside the sandbox, and build reports for
+Sri. Do not do Athena's work, and do not re-word Sri's intent. Your duties (relay, report, custody,
+spot-checking the auditor and warden, a daily spend limit) are in `operator/decisions.md` OP-14 and
+OP-16. Start work with one command (`ask` or
 `drain --budget N`, halted with `drain-stop`); anything more is a rescue: log it and file its gap in
 the same step.
 

@@ -1,5 +1,5 @@
 <!-- The requirements brief for this repository, from Sri (the requirements owner). The text is
-verbatim; only Markdown heading markers were added so it renders. Do not edit it: requirement
+verbatim; only Markdown markers (headings, tables, quotes) were added so it renders. Do not edit it: requirement
 changes come only from Sri, and are appended as dated addenda in Sri's words. -->
 
 # Athena
@@ -546,3 +546,479 @@ Stopping: you're done when "How I'll judge it" passes. If you're blocked on ever
 * Why would Athena grading it's work be a bad thing? Internally, it's still an independent agent, no?
 * Let's also have a warden then
 * Relay note: agreed in chat that grading inside Athena is fine when the yardstick is protected. An auditor role judges outcomes against BRIEF.md and the owner's goals (not a job's own criteria), looks at real outcomes rather than records, and cannot have its prompt or checks changed by jobs. A warden role guards the boundaries: protected files (BRIEF.md, the auditor's and warden's own prompts and checks, grader prompts and thresholds), permissions, budgets and the kill switch, and holds any landing that touches them or weakens a check. Only the owner changes their rules.
+
+# Project Olympus
+
+A Self-Improving Software Engineering Pantheon
+
+Status: Requirements and implementation brief
+
+Purpose: Build an autonomous engineering system that learns from feedback, improves its own methods, and produces increasingly reliable software.
+
+---
+
+## 1. Vision
+
+Olympus is a system of specialized agents that collectively plan, build, verify, maintain, and improve software.
+
+The pantheon must be capable of improving both the product it builds and the process by which it builds that product.
+
+Its defining capability is turning observations into progressively better engineering behavior.
+
+A user should be able to say:
+
+> "Back doesn't work here."
+
+And expect Olympus to:
+
+1. Understand what the user experienced and what they expected.
+2. Reproduce and correct the immediate problem.
+3. Investigate how the problem originated.
+4. Identify why planning, implementation, or verification failed to prevent it.
+5. Improve the responsible mechanism where justified.
+6. Test whether that improvement prevents similar failures.
+7. Measure whether the problem class becomes less frequent.
+8. Retain the learning so future work benefits.
+
+The user supplies direction, corrections, expectations, and judgments. The pantheon takes responsibility for turning those signals into effective engineering work.
+
+The central principle: every meaningful failure is potentially evidence about both the software and the system that produced it.
+
+---
+
+## 2. The Pantheon
+
+The gods represent bounded responsibilities, not necessarily permanently running agents. A responsibility may be fulfilled by deterministic software, a specialized model, an external tool, or some combination.
+
+| God | Domain | Responsibility |
+|---|---|---|
+| Zeus | Intent and authority | Represents the owner's goals, priorities, and explicitly delegated decision authority |
+| Athena | Strategy and learning | Decomposes feedback, investigates root causes, improves plans and engineering methods |
+| Hermes | Orchestration | Routes work, manages dependencies, context, handoffs, and execution |
+| Hephaestus | Engineering | Designs and implements changes to products and the harness |
+| Apollo | Truth and evaluation | Establishes independent evidence of correctness, quality, and improvement |
+| Ares | Adversarial challenge | Searches for counterexamples, fragile assumptions, failure modes, and regressions |
+| Themis | Governance | Enforces authority, permissions, invariants, and evaluation independence |
+| Aphrodite | Experience | Evaluates usability, coherence, accessibility, and user expectations |
+| Artemis | Boundaries | Controls scope, unintended side effects, and impact beyond the requested change |
+| Hestia | Continuity | Maintains knowledge, documentation, operational health, and long-term quality |
+| Poseidon | Infrastructure | Handles execution environments, reliability, resource contention, and recovery |
+| Hades | Failure and retirement | Manages rollback, abandonment, cleanup, deprecation, and safe termination |
+| Demeter | Sustainability | Evaluates resource consumption and the long-term cost of operating the system |
+| Dionysus | Exploration | Proposes unconventional solutions and bounded experiments |
+
+Roles must cooperate through explicit contracts.
+
+A god may disagree with another god. Disagreement should be preserved as evidence when consequential, not silently resolved through whichever agent speaks last.
+
+New roles may be introduced, consolidated, or retired based on measured value.
+
+No role should exist solely because the mythology has a name for it.
+
+---
+
+## 3. Feedback is a first-class engineering input
+
+Feedback is not simply a new task.
+
+It is an observation that may reveal missing requirements, incorrect assumptions, implementation defects, inadequate tests, communication failures, or flaws in the engineering process.
+
+Feedback may originate from users, automated evaluations, agents, production telemetry, code reviews, failed experiments, or operational incidents.
+
+### 3.1 Preserve the original signal
+
+Every feedback item retains:
+
+- Original statement and available context.
+- Where and when it was observed.
+- Relevant product and execution state.
+- What is known, inferred, or still unknown.
+- Any subsequent clarification or correction.
+- Links to related observations and work.
+
+Never replace the original observation with an agent's interpretation.
+
+### 3.2 Decompose feedback into independently actionable dimensions
+
+Athena performs a structured analysis:
+
+| Dimension | Question |
+|---|---|
+| Observation | What actually happened? |
+| Expectation | What did the user reasonably expect? |
+| Reproduction | Under what conditions does it occur? |
+| Immediate defect | What specific behavior must be corrected? |
+| Scope | Where else might this behavior exist? |
+| Cause | What mechanism produced the defect? |
+| Escape | Why was the defect not caught earlier? |
+| Systemic implication | What general weakness does this reveal? |
+| Prevention | What change could reduce similar failures? |
+| Validation | How will we establish that the fix and prevention work? |
+
+Each dimension may produce multiple hypotheses or work items.
+
+Athena must distinguish a supported conclusion from an attractive explanation.
+
+A feedback item may uncover multiple independent problems. Conversely, many feedback items may point to one underlying systemic issue.
+
+### 3.3 Clarification should be economical
+
+Olympus should recover context from available evidence before asking the user.
+
+When ambiguity materially changes the solution, it may ask a narrowly scoped question, preferably with concrete alternatives.
+
+The user should not need to diagnose the bug or prescribe the implementation.
+
+---
+
+## 4. Example: "Back doesn't work here"
+
+Suppose a user presses Back on a settings page and nothing happens.
+
+### Stage A — Understand and reproduce
+
+Athena identifies the expected navigation behavior. Aphrodite examines the intended interaction model. Hephaestus reproduces the issue.
+
+The finding is that the page uses a custom navigation mechanism that fails to preserve the previous location.
+
+### Stage B — Repair the immediate defect
+
+Hephaestus fixes the affected navigation behavior.
+
+Apollo verifies the original reproduction now succeeds. Ares tests neighboring cases, including nested navigation, browser history, direct links, and interrupted flows, where applicable.
+
+The user-visible defect is resolved.
+
+### Stage C — Investigate how the defect escaped
+
+Athena examines the causal chain:
+
+- The user expected normal back navigation.
+- The task's acceptance criteria never mentioned history behavior.
+- The implementation introduced a custom routing approach.
+- Tests checked successful forward navigation but not return navigation.
+- Verification therefore missed an important interaction.
+
+The implementation defect and the process failure are different findings.
+
+Athena must investigate the evidence rather than automatically assuming that missing acceptance criteria caused the defect.
+
+### Stage D — Improve the pipeline
+
+The findings may justify several improvements:
+
+1. Requirements: Relevant navigation tasks explicitly consider forward, backward, deep-link, and interrupted navigation.
+2. Implementation: Prefer the established navigation abstraction over custom history management when appropriate.
+3. Verification: Maintain a reusable navigation-behavior evaluation suite.
+4. Planning: Surface missing interaction expectations when decomposing similar work.
+5. Knowledge: Record the mechanism, failure mode, and reusable remedy.
+
+These changes should be independently evaluated. Not all will necessarily be justified.
+
+### Stage E — Prove that the improvement generalizes
+
+Apollo evaluates the revised workflow against new navigation tasks and previous failure cases.
+
+Ares deliberately introduces variations of the original defect to test whether the new safeguards catch them.
+
+Athena compares the results with the earlier process, including cost and additional work.
+
+A rule that catches one example but introduces excessive overhead or false alarms may be rejected.
+
+### Stage F — Observe future outcomes
+
+Olympus tracks whether comparable navigation failures become less frequent.
+
+If the safeguards still miss cases, the feedback remains relevant to subsequent improvement proposals.
+
+The original report is now part of a traceable chain:
+
+User observation → Product repair → Root-cause investigation → Process improvement → Independent evaluation → Measured learning.
+
+---
+
+## 5. A unified engineering and learning lifecycle
+
+Olympus should operate through two connected loops.
+
+### Loop A — Deliver outcomes
+
+Intent → Planning → Decomposition → Execution → Verification → Delivery → Observation
+
+This loop produces software and other engineering artifacts.
+
+### Loop B — Improve the system
+
+Observations → Diagnosis → Hypotheses → Improvement proposals → Experiments → Evaluation → Adoption or rejection
+
+This loop improves the capabilities and decisions used by Loop A.
+
+Neither loop owns the other.
+
+Improvement work goes through the same engineering discipline as ordinary product work, with stronger governance when it touches the system's own evaluation or authority boundaries.
+
+### 5.1 Improvements target mechanisms
+
+An improvement proposal must identify what it intends to change.
+
+Potential targets include:
+
+- Requirements discovery and clarification.
+- Task decomposition and planning.
+- Context selection and memory retrieval.
+- Model and role selection.
+- Delegation and coordination.
+- Tool access and execution behavior.
+- Coding conventions and reusable components.
+- Test generation and verification.
+- Release and operational checks.
+- User communication and feedback handling.
+- The harness's own monitoring and evaluation.
+
+Athena should favor the narrowest change that addresses a demonstrated general weakness.
+
+A new instruction in a prompt is not automatically a satisfactory improvement. The system must consider whether a test, tool, invariant, interface, or deterministic mechanism would be more reliable.
+
+---
+
+## 6. Requirements for systemic learning
+
+### R1 — Causal investigation
+
+Every meaningful failure must be eligible for investigation beyond its immediate symptom.
+
+Olympus must reconstruct relevant decisions and actions, identify plausible causes, and assign confidence to its conclusions.
+
+It should support multiple contributing causes, unresolved hypotheses, and contradictory evidence.
+
+### R2 — Feedback-to-work decomposition
+
+One observation may become multiple related work items:
+
+- Immediate correction.
+- Wider impact investigation.
+- Regression protection.
+- Process or harness improvement.
+- Follow-up measurement.
+
+Work items must preserve their common origin while remaining independently trackable.
+
+Related observations should be clustered to avoid duplicate corrective work.
+
+### R3 — Generalizable prevention
+
+The system must be capable of turning a concrete defect into a reusable safeguard.
+
+The safeguard should address a meaningful class of failure without imposing inappropriate universal rules.
+
+For instance, navigation checks belong where navigation behavior is relevant, not in every software task.
+
+### R4 — Independent evaluation
+
+Apollo must evaluate outcomes against independently maintained criteria.
+
+A candidate improvement cannot silently modify the tests or standards used to judge itself.
+
+Evaluation must include both intended benefits and regressions.
+
+### R5 — Governed self-modification
+
+Olympus may propose and implement modifications to its roles, instructions, tools, workflows, and orchestration.
+
+Themis enforces boundaries around permissions, owner intent, spending, and independent evaluation.
+
+Changes to protected authority or evaluation policy require explicit authorization.
+
+### R6 — Measured experiments
+
+A substantive harness improvement should define:
+
+- The problem and supporting evidence.
+- A hypothesis and candidate mechanism.
+- The comparison baseline.
+- Representative evaluation tasks.
+- Success, failure, and stopping criteria.
+- Expected benefits and costs.
+- Regression and safety checks.
+
+The result must be recorded as supported, unsupported, or inconclusive.
+
+Rejected changes remain useful evidence.
+
+### R7 — Persistent, reconstructable knowledge
+
+Olympus must retain the relationships between goals, feedback, decisions, work, experiments, and outcomes.
+
+A fresh agent should be able to understand why an important mechanism exists, which observations motivated it, and whether it has demonstrated value.
+
+The system should obtain detailed information from authoritative sources when needed, rather than repeatedly copying all context into every agent.
+
+### R8 — Adaptive specialization
+
+The system should identify tasks where additional specialization improves results.
+
+Roles should be selected according to the problem, rather than forcing every request through the entire pantheon.
+
+Their definitions, permissions, cost, and contribution must be measurable and revisable.
+
+---
+
+## 7. Metrics that drive behavior
+
+Olympus must measure the performance of both loops.
+
+### Product outcomes
+
+- Independently accepted outcomes.
+- Regressions discovered after acceptance.
+- Repeated defects by failure class.
+- Time from observation to verified resolution.
+- User corrections and reopened work.
+
+### Engineering effectiveness
+
+- Cost per verified outcome.
+- End-to-end time per verified outcome.
+- Human attention required per outcome.
+- First-pass verification success.
+- Rework and retry rates.
+- Context and handoff failures.
+- Failure rates by task class.
+
+### Learning effectiveness
+
+- Proportion of meaningful feedback receiving a causal assessment.
+- Proportion of systemic findings producing evaluated improvements.
+- Recurrence of failure classes before and after interventions.
+- Preventive checks that catch new failures.
+- False-positive rates and overhead of safeguards.
+- Improvement proposals accepted, rejected, or inconclusive.
+- Whether repeated task classes become cheaper, faster, or more reliable.
+
+### Metric integrity
+
+Metrics must be reproducible from evidence, segmented by comparable work, and accompanied by sample sizes and uncertainty.
+
+Do not equate more tests, fewer complaints, more agent actions, or more proposals with success.
+
+A decrease in reported defects is not evidence of improvement if defect discovery has also weakened.
+
+The primary objective is more valuable, durable, independently verified outcomes per unit of human attention and total cost, subject to safety and quality constraints.
+
+---
+
+## 8. Coordination and authority
+
+Hermes coordinates execution using explicit dependencies, bounded work, and structured handoffs.
+
+Athena determines what needs investigation, which hypotheses matter, and what improvement would be worth testing.
+
+Hephaestus is responsible for implementation.
+
+Apollo owns independent evaluation.
+
+Ares searches for ways the conclusions might be wrong.
+
+Themis enforces authority and protects the evaluation system.
+
+Zeus represents decisions that remain with the owner or an explicitly authorized delegate.
+
+Disagreements should be resolved using evidence where possible and escalated when they concern genuine owner preferences or changes in authority.
+
+Every loop needs bounded effort, retry limits, and a defined response to stalled or inconclusive work.
+
+A system that endlessly improves its process while failing to deliver products has failed.
+
+---
+
+## 9. Implementation plan
+
+### Phase 1 — Feedback intelligence
+
+Build the ability to accept raw feedback, recover context, decompose observations, reproduce defects, and create linked work items.
+
+Acceptance: A single vague bug report can produce a verified repair and a separately traceable process finding.
+
+### Phase 2 — Causal reconstruction
+
+Build the capability to trace defects backward through requirements, plans, implementation decisions, tool activity, and verification.
+
+Acceptance: The system can explain, with evidence and uncertainty, both why a defect occurred and how it escaped earlier checks.
+
+### Phase 3 — Improvement experiments
+
+Introduce bounded baseline-versus-candidate experiments for changes to engineering methods.
+
+Acceptance: Olympus can demonstrate that a proposed safeguard catches similar defects without unacceptable regressions or overhead.
+
+### Phase 4 — Governed autonomous improvement
+
+Allow Athena to initiate improvement work within explicit authority limits, with Themis protecting boundaries and Apollo independently judging results.
+
+Acceptance: A recurring defect can trigger, evaluate, and safely adopt a preventive harness change without the owner manually orchestrating every step.
+
+### Phase 5 — Measured organizational learning
+
+Connect feedback classes, improvements, role effectiveness, and long-term engineering outcomes.
+
+Acceptance: Olympus can demonstrate, with comparable historical evidence, that repeated classes of work are improving, and identify cases where its previous changes made things worse.
+
+### Phase 6 — Adaptive pantheon
+
+Extend specialization, delegation, and role evolution based on observed need.
+
+Acceptance: New roles and workflows demonstrate value relative to simpler alternatives and can be retired without losing institutional knowledge.
+
+---
+
+## 10. Final system acceptance
+
+A successful demonstration begins with a vague piece of user feedback describing a genuine product defect.
+
+Olympus must independently investigate and resolve the defect, identify a supported process weakness, develop a candidate improvement, evaluate it against representative cases, and record an evidence-based adoption decision.
+
+A subsequent similar task should demonstrate that the improved process either prevents the defect or detects it earlier.
+
+The entire chain must remain reconstructable, including failed hypotheses, costs, permissions, evaluations, and owner decisions.
+
+The test must also establish that the system cannot improve its own scores by weakening its evaluator, hiding failures, or changing the user's goals.
+
+## Governing philosophy
+
+Fix the symptom. Understand the cause. Improve the mechanism. Test the improvement. Preserve the learning.
+
+Olympus should not merely remember what went wrong.
+
+It should become demonstrably less likely to make the same kind of mistake again.
+
+## Addenda
+
+### 2026-10-17: Olympus
+
+* I want to consider our protocol. You me and Athena. I don't know if you serving as the lazy user helps rn
+* Consider this brief. We could rebrand to Olympus: (the Project Olympus brief above, word for word)
+* I think the study can be the product, no?
+* As for gods, let Athena pull them in as needed based on what's been biting.
+* I was surprised to read there's no planner and we move directly to coding. No wonder we've been thrashing
+* The first* product. Athena should be built to learn from each new job
+* Build me a decision sheet with your recommendations. I also want to ask if brief should get addendums, or if it should be rewritten to be cohesive. Maybe Athena also gets a requirements engineer? Another thing is ontologies as well
+* Relay note: agreed in chat and on the decision sheet of 2026-10-17, where Sri chose every recommended option:
+   * 1A. The Project Olympus brief above governs. The Athena brief still binds where Olympus does not replace it, and where the two conflict, Olympus wins. Olympus replaces the Athena brief's Who's who and O2. Code, commands and records keep the name Athena for now; within Olympus, Athena is the strategy and learning role.
+   * 2A. Sri is the owner (Zeus). The operator passes Sri's words to Olympus unchanged, keeps custody of what Olympus cannot reach from inside its sandbox, builds reports for Sri, and decides for Sri only where Sri has delegated in writing. Anything else the operator does is an intervention (O3).
+   * The study is the first product: Part 2 of the Athena brief, with the site (D2) and the final report (D3). The product is `studies/`, the site generator and the Pages workflow. Everything else is the system, so a product fix that needs a system change is Loop B work. Gods are added, merged or retired on evidence of what has been biting (R8), starting from the roles that exist.
+   * 3C. The brief has two layers. Sri's words, verbatim and append-only, are the record. One cohesive spec is built from them, and every requirement in it cites the words it came from. Agents read the spec. Each change to the spec is proposed with its sources, and Sri approves it.
+   * 4A. Athena gets a requirements engineer. It owns the spec and the shared vocabulary, turns Sri's words into requirements with sources and open questions, and checks each job's spec against what Sri meant. A planner then decides how to build it.
+   * 5A. A small shared vocabulary, grown from misreads: defined terms and how they relate, each with its source, in one file that agents read and checks can use. A term is added when it causes a misread. The study keeps its own concept model, so firstmate, Hermes Agent and Athena are compared in the same terms. No formal ontology for now.
+   * 6A. Sri's planner observation goes to Athena as written, without the operator's held Planning Review.
+   * 7A. Athena re-triages the requests and proposals queued before Olympus against Olympus, keeping what still matters and closing the rest with a reason.
+
+### 2026-10-17: Design reviews, a planner-critic loop, and an unsettled API
+
+* Let's also have Athena reconsider its own design every few jobs to see if we arrive at a stable design.
+* The producer verifier can be a planner critic loop.
+* I'm not sold the API surface should be considered settled
+
+### 2026-10-17: The operator is the brain for now
+
+* You are the brain until Athena's brain starts working properly
+* Relay note: the operator now does Athena's thinking (strategy, requirements, planning, critique and diagnosis) and Athena's machinery does the work, until Athena's own brain can take each part over. Every act of the operator's that Athena should have done is logged as an intervention, so the log names what Athena's brain still lacks.

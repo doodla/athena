@@ -184,3 +184,57 @@ Athena's decision log, not here. Newest last.
 - Retires OP-12 (the operator owns ordering): Athena's planning stage now orders the work.
 - Unchanged: no hand edits to Athena's code, push only under the lease, Athena never references the operator, and
   the high bar for reaching Sri (OP-10).
+
+## OP-15. Standing instructions from Sri carried across the 2026-10-17 restart (2026-10-17)
+
+- Hold the planning-pipeline critique (https://claude.ai/artifact/XnBg72gAKbXZjZDxhzLvUA): Sri said "We won't send it
+  to Athena yet". Do not relay it or file it as requests until Sri says so.
+- Pages made for Sri: plans (https://claude.ai/artifact/AXhv38TsXZpxY4x35vVNvH) and the systems atlas
+  (https://claude.ai/artifact/RrfQHSkNEf1snfa6Dtvm88, a snapshot as of main 7e94791).
+- 2026-10-17 ~16:00 UTC, Sri: "Stop the queue, and restart". The kill switch was thrown on the old machine (it is
+  machine-local, so a new machine starts with it off), and the running job 20261017-155259-7mjc ended rejected.
+  Confirm with Sri before resuming work.
+
+## OP-16. Olympus: Sri is the user; the operator relays and keeps custody (2026-10-17)
+
+- Decision (Sri, decision sheet of 2026-10-17, https://claude.ai/artifact/BL3f5haocHYvJiC5jCKSin, read at ~17:33
+  UTC; every recommended option, no notes):
+  1. 1A: adopt Sri's Project Olympus brief. It is appended to `BRIEF.md` after the Athena brief's addenda, so the
+     line numbers that `docs/design/requirements-map.md` cites do not move, and it ends with a second `## Addenda`
+     for owner addenda from 2026-10-17 on. Code, commands and records keep the name Athena for now.
+  2. 2A: Sri is the user (Zeus). The operator passes Sri's words to Athena unchanged, keeps custody, and builds
+     reports. BRIEF.md O2 (the operator as lazy user) is replaced. An option Sri picks on a decision sheet goes to
+     Athena worded as on the sheet, with a line naming its source.
+  3. 3C: the brief gets two layers, Sri's verbatim words as the record and one cohesive spec built from them.
+  4. 4A: Athena gets a requirements engineer. 5A: a small shared vocabulary grown from misreads.
+  5. 6A: Sri's planner line goes to Athena as written, without the held Planning Review (OP-15's hold stands).
+  6. 7A: Athena re-triages the requests and proposals queued before Olympus.
+- Unchanged: OP-14's duties and boundary. Anything beyond relay and custody is an intervention, logged with
+  `athena intervene` and filed as a gap in the same step. OP-15's "confirm with Sri before resuming work" still
+  holds until Sri says go.
+- Baseline before the change, from Athena's records at ~17:00 UTC: 293 jobs; 152 of the 250 finished jobs landed
+  (61%); about $255 of reported model cost, about $1.68 per landed job; 109 interventions; 85 recorded
+  introspections, 46 of them in seven failure classes at the front or the end of the pipeline; about 78% of
+  dispatched jobs (judged by title) were work on Athena itself. The fourth operator session's own usage was about
+  $273.
+- Why: the stand-in user had become hidden project management. 12 of the last 30 interventions were overrides,
+  and the operator cost more than every Athena job together. With Sri as the user, the intervention log and
+  Olympus's human-attention metric measure Athena against real attention.
+- 2026-10-17 ~17:40 UTC, Sri, after the operator stopped to wait for a go: "I think you should be doing more work
+  somehow". Read as the go that OP-15 asked for, and as a standing instruction: keep Athena working within the
+  daily spend limit without waiting for a go each time, do the custody work (landing, restarts, the lease)
+  actively, and spend the operator's own time on OP-14's spot-checks and reports. Decisions still go to Sri.
+
+## OP-17. The operator is Athena's brain until Athena's own works (2026-10-17)
+
+- Decision (Sri, in chat, ~18:00 UTC): "You are the brain until Athena's brain starts working properly". This
+  widens OP-16's 2A. The operator now decides what Athena works on and in what order, writes requests with the
+  requirements, plan and acceptance a planner would have produced, critiques readings and results, and diagnoses
+  failures. Athena's producer, verifier, landing and records do the work.
+- Every such act is logged with `athena intervene` (class of work, and category: gave-detailed-instructions,
+  overrode-decision, did-work-themselves), so the log is the list of what Athena's brain still lacks.
+- Handover: each part (requirements, planning, critique, ordering, diagnosis) moves back to Athena once Athena's
+  own version agrees with the operator's on recent jobs. Athena builds those parts first.
+- Also relayed: Sri's three lines of ~17:45 (design review every few jobs toward a stable design; the producer and
+  verifier as a planner-critic loop; the API surface not settled), held until the drain ended so that two Athena
+  commands would not commit at once.
