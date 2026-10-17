@@ -257,6 +257,43 @@ pub fn deterministic_turn(spec: &AgentInvocation) -> FakeTurn {
                 "summary": "A fake verdict made without a model call."
             }))
         }
+        // A plan with one demonstration for each numbered criterion in the brief, and one file to create.
+        Role::Planner => {
+            let demonstrations: Vec<Value> = section(&spec.user_prompt, "## Acceptance criteria")
+                .lines()
+                .filter_map(|l| {
+                    l.split_once(". ")
+                        .filter(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+                        .map(|(n, rest)| (n.parse::<u32>().unwrap_or(0), rest))
+                })
+                .map(|(n, rest)| (n, rest.split_once("] ").map_or(rest, |(_, text)| text)))
+                .map(|(n, text)| {
+                    json!({
+                        "criterion": n,
+                        "method": "read the change",
+                        "command": "cargo test --locked",
+                        "observes": format!("fake planner: {text}"),
+                        "fails_without": "fake planner: nothing was checked"
+                    })
+                })
+                .collect();
+            FakeTurn::output(json!({
+                "approach": format!("Write the request to {FAKE_DELIVERABLE} (fake planner, no model call)."),
+                "decisions": [],
+                "files": [{ "path": FAKE_DELIVERABLE, "action": "create", "purpose": "Hold the request." }],
+                "steps": [format!("Create {FAKE_DELIVERABLE}.")],
+                "risks": [],
+                "demonstrations": demonstrations,
+                "open_questions": []
+            }))
+        }
+        // A critic that finds nothing wrong.
+        Role::Critic => FakeTurn::output(json!({
+            "verdict": "accept",
+            "findings": [],
+            "request_reading_mismatch": null,
+            "summary": "A fake critique made without a model call."
+        })),
         // A nested run has nothing for the steward to report.
         Role::Steward => FakeTurn::output(json!({ "items": [] })),
         // A nested run rates nothing: a middling rating with no findings raises no work item.
@@ -344,6 +381,32 @@ mod tests {
             .unwrap();
         assert_eq!(steward.structured.unwrap()["items"], json!([]));
         assert_eq!(steward.cost_usd, Some(0.0), "no model call, no cost");
+    }
+
+    #[test]
+    fn the_fake_planner_covers_every_criterion_and_the_critic_accepts() {
+        let dir = tempfile::tempdir().unwrap();
+        let driver = FakeAgentDriver::deterministic();
+        let brief = "## Acceptance criteria\n\n1. [content] it exists\n2. [behavior] it runs\n3. [content] it is documented\n\n## Next";
+        let plan = driver
+            .invoke(&spec(Role::Planner, brief, dir.path().into()), &mut NoSink)
+            .unwrap()
+            .structured
+            .unwrap();
+        let numbers: Vec<u64> = plan["demonstrations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["criterion"].as_u64().unwrap())
+            .collect();
+        assert_eq!(numbers, [1, 2, 3]);
+        let critique = driver
+            .invoke(&spec(Role::Critic, "", dir.path().into()), &mut NoSink)
+            .unwrap()
+            .structured
+            .unwrap();
+        assert_eq!(critique["verdict"], "accept");
+        assert_eq!(critique["findings"], json!([]));
     }
 
     #[test]

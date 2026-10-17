@@ -29,6 +29,57 @@ pub struct Config {
     /// How many jobs one drain may run at once. Absent from `athena.toml` means one at a time.
     #[serde(default)]
     pub parallel: Parallel,
+    /// Job planning (`docs/design/job-planning.md`). Absent means off. It is left out of the serialized form
+    /// when absent and reset in [`Config::reading_inputs`], so it never changes a reading's config digest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_plan: Option<JobPlanConfig>,
+}
+
+/// `[job_plan]`: the planner and critic that run before the producer. Nothing reads these settings yet.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JobPlanConfig {
+    /// Whether jobs are planned. The default is false.
+    #[serde(default)]
+    pub enabled: bool,
+    /// The most plan-and-critique rounds before a job stops in planning, at least 1.
+    #[serde(default = "JobPlanConfig::default_max_rounds")]
+    pub max_rounds: u32,
+    /// The cap on one planner call, in dollars.
+    #[serde(default = "JobPlanConfig::default_usd")]
+    pub planner_usd: f64,
+    /// The cap on one critic call, in dollars.
+    #[serde(default = "JobPlanConfig::default_usd")]
+    pub critic_usd: f64,
+    #[serde(default = "JobPlanConfig::default_timeout_s")]
+    pub planner_timeout_s: u64,
+    #[serde(default = "JobPlanConfig::default_timeout_s")]
+    pub critic_timeout_s: u64,
+}
+
+impl JobPlanConfig {
+    fn default_max_rounds() -> u32 {
+        3
+    }
+    fn default_usd() -> f64 {
+        0.75
+    }
+    fn default_timeout_s() -> u64 {
+        600
+    }
+}
+
+impl Default for JobPlanConfig {
+    fn default() -> Self {
+        JobPlanConfig {
+            enabled: false,
+            max_rounds: Self::default_max_rounds(),
+            planner_usd: Self::default_usd(),
+            critic_usd: Self::default_usd(),
+            planner_timeout_s: Self::default_timeout_s(),
+            critic_timeout_s: Self::default_timeout_s(),
+        }
+    }
 }
 
 /// The most jobs `[parallel] max_concurrency` may allow at once. A drain runs a model and a build per job, so
@@ -300,6 +351,8 @@ pub enum ConfigError {
     Exempt(String),
     #[error("[parallel] max_concurrency {0} must be from 1 to {MAX_CONCURRENCY_CEILING}")]
     Parallel(u32),
+    #[error("[job_plan] {0} must be positive")]
+    JobPlan(&'static str),
 }
 
 impl Config {
@@ -311,7 +364,8 @@ impl Config {
     }
 
     /// The configuration that bears on a reading, as canonical text: every setting except `[parallel]`
-    /// (how many jobs a drain runs at once) and `[landing]` (how a pull request is merged). Neither changes
+    /// (how many jobs a drain runs at once), `[landing]` (how a pull request is merged) and `[job_plan]`
+    /// (not yet read by any stage, and absent from the text so old digests hold). None changes
     /// what the reader sees or what a job may do, so a change to them leaves a reading valid (D38). The text
     /// does not depend on how the file is laid out, only on the parsed values, so comments, spacing and key
     /// order do not count either.
@@ -319,6 +373,7 @@ impl Config {
         let mut relevant = self.clone();
         relevant.parallel = Parallel::default();
         relevant.landing = Landing::default();
+        relevant.job_plan = None;
         serde_json::to_string(&relevant).expect("a parsed configuration serializes")
     }
 
@@ -390,6 +445,25 @@ impl Config {
         if !(1..=MAX_CONCURRENCY_CEILING).contains(&self.parallel.max_concurrency) {
             return Err(ConfigError::Parallel(self.parallel.max_concurrency));
         }
+        if let Some(plan) = &self.job_plan {
+            if plan.max_rounds == 0 {
+                return Err(ConfigError::JobPlan("max_rounds"));
+            }
+            for (name, value) in [
+                ("planner_usd", plan.planner_usd),
+                ("critic_usd", plan.critic_usd),
+            ] {
+                if !(value.is_finite() && value > 0.0) {
+                    return Err(ConfigError::JobPlan(name));
+                }
+            }
+            if plan.planner_timeout_s == 0 {
+                return Err(ConfigError::JobPlan("planner_timeout_s"));
+            }
+            if plan.critic_timeout_s == 0 {
+                return Err(ConfigError::JobPlan("critic_timeout_s"));
+            }
+        }
         Ok(())
     }
 
@@ -446,6 +520,56 @@ pub(crate) mod tests {
         let mut changed = base.clone();
         changed.budget.job_usd += 1.0;
         assert_ne!(base.reading_inputs(), changed.reading_inputs());
+    }
+
+    /// The SHA-256 of `reading_inputs()` for this repository's `athena.toml`, computed from the code before
+    /// `[job_plan]` existed. A reading records this digest, so it must not move when the schema grows.
+    const REPO_READING_INPUTS_SHA256: &str =
+        "ba462c7ffba3475385f095363becb853b0eda55fed87c41e3f78d800cf1f63fc";
+
+    fn digest(config: &Config) -> String {
+        crate::sha256_hex(config.reading_inputs().as_bytes())
+    }
+
+    #[test]
+    fn reading_inputs_digest_is_unchanged_by_the_job_plan_section() {
+        let base = Config::parse(REPO_CONFIG).unwrap();
+        assert!(base.job_plan.is_none());
+        assert_eq!(digest(&base), REPO_READING_INPUTS_SHA256);
+        let text = format!("{REPO_CONFIG}\n[job_plan]\nenabled = true\n");
+        let on = Config::parse(&text).unwrap();
+        assert!(on.job_plan.as_ref().is_some_and(|j| j.enabled));
+        assert_eq!(digest(&on), REPO_READING_INPUTS_SHA256);
+        assert_eq!(on.reading_inputs(), base.reading_inputs());
+    }
+
+    #[test]
+    fn job_plan_defaults_are_off_and_bounded() {
+        let text = format!("{REPO_CONFIG}\n[job_plan]\n");
+        let config = Config::parse(&text).unwrap();
+        let plan = config.job_plan.unwrap();
+        assert!(!plan.enabled);
+        assert_eq!(plan.max_rounds, 3);
+        assert_eq!(plan.planner_usd, 0.75);
+        assert_eq!(plan.critic_usd, 0.75);
+        assert_eq!(plan.planner_timeout_s, 600);
+        assert_eq!(plan.critic_timeout_s, 600);
+    }
+
+    #[test]
+    fn bad_job_plan_settings_are_refused_naming_the_field() {
+        for (line, field) in [
+            ("max_rounds = 0", "max_rounds"),
+            ("planner_usd = 0.0", "planner_usd"),
+            ("critic_usd = -1.0", "critic_usd"),
+            ("planner_timeout_s = 0", "planner_timeout_s"),
+            ("critic_timeout_s = 0", "critic_timeout_s"),
+            ("surprise = true", "surprise"),
+        ] {
+            let text = format!("{REPO_CONFIG}\n[job_plan]\nenabled = true\n{line}\n");
+            let error = Config::parse(&text).expect_err(line).to_string();
+            assert!(error.contains(field), "{line}: {error}");
+        }
     }
 
     #[test]

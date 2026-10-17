@@ -1,7 +1,8 @@
 # Job planning: a planner and a critic before the producer
 
 **Status:** proposed, revision 2. Review 1 (`docs/design/reviews/job-planning-review-1.md`) found no High and
-11 Medium findings; section 12 says where each is settled. Nothing here is built.
+11 Medium findings; section 12 says where each is settled. Job 1 of section 8 (the records, roles and config)
+is built; nothing else here is.
 
 **Author:** written by hand at Sri's direction ("You are the brain until Athena's brain starts working
 properly", 2026-10-17, `BRIEF.md` addenda), and committed as a declared intervention, so the work Athena's

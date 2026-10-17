@@ -4,10 +4,10 @@
 
 use anyhow::{Result, anyhow, bail};
 use athena_data::records::{
-    AnyRecord, Candidate, Correction, DecisionState, DecisionStateKind, DefaultExpectations,
-    FailureClass, HostError, Intervention, IntrospectionRecord, Invocation, Job, Outcome,
-    OutcomeState, ProposalRecord, Reading, Request, Resolution, Restart, Role, Score, Verification,
-    fold_decision_states,
+    AnyRecord, Candidate, Correction, Critique, DecisionState, DecisionStateKind,
+    DefaultExpectations, FailureClass, HostError, Intervention, IntrospectionRecord, Invocation,
+    Job, JobPlan, Outcome, OutcomeState, ProposalRecord, Reading, Request, Resolution, Restart,
+    Role, Score, Verification, fold_decision_states,
 };
 use athena_data::{JobId, RecordId};
 use athena_gate::records::RecordSet;
@@ -29,6 +29,10 @@ pub struct JobRecords {
     /// An outcome after `blocked`: the late landing, or the abandonment.
     pub later_outcome: Option<Outcome>,
     pub scores: Vec<Score>,
+    /// The job's plans, by round (`athena.job-plan/1`).
+    pub plans: Vec<JobPlan>,
+    /// The critiques of those plans, by round (`athena.critique/1`).
+    pub critiques: Vec<Critique>,
     pub briefs: BTreeMap<String, String>,
 }
 
@@ -144,6 +148,8 @@ impl JobRecords {
             AnyRecord::Outcome(o) if o.after_blocked => self.later_outcome = Some(*o),
             AnyRecord::Outcome(o) => self.outcome = Some(*o),
             AnyRecord::Score(s) => self.scores.push(*s),
+            AnyRecord::JobPlan(p) => self.plans.push(*p),
+            AnyRecord::Critique(c) => self.critiques.push(*c),
             other => {
                 let _ = (path, other);
             }
@@ -155,6 +161,8 @@ impl JobRecords {
         self.corrections.sort_by_key(|c| c.n);
         self.invocations.sort_by_key(|i| i.seq);
         self.scores.sort_by_key(|s| s.at);
+        self.plans.sort_by_key(|p| p.round);
+        self.critiques.sort_by_key(|c| c.round);
     }
 }
 
@@ -216,6 +224,8 @@ fn job_of(record: &AnyRecord) -> Option<&JobId> {
         AnyRecord::Verification(r) => Some(&r.job),
         AnyRecord::Outcome(r) => Some(&r.job),
         AnyRecord::Score(r) => Some(&r.job),
+        AnyRecord::JobPlan(r) => Some(&r.job),
+        AnyRecord::Critique(r) => Some(&r.job),
         _ => None,
     }
 }
@@ -391,5 +401,145 @@ impl Records {
         self.default_expectations
             .iter()
             .rfind(|e| e.default_id == default_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use athena_data::records::{
+        Critique, CritiqueVerdict, DeliverableAction, Demonstration, Finding, FindingSource,
+        JobKind, JobPlan, Owner, PlanFile, Severity,
+    };
+
+    fn job_id() -> JobId {
+        JobId::parse("20261010-153012-k7q2").unwrap()
+    }
+
+    fn plan(round: u32) -> JobPlan {
+        JobPlan {
+            job: job_id(),
+            round,
+            at: "2026-10-10T15:30:12Z".parse().unwrap(),
+            invocation_seq: 1,
+            approach: "Add the records.".into(),
+            decisions: vec![],
+            files: vec![PlanFile {
+                path: "a.md".into(),
+                action: DeliverableAction::Create,
+                purpose: "Hold it.".into(),
+                governance: false,
+                exists: false,
+            }],
+            steps: vec![],
+            risks: vec![],
+            demonstrations: vec![Demonstration {
+                criterion: 1,
+                method: "test".into(),
+                command: "cargo test".into(),
+                observes: "pass".into(),
+                fails_without: None,
+            }],
+            open_questions: vec![],
+            producer_section_sha256: "d".repeat(64),
+        }
+    }
+
+    fn critique(round: u32, verdict: CritiqueVerdict) -> Critique {
+        Critique {
+            job: job_id(),
+            round,
+            at: "2026-10-10T15:30:12Z".parse().unwrap(),
+            invocation_seq: Some(2),
+            agent_verdict: Some(verdict),
+            final_verdict: verdict,
+            findings: vec![Finding {
+                severity: Severity::Minor,
+                summary: "Vague.".into(),
+                evidence: "step 1".into(),
+                location: None,
+                source: FindingSource::Critic,
+            }],
+            request_reading_mismatch: None,
+            summary: None,
+        }
+    }
+
+    fn dispatched() -> Job {
+        Job {
+            id: job_id(),
+            kind: JobKind::Request,
+            title: "Add a file".into(),
+            class_of_work: None,
+            capability: None,
+            accepted_reading: None,
+            accepted_by: None,
+            owner: Owner {
+                role: "athena".into(),
+                capability: None,
+                model: None,
+                note: None,
+            },
+            verifier_model: None,
+            caps: None,
+            base_commit: None,
+            config_sha256: None,
+            defaults_sha256: None,
+            athena: None,
+            driver: None,
+            brief_sha256: None,
+            dispatched_at: None,
+            request_path: None,
+            request_sha256: None,
+            cost: None,
+            tokens: None,
+            note: None,
+            pin: None,
+        }
+    }
+
+    #[test]
+    fn plans_and_critiques_are_filed_under_their_job_and_do_not_close_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = Git::at(dir.path());
+        git.run(["init", "-q", "-b", "main"]).unwrap();
+        for (key, value) in [
+            ("user.name", "Test User"),
+            ("user.email", "noreply@example.com"),
+            ("commit.gpgsign", "false"),
+            ("core.hooksPath", "/dev/null"),
+        ] {
+            git.run(["config", key, value]).unwrap();
+        }
+        let records = [
+            AnyRecord::Job(Box::new(dispatched())),
+            // Written out of order to show that loading sorts by round.
+            AnyRecord::Critique(Box::new(critique(2, CritiqueVerdict::Accept))),
+            AnyRecord::JobPlan(Box::new(plan(2))),
+            AnyRecord::JobPlan(Box::new(plan(1))),
+            AnyRecord::Critique(Box::new(critique(1, CritiqueVerdict::Revise))),
+        ];
+        for record in &records {
+            let path = dir.path().join(record.canonical_path());
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, record.to_json()).unwrap();
+        }
+        git.run(["add", "-A"]).unwrap();
+        git.run(["commit", "-q", "-m", "Plan a job"]).unwrap();
+
+        let loaded = Records::load(&git, "HEAD").unwrap();
+        assert!(loaded.invalid.is_empty(), "{:?}", loaded.invalid);
+        let job = &loaded.jobs[job_id().as_str()];
+        assert_eq!(
+            job.plans.iter().map(|p| p.round).collect::<Vec<_>>(),
+            [1, 2]
+        );
+        assert_eq!(
+            job.critiques.iter().map(|c| c.round).collect::<Vec<_>>(),
+            [1, 2]
+        );
+        assert_eq!(job.critiques[0].final_verdict, CritiqueVerdict::Revise);
+        assert!(job.outcome.is_none());
+        assert_eq!(job.state(), JobState::Dispatched);
     }
 }
