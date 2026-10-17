@@ -320,6 +320,17 @@ Each item is a separate later job, after review.
 4. **Result-reuse job.** The record of 5.2, the SHA check of 5.3, the local fallback, and tests that fail
    without it: a result for a different SHA is ignored; a missing result runs locally; a red result fails; a
    stale record never marks a job verified.
+   *Built in part:* `crates/athena-core/src/ci_result.rs` holds the record (run address, full SHA, per-check
+   conclusions, duration, source CI or local) and `resolve`, which applies the rules of 5.3 with the platform
+   read and the local run injected: a different SHA is ignored; a missing, unfinished (after a bounded wait),
+   cancelled, skipped or timed-out run, or a green run with a workflow file changed, runs the three checks
+   locally once and records them as local; a red run for the SHA is a failure and the fallback does not run;
+   if the fallback cannot report all three checks the outcome is `blocked` with a named reason. `gh.rs` reads
+   the `ci` run for a SHA from the platform API (one CI step covers all three checks, so its conclusion is
+   given to each); `checks::runs_from_record` and `verify::reuse_statement` turn a record into check records
+   and into the line for the verifier's input. Tests cover each rule. Not done: calling `resolve` from the
+   job run and the verifier's input (the record is not yet used by a real job), pushing the candidate commit
+   before the read, and the wait bound's value, which needs section 9 data. No speedup is claimed.
 5. **Routing job.** Apply the table of 3.2 from the plan's job kind.
 6. **Measurement job.** After N jobs, compute the "after" numbers and record the comparison.
 7. **Docs job, alone and last.** README, CHANGELOG and decisions entry, as the parallel design's section 9 says.

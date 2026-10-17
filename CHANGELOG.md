@@ -7,6 +7,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- CI result reuse keyed by commit SHA (item 4 of `docs/design/ci-routing.md` section 10), in
+  `athena-core::ci_result`: a record of the run address, full SHA, per-check conclusions and duration; a result
+  for another SHA is ignored; a missing, unfinished, cancelled, skipped or timed-out run, or a green run with a
+  workflow file changed, falls back to running the three checks locally once; a red run is a failure and is not
+  hidden by the fallback; with no result from either, the outcome is blocked with a named reason. Athena reads
+  the record from the platform API (`gh.rs`); the verifier does not. Not yet called from a job run; no
+  speedup is claimed.
+
 ### Fixed
 
 - The verifier is told that `records/`, private files and history are absent from its snapshot by design, and

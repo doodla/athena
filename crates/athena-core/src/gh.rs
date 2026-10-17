@@ -702,6 +702,98 @@ impl PrHost for GhClient<'_> {
     }
 }
 
+/// The name of the CI workflow whose run carries the three checks.
+pub const CI_WORKFLOW: &str = "ci";
+
+/// The CI step that runs `fmt`, `clippy` and `test` together (`xtask ci`); its name starts with this.
+const CI_CHECK_STEP: &str = "cargo fmt --check";
+
+/// Builds the CI result for one commit from the workflow-runs reply and, for the chosen run, the jobs reply.
+/// Only fixed fields are read; log text is never used. The newest run of [`CI_WORKFLOW`] is chosen. The
+/// run's own `head_sha` is kept as the SHA, so a run for another commit stays visible to the SHA check in
+/// [`crate::ci_result::resolve`]. The platform reports one step for all three checks, so its conclusion is
+/// given to each; per-check time is not reported, so each step carries 0 and the run's time is the total.
+pub fn parse_ci_run(runs: &Value, jobs: Option<&Value>) -> Option<crate::ci_result::CiRun> {
+    use crate::ci_result::{CiRun, STEPS, Step};
+    let run = runs["workflow_runs"]
+        .as_array()?
+        .iter()
+        .filter(|r| r["name"].as_str() == Some(CI_WORKFLOW))
+        .max_by_key(|r| r["created_at"].as_str().unwrap_or("").to_string())?;
+    let finished = run["status"].as_str() == Some("completed");
+    let conclusion = run["conclusion"].as_str().unwrap_or("").to_string();
+    let seconds = |key: &str| {
+        run[key]
+            .as_str()
+            .and_then(|t| t.parse::<jiff::Timestamp>().ok())
+    };
+    let duration_s = match (seconds("created_at"), seconds("updated_at")) {
+        (Some(start), Some(end)) => (end.as_second() - start.as_second()).max(0) as f64,
+        _ => 0.0,
+    };
+    let step_conclusion = jobs
+        .and_then(|j| j["jobs"].as_array())
+        .into_iter()
+        .flatten()
+        .flat_map(|job| job["steps"].as_array().into_iter().flatten())
+        .find(|s| {
+            s["name"]
+                .as_str()
+                .is_some_and(|n| n.starts_with(CI_CHECK_STEP))
+        })
+        .and_then(|s| s["conclusion"].as_str());
+    let steps = match step_conclusion {
+        Some(c) => STEPS
+            .iter()
+            .map(|name| Step {
+                name: name.to_string(),
+                conclusion: c.to_string(),
+                duration_s: 0.0,
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+    Some(CiRun {
+        sha: run["head_sha"].as_str()?.to_string(),
+        address: run["html_url"].as_str()?.to_string(),
+        finished,
+        conclusion,
+        steps,
+        duration_s,
+    })
+}
+
+impl crate::ci_result::CiSource for GhClient<'_> {
+    fn fetch(&self, sha: &str) -> Result<Option<crate::ci_result::CiRun>> {
+        let runs = self.api(
+            HostOperation::ReadChecks,
+            "GET",
+            &self.repo_path(&format!("actions/runs?head_sha={sha}&per_page=20")),
+            &[],
+        )?;
+        let Some(first) = parse_ci_run(&runs, None) else {
+            return Ok(None);
+        };
+        let id = runs["workflow_runs"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|r| r["name"].as_str() == Some(CI_WORKFLOW))
+            .max_by_key(|r| r["created_at"].as_str().unwrap_or("").to_string())
+            .and_then(|r| r["id"].as_u64());
+        let (Some(id), true) = (id, first.finished) else {
+            return Ok(Some(first));
+        };
+        let jobs = self.api(
+            HostOperation::ReadChecks,
+            "GET",
+            &self.repo_path(&format!("actions/runs/{id}/jobs")),
+            &[],
+        )?;
+        Ok(parse_ci_run(&runs, Some(&jobs)))
+    }
+}
+
 /// The workflow file whose runs are the Pages deploy.
 pub const PAGES_WORKFLOW: &str = "pages.yml";
 
@@ -1462,6 +1554,37 @@ mod tests {
         assert!(err.contains("allow_squash_merge false"), "{err}");
         // Only the read of the repository happened; no PUT.
         assert_eq!(runner.calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn the_ci_run_is_read_with_its_sha_address_conclusions_and_duration() {
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let runs = json!({"workflow_runs": [
+            {"name": "pages", "head_sha": sha, "status": "completed", "conclusion": "failure",
+             "html_url": "https://example.test/pages", "created_at": "2026-01-01T00:00:00Z",
+             "updated_at": "2026-01-01T00:09:00Z", "id": 1},
+            {"name": "ci", "head_sha": sha, "status": "completed", "conclusion": "success",
+             "html_url": "https://example.test/ci/2", "created_at": "2026-01-01T00:00:00Z",
+             "updated_at": "2026-01-01T00:02:30Z", "id": 2}]});
+        let jobs = json!({"jobs": [{"steps": [
+            {"name": "Set up", "conclusion": "success"},
+            {"name": "cargo fmt --check, cargo clippy -D warnings, cargo test",
+             "conclusion": "success"}]}]});
+        let run = parse_ci_run(&runs, Some(&jobs)).unwrap();
+        assert_eq!(run.sha, sha);
+        assert_eq!(run.address, "https://example.test/ci/2");
+        assert!(run.finished);
+        assert_eq!(run.duration_s, 150.0);
+        assert_eq!(run.steps.len(), 3);
+        assert!(run.steps.iter().all(|s| s.passed()));
+        // Without the jobs reply, or for a run of another workflow only, there are no step results.
+        assert!(parse_ci_run(&runs, None).unwrap().steps.is_empty());
+        let only_pages = json!({"workflow_runs": [runs["workflow_runs"][0].clone()]});
+        assert!(parse_ci_run(&only_pages, None).is_none());
+        // A run for another commit keeps its own SHA, so the SHA check can reject it.
+        let other = json!({"workflow_runs": [{"name": "ci", "head_sha": "fedcba",
+            "status": "completed", "conclusion": "success", "html_url": "u"}]});
+        assert_eq!(parse_ci_run(&other, None).unwrap().sha, "fedcba");
     }
 
     #[test]
