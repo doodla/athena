@@ -9,6 +9,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- Scoring rules are versioned. A score's `rules` string names its version, `v1` (a cost known only as a bound
+  is never provisional) or `v2` (it is, the current version); new scores are written under `v2`. The commit
+  gate recomputes each score under the version it records instead of demanding the latest rules, and still
+  refuses a score whose rules string is no known version. This lets `athena check --history` pass on scores
+  written before the bound-only cost rule, with no record edited. See D108 in `docs/decisions.md`.
+- A producer stopped by the kill switch is recorded as `killed`, not `error`, even when the child died
+  before the driver's own check; and a `cost_usd` quantity score whose execution cost is only a bound is
+  marked `provisional` (new `provisional` field, defaulting to false for older `score.json` records), left
+  out of aggregates and out of the reference's history. This fixes m8 of
+  `docs/design/reviews/athena-v0-acceptance-1.md`.
 - The explainer page, after a newcomer's 4/5 rating. "Start here" now has a "Words used first" list that
   defines captain, yolo, green, red, local-only landing and home before they are used; the Glossary gains
   green, red and home and is sorted alphabetically by the generator; each design-choice card (ra1 to ra6)

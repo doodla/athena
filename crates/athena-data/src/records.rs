@@ -770,6 +770,11 @@ pub struct QuantityScore {
     pub quantity: String,
     pub actual: f64,
     pub floor: f64,
+    /// True when `actual` is only a bound (a cost known as a lower bound, not a firm figure). Such a score
+    /// is not final and does not count in aggregates or in the reference's history. Records written before
+    /// this field existed read as not provisional.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub provisional: bool,
     pub forecasts: BTreeMap<String, QuantileScore>,
 }
 
@@ -2175,6 +2180,27 @@ mod tests {
             AnyRecord::parse("x", v1.as_bytes()),
             Err(RecordError::Invalid { .. })
         ));
+    }
+
+    #[test]
+    fn a_quantity_score_written_before_the_provisional_field_still_reads() {
+        // m8 of the v0 acceptance review: the new field has a serde default, and a firm score omits it.
+        let old = r#"{"quantity":"cost_usd","actual":0.4,"floor":0.001,"forecasts":{}}"#;
+        let score: QuantityScore = serde_json::from_str(old).unwrap();
+        assert!(!score.provisional);
+        assert!(
+            !serde_json::to_string(&score)
+                .unwrap()
+                .contains("provisional")
+        );
+        let mut bound = score;
+        bound.provisional = true;
+        let text = serde_json::to_string(&bound).unwrap();
+        assert!(
+            serde_json::from_str::<QuantityScore>(&text)
+                .unwrap()
+                .provisional
+        );
     }
 
     #[test]

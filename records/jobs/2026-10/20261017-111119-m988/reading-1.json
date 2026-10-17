@@ -1,0 +1,180 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261017-111119-m988",
+  "n": 1,
+  "at": "2026-10-17T11:12:10.456207091Z",
+  "invocation_seq": 1,
+  "base_commit": "d506f566aedd3f3c621758ae1816f0e56d1e62b6",
+  "config_sha256": "289fefe74be12a14d45de2cd1cdd0f64c29de584823f68a2400bae1d2641d696",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Version the scoring rules so old scores still verify; gate rule changes",
+  "summary": "Goal: PR #129's provisional-cost rule must pass `athena check --history` without editing any record, and future scoring-rule changes must be checked against full history before landing. Read as: bump the rules version (v1→v2) so bound-only costs score provisional only under v2, keep recomputing v1 scores under v1 behavior, and add a mechanism that runs the history score check when scoring code changes. Audience: maintainers and CI.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "All changes are Rust."
+    },
+    {
+      "id": "tested",
+      "how": "Tests for both rule versions and the new check; cargo test and clippy must pass."
+    },
+    {
+      "id": "mechanism",
+      "how": "The history check on rule changes is enforced by a test or xtask step."
+    },
+    {
+      "id": "root-cause",
+      "how": "Fix by rule versioning rather than exempting the 8 files."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run tests and the history check."
+    },
+    {
+      "id": "designed",
+      "how": "Decision recorded with alternatives in docs/decisions.md."
+    },
+    {
+      "id": "small",
+      "how": "One focused change around scoring rule versioning."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "PR #129's code is already in the working tree (provisional field and cost_is_only_a_bound exist in athena-score), so this change builds on it.",
+    "The gate already checks `score.rules == RULES` and recomputes the score; the cleanest fix is a known-rules list with legacy behavior for v1, not a [history] exempt entry (which would hide the problem).",
+    "The 'before it lands' mechanism can be a test or xtask ci step that runs the history score recompute, since CI's history job already exists but ran only after the change was written.",
+    "Exact file paths beyond athena-score and athena-gate/jobs.rs are inferred."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new scorer test shows the same job records score with a bound-only cost provisional under the current rules string and not provisional under the previous v1 rules string; run `cargo test -p athena-score`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A gate test shows a score file stamped with the v1 rules string, whose cost was a bound, still passes the score-follows-records check, and a v2 score with the wrong provisional flag is still rejected; run `cargo test -p athena-gate`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`cargo run -p athena -- check --history` (or the repository's equivalent) over the repository reports no violation for the 8 existing score files, including records/jobs/2026-10/20261013-141005-hrdp/score.json, and no file under records/ is modified in the diff.",
+      "kind": "behavior"
+    },
+    {
+      "text": "New scores are written under a bumped rules string (v2); the gate recomputes each score under the rules string it carries and still refuses an unknown rules string.",
+      "kind": "content"
+    },
+    {
+      "text": "A mechanism, not prose, makes a change to scoring behavior get checked against the full history before landing: a test or the xtask ci step recomputes every historical score with the working-tree scorer and fails if the rules string was not bumped; run `cargo run -p xtask -- ci` or `cargo test` to see it pass, and a test shows it fails when a rule changes under an unchanged version.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`cargo test` passes, `cargo clippy` is clean, and `cargo fmt --check` passes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The call (versioned rules over rewriting history or exempting records) is recorded with alternatives in docs/decisions.md.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-score/src/lib.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-gate/src/jobs.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-gate/src/history.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "xtask/src/main.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-core/src/scoring.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "p": 0.25
+    }
+  ],
+  "out_of_scope": [
+    "Editing or regenerating any file under records/",
+    "Showing provisional status in the status display (athena-cli display.rs)",
+    "Changing the kill-switch outcome logic from job 60r4",
+    "Other rules besides scoring rules"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.12,
+      "cost_usd": {
+        "p10": 0.4,
+        "p50": 1.0,
+        "p90": 2.4
+      },
+      "wall_time_s": {
+        "p10": 500.0,
+        "p50": 1100.0,
+        "p90": 2400.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.8083333333333333,
+      "p_verification_passes": 0.6375838926174496,
+      "p_user_intervenes": 0.07919463087248323,
+      "cost_usd": {
+        "p10": 0.35970031871888963,
+        "p50": 0.9202356,
+        "p90": 2.156940892160377
+      },
+      "wall_time_s": {
+        "p10": 564.2344018515648,
+        "p50": 1038.4187932910002,
+        "p90": 2314.4746498710124
+      }
+    }
+  },
+  "departures": "Slightly higher cost and lower pass odds than reference: the change spans scorer, gate and a new check mechanism, and the history check needs cold builds."
+}

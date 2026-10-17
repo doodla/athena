@@ -7,7 +7,7 @@ use athena_data::records::{
     Verification,
 };
 use athena_data::{JobId, Provenance, Quantity, RecordId, Unit};
-use athena_score::{JobFacts, PastJob, reference_forecast, score_records};
+use athena_score::{JobFacts, PastJob, RulesVersion, reference_forecast, score_records};
 use std::collections::BTreeSet;
 
 /// The resolved history the reference forecaster learns from: every closed, scored job.
@@ -37,7 +37,7 @@ pub fn history(records: &Records) -> Vec<PastJob> {
             cost_execution_usd: score
                 .quantities
                 .iter()
-                .find(|q| q.quantity == "cost_usd")
+                .find(|q| q.quantity == "cost_usd" && !q.provisional)
                 .map(|q| q.actual),
             wall_time_execution_s: score
                 .quantities
@@ -164,6 +164,7 @@ pub fn score(
     let id: &JobId = job.id();
     let interventions: Vec<&Intervention> = records.interventions_for(id);
     score_records(
+        RulesVersion::CURRENT,
         &JobFacts {
             job: id,
             readings: &job.readings,

@@ -20,7 +20,7 @@ use athena_data::records::{
 };
 use athena_data::{JobId, RecordId};
 use athena_git::Git;
-use athena_score::JobFacts;
+use athena_score::{JobFacts, RulesVersion};
 use std::collections::BTreeSet;
 
 /// The records of one job in one tree. Files that do not parse, or that sit away from their canonical
@@ -103,13 +103,15 @@ pub fn interventions_for(git: &Git, treeish: &str, job: &JobId) -> Result<Vec<In
         .collect())
 }
 
-/// The score that `job`'s records in `treeish` imply, made at `at`; a re-score when `cause` is set.
+/// The score that `job`'s records in `treeish` imply under `rules`, made at `at`; a re-score when `cause`
+/// is set.
 pub fn expected_score(
     git: &Git,
     treeish: &str,
     job: &JobId,
     cause: Option<RecordId>,
     at: jiff::Timestamp,
+    rules: RulesVersion,
 ) -> Result<Score> {
     let files = JobFiles::load(git, treeish, job)?;
     // Only the interventions that existed when the score was made count. A squash folds a job's closing
@@ -123,6 +125,7 @@ pub fn expected_score(
     let interventions: Vec<&Intervention> = interventions.iter().filter(|i| i.at <= at).collect();
     let invocations = files.invocation_records();
     let closing = athena_score::score_records(
+        rules,
         &JobFacts {
             job,
             readings: &files.readings,
@@ -284,19 +287,25 @@ pub fn check(
                         continue;
                     }
                 }
-                if score.rules != athena_score::RULES {
+                let Some(rules) = RulesVersion::from_recorded(&score.rules) else {
                     violations.push(fail(
                         &d.path,
                         format!(
                             "{} was scored under rules {:?}, which this Athena cannot recompute",
                             d.path, score.rules
                         ),
-                        "scores are written by athena, under the rules it recomputes them with",
+                        "scores are written by athena, under a rules version it knows and recomputes them with",
                     ));
                     continue;
-                }
-                let expected =
-                    expected_score(git, &change.tree, &score.job, score.cause.clone(), score.at)?;
+                };
+                let expected = expected_score(
+                    git,
+                    &change.tree,
+                    &score.job,
+                    score.cause.clone(),
+                    score.at,
+                    rules,
+                )?;
                 if let Some(difference) = score_difference(&score, &expected) {
                     violations.push(fail(
                         &d.path,
