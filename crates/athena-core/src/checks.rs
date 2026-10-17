@@ -7,6 +7,7 @@
 //! `skip_when_only` patterns is skipped, with a note in its record, when every changed path matches one.
 
 use crate::capability::CheckSpec;
+use crate::ci_result::{CiRecord, Source};
 use anyhow::Result;
 use athena_agent::procs::{GRACE, Registry, isolate, kill_group};
 use athena_data::config::CheckKind;
@@ -95,6 +96,36 @@ pub fn skipped_run(spec: &CheckSpec, note: String) -> CheckRun {
         output_tail: String::new(),
         note: Some(note),
     }
+}
+
+/// The check records for a result reused from a [`CiRecord`], one per spec the record covers, so Athena's
+/// check step reads the record instead of running the check again. A spec the record does not name is left
+/// out (the caller runs it); a record for another SHA than `sha` yields nothing.
+pub fn runs_from_record(specs: &[CheckSpec], record: &CiRecord, sha: &str) -> Vec<CheckRun> {
+    if record.sha != sha {
+        return Vec::new();
+    }
+    let origin = match (&record.source, &record.run_address) {
+        (Source::Ci, Some(address)) => format!("CI run {address}"),
+        (Source::Ci, None) => "CI run".to_string(),
+        (Source::Local, _) => "local run".to_string(),
+    };
+    specs
+        .iter()
+        .filter_map(|spec| {
+            let step = record.steps.iter().find(|s| s.name == spec.name)?;
+            Some(CheckRun {
+                name: spec.name.clone(),
+                command: spec.run.clone(),
+                exit_code: None,
+                passed: step.passed(),
+                tests_ran: None,
+                duration: Quantity::measured(step.duration_s, Unit::Seconds, "recorded result"),
+                output_tail: String::new(),
+                note: Some(format!("result reused from the {origin} for {sha}")),
+            })
+        })
+        .collect()
 }
 
 /// Where a check runs, and under what limits.
@@ -313,6 +344,54 @@ mod tests {
         let run = run_check(&slow, &ctx).unwrap();
         assert!(!run.passed);
         assert!(run.note.unwrap().contains("deadline"));
+    }
+
+    #[test]
+    fn a_record_for_the_same_sha_stands_in_for_the_checks_and_another_sha_does_not() {
+        use crate::ci_result::Step;
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let record = CiRecord {
+            source: Source::Ci,
+            sha: sha.into(),
+            run_address: Some("https://example.test/runs/9".into()),
+            steps: vec![
+                Step {
+                    name: "fmt".into(),
+                    conclusion: "success".into(),
+                    duration_s: 1.0,
+                },
+                Step {
+                    name: "test".into(),
+                    conclusion: "failure".into(),
+                    duration_s: 3.0,
+                },
+            ],
+            duration_s: 4.0,
+        };
+        let specs = vec![
+            CheckSpec {
+                name: "fmt".into(),
+                ..spec_skipping(None)
+            },
+            CheckSpec {
+                name: "test".into(),
+                ..spec_skipping(None)
+            },
+            CheckSpec {
+                name: "clippy".into(),
+                ..spec_skipping(None)
+            },
+        ];
+        let runs = runs_from_record(&specs, &record, sha);
+        assert_eq!(
+            runs.len(),
+            2,
+            "clippy is not in the record, so it still runs"
+        );
+        assert!(runs[0].passed && !runs[1].passed);
+        assert!(runs[0].note.as_ref().unwrap().contains("runs/9"));
+        let other = "fedcba9876543210fedcba9876543210fedcba98";
+        assert!(runs_from_record(&specs, &record, other).is_empty());
     }
 
     fn spec_skipping(patterns: Option<&[&str]>) -> CheckSpec {

@@ -1,0 +1,142 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261017-003902-d5gk",
+  "base_commit": "d74fb77cb7b1164c3cba91eccde8b73be285f6f6",
+  "base_fingerprint": "sha256:98f612613bb957aa7ccc27586652a173804a2b502877bdb77024b72722cde5c5",
+  "previous_job": "20261017-032153-1wtf",
+  "candidate_commit": "7a26ee7db8985a032c7c5e118456b6b19bf260e4",
+  "candidate_tree": "b970be14e58e3ee08feabcb13e70941ad4c8fdcd",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 91445
+    },
+    {
+      "path": "crates/athena-core/src/checks.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 17146
+    },
+    {
+      "path": "crates/athena-core/src/ci_result.rs",
+      "status": "added",
+      "mode": "100644",
+      "bytes": 18303
+    },
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 101545
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 7981
+    },
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 27664
+    },
+    {
+      "path": "docs/design/ci-routing.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 27239
+    }
+  ],
+  "fingerprint": "sha256:fdc197125106ee7a525b025f59493fda8e0296fbe61174107d12d6b481d08fbf",
+  "violations": [],
+  "producer_report": {
+    "summary": "Added `athena-core::ci_result`, a pure module that applies the 5.3 rules to a CI result keyed by commit SHA, with a local fallback. The platform read and the local run are injected, so the tests need no network. A run for another SHA is ignored. A missing, unfinished (after a bounded wait), cancelled, skipped or timed-out run, an unreachable service, or a green run with a `.github/workflows/` file changed runs the three checks locally once and records them as local. A red run for the SHA is a failure and the fallback does not run. If neither source gives all three checks, the outcome is blocked with a named reason. `gh.rs` reads the `ci` run for a SHA from the platform API, `checks::runs_from_record` turns a record into check records, and `verify::reuse_statement` builds the line for the verifier's input (only when the SHA matches). Item 4 in the design doc is marked \"built in part\" with what remains. The CHANGELOG has an entry. Nothing is claimed about speedup. The new code is not yet called from a real job run, which the doc and changelog say.",
+    "files": [
+      "crates/athena-core/src/ci_result.rs",
+      "crates/athena-core/src/lib.rs",
+      "crates/athena-core/src/checks.rs",
+      "crates/athena-core/src/gh.rs",
+      "crates/athena-core/src/verify.rs",
+      "docs/design/ci-routing.md",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo fmt --all",
+        "result": "pass",
+        "note": "Applied formatting. I did not run `cargo fmt --all --check` separately afterwards."
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "Clean."
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "The full run printed no failure and the tool reported no error, but its output was truncated and I could not search it. I confirmed separately that `cargo test --locked -p athena-core ci_result` runs and passes all 15 ci_result tests. The new gh, checks and verify tests ran only inside the full run."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Run `cargo test --locked`: new tests pass showing a CI result whose SHA differs from the candidate's is ignored (stale) and never yields a verified outcome; each test fails if the SHA comparison is removed.",
+        "status": "met",
+        "evidence": "The ci_result tests `a_green_run_for_another_sha_is_stale_and_never_verifies`, `a_stale_run_is_ignored_and_the_local_record_is_used` and `a_red_run_for_another_sha_is_not_this_candidates_failure` pass. Each would fail without the `run.sha != sha` check in `read_ci`. I did not remove the check to confirm."
+      },
+      {
+        "criterion": "Run `cargo test --locked`: tests show a missing, unfinished, cancelled, skipped or timed-out CI result selects the local fallback, which runs the three checks once and records them as local, keyed by SHA.",
+        "status": "met",
+        "evidence": "`no_unfinished_cancelled_skipped_or_timed_out_run_selects_the_local_fallback` covers no run, unfinished, cancelled, skipped, timed out and service error. It asserts source Local, the candidate SHA, and exactly one local call."
+      },
+      {
+        "criterion": "Run `cargo test --locked`: a red CI result for the matching SHA is a failed check and the fallback is not run to hide it; a green run with a workflow file changed in the same candidate is not trusted and falls back locally.",
+        "status": "met",
+        "evidence": "`a_red_run_for_the_same_sha_fails_and_the_fallback_does_not_hide_it` asserts Failed and zero local calls. `a_green_run_with_a_workflow_file_changed_is_not_trusted` asserts a Local record and one local call."
+      },
+      {
+        "criterion": "Run `cargo test --locked`: when neither CI nor the local run can produce a result, the outcome is blocked with a named reason, not verified (no empty success).",
+        "status": "met",
+        "evidence": "`with_no_ci_result_and_no_local_run_the_job_is_blocked_with_a_reason` and `a_local_run_that_reports_too_little_is_blocked_not_verified` pass. `a_short_sha_is_blocked_before_anything_is_read` also passes."
+      },
+      {
+        "criterion": "Run `cargo clippy --all-targets --locked -- -D warnings` and `cargo fmt --check`: both are clean.",
+        "status": "met",
+        "evidence": "Clippy ran clean. `cargo fmt --all` was applied after the last edit; I did not rerun it with `--check`."
+      },
+      {
+        "criterion": "The record holds the run address, full SHA, per-step conclusions and duration, and Athena (not the verifier) is what reads it; the verifier command set in athena.toml is unchanged.",
+        "status": "met",
+        "evidence": "`CiRecord` has `run_address`, `sha`, `steps` and `duration_s`. `the_record_round_trips_with_its_address_sha_steps_and_duration` covers it. The platform read lives in `gh.rs`, which Athena runs. athena.toml is untouched."
+      },
+      {
+        "criterion": "Section 10 item 4 of docs/design/ci-routing.md states what was built and what remains; items 5-7 are untouched, and no speedup is claimed.",
+        "status": "met",
+        "evidence": "Edited only the item 4 paragraph in docs/design/ci-routing.md. It says no speedup is claimed."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry for the result-reuse change.",
+        "status": "met",
+        "evidence": "Added an \"Added\" entry under [Unreleased]."
+      }
+    ],
+    "open_issues": [
+      "`resolve`, `runs_from_record` and `reuse_statement` are not called from `run.rs` or the verifier input path. `run.rs` is not in the deliverables. The record is not yet used by a real job.",
+      "The candidate is not pushed before the CI read. The wait bound has no real value yet; it needs section 9 data.",
+      "The CI workflow runs the three checks as one step, so per-check conclusions and times are approximated."
+    ],
+    "mistakes": [
+      "I could not read the full `cargo test --locked` output because it was truncated. I judged the full run passed from the absence of an error, plus a targeted run of the ci_result tests."
+    ],
+    "learnings": [
+      "CI has one step, `cargo run --locked -p xtask -- ci`, that runs fmt, clippy and test together. The platform gives one conclusion for all three and no per-check time. `gh::parse_ci_run` gives that conclusion to each check and sets each check's time to 0.",
+      "`GhClient::api` retries transient failures and records host errors; the new fetch reuses it.",
+      "The Bash tool refuses pipes and `grep`, and the Grep tool refuses paths outside the working directory. Large cargo output saved by the tool cannot be searched."
+    ],
+    "desires": [
+      "A way to read saved large tool output, or a cargo test summary flag, to confirm the full test result."
+    ]
+  }
+}

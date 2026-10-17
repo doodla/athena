@@ -51,6 +51,30 @@ impl Verified {
     }
 }
 
+/// The line Athena writes into the verifier's input about a reused check result: where it came from, the
+/// SHA it is for, and each check's conclusion. The verifier never fetches the result itself; it gets this
+/// text only when the record's SHA equals the candidate's, and nothing otherwise.
+pub fn reuse_statement(record: &crate::ci_result::CiRecord, candidate_sha: &str) -> Option<String> {
+    if record.sha != candidate_sha {
+        return None;
+    }
+    let origin = match (&record.source, &record.run_address) {
+        (crate::ci_result::Source::Ci, Some(address)) => format!("the CI run {address}"),
+        (crate::ci_result::Source::Ci, None) => "a CI run".to_string(),
+        (crate::ci_result::Source::Local, _) => "Athena's local run".to_string(),
+    };
+    let steps: Vec<String> = record
+        .steps
+        .iter()
+        .map(|s| format!("{} {}", s.name, s.conclusion))
+        .collect();
+    Some(format!(
+        "Check results for {candidate_sha} come from {origin} ({:.0}s): {}.",
+        record.duration_s,
+        steps.join(", ")
+    ))
+}
+
 fn severity(s: SeverityOutput) -> Severity {
     match s {
         SeverityOutput::Blocker => Severity::Blocker,
@@ -400,6 +424,29 @@ mod tests {
     use super::*;
     use athena_context::outputs::{CriterionVerdictOutput, FindingOutput};
     use athena_data::{Quantity, Unit};
+
+    #[test]
+    fn the_reuse_statement_names_the_run_and_exists_only_for_the_same_sha() {
+        use crate::ci_result::{CiRecord, Source, Step};
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let record = CiRecord {
+            source: Source::Ci,
+            sha: sha.into(),
+            run_address: Some("https://example.test/runs/5".into()),
+            steps: vec![Step {
+                name: "fmt".into(),
+                conclusion: "success".into(),
+                duration_s: 1.0,
+            }],
+            duration_s: 12.0,
+        };
+        let text = reuse_statement(&record, sha).unwrap();
+        assert!(text.contains("runs/5") && text.contains(sha) && text.contains("fmt success"));
+        assert_eq!(
+            reuse_statement(&record, "fedcba9876543210fedcba9876543210fedcba98"),
+            None
+        );
+    }
 
     fn criteria() -> Vec<Criterion> {
         vec![

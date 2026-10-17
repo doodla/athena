@@ -16,6 +16,8 @@
 //! - [`status`]: the state of the work, from the repository alone;
 //! - [`nested`]: Athena running inside one of its own jobs;
 //! - [`pr`]: pull-request landing in owned mode: the link store, the push guard, the merged-content check;
+//! - [`ci_result`]: the CI result record keyed by commit SHA, its stale, missing and red rules, and the local
+//!   fallback (`docs/design/ci-routing.md` 5.3);
 //! - [`gh`]: `athena land --pr`: push the job's branch, open the pull request, wait for green checks, and merge
 //!   over REST only when the opt-in setting is on;
 //! - [`introspect`]: the introspection record of an event, the class registry, and the reading code shared with
@@ -48,6 +50,7 @@ pub mod audience;
 pub mod capability;
 pub mod chain;
 pub mod checks;
+pub mod ci_result;
 pub mod commits;
 pub mod fake;
 pub mod gh;
