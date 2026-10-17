@@ -1011,3 +1011,14 @@ It should become demonstrably less likely to make the same kind of mistake again
    * 5A. A small shared vocabulary, grown from misreads: defined terms and how they relate, each with its source, in one file that agents read and checks can use. A term is added when it causes a misread. The study keeps its own concept model, so firstmate, Hermes Agent and Athena are compared in the same terms. No formal ontology for now.
    * 6A. Sri's planner observation goes to Athena as written, without the operator's held Planning Review.
    * 7A. Athena re-triages the requests and proposals queued before Olympus against Olympus, keeping what still matters and closing the rest with a reason.
+
+### 2026-10-17: Design reviews, a planner-critic loop, and an unsettled API
+
+* Let's also have Athena reconsider its own design every few jobs to see if we arrive at a stable design.
+* The producer verifier can be a planner critic loop.
+* I'm not sold the API surface should be considered settled
+
+### 2026-10-17: The operator is the brain for now
+
+* You are the brain until Athena's brain starts working properly
+* Relay note: the operator now does Athena's thinking (strategy, requirements, planning, critique and diagnosis) and Athena's machinery does the work, until Athena's own brain can take each part over. Every act of the operator's that Athena should have done is logged as an intervention, so the log names what Athena's brain still lacks.

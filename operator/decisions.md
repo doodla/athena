@@ -224,3 +224,17 @@ Athena's decision log, not here. Newest last.
   somehow". Read as the go that OP-15 asked for, and as a standing instruction: keep Athena working within the
   daily spend limit without waiting for a go each time, do the custody work (landing, restarts, the lease)
   actively, and spend the operator's own time on OP-14's spot-checks and reports. Decisions still go to Sri.
+
+## OP-17. The operator is Athena's brain until Athena's own works (2026-10-17)
+
+- Decision (Sri, in chat, ~18:00 UTC): "You are the brain until Athena's brain starts working properly". This
+  widens OP-16's 2A. The operator now decides what Athena works on and in what order, writes requests with the
+  requirements, plan and acceptance a planner would have produced, critiques readings and results, and diagnoses
+  failures. Athena's producer, verifier, landing and records do the work.
+- Every such act is logged with `athena intervene` (class of work, and category: gave-detailed-instructions,
+  overrode-decision, did-work-themselves), so the log is the list of what Athena's brain still lacks.
+- Handover: each part (requirements, planning, critique, ordering, diagnosis) moves back to Athena once Athena's
+  own version agrees with the operator's on recent jobs. Athena builds those parts first.
+- Also relayed: Sri's three lines of ~17:45 (design review every few jobs toward a stable design; the producer and
+  verifier as a planner-critic loop; the API surface not settled), held until the drain ended so that two Athena
+  commands would not commit at once.
