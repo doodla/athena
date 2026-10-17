@@ -3,9 +3,9 @@
 **Status:** proposed. Independent review requested (`docs/design/reviews/job-planning-review-1.md`, not yet
 written). Nothing here is built.
 
-**Author:** the operator, acting as Athena's brain under `operator/decisions.md` OP-17 ("You are the brain until
-Athena's brain starts working properly", Sri, 2026-10-17). It was committed by hand as a declared intervention,
-so the work Athena's planner should have done is on the record.
+**Author:** written by hand at Sri's direction ("You are the brain until Athena's brain starts working
+properly", 2026-10-17, `BRIEF.md` addenda), and committed as a declared intervention, so the work Athena's
+planner should have done is on the record.
 
 **Reader:** Sri, the design reviewer, and the producers of the build jobs in section 8. Paths are relative to
 the repository root. Code facts were read at commit 4adaf98 by a read-only review and are marked **(read)**.
@@ -124,7 +124,7 @@ renaming `athena plan` to `athena queue` belongs to the design review Sri asked 
 | A stronger reader that also designs | The reader works without reading the code in depth, and one model would plan and review itself. |
 | A plan section inside the producer's run | The producer already decides the design mid-coding; that is the status quo that thrashes. |
 | A critic alone, reviewing the reading | It can catch vague criteria but not a bad design, because no design exists yet to review. |
-| The operator plans every job by hand (OP-17) | Works now, but it is the gap itself: the plans should come from Athena. |
+| Plans written by hand for every job (today's stopgap) | Works now, but it is the gap itself: the plans should come from Athena. |
 | A different model family as critic | Worth testing later; the producer–verifier pair keeps scoring and model rules unchanged. |
 
 ## 8. Build plan
@@ -196,5 +196,5 @@ This is a measured experiment in the sense of the Olympus brief's R6.
 
 - Should study jobs be planned too? Not in the first build; decide after the measurement.
 - Should the critic later become a different model family? Decide from the critique records.
-- When does the operator stop writing plans by hand? When Athena's accepted plans agree with the operator's on
-  recent jobs (OP-17's handover rule).
+- When do hand-written plans stop? When Athena's accepted plans agree with the hand-written ones on recent
+  jobs.
