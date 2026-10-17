@@ -9,6 +9,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- An independent review of `docs/design/job-planning.md`, `docs/design/reviews/job-planning-review-1.md`. It
+  checks the design's code claims against the source, the order and size of its five build jobs, and the keep
+  rule, and ends with the verdict "build after the listed fixes" (0 High, 11 Medium, 10 Low findings).
 - A small shared vocabulary, `docs/ontology.toml`, with seven terms that caused misreads (planning, job,
   Athena, Hermes, product versus system, landed, Sri). Each has a definition, the misread behind it, sources
   and relations. `crates/athena-cli/tests/ontology.rs` checks that sources exist, relation targets are defined
