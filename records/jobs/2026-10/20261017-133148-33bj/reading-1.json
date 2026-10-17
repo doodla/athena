@@ -1,0 +1,168 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261017-133148-33bj",
+  "n": 1,
+  "at": "2026-10-17T17:42:04.934292064Z",
+  "invocation_seq": 1,
+  "base_commit": "a7c8bb93a3e58492085a3d0dd143de6d7b080b5f",
+  "config_sha256": "ba462c7ffba3475385f095363becb853b0eda55fed87c41e3f78d800cf1f63fc",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Gate landings that touch record or scoring rules on the history check",
+  "summary": "When a candidate's change touches record-validation code, scoring code, or crates/athena-gate, Athena's in-process gate at landing must validate every existing record under the candidate's rules (the record-validation half of `athena check --history`). It must refuse the landing, with the offending records named, instead of leaving CI to find the breakage. The audience is Athena maintainers, who today see the failure only after the PR or main goes red, as in jobs 60r4 and sg0j.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "Gate tests cover refused, unaffected and versioned-fix candidates; workspace test and clippy must pass."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check that a rule-breaking candidate is refused and a safe one lands, not that the wiring exists."
+    },
+    {
+      "id": "root-cause",
+      "how": "The check sits in the shared gate used for all landings, not only the two jobs that surfaced the problem."
+    },
+    {
+      "id": "buy-first",
+      "how": "Reuse the existing RecordSet and reconcile code instead of building a new validator."
+    },
+    {
+      "id": "small",
+      "how": "One focused change in the gate, with no CI or config edits."
+    },
+    {
+      "id": "mechanism",
+      "how": "The rule is enforced by the gate, not by prose."
+    },
+    {
+      "id": "strangers",
+      "how": "Doc comments and the changelog explain the trigger paths and the reason."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Goal: a candidate that would break `athena check --history` is refused before landing. The audience is Athena maintainers and CI.",
+    "Running the whole `check_history` (gitleaks over all commits, per-commit judgement) at every qualifying landing is too slow. The failure seen in both jobs came from the final stage, `RecordSet::load` at the tip plus `reconcile::check_records`. I assume the landing check runs that stage on the candidate tree. This is the same check as `athena check --history` for this failure class, and the full history walk is not repeated.",
+    "The trigger is a path match on the candidate diff: crates/athena-data/src/records.rs (and sibling record-validation modules), crates/athena-core/src/scoring.rs, and crates/athena-gate/**. The paths come from the two jobs' diffstats and the repository layout. A constant in the gate is enough, so athena.toml stays unchanged.",
+    "The check goes in the in-process gate (Scope::Commit and Scope::CommitLegacyUsage), because run.rs's `land_or_block` already turns a gate refusal of the landing commit into a failed outcome. No new landing flow is needed.",
+    "The check judges existing records under the candidate's rules, so it loads records from the candidate tree. Other checks still judge by the parent's rules (D38).",
+    "I did not read the full record-validation layout or the design docs, and I did not run anything. The exact trigger paths and insertion point are inferred from gate() in lib.rs, history.rs, and land_or_block in run.rs."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A gate test builds a repository with an existing score record written under the old scoring rule. A candidate commit changes the scoring rule so that the record no longer validates. `gate(..., Scope::Commit)` returns a violation that names the failing record path and the rule. Run `cargo test -p athena-gate`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A candidate that changes only unrelated files (for example docs) is not put through the extra records check. A test shows that the gate result is unchanged. Run `cargo test -p athena-gate`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A candidate that changes a scoring or record-validation rule and versions it so older records still verify (the sg0j fix shape) passes the gate and lands. Run `cargo test -p athena-gate`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A landing test in the run path shows a refused landing that touches a scoring rule. The job ends failed with a reason naming the history-breaking records. Nothing is advanced on main. Run `cargo test -p athena-core -p athena-cli`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The set of paths that trigger the check (record-validation code in athena-data, scoring code in athena-core, and crates/athena-gate) is defined in one place and documented. The doc comment of `gate` and the module docs of history.rs describe the new landing-time check.",
+      "kind": "content"
+    },
+    {
+      "text": "`cargo test` passes for the workspace, `cargo clippy --all-targets` is clean, and `cargo fmt --check` passes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The call is recorded: the landing-time check reuses the existing record-load and reconcile code from `check_history` instead of shelling out to the CLI, and it skips the gitleaks history scan. The changelog or design note says so.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-gate/src/lib.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-gate/src/landing_tests.rs",
+      "action": "modify",
+      "p": 0.75
+    },
+    {
+      "path": "crates/athena-gate/src/history.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-gate/src/records.rs",
+      "action": "modify",
+      "p": 0.25
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "docs/design/athena-v0.md",
+      "action": "modify",
+      "p": 0.15
+    }
+  ],
+  "out_of_scope": [
+    "Changing CI workflows or the PR flow in gh.rs",
+    "Editing or migrating any existing record under records/",
+    "Rewriting the scoring-rule versioning from job sg0j",
+    "Showing the provisional cost in the status display, or other minor findings from job 60r4",
+    "Making the full gitleaks history scan run at landing"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.68,
+      "p_verification_passes": 0.58,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.4,
+        "p50": 1.0,
+        "p90": 2.3
+      },
+      "wall_time_s": {
+        "p10": 450.0,
+        "p50": 1100.0,
+        "p90": 2400.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7977653631284917,
+      "p_verification_passes": 0.6282051282051282,
+      "p_user_intervenes": 0.08205128205128205,
+      "cost_usd": {
+        "p10": 0.36933058694043064,
+        "p50": 0.9269537106048124,
+        "p90": 2.1435769675309246
+      },
+      "wall_time_s": {
+        "p10": 567.4218258194782,
+        "p50": 1127.2450045964606,
+        "p90": 2207.9224890481764
+      }
+    }
+  },
+  "departures": "Slightly higher cost and time than the reference: the change touches the gate's central function and needs fixtures that build a record history, and I could not run the real records."
+}
