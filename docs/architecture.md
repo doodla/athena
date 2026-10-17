@@ -62,7 +62,7 @@ depends on another, and `athena-data` and `athena-git` are leaves.
 
 | Location | Contents | Lifetime |
 |---|---|---|
-| The repository | code, `athena.toml`, `defaults.toml`, `records/`, docs | permanent, public |
+| The repository | code, `athena.toml`, `defaults.toml`, `records/`, docs, and the shared vocabulary `docs/ontology.toml` (D109), checked by `crates/athena-cli/tests/ontology.rs` | permanent, public |
 | State directory (`<root>/<repo>-<key>/`, where the root is `$ATHENA_STATE_DIR`, by default `${XDG_STATE_HOME:-~/.local/state}/athena`; agents and checks get a root inside their job's own directory) | snapshots, live copies of records not yet committed, running usage of invocations, the process-group registry, locks, `STOP`, per-job build directories | one machine; disposable once a job's records are committed |
 | Install directory (`$ATHENA_HOME`, default `${XDG_DATA_HOME:-~/.local/share}/athena/`) | the adopted `athena` binary, the pinned gitleaks, a private Claude Code when the pinned version is not on `PATH`, and `config.toml` naming it | one machine |
 

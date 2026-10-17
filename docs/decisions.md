@@ -2527,3 +2527,25 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   `a_score_written_under_the_current_rules_marks_a_bound_cost_provisional`,
   `a_score_labelled_v1_but_computed_under_v2_is_refused` and
   `a_score_under_an_unknown_rules_version_is_refused`.
+
+## D109 · A small sourced ontology, grown only from misreads
+
+- **Case:** Words kept being read in the wrong sense: "planning" (queue order or job planning), "Hermes" (the
+  studied agent or the Orchestration god), "Athena" (the role or the whole system), "landed", and Sri's
+  pronouns (job 20261017-173504-91ys). Each time, the meaning lived in prose that the reader had not loaded.
+- **Decision:** Keep `docs/ontology.toml`: defined terms, each with a definition, the misread that caused it,
+  sources and relations. A term is added only when it causes a misread. `crates/athena-cli/tests/ontology.rs`
+  parses the file and fails on a missing field, a source that is neither an existing path nor a decision id
+  with a heading here, a relation whose target is not a defined term, or a duplicate term. The study keeps its
+  own concept model, so firstmate, Hermes Agent and Athena are compared in the same terms; the ontology does
+  not replace it. This follows decision 5 (5A) of the Olympus decision sheet of 2026-10-17, as relayed in
+  `BRIEF.md`.
+- **Alternatives:** (a) No ontology: the misreads recur and nothing checks the meanings. (b) Per-study
+  glossaries only: each study defines its own words, so the three systems are not compared in the same terms
+  and the Olympus words stay undefined. (c) A formal ontology: more machinery than seven terms need.
+- **Tradeoff:** The file can go stale; the test checks structure and sources, not that a definition is true.
+  There is no per-occurrence check of term names in `BRIEF.md`.
+- **Reversal cost:** Low: delete the file and the test.
+- **Provenance:** read: `BRIEF.md`, the 2026-10-17 Olympus relay note, item 5A; measured: the tests in
+  `crates/athena-cli/tests/ontology.rs`, including the negative cases for a missing sources field, a
+  non-existent source, a dangling relation target and a duplicate term.

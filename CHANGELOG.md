@@ -7,6 +7,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- A small shared vocabulary, `docs/ontology.toml`, with seven terms that caused misreads (planning, job,
+  Athena, Hermes, product versus system, landed, Sri). Each has a definition, the misread behind it, sources
+  and relations. `crates/athena-cli/tests/ontology.rs` checks that sources exist, relation targets are defined
+  and terms are unique. See D109 in `docs/decisions.md`.
+
 ### Changed
 
 - An interrupted job can be retried and is drained. A job that was dispatched, has no closing record and has
