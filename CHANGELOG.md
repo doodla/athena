@@ -9,6 +9,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The schema for job planning (job 1 of `docs/design/job-planning.md`), with no change in behavior. Records
+  `athena.job-plan/1` (`<job>/job-plan-<round>.json`) and `athena.critique/1` (`<job>/critique-<round>.json`),
+  documented in `docs/records.md`; roles `planner` and `critic` for invocation records; `FindingSource::Critic`
+  (review finding F10); and an optional `[job_plan]` section of `athena.toml` (`enabled`, false by default,
+  `max_rounds`, `planner_usd`, `critic_usd` and two timeouts) that nothing reads yet. A round-0 record, and a
+  critique that accepts while holding a blocker or major finding, are refused. The section is left out of the
+  serialized configuration when absent and reset in `reading_inputs`, and a test pins the digest of this
+  repository's `athena.toml` computed before the change, so no reading's `config_sha256` moves (F16). The fake
+  driver gained a planner that gives one demonstration per criterion and a critic that accepts, and the
+  exhaustive role matches in `retry.rs` and `common/mod.rs` gained arms (F15). Where the code differs from the
+  design: the design says Athena decides the critique's verdict, so the record keeps both `agent_verdict` and
+  `final_verdict`; a critique's `invocation_seq` may be null for a round Athena's own checks ended; and
+  `Records::load` files plans and critiques under `JobRecords.plans` and `JobRecords.critiques`, which the
+  design did not name. `athena.toml` and `defaults.toml` are unchanged.
 - An independent review of `docs/design/job-planning.md`, `docs/design/reviews/job-planning-review-1.md`. It
   checks the design's code claims against the source, the order and size of its five build jobs, and the keep
   rule, and ends with the verdict "build after the listed fixes" (0 High, 11 Medium, 10 Low findings).

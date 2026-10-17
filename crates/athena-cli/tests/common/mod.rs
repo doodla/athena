@@ -444,6 +444,9 @@ impl Scenario {
                     drop(seen);
                     FakeTurn::output(self.audience.clone())
                 }
+                // Job planning is not wired in yet, so no scenario reaches these; if one does, the
+                // deterministic fake answers and the recorded roles show it.
+                Role::Planner | Role::Critic => athena_agent::fake::deterministic_turn(spec),
                 Role::Auditor => {
                     let mut seen = self.seen_by_auditor.lock().unwrap();
                     seen.push(spec.system_prompt.clone());

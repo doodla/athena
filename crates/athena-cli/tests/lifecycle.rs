@@ -247,6 +247,29 @@ fn a_failing_check_rejects_the_job_without_spending_a_verifier() {
     assert!(athena.check_history().unwrap().violations.is_empty());
 }
 
+#[test]
+fn a_fake_driver_go_runs_only_the_reader_producer_and_verifier() {
+    // Job planning has a schema but no stage: no planner or critic is ever called.
+    let fx = Fixture::new();
+    let scenario = Scenario::default();
+    let calls = scenario.invocations.clone();
+    let athena = fx.athena(scenario.script());
+    let proposal = athena.ask("tidy the readme", &Lines::default()).unwrap();
+    let f = finished(
+        athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(f.state, OutcomeState::Landed);
+    let roles: std::collections::BTreeSet<Role> = calls.lock().unwrap().iter().copied().collect();
+    assert_eq!(
+        roles,
+        [Role::Reader, Role::Producer, Role::Verifier]
+            .into_iter()
+            .collect()
+    );
+}
+
 /// A script that also keeps every brief the reader was given.
 fn recording_readers(scenario: Scenario) -> (athena_agent::fake::Script, Arc<Mutex<Vec<String>>>) {
     let seen = Arc::new(Mutex::new(Vec::new()));

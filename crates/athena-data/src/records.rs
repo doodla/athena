@@ -23,11 +23,17 @@ pub enum Role {
     Steward,
     Audience,
     Auditor,
+    /// Plans a job's work before the producer starts (`docs/design/job-planning.md`).
+    Planner,
+    /// Reviews the planner's plan.
+    Critic,
 }
 
 impl Role {
     pub fn as_str(self) -> &'static str {
         match self {
+            Role::Planner => "planner",
+            Role::Critic => "critic",
             Role::Reader => "reader",
             Role::Producer => "producer",
             Role::Verifier => "verifier",
@@ -44,6 +50,8 @@ impl Role {
             "steward" => Some(Role::Steward),
             "audience" => Some(Role::Audience),
             "auditor" => Some(Role::Auditor),
+            "planner" => Some(Role::Planner),
+            "critic" => Some(Role::Critic),
             _ => None,
         }
     }
@@ -215,6 +223,8 @@ pub enum ChangeStatus {
 pub enum FindingSource {
     Verifier,
     Athena,
+    /// The job-planning critic; its critique reuses [`Finding`].
+    Critic,
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -1733,6 +1743,153 @@ impl Audit {
 }
 
 // ---------------------------------------------------------------------------------------------------------
+// Job planning (`docs/design/job-planning.md` sections 3 to 5)
+
+pub const JOB_PLAN_SCHEMA: &str = "athena.job-plan/1";
+pub const CRITIQUE_SCHEMA: &str = "athena.critique/1";
+
+/// An option the planner weighed and turned down.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RejectedOption {
+    pub option: String,
+    pub why: String,
+}
+
+/// One design choice in a plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanDecision {
+    pub choice: String,
+    pub reason: String,
+    pub rejected: Vec<RejectedOption>,
+}
+
+/// A file the plan touches. Athena, not the planner, sets `governance` and `exists`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanFile {
+    pub path: String,
+    pub action: DeliverableAction,
+    pub purpose: String,
+    pub governance: bool,
+    pub exists: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanRisk {
+    pub risk: String,
+    pub mitigation: String,
+}
+
+/// How one acceptance criterion will be shown to hold.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Demonstration {
+    /// The criterion's number in the reading, from 1.
+    pub criterion: u32,
+    pub method: String,
+    /// The command or test that shows it.
+    pub command: String,
+    /// What running it observes.
+    pub observes: String,
+    /// What would fail if the behavior were missing; a behavior demonstration needs it.
+    pub fails_without: Option<String>,
+}
+
+/// `athena.job-plan/1`: one round of the planner's plan, at `<job>/job-plan-<round>.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JobPlan {
+    pub job: JobId,
+    /// From 1.
+    pub round: u32,
+    pub at: Timestamp,
+    /// The planner's invocation, as numbered in the job's `invocations/` directory.
+    pub invocation_seq: u32,
+    pub approach: String,
+    pub decisions: Vec<PlanDecision>,
+    pub files: Vec<PlanFile>,
+    pub steps: Vec<String>,
+    pub risks: Vec<PlanRisk>,
+    pub demonstrations: Vec<Demonstration>,
+    pub open_questions: Vec<String>,
+    /// The SHA-256 of the section of the producer's prompt that code renders from this plan.
+    pub producer_section_sha256: String,
+}
+
+impl JobPlan {
+    /// Why this record is not acceptable, if it is not.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.round == 0 {
+            return Err("a job plan's round starts at 1".into());
+        }
+        if self.approach.trim().is_empty() {
+            return Err("a job plan states its approach".into());
+        }
+        if self.demonstrations.iter().any(|d| d.criterion == 0) {
+            return Err("a demonstration names its criterion by number, from 1".into());
+        }
+        if self.producer_section_sha256.len() != 64
+            || !self
+                .producer_section_sha256
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit())
+        {
+            return Err("producer_section_sha256 is a SHA-256 in hexadecimal".into());
+        }
+        Ok(())
+    }
+}
+
+/// A critique's verdict on a plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CritiqueVerdict {
+    Accept,
+    Revise,
+    Reject,
+}
+
+/// `athena.critique/1`: the critic's review of one plan round, at `<job>/critique-<round>.json`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Critique {
+    pub job: JobId,
+    /// The round of the plan reviewed, from 1.
+    pub round: u32,
+    pub at: Timestamp,
+    /// The critic's invocation; none when Athena's own checks stopped the round before any critic call.
+    pub invocation_seq: Option<u32>,
+    pub agent_verdict: Option<CritiqueVerdict>,
+    pub final_verdict: CritiqueVerdict,
+    /// Findings from the critic and from Athena's own checks.
+    pub findings: Vec<Finding>,
+    /// Set when the critic judged that the accepted reading misread the request.
+    pub request_reading_mismatch: Option<String>,
+    pub summary: Option<String>,
+}
+
+impl Critique {
+    /// Why this record is not acceptable, if it is not.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.round == 0 {
+            return Err("a critique's round starts at 1".into());
+        }
+        if self.final_verdict == CritiqueVerdict::Accept
+            && self
+                .findings
+                .iter()
+                .any(|f| matches!(f.severity, Severity::Blocker | Severity::Major))
+        {
+            return Err("a critique that accepts cannot hold a blocker or major finding".into());
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------
 // The envelope
 
 /// Any record, tagged by its `schema` field.
@@ -1789,6 +1946,10 @@ pub enum AnyRecord {
     AudienceRating(Box<AudienceRating>),
     #[serde(rename = "athena.audit/1")]
     Audit(Box<Audit>),
+    #[serde(rename = "athena.job-plan/1")]
+    JobPlan(Box<JobPlan>),
+    #[serde(rename = "athena.critique/1")]
+    Critique(Box<Critique>),
 }
 
 /// Why a file under `records/` is not acceptable.
@@ -1869,6 +2030,8 @@ impl AnyRecord {
             AnyRecord::WorkDecision(d) => d.validate().map_err(invalid)?,
             AnyRecord::AudienceRating(a) => a.validate().map_err(invalid)?,
             AnyRecord::Audit(a) => a.validate().map_err(invalid)?,
+            AnyRecord::JobPlan(p) => p.validate().map_err(invalid)?,
+            AnyRecord::Critique(c) => c.validate().map_err(invalid)?,
             AnyRecord::DefaultsProposal(p) => p.validate().map_err(invalid)?, // Totals are what reconciliation checks an outcome against; only the bootstrap has none
             // (acceptance verification 2).
             AnyRecord::Outcome(o) if o.job.is_request() && o.totals.is_none() => {
@@ -1960,6 +2123,8 @@ impl AnyRecord {
                 format!("records/audience-ratings/{}/{}.json", r.id.month(), r.id)
             }
             AnyRecord::Audit(r) => format!("records/audits/{}/{}.json", r.id.month(), r.id),
+            AnyRecord::JobPlan(r) => format!("{}/job-plan-{}.json", r.job.dir(), r.round),
+            AnyRecord::Critique(r) => format!("{}/critique-{}.json", r.job.dir(), r.round),
         }
     }
 
@@ -1990,6 +2155,8 @@ impl AnyRecord {
             AnyRecord::WorkDecision(_) => "athena.work-decision/1",
             AnyRecord::AudienceRating(_) => AUDIENCE_RATING_SCHEMA,
             AnyRecord::Audit(_) => AUDIT_SCHEMA,
+            AnyRecord::JobPlan(_) => JOB_PLAN_SCHEMA,
+            AnyRecord::Critique(_) => CRITIQUE_SCHEMA,
         }
     }
 }
@@ -2731,10 +2898,132 @@ mod tests {
             Role::Steward,
             Role::Audience,
             Role::Auditor,
+            Role::Planner,
+            Role::Critic,
         ] {
             assert_eq!(Role::parse(role.as_str()), Some(role));
         }
         assert_eq!(Role::Auditor.as_str(), "auditor");
+        assert_eq!(Role::Planner.as_str(), "planner");
+        assert_eq!(Role::Critic.as_str(), "critic");
+    }
+
+    fn sample_plan(round: u32) -> JobPlan {
+        JobPlan {
+            job: job(),
+            round,
+            at: ts(),
+            invocation_seq: 1,
+            approach: "Add the records.".into(),
+            decisions: vec![PlanDecision {
+                choice: "Reuse Finding".into(),
+                reason: "One shape for every finding.".into(),
+                rejected: vec![RejectedOption {
+                    option: "A new finding type".into(),
+                    why: "Two shapes to keep in step.".into(),
+                }],
+            }],
+            files: vec![PlanFile {
+                path: "src/lib.rs".into(),
+                action: DeliverableAction::Modify,
+                purpose: "Add the types.".into(),
+                governance: false,
+                exists: true,
+            }],
+            steps: vec!["Write the types.".into()],
+            risks: vec![PlanRisk {
+                risk: "Digest drift".into(),
+                mitigation: "A recorded digest test.".into(),
+            }],
+            demonstrations: vec![Demonstration {
+                criterion: 1,
+                method: "test".into(),
+                command: "cargo test".into(),
+                observes: "all pass".into(),
+                fails_without: Some("the new test fails".into()),
+            }],
+            open_questions: vec![],
+            producer_section_sha256: "c".repeat(64),
+        }
+    }
+
+    fn sample_critique(round: u32) -> Critique {
+        Critique {
+            job: job(),
+            round,
+            at: ts(),
+            invocation_seq: Some(2),
+            agent_verdict: Some(CritiqueVerdict::Accept),
+            final_verdict: CritiqueVerdict::Accept,
+            findings: vec![Finding {
+                severity: Severity::Minor,
+                summary: "Name is vague.".into(),
+                evidence: "step 1".into(),
+                location: None,
+                source: FindingSource::Critic,
+            }],
+            request_reading_mismatch: None,
+            summary: None,
+        }
+    }
+
+    #[test]
+    fn plans_and_critiques_belong_at_their_round_and_nowhere_else() {
+        let plan = AnyRecord::JobPlan(Box::new(sample_plan(2)));
+        let critique = AnyRecord::Critique(Box::new(sample_critique(2)));
+        assert_eq!(plan.schema(), "athena.job-plan/1");
+        assert_eq!(critique.schema(), "athena.critique/1");
+        let dir = job().dir();
+        for (record, name) in [(&plan, "job-plan"), (&critique, "critique")] {
+            let json = record.to_json();
+            assert_eq!(AnyRecord::parse("x", json.as_bytes()).unwrap(), *record);
+            let right = format!("{dir}/{name}-2.json");
+            assert_eq!(record.canonical_path(), right);
+            assert!(check_record_file(&right, json.as_bytes()).is_ok());
+            let wrong = format!("{dir}/{name}-1.json");
+            assert!(matches!(
+                check_record_file(&wrong, json.as_bytes()),
+                Err(RecordError::Misplaced { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn a_round_zero_plan_or_critique_is_refused() {
+        let plan = AnyRecord::JobPlan(Box::new(sample_plan(0)));
+        let critique = AnyRecord::Critique(Box::new(sample_critique(0)));
+        for record in [plan, critique] {
+            assert!(matches!(
+                AnyRecord::parse("x", record.to_json().as_bytes()),
+                Err(RecordError::Invalid { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn an_accepting_critique_with_a_blocker_or_major_finding_is_refused() {
+        for severity in [Severity::Blocker, Severity::Major] {
+            let mut bad = sample_critique(1);
+            bad.findings[0].severity = severity;
+            let record = AnyRecord::Critique(Box::new(bad.clone()));
+            assert!(matches!(
+                AnyRecord::parse("x", record.to_json().as_bytes()),
+                Err(RecordError::Invalid { .. })
+            ));
+            bad.final_verdict = CritiqueVerdict::Revise;
+            assert!(bad.validate().is_ok());
+        }
+    }
+
+    #[test]
+    fn a_plan_with_a_bad_section_hash_or_criterion_number_is_refused() {
+        let mut plan = sample_plan(1);
+        assert_eq!(plan.validate(), Ok(()));
+        plan.producer_section_sha256 = "abc".into();
+        assert!(plan.validate().is_err());
+        let mut plan = sample_plan(1);
+        plan.demonstrations[0].criterion = 0;
+        assert!(plan.validate().is_err());
     }
 
     #[test]

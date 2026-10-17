@@ -1,7 +1,8 @@
 # Job planning: a planner and a critic before the producer
 
-**Status:** proposed. Independent review requested (`docs/design/reviews/job-planning-review-1.md`, not yet
-written). Nothing here is built.
+**Status:** proposed, revision 2. Review 1 (`docs/design/reviews/job-planning-review-1.md`) found no High and
+11 Medium findings; section 12 says where each is settled. Job 1 of section 8 (the records, roles and config)
+is built; nothing else here is.
 
 **Author:** written by hand at Sri's direction ("You are the brain until Athena's brain starts working
 properly", 2026-10-17, `BRIEF.md` addenda), and committed as a declared intervention, so the work Athena's
@@ -84,31 +85,44 @@ producer–verifier pair moved earlier, as Sri put it. `Config::validate` alread
 
 ## 4. How the producer and verifier use the plan
 
-- **Producer (design):** its prompt is `brief-producer.md` plus a section "Job plan (accepted, round r)",
-  rendered from the plan record and appended the way the "Sent back" section is today **(read)**. It follows the
-  plan and may depart only with a reason in `open_issues`.
-- **Verifier (design):** `VerifierInputs` gains the plan. The brief lists the demonstrations, planned files that
-  did not change, and changed files that were not planned (from `candidate.changes`). The verifier judges the
-  request and the criteria first and runs each demonstration. A departure from the plan is a finding only when
-  it leaves a criterion unshown or adds scope.
+- **Producer (design):** its prompt is `brief-producer.md` plus a section "Job plan (accepted, round r)", rendered
+  by code from the accepted `athena.job-plan/1` record. The rendering is deterministic, and the job-plan record
+  stores the sha256 of the rendered section (`producer_section_sha256`), so the producer's exact prompt can be
+  rebuilt from the committed `brief-producer.md` and the plan record without a new markdown file (review F6). The
+  send-back builds from the plan-augmented prompt, not the original brief, so a second producer run keeps the
+  plan (F6). The producer follows the plan and may depart only with a reason in `open_issues`.
+- **Verifier (design):** it is not given the planner's approach, reasons or rejected options, which come from the
+  producer's model and would anchor it (review F5; `VerifierInputs` in `briefs.rs` promises no producer
+  reasoning). It gets only the critic-accepted demonstrations (one per criterion) and the planned file list.
+  `VerifierInputs::names` gains a conditional entry for them. The verifier judges the request and the criteria
+  first and runs each demonstration; a changed file that was not planned, or a planned file that did not change,
+  is a finding only when it leaves a criterion unshown or adds scope.
 - The guidance goes in the briefs, not in the always-loaded prompt frames, whose budgets are nearly full
   (**estimate**).
 
 ## 5. Records, status and failure
 
 - `athena.job-plan/1` at `<job>/job-plan-<round>.json` and `athena.critique/1` at `<job>/critique-<round>.json`.
-  A critique that accepts while holding a blocker or major finding is invalid. Both are committed in the closing
-  or landing commit, and the invocation numbers (`NN-planner.json`, `NN-critic.json`, before `NN-producer.json`)
-  show the plan came first.
+  A critique that accepts while holding a blocker or major finding is invalid; round 0 is invalid. The critique
+  reuses `Finding`, so `FindingSource` gains `Critic`, a change to a committed schema that lands in job 1, before
+  anything writes it (review F10).
+- **Plumbing (review F1, design):** `plan_job` returns a `Closing` seeded with the planning invocations, plans
+  and critiques, and `produce_and_verify` continues from that `Closing` instead of starting a new one, taking
+  its next invocation number after the planning invocations. `dispatch` recomputes `spent` after planning, so
+  the producer's budget check counts what planning cost. `close_dispatched` writes the plan and critique
+  records with the invocations. The invocation numbers (`NN-planner.json`, `NN-critic.json`, before
+  `NN-producer.json`) then show the plan came first.
 - `records::Role` gains `Planner` and `Critic`. `store.rs` `job_of` needs arms for the new record types: it
   panics on a type it does not know **(read)**. Reused unchanged: `agent_spec`, `invoke_and_record`,
-  `check_budget`, `failure`, `close_dispatched`, `Finding` and `Severity` (with `FindingSource::Critic`), and the
-  scoring functions, which already count every non-reader invocation as execution **(read)**.
+  `check_budget`, `failure`, and the scoring functions, which already count every non-reader invocation as
+  execution **(read)**.
 - `athena status` shows "plan accepted r2" or "plan stopped r3" per job, and the first-round accept and stop
   counts. `athena status <job>` lists each round with its verdict and findings.
 - When planning stops (reject, misread, revise in the last round, a planner or critic failure, or no budget), the
   job fails through `failure()` with the reason "planning stopped before any code was written:" and the findings.
-  `go` introspects it, and a retry passes the reason to the next reader through `earlier_attempt` **(read)**.
+  `go` introspects it. A retry's carry includes the last critique's findings, not only that reason (review F11).
+  A job stopped in planning records `verification_passed` as unknown, not false, so it is not scored as a
+  verification that failed (F11).
 
 ## 6. Naming
 
@@ -121,6 +135,7 @@ renaming `athena plan` to `athena queue` belongs to the design review Sri asked 
 
 | Alternative | Why not now |
 |---|---|
+| Athena's own checks on the reading only, with no planner or critic | Free, and by the introspection counts it reaches 12 of 85 (governance file missing from the reading, criteria that check presence, acceptance method unstated; **unchecked** against records). The largest class, a criterion found unmet only at the final verdict (20), needs a plan to review. These checks are still built first inside the stage (job 4), so their reach is measured on their own (review F14). |
 | A stronger reader that also designs | The reader works without reading the code in depth, and one model would plan and review itself. |
 | A plan section inside the producer's run | The producer already decides the design mid-coding; that is the status quo that thrashes. |
 | A critic alone, reviewing the reading | It can catch vague criteria but not a bad design, because no design exists yet to review. |
@@ -131,57 +146,71 @@ renaming `athena plan` to `athena queue` belongs to the design review Sri asked 
 
 Order matters: the config section needs its schema before any `athena.toml` turns it on (the
 config-edit-ahead-of-schema class, jobs 20261016-071202-q0xy and 20261016-185517-qcrz). Each job is sized for
-one producer run.
+one producer run; review 1 split jobs 3 and 5.
 
-1. **Records, roles and config; no behavior change.** `crates/athena-data/src/{records.rs, config.rs}`,
-   `crates/athena-core/src/{store.rs, run_pin_tests.rs}`, the fake driver's role arms
-   (`crates/athena-agent/src/fake.rs`: a deterministic planner that covers every criterion, a critic that
-   accepts), tests, `docs/records.md`, `CHANGELOG.md`. `Config.job_plan: Option<JobPlanConfig>` with
-   `deny_unknown_fields`, `enabled` false by default, and left out of `reading_inputs` so existing readings stay
-   valid. No `athena.toml` edit. Done when: round-2 records pass `check_record_file` at their paths and are
-   refused as misplaced at round-1 paths; a round-0 record and an accepting critique with a major finding are
-   refused; this repository's `athena.toml` parses to `job_plan == None` and adding an enabled section leaves
-   `reading_inputs()` unchanged; `max_rounds = 0`, a zero cap and an unknown key are refused; a fake-driver `go`
-   still runs only reader, producer and verifier.
+1. **Records, roles and config; no behavior change.** `crates/athena-data/src/{records.rs, config.rs}` (with
+   `FindingSource::Critic`, F10), `crates/athena-core/src/{store.rs, run_pin_tests.rs}`, the fake driver's role
+   arms (`crates/athena-agent/src/fake.rs`: a deterministic planner that covers every criterion, a critic that
+   accepts), the exhaustive role matches in `crates/athena-cli/tests/retry.rs` and
+   `crates/athena-cli/tests/common/mod.rs` (F15), `docs/records.md`, `CHANGELOG.md`. `Config.job_plan:
+   Option<JobPlanConfig>` with `deny_unknown_fields`, `skip_serializing_if = "Option::is_none"`, `enabled` false
+   by default, and reset to `None` in `reading_inputs` (F16). No `athena.toml` edit. Done when: `cargo test
+   --locked` passes; round-2 records pass `check_record_file` at their paths and are refused as misplaced at
+   round-1 paths; a round-0 record and an accepting critique with a major finding are refused; `reading_inputs()`
+   for this repository's `athena.toml` is byte-identical to a digest recorded in the test before the change, and
+   adding an enabled section leaves it unchanged; `max_rounds = 0`, a zero cap and an unknown key are refused; a
+   fake-driver `go` still runs only reader, producer and verifier.
 2. **Prompts, outputs and briefs, as pure functions.** `crates/athena-context/prompts/{planner.md, critic.md}`,
    `crates/athena-context/src/{lib.rs, outputs.rs, briefs.rs}`, `crates/athena-cli/tests/budgets.rs`. Done when:
    the planner brief numbers each criterion, flags a listed `athena.toml` as governance and lists the verifier's
    commands; a revision brief quotes the previous plan and its findings; the critic brief carries the
    demonstrations and Athena's findings and nothing about the planner's cost or commands; both output schemas
-   forbid extra properties and allow exactly accept, revise and reject; the verifier brief without a plan is
-   byte-identical to today's.
-3. **The accept path in `go`.** New `crates/athena-core/src/job_plan.rs`, `run.rs`, `lib.rs`,
-   `crates/athena-cli/tests/job_plan.rs` (planning on through `Fixture::with_config`). Done when: with an
-   accepting critic the roles run reader, planner, critic, producer, verifier; the landing commit holds
-   `job-plan-1`, `critique-1` and invocations 02 to 05, and `check_history()` is clean; the producer's prompt holds
-   the planned files and demonstration commands and the verifier's brief holds the plan; with the section absent
-   or off, or for a study, roles and records are today's.
-4. **Revise and stop paths, and Athena's own checks.** `job_plan.rs` and its tests. Done when: after revise then
+   forbid extra properties and allow exactly accept, revise and reject; the rendered producer section is
+   deterministic (same record, same bytes); the verifier brief with a plan holds only the demonstrations and the
+   planned files (F5), and without a plan is byte-identical to today's.
+3. **3a: the plumbing in `run.rs`, with a fixed plan.** `crates/athena-core/src/run.rs`, `lib.rs`, a test with the
+   fake driver and a plan supplied by the test. Done when: planning invocations are numbered before the
+   producer's and are in the landing commit with the plan and critique records (F1); `spent` after planning
+   counts the planning invocations; the send-back prompt keeps the plan section (F6); `check_history()` is clean;
+   with planning off, roles and records are today's.
+4. **3b: the stage.** New `crates/athena-core/src/job_plan.rs`, `crates/athena-cli/tests/job_plan.rs` (planning
+   on through `Fixture::with_config`). Done when: with an accepting critic the roles run reader, planner, critic,
+   producer, verifier; the producer's prompt holds the planned files and demonstration commands and its section
+   hash matches the plan record; for a study, roles and records are today's.
+5. **4: revise and stop paths, and Athena's own checks.** `job_plan.rs` and its tests. Done when: after revise then
    accept, the second planner prompt quotes the finding; when every round says revise, no producer or verifier
-   runs, the outcome is failed with the "planning stopped" reason, three plans and three critiques are committed,
-   the totals include all six planning invocations, and `check_history()` is clean; a plan that edits an
-   unlisted `athena.toml`, or cites a command outside the verifier's grant, gets an Athena critique with no critic
-   call.
-5. **Status, recovery, and turning it on.** `crates/athena-core/src/{status.rs, manage.rs}`,
-   `crates/athena-cli/src/display.rs`, `crates/athena-cli/tests/common/mod.rs` (the test config drops
-   `[job_plan]`), `athena.toml`, `docs/decisions.md`, `CHANGELOG.md`. Queue it only after Athena has been rebuilt
-   with `./setup.sh` from a main that holds jobs 1 to 4. Done when: plan state appears only for planned jobs and
-   `status <job> --json` includes plans and critiques; closing a job killed during planning adds no producer
-   invocation; the repository's `athena.toml` parses with planning on; the decision entry names the alternatives
-   above and the reversal (set `enabled = false`).
+   runs, the outcome is failed with the "planning stopped" reason, three plans and three critiques are
+   committed, the totals include all six planning invocations, `verification_passed` is unknown (F11), and
+   `check_history()` is clean; a retry's carry quotes the last critique's findings (F11); a plan that edits an
+   unlisted `athena.toml`, or cites a command outside the verifier's grant, gets an Athena critique with no
+   critic call.
+6. **5a: status and recovery.** `crates/athena-core/src/{status.rs, manage.rs}`, `crates/athena-cli/src/display.rs`.
+   Done when: plan state appears only for planned jobs and `status <job> --json` includes plans and critiques;
+   closing a job killed during planning adds no producer invocation.
+7. **5b: turning it on.** Only `athena.toml`, `crates/athena-cli/tests/common/mod.rs` (the test config drops
+   `[job_plan]` so existing tests keep today's path), `docs/decisions.md` and `CHANGELOG.md`. The reading lists
+   `athena.toml` as a deliverable and names it in a criterion (`governance_change_is_listed`). Queue it only after
+   Athena has been rebuilt with `./setup.sh` from a main that holds jobs 1 to 5a. Done when: the repository's
+   `athena.toml` parses with planning on; the decision entry names the alternatives above and the reversal (set
+   `enabled = false`).
 
 ## 9. Measuring it, and when to keep it
 
-This is a measured experiment in the sense of the Olympus brief's R6.
+This is a measured experiment in the sense of the Olympus brief's R6. Review 1 found the first rule could not
+decide anything (F18 to F20); this replaces it.
 
-- **Baseline at 4adaf98 (read):** 237 jobs closed after dispatch, 152 landed, 61 rejected, 24 failed; 155 of 216
-  verifications passed (about 72%); about $1.67 per landed job.
-- **Track, for planned change jobs:** first-pass verification rate; cost and execution wall time per landed job
-  (counting every job, landed or not); attempts per landed request; the five failure classes in section 2 per
-  100 jobs; the first-round accept rate; planning's share of cost.
-- **Keep rule (design):** after about 30 planned jobs, keep planning if the first-pass rate rises by at least 10
-  points and cost per landed job rises by no more than 25%. Otherwise record the result as unsupported or
-  inconclusive, keep the records, and turn it off.
+- **Primary measure (F18):** the landed share of dispatched change jobs, counting a job stopped in planning as
+  not landed, so planning cannot raise the rate by removing jobs from the denominator. Baseline at 4adaf98: 152
+  of 237 dispatched jobs landed, about 64% **(read)**.
+- **Guards:** cost per landed job (`totals.cost_all`, every job's cost divided by landed jobs) at most $2.50
+  against a baseline of about $1.67; attempts per landed request; the five failure classes in section 2 per 100
+  jobs; the first-round accept rate; planning's share of cost.
+- **Rule (F19, F20):** through the first 30 planned jobs, keep planning on unless the landed share falls below
+  the baseline. At 100 planned jobs, keep it if the landed share is at least 72% and cost per landed job is at
+  most $2.50; turn it off if the share is at or below 64%; otherwise record the result as inconclusive and keep
+  measuring. At 30 jobs a 10-point change is about one standard error (**estimate**), so no firm decision is
+  taken there. The landed-share target governs; the cost ceiling is a guard, not a second test of the same
+  effect.
 
 ## 10. Risks
 
@@ -198,3 +227,21 @@ This is a measured experiment in the sense of the Olympus brief's R6.
 - Should the critic later become a different model family? Decide from the critique records.
 - When do hand-written plans stop? When Athena's accepted plans agree with the hand-written ones on recent
   jobs.
+
+## 12. Changes after review 1
+
+| Finding | Settled in |
+|---|---|
+| F1: planning invocations had no path into the closing records or the budget | Section 5 (plumbing), job 3a |
+| F5: the verifier would see the producer model's reasoning | Section 4: demonstrations and planned files only; job 2 |
+| F6: the recorded brief was not the producer's prompt, and a send-back dropped the plan | Section 4: rendered section and its hash in the plan record; jobs 2 and 3a |
+| F10: `FindingSource::Critic` changes a committed schema | Section 5; job 1 |
+| F11: a retry lost the critic's findings, and a stopped job scored as a failed verification | Section 5; job 4 |
+| F14: the cheapest alternative was missing | Section 7 |
+| F15: job 1 did not compile as listed | Job 1 lists `retry.rs` and `common/mod.rs` and requires `cargo test --locked` |
+| F16: the new config field could change every reading's digest | Job 1: skipped when absent, reset in `reading_inputs`, byte-identical digest test |
+| Sizing: jobs 3 and 5 too large | Split into 3a and 3b, and 5a and 5b |
+| F18 to F20: the keep rule could not decide | Section 9 rewritten |
+
+The Low findings (F2, F3, F4, F7, F8, F9, F12, F13, F17, F21) are left to the build jobs that touch their code,
+which should read the review.

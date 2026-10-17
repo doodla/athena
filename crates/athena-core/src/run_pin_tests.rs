@@ -204,6 +204,9 @@ fn athena_with(
                 t.commands_run = vec!["cargo test".into()];
                 t
             }
+            Role::Planner | Role::Critic => {
+                unreachable!("job planning is not wired in, so no test reaches these roles")
+            }
             Role::Steward => FakeTurn::output(json!({ "items": [] })),
             Role::Audience => FakeTurn::output(json!({ "rating": 3, "findings": [] })),
             Role::Auditor => FakeTurn::output(json!({ "summary": "Fine.", "findings": [] })),
