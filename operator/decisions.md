@@ -220,3 +220,7 @@ Athena's decision log, not here. Newest last.
 - Why: the stand-in user had become hidden project management. 12 of the last 30 interventions were overrides,
   and the operator cost more than every Athena job together. With Sri as the user, the intervention log and
   Olympus's human-attention metric measure Athena against real attention.
+- 2026-10-17 ~17:40 UTC, Sri, after the operator stopped to wait for a go: "I think you should be doing more work
+  somehow". Read as the go that OP-15 asked for, and as a standing instruction: keep Athena working within the
+  daily spend limit without waiting for a go each time, do the custody work (landing, restarts, the lease)
+  actively, and spend the operator's own time on OP-14's spot-checks and reports. Decisions still go to Sri.
