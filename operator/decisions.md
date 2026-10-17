@@ -169,7 +169,8 @@ Athena's decision log, not here. Newest last.
        This is custody, not an intervention.
      - Long runs (a drain, a go and land) run as session-tracked background tasks, never as detached `nohup`
        processes: on 2026-10-16 the cloud container was reclaimed twice while only detached processes ran, killing
-       the jobs in flight. After any restart: check uptime, `./setup.sh`, renew the lease, close and re-ask the
+       the jobs in flight. Tracked tasks are not proof against restarts either: on 2026-10-17 at about 11:06 UTC the
+       container restarted during a tracked run (with a Claude Code update to 2.1.302). Expect restarts at any time. After any restart: check uptime, `./setup.sh`, renew the lease, close and re-ask the
        interrupted job.
      - A tracked task ends at 2 hours, and a job takes 30 to 45 minutes, so one drain run takes `--job-limit 2`. A drain
        cut off mid-job leaves that job interrupted (2026-10-17: pkwj, closed and asked again as x3c8).
