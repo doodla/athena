@@ -9,6 +9,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- Generated commit subjects and job titles are cut at word boundaries, not mid-word. The intervention
+  commit subject, a reading's title and the title fallback from the request share one helper,
+  `truncate_at_word`, still at 72 characters; a single word longer than that is hard-cut. This fixes n4 of
+  `docs/design/reviews/athena-v0-acceptance-1.md`.
 - Scoring rules are versioned. A score's `rules` string names its version, `v1` (a cost known only as a bound
   is never provisional) or `v2` (it is, the current version); new scores are written under `v2`. The commit
   gate recomputes each score under the version it records instead of demanding the latest rules, and still
@@ -54,6 +58,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   speedup is claimed.
 
 ### Fixed
+
+- Main's "full history" check passes again. Commit `39962ed` (the squash of PR #130) carried two jobs'
+  landings, `20261010-154004-60r4` (its PR #129 was closed unmerged) and `20261017-121143-sg0j`, and the chain
+  between them is broken, so the check failed on it. `39962ed` is added to `[history] exempt` in `athena.toml`
+  with a comment, the same remedy as `ee4b0dd` (D66) and `f2a8453` (D70). Its content skips the invariant; each
+  job's own records still get the per-record checks. The chain-landing check itself is unchanged.
 
 - The verifier is told that `records/`, private files and history are absent from its snapshot by design, and
   that their absence is not a finding. Root cause: the verifier prompt named the absent paths but did not say

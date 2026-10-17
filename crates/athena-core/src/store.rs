@@ -112,14 +112,9 @@ impl JobRecords {
     pub fn title(&self) -> String {
         match (self.latest_reading(), &self.request) {
             (Some(r), _) => r.title.clone(),
-            (None, Some(req)) => req
-                .text
-                .lines()
-                .next()
-                .unwrap_or("")
-                .chars()
-                .take(72)
-                .collect(),
+            (None, Some(req)) => {
+                crate::truncate_at_word(req.text.lines().next().unwrap_or(""), crate::SUBJECT_MAX)
+            }
             _ => String::new(),
         }
     }

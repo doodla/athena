@@ -457,13 +457,7 @@ impl Athena {
                 p: d.p,
             });
         }
-        let title: String = text[0]
-            .lines()
-            .next()
-            .unwrap_or("")
-            .chars()
-            .take(72)
-            .collect();
+        let title = reading_title(&text[0]);
         let reading = Reading {
             job: job.clone(),
             n,
@@ -1446,9 +1440,27 @@ pub fn job_records(athena: &Athena, job_ref: &str) -> Result<(Records, JobRecord
     Ok((records, job))
 }
 
+/// A reading's title: the first line of the reader's text, cut at a word boundary.
+fn reading_title(text: &str) -> String {
+    crate::truncate_at_word(text.lines().next().unwrap_or(""), crate::SUBJECT_MAX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_long_reading_title_is_cut_at_a_word_boundary() {
+        let text = "Cut generated commit subjects at a word boundary and not in the middle of a word, \
+                    so that the log reads cleanly\nsecond line";
+        let title = reading_title(text);
+        assert!(title.chars().count() <= 72, "{title:?}");
+        assert!(text.starts_with(&title));
+        assert!(
+            text[title.len()..].starts_with(' '),
+            "ends mid-word: {title:?}"
+        );
+    }
 
     #[test]
     fn a_bare_try_again_on_is_refused_and_a_named_job_is_found() {
