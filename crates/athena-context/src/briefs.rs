@@ -375,7 +375,8 @@ pub fn verifier_brief(inputs: &VerifierInputs, inline_diff: bool) -> String {
     let c = &inputs.candidate;
     let _ = writeln!(
         out,
-        "## The change\n\nBase {} → candidate {}. In your working directory, `git diff HEAD~1` shows it.\n",
+        "## The change\n\nBase {} → candidate {}. In your working directory, `git diff HEAD~1` shows it. \
+         records/, the owner's private files, and history are absent by design; their absence is not a finding.\n",
         short(&c.base),
         short(&c.candidate)
     );
@@ -883,6 +884,29 @@ mod tests {
         assert!(
             brief.contains("judged against the list and not against the wording of a criterion")
         );
+    }
+
+    #[test]
+    fn verifier_briefs_say_what_the_snapshot_lacks_is_not_a_finding() {
+        let inputs = VerifierInputs {
+            job: "20261010-153012-k7q2".into(),
+            request: "change the demo".into(),
+            reading: AcceptedReading::new(&reading(), &defaults(), |_| false),
+            candidate: CandidateView {
+                base: "1".repeat(40),
+                candidate: "2".repeat(40),
+                stat: String::new(),
+                diff: String::new(),
+            },
+            checks: vec![],
+            commands: vec![],
+            tool_config_from_base: vec![],
+            pin: None,
+        };
+        let brief = verifier_brief(&inputs, true);
+        assert!(brief.contains(
+            "records/, the owner's private files, and history are absent by design; their absence is not a finding."
+        ));
     }
 
     #[test]
