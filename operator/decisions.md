@@ -166,7 +166,9 @@ Athena's decision log, not here. Newest last.
      - Harness version (Sri, 2026-10-16): "When Claude code updates, you own bumping it up. We're in a cloud session,
        so it's inevitable." Athena keeps an exact `claude_version` pin; when the installed Claude Code changes, the
        operator bumps the pin (check `claude --version` at session start and after any refusal against the pin).
-       This is custody, not an intervention.
+       This is custody, not an intervention. Order matters: bump the pin, then run `./setup.sh`, then confirm
+       `athena status` reports the driver at the new version. Setup run before the bump keeps Athena on the old copy
+       and its agents refuse to start (2026-10-17, ~11:10 UTC).
      - Long runs (a drain, a go and land) run as session-tracked background tasks, never as detached `nohup`
        processes: on 2026-10-16 the cloud container was reclaimed twice while only detached processes ran, killing
        the jobs in flight. Tracked tasks are not proof against restarts either: on 2026-10-17 at about 11:06 UTC the
