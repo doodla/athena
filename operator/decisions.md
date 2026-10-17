@@ -194,3 +194,29 @@ Athena's decision log, not here. Newest last.
 - 2026-10-17 ~16:00 UTC, Sri: "Stop the queue, and restart". The kill switch was thrown on the old machine (it is
   machine-local, so a new machine starts with it off), and the running job 20261017-155259-7mjc ended rejected.
   Confirm with Sri before resuming work.
+
+## OP-16. Olympus: Sri is the user; the operator relays and keeps custody (2026-10-17)
+
+- Decision (Sri, decision sheet of 2026-10-17, https://claude.ai/artifact/BL3f5haocHYvJiC5jCKSin, read at ~17:33
+  UTC; every recommended option, no notes):
+  1. 1A: adopt Sri's Project Olympus brief. It is appended to `BRIEF.md` after the Athena brief's addenda, so the
+     line numbers that `docs/design/requirements-map.md` cites do not move, and it ends with a second `## Addenda`
+     for owner addenda from 2026-10-17 on. Code, commands and records keep the name Athena for now.
+  2. 2A: Sri is the user (Zeus). The operator passes Sri's words to Athena unchanged, keeps custody, and builds
+     reports. BRIEF.md O2 (the operator as lazy user) is replaced. An option Sri picks on a decision sheet goes to
+     Athena worded as on the sheet, with a line naming its source.
+  3. 3C: the brief gets two layers, Sri's verbatim words as the record and one cohesive spec built from them.
+  4. 4A: Athena gets a requirements engineer. 5A: a small shared vocabulary grown from misreads.
+  5. 6A: Sri's planner line goes to Athena as written, without the held Planning Review (OP-15's hold stands).
+  6. 7A: Athena re-triages the requests and proposals queued before Olympus.
+- Unchanged: OP-14's duties and boundary. Anything beyond relay and custody is an intervention, logged with
+  `athena intervene` and filed as a gap in the same step. OP-15's "confirm with Sri before resuming work" still
+  holds until Sri says go.
+- Baseline before the change, from Athena's records at ~17:00 UTC: 293 jobs; 152 of the 250 finished jobs landed
+  (61%); about $255 of reported model cost, about $1.68 per landed job; 109 interventions; 85 recorded
+  introspections, 46 of them in seven failure classes at the front or the end of the pipeline; about 78% of
+  dispatched jobs (judged by title) were work on Athena itself. The fourth operator session's own usage was about
+  $273.
+- Why: the stand-in user had become hidden project management. 12 of the last 30 interventions were overrides,
+  and the operator cost more than every Athena job together. With Sri as the user, the intervention log and
+  Olympus's human-attention metric measure Athena against real attention.
