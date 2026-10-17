@@ -9,6 +9,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The planning round, threaded through dispatch behind `[job_plan] enabled = true` (job 3a of
+  `docs/design/job-planning.md`). For a capability that does not pin a repository, `dispatch` runs one planner
+  and one critic invocation after the prediction commit and before the producer, accept only: a critic that
+  revises or rejects fails the job with "planning stopped before any code was written" (revising is job 4). The
+  round seeds the `Closing` that `produce_and_verify` now continues from, so the invocations are numbered
+  reader, planner, critic, producer, verifier, and the landing commit holds `job-plan-1.json`,
+  `critique-1.json` and every invocation record (review finding F1). `spent` is recomputed after planning, so
+  the producer-and-verifier budget check counts what planning cost, and a job left too little stops before
+  the producer naming the budget. The producer's prompt is `brief-producer.md` plus the rendered plan section
+  (`producer_prompt_with_plan`), the send-back is built from that same prompt, and the plan record's
+  `producer_section_sha256` is the hash of that section (F6). With `[job_plan]` absent or off, and for a
+  study, roles and records are unchanged.
 - The planner and critic prompts, schemas and briefs (job 2 of `docs/design/job-planning.md`), as pure functions
   that nothing calls yet, so behavior does not change. `prompts/planner.md` and `prompts/critic.md` are
   registered as `PLANNER_FRAME` and `CRITIC_FRAME`. `outputs.rs` gains `PlanOutput` and `CriticOutput`

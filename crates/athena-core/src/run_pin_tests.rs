@@ -205,7 +205,7 @@ fn athena_with(
                 t
             }
             Role::Planner | Role::Critic => {
-                unreachable!("job planning is not wired in, so no test reaches these roles")
+                unreachable!("a study is not planned, so no test reaches these roles")
             }
             Role::Steward => FakeTurn::output(json!({ "items": [] })),
             Role::Audience => FakeTurn::output(json!({ "rating": 3, "findings": [] })),
@@ -306,6 +306,31 @@ fn a_study_pins_once_records_the_commit_and_mounts_it_read_only_for_both_agents(
             .unwrap()
             .iter()
             .any(|e| e.path.starts_with(MOUNT_DIR))
+    );
+}
+
+#[test]
+fn a_study_is_not_planned_even_with_job_planning_enabled() {
+    // A study pins a repository, so planning is skipped: the scripted planner and critic are unreachable.
+    let enabled = format!("{}\n[job_plan]\nenabled = true\n", config(true));
+    let (dir, git) = repo(&enabled);
+    let state = tempfile::tempdir().unwrap();
+    let seen: Seen = Arc::default();
+    let athena = athena(&dir, &state, CountingPinner::new(FAKE_SHA), seen.clone());
+    let proposal = athena.ask("study the demo", &Quiet).unwrap();
+    let GoResult::Finished(finished) = athena
+        .go(proposal.job.as_str(), AcceptedBy::User, &Quiet)
+        .unwrap()
+    else {
+        panic!("expected the job to finish");
+    };
+    assert_eq!(finished.state, OutcomeState::Landed, "{}", finished.reason);
+    let roles: Vec<Role> = seen.lock().unwrap().iter().map(|s| s.0).collect();
+    assert_eq!(roles, vec![Role::Producer, Role::Verifier]);
+    let dir = proposal.job.dir();
+    assert!(
+        !git.path_exists("HEAD", &format!("{dir}/job-plan-1.json"))
+            .unwrap()
     );
 }
 

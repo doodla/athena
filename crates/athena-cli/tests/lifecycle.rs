@@ -249,7 +249,7 @@ fn a_failing_check_rejects_the_job_without_spending_a_verifier() {
 
 #[test]
 fn a_fake_driver_go_runs_only_the_reader_producer_and_verifier() {
-    // Job planning has a schema but no stage: no planner or critic is ever called.
+    // Job planning is off unless `[job_plan]` enables it: no planner or critic is called.
     let fx = Fixture::new();
     let scenario = Scenario::default();
     let calls = scenario.invocations.clone();

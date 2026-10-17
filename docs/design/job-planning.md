@@ -173,6 +173,9 @@ one producer run; review 1 split jobs 3 and 5.
    producer's and are in the landing commit with the plan and critique records (F1); `spent` after planning
    counts the planning invocations; the send-back prompt keeps the plan section (F6); `check_history()` is clean;
    with planning off, roles and records are today's.
+   *Built as:* `plan_round` in `run.rs` runs the planner and critic (accept only; any other verdict fails the job
+   with the "planning stopped" reason) and returns the producer section; the fake planner and critic stand in
+   for a plan supplied by the test, and `crates/athena-cli/tests/job_plan.rs` holds the tests that 3b extends.
 4. **3b: the stage.** New `crates/athena-core/src/job_plan.rs`, `crates/athena-cli/tests/job_plan.rs` (planning
    on through `Fixture::with_config`). Done when: with an accepting critic the roles run reader, planner, critic,
    producer, verifier; the producer's prompt holds the planned files and demonstration commands and its section

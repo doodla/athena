@@ -1,0 +1,141 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261017-221628-by6t",
+  "base_commit": "79d27ee1ec8eaad28764e70ba0e875fcbddc8e9b",
+  "base_fingerprint": "sha256:21ad576fb7e1f3d5b9a531d4a7c26536a6cbfff0ef089b3b823a9c1a15725011",
+  "previous_job": "20261017-213422-amr5",
+  "candidate_commit": "78faf92b1cdc7ca268b5401bb23e7e0b901ae350",
+  "candidate_tree": "5f0fe91b936a7b7dd0f207d2f3c493a6266d7c26",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 101400
+    },
+    {
+      "path": "crates/athena-cli/tests/job_plan.rs",
+      "status": "added",
+      "mode": "100644",
+      "bytes": 7346
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 78918
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 74309
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 99339
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 29798
+    },
+    {
+      "path": "docs/design/job-planning.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 19526
+    }
+  ],
+  "fingerprint": "sha256:6772a1901aa729912857dcb3d6393e250ca0b8b308433f618165c90dbd020401",
+  "violations": [],
+  "producer_report": {
+    "summary": "With `[job_plan] enabled = true` and a capability that does not pin a repository, dispatch now runs one planning round. It happens after the prediction commit and before the producer, and it accepts only. A planner invocation (the producer's model) and a critic invocation (the verifier's model) run in a read-only snapshot of the prediction commit, through `agent_spec` and `invoke_and_record`, using the job-2 briefs. All checks pass: `cargo test --locked`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo fmt --all --check`.\\n\\nThe round seeds the `Closing` with the two invocations, `job-plan-1` and `critique-1`. `produce_and_verify` now takes that `Closing` and numbers the producer after them (F1). That gives reader, planner, critic, producer, verifier. After planning, dispatch recomputes `spent` and checks the producer-and-verifier cap. A job left too little stops before the producer, with a message naming the budget.\\n\\nThe producer prompt is `brief-producer.md` plus the rendered plan section, built by a new `producer_prompt_with_plan` in `briefs.rs`. The send-back is built from that same prompt (F6). The plan record's `producer_section_sha256` is the hash of that section. `close_dispatched` writes the plan and critique records with the invocations.\\n\\nIf the critic revises or rejects, or the planner or critic fails, the job fails with 'planning stopped before any code was written'. Revising is job 4.\\n\\nWith `[job_plan]` absent or off, and for a study, roles and records are unchanged. `athena.toml`, `defaults.toml` and the workflows are untouched. I also added the CHANGELOG entry and a 'Built as' note under job 3a in the design doc.\\n\\nTests are in a new file, `crates/athena-cli/tests/job_plan.rs`: the five-invocation landing, the budget stop, the send-back with the section hash, and planning off or absent. A study test with planning enabled is added to `run_pin_tests.rs`. I changed two stale comments about planning not being wired in.\"",
+    "files": [
+      "crates/athena-core/src/run.rs",
+      "crates/athena-context/src/briefs.rs",
+      "crates/athena-cli/tests/job_plan.rs",
+      "crates/athena-core/src/run_pin_tests.rs",
+      "crates/athena-cli/tests/lifecycle.rs",
+      "CHANGELOG.md",
+      "docs/design/job-planning.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "all suites pass, including the new crates/athena-cli/tests/job_plan.rs (4 tests) and the study test in run_pin_tests.rs; the xtask boundary test is part of it"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "clean after removing a clone on a Copy value"
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "clean"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Run cargo test: a fake-driver test with a fixture config having [job_plan] enabled = true yields invocations 01 reader, 02 planner, 03 critic, 04 producer, 05 verifier; the landing commit contains job-plan-1.json, critique-1.json and all five invocation records; check_history() is clean.",
+        "status": "met",
+        "evidence": "job_plan.rs test an_enabled_job_runs_the_planner_and_critic_before_the_producer_and_commits_their_records asserts the five invocation names under HEAD, both records, and no check_history violations; it passed."
+      },
+      {
+        "criterion": "Run cargo test: with a fixture cap between producer-alone cost and planning-plus-producer cost, the job stops before the producer is invoked and the failure names the budget, proving spent is recomputed after planning.",
+        "status": "met",
+        "evidence": "test a_cap_between_the_producer_alone_and_planning_plus_the_producer_stops_the_job_before_the_producer uses job_usd 5.025: left is 5.015 before planning and 4.995 after. It asserts state Failed, reason contains 'budget', no producer or verifier call, and only three invocation records. Passed. Only the post-planning check in dispatch can stop the job here, because no producer-side check exists."
+      },
+      {
+        "criterion": "Run cargo test: on a forced send-back the second producer prompt still contains the 'Job plan (accepted, round 1)' section, and job-plan-1.json's producer_section_sha256 equals the sha256 of the rendered section.",
+        "status": "met",
+        "evidence": "test a_send_back_keeps_the_plan_section_and_its_hash_matches_the_plan_record forces a send-back (first report has no full test run). It checks both prompts contain the heading, prompts[1] contains '## Sent back', the committed plan's producer_section_sha256 equals sha256_hex(render_plan_section(plan)), and prompt 1 equals the committed brief plus the section. Passed."
+      },
+      {
+        "criterion": "Run cargo test: with [job_plan] absent, enabled = false, or for a study job (or a capability pinning a repository), the invocations and records are identical to current behavior; all existing tests pass.",
+        "status": "met",
+        "evidence": "test with_planning_absent_or_off_the_invocations_are_the_producer_verifier_pair_only checks roles and the 01 reader, 02 producer, 03 verifier records, with no plan or critique files. run_pin_tests a_study_is_not_planned_even_with_job_planning_enabled has planner and critic arms that panic if reached, and it passed. The full suite passed."
+      },
+      {
+        "criterion": "cargo clippy --all-targets -- -D warnings and cargo fmt --check pass, and xtask's boundary test passes under cargo test.",
+        "status": "met",
+        "evidence": "ran cargo clippy --all-targets --locked -- -D warnings, cargo fmt --all --check and cargo test --locked; all pass."
+      },
+      {
+        "criterion": "Planner and critic are recorded through agent_spec and invoke_and_record as Role::Planner and Role::Critic using the job-2 briefs; the producer prompt is brief-producer.md plus render_plan_section, and the send-back is built from that same augmented prompt.",
+        "status": "met",
+        "evidence": "plan_round in run.rs calls agent_spec and invoke_and_record with Role::Planner and Role::Critic, planner_brief and critic_brief, plan_schema and critic_schema. dispatch builds the producer prompt with producer_prompt_with_plan(brief, render_plan_section output) and passes it as `brief` to produce_and_verify, whose send-back formats from that same text."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry describing the planning round plumbing; athena.toml, defaults.toml and workflows are unchanged.",
+        "status": "met",
+        "evidence": "CHANGELOG.md has a new first entry under Unreleased/Added. I edited no athena.toml, defaults.toml or workflow file."
+      }
+    ],
+    "open_issues": [
+      "I did not edit crates/athena-core/src/lib.rs. No new module was needed, since the tests live in athena-cli/tests/job_plan.rs, so the brief's lib.rs deliverable was left unchanged.",
+      "A critic that revises or rejects fails the job through failure() with the 'planning stopped' reason, and the plan and critique records are still written. Setting verification_passed to unknown (F11) is left to job 4. The field is not used by scoring, which reads the records.",
+      "Planner and critic text is redacted by redacting the JSON text of the output and parsing it back. If redaction broke the JSON, dispatch would return an error. This works for the current redactor, but job 3b may want field-level redaction.",
+      "The critic's evidence and fix fields are merged into Finding.evidence as 'evidence Fix: fix', because Finding has no fix field."
+    ],
+    "mistakes": [
+      "I first left a bogus name in a use list; the first cargo check would have caught it, and I fixed it before then.",
+      "The first draft of the budget test asserted the exact role list and failed because of the post-failure introspection call; I corrected the assertion."
+    ],
+    "learnings": [
+      "dispatch's only budget check before the producer is the one made before the prediction commit; produce_and_verify has none for the producer, so the post-planning check had to be added in dispatch.",
+      "Spent already includes closing.new_invocations through RunContext::spent, so seeding the Closing makes the verifier's budget check count planning with no further change.",
+      "A failed job is introspected by go, which makes one more reader-role call. Tests that list roles after a failure must allow for it.",
+      "The fake driver's deterministic planner and critic already work with Scenario, so planning tests need no new fake code.",
+      "crates/athena-core cannot depend on the change capability, so end-to-end tests with planning on live in athena-cli/tests."
+    ],
+    "desires": [
+      "Bash output over the size limit is saved outside the working directory, where Grep and Read are refused; a way to read it would save a rerun."
+    ]
+  }
+}

@@ -16,18 +16,24 @@ use crate::{Athena, Ui};
 use anyhow::{Context, Result, bail};
 use athena_agent::env::{EnvSpec, Side};
 use athena_context::briefs::{
-    AcceptedReading, CandidateView, CheckResultView, CheckView, ProducerInputs, VerifierInputs,
-    producer_brief, verifier_brief,
+    AcceptedReading, CandidateView, CheckResultView, CheckView, CriticInputs, DeliverableFact,
+    PlannerInputs, ProducerInputs, VerifierInputs, critic_brief, planner_brief, producer_brief,
+    producer_prompt_with_plan, render_plan_section, verifier_brief,
 };
 use athena_context::outputs::{
-    CriterionStatusOutput, ProducerOutput, VerdictOutput, producer_schema, verdict_schema,
+    CriterionStatusOutput, CriticOutput, CritiqueVerdictOutput, DeliverableActionOutput,
+    PlanOutput, ProducerOutput, SeverityOutput, VerdictOutput, critic_schema, plan_schema,
+    producer_schema, verdict_schema,
 };
-use athena_context::{CONTRACT, Component, PRODUCER_FRAME, VERIFIER_FRAME, compose};
+use athena_context::{
+    CONTRACT, CRITIC_FRAME, Component, PLANNER_FRAME, PRODUCER_FRAME, VERIFIER_FRAME, compose,
+};
 use athena_data::records::{
-    AcceptedBy, AnyRecord, Build, Candidate, Caps, ChangeEntry, ChangeStatus, CheckRun, Invocation,
-    InvocationOutcome, Job, JobKind, Outcome, OutcomeState, Owner, PinnedRepo, PolicyViolation,
-    ProducerReport, Reading, ReportedCheck, ReportedCriterion, Role, Score, Totals, Verdict,
-    Verification,
+    AcceptedBy, AnyRecord, Build, Candidate, Caps, ChangeEntry, ChangeStatus, CheckRun, Critique,
+    CritiqueVerdict, DeliverableAction, Demonstration, Finding, FindingSource, Invocation,
+    InvocationOutcome, Job, JobKind, JobPlan, Outcome, OutcomeState, Owner, PinnedRepo,
+    PlanDecision, PlanFile, PlanRisk, PolicyViolation, ProducerReport, Reading, RejectedOption,
+    ReportedCheck, ReportedCriterion, Role, Score, Severity, Totals, Verdict, Verification,
 };
 use athena_data::{JobId, sha256_hex};
 use athena_gate::redact::Redactor;
@@ -81,11 +87,17 @@ struct Closing {
     /// Set only on a final verdict of pass.
     verified: Option<Verified>,
     happened: Happened,
+    /// The accepted plans of a planned job, written with the invocations.
+    plans: Vec<JobPlan>,
+    /// The critiques of those plans.
+    critiques: Vec<Critique>,
 }
 
 impl Closing {
     fn new() -> Closing {
         Closing {
+            plans: Vec::new(),
+            critiques: Vec::new(),
             files: Vec::new(),
             new_invocations: Vec::new(),
             candidate: None,
@@ -249,6 +261,13 @@ impl Athena {
         let producer_grant = capability.producer_grant(&jc);
         let checks = capability.checks(&jc);
         let accepted = AcceptedReading::new(&reading, &jc.defaults, is_governance);
+        let check_views: Vec<CheckView> = checks
+            .iter()
+            .map(|c| CheckView {
+                name: c.name.clone(),
+                command: c.run.join(" "),
+            })
+            .collect();
         let brief = producer_brief(&ProducerInputs {
             job: id.as_str().to_string(),
             request: job
@@ -257,13 +276,7 @@ impl Athena {
                 .map(|r| r.text.clone())
                 .unwrap_or_default(),
             reading: accepted.clone(),
-            checks: checks
-                .iter()
-                .map(|c| CheckView {
-                    name: c.name.clone(),
-                    command: c.run.join(" "),
-                })
-                .collect(),
+            checks: check_views.clone(),
             commands: athena_agent::policy::describe_commands(&producer_grant.commands),
             pin: pinned.as_ref().map(|(record, _)| record.clone()),
         });
@@ -339,8 +352,310 @@ impl Athena {
             ui,
             pin_dir: pinned.map(|(_, dir)| dir),
         };
-        let closing = self.produce_and_verify(&ctx, &brief, &accepted)?;
+        // Job planning (docs/design/job-planning.md): one accepted round, before the producer. The round
+        // seeds the closing with its invocations, plan and critique, so the producer's invocation is
+        // numbered after them and the budget check below counts what planning cost (review F1).
+        let mut closing = Closing::new();
+        let mut producer_prompt = brief.clone();
+        let planned =
+            jc.config.job_plan.as_ref().is_some_and(|p| p.enabled) && !ctx.capability.pins_repo();
+        if planned {
+            let Some(section) = self.plan_round(&ctx, &accepted, &check_views, &mut closing)?
+            else {
+                return self.close_dispatched(&ctx, closing);
+            };
+            producer_prompt = producer_prompt_with_plan(&brief, &section);
+            let spent = ctx.spent(&closing);
+            if let Err(e) = self.check_budget(
+                &jc,
+                spent,
+                jc.config.budget.producer_usd + jc.config.budget.verifier_usd,
+                "producer and verifier together",
+            ) {
+                self.stop_planning(&ctx, &mut closing, &format!("{e}"));
+                return self.close_dispatched(&ctx, closing);
+            }
+        }
+        let closing = self.produce_and_verify(&ctx, &producer_prompt, &accepted, closing)?;
         self.close_dispatched(&ctx, closing)
+    }
+
+    /// Ends the job in planning: it fails before any code was written.
+    fn stop_planning(&self, ctx: &RunContext<'_>, closing: &mut Closing, reason: &str) {
+        closing.happened = self.failure(
+            ctx,
+            &format!("planning stopped before any code was written: {reason}"),
+        );
+    }
+
+    /// One planning round, accept only: a planner invocation and a critic invocation in a read-only
+    /// snapshot of the prediction commit. On accept, the invocations, the `job-plan-1` and `critique-1`
+    /// records go into `closing`, and the rendered producer section is returned. On any other end the job is
+    /// failed in `closing` and `None` is returned (revising and stopping on a verdict are job 4).
+    fn plan_round(
+        &self,
+        ctx: &RunContext<'_>,
+        accepted: &AcceptedReading,
+        checks: &[CheckView],
+        closing: &mut Closing,
+    ) -> Result<Option<String>> {
+        let jc = ctx.jc;
+        let cfg = jc
+            .config
+            .job_plan
+            .expect("planning runs only with [job_plan]");
+        let id = ctx.id().clone();
+        let p = ctx.prediction.clone();
+        let budget = &jc.config.budget;
+        let request = ctx
+            .job
+            .request
+            .as_ref()
+            .map(|r| r.text.clone())
+            .unwrap_or_default();
+        let after = budget.producer_usd + budget.verifier_usd;
+        let grant = crate::capability::ToolGrant {
+            tools: vec!["Read".into(), "Grep".into(), "Glob".into()],
+            commands: std::collections::BTreeMap::new(),
+            writes: false,
+            permission_mode: "dontAsk".into(),
+        };
+        let snap_dir = self.state.job_dir(&id).join("plan-1");
+        let no_env = std::collections::BTreeMap::new();
+
+        // The planner.
+        if let Err(e) = self.check_budget(
+            jc,
+            ctx.spent(closing),
+            cfg.planner_usd + after,
+            "planner, with the producer and verifier",
+        ) {
+            self.stop_planning(ctx, closing, &format!("{e}"));
+            return Ok(None);
+        }
+        let mut facts = Vec::new();
+        for d in &accepted.deliverables {
+            let bytes = self.git.show_file(&p, &d.0)?.map(|b| b.len() as u64);
+            facts.push(DeliverableFact {
+                path: d.0.clone(),
+                exists: bytes.is_some(),
+                bytes,
+            });
+        }
+        let planner_brief_text = planner_brief(&PlannerInputs {
+            job: id.as_str().to_string(),
+            request: request.clone(),
+            reading: accepted.clone(),
+            checks: checks.to_vec(),
+            verifier_commands: athena_agent::policy::describe_commands(
+                &ctx.capability.verifier_grant(jc).commands,
+            ),
+            deliverable_facts: facts,
+            revision: None,
+        });
+        let composed = compose(&[CONTRACT.into(), PLANNER_FRAME.into()]);
+        crate::pin::remove_tree(&snap_dir)?;
+        Snapshot::create(&self.git, &p, &p, &snap_dir, SnapshotRepo::None)?;
+        let model = ctx.reading.producer_model.clone();
+        let seq = ctx.next_seq(closing);
+        let spec = self.agent_spec(
+            jc,
+            &id,
+            seq,
+            Role::Planner,
+            &model,
+            &composed,
+            planner_brief_text,
+            &grant,
+            &snap_dir,
+            Side::Read,
+            &no_env,
+            cfg.planner_usd,
+            cfg.planner_timeout_s,
+            plan_schema(),
+        )?;
+        let invoked = self.invoke_and_record(
+            &InvocationFacts {
+                job: &id,
+                spec: &spec,
+                composed: &composed,
+                config: &jc.config,
+                fake: self.is_fake(),
+            },
+            ctx.redactor,
+        )?;
+        let _ = crate::pin::remove_tree(&snap_dir);
+        let (output, record) = match invoked {
+            Ok(done) => done,
+            Err(error) => {
+                self.stop_planning(ctx, closing, &format!("the planner could not run: {error}"));
+                return Ok(None);
+            }
+        };
+        ctx.ui.line(&format!(
+            "planner    {model} · {:.0}s · {}",
+            output.wall_s,
+            cost_text(&record)
+        ));
+        closing.new_invocations.push(record.clone());
+        if output.outcome != InvocationOutcome::Success {
+            let why = record.detail.clone().unwrap_or_default();
+            self.stop_planning(
+                ctx,
+                closing,
+                &format!("the planner did not complete: {why}"),
+            );
+            return Ok(None);
+        }
+        let plan_output = match output
+            .structured
+            .clone()
+            .map(serde_json::from_value::<PlanOutput>)
+        {
+            Some(Ok(raw)) => redacted(raw, ctx.redactor)?,
+            _ => {
+                self.stop_planning(ctx, closing, "the planner returned no valid plan");
+                return Ok(None);
+            }
+        };
+        let mut plan = plan_record(&id, 1, seq, plan_output, &|path| {
+            Ok(self.git.show_file(&p, path)?.is_some())
+        })?;
+        let section = render_plan_section(&plan);
+        plan.producer_section_sha256 = sha256_hex(section.as_bytes());
+        if let Err(e) = plan.validate() {
+            self.stop_planning(ctx, closing, &format!("the plan is invalid: {e}"));
+            return Ok(None);
+        }
+
+        // The critic.
+        if let Err(e) = self.check_budget(
+            jc,
+            ctx.spent(closing),
+            cfg.critic_usd + after,
+            "critic, with the producer and verifier",
+        ) {
+            self.stop_planning(ctx, closing, &format!("{e}"));
+            return Ok(None);
+        }
+        let critic_brief_text = critic_brief(&CriticInputs {
+            job: id.as_str().to_string(),
+            request,
+            reading: accepted.clone(),
+            plan: plan.clone(),
+            athena_findings: Vec::new(),
+        });
+        let composed = compose(&[CONTRACT.into(), CRITIC_FRAME.into()]);
+        Snapshot::create(&self.git, &p, &p, &snap_dir, SnapshotRepo::None)?;
+        let model = ctx.reading.verifier_model.clone();
+        let critic_seq = ctx.next_seq(closing);
+        let spec = self.agent_spec(
+            jc,
+            &id,
+            critic_seq,
+            Role::Critic,
+            &model,
+            &composed,
+            critic_brief_text,
+            &grant,
+            &snap_dir,
+            Side::Read,
+            &no_env,
+            cfg.critic_usd,
+            cfg.critic_timeout_s,
+            critic_schema(),
+        )?;
+        let invoked = self.invoke_and_record(
+            &InvocationFacts {
+                job: &id,
+                spec: &spec,
+                composed: &composed,
+                config: &jc.config,
+                fake: self.is_fake(),
+            },
+            ctx.redactor,
+        )?;
+        let _ = crate::pin::remove_tree(&snap_dir);
+        let (output, record) = match invoked {
+            Ok(done) => done,
+            Err(error) => {
+                self.stop_planning(ctx, closing, &format!("the critic could not run: {error}"));
+                return Ok(None);
+            }
+        };
+        ctx.ui.line(&format!(
+            "critic     {model} · {:.0}s · {}",
+            output.wall_s,
+            cost_text(&record)
+        ));
+        closing.new_invocations.push(record.clone());
+        if output.outcome != InvocationOutcome::Success {
+            let why = record.detail.clone().unwrap_or_default();
+            self.stop_planning(ctx, closing, &format!("the critic did not complete: {why}"));
+            return Ok(None);
+        }
+        let critic_output = match output
+            .structured
+            .clone()
+            .map(serde_json::from_value::<CriticOutput>)
+        {
+            Some(Ok(raw)) => redacted(raw, ctx.redactor)?,
+            _ => {
+                self.stop_planning(ctx, closing, "the critic returned no valid critique");
+                return Ok(None);
+            }
+        };
+        let verdict = match critic_output.verdict {
+            CritiqueVerdictOutput::Accept => CritiqueVerdict::Accept,
+            CritiqueVerdictOutput::Revise => CritiqueVerdict::Revise,
+            CritiqueVerdictOutput::Reject => CritiqueVerdict::Reject,
+        };
+        let critique = Critique {
+            job: id.clone(),
+            round: 1,
+            at: crate::now(),
+            invocation_seq: Some(critic_seq),
+            agent_verdict: Some(verdict),
+            final_verdict: verdict,
+            findings: critic_output
+                .findings
+                .iter()
+                .map(|f| Finding {
+                    severity: match f.severity {
+                        SeverityOutput::Blocker => Severity::Blocker,
+                        SeverityOutput::Major => Severity::Major,
+                        SeverityOutput::Minor => Severity::Minor,
+                        SeverityOutput::Nit => Severity::Nit,
+                    },
+                    summary: f.summary.clone(),
+                    evidence: format!("{} Fix: {}", f.evidence.trim(), f.fix.trim()),
+                    location: Some(f.location.clone()),
+                    source: FindingSource::Critic,
+                })
+                .collect(),
+            request_reading_mismatch: critic_output.request_reading_mismatch.clone(),
+            summary: Some(critic_output.summary.clone()),
+        };
+        if let Err(e) = critique.validate() {
+            self.stop_planning(ctx, closing, &format!("the critique is invalid: {e}"));
+            return Ok(None);
+        }
+        if verdict != CritiqueVerdict::Accept || critique.request_reading_mismatch.is_some() {
+            self.stop_planning(
+                ctx,
+                closing,
+                &format!(
+                    "the critic did not accept the plan ({verdict:?}): {}; revising a plan is not built yet",
+                    critic_output.summary
+                ),
+            );
+            closing.plans.push(plan);
+            closing.critiques.push(critique);
+            return Ok(None);
+        }
+        closing.plans.push(plan);
+        closing.critiques.push(critique);
+        Ok(Some(section))
     }
 
     /// For a capability that pins, resolves the commit to read and checks its tree out under the job's
@@ -559,6 +874,91 @@ impl RunContext<'_> {
                 .map(|i| i.cost.best_lower())
                 .sum::<f64>()
     }
+    /// The number of the next invocation: after the job's recorded ones and those the closing holds.
+    fn next_seq(&self, closing: &Closing) -> u32 {
+        self.job.next_seq() + closing.new_invocations.len() as u32
+    }
+}
+
+/// Redacts every string of an agent's structured output, by redacting its JSON text and reading it back.
+fn redacted<T: serde::Serialize + serde::de::DeserializeOwned>(
+    value: T,
+    redactor: &Redactor,
+) -> Result<T> {
+    let mut text = vec![serde_json::to_string(&value)?];
+    redactor.redact_all(&mut text)?;
+    serde_json::from_str(&text[0]).context("the redacted output is no longer valid")
+}
+
+/// The `athena.job-plan/1` record of a planner's output. Athena sets whether each file is governance and
+/// whether it exists. The caller sets `producer_section_sha256` once the section is rendered.
+fn plan_record(
+    job: &JobId,
+    round: u32,
+    invocation_seq: u32,
+    out: PlanOutput,
+    exists: &dyn Fn(&str) -> Result<bool>,
+) -> Result<JobPlan> {
+    let mut files = Vec::new();
+    for f in out.files {
+        files.push(PlanFile {
+            governance: is_governance(&f.path),
+            exists: exists(&f.path)?,
+            action: match f.action {
+                DeliverableActionOutput::Create => DeliverableAction::Create,
+                DeliverableActionOutput::Modify => DeliverableAction::Modify,
+                DeliverableActionOutput::Delete => DeliverableAction::Delete,
+            },
+            path: f.path,
+            purpose: f.purpose,
+        });
+    }
+    Ok(JobPlan {
+        job: job.clone(),
+        round,
+        at: crate::now(),
+        invocation_seq,
+        approach: out.approach,
+        decisions: out
+            .decisions
+            .into_iter()
+            .map(|d| PlanDecision {
+                choice: d.choice,
+                reason: d.reason,
+                rejected: d
+                    .rejected
+                    .into_iter()
+                    .map(|r| RejectedOption {
+                        option: r.option,
+                        why: r.why,
+                    })
+                    .collect(),
+            })
+            .collect(),
+        files,
+        steps: out.steps,
+        risks: out
+            .risks
+            .into_iter()
+            .map(|r| PlanRisk {
+                risk: r.risk,
+                mitigation: r.mitigation,
+            })
+            .collect(),
+        demonstrations: out
+            .demonstrations
+            .into_iter()
+            .map(|d| Demonstration {
+                criterion: d.criterion,
+                method: d.method,
+                command: d.command,
+                observes: d.observes,
+                fails_without: d.fails_without,
+            })
+            .collect(),
+        open_questions: out.open_questions,
+        producer_section_sha256: "0".repeat(64),
+    })
 }
 
 /// Runs one routed check in the verifier's snapshot, then puts the snapshot back as it was prepared.
@@ -655,13 +1055,14 @@ impl Athena {
         ctx: &RunContext<'_>,
         brief: &str,
         accepted: &AcceptedReading,
+        mut closing: Closing,
     ) -> Result<Closing> {
-        let mut closing = Closing::new();
         let id = ctx.id().clone();
         let jc = ctx.jc;
         let job_dir = self.state.job_dir(&id);
         let p = ctx.prediction.clone();
-        let mut seq = ctx.job.next_seq();
+        // After any planning invocations the closing already holds.
+        let mut seq = ctx.next_seq(&closing);
 
         // The producer, in a detached snapshot of the base with a one-commit repository of its own.
         let work = job_dir.join("work");
@@ -1457,6 +1858,18 @@ impl Athena {
                 .files
                 .push(NewFile::record(&AnyRecord::Invocation(Box::new(
                     inv.clone(),
+                ))));
+        }
+        for plan in &closing.plans {
+            closing
+                .files
+                .push(NewFile::record(&AnyRecord::JobPlan(Box::new(plan.clone()))));
+        }
+        for critique in &closing.critiques {
+            closing
+                .files
+                .push(NewFile::record(&AnyRecord::Critique(Box::new(
+                    critique.clone(),
                 ))));
         }
         if let Some(candidate) = &closing.candidate {

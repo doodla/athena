@@ -617,6 +617,12 @@ pub fn render_plan_section(plan: &JobPlan) -> String {
     out
 }
 
+/// The producer's prompt for a planned job: the committed producer brief, then the rendered plan section.
+/// The send-back is built from this text, not from the brief alone (review F6).
+pub fn producer_prompt_with_plan(brief: &str, section: &str) -> String {
+    format!("{brief}\n\n{section}")
+}
+
 /// What the planner is told about one deliverable's path in the base snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeliverableFact {
