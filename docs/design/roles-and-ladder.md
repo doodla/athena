@@ -44,7 +44,10 @@ are not built.
   or raised by a role with no recorded definition, stay with people: `drain` lists those as waiting.
 - **Planning comes first, and the drain follows one plan** (`athena_core::plan`, D105). Before design or code,
   each open request is fleshed out as a plan entry: goal, ladder rung, acceptance, open questions, dependencies
-  and touched paths. Once a request is read, these come from its reading (summary, criteria, question,
+  and touched paths. The rung is the proposal's, else what the request serves in BRIEF.md and its addenda
+  (a request that shares at least two significant words with a requirement heading or an addendum ranks as a
+  brief requirement; plain code work with a touched path is Implementation; a word such as "fix" is no
+  evidence), so the owner's newest priorities order ahead of older plain work (D107). Once a request is read, these come from its reading (summary, criteria, question,
   deliverables); before that, the request's own words stand in (first line as goal; bullet lines, else the first
   line, as acceptance; path-like words as touches; full job ids it names as dependencies). All open entries
   are planned together: items whose dependencies are done form a wave; a wave is ordered by rung (top first),

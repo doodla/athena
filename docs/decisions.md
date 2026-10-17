@@ -2482,3 +2482,23 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Reversal cost:** Low: empty the constant.
 - **Provenance:** read: `plan.rs` `overlap` and `disjoint`, and section 9; measured: the `plan.rs` unit test
   `shared_append_only_files_are_not_a_clash_but_other_shared_paths_and_lone_shared_entries_are`.
+
+## D107 · A request's rung comes from what it serves in BRIEF.md, not a word list
+
+- **Case:** The plan for 30 open requests ranked 29 as Implementation and ordered them oldest first, so the
+  owner's 2026-10-16 priority (speed: CI routing, parallel jobs) came last. `reading::infer_rung` treated any
+  touched path, the `change` capability or a word such as "code" or "ci" as Implementation.
+- **Decision:** The rung is the proposal's, else inferred from what the request and its reading serve in
+  BRIEF.md. `Lookup` carries the brief's sections (`reading::brief_topics`: every `###` heading, and the body of
+  each addendum); a request sharing at least two significant words with one ranks as BriefRequirements, above
+  Implementation. A touched path or the `change` capability is still Implementation when no section matches.
+  `IMPLEMENTATION_WORDS` is no longer evidence; it only keeps generic words out of the matching. Roles still
+  cannot change the top two rungs, and `plan.rs` still orders by rung, then oldest first.
+- **Alternatives:** (a) A model-chosen rung: a call per request, not testable without a model, and not
+  repeatable. (b) Keep the word list and reorder the two speed items: fixes the instance, not the cause.
+- **Tradeoff:** Word overlap is a heuristic: a request worded away from the brief falls to Implementation, and
+  an unrelated one sharing two words is ranked up. A person corrects either with a rung hint or a bullet.
+- **Reversal cost:** Low: pass an empty brief.
+- **Provenance:** measured: the `reading.rs` unit tests
+  `a_request_serving_the_speed_addendum_ranks_above_implementation`,
+  `a_plan_orders_a_speed_request_before_an_older_typo_fix` and `a_word_like_fix_or_bug_alone_is_no_rung`.

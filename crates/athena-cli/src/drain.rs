@@ -1390,12 +1390,22 @@ impl<'a> RealSteps<'a> {
         let job_exists = |id: &str| records.jobs.contains_key(id);
         // A lookup that fails counts the path as present, so a git error never invents an open question.
         let path_exists = |path: &str| self.athena.git.path_exists(head, path).unwrap_or(true);
+        // The requirements and addenda a request can serve; no brief at the base commit means none.
+        let brief = self
+            .athena
+            .git
+            .show_file(head, "BRIEF.md")
+            .ok()
+            .flatten()
+            .map(|b| athena_core::reading::brief_topics(&String::from_utf8_lossy(&b)))
+            .unwrap_or_default();
         Some(athena_core::reading::plan_entry(
             record,
             hint,
             &athena_core::reading::Lookup {
                 job_exists: &job_exists,
                 path_exists: &path_exists,
+                brief: &brief,
             },
         ))
     }

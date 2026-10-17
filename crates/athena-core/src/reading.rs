@@ -1135,6 +1135,8 @@ pub struct Lookup<'a> {
     pub job_exists: &'a dyn Fn(&str) -> bool,
     /// Whether this path (a directory ends with `/`) exists at the base commit.
     pub path_exists: &'a dyn Fn(&str) -> bool,
+    /// What BRIEF.md says the owner wants (see [`brief_topics`]); empty when there is no brief.
+    pub brief: &'a [BriefTopic],
 }
 
 impl std::fmt::Debug for Lookup<'_> {
@@ -1143,8 +1145,83 @@ impl std::fmt::Debug for Lookup<'_> {
     }
 }
 
-/// Words that show a request is about the code, tests or docs. They are evidence for the Implementation rung;
-/// without any of them (and without a touched path or a reading that makes a change) the rung is not known.
+/// One section of BRIEF.md that a request can serve: a requirement or an owner addendum.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BriefTopic {
+    /// The `###` heading.
+    pub heading: String,
+    /// The section's body. Kept only for addenda; a requirement is matched by its heading alone, because its
+    /// long body would match nearly any request.
+    pub text: String,
+}
+
+/// The sections of `brief` (the text of BRIEF.md) that a request can serve: every `###` heading, and for those
+/// under `## Addenda` the body too.
+pub fn brief_topics(brief: &str) -> Vec<BriefTopic> {
+    let mut topics: Vec<BriefTopic> = Vec::new();
+    let mut in_addenda = false;
+    let mut in_topic = false;
+    for line in brief.lines() {
+        if let Some(h) = line.strip_prefix("### ") {
+            topics.push(BriefTopic {
+                heading: h.trim().to_string(),
+                text: String::new(),
+            });
+            in_topic = true;
+        } else if line.starts_with('#') {
+            in_addenda = line.trim_end() == "## Addenda";
+            in_topic = false;
+        } else if in_topic
+            && in_addenda
+            && let Some(t) = topics.last_mut()
+        {
+            t.text.push_str(line);
+            t.text.push('\n');
+        }
+    }
+    topics
+}
+
+/// Words too common in BRIEF.md to say which section a request serves.
+const COMMON_WORDS: [&str; 30] = [
+    "that", "this", "with", "from", "have", "they", "them", "will", "should", "would", "could",
+    "about", "which", "there", "their", "athena", "system", "what", "when", "also", "into", "make",
+    "work", "then", "than", "each", "only", "some", "just", "need",
+];
+
+/// The words of `text` that can tie a request to a brief section: lowercase, a trailing `s` dropped, at least
+/// four letters (or `ci`), and neither common nor one of [`IMPLEMENTATION_WORDS`].
+fn topic_words(text: &str) -> std::collections::BTreeSet<String> {
+    text.to_lowercase()
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .map(|w| w.strip_suffix('s').unwrap_or(w))
+        .filter(|w| {
+            (w.len() >= 4 || *w == "ci")
+                && !w.chars().all(|c| c.is_ascii_digit())
+                && !COMMON_WORDS.contains(w)
+                && !IMPLEMENTATION_WORDS.contains(w)
+        })
+        .map(String::from)
+        .collect()
+}
+
+/// The topic of `topics` that `hay` shares the most words with, when it shares at least two.
+fn serves_topic<'t>(hay: &str, topics: &'t [BriefTopic]) -> Option<&'t BriefTopic> {
+    let words = topic_words(hay);
+    topics
+        .iter()
+        .map(|t| {
+            let theirs = topic_words(&format!("{} {}", t.heading, t.text));
+            (words.intersection(&theirs).count(), t)
+        })
+        .filter(|(shared, _)| *shared >= 2)
+        .max_by_key(|(shared, _)| *shared)
+        .map(|(_, t)| t)
+}
+
+/// Words that say a request is about code, tests or docs, not which requirement it serves. They are never a
+/// rung on their own: the rung comes from what the request serves in BRIEF.md and its addenda. They are
+/// ignored when a request is matched to a brief section, since they are everywhere in a brief about software.
 const IMPLEMENTATION_WORDS: [&str; 18] = [
     "readme",
     "changelog",
@@ -1166,14 +1243,22 @@ const IMPLEMENTATION_WORDS: [&str; 18] = [
     "cli",
 ];
 
-/// The rung a request serves, found from its words and its reading; `None` when nothing in them says.
-/// Deterministic and cheap, and a heuristic: a higher rung needs a phrase naming it, Implementation needs
-/// evidence that code, tests or docs change (a touched path, a reading for the `change` capability, or one of
-/// [`IMPLEMENTATION_WORDS`]). It is never the answer by default.
+/// The rung a request serves, found from what it serves in BRIEF.md and the owner's addenda; `None` when
+/// nothing says. Deterministic and cheap, and a heuristic, in this order:
+///
+/// 1. A phrase naming a higher rung (an owner goal, a brief change, a design decision, a user default).
+/// 2. The request or its reading shares at least two significant words with a section of `brief` (a
+///    requirement heading or an addendum, see [`brief_topics`]): it serves the brief, so
+///    BriefRequirements. This is how the owner's latest priorities rank above plain implementation work.
+/// 3. A touched path or a reading for the `change` capability: Implementation, as plain work that serves no
+///    particular brief section.
+///
+/// The [`IMPLEMENTATION_WORDS`] are not evidence. It is never the answer by default.
 pub fn infer_rung(
     text: &str,
     reading: Option<&Reading>,
     touches: &[String],
+    brief: &[BriefTopic],
 ) -> Option<athena_data::roles::Ladder> {
     use athena_data::roles::Ladder;
     let mut hay = text.to_lowercase();
@@ -1195,11 +1280,10 @@ pub fn infer_rung(
         Some(Ladder::DesignDecisions)
     } else if has(&["user default", "defaults-conventions"]) {
         Some(Ladder::DefaultsConventions)
+    } else if serves_topic(&hay, brief).is_some() {
+        Some(Ladder::BriefRequirements)
     } else if !touches.is_empty()
         || reading.is_some_and(|r| r.capability.as_deref() == Some("change"))
-        || hay
-            .split(|c: char| !c.is_ascii_alphanumeric())
-            .any(|w| IMPLEMENTATION_WORDS.contains(&w))
     {
         Some(Ladder::Implementation)
     } else {
@@ -1226,7 +1310,7 @@ fn is_bullet(line: &str) -> bool {
 ///   start with `-`, `*` or a number are the acceptance (the first line is **not** copied into it); path-like
 ///   words are what it touches.
 /// - The rung is `rung_hint` when the caller knows it (a steward proposal carries it), else [`infer_rung`]
-///   from the request and the reading, else `None`, which the plan flags.
+///   from what the request and the reading serve in `lookup.brief`, else `None`, which the plan flags.
 /// - A request depends on every other job whose full id it names (a retry, or "after <job>").
 /// - Open questions are also filled by lookup: every touched path that does not exist (a file a reading
 ///   creates is excepted), and every referenced job that is not among the records.
@@ -1289,7 +1373,8 @@ pub fn plan_entry(
             }
         }
     }
-    entry.rung = rung_hint.or_else(|| infer_rung(text, job.latest_reading(), &entry.touches));
+    entry.rung =
+        rung_hint.or_else(|| infer_rung(text, job.latest_reading(), &entry.touches, lookup.brief));
     for path in &entry.touches {
         if !creates.contains(path) && !(lookup.path_exists)(path) {
             entry.open_questions.push(format!(
@@ -1849,6 +1934,7 @@ mod tests {
         let everything = Lookup {
             job_exists: &|_| true,
             path_exists: &|_| true,
+            brief: &[],
         };
         let entry = plan_entry(&job, None, &everything);
         assert_eq!(
@@ -1891,7 +1977,87 @@ mod tests {
         Lookup {
             job_exists: &|_| false,
             path_exists: &|_| false,
+            brief: &[],
         }
+    }
+
+    /// Lookups that know the real BRIEF.md, as `athena plan` does.
+    fn real_brief() -> Vec<BriefTopic> {
+        brief_topics(include_str!("../../../BRIEF.md"))
+    }
+
+    fn rung_with_brief(text: &str, brief: &[BriefTopic]) -> Option<athena_data::roles::Ladder> {
+        let mut job = job_with_checks(vec![]);
+        job.request.as_mut().unwrap().text = text.into();
+        let lookup = Lookup {
+            job_exists: &|_| false,
+            path_exists: &|_| false,
+            brief,
+        };
+        plan_entry(&job, None, &lookup).rung
+    }
+
+    #[test]
+    fn a_request_serving_the_speed_addendum_ranks_above_implementation() {
+        use athena_data::roles::Ladder;
+        let brief = real_brief();
+        assert!(
+            brief.iter().any(|t| t.heading
+                == "2026-10-16: Speed, planning first, and initiatives in parallel"
+                && t.text.contains("intelligent routing")),
+            "the speed addendum is read from BRIEF.md"
+        );
+        for text in [
+            "Move compute to CI with intelligent routing of jobs",
+            "Run parallel jobs for initiatives",
+        ] {
+            let rung = rung_with_brief(text, &brief);
+            assert_eq!(rung, Some(Ladder::BriefRequirements), "{text}");
+            // The derived order puts the top rung first, so a smaller rung is a higher one.
+            assert!(rung < Some(Ladder::Implementation), "{text}");
+        }
+        // Even with a touched path, serving the brief wins over plain implementation.
+        assert_eq!(
+            rung_with_brief(
+                "Add intelligent routing of CI jobs in .github/workflows/ci.yml",
+                &brief
+            ),
+            Some(Ladder::BriefRequirements)
+        );
+    }
+
+    #[test]
+    fn a_plan_orders_a_speed_request_before_an_older_typo_fix() {
+        let brief = real_brief();
+        let entry = |id: &str, text: &str| {
+            let mut job = job_with_checks(vec![]);
+            job.request.as_mut().unwrap().text = format!("{text}\n- it is done");
+            let lookup = Lookup {
+                job_exists: &|_| false,
+                path_exists: &|_| true,
+                brief: &brief,
+            };
+            let mut e = plan_entry(&job, None, &lookup);
+            e.id = id.into();
+            e
+        };
+        let old_typo = entry("old", "Fix a typo in README.md");
+        let new_speed = entry("new", "Route CI jobs with intelligent routing");
+        assert_eq!(
+            old_typo.rung,
+            Some(athena_data::roles::Ladder::Implementation)
+        );
+        // Oldest first in the input: without the brief the old item would lead.
+        let plan = crate::plan::Plan::build(&[old_typo, new_speed]);
+        assert_eq!(plan.order, ["new", "old"], "{plan:?}");
+    }
+
+    #[test]
+    fn a_word_like_fix_or_bug_alone_is_no_rung() {
+        let brief = real_brief();
+        assert_eq!(rung_with_brief("fix a bug", &brief), None);
+        assert_eq!(rung_with_brief("fix the typo in the intro", &brief), None);
+        assert_eq!(rung_with_brief("update the docs and tests", &brief), None);
     }
 
     #[test]
@@ -1943,8 +2109,11 @@ mod tests {
         };
         assert_eq!(rung_of("make it better"), None);
         assert_eq!(rung_of("tidy things up a bit"), None);
+        // A word such as "fix" or "typo" is not evidence by itself; a touched path is.
+        assert_eq!(rung_of("fix the typo in the intro"), None);
+        assert_eq!(rung_of("fix a bug"), None);
         assert_eq!(
-            rung_of("fix the typo in the intro"),
+            rung_of("fix the typo in README.md"),
             Some(Ladder::Implementation)
         );
         assert_eq!(
@@ -1982,6 +2151,7 @@ mod tests {
         let lookup = Lookup {
             job_exists: &|_| false,
             path_exists: &|p| p == "docs/here.md",
+            brief: &[],
         };
         let unread = plan_entry(&job, None, &lookup);
         assert_eq!(
