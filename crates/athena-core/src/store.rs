@@ -202,6 +202,10 @@ pub struct Records {
     pub audience_ratings: Vec<athena_data::records::AudienceRating>,
     /// The audience's model invocations, oldest first, kept apart from `jobs` as the steward's are.
     pub audience_runs: Vec<Invocation>,
+    /// Every audit of a job's outcome (`crate::auditor`), oldest first.
+    pub audits: Vec<athena_data::records::Audit>,
+    /// The auditor's model invocations, oldest first, kept apart from `jobs` as the audience's are.
+    pub auditor_runs: Vec<Invocation>,
     /// Files that are not acceptable records, by path.
     pub invalid: Vec<String>,
 }
@@ -261,6 +265,10 @@ impl Records {
                 AnyRecord::WorkItem(w) => records.work_items.push(*w),
                 AnyRecord::WorkDecision(d) => records.work_decisions.push(d),
                 AnyRecord::AudienceRating(a) => records.audience_ratings.push(*a),
+                AnyRecord::Audit(a) => records.audits.push(*a),
+                AnyRecord::Invocation(i) if i.role == Role::Auditor => {
+                    records.auditor_runs.push(*i);
+                }
                 AnyRecord::Invocation(i) if i.role == Role::Steward => {
                     records.steward_runs.push(*i);
                 }
@@ -282,6 +290,10 @@ impl Records {
         }
         records.steward_runs.sort_by_key(|i| i.started_at);
         records.audience_runs.sort_by_key(|i| i.started_at);
+        records.auditor_runs.sort_by_key(|i| i.started_at);
+        records
+            .audits
+            .sort_by(|a, b| (a.at, &a.id).cmp(&(b.at, &b.id)));
         records
             .audience_ratings
             .sort_by(|a, b| (a.at, &a.id).cmp(&(b.at, &b.id)));

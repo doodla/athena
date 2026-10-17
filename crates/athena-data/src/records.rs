@@ -12,7 +12,8 @@ use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// The agent roles: the three that work on a job, and the steward and the audience, which run beside them.
+/// The agent roles: the three that work on a job, and the steward, the audience and the auditor, which run
+/// beside them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
@@ -21,6 +22,7 @@ pub enum Role {
     Verifier,
     Steward,
     Audience,
+    Auditor,
 }
 
 impl Role {
@@ -31,6 +33,7 @@ impl Role {
             Role::Verifier => "verifier",
             Role::Steward => "steward",
             Role::Audience => "audience",
+            Role::Auditor => "auditor",
         }
     }
     pub fn parse(text: &str) -> Option<Role> {
@@ -40,6 +43,7 @@ impl Role {
             "verifier" => Some(Role::Verifier),
             "steward" => Some(Role::Steward),
             "audience" => Some(Role::Audience),
+            "auditor" => Some(Role::Auditor),
             _ => None,
         }
     }
@@ -1679,6 +1683,50 @@ impl AudienceRating {
     }
 }
 
+/// The schema tag of an audit.
+pub const AUDIT_SCHEMA: &str = "athena.audit/1";
+
+/// One finding of an audit: how an outcome fell short of, or served, the owner's goals, and the evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditFinding {
+    /// One or two sentences.
+    pub text: String,
+    /// The evidence: a file and line, a command's output, or a quoted passage of the real outcome.
+    pub evidence: String,
+}
+
+/// `athena.audit/1`: what the auditor found when it judged one job's real outcome against `BRIEF.md` and the
+/// owner's goals. Audits are never edited; a later audit of the same job is a new record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Audit {
+    pub id: RecordId,
+    pub at: Timestamp,
+    /// The job whose outcome was judged.
+    pub target: JobId,
+    /// One or two sentences: whether the outcome serves the goals.
+    pub summary: String,
+    pub findings: Vec<AuditFinding>,
+}
+
+impl Audit {
+    /// Why this record is not acceptable, if it is not.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.summary.trim().is_empty() {
+            return Err("an audit has a summary".into());
+        }
+        if self
+            .findings
+            .iter()
+            .any(|f| f.text.trim().is_empty() || f.evidence.trim().is_empty())
+        {
+            return Err("every audit finding has text and cites its evidence".into());
+        }
+        Ok(())
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------------
 // The envelope
 
@@ -1734,6 +1782,8 @@ pub enum AnyRecord {
     WorkDecision(WorkDecision),
     #[serde(rename = "athena.audience-rating/1")]
     AudienceRating(Box<AudienceRating>),
+    #[serde(rename = "athena.audit/1")]
+    Audit(Box<Audit>),
 }
 
 /// Why a file under `records/` is not acceptable.
@@ -1813,6 +1863,7 @@ impl AnyRecord {
             AnyRecord::WorkItem(w) => w.validate().map_err(invalid)?,
             AnyRecord::WorkDecision(d) => d.validate().map_err(invalid)?,
             AnyRecord::AudienceRating(a) => a.validate().map_err(invalid)?,
+            AnyRecord::Audit(a) => a.validate().map_err(invalid)?,
             AnyRecord::DefaultsProposal(p) => p.validate().map_err(invalid)?, // Totals are what reconciliation checks an outcome against; only the bootstrap has none
             // (acceptance verification 2).
             AnyRecord::Outcome(o) if o.job.is_request() && o.totals.is_none() => {
@@ -1903,6 +1954,7 @@ impl AnyRecord {
             AnyRecord::AudienceRating(r) => {
                 format!("records/audience-ratings/{}/{}.json", r.id.month(), r.id)
             }
+            AnyRecord::Audit(r) => format!("records/audits/{}/{}.json", r.id.month(), r.id),
         }
     }
 
@@ -1932,6 +1984,7 @@ impl AnyRecord {
             AnyRecord::WorkItem(_) => "athena.work-item/1",
             AnyRecord::WorkDecision(_) => "athena.work-decision/1",
             AnyRecord::AudienceRating(_) => AUDIENCE_RATING_SCHEMA,
+            AnyRecord::Audit(_) => AUDIT_SCHEMA,
         }
     }
 }
@@ -2603,6 +2656,59 @@ mod tests {
         let mut no_target = sample_rating();
         no_target.target.clear();
         assert!(no_target.validate().is_err());
+    }
+
+    fn sample_audit() -> Audit {
+        Audit {
+            id: RecordId::parse("20261017-090000-3abc").unwrap(),
+            at: ts(),
+            target: JobId::parse("20261016-120000-4def").unwrap(),
+            summary: "The outcome serves the goal.".into(),
+            findings: vec![AuditFinding {
+                text: "The command exists.".into(),
+                evidence: "crates/athena-cli/src/main.rs: Command::Audit".into(),
+            }],
+        }
+    }
+
+    #[test]
+    fn an_audit_has_a_path_a_schema_and_round_trips() {
+        let record = AnyRecord::Audit(Box::new(sample_audit()));
+        assert_eq!(record.schema(), "athena.audit/1");
+        assert_eq!(
+            record.canonical_path(),
+            "records/audits/2026-10/20261017-090000-3abc.json"
+        );
+        let json = record.to_json();
+        assert_eq!(AnyRecord::parse("x", json.as_bytes()).unwrap(), record);
+        assert!(check_record_file(&record.canonical_path(), json.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn an_audit_finding_without_evidence_is_refused() {
+        let mut bad = sample_audit();
+        bad.findings[0].evidence = "  ".into();
+        assert!(bad.validate().is_err());
+        let record = AnyRecord::Audit(Box::new(bad));
+        assert!(AnyRecord::parse("x", record.to_json().as_bytes()).is_err());
+        let mut no_summary = sample_audit();
+        no_summary.summary.clear();
+        assert!(no_summary.validate().is_err());
+    }
+
+    #[test]
+    fn every_role_round_trips_through_its_name() {
+        for role in [
+            Role::Reader,
+            Role::Producer,
+            Role::Verifier,
+            Role::Steward,
+            Role::Audience,
+            Role::Auditor,
+        ] {
+            assert_eq!(Role::parse(role.as_str()), Some(role));
+        }
+        assert_eq!(Role::Auditor.as_str(), "auditor");
     }
 
     #[test]

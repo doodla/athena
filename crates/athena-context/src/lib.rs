@@ -151,6 +151,8 @@ pub enum BudgetSet {
     Steward,
     /// The contract and the audience's stored prompt (`athena_data::roles::AUDIENCE_PROMPT`).
     Audience,
+    /// The contract and the auditor's stored prompt (`athena_data::roles::AUDITOR_PROMPT`).
+    Auditor,
 }
 
 impl BudgetSet {
@@ -163,6 +165,7 @@ impl BudgetSet {
             BudgetSet::Verifier => 1_300,
             BudgetSet::Steward => 600,
             BudgetSet::Audience => 600,
+            BudgetSet::Auditor => 600,
         }
     }
     pub fn name(self) -> &'static str {
@@ -173,8 +176,17 @@ impl BudgetSet {
             BudgetSet::Verifier => "verifier",
             BudgetSet::Steward => "steward",
             BudgetSet::Audience => "audience",
+            BudgetSet::Auditor => "auditor",
         }
     }
+}
+
+/// The auditor's system prompt: the contract, then the role's stored prompt.
+pub fn auditor_system_prompt(prompt: &str, version: u32) -> Composed {
+    compose(&[
+        CONTRACT.into(),
+        Component::new("auditor.prompt", version, prompt),
+    ])
 }
 
 /// The audience's system prompt: the contract, then the role's stored prompt.
@@ -255,6 +267,15 @@ mod tests {
             let composed = compose(&[CONTRACT.into(), frame.into()]);
             assert!(check_budget(set, &composed).is_ok(), "{} frame", set.name());
         }
+    }
+
+    #[test]
+    fn the_auditor_prompt_follows_the_contract_and_fits_its_budget() {
+        let composed = auditor_system_prompt("You are the auditor.", 1);
+        assert_eq!(composed.components[1].id, "auditor.prompt");
+        assert!(check_budget(BudgetSet::Auditor, &composed).is_ok());
+        let long = auditor_system_prompt(&"word ".repeat(2_000), 1);
+        assert!(check_budget(BudgetSet::Auditor, &long).is_err());
     }
 
     #[test]

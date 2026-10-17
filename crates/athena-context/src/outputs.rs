@@ -308,6 +308,27 @@ pub struct AudienceFindingOutput {
     pub source: String,
 }
 
+/// The auditor's report: whether the outcome serves the goals, and the findings behind that. Athena validates
+/// both before it records them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AuditorOutput {
+    /// One or two sentences: whether the outcome serves BRIEF.md and the owner's goals.
+    pub summary: String,
+    /// Empty only when there is nothing to say.
+    pub findings: Vec<AuditorFindingOutput>,
+}
+
+/// One finding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AuditorFindingOutput {
+    /// One or two sentences.
+    pub text: String,
+    /// The evidence: a file and line, a command's output, or a quoted passage.
+    pub evidence: String,
+}
+
 /// The closed lists that narrow the reader's schema.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ReaderChoices {
@@ -395,9 +416,34 @@ pub fn audience_schema() -> Value {
     schema_of::<AudienceOutput>()
 }
 
+/// The auditor's schema.
+pub fn auditor_schema() -> Value {
+    schema_of::<AuditorOutput>()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_auditor_schema_requires_a_summary_and_findings_with_evidence() {
+        let schema = auditor_schema();
+        let required = |v: &Value| {
+            let mut names: Vec<String> = v["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|n| n.as_str().unwrap().to_string())
+                .collect();
+            names.sort();
+            names
+        };
+        assert_eq!(required(&schema), ["findings", "summary"]);
+        assert_eq!(
+            required(&schema["properties"]["findings"]["items"]),
+            ["evidence", "text"]
+        );
+    }
 
     #[test]
     fn the_audience_schema_requires_a_rating_and_findings_with_sources() {

@@ -169,6 +169,33 @@ pub fn reading(job: &str, r: &Reading, interactive: bool) -> String {
 }
 
 /// What `ask --later` prints.
+/// What `athena audit` prints: the summary, each finding with its evidence, and the recorded invocation, so
+/// the owner sees that the auditor ran and what it cost.
+pub fn audit(a: &athena_core::auditor::Audited) -> String {
+    let mut out = format!("audit of job {}: {}\n", a.audit.target, a.audit.summary);
+    if a.audit.findings.is_empty() {
+        out.push_str("  no findings\n");
+    }
+    for f in &a.audit.findings {
+        let _ = writeln!(out, "  - {} (evidence: {})", f.text, f.evidence);
+    }
+    let _ = writeln!(
+        out,
+        "auditor invocation recorded: {} ({}, {:?}, cost ${:.4})",
+        a.invocation_path(),
+        a.invocation.model,
+        a.invocation.outcome,
+        a.invocation.cost.best_lower()
+    );
+    let _ = writeln!(
+        out,
+        "audit recorded: records/audits/{}/{}.json",
+        a.audit.id.month(),
+        a.audit.id
+    );
+    out
+}
+
 pub fn queued(job: &str, commit: &str) -> String {
     format!(
         "queued     {job} · {} (nothing read, no model called)\nnext       athena go {job}   # reads it, then asks to run it\n",
@@ -696,6 +723,12 @@ pub fn status(v: &StatusView) -> String {
             "audience    {}/5 from a {} reading {} ({})",
             a.rating, a.audience, a.target, a.at
         );
+        for finding in &a.findings {
+            let _ = writeln!(out, "{:<11}   finding: {finding}", "");
+        }
+    }
+    if let Some(a) = &v.audit {
+        let _ = writeln!(out, "audit       job {}: {} ({})", a.job, a.summary, a.at);
         for finding in &a.findings {
             let _ = writeln!(out, "{:<11}   finding: {finding}", "");
         }

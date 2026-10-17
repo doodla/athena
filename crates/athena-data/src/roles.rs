@@ -164,12 +164,61 @@ pub fn audience(at: jiff::Timestamp) -> RoleDefinition {
     }
 }
 
+/// The auditor's name.
+pub const AUDITOR: &str = "auditor";
+
+/// The auditor's prompt. It stays fixed so that a change to it is a new recorded version.
+///
+/// Protection: nothing but being a constant in this file keeps a job from changing this prompt. A job that
+/// edits this file changes the yardstick it is judged by. The warden request will enforce the protection
+/// by mechanism; until then it is prose-only (`docs/design/roles-and-ladder.md`).
+pub const AUDITOR_PROMPT: &str = "You are Athena's auditor. You only read. Judge a job's real outcome against \
+BRIEF.md and the owner's goals, never against the job's own acceptance criteria or its own records: you are \
+not given them. Look at what the job actually changed, in the files and by running what you may, not at what \
+records say about it. Report whether the outcome serves the goals, and give findings. Cite evidence for \
+every finding: a file and line, a command's output, or a quoted passage. A finding without evidence is \
+dropped. Change nothing.";
+
+/// The one auditor definition. It reads and records only, so it may change nothing above the implementation
+/// rung. `athena audit` runs it on request.
+pub fn auditor(at: jiff::Timestamp) -> RoleDefinition {
+    RoleDefinition {
+        name: AUDITOR.into(),
+        version: 1,
+        at,
+        goal: "Judge a job's real outcome against BRIEF.md and the owner's goals, not against the job's own criteria, and cite the evidence for each finding."
+            .into(),
+        prompt: AUDITOR_PROMPT.into(),
+        cadence_tasks: 20,
+        highest_rung: Ladder::Implementation,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn at() -> jiff::Timestamp {
         "2026-10-14T00:00:00Z".parse().unwrap()
+    }
+
+    #[test]
+    fn the_auditor_is_valid_and_judges_against_the_brief_with_evidence() {
+        let role = auditor(at());
+        assert_eq!(role.validate(), Ok(()));
+        assert_eq!(role.name, "auditor");
+        assert_eq!(role.path(), "records/roles/auditor-1.json");
+        assert!(!role.may_change(Ladder::DefaultsConventions));
+        for needle in [
+            "BRIEF.md",
+            "owner's goals",
+            "never against the job's own acceptance criteria",
+            "real outcome",
+            "Cite evidence",
+        ] {
+            assert!(role.prompt.contains(needle), "{needle}");
+        }
+        assert!(role.prompt.len() < 800, "{}", role.prompt.len());
     }
 
     #[test]

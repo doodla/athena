@@ -78,6 +78,8 @@ pub struct StatusView {
     pub work_proposals: Vec<WorkProposalView>,
     /// The latest audience rating (`crate::audience`), if one is recorded.
     pub audience: Option<AudienceView>,
+    /// The latest audit of a job's outcome (`crate::auditor`), if one is recorded.
+    pub audit: Option<AuditView>,
     pub invalid_records: Vec<String>,
     pub next: Vec<String>,
 }
@@ -147,6 +149,32 @@ fn audience_view(records: &Records) -> Option<AudienceView> {
             .findings
             .iter()
             .map(|f| format!("{} (evidence: {})", f.text, f.source))
+            .collect(),
+    })
+}
+
+/// The latest audit as `athena status` lists it.
+#[derive(Debug, Clone, Serialize)]
+pub struct AuditView {
+    pub id: String,
+    /// The job whose outcome was judged.
+    pub job: String,
+    pub summary: String,
+    pub at: String,
+    /// Each finding with the evidence it cites.
+    pub findings: Vec<String>,
+}
+
+fn audit_view(records: &Records) -> Option<AuditView> {
+    records.audits.last().map(|a| AuditView {
+        id: a.id.to_string(),
+        job: a.target.as_str().to_string(),
+        summary: a.summary.clone(),
+        at: a.at.to_string(),
+        findings: a
+            .findings
+            .iter()
+            .map(|f| format!("{} (evidence: {})", f.text, f.evidence))
             .collect(),
     })
 }
@@ -577,6 +605,7 @@ impl Athena {
             proposals,
             work_proposals,
             audience: audience_view(&records),
+            audit: audit_view(&records),
             invalid_records: records.invalid.clone(),
             next,
         })
