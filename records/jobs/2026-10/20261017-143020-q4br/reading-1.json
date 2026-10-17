@@ -1,0 +1,159 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261017-143020-q4br",
+  "n": 1,
+  "at": "2026-10-17T17:43:15.18164513Z",
+  "invocation_seq": 1,
+  "base_commit": "99709e5b5e9701431e8b1db6a05715f0fc93c9cf",
+  "config_sha256": "ba462c7ffba3475385f095363becb853b0eda55fed87c41e3f78d800cf1f63fc",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Stop history and claude_version changes from invalidating readings",
+  "summary": "Settings that cannot change what a job should do, `[history]` and `[agents] claude_version`, will no longer count towards the reading-validity hash, so queued readings stay valid. A re-read forced by a relevant change that differs only in wording from the old reading will be accepted by flag callers like drain without waiting for a person. The audience is the operator running `athena drain`.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "Unit and integration tests are added, and cargo test and clippy must be clean."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check that a queued reading is not re-read after an exempt or version change, and that a wording-only reread is accepted without a person."
+    },
+    {
+      "id": "root-cause",
+      "how": "The fix is in the reading-validity input set, not a per-case bypass."
+    },
+    {
+      "id": "small",
+      "how": "One focused change to the validity hash and the acceptance of same-scope rereads."
+    },
+    {
+      "id": "mechanism",
+      "how": "A test enforces which settings bear on a reading."
+    },
+    {
+      "id": "verified",
+      "how": "Behavior criteria name the cargo commands to run."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "`Config::reading_inputs` in crates/athena-data/src/config.rs is the place to fix: it already resets `[parallel]` and `[landing]` and will also reset `history` and `agents.claude_version` to defaults. The other `[agents]` fields still count.",
+    "The harness version (claude_version) is excluded only from the reading hash. It is still pinned and checked at invocation time (claude.rs, wiring.rs, xtask), so it stays enforced for runs.",
+    "Wording-only means every field `same_scope` already compares is equal: capability, class_of_work, and deliverable paths and actions. Summary, title, criteria text, assumptions and forecasts may differ. A reread whose deliverable paths differ is a real scope difference and is unchanged.",
+    "The existing flag-accept path in `dispatch` (run.rs ~195-225) already accepts a same-scope reread for `AcceptedBy::Flag`. The producer should confirm from the code and a test whether any other wording-sensitive comparison blocks acceptance, and fix only that.",
+    "The change updates the doc comments that mention D38 and `reading_inputs`, and adds a CHANGELOG entry."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A unit test in crates/athena-data/src/config.rs shows `reading_inputs()` is identical for two configs that differ only in `[history] exempt` (e.g. adding a 40-hex id) and identical for two that differ only in `agents.claude_version`. Run `cargo test -p athena-data reading_inputs`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The same test module shows `reading_inputs()` still differs when a bearing setting changes (a budget value, a capability command list, or another `[agents]` field such as `env_pass`). Run `cargo test -p athena-data`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "An integration test in crates/athena-cli/tests/drain.rs shows that after a commit changes `[history] exempt` or `claude_version` in athena.toml, a queued, already-read job is dispatched with no `Reread` result and no new reading record. Run `cargo test -p athena-cli`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test shows that when a relevant change forces a re-read whose capability, class of work and deliverable paths and actions equal the old reading's, but whose title, summary, assumptions and criteria text differ, drain accepts and runs it without returning `Reread`. A reread with a changed scope is still returned for the user. Run `cargo test -p athena-cli`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The doc comments on `GoResult::Reread`, `reread_after_configuration_change` and `Config::reading_inputs` name `[history]` and `claude_version` among the settings that leave a reading valid, and CHANGELOG.md has an entry describing the change.",
+      "kind": "content"
+    },
+    {
+      "text": "`cargo test`, `cargo clippy --all-targets` and `cargo fmt --check` all pass, and athena.toml, defaults.toml and the workflows are untouched.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "p": 0.35
+    },
+    {
+      "path": "crates/athena-core/src/capability.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.15
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.7
+    }
+  ],
+  "out_of_scope": [
+    "Changing athena.toml, defaults.toml or any workflow file.",
+    "Removing the claude_version pin check at invocation time.",
+    "Making the reader's wording deterministic.",
+    "Auto-accepting rereads whose capability, class of work or deliverables changed.",
+    "Changing the defaults.toml byte comparison."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.12,
+      "cost_usd": {
+        "p10": 0.4,
+        "p50": 0.95,
+        "p90": 2.2
+      },
+      "wall_time_s": {
+        "p10": 450.0,
+        "p50": 1050.0,
+        "p90": 2300.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7977653631284917,
+      "p_verification_passes": 0.6282051282051282,
+      "p_user_intervenes": 0.08205128205128205,
+      "cost_usd": {
+        "p10": 0.36933058694043064,
+        "p50": 0.9269537106048124,
+        "p90": 2.1435769675309246
+      },
+      "wall_time_s": {
+        "p10": 567.4218258194782,
+        "p50": 1127.2450045964606,
+        "p90": 2207.9224890481764
+      }
+    }
+  },
+  "departures": "Slightly higher cost and lower verification pass rate than the reference: the change touches the reading hash and the dispatch path, needs integration tests with a faked reader, and the wording-only part is underspecified."
+}
