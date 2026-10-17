@@ -184,3 +184,13 @@ Athena's decision log, not here. Newest last.
 - Retires OP-12 (the operator owns ordering): Athena's planning stage now orders the work.
 - Unchanged: no hand edits to Athena's code, push only under the lease, Athena never references the operator, and
   the high bar for reaching Sri (OP-10).
+
+## OP-15. Standing instructions from Sri carried across the 2026-10-17 restart (2026-10-17)
+
+- Hold the planning-pipeline critique (https://claude.ai/artifact/XnBg72gAKbXZjZDxhzLvUA): Sri said "We won't send it
+  to Athena yet". Do not relay it or file it as requests until Sri says so.
+- Pages made for Sri: plans (https://claude.ai/artifact/AXhv38TsXZpxY4x35vVNvH) and the systems atlas
+  (https://claude.ai/artifact/RrfQHSkNEf1snfa6Dtvm88, a snapshot as of main 7e94791).
+- 2026-10-17 ~16:00 UTC, Sri: "Stop the queue, and restart". The kill switch was thrown on the old machine (it is
+  machine-local, so a new machine starts with it off), and the running job 20261017-155259-7mjc ended rejected.
+  Confirm with Sri before resuming work.
