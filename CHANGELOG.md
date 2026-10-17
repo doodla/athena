@@ -9,6 +9,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- A producer stopped by the kill switch is recorded as `killed`, not `error`, even when the child died
+  before the driver's own check; and a `cost_usd` quantity score whose execution cost is only a bound is
+  marked `provisional` (new `provisional` field, defaulting to false for older `score.json` records), left
+  out of aggregates and out of the reference's history. This fixes m8 of
+  `docs/design/reviews/athena-v0-acceptance-1.md`.
 - The explainer page, after a newcomer's 4/5 rating. "Start here" now has a "Words used first" list that
   defines captain, yolo, green, red, local-only landing and home before they are used; the Glossary gains
   green, red and home and is sorted alphabetically by the generator; each design-choice card (ra1 to ra6)

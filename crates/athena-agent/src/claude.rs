@@ -393,6 +393,12 @@ impl AgentDriver for ClaudeCodeDriver {
 
         let commands_run = state.commands_run();
         let partial = state.partial_usage();
+        // `athena stop` ends the registered groups itself, so the child can die between two of the loop's
+        // checks and the driver never saw the switch. A child with no result while the switch is on was
+        // stopped by it, not broken (m8 of the v0 acceptance review).
+        if killed.is_none() && state.result.is_none() && self.registry.stopped() {
+            killed = Some("the kill switch was turned on".into());
+        }
         let output = match (state.result.clone(), killed) {
             (Some(result), _) => output_from_result(
                 &result,
@@ -537,6 +543,7 @@ if [ "$MODE" = "spill" ]; then
 fi
 echo '{"type":"assistant","message":{"id":"msg_1","model":"claude-haiku-5-5","content":[{"type":"tool_use","id":"tu_1","name":"Bash","input":{"command":"cargo test"}}],"usage":{"input_tokens":3,"cache_creation_input_tokens":100,"cache_read_input_tokens":0,"output_tokens":7}}}'
 if [ "$MODE" = "hang" ]; then sleep 60; exit 0; fi
+if [ "$MODE" = "stopped" ]; then echo on > "$STOP_FILE"; exit 143; fi
 echo '{"type":"result","subtype":"success","is_error":false,"num_turns":2,"duration_api_ms":900,"total_cost_usd":0.002,"usage":{"input_tokens":5,"cache_creation_input_tokens":120,"cache_read_input_tokens":40,"output_tokens":60},"modelUsage":{"claude-haiku-5-5":{"inputTokens":5,"outputTokens":60,"cacheReadInputTokens":40,"cacheCreationInputTokens":120,"costUSD":0.002}},"permission_denials":[],"structured_output":{"answer":42}}'
 "#;
 
@@ -687,6 +694,36 @@ echo '{"type":"result","subtype":"success","is_error":false,"num_turns":2,"durat
         );
         assert_eq!(out.cost_usd, None);
         assert!(registry.entries().is_empty(), "the group left the registry");
+    }
+
+    #[test]
+    fn a_child_ending_without_a_result_while_the_kill_switch_is_on_is_killed_not_an_error() {
+        // m8 of the v0 acceptance review: the switch ended the child before the driver's own check.
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let registry = Registry::new(state.path());
+        let driver = driver(stand_in(dir.path()), registry.clone());
+        let mut invocation = spec(dir.path(), "stopped", Duration::from_secs(30));
+        invocation.env.insert(
+            "STOP_FILE".to_string(),
+            registry.stop_file().display().to_string(),
+        );
+        assert!(!registry.stopped());
+        let out = driver
+            .invoke(&invocation, &mut Recorder::default())
+            .unwrap();
+        assert_eq!(out.outcome, InvocationOutcome::Killed);
+        assert!(out.detail.unwrap().contains("kill switch"));
+        // Without the switch the same early exit is an error.
+        std::fs::remove_file(registry.stop_file()).unwrap();
+        let mut plain = spec(dir.path(), "stopped", Duration::from_secs(30));
+        plain.env.insert(
+            "STOP_FILE".to_string(),
+            dir.path().join("elsewhere").display().to_string(),
+        );
+        let out = driver.invoke(&plain, &mut Recorder::default()).unwrap();
+        assert!(!registry.stopped());
+        assert_eq!(out.outcome, InvocationOutcome::Error);
     }
 
     #[test]

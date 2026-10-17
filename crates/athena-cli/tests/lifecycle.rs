@@ -945,6 +945,64 @@ fn a_killed_invocation_is_recorded_with_bounds() {
     );
 }
 
+#[test]
+fn a_producer_stopped_by_the_kill_switch_closes_killed_with_a_provisional_cost_score() {
+    // m8 of the v0 acceptance review: the stop is a kill, not an error, and a cost known only as a bound
+    // is not scored as a firm figure.
+    let fx = Fixture::new();
+    let base = Scenario::default().script();
+    let script: athena_agent::fake::Script = Box::new(move |spec| {
+        let mut turn = base(spec);
+        if spec.role == Role::Producer {
+            turn.outcome = athena_data::records::InvocationOutcome::Killed;
+            turn.structured = None;
+            turn.detail = Some("the kill switch was turned on".into());
+        }
+        turn
+    });
+    let athena = fx.athena(script);
+    let proposal = athena.ask("add a greeting", &Lines::default()).unwrap();
+    let f = finished(
+        athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(f.state, OutcomeState::Failed);
+    let head = fx.head();
+    let dir = proposal.job.dir();
+    match record_at(&fx, &head, &format!("{dir}/invocations/02-producer.json")) {
+        Some(AnyRecord::Invocation(inv)) => {
+            assert_eq!(inv.outcome, athena_data::records::InvocationOutcome::Killed);
+            assert!(inv.detail.as_deref().unwrap().contains("kill switch"));
+            assert_eq!(inv.cost.value(), None);
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+    match record_at(&fx, &head, &format!("{dir}/score.json")) {
+        Some(AnyRecord::Score(score)) => {
+            let cost = score
+                .quantities
+                .iter()
+                .find(|q| q.quantity == "cost_usd")
+                .expect("a cost score");
+            assert!(cost.provisional, "a bound-only cost is not a firm figure");
+            let time = score
+                .quantities
+                .iter()
+                .find(|q| q.quantity == "wall_time_s")
+                .expect("a time score");
+            assert!(!time.provisional);
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+    let report = athena.check_history().unwrap();
+    assert!(
+        report.violations.is_empty(),
+        "the gate recomputes the same score: {:?}",
+        report.violations
+    );
+}
+
 /// An interrupted job: the history of a killed run cut back to just before its closing commit, with the
 /// producer's invocation record rewritten into the shape written before the usage fix (per-model costs
 /// that do not sum to the reported total) and committed by hand. Returns the job and the invocation path.

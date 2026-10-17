@@ -109,6 +109,16 @@ An abridged invocation record:
 A killed invocation records bounds instead: tokens `estimated` with the basis "lower bound: usage before
 termination", and a cost with `value` null, `lower` 0, and `upper` the invocation's cap.
 
+A producer stopped by the kill switch (`athena stop`) is recorded as `killed`, with a detail naming the
+kill switch, not as `error`: the driver attributes any child that ends with no result while the switch is
+on to it, even when the child died between two of the driver's own checks.
+
+Each entry of a score's `quantities` (`cost_usd`, `wall_time_s`) has a `provisional` field. It is `true`
+when the actual is only a bound, as when an execution invocation has a cost with no single value (a killed
+or lost producer). A provisional quantity still records its forecasts and their interval scores, but it
+does not count in aggregates and is not part of the history the reference forecast learns from. The field
+is omitted when false, and a score written before the field existed reads as not provisional.
+
 ## Following a job from a commit
 
 Every commit Athena makes carries an `Athena-Job` trailer. A landing commit also carries:

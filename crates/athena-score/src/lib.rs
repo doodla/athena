@@ -18,7 +18,7 @@ use athena_data::records::{
     Intervention, InterventionSource, Invocation, Job, ModelsCheck, QuantileScore, Quantiles,
     QuantityScore, Reading, Role, Score, Verdict, Verification,
 };
-use athena_data::{JobId, RecordId};
+use athena_data::{JobId, Quantity, RecordId};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The rules and their version, recorded in every score.
@@ -159,6 +159,8 @@ pub struct Resolution {
     pub intervention_provisional: bool,
     pub changed_paths: BTreeSet<String>,
     pub cost_execution_usd: Option<f64>,
+    /// True when `cost_execution_usd` is only a bound: some execution invocation has no firm cost.
+    pub cost_provisional: bool,
     pub wall_time_execution_s: Option<f64>,
     pub models_expected: Vec<String>,
     pub models_observed: Vec<String>,
@@ -244,43 +246,49 @@ pub fn score_job(
             &r.deliverables,
             &resolution.changed_paths,
         ));
-        let mut quantity =
-            |name: &str, actual: Option<f64>, floor: f64, pick: fn(&Forecast) -> Quantiles| {
-                if let Some(actual) = actual {
-                    let forecasts = [("reader", &r.reader), ("reference", &r.reference)]
-                        .into_iter()
-                        .map(|(name, f)| {
-                            let q = pick(f);
-                            let (wis, inside) = wis_log(&q, actual, floor);
-                            (
-                                name.to_string(),
-                                QuantileScore {
-                                    p10: q.p10(),
-                                    p50: q.p50(),
-                                    p90: q.p90(),
-                                    wis,
-                                    inside_80: inside,
-                                },
-                            )
-                        })
-                        .collect();
-                    quantities.push(QuantityScore {
-                        quantity: name.to_string(),
-                        actual,
-                        floor,
-                        forecasts,
-                    });
-                }
-            };
+        let mut quantity = |name: &str,
+                            actual: Option<f64>,
+                            provisional: bool,
+                            floor: f64,
+                            pick: fn(&Forecast) -> Quantiles| {
+            if let Some(actual) = actual {
+                let forecasts = [("reader", &r.reader), ("reference", &r.reference)]
+                    .into_iter()
+                    .map(|(name, f)| {
+                        let q = pick(f);
+                        let (wis, inside) = wis_log(&q, actual, floor);
+                        (
+                            name.to_string(),
+                            QuantileScore {
+                                p10: q.p10(),
+                                p50: q.p50(),
+                                p90: q.p90(),
+                                wis,
+                                inside_80: inside,
+                            },
+                        )
+                    })
+                    .collect();
+                quantities.push(QuantityScore {
+                    quantity: name.to_string(),
+                    actual,
+                    floor,
+                    provisional,
+                    forecasts,
+                });
+            }
+        };
         quantity(
             "cost_usd",
             resolution.cost_execution_usd,
+            resolution.cost_provisional,
             COST_FLOOR_USD,
             |f| f.cost_usd,
         );
         quantity(
             "wall_time_s",
             resolution.wall_time_execution_s,
+            false,
             TIME_FLOOR_S,
             |f| f.wall_time_s,
         );
@@ -310,6 +318,11 @@ pub fn score_job(
         quantities,
         models,
     }
+}
+
+/// Whether any of these costs is only a bound (no single figure), so their sum is not a firm figure.
+pub fn cost_is_only_a_bound<'a>(costs: impl IntoIterator<Item = &'a Quantity>) -> bool {
+    costs.into_iter().any(|c| c.value().is_none())
 }
 
 /// A job's records, as the scorer reads them. A score is a function of these and nothing else, so Athena
@@ -414,6 +427,8 @@ pub fn score_records(facts: &JobFacts<'_>, cause: Option<RecordId>, at: jiff::Ti
         cost_execution_usd: (accepted.is_some() && !execution.is_empty())
             .then(|| execution.iter().map(|i| i.cost.best_lower()).sum())
             .or(accepted.map(|_| 0.0)),
+        // A cost known only as a bound (a killed or lost producer) is not a firm figure.
+        cost_provisional: cost_is_only_a_bound(execution.iter().map(|i| &i.cost)),
         wall_time_execution_s: facts.wall_time_execution_s,
         models_expected: expected,
         models_observed: observed.into_iter().collect(),
@@ -475,7 +490,8 @@ pub fn aggregate(scores: &[&Score]) -> Aggregate {
                 t.events += 1;
             }
         }
-        for q in &score.quantities {
+        // A provisional quantity is not a resolved value, so it adds to no total.
+        for q in score.quantities.iter().filter(|q| !q.provisional) {
             for (forecaster, s) in &q.forecasts {
                 let t = per_forecaster.entry(forecaster.clone()).or_default();
                 t.wis_sum += s.wis;
@@ -627,6 +643,97 @@ mod tests {
         assert!((after.cost_usd.p50() - 1.0).abs() < 1e-9);
     }
 
+    fn forecasts_for_bound_tests() -> ReadingForecasts {
+        ReadingForecasts {
+            n: 1,
+            reader: Forecast {
+                p_reading_accepted: 0.9,
+                p_verification_passes: 0.9,
+                p_user_intervenes: 0.1,
+                cost_usd: q(0.1, 0.5, 1.0),
+                wall_time_s: q(60.0, 300.0, 900.0),
+            },
+            reference: Forecast {
+                p_reading_accepted: 0.7,
+                p_verification_passes: 0.75,
+                p_user_intervenes: 0.2,
+                cost_usd: q(0.15, 0.6, 2.5),
+                wall_time_s: q(120.0, 420.0, 1500.0),
+            },
+            deliverables: vec![("README.md".into(), 0.9)],
+        }
+    }
+
+    fn score_with_costs(costs: &[Quantity]) -> Score {
+        let resolution = Resolution {
+            reading_accepted: BTreeMap::from([(1, Some(true))]),
+            verification_passed: Some(false),
+            user_intervened: false,
+            intervention_provisional: true,
+            changed_paths: BTreeSet::new(),
+            cost_execution_usd: Some(costs.iter().map(Quantity::best_lower).sum()),
+            cost_provisional: cost_is_only_a_bound(costs),
+            wall_time_execution_s: Some(100.0),
+            models_expected: vec![],
+            models_observed: vec![],
+        };
+        let job = JobId::parse("20261010-153012-k7q2").unwrap();
+        let at: jiff::Timestamp = "2026-10-10T16:00:00Z".parse().unwrap();
+        score_job(
+            &job,
+            at,
+            None,
+            &[forecasts_for_bound_tests()],
+            Some(1),
+            &resolution,
+        )
+    }
+
+    #[test]
+    fn a_cost_known_only_as_a_bound_scores_provisional_and_a_firm_cost_does_not() {
+        // m8 of the v0 acceptance review.
+        use athena_data::Unit;
+        let bound =
+            Quantity::estimated(None, Unit::Usd, "bounded by the cap", Some(0.0), Some(3.0))
+                .unwrap();
+        let firm = Quantity::reported(0.4, Unit::Usd, "reported");
+        let cost = |s: &Score| {
+            s.quantities
+                .iter()
+                .find(|q| q.quantity == "cost_usd")
+                .cloned()
+        };
+        let time = |s: &Score| {
+            s.quantities
+                .iter()
+                .find(|q| q.quantity == "wall_time_s")
+                .cloned()
+        };
+        let bounded = score_with_costs(&[firm.clone(), bound]);
+        assert!(cost(&bounded).unwrap().provisional);
+        assert!(!time(&bounded).unwrap().provisional);
+        let exact = score_with_costs(&[firm.clone(), firm]);
+        assert!(!cost(&exact).unwrap().provisional);
+    }
+
+    #[test]
+    fn a_provisional_quantity_does_not_count_in_aggregates() {
+        use athena_data::Unit;
+        let bound =
+            Quantity::estimated(None, Unit::Usd, "bounded by the cap", Some(0.0), Some(3.0))
+                .unwrap();
+        let provisional = score_with_costs(&[bound]);
+        let firm = score_with_costs(&[Quantity::reported(0.4, Unit::Usd, "reported")]);
+        let only_bound = aggregate(&[&provisional]);
+        assert_eq!(
+            only_bound.per_forecaster["reader"].quantities, 1,
+            "time counts"
+        );
+        let both = aggregate(&[&provisional, &firm]);
+        assert_eq!(both.per_forecaster["reader"].quantities, 3);
+        assert_eq!(both.per_forecaster["reader"].jobs, 2);
+    }
+
     #[test]
     fn skill_is_withheld_below_the_minimum_job_count() {
         let reading = ReadingForecasts {
@@ -654,6 +761,7 @@ mod tests {
             intervention_provisional: true,
             changed_paths: ["README.md".to_string()].into(),
             cost_execution_usd: Some(0.4),
+            cost_provisional: false,
             wall_time_execution_s: Some(250.0),
             models_expected: vec!["claude-sonnet-5-5".into(), "claude-opus-5-5".into()],
             models_observed: vec!["claude-sonnet-5-5".into(), "claude-opus-5-5".into()],

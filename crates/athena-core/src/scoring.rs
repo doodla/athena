@@ -37,7 +37,7 @@ pub fn history(records: &Records) -> Vec<PastJob> {
             cost_execution_usd: score
                 .quantities
                 .iter()
-                .find(|q| q.quantity == "cost_usd")
+                .find(|q| q.quantity == "cost_usd" && !q.provisional)
                 .map(|q| q.actual),
             wall_time_execution_s: score
                 .quantities
