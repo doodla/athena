@@ -1,0 +1,138 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261017-213422-amr5",
+  "base_commit": "d94497ae84e96199427051e5915c15f20556d59c",
+  "base_fingerprint": "sha256:a18892f49f2e40e731b29b95e8b5ec8a360690d20e71e6d67d60357d183bb3d1",
+  "previous_job": "20261017-205545-ygfd",
+  "candidate_commit": "dd7da256245f26ddbc79001cfec52e8352047b71",
+  "candidate_tree": "b220ed3656a668be5d16fbcd27371607bb8acc66",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 100199
+    },
+    {
+      "path": "crates/athena-cli/tests/budgets.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 3033
+    },
+    {
+      "path": "crates/athena-context/prompts/critic.md",
+      "status": "added",
+      "mode": "100644",
+      "bytes": 1248
+    },
+    {
+      "path": "crates/athena-context/prompts/planner.md",
+      "status": "added",
+      "mode": "100644",
+      "bytes": 1386
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 74009
+    },
+    {
+      "path": "crates/athena-context/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 13162
+    },
+    {
+      "path": "crates/athena-context/src/outputs.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 26657
+    }
+  ],
+  "fingerprint": "sha256:21ad576fb7e1f3d5b9a531d4a7c26536a6cbfff0ef089b3b823a9c1a15725011",
+  "violations": [],
+  "producer_report": {
+    "summary": "Built job 2 of the job-planning design as pure functions that nothing calls yet, so behavior is unchanged. It adds the planner and critic prompts, their strict output schemas, and the planner, critic and plan-section briefs. `verifier_brief` is untouched. A new `verifier_brief_with_plan` adds the optional plan input. I kept the existing `verifier_brief(inputs, inline_diff)` signature because changing it would have meant editing `run.rs`, which is out of scope. The full test suite, clippy and fmt all pass.\n\n- **Prompts:** `planner.md` and `critic.md` are registered as `PLANNER_FRAME` and `CRITIC_FRAME` in `lib.rs`. A test checks each frame is under 500 estimated tokens and fits the producer or verifier budget. `budgets.rs` gained the same check.\n- **Schemas** (`outputs.rs`): `PlanOutput`, `CriticOutput`, `plan_schema()` and `critic_schema()`. All nested types deny unknown fields, and the generated schema sets `additionalProperties` false and requires every property at every level. The critic verdict is exactly `accept`, `revise` or `reject`.\n- **Briefs** (`briefs.rs`):\n  - `planner_brief` numbers each criterion with its kind and flags governance files through the reading's governance closure. It lists the verifier's commands and each deliverable's existence and size. A revision brief quotes the previous plan in full and every finding.\n  - `critic_brief` carries the request, the reading, the full plan with every demonstration, and Athena's findings. Its inputs have no field for cost or commands.\n  - `render_plan_section` writes the \"## Job plan (accepted, round r)\" section deterministically.\n  - `verifier_brief_with_plan` takes a `VerifierPlan` built by `VerifierPlan::from_plan`. That type holds only the demonstrations and the planned file paths with their actions (F5). The plan section goes after Scope. `VerifierInputs::names_with_plan` adds the matching input name.\n- **Tests:**\n  - Every brief and schema criterion has a test. The critic-brief test asserts the words \"cost\", \"usd\", \"$\", and the command-list headings are absent.\n  - The verifier-with-plan test asserts the approach, reasons, rejected options, steps, risks and file purposes are absent.\n  - The no-plan test compares against a stored literal, hand-derived from the old code's format strings.\n- **CHANGELOG.md** has an entry.",
+    "files": [
+      "crates/athena-context/prompts/planner.md",
+      "crates/athena-context/prompts/critic.md",
+      "crates/athena-context/src/lib.rs",
+      "crates/athena-context/src/outputs.rs",
+      "crates/athena-context/src/briefs.rs",
+      "crates/athena-cli/tests/budgets.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "Run as `cargo test --locked --quiet`; every test binary reported ok, with only the repository's existing ignored tests skipped. A first, non-quiet run printed too much to read, so I reran it quietly."
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "I ran `cargo fmt --all` once before the check."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Run cargo test: planner_brief numbers every criterion with its kind, marks a listed athena.toml (and defaults.toml) as a governance file, and lists the commands the verifier may run. A revision brief contains the previous plan and the text of each finding.",
+        "status": "met",
+        "evidence": "The tests `planner_briefs_number_criteria_flag_governance_and_list_the_verifiers_commands` and `a_revision_brief_quotes_the_previous_plan_and_every_finding` in `briefs.rs` pass. They assert the numbered kinds, governance marks on both files, the verifier's commands, and the plan and finding text."
+      },
+      {
+        "criterion": "Run cargo test: critic_brief contains every demonstration and each Athena finding. Assertions on absence show it has no planner cost and no planner command list.",
+        "status": "met",
+        "evidence": "The test `critic_briefs_carry_the_demonstrations_and_athenas_findings_and_no_planner_cost_or_commands` passes. It asserts the absence of \"cost\", \"usd\", \"$\", \"commands bash may run\", \"commands the verifier may run\" and \"planner_usd\"."
+      },
+      {
+        "criterion": "Run cargo test: the planner and critic output schemas each reject an extra property at the top level and inside a nested item (additionalProperties false at every level). The critic verdict accepts exactly accept, revise and reject.",
+        "status": "met",
+        "evidence": "Three tests in `outputs.rs` pass. The first walks every object in both generated schemas for `additionalProperties` false and all properties required. The second shows serde rejects extra properties at the top, in each nested list and in the doubly nested rejected options. The third shows the verdict enum is exactly accept, revise, reject, and other words are refused."
+      },
+      {
+        "criterion": "Run cargo test: render_plan_section returns identical bytes for the same record called twice, under the heading 'Job plan (accepted, round r)'. verifier_brief with a plan contains the demonstrations and the planned file list but not the plan's approach, decision reasons or rejected options. With no plan its output equals a stored copy of today's output byte for byte.",
+        "status": "met",
+        "evidence": "Three tests in `briefs.rs` pass: `render_plan_section_is_deterministic_and_headed_with_the_round`, `a_verifier_brief_with_a_plan_holds_demonstrations_and_files_but_not_the_reasoning`, and `a_verifier_brief_without_a_plan_is_byte_identical_to_the_stored_copy`. The last compares to a literal derived from the old code, and passes through `verifier_brief` and through `verifier_brief_with_plan(None)`."
+      },
+      {
+        "criterion": "Run cargo test (including crates/athena-cli/tests/budgets.rs), cargo clippy --all-targets -- -D warnings, and cargo fmt --check. xtask's boundary test is among the tests. All pass with no change to existing behavior.",
+        "status": "met",
+        "evidence": "`cargo test --locked`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo fmt --all --check` all passed. The tests include `budgets.rs` and the xtask policy tests."
+      },
+      {
+        "criterion": "prompts/planner.md and prompts/critic.md exist, are short, and are registered in crates/athena-context/src/lib.rs as PromptAssets (id, version, include_str!) like the existing frames.",
+        "status": "met",
+        "evidence": "Both files exist, each about 15 lines. `lib.rs` defines `PLANNER_FRAME` (id `frame.planner`) and `CRITIC_FRAME` (id `frame.critic`), each version 1 with `include_str!`. The test `planner_and_critic_frames_are_short_and_fit_the_budgets` passes."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry for this change. Nothing calls the planner or critic, and run.rs, status display and athena.toml are unchanged.",
+        "status": "met",
+        "evidence": "CHANGELOG.md has a new entry under Unreleased/Added. I did not edit `run.rs`, the status display or `athena.toml`. The new functions have no callers outside tests."
+      }
+    ],
+    "open_issues": [
+      "The expected deliverables list `crates/athena-cap-change/src/lib.rs` and `crates/athena-cap-study/src/lib.rs`. I left both unchanged because no existing caller needs a plan input; `verifier_brief` keeps its signature.",
+      "A later job (3a) will need to switch `run.rs` to `verifier_brief_with_plan`. It can also fold the two functions together at that point if it prefers a single signature.",
+      "`BudgetSet` has no planner or critic variants. The planner is checked against the Producer budget (1300) and the critic against the Verifier budget (1300). Add dedicated sets if the design wants separate budgets."
+    ],
+    "mistakes": [
+      "In the first test draft, `let plan = plan(2)` shadowed the helper `plan` fn, so a later `plan(3)` call would not have compiled. I fixed it before running.",
+      "I ran the full non-quiet `cargo test` once and could not read its large saved output. I reran it with `--quiet` to confirm the result."
+    ],
+    "learnings": [
+      "`VerifierInputs` is built with a struct literal in `run.rs`, so adding a field or a parameter to `verifier_brief` would force edits to out-of-scope code. A separate `verifier_brief_with_plan` function avoids that.",
+      "`outputs::harden` sets `required` and `additionalProperties` only on schema nodes that have `properties`, and recurses through `items`, `anyOf`, `oneOf`, `allOf` and `prefixItems`. It handles the doubly nested `rejected` items correctly.",
+      "Bash cannot grep or read files outside the working directory. The saved output of a long cargo run is outside it, so use `cargo test --quiet`."
+    ],
+    "desires": [
+      "A way to read a long test log from inside the working directory, or an option to redirect cargo output to a file there."
+    ]
+  }
+}

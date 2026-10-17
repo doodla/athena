@@ -52,6 +52,18 @@ pub const VERIFIER_FRAME: PromptAsset = PromptAsset {
     version: 1,
     text: include_str!("../prompts/verifier.md"),
 };
+/// The job planner's role frame.
+pub const PLANNER_FRAME: PromptAsset = PromptAsset {
+    id: "frame.planner",
+    version: 1,
+    text: include_str!("../prompts/planner.md"),
+};
+/// The plan critic's role frame.
+pub const CRITIC_FRAME: PromptAsset = PromptAsset {
+    id: "frame.critic",
+    version: 1,
+    text: include_str!("../prompts/critic.md"),
+};
 
 /// The basis recorded for estimated token counts.
 pub const ESTIMATE_BASIS: &str = "ceil(bytes/3.0), prose tripwire";
@@ -266,6 +278,19 @@ mod tests {
         ] {
             let composed = compose(&[CONTRACT.into(), frame.into()]);
             assert!(check_budget(set, &composed).is_ok(), "{} frame", set.name());
+        }
+    }
+
+    #[test]
+    fn planner_and_critic_frames_are_short_and_fit_the_budgets() {
+        // The planner works on the producer's model and the critic on the verifier's.
+        for (set, frame) in [
+            (BudgetSet::Producer, PLANNER_FRAME),
+            (BudgetSet::Verifier, CRITIC_FRAME),
+        ] {
+            let composed = compose(&[CONTRACT.into(), frame.into()]);
+            assert!(check_budget(set, &composed).is_ok(), "{}", frame.id);
+            assert!(estimate_tokens(frame.text) < 500, "{} is short", frame.id);
         }
     }
 

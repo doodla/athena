@@ -329,6 +329,108 @@ pub struct AuditorFindingOutput {
     pub evidence: String,
 }
 
+/// The planner's plan (job planning, `docs/design/job-planning.md` section 3). Athena sets whether a file is
+/// governance and whether it exists; the planner does not.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PlanOutput {
+    /// How the change will be made, in a few sentences.
+    pub approach: String,
+    pub decisions: Vec<PlanDecisionOutput>,
+    pub files: Vec<PlanFileOutput>,
+    /// In the order the producer should do them.
+    pub steps: Vec<String>,
+    pub risks: Vec<PlanRiskOutput>,
+    /// Exactly one per acceptance criterion.
+    pub demonstrations: Vec<DemonstrationOutput>,
+    pub open_questions: Vec<String>,
+}
+
+/// One design choice.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PlanDecisionOutput {
+    pub choice: String,
+    pub reason: String,
+    pub rejected: Vec<RejectedOptionOutput>,
+}
+
+/// An option weighed and turned down.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RejectedOptionOutput {
+    pub option: String,
+    pub why: String,
+}
+
+/// A file the plan touches.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PlanFileOutput {
+    /// Repository-relative path.
+    pub path: String,
+    pub action: DeliverableActionOutput,
+    pub purpose: String,
+}
+
+/// A risk and what limits it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PlanRiskOutput {
+    pub risk: String,
+    pub mitigation: String,
+}
+
+/// How one acceptance criterion will be shown to hold.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DemonstrationOutput {
+    /// The criterion's number in the brief, from 1.
+    #[schemars(range(min = 1))]
+    pub criterion: u32,
+    pub method: String,
+    /// The command or test that shows it, a command the verifier may run.
+    pub command: String,
+    /// What running it observes.
+    pub observes: String,
+    /// What would fail if the behavior were missing; required for a behavior criterion.
+    pub fails_without: Option<String>,
+}
+
+/// The critic's verdict on a plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CritiqueVerdictOutput {
+    Accept,
+    Revise,
+    Reject,
+}
+
+/// The critic's review of one plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CriticOutput {
+    pub verdict: CritiqueVerdictOutput,
+    pub findings: Vec<CriticFindingOutput>,
+    /// Set when the accepted reading misread the request, with how.
+    pub request_reading_mismatch: Option<String>,
+    /// One paragraph.
+    pub summary: String,
+}
+
+/// One finding on a plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CriticFindingOutput {
+    pub severity: SeverityOutput,
+    pub summary: String,
+    /// A part of the plan or a file and line in the snapshot.
+    pub location: String,
+    pub evidence: String,
+    /// What the planner should change.
+    pub fix: String,
+}
+
 /// The closed lists that narrow the reader's schema.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ReaderChoices {
@@ -421,9 +523,129 @@ pub fn auditor_schema() -> Value {
     schema_of::<AuditorOutput>()
 }
 
+/// The planner's schema.
+pub fn plan_schema() -> Value {
+    schema_of::<PlanOutput>()
+}
+
+/// The critic's schema.
+pub fn critic_schema() -> Value {
+    schema_of::<CriticOutput>()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every object schema that lists properties, with the path to it.
+    fn object_schemas<'a>(schema: &'a Value, path: &str, found: &mut Vec<(String, &'a Value)>) {
+        if let Some(props) = schema.get("properties").and_then(Value::as_object) {
+            found.push((path.to_string(), schema));
+            for (name, child) in props {
+                object_schemas(child, &format!("{path}.{name}"), found);
+            }
+        }
+        if let Some(items) = schema.get("items") {
+            object_schemas(items, &format!("{path}[]"), found);
+        }
+    }
+
+    fn sample_plan() -> Value {
+        json!({
+            "approach": "a", "steps": ["s"], "open_questions": [],
+            "decisions": [{ "choice": "c", "reason": "r",
+                "rejected": [{ "option": "o", "why": "w" }] }],
+            "files": [{ "path": "p", "action": "modify", "purpose": "x" }],
+            "risks": [{ "risk": "r", "mitigation": "m" }],
+            "demonstrations": [{ "criterion": 1, "method": "m", "command": "c",
+                "observes": "o", "fails_without": null }]
+        })
+    }
+
+    fn sample_critique() -> Value {
+        json!({
+            "verdict": "revise", "request_reading_mismatch": null, "summary": "s",
+            "findings": [{ "severity": "major", "summary": "s", "location": "l",
+                "evidence": "e", "fix": "f" }]
+        })
+    }
+
+    #[test]
+    fn the_plan_and_critic_schemas_forbid_extra_properties_at_every_level() {
+        for (schema, nested) in [
+            (plan_schema(), 5), // top, decisions, rejected, files, risks, demonstrations: 6 objects
+            (critic_schema(), 1), // top, findings: 2 objects
+        ] {
+            let mut found = Vec::new();
+            object_schemas(&schema, "$", &mut found);
+            assert_eq!(found.len(), nested + 1, "{found:?}");
+            for (path, object) in found {
+                assert_eq!(object["additionalProperties"], json!(false), "{path}");
+                let required = object["required"].as_array().unwrap().len();
+                assert_eq!(required, object["properties"].as_object().unwrap().len());
+            }
+            assert!(schema.to_string().find("$ref").is_none());
+        }
+    }
+
+    #[test]
+    fn the_plan_and_critic_outputs_reject_an_extra_property_at_the_top_and_in_a_nested_item() {
+        let plan = sample_plan();
+        assert!(serde_json::from_value::<PlanOutput>(plan.clone()).is_ok());
+        let mut top = plan.clone();
+        top["extra"] = json!(1);
+        assert!(serde_json::from_value::<PlanOutput>(top).is_err());
+        for (list, item) in [
+            ("decisions", 0),
+            ("files", 0),
+            ("risks", 0),
+            ("demonstrations", 0),
+        ] {
+            let mut nested = plan.clone();
+            nested[list][item]["extra"] = json!(1);
+            assert!(
+                serde_json::from_value::<PlanOutput>(nested).is_err(),
+                "{list}"
+            );
+        }
+        let mut deep = plan;
+        deep["decisions"][0]["rejected"][0]["extra"] = json!(1);
+        assert!(serde_json::from_value::<PlanOutput>(deep).is_err());
+
+        let critique = sample_critique();
+        assert!(serde_json::from_value::<CriticOutput>(critique.clone()).is_ok());
+        let mut top = critique.clone();
+        top["extra"] = json!(1);
+        assert!(serde_json::from_value::<CriticOutput>(top).is_err());
+        let mut nested = critique;
+        nested["findings"][0]["extra"] = json!(1);
+        assert!(serde_json::from_value::<CriticOutput>(nested).is_err());
+    }
+
+    #[test]
+    fn the_critic_verdict_is_exactly_accept_revise_or_reject() {
+        let schema = critic_schema();
+        assert_eq!(
+            schema["properties"]["verdict"]["enum"],
+            json!(["accept", "revise", "reject"])
+        );
+        for word in ["accept", "revise", "reject"] {
+            let mut critique = sample_critique();
+            critique["verdict"] = json!(word);
+            assert!(
+                serde_json::from_value::<CriticOutput>(critique).is_ok(),
+                "{word}"
+            );
+        }
+        for word in ["pass", "fail", "Accept", "approve", ""] {
+            let mut critique = sample_critique();
+            critique["verdict"] = json!(word);
+            assert!(
+                serde_json::from_value::<CriticOutput>(critique).is_err(),
+                "{word}"
+            );
+        }
+    }
 
     #[test]
     fn the_auditor_schema_requires_a_summary_and_findings_with_evidence() {

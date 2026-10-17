@@ -4,8 +4,8 @@
 
 use athena_context::briefs::render_catalog;
 use athena_context::{
-    BudgetSet, CONTRACT, Component, PRODUCER_FRAME, READER_FRAME, VERIFIER_FRAME, check_budget,
-    compose,
+    BudgetSet, CONTRACT, CRITIC_FRAME, Component, PLANNER_FRAME, PRODUCER_FRAME, READER_FRAME,
+    VERIFIER_FRAME, check_budget, compose,
 };
 use athena_data::DefaultsModel;
 
@@ -53,6 +53,15 @@ fn every_role_set_is_within_its_budget() {
             check_budget(BudgetSet::Verifier, &verifier).unwrap()
         ));
     }
+    // Planning roles reuse the producer's and verifier's budgets: the planner runs on the producer's model
+    // and the critic on the verifier's.
+    let planner = compose(&[CONTRACT.into(), PLANNER_FRAME.into()]);
+    let critic = compose(&[CONTRACT.into(), CRITIC_FRAME.into()]);
+    report.push(format!(
+        "planner {}, critic {}",
+        check_budget(BudgetSet::Producer, &planner).unwrap(),
+        check_budget(BudgetSet::Verifier, &critic).unwrap()
+    ));
     report.push(format!(
         "contract {}",
         check_budget(BudgetSet::Contract, &compose(&[CONTRACT.into()])).unwrap()
