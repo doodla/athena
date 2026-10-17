@@ -1,0 +1,160 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261017-133148-5vbe",
+  "n": 1,
+  "at": "2026-10-17T17:41:14.34119436Z",
+  "invocation_seq": 1,
+  "base_commit": "82d5649d17faabbfaf503985d7b1c1073c0f1c12",
+  "config_sha256": "ba462c7ffba3475385f095363becb853b0eda55fed87c41e3f78d800cf1f63fc",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Fix the landing/history mismatch that fails main's CI at 39962ed",
+  "summary": "Find why `athena check --history` rejects 39962ed as a landing of jobs 60r4 and sg0j: either the landing path wrote records for two jobs that don't chain (sg0j's base differs from 60r4's end), or the chain rule in invariant.rs is wrong. Fix only that one, add a test reproducing the sequence, and edit no existing record. The audience is the maintainer and CI.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "The fix and the test are Rust."
+    },
+    {
+      "id": "tested",
+      "how": "cargo test and cargo clippy pass with the new regression test."
+    },
+    {
+      "id": "root-cause",
+      "how": "The producer identifies which side is wrong, the landing path or the check's landing rule, and fixes that one rather than special-casing the instance."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "The criteria run the reproduction test and check the outcomes of the history check."
+    },
+    {
+      "id": "verified",
+      "how": "The verifier runs cargo test."
+    },
+    {
+      "id": "small",
+      "how": "One focused fix plus one test."
+    },
+    {
+      "id": "strangers",
+      "how": "Comments and the commit message explain the finding for an outside reader."
+    },
+    {
+      "id": "public",
+      "how": "No secrets or personal data in the test fixtures."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "records/ is absent from my snapshot, so I could not inspect the two jobs' candidate.json fingerprints or the real commit. The diagnosis must be done by the producer from code and from a synthetic fixture.",
+    "Likely mechanism, from crates/athena-gate/src/invariant.rs chain_problem: sg0j (a fix for PR #129) was built on 60r4's branch and landed together with 60r4's records in one squash. 60r4's PR was closed unmerged, yet its outcome says landed. The chain link check (later.base_fingerprint == earlier.fingerprint) then fails, and each job is reported as not a valid landing.",
+    "The history rule that a landed outcome needs a valid landing is correct, so the likelier fault is in the landing path: it records `landed` for a job whose own PR was not merged, or it lets a successor job land a predecessor's records without a matching fingerprint link. The producer should confirm this against the code and change the rule only if the code shows the rule is wrong.",
+    "The fix must not rewrite the existing records of 60r4 or sg0j. If main's history stays red because of those records, the fix may be a narrowly scoped, mechanism-backed handling of the already-landed commit (for example an explicit exemption keyed to 39962ed), and the producer must record that call.",
+    "Which crate holds the landing path (athena-cli or athena-gate) is not confirmed, so those deliverable paths are guesses."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new test builds the sequence in a temporary git repository. Job A closes with its PR unmerged. Job B starts from A's branch and lands, and the commit carries both jobs' records. The test fails on the base commit with the same three violations and passes after the fix. Run `cargo test -p athena-gate`, plus `-p athena-cli` if the fix touches it.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`cargo test --workspace`, `cargo clippy --workspace --all-targets`, and `cargo fmt --check` all pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "No file under records/ is added, modified or deleted in a way that changes an existing record. The diff touches only code, tests, and docs or changelog.",
+      "kind": "content"
+    },
+    {
+      "text": "The commit message or a doc comment states which side was wrong, the landing path or the history landing rule. It cites the code that shows this and explains why the other side is correct.",
+      "kind": "content"
+    },
+    {
+      "text": "After the fix, a landing of a job whose PR was closed without merging is no longer recorded as `landed` on the landing path, or the check accepts the chain the landing path legitimately produces. A test asserts this and also asserts that a real unrelated, non-chaining landing is still refused (`cargo test -p athena-gate`).",
+      "kind": "behavior"
+    },
+    {
+      "text": "The summary of the change says that `athena check --history` on the real 39962ed was not run, because records/ is unavailable to the verifier, and names it as the check CI must confirm.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-gate/src/invariant.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-gate/src/history.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-gate/src/jobs.rs",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-cli/src/land.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.3
+    }
+  ],
+  "out_of_scope": [
+    "Editing or deleting any existing record under records/, including the outcomes of jobs 60r4 and sg0j.",
+    "The display.rs provisional-cost status line and the kill-switch reason gap noted in 60r4's verification.",
+    "Gating future scoring-rule changes on history."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.6,
+      "p_verification_passes": 0.5,
+      "p_user_intervenes": 0.15,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.3,
+        "p90": 3.0
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 1400.0,
+        "p90": 3000.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7977653631284917,
+      "p_verification_passes": 0.6282051282051282,
+      "p_user_intervenes": 0.08205128205128205,
+      "cost_usd": {
+        "p10": 0.36933058694043064,
+        "p50": 0.9269537106048124,
+        "p90": 2.1435769675309246
+      },
+      "wall_time_s": {
+        "p10": 567.4218258194782,
+        "p50": 1127.2450045964606,
+        "p90": 2207.9224890481764
+      }
+    }
+  },
+  "departures": "This is a root-cause investigation without access to records/, so cost, time and the odds of passing are worse than the reference."
+}
