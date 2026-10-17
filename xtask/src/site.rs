@@ -247,7 +247,8 @@ pub fn render(study: &Study) -> Result<String> {
         "<header><h1>Athena explains how {sys} handles work</h1>\
          <p class=\"lede\">{athena}</p>\
          <p class=\"lede\">{study_text}</p>\
-         <p class=\"lede\">This page is that study of {sys}, from <code>{id}</code>. \
+         <p class=\"lede\">This page is that study of {sys}. Its study id, <code>{id}</code>, is the name of \
+         the folder under <code>studies/</code> that holds the data this page is generated from. \
          Each statement below ends with the id of the claim that supports it; the claims, with links to \
          their sources, are listed at the end.</p>\
          <p class=\"pin\">Pinned {sys} commit: <code>{sha}</code> in {repo_link}</p></header>",
@@ -263,8 +264,22 @@ pub fn render(study: &Study) -> Result<String> {
         "<section><h2>Start here</h2>\
          <p>The three parts below say what firstmate is, follow one piece of work, and say what happens \
          when something fails or has no limit. A glossary of the words used follows the main sections.</p>\
-         <h3>What firstmate is</h3><ul>",
+         <h3>Words used first</h3>",
     );
+    leadin(&mut body, &study.intro, "terms", &known)?;
+    body.push_str("<dl class=\"deciders\">");
+    for t in array_of(&study.intro, "start_terms", "intro.json")? {
+        let term = str_of(t, "term", "a start term")?;
+        let what = format!("start term {term}");
+        let _ = write!(
+            body,
+            "<dt>{}</dt><dd>{} {}</dd>",
+            escape(term),
+            escape(str_of(t, "text", &what)?),
+            cites(t, &what, &known)?
+        );
+    }
+    body.push_str("</dl><h3>What firstmate is</h3><ul>");
     for item in array_of(&study.intro, "what", "intro.json")? {
         intro_item(&mut body, item, "an intro sentence", &known)?;
     }
@@ -382,13 +397,19 @@ pub fn render(study: &Study) -> Result<String> {
     body.push_str("<section><h2>Why it is built this way</h2>");
     leadin(&mut body, &study.intro, "why", &known)?;
     body.push_str("<div class=\"cards\">");
+    let titles = array_of(&study.intro, "rationale_titles", "intro.json")?;
     for r in array_of_value(&study.rationales, "rationales.json")? {
         let id = str_of(r, "id", "a rationale")?;
         let what = format!("rationale {id}");
+        let title = titles
+            .iter()
+            .find(|t| t.get("id").and_then(Value::as_str) == Some(id))
+            .ok_or_else(|| anyhow!("{what} has no title in intro.json"))?;
         let _ = write!(
             body,
-            "<article class=\"card\"><h3>{}</h3><p>{}</p>",
+            "<article class=\"card\"><h3>{} <span class=\"arrow\">{}</span></h3><p>{}</p>",
             escape(id),
+            escape(str_of(title, "title", &format!("title of {what}"))?),
             escape(str_of(r, "decision", &what)?)
         );
         let alternatives = array_of(r, "alternatives", &what)?;
@@ -410,7 +431,11 @@ pub fn render(study: &Study) -> Result<String> {
 
     // Glossary: after the walk-through and the sections that use its words.
     body.push_str("<section><h2>Glossary</h2><dl class=\"glossary\">");
-    for entry in array_of(&study.intro, "glossary", "intro.json")? {
+    let mut entries: Vec<&Value> = array_of(&study.intro, "glossary", "intro.json")?
+        .iter()
+        .collect();
+    entries.sort_by_cached_key(|e| e.get("term").and_then(Value::as_str).map(str::to_lowercase));
+    for entry in entries {
         let term = str_of(entry, "term", "a glossary entry")?;
         let what = format!("glossary entry {term}");
         let definition = escape(str_of(entry, "definition", &what)?);
@@ -468,7 +493,10 @@ pub fn render(study: &Study) -> Result<String> {
 
     // Claims and their sources
     body.push_str("<section><h2>Claims and sources</h2><ol class=\"claims\">");
-    for c in claims {
+    // Claims are listed in numeric order of their id (c9 before c10), whatever the order in the file.
+    let mut ordered: Vec<&Value> = claims.iter().collect();
+    ordered.sort_by_cached_key(|c| claim_key(c.get("id").and_then(Value::as_str).unwrap_or("")));
+    for c in ordered {
         let id = str_of(c, "id", "a claim")?;
         let what = format!("claim {id}");
         let (tag, sentence) = split_tag(str_of(c, "text", &what)?);
@@ -483,11 +511,16 @@ pub fn render(study: &Study) -> Result<String> {
             escape(id),
             escape(str_of(c, "mark", &what)?)
         );
+        // A claim lists each source location once, even when several quotes come from the same lines.
+        let mut seen = BTreeSet::new();
         for s in array_of(c, "sources", &what)? {
             let path = str_of(s, "path", &what)?;
             let start = s.get("start_line").and_then(Value::as_u64).unwrap_or(0);
             let end = s.get("end_line").and_then(Value::as_u64).unwrap_or(start);
             let text = format!("{path}:{start}-{end}");
+            if !seen.insert(text.clone()) {
+                continue;
+            }
             match &github {
                 Some(base) => {
                     let _ = write!(
@@ -520,6 +553,14 @@ pub fn render(study: &Study) -> Result<String> {
          <title>Athena explains how {sys} handles work</title><style>{CSS}</style></head><body><main>{body}</main></body></html>\n",
         sys = escape(system)
     ))
+}
+
+/// Sort key for a claim id: its number when it is `c<number>`, so `c9` sorts before `c10`; other ids follow, by text.
+fn claim_key(id: &str) -> (u64, String) {
+    match id.strip_prefix('c').and_then(|n| n.parse::<u64>().ok()) {
+        Some(n) => (n, String::new()),
+        None => (u64::MAX, id.to_string()),
+    }
 }
 
 /// A plain-language lead-in under a section heading, from `leadins.<key>` in `intro.json`.
@@ -631,7 +672,10 @@ mod tests {
                 "what":[{"text":"Firstmate does a thing.","claims":["c1"]}],
                 "walkthrough":[{"text":"First step.","claims":["c1"]}],
                 "limits":[{"text":"A limit.","claims":["c1"]}],
+                "start_terms":[{"term":"captain","text":"The person.","claims":["c1"]}],
+                "rationale_titles":[{"id":"ra1","title":"A short title"}],
                 "leadins":{
+                  "terms":{"text":"Terms lead.","claims":["c1"]},
                   "states":{"text":"States lead.","claims":["c1"]},
                   "counters":{"text":"Counters lead.","claims":["c1"]},
                   "transitions":{"text":"Transitions lead.","claims":["c1"]},
@@ -641,8 +685,8 @@ mod tests {
                   {"term":"code","text":"Code decides.","claims":["c1"]}],
                 "summaries":[{"id":"t1","text":"Queued stays queued.","claims":["c1"]}],
                 "glossary":[
-                  {"term":"guard","about":"page","definition":"A condition."},
-                  {"term":"worker","definition":"Does the task.","claims":["c1"]}]}"#,
+                  {"term":"worker","definition":"Does the task.","claims":["c1"]},
+                  {"term":"guard","about":"page","definition":"A condition."}]}"#,
         );
         dir
     }
@@ -716,7 +760,9 @@ mod tests {
             ("/what/0/claims", serde_json::json!([])),
             ("/walkthrough/0/claims", serde_json::json!(["c99"])),
             ("/limits/0/claims", serde_json::json!([])),
-            ("/glossary/1/claims", serde_json::json!([])),
+            ("/glossary/0/claims", serde_json::json!([])),
+            ("/start_terms/0/claims", serde_json::json!([])),
+            ("/leadins/terms/claims", serde_json::json!([])),
             ("/leadins/states/claims", serde_json::json!([])),
             ("/leadins/counters/claims", serde_json::json!(["c99"])),
             ("/leadins/transitions/claims", serde_json::json!([])),
@@ -774,7 +820,7 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
         let html = render(&load(&root.join(STUDY_DIR)).unwrap()).unwrap();
         assert_eq!(html.matches("<p class=\"summary\">").count(), 11);
-        assert_eq!(html.matches("<p class=\"leadin\">").count(), 4);
+        assert_eq!(html.matches("<p class=\"leadin\">").count(), 5);
         assert!(html.contains("<dt>agent</dt>") && html.contains("<dt>code</dt>"));
     }
 
@@ -793,6 +839,107 @@ mod tests {
         ] {
             assert!(html.contains(&format!("<dt id=\"term-{term}\">")), "{term}");
         }
+    }
+
+    /// The ids of the claims listed at the end of the page, in page order.
+    fn listed_claim_ids(html: &str) -> Vec<String> {
+        html.split("<li id=\"claim-")
+            .skip(1)
+            .map(|s| s.split('"').next().unwrap().to_string())
+            .collect()
+    }
+
+    /// The glossary terms on the page, in page order.
+    fn glossary_terms(html: &str) -> Vec<String> {
+        html.split("<dt id=\"term-")
+            .skip(1)
+            .map(|s| {
+                let s = s.split_once('>').unwrap().1;
+                s.split("</dt>").next().unwrap().to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_glossary_is_sorted_alphabetically_whatever_the_data_order() {
+        let dir = study_dir("[mechanism] A thing happens.", "c1");
+        let html = render(&load(dir.path()).unwrap()).unwrap();
+        assert_eq!(glossary_terms(&html), ["guard", "worker"]);
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let real = render(&load(&root.join(STUDY_DIR)).unwrap()).unwrap();
+        let terms = glossary_terms(&real);
+        let mut sorted = terms.clone();
+        sorted.sort_by_key(|t| t.to_lowercase());
+        assert_eq!(terms, sorted);
+        for term in ["green", "red", "home"] {
+            assert!(terms.iter().any(|t| t == term), "{term}");
+        }
+    }
+
+    #[test]
+    fn claims_are_listed_in_numeric_order_and_no_claim_repeats_a_source() {
+        let dir = study_dir("[mechanism] A thing happens.", "c1");
+        let src = |l: u64| serde_json::json!({"path": "a.md", "start_line": l, "end_line": l});
+        let claim = |id: &str, sources: Vec<Value>| serde_json::json!({"id": id, "mark": "read", "text": "[mechanism] X.", "sources": sources});
+        let claims = serde_json::json!([
+            claim("c10", vec![]),
+            claim("c1", vec![src(3), src(3), src(4)]),
+            claim("c9", vec![])
+        ]);
+        write(dir.path(), "claims.json", &claims.to_string());
+        let html = render(&load(dir.path()).unwrap()).unwrap();
+        assert_eq!(listed_claim_ids(&html), ["c1", "c9", "c10"]);
+        assert_eq!(html.matches("<code>a.md:3-3</code>").count(), 1);
+        assert_eq!(html.matches("<code>a.md:4-4</code>").count(), 1);
+    }
+
+    #[test]
+    fn the_real_study_orders_claims_and_repeats_no_source() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let html = render(&load(&root.join(STUDY_DIR)).unwrap()).unwrap();
+        let ids = listed_claim_ids(&html);
+        let numbers: Vec<u64> = ids.iter().map(|i| i[1..].parse().unwrap()).collect();
+        assert!(numbers.windows(2).all(|w| w[0] < w[1]), "{ids:?}");
+        let claims = html.split("<li id=\"claim-").skip(1);
+        for claim in claims {
+            let claim = claim.split("</ol>").next().unwrap();
+            let mut seen = BTreeSet::new();
+            for code in claim.split("<code>").skip(1) {
+                let code = code.split("</code>").next().unwrap();
+                assert!(seen.insert(code.to_string()), "repeated source {code}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_real_page_titles_each_design_choice_and_defines_the_start_here_terms() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let html = render(&load(&root.join(STUDY_DIR)).unwrap()).unwrap();
+        for id in ["ra1", "ra2", "ra3", "ra4", "ra5", "ra6"] {
+            let at = html
+                .find(&format!("<h3>{id} <span class=\"arrow\">"))
+                .unwrap();
+            assert!(!html[at..].starts_with(&format!("<h3>{id} <span class=\"arrow\"></span>")));
+        }
+        let start = html.find("<h2>Start here</h2>").unwrap();
+        let first_use = html.find("<h3>What firstmate is</h3>").unwrap();
+        for term in ["captain", "yolo", "green", "red", "local-only landing"] {
+            let at = html[start..first_use]
+                .find(&format!("<dt>{term}</dt>"))
+                .unwrap_or_else(|| panic!("{term}"));
+            assert!(at > 0);
+        }
+        assert!(html.contains("is the name of the folder under <code>studies/</code>"));
+    }
+
+    #[test]
+    fn a_rationale_without_a_title_is_an_error() {
+        let dir = study_dir("[mechanism] A thing happens.", "c1");
+        let mut intro = read_intro(dir.path());
+        intro["rationale_titles"] = serde_json::json!([]);
+        write(dir.path(), "intro.json", &intro.to_string());
+        let err = render(&load(dir.path()).unwrap()).unwrap_err();
+        assert!(format!("{err:#}").contains("ra1"));
     }
 
     #[test]

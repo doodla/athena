@@ -7,6 +7,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- The explainer page, after a newcomer's 4/5 rating. "Start here" now has a "Words used first" list that
+  defines captain, yolo, green, red, local-only landing and home before they are used; the Glossary gains
+  green, red and home and is sorted alphabetically by the generator; each design-choice card (ra1 to ra6)
+  has a short title (`rationale_titles` in the study's `intro.json`); the lede explains the study id; claims
+  are listed in numeric order and a claim lists each source location once. The sorting and de-duplication are
+  in `xtask/src/site.rs`, so they hold for any study, and generator tests cover them.
+
 ### Added
 
 - The auditor role and `athena audit [JOB]`. A model judges a job's real outcome (its request, how it ended,
