@@ -9,6 +9,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The planner and critic prompts, schemas and briefs (job 2 of `docs/design/job-planning.md`), as pure functions
+  that nothing calls yet, so behavior does not change. `prompts/planner.md` and `prompts/critic.md` are
+  registered as `PLANNER_FRAME` and `CRITIC_FRAME`. `outputs.rs` gains `PlanOutput` and `CriticOutput`
+  (`plan_schema`, `critic_schema`), which forbid extra properties at every level; the critic's verdict is
+  `accept`, `revise` or `reject`. `briefs.rs` gains `planner_brief` (a revision quotes the previous plan and
+  every finding), `critic_brief` (the demonstrations and Athena's findings, nothing of the planner's cost or
+  commands), `render_plan_section` (the producer's deterministic "Job plan (accepted, round r)" section) and
+  `verifier_brief_with_plan`, which adds only the demonstrations and the planned file list, never the approach,
+  reasons or rejected options (review finding F5). `verifier_brief` is unchanged and a test pins its output.
 - The schema for job planning (job 1 of `docs/design/job-planning.md`), with no change in behavior. Records
   `athena.job-plan/1` (`<job>/job-plan-<round>.json`) and `athena.critique/1` (`<job>/critique-<round>.json`),
   documented in `docs/records.md`; roles `planner` and `critic` for invocation records; `FindingSource::Critic`
