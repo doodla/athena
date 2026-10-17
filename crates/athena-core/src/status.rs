@@ -430,7 +430,8 @@ fn invocation_line(i: &Invocation) -> InvocationLine {
 }
 
 impl Athena {
-    fn running(&self, job: &str) -> bool {
+    /// Whether a process of the registry still works on `job`.
+    pub fn running(&self, job: &str) -> bool {
         self.state.registry().entries().iter().any(|e| e.job == job)
     }
 
@@ -544,7 +545,7 @@ impl Athena {
                 "queued" => next.push(format!("athena go {id}   # reads it first, then asks to run it · or: athena close {id} --why \"...\"")),
                 "proposed" => next.push(format!("athena go {id}   # or: athena correct {id} \"<line>\" · athena close {id} --why \"...\"")),
                 "declined" => next.push(format!("athena correct {id} \"<line>\"   # or: athena close {id} --why \"...\"")),
-                "interrupted" => next.push(format!("athena close {id} --why \"...\"   # commits what the interrupted job left")),
+                "interrupted" => next.push(format!("athena retry {id}   # reads it again to resume · or: athena close {id} --why \"...\" (commits what the interrupted job left)")),
                 "blocked" => next.push(format!("athena go {id}   # after resolving local edits; or: athena close {id} --why \"...\"")),
                 _ => {}
             }

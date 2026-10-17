@@ -170,17 +170,11 @@ impl Athena {
                     .unwrap_or_default()
             ),
             JobState::Dispatched => {
-                if self
-                    .state
-                    .registry()
-                    .entries()
-                    .iter()
-                    .any(|e| e.job == id.as_str())
-                {
+                if self.running(id.as_str()) {
                     bail!("job {id} is running");
                 }
                 bail!(
-                    "job {id} was interrupted: its process died before it closed. `athena close {id} --why \"...\"` records what happened"
+                    "job {id} was interrupted: its process died before it closed. `athena retry {id}` reads it again to resume, or `athena close {id} --why \"...\"` records what happened"
                 )
             }
             JobState::Closed(state) => bail!("job {id} is already closed ({})", state.as_str()),

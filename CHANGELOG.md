@@ -9,6 +9,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- An interrupted job can be retried and is drained. A job that was dispatched, has no closing record and has
+  no process working on it (a machine restart killed it) is accepted by `athena retry`, which carries its
+  original request without needing a verification or outcome record; a job whose process is still running is
+  refused with "is running". `athena drain` lists such a job as work (on the drained channels only), retries
+  it as its first attempt and runs the retry, and does not list it again once a retry names it. The
+  `athena status` next step and the `athena go` message for an interrupted job name `athena retry` beside
+  `athena close`.
 - Generated commit subjects and job titles are cut at word boundaries, not mid-word. The intervention
   commit subject, a reading's title and the title fallback from the request share one helper,
   `truncate_at_word`, still at 72 characters; a single word longer than that is hard-cut. This fixes n4 of

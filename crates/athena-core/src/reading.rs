@@ -601,7 +601,8 @@ impl Athena {
     ) -> Result<Proposal> {
         let job = request.job.clone();
         let redactor = self.redactor(&jc.config, Some(&job))?;
-        let attempt = earlier_attempt(records, &request.text, &redactor)?;
+        let attempt =
+            earlier_attempt_with(records, &request.text, &redactor, &|j| self.running(j))?;
         let (reading, invocation, error) = self.read_for(
             jc,
             records,
@@ -644,7 +645,8 @@ impl Athena {
         })
     }
 
-    /// `athena retry <job>`: reads a retry of a rejected or failed job, seeded from that job's
+    /// `athena retry <job>`: reads a retry of a rejected, failed or interrupted job (dispatched with no
+    /// process working on it, for example after a restart), seeded from that job's
     /// introspection record when it has one. The request recorded is "try again on <job id>", so a later
     /// retry of this job finds the original; nothing is run. The flag says whether the introspection
     /// record seeded the reading (false: the plain "try again on" behavior).
@@ -654,7 +656,8 @@ impl Athena {
         let id = records.resolve(job_ref)?;
         let job = records.jobs.get(id.as_str()).expect("resolved");
         let seeded = has_retry_introspection(&records, job);
-        // `ask` refuses a job that is not rejected or failed before any model is called.
+        // `ask` refuses a job that is not rejected, failed or interrupted before any model is called.
+        self.state.registry().reap();
         let proposal = self.ask(&format!("{RETRY_PREFIX}{id}"), ui)?;
         Ok((proposal, seeded))
     }
@@ -753,7 +756,8 @@ impl Athena {
             .collect();
         let seq = job.next_seq();
         let spent = job.spent_usd();
-        let attempt = earlier_attempt(&records, &request.text, &redactor)?;
+        let attempt =
+            earlier_attempt_with(&records, &request.text, &redactor, &|j| self.running(j))?;
         let (reading, invocation, error) = self.read_for(
             &jc,
             &records,
@@ -809,25 +813,43 @@ pub fn earlier_attempt(
     request: &str,
     redactor: &Redactor,
 ) -> Result<Option<EarlierAttempt>> {
+    earlier_attempt_with(records, request, redactor, &|_| false)
+}
+
+/// Like [`earlier_attempt`], with `running` saying whether a process still works on a job. A dispatched job
+/// that no process works on was interrupted (for example by a restart) and can be tried again, though it
+/// may have no verification or outcome record; one that is running is refused.
+pub fn earlier_attempt_with(
+    records: &Records,
+    request: &str,
+    redactor: &Redactor,
+    running: &dyn Fn(&str) -> bool,
+) -> Result<Option<EarlierAttempt>> {
     let Some(reference) = retry_reference(request)? else {
         return Ok(None);
     };
     let id = records.resolve(reference)?;
     let job = records.jobs.get(id.as_str()).expect("resolved");
     let state = job.state();
-    if !matches!(
-        state,
-        JobState::Closed(OutcomeState::Rejected | OutcomeState::Failed)
-    ) {
+    let interrupted = state == JobState::Dispatched && !running(id.as_str());
+    if state == JobState::Dispatched && !interrupted {
+        bail!("job {id} is running; wait for it to finish before trying it again");
+    }
+    if !interrupted
+        && !matches!(
+            state,
+            JobState::Closed(OutcomeState::Rejected | OutcomeState::Failed)
+        )
+    {
         bail!(
-            "job {id} is {}; only a rejected or failed job can be tried again",
+            "job {id} is {}; only a rejected or failed job can be tried again, or one that was interrupted",
             state.name()
         );
     }
     if job.request.is_none() {
         bail!("job {id} is {} but has no request record", state.name());
     }
-    if job.verification.is_none() && job.outcome.is_none() {
+    if !interrupted && job.verification.is_none() && job.outcome.is_none() {
         bail!(
             "job {id} is {} but has no verification or outcome record",
             state.name()
@@ -961,6 +983,13 @@ fn retry_cause(
 /// Whether `job` has an introspection record that `athena retry` can seed a retry from.
 pub fn has_retry_introspection(records: &Records, job: &JobRecords) -> bool {
     retry_introspection(records, job).is_some()
+}
+
+/// The job a request of the form "try again on <job>" retries; `None` when it is not that form or names no
+/// job.
+pub fn retried_job(records: &Records, request: &str) -> Option<JobId> {
+    let reference = retry_reference(request).ok().flatten()?;
+    records.resolve(reference).ok()
 }
 
 /// The reference after "try again on " at the start of `request`; `None` when it is not that form.
