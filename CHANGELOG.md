@@ -9,6 +9,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- Drain works its queue after an `athena.toml` change that does not bear on a reading. Root cause, two faults:
+  a reading was valid only for the raw bytes of `athena.toml`, so changing `[parallel] max_concurrency` read
+  every proposed item again; and when that reading needed accepting, drain recorded "no outcome" and then ran
+  `athena retry` on a job that was still proposed ("only a rejected or failed job can be tried again"), which
+  counted as a second failure and stopped the drain as "repeated failure". Now a reading is valid for the
+  parsed settings that bear on it (`Config::reading_inputs`: everything but `[parallel]` and `[landing]`) and
+  the bytes of `defaults.toml`; when a relevant change forces a new reading, `athena go` with `--yes` and drain
+  accept it and run the job if its capability, class of work and deliverables are unchanged
+  (`reading::same_scope`); a changed scope leaves the item queued as "needs accepting" with the reason, not as a
+  failure; and drain tries `athena retry` only after a rejected or failed run. Readings made before this
+  change are read again once, because the stored configuration hash now covers the parsed inputs.
+
 - A request's ladder rung comes from what it serves in BRIEF.md and the owner's addenda, not a word list.
   Root cause: `reading::infer_rung` took any touched path, the `change` capability or a word such as "code" or
   "ci" as Implementation, so nearly every request got that rung and age alone ordered the plan, which put the

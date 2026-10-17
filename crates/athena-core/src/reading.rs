@@ -29,6 +29,25 @@ use athena_git::snapshot::{Snapshot, SnapshotRepo};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+/// Whether two readings promise the same work: the same capability, the same class of work, and the same
+/// deliverables (path and action). Probabilities, wording, criteria and forecasts may differ. A reading
+/// with no capability (a decline) is never the same scope as anything.
+pub fn same_scope(old: &Reading, new: &Reading) -> bool {
+    let deliverables = |r: &Reading| -> Vec<(String, String)> {
+        let mut list: Vec<(String, String)> = r
+            .deliverables
+            .iter()
+            .map(|d| (d.path.clone(), format!("{:?}", d.action)))
+            .collect();
+        list.sort();
+        list
+    };
+    old.capability.is_some()
+        && old.capability == new.capability
+        && old.class_of_work == new.class_of_work
+        && deliverables(old) == deliverables(new)
+}
+
 /// What `ask` and `correct` leave behind: a proposed (or declined) job, committed.
 #[derive(Debug, Clone)]
 pub struct Proposal {

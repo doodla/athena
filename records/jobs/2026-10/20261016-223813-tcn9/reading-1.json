@@ -1,0 +1,163 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261016-223813-tcn9",
+  "n": 1,
+  "at": "2026-10-17T00:42:21.988987711Z",
+  "invocation_seq": 1,
+  "base_commit": "ef3d5646ba1c7de71656cb67a48c4c8e1d70afeb",
+  "config_sha256": "74dead5c36e8aab9dc0fb23e541b63ee930bd688f9590cee2fc22291ad6a3ea6",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Don't let a landed config schema change break the running Athena",
+  "summary": "When a job's commit adds a new athena.toml section, the old running binary fails with \"unknown field\" while landing. The fix is to make the running Athena read the config of a landed commit tolerantly (fall back to its compiled-in config) instead of failing. The audience is the maintainer running Athena, who wants landing to succeed after schema-changing jobs.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "root-cause",
+      "how": "The fix targets the shared config-reading path used after landing, not the single [parallel] instance."
+    },
+    {
+      "id": "tested",
+      "how": "Adds regression tests; cargo test and clippy must pass."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run landing with an unknown-section config and check that it succeeds."
+    },
+    {
+      "id": "rust",
+      "how": "All code is Rust."
+    },
+    {
+      "id": "small",
+      "how": "One focused change to config reading after landing."
+    },
+    {
+      "id": "verified",
+      "how": "Behavior criteria name cargo commands the verifier can run."
+    },
+    {
+      "id": "strangers",
+      "how": "The CHANGELOG entry is written for an outside reader."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Root cause: athena_gate::config_at (crates/athena-gate/src/lib.rs) strictly parses the athena.toml of a landed commit, with unknown fields denied. The running binary has an older schema, and the post-landing reads at run.rs:1750 and gh.rs:1199 propagate the error with '?'.",
+    "Chosen approach is tolerate, not rebuild. Post-landing reads that need only non-gating values (model name, merge settings) fall back to the running build's config when the config parses only under a newer schema. The validity gate still rejects bad configs through the admission/content checks.",
+    "Rebuild-before-read is out of reach for a long-running process. Rebuilding would need a re-exec design, so it is recorded as the rejected alternative.",
+    "Config errors must still fail closed when the file is genuinely malformed. Only an unknown-field error caused by a newer schema is tolerated, and the tolerance applies on the landing path, not to the gate that judges new commits.",
+    "No change to athena.toml or defaults.toml is needed."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new test builds a repository whose HEAD athena.toml contains an extra unknown section, then runs the landing code path that reads the config after the commit lands (run.rs retry-landing and gh.rs). Landing completes instead of failing with 'unknown field'. Run: cargo test -p athena-core -p athena-gate.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test shows that a genuinely malformed athena.toml (a TOML syntax error, or a wrong type for a known field) is still rejected by the gate's checks, so the tolerance does not weaken validation. Run: cargo test.",
+      "kind": "behavior"
+    },
+    {
+      "text": "cargo test and cargo clippy --all-targets pass, and cargo fmt --check is clean.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The fix is in the shared config-reading path (config_at or a helper next to it), not patched at one call site. Every post-landing reader (run.rs, gh.rs, wiring.rs) goes through it.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has an entry that explains the failure and the chosen tolerance, and names the rejected alternative (rebuild or re-exec before reading).",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-gate/src/lib.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-cli/src/wiring.rs",
+      "action": "modify",
+      "p": 0.25
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-core/src/land.rs",
+      "action": "modify",
+      "p": 0.15
+    },
+    {
+      "path": "crates/athena-gate/src/landing_tests.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.85
+    }
+  ],
+  "out_of_scope": [
+    "Re-exec or self-rebuild of the Athena binary mid-run.",
+    "Relaxing validation of athena.toml for commits being judged by the gate.",
+    "Re-doing job 20261016-214725-zt1a's [parallel] feature.",
+    "Changes to athena.toml, defaults.toml, or workflows."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.72,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.4,
+        "p50": 0.9,
+        "p90": 2.2
+      },
+      "wall_time_s": {
+        "p10": 420.0,
+        "p50": 900.0,
+        "p90": 2000.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.8352941176470589,
+      "p_verification_passes": 0.6544117647058824,
+      "p_user_intervenes": 0.07941176470588236,
+      "cost_usd": {
+        "p10": 0.40779786057009587,
+        "p50": 0.917859983636829,
+        "p90": 2.170281785349226
+      },
+      "wall_time_s": {
+        "p10": 557.4813195929656,
+        "p50": 996.9442709725414,
+        "p90": 2067.8965761416894
+      }
+    }
+  },
+  "departures": "Slightly lower acceptance than the reference. The request allows two fixes (rebuild or tolerate), and the call sites to change are uncertain."
+}

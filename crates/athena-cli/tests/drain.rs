@@ -65,6 +65,8 @@ struct Stub {
     after_read: Vec<PlanEntry>,
     /// When set, a stop is asked for as soon as this job is run (the user types `athena drain-stop` mid-run).
     stop_when_running: Option<&'static str>,
+    /// When set, the first run ends with no outcome (the job is still proposed afterwards).
+    no_outcome_first: bool,
     stop: Cell<bool>,
     log: RefCell<Vec<String>>,
 }
@@ -131,9 +133,18 @@ impl Steps for Stub {
         }
     }
     fn run(&self, job: &str) -> Run {
+        let first_run = !self.log.borrow().iter().any(|l| l.starts_with("run "));
         self.log.borrow_mut().push(format!("run {job}"));
         if self.stop_when_running == Some(job) {
             self.stop.set(true);
+        }
+        if self.no_outcome_first && first_run {
+            return Run {
+                outcome: None,
+                reason: "the job did not reach an outcome".into(),
+                cost: 0.5,
+                ..Run::default()
+            };
         }
         let mut outcomes = self.outcomes.borrow_mut();
         let outcome = if outcomes.is_empty() {
@@ -145,6 +156,7 @@ impl Steps for Stub {
             outcome: Some(outcome),
             reason: format!("ended {}", outcome.as_str()),
             cost: self.run_cost.unwrap_or(0.5),
+            ..Run::default()
         }
     }
     fn land(&self, job: &str) -> Landing {
@@ -706,6 +718,94 @@ fn the_same_item_failing_twice_is_a_repeated_failure_naming_the_item() {
 }
 
 #[test]
+fn a_run_with_no_outcome_is_run_again_and_never_retried() {
+    // `athena retry` takes only a rejected or failed job; a job with no outcome is still proposed.
+    let stub = Stub {
+        items: vec!["a"],
+        no_outcome_first: true,
+        outcomes: passing(),
+        ratings: RefCell::new(vec![5]),
+        ..Stub::default()
+    };
+    let report = drain::drain(&stub, limits(5.0), &Quiet).unwrap();
+    let log = stub.log();
+    assert_eq!(log[..4], ["read a", "run a", "run a", "land a"], "{log:?}");
+    assert!(!log.iter().any(|l| l.starts_with("reread")), "{log:?}");
+    assert_eq!(report.jobs[0].outcome, "no outcome");
+    assert_eq!(report.jobs[1].outcome, "passed");
+    assert_ne!(report.stop, Stop::RepeatedFailure);
+    assert_eq!(report.landed, 1);
+}
+
+#[test]
+fn a_run_that_needs_accepting_leaves_the_item_queued_without_a_failure() {
+    struct Unaccepted(RefCell<Vec<String>>);
+    impl Steps for Unaccepted {
+        fn caps(&self) -> anyhow::Result<Caps> {
+            Stub::default().caps()
+        }
+        fn queue(&self) -> anyhow::Result<QueueView> {
+            Ok(QueueView {
+                items: vec![
+                    Item {
+                        read: true,
+                        ..Item::queued("a", "title of a")
+                    },
+                    Item {
+                        read: true,
+                        ..Item::queued("b", "title of b")
+                    },
+                ],
+                ..QueueView::default()
+            })
+        }
+        fn previous_rating(&self) -> Option<u8> {
+            None
+        }
+        fn read(&self, _: ReadOf<'_>) -> Read {
+            panic!("a read job is not read again")
+        }
+        fn approve(&self, _: &str) -> Approval {
+            Approval::default()
+        }
+        fn run(&self, job: &str) -> Run {
+            self.0.borrow_mut().push(format!("run {job}"));
+            Run {
+                outcome: (job == "b").then_some(OutcomeState::Landed),
+                reason: "the reading needs accepting".into(),
+                cost: 0.1,
+                needs_accepting: job == "a",
+            }
+        }
+        fn land(&self, job: &str) -> Landing {
+            self.0.borrow_mut().push(format!("land {job}"));
+            Landing::Landed {
+                changed: vec!["README.md".into()],
+            }
+        }
+        fn rate(&self) -> Rate {
+            Rate::default()
+        }
+        fn check_page(&self) -> Check {
+            Check::pass("stub")
+        }
+        fn check_cap(&self) -> f64 {
+            0.0
+        }
+    }
+    let steps = Unaccepted(RefCell::new(Vec::new()));
+    let report = drain::drain(&steps, limits(5.0), &Quiet).unwrap();
+    // `a` is run once, not retried; the drain goes on to `b`.
+    assert_eq!(*steps.0.borrow(), ["run a", "run b", "land b"]);
+    assert_ne!(report.stop, Stop::RepeatedFailure);
+    assert_eq!(report.jobs[0].outcome, "needs accepting");
+    assert!(report.notes.iter().any(|n| n.contains("needs accepting")));
+    assert_eq!(report.landed, 1);
+    assert_eq!(report.queued.len(), 1);
+    assert_eq!(report.queued[0].job, "a");
+}
+
+#[test]
 fn a_landing_failure_is_a_failure_and_no_rating_is_taken_as_success() {
     let stub = Stub {
         items: vec!["a"],
@@ -941,6 +1041,145 @@ fn the_real_steps_work_a_queued_request_land_it_and_only_then_rate_the_page() {
             .unwrap()
             .contains(&athena_data::records::Role::Audience)
     );
+}
+
+/// Commits `config` as the repository's `athena.toml`.
+fn commit_config(fx: &Fixture, config: &str) {
+    write(fx.root(), &[("athena.toml", config)]);
+    fx.git.run(["add", "-A"]).unwrap();
+    fx.git
+        .run(["commit", "-q", "-m", "Change athena.toml"])
+        .unwrap();
+}
+
+/// A script that answers the first reading with `first` and every later one with `later`; every other role
+/// is answered by `first`.
+fn readings_then(first: Scenario, later: Scenario) -> Script {
+    let first = first.script();
+    let later = later.script();
+    let readers = std::sync::atomic::AtomicUsize::new(0);
+    Box::new(move |spec| {
+        if spec.role == Role::Reader
+            && readers.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 1
+        {
+            later(spec)
+        } else {
+            first(spec)
+        }
+    })
+}
+
+/// A drain against a job that was read under `before` and is worked under `after`. Returns the job, the
+/// report, the progress lines and the number of reader calls.
+fn drain_after_config_change(
+    fx: &Fixture,
+    script: Script,
+    invocations: &Arc<std::sync::Mutex<Vec<Role>>>,
+    after: &str,
+) -> (String, drain::Report, Vec<String>, usize) {
+    let athena = fx.athena(script);
+    let (job, _) = athena.queue("add a greeting to the readme").unwrap();
+    // The request is read and waits, proposed, as after `athena plan`.
+    let first = athena.go(job.as_str(), AcceptedBy::User, &Quiet).unwrap();
+    assert!(matches!(first, athena_core::run::GoResult::Reread(_)));
+    commit_config(fx, after);
+    let lander = RecordingLander::default();
+    let lines = Lines::default();
+    let steps = RealSteps {
+        athena: &athena,
+        ui: &lines,
+        page: &StubPage,
+        lander: &lander,
+    };
+    let report = drain::drain(&steps, work_everything(), &Quiet).unwrap();
+    let said = lines.0.lock().unwrap().clone();
+    (job.as_str().to_string(), report, said, readers(invocations))
+}
+
+#[test]
+fn a_change_to_max_concurrency_alone_does_not_invalidate_a_reading() {
+    // The 01:48 sequence: items were read, then `[parallel] max_concurrency` went from 1 to 2.
+    let before = test_config().replace("max_concurrency = 2", "max_concurrency = 1");
+    let after = test_config().replace("max_concurrency = 2", "max_concurrency = 3");
+    assert_ne!(before, after);
+    let fx = Fixture::with_config(&before);
+    let scenario = Scenario::default();
+    let invocations = scenario.invocations.clone();
+    let (job, report, said, reads) =
+        drain_after_config_change(&fx, scenario.script(), &invocations, &after);
+    let text = display::drain(&report);
+    assert_eq!(report.landed, 1, "{text}");
+    assert_eq!(report.jobs.len(), 1, "{text}");
+    assert_eq!(report.jobs[0].outcome, "passed", "{text}");
+    assert_ne!(report.stop, Stop::RepeatedFailure, "{text}");
+    assert_eq!(reads, 1, "no reading was made again");
+    assert!(
+        !said.iter().any(|l| l.contains("reading again")),
+        "{said:?}"
+    );
+    assert!(!text.contains("needs accepting"), "{text}");
+    assert!(!text.contains("no outcome"), "{text}");
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    assert_eq!(records.jobs[&job].readings.len(), 1);
+}
+
+#[test]
+fn a_relevant_config_change_rereads_and_drain_accepts_a_reading_of_the_same_scope() {
+    let fx = Fixture::new();
+    let after = with_job_usd(&test_config(), "7.5");
+    let scenario = Scenario::default();
+    let invocations = scenario.invocations.clone();
+    let (job, report, said, reads) =
+        drain_after_config_change(&fx, scenario.script(), &invocations, &after);
+    let text = display::drain(&report);
+    assert_eq!(reads, 2, "the request was read again");
+    assert!(said.iter().any(|l| l.contains("reading again")), "{said:?}");
+    assert_eq!(report.landed, 1, "{text}");
+    assert_eq!(report.jobs.len(), 1, "{text}");
+    assert_eq!(report.jobs[0].outcome, "passed", "{text}");
+    assert_ne!(report.stop, Stop::RepeatedFailure, "{text}");
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    assert_eq!(records.jobs[&job].readings.len(), 2);
+    assert_eq!(
+        records.jobs[&job].job.as_ref().unwrap().accepted_reading,
+        Some(2)
+    );
+}
+
+#[test]
+fn a_reread_whose_scope_changed_is_left_for_a_person_and_is_not_a_failure() {
+    let fx = Fixture::new();
+    let after = with_job_usd(&test_config(), "7.5");
+    let first = Scenario::default();
+    let invocations = first.invocations.clone();
+    let mut later = Scenario::default();
+    later.reading = reading(
+        &[("src/lib.rs", "modify")],
+        &[
+            ("content", "README.md ends with a greeting line"),
+            ("behavior", "the tests still pass"),
+        ],
+    );
+    let later_calls = later.invocations.clone();
+    let (job, report, _, reads) =
+        drain_after_config_change(&fx, readings_then(first, later), &invocations, &after);
+    let text = display::drain(&report);
+    // One reading in each scenario: the first, and the one made after the change.
+    assert_eq!(reads + readers(&later_calls), 2);
+    assert_eq!(report.landed, 0, "{text}");
+    assert_ne!(report.stop, Stop::RepeatedFailure, "{text}");
+    assert_eq!(report.jobs.len(), 1, "no second attempt: {text}");
+    assert_eq!(report.jobs[0].outcome, "needs accepting", "{text}");
+    assert!(
+        report.jobs[0]
+            .reason
+            .as_deref()
+            .is_some_and(|r| r.contains("needs accepting") && r.contains("scope differs")),
+        "{text}"
+    );
+    assert_eq!(report.queued.len(), 1, "{text}");
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    assert_eq!(records.jobs[&job].state(), JobState::Proposed);
 }
 
 #[test]
@@ -2483,6 +2722,7 @@ mod parallel {
                 outcome: Some(outcome),
                 reason: String::new(),
                 cost: 0.5,
+                ..Run::default()
             }
         }
         fn land(&self, job: &str) -> Landing {

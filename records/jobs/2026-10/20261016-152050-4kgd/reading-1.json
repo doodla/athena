@@ -1,0 +1,173 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261016-152050-4kgd",
+  "n": 1,
+  "at": "2026-10-17T00:41:11.867683515Z",
+  "invocation_seq": 1,
+  "base_commit": "b2696319aff78626db7643f2d96cbf19aa382dfc",
+  "config_sha256": "74dead5c36e8aab9dc0fb23e541b63ee930bd688f9590cee2fc22291ad6a3ea6",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Make interrupted jobs retryable and picked up by drain",
+  "summary": "A job left in dispatched state with no live process (interrupted, e.g. by a container restart) can be retried with `athena retry <job>` without first being closed by hand, and `athena drain` picks such jobs back up and works them. The audience is the user running athena on a machine that can restart.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "Tests for retry of interrupted and drain pickup; cargo test and clippy criterion."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run retry and drain against an interrupted job rather than checking wiring."
+    },
+    {
+      "id": "root-cause",
+      "how": "Fixes the retry gate and the drain queue, not just the one job."
+    },
+    {
+      "id": "small",
+      "how": "One focused change on retry eligibility and drain pickup."
+    },
+    {
+      "id": "verified",
+      "how": "Behavior criteria name cargo test commands."
+    },
+    {
+      "id": "rust",
+      "how": "All changes in Rust."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Resume is done as a retry: a new job 'try again on <id>' is read, carrying the interrupted job's request; the interrupted job is then closed with an explanatory outcome (superseded by the retry) so it stops showing as open.",
+    "'Interrupted' means state Dispatched with no entry in the process registry, as status.rs already defines it; a job whose process is live is still refused.",
+    "Drain picks up interrupted jobs on the drained channels (steward and user queue) in the same ordering as queued work, using its existing retry path.",
+    "An interrupted job has no verification or outcome record, so earlier_attempt must accept that case and carry only the request and any corrections.",
+    "The closing of the interrupted job by retry/drain reuses the existing close mechanism and records."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A test (run with cargo test) creates a job that is dispatched with no live process, runs `athena retry <job>`, and gets a proposal whose request is 'try again on <id>' carrying the original request, instead of the error 'only a rejected or failed job can be tried again'.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test (cargo test) shows that a job whose process is still in the registry (running) is still refused by retry with a clear message.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A drain test (cargo test) with an interrupted job on a drained channel shows the drain lists it as work, retries it, and does not report an empty queue; an interrupted job on another channel is left alone.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The `athena status` next-step hint for 'interrupted' (status.rs) and the run.rs interrupted message mention retry as the way to resume, alongside close.",
+      "kind": "content"
+    },
+    {
+      "text": "drain.rs module docs and CHANGELOG.md describe interrupted jobs being retryable and drained.",
+      "kind": "content"
+    },
+    {
+      "text": "cargo test, cargo clippy and cargo fmt --check all pass.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/steward.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-cli/tests/retry.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "README.md",
+      "action": "modify",
+      "p": 0.2
+    }
+  ],
+  "out_of_scope": [
+    "Fixing the plan/drain read-request bug from job 20261016-071045-mx7e",
+    "Automatically resuming a job mid-run from its partial invocation state",
+    "Changing retry for already rejected or failed jobs",
+    "Changes to athena.toml or defaults.toml"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.72,
+      "p_verification_passes": 0.58,
+      "p_user_intervenes": 0.12,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.1,
+        "p90": 2.5
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 1200.0,
+        "p90": 2400.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.8352941176470589,
+      "p_verification_passes": 0.6544117647058824,
+      "p_user_intervenes": 0.07941176470588236,
+      "cost_usd": {
+        "p10": 0.40779786057009587,
+        "p50": 0.917859983636829,
+        "p90": 2.170281785349226
+      },
+      "wall_time_s": {
+        "p10": 557.4813195929656,
+        "p50": 996.9442709725414,
+        "p90": 2067.8965761416894
+      }
+    }
+  },
+  "departures": "Touches retry, status and drain across crates with an ambiguous resume-vs-retry design, so cost and time are above the reference and pass odds lower."
+}

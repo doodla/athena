@@ -8,7 +8,7 @@ use crate::commits::{NewFile, Refusal, message};
 use crate::invocation::InvocationFacts;
 use crate::land::{Plan, plan};
 use crate::pin::{is_full_sha, mount};
-use crate::reading::Proposal;
+use crate::reading::{Proposal, same_scope};
 use crate::scoring::{self, Happened, score, totals};
 use crate::store::{JobRecords, JobState, Records};
 use crate::verify::{MAP_PATH, VerdictInputs, Verified, judge, verified};
@@ -43,6 +43,15 @@ use std::time::Instant;
 pub enum GoResult {
     /// Athena read the request, and the reading needs accepting: a queued request read for the first
     /// time, or a reading made again because the configuration changed since it.
+    ///
+    /// A reading stays valid across a configuration change unless the change bears on a reading: it is
+    /// judged by [`athena_data::config::Config::reading_inputs`] (every `athena.toml` setting but
+    /// `[parallel]` and `[landing]`, compared as parsed values) and by the bytes of `defaults.toml`
+    /// (D38). When a relevant change forces a new reading, a caller that accepts by flag
+    /// ([`AcceptedBy::Flag`], which `athena drain` uses) accepts it at once and runs the job if it has the
+    /// same scope as the reading it replaces ([`crate::reading::same_scope`]: capability, class of work
+    /// and deliverable paths and actions). A reading whose scope changed is returned here for the user to
+    /// accept, as is any reread for [`AcceptedBy::User`].
     Reread(Box<Proposal>),
     /// The job reached a terminal state, or `blocked`.
     Finished(Box<Finished>),
@@ -192,10 +201,40 @@ impl Athena {
         if reading.config_sha256 != jc.config_sha256
             || reading.defaults_sha256 != jc.defaults_sha256
         {
-            ui.line("reading    athena.toml or defaults.toml changed since this reading; reading again under the new configuration");
-            return self
-                .reread_after_configuration_change(&jc, records, job, ui)
-                .map(|p| GoResult::Reread(Box::new(p)));
+            ui.line("reading    the configuration that bears on a reading changed since this reading; reading again under the new configuration");
+            let proposal = self.reread_after_configuration_change(&jc, records, job, ui)?;
+            // A non-interactive caller (`--yes`, drain) accepts a reading that promises the same work; any
+            // other reread waits for the user.
+            let same = proposal.reader_error.is_none()
+                && proposal
+                    .reading
+                    .as_ref()
+                    .is_some_and(|new| same_scope(&reading, new));
+            if accepted_by != AcceptedBy::Flag || !same {
+                return Ok(GoResult::Reread(Box::new(proposal)));
+            }
+            ui.line(
+                "reading    the new reading has the same scope as the one it replaces; accepted",
+            );
+            let new_head = self.head()?;
+            let new_records = Records::load(&self.git, &new_head)?;
+            let new_job = new_records
+                .jobs
+                .get(id.as_str())
+                .context("the job vanished after it was read again")?
+                .clone();
+            let new_reading = proposal
+                .reading
+                .clone()
+                .context("the new reading vanished")?;
+            return self.dispatch(
+                &new_head,
+                &new_records,
+                &new_job,
+                new_reading,
+                accepted_by,
+                ui,
+            );
         }
         let capability_id = reading.capability.clone().expect("checked by the caller");
         let capability = self.capability(&capability_id)?;
@@ -439,6 +478,11 @@ impl Athena {
         }
     }
 
+    /// The reading-validity rule (D38): a reading is valid only for the configuration inputs it was made
+    /// under, which are the parsed `athena.toml` settings that bear on a reading
+    /// ([`athena_data::config::Config::reading_inputs`]; `[parallel]` and `[landing]` do not) and the bytes
+    /// of `defaults.toml`. When they differ, the request is read again here, and [`Athena::dispatch`]
+    /// accepts the new reading for a flag-accepted caller when its scope is unchanged.
     fn reread_after_configuration_change(
         &self,
         jc: &JobConfig,
