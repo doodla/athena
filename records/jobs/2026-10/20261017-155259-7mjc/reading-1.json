@@ -1,0 +1,162 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261017-155259-7mjc",
+  "n": 1,
+  "at": "2026-10-17T15:53:16.888446674Z",
+  "invocation_seq": 1,
+  "base_commit": "daec7c6bfbaf4b65c19e1012516671cdca4cec83",
+  "config_sha256": "ba462c7ffba3475385f095363becb853b0eda55fed87c41e3f78d800cf1f63fc",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Wire CI push and wait into checks without breaking land --pr",
+  "summary": "Retry the rejected CI-routing wiring: push the candidate after the producer, wait a bounded time for CI on that exact SHA, and reuse it in the checks step with the local fallback kept. Unlike the rejected attempt, the push must not break the later `athena land --pr`, and the run.rs wiring and the push-to-land sequence need tests.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "Behavior criteria name cargo test, clippy and fmt commands."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check wiring and land interaction by behavior, not mere existence."
+    },
+    {
+      "id": "root-cause",
+      "how": "Fix the push/land interaction itself, not only the one failing case."
+    },
+    {
+      "id": "outcome-check",
+      "how": "Outcome criteria: CI reuse happens and land still works."
+    },
+    {
+      "id": "small",
+      "how": "One focused change, verifier reuse excluded."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Goal: the Athena operator's job checks take CI's time rather than ~29 minutes locally; audience is that operator and the verifier.",
+    "Reading follows the proposed next request: keep the earlier scope, and fix the push/land non-fast-forward conflict by pushing to a separate ref or making publish safe.",
+    "Exact ref choice is left to the producer; a separate candidate ref is assumed simplest, provided CI triggers on it.",
+    "athena.toml changes only if the wait bound becomes a config field."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Run `cargo test --locked`: passes. A test on the run.rs wiring (not only routing::run_pushed with a test-only bound) shows the checks step gets a platform-backed CI source, not NoCi, and uses the CI_WAIT bound rather than one poll; it fails if run.rs reverts to NoCi or one poll.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`: with fake push and CI sources, the candidate is pushed before CI is read and the same SHA is used for both. A green run for that SHA runs no local check and records CI provenance with the run address. A run for another SHA, no run after the bounded wait, or a push failure each run the three checks locally exactly once. A red run fails without running locally.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`: an integration test on one job branch runs candidate push, then CI read, then publish/land --pr, and shows the land push is accepted, not refused as a non-fast-forward (cf. pr::tests::the_guard_refuses_a_non_fast_forward_push). Landing does not force-push over unrelated work.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo clippy --all-targets --locked -- -D warnings` and `cargo fmt --all --check`: both are clean.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The push uses the existing guarded path (check_push), never the default branch. It targets a ref landing's publish does not conflict with, or publish handles the existing branch safely. The candidate commit message no longer says 'Not on any branch'.",
+      "kind": "content"
+    },
+    {
+      "text": "The wait bound is a named, documented value with a stated basis; run output says whether checks came from CI or ran locally. The cost of waiting when CI never reports is documented. If athena.toml gets a field, it is named and the schema/load tests are updated.",
+      "kind": "content"
+    },
+    {
+      "text": "docs/design/ci-routing.md section 10 items on push and wait are no longer 'not done'; the verifier's reuse is still listed as not done, and no speedup is claimed without measurement. The fmt, clippy and test check definitions, verifier input and prompts are unchanged.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/routing.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/pr.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-core/src/ci_result.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "docs/design/ci-routing.md",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "athena.toml",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.7
+    }
+  ],
+  "out_of_scope": [
+    "The verifier reusing CI results.",
+    "Changing the fmt, clippy or test check definitions.",
+    "Changing verifier input or prompts.",
+    "Pushing to the default branch."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.75,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.4,
+        "p50": 1.0,
+        "p90": 2.3
+      },
+      "wall_time_s": {
+        "p10": 500.0,
+        "p50": 1100.0,
+        "p90": 2400.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7966292134831461,
+      "p_verification_passes": 0.632258064516129,
+      "p_user_intervenes": 0.08258064516129032,
+      "cost_usd": {
+        "p10": 0.3654091,
+        "p50": 0.9265467,
+        "p90": 2.1472445999999996
+      },
+      "wall_time_s": {
+        "p10": 566.8517764085597,
+        "p50": 1114.1264909960005,
+        "p90": 2227.454569343176
+      }
+    }
+  },
+  "departures": "Slightly lower pass odds and higher cost than reference: cross-stage push/land interaction needs an integration test, and the previous attempt failed."
+}
