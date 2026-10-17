@@ -1,0 +1,166 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261017-140724-v3gg",
+  "n": 1,
+  "at": "2026-10-17T17:42:31.588442031Z",
+  "invocation_seq": 1,
+  "base_commit": "76e24c526cd37a8eb02ba75f9f40c00dfff8e3d2",
+  "config_sha256": "ba462c7ffba3475385f095363becb853b0eda55fed87c41e3f78d800cf1f63fc",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Preflight the squash against main with the history check before merging",
+  "summary": "Before `athena land --pr` asks the host to merge over REST, land builds the squash the host will make (the PR head's change with the job's squash text, on the freshly fetched current main) and runs the full-history check on it. It refuses to merge if that fails. The audience is the maintainers and CI, who need main to stay green after a squash carries extra jobs.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "Unit tests for refuse and pass paths; cargo test and clippy criteria."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check the merge is not called when the preflight fails."
+    },
+    {
+      "id": "root-cause",
+      "how": "The gate sits before the merge for every landing, using the same check CI runs, not just the one instance."
+    },
+    {
+      "id": "small",
+      "how": "One focused change in the landing flow."
+    },
+    {
+      "id": "rust",
+      "how": "All code in Rust, reusing check_history."
+    },
+    {
+      "id": "buy-first",
+      "how": "Reuses existing git plumbing and the gate crate; no new dependencies."
+    },
+    {
+      "id": "verified",
+      "how": "Behavior criteria runnable with cargo test."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "The merge Athena requests is the REST merge in land_pr (gh.rs), so the gate goes just before host.merge; a PR merged by hand in the web UI is out of reach.",
+    "The full-history check is athena_gate::check_history (athena check --history), reusable from athena-core, which already depends on athena_gate.",
+    "The squash is simulated locally with git plumbing: merge-tree of the head against current origin default branch, then commit-tree with the squash text (title plus trailers), with no refs moved.",
+    "Preflight is injected through a trait on LandPr so tests can fake it.",
+    "Fetch failure or inability to build the squash refuses the merge (fail closed)."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A test in gh.rs: with merge_via_rest on and green checks, when the preflight squash on current main fails the history check, land_pr returns an error naming the violations and the host's merge endpoint is never called. Check with `cargo test -p athena-core`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test: when the preflight passes, the merge is requested as before and the job lands (existing merge tests still pass).",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test reproduces the incident shape. A branch whose squash onto a moved main carries a second job's trailers (60r4/sg0j style) and fails the history check is refused. Check with `cargo test`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The preflight fetches current main, builds the squash from the PR head's change and the job's squash text on top of it, and runs athena_gate::check_history on that commit. It does not move any ref, and it leaves the working branch untouched.",
+      "kind": "content"
+    },
+    {
+      "text": "The preflight runs only on the path that would request the merge (REST setting on, checks green), and a refusal is surfaced to the user with the failing rules, not swallowed.",
+      "kind": "content"
+    },
+    {
+      "text": "`cargo test`, `cargo clippy --all-targets` and `cargo fmt --check` all pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "No governance files (athena.toml, defaults.toml, workflows) change. Docs or CHANGELOG record the new refusal.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-git/src/lib.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/pr.rs",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "crates/athena-cli/tests/external_calls.rs",
+      "action": "modify",
+      "p": 0.35
+    },
+    {
+      "path": "docs/design/native-pr-landing.md",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-core/Cargo.toml",
+      "action": "modify",
+      "p": 0.1
+    }
+  ],
+  "out_of_scope": [
+    "Fixing the specific red main at 39962ed or the job-trailer bug that caused the extra jobs",
+    "Changing CI workflows",
+    "Changing what the history check enforces",
+    "Handling merges made outside athena land"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.75,
+      "p_verification_passes": 0.58,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.4,
+        "p50": 1.0,
+        "p90": 2.3
+      },
+      "wall_time_s": {
+        "p10": 450.0,
+        "p50": 1050.0,
+        "p90": 2300.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7977653631284917,
+      "p_verification_passes": 0.6282051282051282,
+      "p_user_intervenes": 0.08205128205128205,
+      "cost_usd": {
+        "p10": 0.36933058694043064,
+        "p50": 0.9269537106048124,
+        "p90": 2.1435769675309246
+      },
+      "wall_time_s": {
+        "p10": 567.4218258194782,
+        "p50": 1127.2450045964606,
+        "p90": 2207.9224890481764
+      }
+    }
+  },
+  "departures": "Slightly higher cost and lower verification pass odds than the reference: the change touches the landing flow, needs a git-built simulated squash, and the tests need a fixture."
+}
