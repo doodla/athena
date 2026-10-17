@@ -9,6 +9,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Routing of the checks by the plan's job kind (item 5 of `docs/design/ci-routing.md` section 10), in
+  `athena-core::routing`, called from the job run. The path rule `skip_when_only` still decides what is
+  skipped, so a docs, design or study job that changes Rust, `Cargo.toml` or `Cargo.lock` still runs `fmt` and
+  `clippy`; a `config` job, or one with a missing or unrecognised kind, never has a check skipped; `test`
+  always runs. Kinds other than `build` read a CI result for the candidate SHA through `resolve` (a result for
+  another SHA is ignored, a red one fails without a local rerun); a `build` job never reuses a result and is
+  flagged as needing the workflow's own run. The run path has no CI result to read yet, so checks still run
+  locally; no speedup is claimed.
 - CI result reuse keyed by commit SHA (item 4 of `docs/design/ci-routing.md` section 10), in
   `athena-core::ci_result`: a record of the run address, full SHA, per-check conclusions and duration; a result
   for another SHA is ignored; a missing, unfinished, cancelled, skipped or timed-out run, or a green run with a

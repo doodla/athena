@@ -332,6 +332,21 @@ Each item is a separate later job, after review.
    job run and the verifier's input (the record is not yet used by a real job), pushing the candidate commit
    before the read, and the wait bound's value, which needs section 9 data. No speedup is claimed.
 5. **Routing job.** Apply the table of 3.2 from the plan's job kind.
+   *Built in part:* `crates/athena-core/src/routing.rs` holds `route`, which maps the plan's kind (`code`,
+   `tests`, `docs`, `design`, `config`, `build`, or `study` for the study capability) and the capability's
+   checks to what runs and where a result comes from, and `run_routed`, which `run.rs` calls in the checks step.
+   "Skipped as today" stays the path rule: `skip_when_only` (`docs/` and `*.md`) decides, so a job of any kind
+   that changes a `.rs` file, `Cargo.toml` or `Cargo.lock` still runs `fmt` and `clippy`, and the kind never
+   skips either by itself. The kind switches the path rule off for `config` and for a missing or unrecognised
+   kind (section 7), which never have a check skipped; `test` always runs. Every kind but `build` goes through
+   `resolve` (item 4) with the candidate SHA when the capability lists `fmt`, `clippy` and `test`: a result for
+   another SHA is ignored and the checks run locally, and a red result fails and does not rerun locally. A
+   `build` job never reuses a prior result and is flagged as needing the workflow's own run. No schema or
+   `athena.toml` field was added; tests cover each kind, including one that loads the committed `athena.toml`.
+   Not done: the run path has no CI result to read, because the candidate commit is not pushed (item 4), so it
+   reads through a source that finds none and every check runs locally; the workflow's own run for a `build`
+   job is flagged in the output, not performed; the verifier's input does not yet carry the reuse statement.
+   No speedup is claimed or measured.
 6. **Measurement job.** After N jobs, compute the "after" numbers and record the comparison.
 7. **Docs job, alone and last.** README, CHANGELOG and decisions entry, as the parallel design's section 9 says.
 
