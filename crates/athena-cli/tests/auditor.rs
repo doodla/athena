@@ -162,6 +162,76 @@ fn a_job_with_no_outcome_is_not_audited_and_calls_no_model() {
     assert_eq!(fx.head(), head);
 }
 
+/// Makes the landed job's candidate commit absent, as in a fresh clone, and returns the job and that commit.
+fn drop_candidate(fx: &Fixture) -> (String, String) {
+    let after = records(fx);
+    let (job, record) = after.jobs.iter().next().expect("one job");
+    let candidate = record
+        .candidate
+        .as_ref()
+        .and_then(|c| c.candidate_commit.clone())
+        .expect("a candidate commit");
+    assert!(fx.git.commit_exists(&candidate).unwrap());
+    let object = fx
+        .root()
+        .join(".git/objects")
+        .join(&candidate[..2])
+        .join(&candidate[2..]);
+    std::fs::remove_file(&object).expect("the candidate is a loose object");
+    assert!(!fx.git.commit_exists(&candidate).unwrap());
+    (job.to_string(), candidate)
+}
+
+#[test]
+fn a_missing_candidate_commit_is_read_from_the_squash_commit_with_the_job_trailer() {
+    let mut scenario = Scenario::default();
+    scenario.auditor = finding("README.md line 3: Hello, reader.");
+    let seen = scenario.seen_by_auditor.clone();
+    let (fx, athena) = landed(scenario);
+    drop_candidate(&fx);
+
+    let audited = athena.audit("latest").unwrap().expect("an audit");
+
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 3, "one auditor run");
+    assert!(
+        seen[2].contains("Hello, reader."),
+        "the workspace holds the file as the squash commit has it: {}",
+        seen[2]
+    );
+    let after = records(&fx);
+    assert_eq!(after.audits, vec![audited.audit]);
+    assert_eq!(after.auditor_runs.len(), 1);
+}
+
+#[test]
+fn with_no_commit_to_read_the_audit_refuses_before_paying() {
+    let mut scenario = Scenario::default();
+    scenario.auditor = finding("README.md line 3: Hello, reader.");
+    let invocations = scenario.invocations.clone();
+    let (fx, athena) = landed(scenario);
+    let (job, candidate) = drop_candidate(&fx);
+    // Rewrite history as one commit with the same tree, so no commit carries the job's trailer.
+    let tree = fx.git.run(["rev-parse", "HEAD^{tree}"]).unwrap();
+    let flat = fx
+        .git
+        .run(["commit-tree", tree.trim(), "-m", "Snapshot"])
+        .unwrap();
+    fx.git.run(["reset", "-q", "--hard", flat.trim()]).unwrap();
+    let before = invocations.lock().unwrap().len();
+    let head = fx.head();
+
+    let error = athena.audit(&job).unwrap_err().to_string();
+
+    assert!(error.contains(&job), "{error}");
+    assert!(error.contains(&candidate), "{error}");
+    assert_eq!(invocations.lock().unwrap().len(), before, "no model call");
+    assert_eq!(fx.head(), head, "nothing was committed");
+    let after = records(&fx);
+    assert!(after.audits.is_empty());
+    assert!(after.auditor_runs.is_empty());
+}
+
 #[test]
 fn a_nested_run_audits_nothing() {
     let (fx, mut athena) = landed(Scenario::default());

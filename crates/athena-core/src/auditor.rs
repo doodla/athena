@@ -159,6 +159,66 @@ fn is_plain_relative(path: &str) -> bool {
             .all(|c| matches!(c, Component::Normal(_)))
 }
 
+/// Reads the job's changed files (at most `MAX_FILES`) from the commit that holds them.
+///
+/// That is `candidate` when it exists in this repository. A fresh clone does not have candidate commits, so
+/// otherwise it is the newest commit on `head`'s history that carries the job's `Athena-Job` trailer and holds
+/// at least one of the files (the squash commit that landed the job). A file the job deleted reads as nothing.
+/// When the job changed files and none can be read, this fails naming the job and the commits tried.
+fn read_changed_files(
+    athena: &Athena,
+    head: &str,
+    job: &JobId,
+    candidate: Option<&str>,
+    changed: &[String],
+) -> Result<Vec<(String, Vec<u8>)>> {
+    let wanted: Vec<&String> = changed.iter().take(MAX_FILES).collect();
+    if wanted.is_empty() {
+        return Ok(Vec::new());
+    }
+    let read_from = |commit: &str| -> Result<Vec<(String, Vec<u8>)>> {
+        let mut files = Vec::new();
+        for path in &wanted {
+            if let Some(bytes) = athena.git.show_file(commit, path)? {
+                files.push(((*path).clone(), bytes));
+            }
+        }
+        Ok(files)
+    };
+    let mut tried: Vec<String> = Vec::new();
+    match candidate {
+        Some(c) if athena.git.commit_exists(c)? => {
+            let files = read_from(c)?;
+            if files.is_empty() {
+                bail!("{}", refusal(job, &[format!("{c} (candidate)")]));
+            }
+            return Ok(files);
+        }
+        Some(c) => tried.push(format!("{c} (candidate, not in this repository)")),
+        None => tried.push("no candidate commit recorded".to_string()),
+    }
+    for squash in athena
+        .git
+        .log_grep(head, &format!("^Athena-Job: {}$", job.as_str()))?
+    {
+        let files = read_from(&squash)?;
+        if !files.is_empty() {
+            return Ok(files);
+        }
+        tried.push(format!("{squash} (Athena-Job trailer)"));
+    }
+    bail!("{}", refusal(job, &tried))
+}
+
+/// The refusal for a job whose changed files cannot be read.
+fn refusal(job: &JobId, tried: &[String]) -> String {
+    format!(
+        "cannot audit job {job}: it changed files but none could be read; commits tried: {}. \
+         Nothing was paid for and no audit was recorded",
+        tried.join(", ")
+    )
+}
+
 /// One audit run over the job `reference`: reads `BRIEF.md` and the job's changed files at the head commit's
 /// records, asks the model, and commits the audit, the invocation record and the role definition (when it is
 /// not yet recorded) in one records commit. A nested run makes no model call and records nothing.
@@ -207,6 +267,9 @@ pub fn run(
         })
         .unwrap_or_default();
 
+    // Read the job's files before anything is created or paid for, so a refusal costs nothing.
+    let files = read_changed_files(athena, &head, &target, commit.as_deref(), &changed)?;
+
     let jc = JobConfig::at(&athena.git, &head)?;
     let run_job = JobId::Id(RecordId::generate(now));
     let job_dir = athena.state.job_dir(&run_job);
@@ -217,21 +280,16 @@ pub fn run(
         workspace.join(OUTCOME_FILE),
         outcome_text(job, &changed[..changed.len().min(MAX_FILES)]),
     )?;
-    if let Some(commit) = &commit {
-        for path in changed.iter().take(MAX_FILES) {
-            // A file the job deleted is not in its commit; there is nothing to read.
-            if let Some(bytes) = athena.git.show_file(commit, path)? {
-                let text: String = String::from_utf8_lossy(&bytes)
-                    .chars()
-                    .take(MAX_FILE_CHARS)
-                    .collect();
-                let to = workspace.join(OUTCOME_DIR).join(path);
-                if let Some(parent) = to.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                std::fs::write(to, text)?;
-            }
+    for (path, bytes) in &files {
+        let text: String = String::from_utf8_lossy(bytes)
+            .chars()
+            .take(MAX_FILE_CHARS)
+            .collect();
+        let to = workspace.join(OUTCOME_DIR).join(path);
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent)?;
         }
+        std::fs::write(to, text)?;
     }
 
     let composed: Composed = auditor_system_prompt(&role.prompt, role.version);

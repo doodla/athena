@@ -44,6 +44,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   are listed in numeric order and a claim lists each source location once. The sorting and de-duplication are
   in `xtask/src/site.rs`, so they hold for any study, and generator tests cover them.
 
+### Fixed
+
+- `athena audit` of a landed job whose candidate commit is missing (candidate commits are not in a fresh
+  clone) read nothing: the auditor got an empty `outcome/` folder, yet the model call was paid for and an
+  audit was recorded. The auditor now reads the changed files from the candidate commit if it exists, else
+  from the commit on the current branch whose message has the trailer `Athena-Job: <job id>` (the squash
+  commit that landed the job). If the job changed files and none can be read, `athena audit` stops before any
+  model call with an error naming the job and the commits tried, and records nothing. `athena-git` gains
+  `Git::commit_exists`; `Git::show_file` is unchanged.
+
 ### Added
 
 - The auditor role and `athena audit [JOB]`. A model judges a job's real outcome (its request, how it ended,

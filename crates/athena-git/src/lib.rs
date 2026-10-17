@@ -299,6 +299,11 @@ impl Git {
         )
     }
 
+    /// Whether `oid` names a commit that is present in this repository.
+    pub fn commit_exists(&self, oid: &str) -> Result<bool> {
+        Ok(self.rev_parse(oid)?.is_some())
+    }
+
     /// Makes the commit `oid` present in the object store by fetching it from `remote` when it is missing.
     /// It fetches the object only: no branch, tag or other ref moves and `FETCH_HEAD` is not written.
     /// Returns whether the commit is present afterwards.
@@ -962,6 +967,18 @@ mod tests {
         assert_eq!(local.head().unwrap().unwrap(), local_head);
         // Already present: nothing to fetch.
         assert!(local.ensure_commit("origin", &local_head).unwrap());
+    }
+
+    #[test]
+    fn commit_exists_tells_a_present_commit_from_an_absent_one_and_a_path() {
+        let (_dir, git) = repo_with(&[("a.txt", "a")]);
+        let head = git.head().unwrap().unwrap();
+        assert!(git.commit_exists(&head).unwrap());
+        assert!(!git.commit_exists(&"0".repeat(40)).unwrap());
+        assert!(!git.commit_exists(&format!("{head}:a.txt")).unwrap());
+        // A missing path is still just nothing to read.
+        assert_eq!(git.show_file(&head, "missing.txt").unwrap(), None);
+        assert_eq!(git.show_file(&"0".repeat(40), "a.txt").unwrap(), None);
     }
 
     #[test]
