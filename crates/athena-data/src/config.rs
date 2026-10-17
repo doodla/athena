@@ -310,6 +310,18 @@ impl Config {
         Ok(config)
     }
 
+    /// The configuration that bears on a reading, as canonical text: every setting except `[parallel]`
+    /// (how many jobs a drain runs at once) and `[landing]` (how a pull request is merged). Neither changes
+    /// what the reader sees or what a job may do, so a change to them leaves a reading valid (D38). The text
+    /// does not depend on how the file is laid out, only on the parsed values, so comments, spacing and key
+    /// order do not count either.
+    pub fn reading_inputs(&self) -> String {
+        let mut relevant = self.clone();
+        relevant.parallel = Parallel::default();
+        relevant.landing = Landing::default();
+        serde_json::to_string(&relevant).expect("a parsed configuration serializes")
+    }
+
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.athena.schema != 1 {
             return Err(ConfigError::Schema(self.athena.schema));
@@ -418,6 +430,22 @@ pub(crate) mod tests {
         );
         assert!(config.capability("change").is_some());
         assert!(config.is_class("other"));
+    }
+
+    #[test]
+    fn reading_inputs_ignore_parallel_and_landing_but_not_other_settings() {
+        let base = Config::parse(REPO_CONFIG).unwrap();
+        let mut other = base.clone();
+        other.parallel.max_concurrency = if base.parallel.max_concurrency == 1 {
+            2
+        } else {
+            1
+        };
+        other.landing.merge_via_rest = !base.landing.merge_via_rest;
+        assert_eq!(base.reading_inputs(), other.reading_inputs());
+        let mut changed = base.clone();
+        changed.budget.job_usd += 1.0;
+        assert_ne!(base.reading_inputs(), changed.reading_inputs());
     }
 
     #[test]

@@ -67,8 +67,16 @@
 //!   [`Steps::check_cap`] (the verifier's cap times the number of studies), it must fit the budget or drain
 //!   stops as "budget spent", and what the calls cost is added to the spend ([`Check::cost`]).
 //! - **Retry.** An item gets two attempts. After a rejected or failed run the second attempt reads the job
-//!   again with `athena retry`, then runs it. After a run that passed but did not land, it lands again. Two
-//!   failures stop the loop, naming the item.
+//!   again with `athena retry`, then runs it. A run that ended any other way (no outcome, blocked) leaves
+//!   the job proposed or blocked, which `athena retry` refuses, so the second attempt runs the same reading
+//!   again. After a run that passed but did not land, it lands again. Two failures stop the loop, naming the
+//!   item.
+//! - **A configuration change.** A reading stays valid across a change that does not bear on it (for
+//!   example `[parallel] max_concurrency`; see `athena_core::run::GoResult::Reread`). When a relevant change
+//!   makes `athena go` read the job again, drain accepts the new reading if its scope (capability, class
+//!   of work, deliverables) is unchanged and runs it in the same drain. If the scope changed, the item is
+//!   left queued with the reason (outcome `needs accepting`, plus a note); that is not a failure and stops
+//!   nothing.
 //! - **In-limit proposals are approved, approved jobs are worked.** An open proposal whose rung the role that
 //!   raised it may change itself (its newest recorded definition decides; a role with no recorded definition
 //!   has no limit) is approved as `athena approve-work` would, which reads the job and records the decision.
@@ -240,6 +248,10 @@ pub struct Run {
     pub outcome: Option<OutcomeState>,
     pub reason: String,
     pub cost: f64,
+    /// True when the job was read again and the new reading's scope differs from the one it replaces, so it
+    /// is not run until a person accepts it. The job is still proposed: it is neither retried nor counted as
+    /// a failure.
+    pub needs_accepting: bool,
 }
 
 /// The paths whose change can change the explainer page: the studies it is written from (`studies/`, the
@@ -515,16 +527,24 @@ enum ItemEnd {
     Stop,
     /// Another worker had already ended the run, so nothing was started.
     Idle,
+    /// The item's reading was made again with a different scope; it stays queued, and nothing else stops.
+    NeedsAccepting,
 }
 
 enum RunStep {
     /// The job passed; its line is at this index.
     Passed(String, usize),
-    /// The job did not pass. `ran` is whether it was run (so a retry can re-read it).
+    /// The job did not pass. `retry` is whether it ended rejected or failed, the only states `athena retry`
+    /// accepts; the next attempt then reads it again. `read` is whether the job was read, so that when it
+    /// is not retried its next attempt is a run of that reading and not a second reading.
     Failed {
         job: String,
-        ran: bool,
+        retry: bool,
+        read: bool,
     },
+    /// The job was read again with a different scope and waits for a person to accept it. It is not a
+    /// failure and not tried again.
+    NeedsAccepting,
     Budget,
     JobLimit,
     /// Another worker had already ended the run.
@@ -567,6 +587,7 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
     fn run_job(&self, item: &Item, from: ReadOf<'_>) -> RunStep {
         // An approved job was read when it was approved; its first attempt is only a run.
         let pre_read = item.read && matches!(from, ReadOf::Queued(_));
+        let (ReadOf::Queued(target) | ReadOf::Retry(target)) = from;
         let needed = if pre_read {
             self.caps.run
         } else {
@@ -588,7 +609,7 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
         }
         let read = if pre_read {
             Read {
-                job: Some(item.job.clone()),
+                job: Some(target.to_string()),
                 cost: 0.0,
                 runnable: true,
                 error: None,
@@ -629,7 +650,8 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 self.push(line);
                 return RunStep::Failed {
                     job: item.job.clone(),
-                    ran: false,
+                    retry: false,
+                    read: false,
                 };
             }
         };
@@ -653,10 +675,26 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 let at = self.push(line);
                 RunStep::Passed(job, at)
             }
+            _ if run.needs_accepting => {
+                line.outcome = "needs accepting".into();
+                self.note(format!(
+                    "item {} is left queued: {}",
+                    item.job,
+                    line.reason
+                        .as_deref()
+                        .unwrap_or("its reading needs accepting")
+                ));
+                self.push(line);
+                RunStep::NeedsAccepting
+            }
             other => {
                 line.outcome = other.map_or("no outcome", OutcomeState::as_str).to_string();
                 self.push(line);
-                RunStep::Failed { job, ran: true }
+                RunStep::Failed {
+                    job,
+                    retry: matches!(other, Some(OutcomeState::Rejected | OutcomeState::Failed)),
+                    read: true,
+                }
             }
         }
     }
@@ -690,6 +728,9 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
 
     /// Works one item through its attempts: read and run, land, and on a failure try once more.
     fn work(&self, item: &Item) -> ItemEnd {
+        // Once the job is read, an attempt that is not a retry only runs it.
+        let mut item = item.clone();
+        let item = &mut item;
         let mut last_job = item.job.clone();
         let mut retry = false;
         let mut passed: Option<(String, usize)> = None;
@@ -703,17 +744,25 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 let from = if retry {
                     ReadOf::Retry(&last_job)
                 } else {
-                    ReadOf::Queued(&item.job)
+                    ReadOf::Queued(&last_job)
                 };
                 match self.run_job(item, from) {
                     RunStep::Budget => return ItemEnd::Budget,
                     RunStep::JobLimit => return ItemEnd::JobLimit,
                     RunStep::Ended => return ItemEnd::Idle,
+                    RunStep::NeedsAccepting => return ItemEnd::NeedsAccepting,
                     RunStep::Passed(job, at) => passed = Some((job, at)),
-                    RunStep::Failed { job, ran } => {
-                        retry = ran;
-                        if ran {
+                    RunStep::Failed {
+                        job,
+                        retry: again,
+                        read,
+                    } => {
+                        // Only a rejected or failed job is read again (`athena retry`); a job that ended
+                        // any other way is still proposed or blocked, so its next attempt runs it.
+                        retry = again;
+                        if read {
                             last_job = job;
+                            item.read = true;
                         }
                     }
                 }
@@ -981,7 +1030,7 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
             ItemEnd::Budget => self.set_stop(Stop::BudgetSpent, None),
             ItemEnd::JobLimit => self.set_stop(Stop::JobLimit, None),
             ItemEnd::Stop => self.set_stop(Stop::Requested, None),
-            ItemEnd::Idle => {}
+            ItemEnd::Idle | ItemEnd::NeedsAccepting => {}
         }
     }
 
@@ -1546,16 +1595,24 @@ impl Steps for RealSteps<'_> {
                 outcome: Some(f.state),
                 reason: f.reason,
                 cost,
+                needs_accepting: false,
             },
-            Ok(athena_core::run::GoResult::Reread(_)) => Run {
+            Ok(athena_core::run::GoResult::Reread(p)) => Run {
                 outcome: None,
-                reason: "the request was read again and needs accepting".into(),
+                reason: format!(
+                    "the request was read again after a configuration change and the new reading's scope differs from the earlier one{}; the reading needs accepting (`athena go {job}`)",
+                    p.reader_error
+                        .as_ref()
+                        .map_or(String::new(), |e| format!(" ({e})"))
+                ),
                 cost,
+                needs_accepting: true,
             },
             Err(error) => Run {
                 outcome: None,
                 reason: format!("{error:#}"),
                 cost,
+                needs_accepting: false,
             },
         }
     }
@@ -1724,6 +1781,7 @@ mod tests {
                 outcome: Some(self.outcome),
                 reason: String::new(),
                 cost: self.run_cost,
+                ..Run::default()
             }
         }
         fn land(&self, job: &str) -> Landing {

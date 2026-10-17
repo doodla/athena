@@ -22,6 +22,8 @@ pub struct JobConfig {
     pub defaults: DefaultsModel,
     /// The commit both files were read from.
     pub commit: String,
+    /// The SHA-256 of [`Config::reading_inputs`]: only the settings that bear on a reading, not the file's
+    /// bytes, so a change to `[parallel]` or `[landing]` (or to comments and layout) does not change it.
     pub config_sha256: String,
     pub defaults_sha256: String,
 }
@@ -40,11 +42,12 @@ impl JobConfig {
             .with_context(|| format!("{CONFIG_PATH} at {short}"))?;
         let defaults = DefaultsModel::parse(&String::from_utf8_lossy(&defaults_bytes))
             .with_context(|| format!("{DEFAULTS_PATH} at {short}"))?;
+        let config_sha256 = sha256_hex(config.reading_inputs().as_bytes());
         Ok(JobConfig {
             config,
             defaults,
             commit: commit.to_string(),
-            config_sha256: sha256_hex(&config_bytes),
+            config_sha256,
             defaults_sha256: sha256_hex(&defaults_bytes),
         })
     }
