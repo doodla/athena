@@ -155,6 +155,134 @@ fn a_send_back_keeps_the_plan_section_and_its_hash_matches_the_plan_record() {
     );
 }
 
+/// The job's accepted plan and verification record, read from the landing commit.
+fn plan_and_verification(fx: &Fixture, dir: &str) -> (JobPlan, athena_data::records::Verification) {
+    let plan_path = format!("{dir}/job-plan-1.json");
+    let bytes = fx.git.show_file("HEAD", &plan_path).unwrap().unwrap();
+    let plan = match AnyRecord::parse(&plan_path, &bytes).unwrap() {
+        AnyRecord::JobPlan(plan) => *plan,
+        other => panic!("unexpected {other:?}"),
+    };
+    let ver_path = format!("{dir}/verification.json");
+    let bytes = fx.git.show_file("HEAD", &ver_path).unwrap().unwrap();
+    let verification = match AnyRecord::parse(&ver_path, &bytes).unwrap() {
+        AnyRecord::Verification(v) => *v,
+        other => panic!("unexpected {other:?}"),
+    };
+    (plan, verification)
+}
+
+#[test]
+fn the_accept_path_runs_every_role_in_order_and_hands_each_the_plan_it_may_see() {
+    let fx = Fixture::with_config(&planned_config());
+    let scenario = Scenario::default();
+    let calls = scenario.invocations.clone();
+    let prompts = scenario.seen_by_producer.clone();
+    let seen_by_verifier = scenario.seen_by_verifier.clone();
+    let athena = fx.athena(scenario.script());
+    let proposal = athena.ask("tidy the readme", &Lines::default()).unwrap();
+    let f = finished(
+        athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(f.state, OutcomeState::Landed, "{}", f.reason);
+    assert_eq!(
+        *calls.lock().unwrap(),
+        [
+            Role::Reader,
+            Role::Planner,
+            Role::Critic,
+            Role::Producer,
+            Role::Verifier
+        ]
+    );
+    let dir = proposal.job.dir();
+    let (plan, verification) = plan_and_verification(&fx, &dir);
+    assert!(!plan.demonstrations.is_empty() && !plan.files.is_empty());
+    assert!(!plan.approach.is_empty());
+
+    // The producer's prompt: the planned files, each demonstration's command, and the hashed section.
+    let prompts = prompts.lock().unwrap().clone();
+    assert_eq!(prompts.len(), 1);
+    for file in &plan.files {
+        assert!(prompts[0].contains(&file.path), "{}", file.path);
+    }
+    for d in &plan.demonstrations {
+        assert!(prompts[0].contains(&d.command), "{}", d.command);
+    }
+    let section = render_plan_section(&plan);
+    assert!(prompts[0].ends_with(&section));
+    assert_eq!(plan.producer_section_sha256, sha256_hex(section.as_bytes()));
+
+    // The verifier's brief: demonstrations and planned files, nothing of the producer-side reasoning (F5).
+    let seen = seen_by_verifier.lock().unwrap().clone();
+    let brief = &seen[1];
+    assert!(brief.contains("## Planned demonstrations"), "{brief}");
+    for file in &plan.files {
+        assert!(brief.contains(&file.path), "{}", file.path);
+    }
+    for d in &plan.demonstrations {
+        assert!(brief.contains(&d.command), "{}", d.command);
+        assert!(brief.contains(&d.observes), "{}", d.observes);
+        if let Some(fails) = &d.fails_without {
+            assert!(brief.contains(fails), "{fails}");
+        }
+    }
+    assert!(
+        !brief.contains(&plan.approach),
+        "the approach reached the verifier"
+    );
+    for step in &plan.steps {
+        assert!(!brief.contains(step.as_str()), "{step}");
+    }
+    for file in &plan.files {
+        assert!(!brief.contains(&file.purpose), "{}", file.purpose);
+    }
+    assert!(
+        verification
+            .inputs
+            .contains(&"planned demonstrations and files".to_string()),
+        "{:?}",
+        verification.inputs
+    );
+    // The stored copy of the brief carries the same section.
+    let stored = fx
+        .git
+        .show_file("HEAD", &format!("{dir}/brief-verifier.md"))
+        .unwrap()
+        .unwrap();
+    let stored = String::from_utf8(stored).unwrap();
+    assert!(stored.contains("## Planned demonstrations"));
+    assert!(!stored.contains(&plan.approach));
+}
+
+#[test]
+fn with_planning_off_the_verifier_brief_and_inputs_have_no_plan() {
+    let fx = Fixture::with_config(&test_config());
+    let scenario = Scenario::default();
+    let seen_by_verifier = scenario.seen_by_verifier.clone();
+    let athena = fx.athena(scenario.script());
+    let proposal = athena.ask("tidy the readme", &Lines::default()).unwrap();
+    let f = finished(
+        athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(f.state, OutcomeState::Landed, "{}", f.reason);
+    assert!(!seen_by_verifier.lock().unwrap()[1].contains("Planned demonstrations"));
+    let path = format!("{}/verification.json", proposal.job.dir());
+    let bytes = fx.git.show_file("HEAD", &path).unwrap().unwrap();
+    let AnyRecord::Verification(v) = AnyRecord::parse(&path, &bytes).unwrap() else {
+        panic!("not a verification");
+    };
+    assert!(
+        !v.inputs.iter().any(|i| i.contains("planned")),
+        "{:?}",
+        v.inputs
+    );
+}
+
 #[test]
 fn with_planning_absent_or_off_the_invocations_are_the_producer_verifier_pair_only() {
     for config in [
