@@ -180,6 +180,10 @@ one producer run; review 1 split jobs 3 and 5.
    on through `Fixture::with_config`). Done when: with an accepting critic the roles run reader, planner, critic,
    producer, verifier; the producer's prompt holds the planned files and demonstration commands and its section
    hash matches the plan record; for a study, roles and records are today's.
+   *Built as:* `produce_and_verify` builds the verifier's `VerifierPlan` from the accepted plan and uses
+   `verifier_brief_with_plan` for both the stored brief and the live one; `verification.json` records the input
+   through `names_with_plan`. `crates/athena-cli/tests/job_plan.rs` runs the accept path through the real
+   lifecycle. No new `job_plan.rs` module in `athena-core` was needed for this step.
 5. **4: revise and stop paths, and Athena's own checks.** `job_plan.rs` and its tests. Done when: after revise then
    accept, the second planner prompt quotes the finding; when every round says revise, no producer or verifier
    runs, the outcome is failed with the "planning stopped" reason, three plans and three critiques are

@@ -9,6 +9,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The verifier receives an accepted plan's demonstrations and planned files (job 3b of
+  `docs/design/job-planning.md`). When a job has an accepted plan, `produce_and_verify` builds the verifier's
+  brief with `verifier_brief_with_plan` from `VerifierPlan::from_plan`, for both the stored
+  `brief-verifier.md` and the live brief, and `verification.json` lists "planned demonstrations and files"
+  among its inputs. The plan's approach, decision reasons and rejected options never reach the verifier (review
+  finding F5). Without a plan the brief and inputs are unchanged. `crates/athena-cli/tests/job_plan.rs` now
+  proves the accept path end to end: roles run reader, planner, critic, producer, verifier; the producer's
+  prompt holds the planned files and demonstration commands, with its section hash matching the plan record;
+  and the verifier's brief holds the demonstrations and files but none of the reasoning.
 - The planning round, threaded through dispatch behind `[job_plan] enabled = true` (job 3a of
   `docs/design/job-planning.md`). For a capability that does not pin a repository, `dispatch` runs one planner
   and one critic invocation after the prediction commit and before the producer, accept only: a critic that

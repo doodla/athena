@@ -17,8 +17,8 @@ use anyhow::{Context, Result, bail};
 use athena_agent::env::{EnvSpec, Side};
 use athena_context::briefs::{
     AcceptedReading, CandidateView, CheckResultView, CheckView, CriticInputs, DeliverableFact,
-    PlannerInputs, ProducerInputs, VerifierInputs, critic_brief, planner_brief, producer_brief,
-    producer_prompt_with_plan, render_plan_section, verifier_brief,
+    PlannerInputs, ProducerInputs, VerifierInputs, VerifierPlan, critic_brief, planner_brief,
+    producer_brief, producer_prompt_with_plan, render_plan_section, verifier_brief_with_plan,
 };
 use athena_context::outputs::{
     CriterionStatusOutput, CriticOutput, CritiqueVerdictOutput, DeliverableActionOutput,
@@ -1511,6 +1511,9 @@ impl Athena {
                 ),
             });
         }
+        // The verifier sees the accepted plan's demonstrations and planned files, never its approach or
+        // reasons (review F5). Without a plan the brief is as it always was.
+        let verifier_plan = closing.plans.last().map(VerifierPlan::from_plan);
         let mut verifier_invocation = None;
         let mut verdict_output: Option<VerdictOutput> = None;
         let mut commands_run = Vec::new();
@@ -1521,7 +1524,7 @@ impl Athena {
         if all_passed {
             closing.files.push(NewFile::text(
                 format!("{}/brief-verifier.md", id.dir()),
-                verifier_brief(&inputs, false),
+                verifier_brief_with_plan(&inputs, verifier_plan.as_ref(), false),
             ));
             let vcomposed = compose(&[
                 CONTRACT.into(),
@@ -1539,7 +1542,7 @@ impl Athena {
                     verifier_failure = Some(format!("{e}"));
                     break;
                 }
-                let vbrief = verifier_brief(&inputs, true);
+                let vbrief = verifier_brief_with_plan(&inputs, verifier_plan.as_ref(), true);
                 let vspec = self.agent_spec(
                     jc,
                     &id,
@@ -1710,7 +1713,7 @@ impl Athena {
             agent_verdict: judgment.agent_verdict,
             final_verdict: judgment.final_verdict,
             reasons: judgment.reasons.clone(),
-            inputs: inputs.names(),
+            inputs: inputs.names_with_plan(verifier_plan.as_ref()),
             summary: verdict_output.as_ref().map(|v| v.summary.clone()),
         };
         let _ = crate::pin::remove_tree(&verify_dir);
