@@ -18,6 +18,8 @@
 //! - [`pr`]: pull-request landing in owned mode: the link store, the push guard, the merged-content check;
 //! - [`ci_result`]: the CI result record keyed by commit SHA, its stale, missing and red rules, and the local
 //!   fallback (`docs/design/ci-routing.md` 5.3);
+//! - [`routing`]: the checks chosen by the plan's job kind, and where each result comes from: a reused CI
+//!   result for the candidate SHA or a local run (`docs/design/ci-routing.md` 3.2);
 //! - [`gh`]: `athena land --pr`: push the job's branch, open the pull request, wait for green checks, and merge
 //!   over REST only when the opt-in setting is on;
 //! - [`introspect`]: the introspection record of an event, the class registry, and the reading code shared with
@@ -67,6 +69,7 @@ pub mod pr;
 pub mod proposals;
 pub mod reading;
 pub mod review;
+pub mod routing;
 pub mod run;
 #[cfg(test)]
 mod run_pin_tests;

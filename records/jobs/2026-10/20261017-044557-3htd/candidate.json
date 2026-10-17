@@ -1,0 +1,146 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261017-044557-3htd",
+  "base_commit": "57ea96daed7a9b82b3fe1d718d807eb721a0fec6",
+  "base_fingerprint": "sha256:fdc197125106ee7a525b025f59493fda8e0296fbe61174107d12d6b481d08fbf",
+  "previous_job": "20261017-003902-d5gk",
+  "candidate_commit": "be75ad56e34b7d875d2dc4d56ec1f403d792d519",
+  "candidate_tree": "2f750cd555fc5d7b49a70bc3ed99d03470c4084c",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 92100
+    },
+    {
+      "path": "athena.toml",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 8598
+    },
+    {
+      "path": "crates/athena-core/src/ci_result.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 19090
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 8104
+    },
+    {
+      "path": "crates/athena-core/src/routing.rs",
+      "status": "added",
+      "mode": "100644",
+      "bytes": 13616
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 86199
+    },
+    {
+      "path": "docs/design/ci-routing.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 28530
+    }
+  ],
+  "fingerprint": "sha256:b41d8058aed52e169083efe572e9a30f927f2e8703e5cef18303fdab4840e771",
+  "violations": [
+    {
+      "rule": "governance",
+      "path": "athena.toml",
+      "detail": "athena.toml is a governance file; a job may change it only when the accepted reading lists it as a deliverable and names it in an acceptance criterion"
+    }
+  ],
+  "producer_report": {
+    "summary": "Added `athena-core::routing`, which maps the plan's class_of_work to a row of the 3.2 table. The check step of the job run now uses it. Every job still runs its checks locally for now, because the candidate commit is not pushed. The routed path passes `resolve` a source that never has a CI run. No speedup is measured or claimed. `cargo test --locked`, clippy with warnings denied and `cargo fmt --all --check` all pass.\n\nHow each kind routes:\n- **docs, design, study:** skip fmt and clippy for a prose-only change; test always runs.\n- **code, tests, config:** skip nothing.\n- **build:** skips nothing, never reuses a prior CI result, and is told about the workflow's own run as a further check.\n- **Missing or unrecognised kind (`other`, `prompts`, none):** takes the config row. `prompts` is in the repository's class list but not in the 3.2 table.\n\nWiring and edits:\n- **Call site:** in `run.rs` (`produce_and_verify`), the check step builds the route from the reading's class and calls `routing::route_checks`. For every kind except build, that calls `resolve` with the candidate SHA. The verifier's input gets a new `check-routing` entry saying where the checks ran and, for a reused result, which run. Nested runs and capabilities without all three of fmt, clippy and test keep the old local loop.\n- **`ci_result.rs`:** `fall_back` is now the public `run_local`. A local run that stopped at a failing check is reported as Failed, where it would have been Blocked as incomplete. I added a test for this.\n- **Docs and config comment:** the section 10 item 5 text in `ci-routing.md`, the `CHANGELOG.md` entry, and a comment in `athena.toml` all describe this change and say what is not done.",
+    "files": [
+      "crates/athena-core/src/routing.rs",
+      "crates/athena-core/src/lib.rs",
+      "crates/athena-core/src/ci_result.rs",
+      "crates/athena-core/src/run.rs",
+      "docs/design/ci-routing.md",
+      "athena.toml",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "whole workspace, exit 0"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test --locked -p athena-core routing",
+        "result": "pass",
+        "note": "7 routing tests passed"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Run `cargo test -p athena-core routing`: tests assert, for each kind (code, tests, docs, design, config, build, study, other), the routed checks and their skips match the section 3.2 table (docs and design skip fmt/clippy but always run test; config never skips; build adds the workflow's own run and never reuses a prior result).",
+        "status": "met",
+        "evidence": "The command ran with 7 passing tests. `each_kind_routes_as_the_table_says` checks skips, reuse and workflow_run for code, tests, docs, design, config, build and study; other is covered by the second test."
+      },
+      {
+        "criterion": "A test shows a missing or unrecognised job kind gets the config row (all three checks, none skipped), per section 7.",
+        "status": "met",
+        "evidence": "`a_missing_or_unknown_kind_takes_the_config_row` covers None, other, prompts, an unknown name and an empty string; each gets the config row's settings and skips nothing for a docs-only change."
+      },
+      {
+        "criterion": "A test shows the routed path calls the item 4 `resolve` with the candidate SHA: a CI result for another SHA is ignored and falls back to a local run; a red CI result fails and does not rerun locally.",
+        "status": "met",
+        "evidence": "Tests in routing.rs: the CI source records the SHA it is asked for and it equals the candidate; a result for another SHA gives a Local record and one local run; a red result gives Failed with zero local runs; build never reads CI."
+      },
+      {
+        "criterion": "`cargo test`, `cargo clippy --all-targets` and `cargo fmt --check` all pass.",
+        "status": "met",
+        "evidence": "`cargo test --locked`, clippy with `-D warnings` and `cargo fmt --all --check` all ran and passed."
+      },
+      {
+        "criterion": "docs/design/ci-routing.md section 10 item 5 is updated to say what was built and what is not done (for example no speedup measured), without claiming a measured improvement.",
+        "status": "met",
+        "evidence": "Item 5 now has a 'Built in part' paragraph. It lists what is not done: no push, so no CI read; the build workflow run is not read; no speedup measured or claimed."
+      },
+      {
+        "criterion": "The routing is used from the job run or verifier input, not only defined: a reader can find the call site that selects checks by the plan's kind.",
+        "status": "met",
+        "evidence": "`run.rs` builds `routing::Route::for_class(Some(&ctx.reading.class_of_work))`, calls `routing::route_checks`, and pushes a `check-routing` entry into the verifier's inputs. The doc and CHANGELOG name this call site."
+      }
+    ],
+    "open_issues": [
+      "The candidate commit is not pushed and no wait bound is set, so the job run passes a source that never has a CI run and always runs the local fallback. This was already unbuilt in item 4.",
+      "A build job's workflow-run check is only named to the verifier, not read from the platform.",
+      "The brief listed checks.rs and verify.rs as deliverables. I did not need to change either, because the `runs_from_record` and `reuse_statement` helpers from item 4 were enough.",
+      "The fallback still stops at the first failing check, as before. The 3.2 table says nothing on this."
+    ],
+    "mistakes": [
+      "My first wiring failed the drain integration tests, because their capability does not name all three checks and `resolve` blocked. Fixed by running unrouted when the capability does not name all three checks. The full suite passed afterwards.",
+      "The first clippy run failed on a pointless `drop` and on missing Debug impls. Both are fixed."
+    ],
+    "learnings": [
+      "The repository's class list is code, tests, docs, prompts, config, build, design, other. It has no study kind, and `prompts` is not in the 3.2 table.",
+      "Test configurations in crates/athena-cli/tests/drain.rs use fewer than three checks. `resolve` demands fmt, clippy and test, so routing in the job run only applies when the capability's checks include all three.",
+      "`run_check` is called only from `run.rs`, and the check loop there is the one place checks run.",
+      "Bash is limited to the listed commands, so I used the Edit tool instead of sed and could not read the large test output with tail."
+    ],
+    "desires": [
+      "Being able to read the saved large test output from within the working directory."
+    ]
+  }
+}

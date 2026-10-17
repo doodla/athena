@@ -567,6 +567,40 @@ impl RunContext<'_> {
     }
 }
 
+/// Runs one routed check in the verifier's snapshot, then puts the snapshot back as it was prepared.
+struct SnapExec<'a> {
+    athena: &'a Athena,
+    snapshot: &'a Snapshot,
+    prepared: &'a str,
+    env: &'a std::collections::BTreeMap<String, String>,
+    registry: &'a athena_agent::procs::Registry,
+    job: &'a str,
+    timeout: std::time::Duration,
+    redactor: &'a Redactor,
+    cleanup: std::cell::RefCell<Vec<String>>,
+}
+
+impl crate::routing::Exec for SnapExec<'_> {
+    fn exec(&self, spec: &crate::capability::CheckSpec) -> Result<CheckRun> {
+        self.athena.refuse_if_stopped()?;
+        let run = run_check(
+            spec,
+            &CheckContext {
+                dir: self.snapshot.dir(),
+                env: self.env,
+                timeout: self.timeout,
+                registry: self.registry,
+                job: self.job,
+                redactor: self.redactor,
+            },
+        )?;
+        self.cleanup
+            .borrow_mut()
+            .extend(self.snapshot.restore_to(self.prepared)?);
+        Ok(run)
+    }
+}
+
 /// The command whose real result every producer report must show.
 const FULL_TEST_COMMAND: &str = "cargo test --locked";
 
@@ -958,8 +992,47 @@ impl Athena {
             .as_ref()
             .map(|c| c.changes.iter().map(|e| e.path.clone()).collect())
             .unwrap_or_default();
-        for spec in ctx.capability.checks(jc) {
-            if self.nested.is_some() {
+        if self.nested.is_none() {
+            // The plan's kind picks the checks and where each result comes from (`routing`). A study is
+            // routed by its capability. Skipping is the path rule, which the route applies.
+            let kind = if ctx.capability.id() == "study" {
+                "study"
+            } else {
+                ctx.reading.class_of_work.as_str()
+            };
+            let route =
+                crate::routing::route(Some(kind), ctx.capability.checks(jc), &changed_for_skip);
+            if route.workflow_run {
+                ctx.ui.line(
+                    "routing    build job: the workflow's own run is required and not yet performed",
+                );
+            }
+            let exec = SnapExec {
+                athena: self,
+                snapshot: &vsnap,
+                prepared: &prepared,
+                env: &check_env,
+                registry: &registry,
+                job: id.as_str(),
+                timeout: std::time::Duration::from_secs(jc.config.budget.check_timeout_s),
+                redactor: ctx.redactor,
+                cleanup: std::cell::RefCell::new(Vec::new()),
+            };
+            // No candidate commit is pushed yet, so no CI result exists to read: one read, no wait.
+            check_runs = crate::routing::run_routed(
+                &route,
+                &c,
+                &changed_for_skip,
+                &crate::routing::NoCi,
+                &exec,
+                crate::ci_result::Wait {
+                    polls: 1,
+                    pause: std::time::Duration::ZERO,
+                },
+            )?;
+            cleanup.extend(exec.cleanup.into_inner());
+        } else {
+            for spec in ctx.capability.checks(jc) {
                 check_runs.push(CheckRun {
                     name: spec.name.clone(),
                     command: spec.run.clone(),
@@ -976,29 +1049,6 @@ impl Athena {
                         "not run: a nested run skips checks; the outer job runs its own".into(),
                     ),
                 });
-                continue;
-            }
-            if let Some(note) = crate::checks::skip_note(&spec, &changed_for_skip) {
-                check_runs.push(crate::checks::skipped_run(&spec, note));
-                continue;
-            }
-            self.refuse_if_stopped()?;
-            let run = run_check(
-                &spec,
-                &CheckContext {
-                    dir: vsnap.dir(),
-                    env: &check_env,
-                    timeout: std::time::Duration::from_secs(jc.config.budget.check_timeout_s),
-                    registry: &registry,
-                    job: id.as_str(),
-                    redactor: ctx.redactor,
-                },
-            )?;
-            cleanup.extend(vsnap.restore_to(&prepared)?);
-            let failed = !run.passed;
-            check_runs.push(run);
-            if failed {
-                break;
             }
         }
         let checks_line: Vec<String> = check_runs
