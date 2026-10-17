@@ -238,6 +238,74 @@ fn a_job_that_is_not_rejected_or_failed_is_refused() {
     assert_eq!(fx.head(), before, "nothing was recorded");
 }
 
+/// A job that was dispatched and has no closing record, as after a machine restart: it is read and run
+/// (the scenario rejects it), then the history is cut back to just before the closing commit.
+fn interrupted(fx: &Fixture, athena: &Athena, text: &str) -> String {
+    let proposal = athena.ask(text, &Lines::default()).unwrap();
+    let job = proposal.job.to_string();
+    athena
+        .go(&job, AcceptedBy::User, &Lines::default())
+        .unwrap();
+    for _ in 0..6 {
+        let records = Records::load(&fx.git, &fx.head()).unwrap();
+        if records.jobs[&job].state() == JobState::Dispatched {
+            return job;
+        }
+        fx.git.run(["reset", "-q", "--hard", "HEAD~1"]).unwrap();
+    }
+    panic!("the job never was dispatched without an outcome");
+}
+
+#[test]
+fn an_interrupted_job_is_tried_again_with_its_original_request() {
+    let model = Model::default();
+    let (fx, athena) = setup(&model);
+    let job = interrupted(&fx, &athena, "remove the readme");
+    let (proposal, seeded) = athena.retry(&job, &Lines::default()).unwrap();
+    assert!(!seeded, "an interrupted job has no introspection");
+    assert!(proposal.reading.is_some());
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    let request = records.jobs[proposal.job.as_str()]
+        .request
+        .as_ref()
+        .unwrap();
+    assert_eq!(request.text, format!("try again on {job}"));
+    let brief = model.last_brief();
+    assert!(brief.contains("# Earlier attempt"), "{brief}");
+    assert!(brief.contains("> remove the readme"), "{brief}");
+    assert_eq!(
+        records.jobs[&job].state(),
+        JobState::Dispatched,
+        "the interrupted job is left as it was"
+    );
+}
+
+#[test]
+fn a_job_that_is_still_running_is_refused_by_retry() {
+    use std::os::unix::process::CommandExt;
+    let model = Model::default();
+    let (fx, athena) = setup(&model);
+    let job = interrupted(&fx, &athena, "remove the readme");
+    // A live process group registered for the job, as a running producer has.
+    let mut sleeper = Command::new("sleep")
+        .arg("30")
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    athena
+        .state
+        .registry()
+        .register(sleeper.id() as i32, &job, "producer")
+        .unwrap();
+    let before = fx.head();
+    let result = athena.retry(&job, &Lines::default());
+    let _ = sleeper.kill();
+    let _ = sleeper.wait();
+    let error = result.unwrap_err().to_string();
+    assert!(error.contains("is running"), "{error}");
+    assert_eq!(fx.head(), before, "nothing was recorded");
+}
+
 #[test]
 fn a_job_with_no_introspection_falls_back_to_try_again_on() {
     let model = Model::default();

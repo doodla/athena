@@ -369,6 +369,45 @@ pub fn queued_work(records: &Records) -> Vec<QueuedWork> {
     found.into_iter().map(|(_, work)| work).collect()
 }
 
+/// The jobs of the drained channels that were interrupted (for example by a restart): dispatched, with no
+/// closing record and no process working on them (`running` says which are), oldest first. Drain retries
+/// them. A job that a later request already retries ("try again on <job>") is left out, so it is retried
+/// once. A job on any other channel is left alone.
+pub fn interrupted_work(records: &Records, running: &dyn Fn(&str) -> bool) -> Vec<QueuedWork> {
+    let retried: BTreeSet<String> = records
+        .jobs
+        .values()
+        .filter_map(|j| crate::reading::retried_job(records, &j.request.as_ref()?.text))
+        .map(|id| id.as_str().to_string())
+        .collect();
+    let mut found: Vec<(Timestamp, QueuedWork)> = records
+        .jobs
+        .values()
+        .filter_map(|j| {
+            if j.state() != JobState::Dispatched
+                || running(j.id().as_str())
+                || retried.contains(j.id().as_str())
+            {
+                return None;
+            }
+            let request = j
+                .request
+                .as_ref()
+                .filter(|r| DRAINED_CHANNELS.contains(&r.channel.as_str()))?;
+            Some((
+                request.received_at,
+                QueuedWork {
+                    job: j.id().clone(),
+                    title: j.title(),
+                    read: false,
+                },
+            ))
+        })
+        .collect();
+    found.sort_by(|a, b| (a.0, a.1.job.as_str()).cmp(&(b.0, b.1.job.as_str())));
+    found.into_iter().map(|(_, work)| work).collect()
+}
+
 /// The jobs that a work decision records as approved and that are still in state proposed: read, waiting for
 /// `go`. A job that has run or been closed is not listed. Oldest decision first.
 pub fn approved_work(records: &Records) -> Vec<QueuedWork> {

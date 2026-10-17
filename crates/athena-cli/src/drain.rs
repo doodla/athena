@@ -28,6 +28,11 @@
 //!   without reading it again, in plan order, and a second `athena plan` lists it again. Only a request
 //!   that was declined, is running, or has ended, and one on another channel, is left out
 //!   ([`athena_core::steward::queued_work`]).
+//! - **An interrupted job is retried.** A job that was dispatched, has no closing record and has no process
+//!   working on it (a machine restart killed it) is listed as work like a queued request, on a drained
+//!   channel only ([`athena_core::steward::interrupted_work`]). Its first attempt is `athena retry`, which
+//!   reads the request again as a new job; that job is then run. The interrupted job is left as it is, but a
+//!   job that a retry already names is not listed again. A job whose process is still running is never listed.
 //! - **Stop at a job boundary.** [`Steps::stop_requested`] is asked before every job. A job that has started
 //!   is finished (landed and rated) and no further job starts: [`Stop::Requested`]. Nothing is killed.
 //!
@@ -66,7 +71,7 @@
 //!   The source check is a model call per study, so it is guarded like the others: the reserve is
 //!   [`Steps::check_cap`] (the verifier's cap times the number of studies), it must fit the budget or drain
 //!   stops as "budget spent", and what the calls cost is added to the spend ([`Check::cost`]).
-//! - **Retry.** An item gets two attempts. After a rejected or failed run the second attempt reads the job
+//! - **Retry.** An item gets two attempts (an interrupted job's first attempt is its retry, see above). After a rejected or failed run the second attempt reads the job
 //!   again with `athena retry`, then runs it. A run that ended any other way (no outcome, blocked) leaves
 //!   the job proposed or blocked, which `athena retry` refuses, so the second attempt runs the same reading
 //!   again. After a run that passed but did not land, it lands again. Two failures stop the loop, naming the
@@ -179,6 +184,10 @@ pub struct Item {
     /// reading. A retry after a failed run still reads again.
     #[serde(skip)]
     pub read: bool,
+    /// True when the job was interrupted (dispatched, no process, no closing record): its first attempt is
+    /// `athena retry`, not a reading of the request.
+    #[serde(skip)]
+    pub interrupted: bool,
 }
 
 impl Item {
@@ -188,6 +197,7 @@ impl Item {
             job: job.into(),
             title: title.into(),
             read: false,
+            interrupted: false,
         }
     }
 }
@@ -732,7 +742,8 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
         let mut item = item.clone();
         let item = &mut item;
         let mut last_job = item.job.clone();
-        let mut retry = false;
+        // An interrupted job has no finished attempt to run: its first attempt reads it again.
+        let mut retry = item.interrupted;
         let mut passed: Option<(String, usize)> = None;
         let mut failures = 0;
         loop {
@@ -759,7 +770,8 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                     } => {
                         // Only a rejected or failed job is read again (`athena retry`); a job that ended
                         // any other way is still proposed or blocked, so its next attempt runs it.
-                        retry = again;
+                        // An interrupted job whose retry could not be read is still interrupted.
+                        retry = again || (item.interrupted && !read);
                         if read {
                             last_job = job;
                             item.read = true;
@@ -810,6 +822,7 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                         job,
                         title: proposal.title,
                         read: true,
+                        interrupted: false,
                     });
                 }
                 (_, error) => {
@@ -840,7 +853,8 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
     fn prepare(&self, view: &mut QueueView, reserve: f64) -> Plan {
         let mut forced: Vec<Refusal> = Vec::new();
         for idx in 0..view.items.len() {
-            if view.items[idx].read {
+            // An interrupted job was read before it ran; its retry reads the request again.
+            if view.items[idx].read || view.items[idx].interrupted {
                 continue;
             }
             let id = view.items[idx].job.clone();
@@ -1493,6 +1507,7 @@ impl Steps for RealSteps<'_> {
             job: w.job.as_str().to_string(),
             title: w.title,
             read: w.read,
+            interrupted: false,
         };
         let mut items: Vec<Item> = steward::approved_work(&records)
             .into_iter()
@@ -1505,6 +1520,17 @@ impl Steps for RealSteps<'_> {
             .filter(|i| !items.iter().any(|a| a.job == i.job))
             .collect();
         items.extend(queued);
+        // A job a restart interrupted is worked by retrying it. The registry is cleaned first, so a job whose
+        // process is gone counts as interrupted.
+        self.athena.state.registry().reap();
+        items.extend(
+            steward::interrupted_work(&records, &|j| self.athena.running(j))
+                .into_iter()
+                .map(|w| Item {
+                    interrupted: true,
+                    ..item(w)
+                }),
+        );
         // Planning: every open request is fleshed out. Nothing is defaulted: a job that came from a steward
         // proposal serves the proposal's rung; any other request's rung is inferred or flagged.
         let head = self.athena.head()?;

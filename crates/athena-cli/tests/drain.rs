@@ -39,6 +39,8 @@ struct Stub {
     items: Vec<&'static str>,
     /// Approved jobs already read, in state proposed.
     read_items: Vec<&'static str>,
+    /// Jobs a restart interrupted: dispatched, no process, no closing record.
+    interrupted: Vec<&'static str>,
     waiting: Vec<Waiting>,
     /// Open proposals within their role's limit.
     approvable: Vec<Waiting>,
@@ -96,6 +98,10 @@ impl Steps for Stub {
                 .iter()
                 .map(|j| item(j, true))
                 .chain(self.items.iter().map(|j| item(j, false)))
+                .chain(self.interrupted.iter().map(|j| Item {
+                    interrupted: true,
+                    ..item(j, false)
+                }))
                 .collect(),
             waiting: self.waiting.clone(),
             approvable: self.approvable.clone(),
@@ -1693,6 +1699,99 @@ fn a_running_job_stays_out_of_the_queue() {
     let (states, queued) = &seen[0];
     assert_eq!(states, &[JobState::Dispatched], "dispatched, not finished");
     assert!(queued.is_empty(), "{queued:?}");
+}
+
+// Jobs a restart interrupted.
+
+#[test]
+fn an_interrupted_job_is_retried_first_and_then_run() {
+    let stub = Stub {
+        interrupted: vec!["a"],
+        outcomes: passing(),
+        ratings: RefCell::new(vec![1]),
+        ..Stub::default()
+    };
+    let report = drain::drain(&stub, limits(9.0), &Quiet).unwrap();
+    // It is read again as a retry (a new job), and that job is run, with no reading of the request itself.
+    assert_eq!(
+        stub.log(),
+        ["reread a", "run a-retry", "land a-retry", "rate"]
+    );
+    assert_eq!(report.jobs.len(), 1);
+    assert_eq!(report.jobs[0].item, "a");
+    assert_eq!(report.jobs[0].job, "a-retry");
+    assert_eq!(report.landed, 1);
+}
+
+/// A script that kills the producer while `kill` is set, so a job's run is cut short.
+fn killing_producer(kill: Arc<std::sync::atomic::AtomicBool>) -> Script {
+    let base = rated_scenario().script();
+    Box::new(move |spec| {
+        let mut turn = base(spec);
+        if spec.role == Role::Producer && kill.load(std::sync::atomic::Ordering::SeqCst) {
+            turn.outcome = athena_data::records::InvocationOutcome::Killed;
+            turn.structured = None;
+        }
+        turn
+    })
+}
+
+/// Reads and runs `job` under a script that kills its producer, then cuts the history back to just before the
+/// closing commit: the job is dispatched with no process and no closing record, as after a machine restart.
+fn interrupt(fx: &Fixture, athena: &Athena, job: &str) {
+    athena.go(job, AcceptedBy::Flag, &Quiet).unwrap();
+    athena.go(job, AcceptedBy::Flag, &Quiet).unwrap();
+    for _ in 0..6 {
+        let records = Records::load(&fx.git, &fx.head()).unwrap();
+        if records.jobs[job].state() == JobState::Dispatched {
+            return;
+        }
+        fx.git.run(["reset", "-q", "--hard", "HEAD~1"]).unwrap();
+    }
+    panic!("the job never was dispatched without an outcome");
+}
+
+#[test]
+fn drain_lists_and_retries_an_interrupted_job_and_leaves_one_on_another_channel_alone() {
+    let fx = Fixture::new();
+    let kill = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let athena = fx.athena(killing_producer(kill.clone()));
+    let (cli, _) = athena.queue(FIRST).unwrap();
+    let cli = cli.as_str().to_string();
+    let web = request_on(&athena, "web", SECOND);
+    interrupt(&fx, &athena, &cli);
+    interrupt(&fx, &athena, &web);
+    kill.store(false, std::sync::atomic::Ordering::SeqCst);
+
+    let lander = RecordingLander::default();
+    let steps = real_steps(&athena, &lander);
+    let queue = steps.queue().unwrap();
+    let listed: Vec<(&str, bool)> = queue
+        .items
+        .iter()
+        .map(|i| (i.job.as_str(), i.interrupted))
+        .collect();
+    assert_eq!(listed, [(cli.as_str(), true)], "only the drained channel");
+
+    let report = drain::drain(&steps, limits(50.0), &Quiet).unwrap();
+    assert_eq!(report.stop, Stop::TargetMet, "{}", display::drain(&report));
+    assert_eq!(report.jobs.len(), 1, "{}", display::drain(&report));
+    let line = &report.jobs[0];
+    assert_eq!(line.item, cli);
+    assert_ne!(line.job, cli, "the retry is a new job");
+    assert_eq!(line.outcome, "passed");
+    assert_eq!(report.landed, 1);
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    let request = records.jobs[line.job.as_str()].request.as_ref().unwrap();
+    assert_eq!(request.text, format!("try again on {cli}"));
+    assert_eq!(
+        records.jobs[&web].state(),
+        JobState::Dispatched,
+        "left alone"
+    );
+
+    // The retry is recorded, so the interrupted job is not listed (and retried) again.
+    assert!(steps.queue().unwrap().items.is_empty());
 }
 
 #[test]
