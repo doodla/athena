@@ -19,8 +19,12 @@
 //!   governance content.
 
 use anyhow::Result;
+use athena_agent::policy::{Decision, Policy, evaluate};
 use athena_data::config::PersonalData;
-use athena_data::records::{ChangeStatus, PolicyViolation, Reading};
+use athena_data::records::{
+    ChangeStatus, CriterionKind, DeliverableAction, Demonstration, Finding, FindingSource, JobPlan,
+    PolicyViolation, Reading, Severity,
+};
 use athena_data::{Config, DefaultsModel};
 use athena_gate::content::disallowed_emails;
 use athena_gate::{CONFIG_PATH, DEFAULTS_PATH, defers_to_schema_test};
@@ -121,6 +125,151 @@ pub fn governance_change_is_listed(reading: &Reading, path: &str) -> bool {
         .iter()
         .any(|c| c.text.contains(path) || c.text.contains(file_name(path)));
     listed && named
+}
+
+fn athena_finding(
+    severity: Severity,
+    location: String,
+    summary: String,
+    evidence: String,
+) -> Finding {
+    Finding {
+        severity,
+        summary,
+        evidence,
+        location: Some(location),
+        source: FindingSource::Athena,
+    }
+}
+
+/// Athena's own checks on a job plan (`docs/design/job-planning.md` section 3), which cost no model call:
+///
+/// - every acceptance criterion has exactly one demonstration;
+/// - a demonstration of a behavior criterion names what fails without the behavior and cites a command the
+///   verifier's grant allows (`verifier` is that grant as a policy; its root must exist);
+/// - a file to modify or delete exists in the base, and a file to create does not;
+/// - a governance file must be listed by the reading and named in a criterion (`governance_change_is_listed`);
+///   that is a major finding otherwise;
+/// - any other path outside the reading's deliverables is a minor finding.
+///
+/// A major finding sends the plan back to the planner without a critic call.
+pub fn plan_findings(plan: &JobPlan, reading: &Reading, verifier: &Policy) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let count = reading.acceptance_criteria.len();
+    for (i, criterion) in reading.acceptance_criteria.iter().enumerate() {
+        let number = (i + 1) as u32;
+        let demos: Vec<&Demonstration> = plan
+            .demonstrations
+            .iter()
+            .filter(|d| d.criterion == number)
+            .collect();
+        let location = format!("demonstrations, criterion {number}");
+        if demos.len() != 1 {
+            findings.push(athena_finding(
+                Severity::Major,
+                location.clone(),
+                format!(
+                    "Criterion {number} has {} demonstrations; it needs exactly one",
+                    demos.len()
+                ),
+                format!("Criterion {number} is: {}", criterion.text),
+            ));
+        }
+        if criterion.kind != CriterionKind::Behavior {
+            continue;
+        }
+        for d in demos {
+            if d.fails_without
+                .as_deref()
+                .is_none_or(|f| f.trim().is_empty())
+            {
+                findings.push(athena_finding(
+                    Severity::Major,
+                    location.clone(),
+                    format!("The demonstration of behavior criterion {number} does not say what fails without the behavior"),
+                    "A demonstration of a behavior criterion must set fails_without, so that it would fail if the behavior were missing.".into(),
+                ));
+            }
+            if let Decision::Deny(why) = evaluate(
+                verifier,
+                "Bash",
+                &serde_json::json!({ "command": d.command }),
+                None,
+            ) {
+                findings.push(athena_finding(
+                    Severity::Major,
+                    location.clone(),
+                    format!(
+                        "The demonstration of behavior criterion {number} cites a command the verifier may not run: `{}`",
+                        d.command.trim()
+                    ),
+                    why,
+                ));
+            }
+        }
+    }
+    for d in plan
+        .demonstrations
+        .iter()
+        .filter(|d| d.criterion == 0 || d.criterion as usize > count)
+    {
+        findings.push(athena_finding(
+            Severity::Major,
+            format!("demonstrations, criterion {}", d.criterion),
+            format!(
+                "A demonstration names criterion {}, but the reading has {count} criteria",
+                d.criterion
+            ),
+            format!("Its command is `{}`.", d.command.trim()),
+        ));
+    }
+    for f in &plan.files {
+        let location = format!("files, {}", f.path);
+        match f.action {
+            DeliverableAction::Create if f.exists => findings.push(athena_finding(
+                Severity::Major,
+                location.clone(),
+                format!(
+                    "The plan creates {}, which already exists in the base",
+                    f.path
+                ),
+                "Plan a modification, or choose another path.".into(),
+            )),
+            DeliverableAction::Modify | DeliverableAction::Delete if !f.exists => {
+                findings.push(athena_finding(
+                    Severity::Major,
+                    location.clone(),
+                    format!(
+                        "The plan changes {}, which does not exist in the base",
+                        f.path
+                    ),
+                    "Plan to create it, or name the file that exists.".into(),
+                ))
+            }
+            _ => {}
+        }
+        if is_governance(&f.path) {
+            if !governance_change_is_listed(reading, &f.path) {
+                findings.push(athena_finding(
+                    Severity::Major,
+                    location,
+                    format!(
+                        "{} is a governance file and the accepted reading does not both list it as a deliverable and name it in a criterion",
+                        f.path
+                    ),
+                    "Admission would refuse the change; leave the file out of the plan.".into(),
+                ));
+            }
+        } else if !reading.deliverables.iter().any(|d| d.path == f.path) {
+            findings.push(athena_finding(
+                Severity::Minor,
+                location,
+                format!("{} is not among the reading's deliverables", f.path),
+                "A change outside the listed deliverables widens the scope.".into(),
+            ));
+        }
+    }
+    findings
 }
 
 /// The core's admission rules. Returns every violation found.

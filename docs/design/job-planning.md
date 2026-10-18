@@ -191,6 +191,11 @@ one producer run; review 1 split jobs 3 and 5.
    `check_history()` is clean; a retry's carry quotes the last critique's findings (F11); a plan that edits an
    unlisted `athena.toml`, or cites a command outside the verifier's grant, gets an Athena critique with no
    critic call.
+   *Built as:* `plan_round` in `run.rs` loops over `planning_round` up to `max_rounds`; `admission::plan_findings`
+   holds Athena's checks; `end_round` files each plan and critique and decides accept, revise or stop. A job
+   stopped in planning scores `verification_passes` as unknown in `athena-score` (a job with planner or critic
+   invocations and no producer or verifier), and `reading::carry` quotes the stopping critique's findings.
+   Tests are in `crates/athena-cli/tests/job_plan.rs`.
 6. **5a: status and recovery.** `crates/athena-core/src/{status.rs, manage.rs}`, `crates/athena-cli/src/display.rs`.
    Done when: plan state appears only for planned jobs and `status <job> --json` includes plans and critiques;
    closing a job killed during planning adds no producer invocation.

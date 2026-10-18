@@ -434,9 +434,19 @@ pub fn score_records(
             .iter()
             .any(|i| i.source == InterventionSource::User && i.at >= t)
     }) || cause.is_some();
-    // A dispatched job that never reached a verdict failed before verification.
+    // A dispatched job that never reached a verdict failed before verification, except one that stopped in
+    // planning: no code was written, so no verification could have failed and the result is unknown.
+    let stopped_in_planning = facts
+        .invocations
+        .iter()
+        .any(|i| matches!(i.role, Role::Planner | Role::Critic))
+        && !facts
+            .invocations
+            .iter()
+            .any(|i| matches!(i.role, Role::Producer | Role::Verifier));
     let verification_passed = match (facts.verification, facts.dispatched) {
         (Some(v), _) => Some(v.final_verdict == Verdict::Pass),
+        (None, Some(_)) if stopped_in_planning => None,
         (None, Some(_)) => Some(false),
         (None, None) => None,
     };

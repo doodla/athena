@@ -276,6 +276,12 @@ pub struct Scenario {
     /// What the source check reports, given the checker's workspace. None: it reads every file under
     /// `page-text/` and finds nothing wrong.
     pub source_check: Option<SourceJudge>,
+    /// The planner's output for each call, in order; a call past the end gets the deterministic fake plan.
+    pub plans: Vec<Value>,
+    /// The critic's output for each call, in order; a call past the end gets the deterministic accepting fake.
+    pub critiques: Vec<Value>,
+    /// The brief each planner call was given, in order.
+    pub seen_by_planner: Arc<Mutex<Vec<String>>>,
 }
 
 /// A fake source checker: from the checker's workspace to its report.
@@ -334,6 +340,9 @@ impl Default for Scenario {
             auditor: json!({ "summary": "The outcome serves the goals.", "findings": [] }),
             seen_by_auditor: Arc::new(Mutex::new(Vec::new())),
             source_check: None,
+            plans: Vec::new(),
+            critiques: Vec::new(),
+            seen_by_planner: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -444,9 +453,39 @@ impl Scenario {
                     drop(seen);
                     FakeTurn::output(self.audience.clone())
                 }
-                // Job planning is not wired in yet, so no scenario reaches these; if one does, the
-                // deterministic fake answers and the recorded roles show it.
-                Role::Planner | Role::Critic => athena_agent::fake::deterministic_turn(spec),
+                // A scripted plan or critique for this call, or else the deterministic fake's.
+                Role::Planner => {
+                    self.seen_by_planner
+                        .lock()
+                        .unwrap()
+                        .push(spec.user_prompt.clone());
+                    let call = self
+                        .invocations
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|r| **r == Role::Planner)
+                        .count()
+                        - 1;
+                    match self.plans.get(call) {
+                        Some(plan) => FakeTurn::output(plan.clone()),
+                        None => athena_agent::fake::deterministic_turn(spec),
+                    }
+                }
+                Role::Critic => {
+                    let call = self
+                        .invocations
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|r| **r == Role::Critic)
+                        .count()
+                        - 1;
+                    match self.critiques.get(call) {
+                        Some(critique) => FakeTurn::output(critique.clone()),
+                        None => athena_agent::fake::deterministic_turn(spec),
+                    }
+                }
                 Role::Auditor => {
                     let mut seen = self.seen_by_auditor.lock().unwrap();
                     seen.push(spec.system_prompt.clone());
