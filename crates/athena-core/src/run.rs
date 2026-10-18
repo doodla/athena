@@ -570,6 +570,7 @@ impl Athena {
                 commands: verifier_commands,
                 writes: false,
             },
+            &|path| self.git.path_is_tree(&p, path).unwrap_or(false),
         );
         if athena_findings
             .iter()

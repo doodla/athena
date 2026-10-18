@@ -763,6 +763,46 @@ fn athena_checks_that_files_to_modify_exist_and_files_to_create_do_not() {
 }
 
 #[test]
+fn a_plan_that_lists_a_directory_gets_a_major_athena_finding_and_the_job_goes_to_the_next_round() {
+    // `src` is a directory in the fixture's base commit; `docs/` is a path ending in a slash.
+    for (dir_path, action) in [("docs/", "create"), ("src", "create"), ("src", "modify")] {
+        let fx = Fixture::with_config(&planned_config());
+        let mut scenario = Scenario::default();
+        scenario.plans = vec![
+            plan_of(
+                json!([
+                    { "path": "README.md", "action": "modify", "purpose": "Hold the greeting." },
+                    { "path": dir_path, "action": action, "purpose": "A directory." }
+                ]),
+                good_demos(),
+            ),
+            good_plan(),
+        ];
+        let calls = scenario.invocations.clone();
+        let athena = fx.athena(scenario.script());
+        let proposal = athena.ask("tidy the readme", &Lines::default()).unwrap();
+        let f = finished(
+            athena
+                .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
+                .unwrap(),
+        );
+        assert_eq!(f.state, OutcomeState::Landed, "{dir_path}: {}", f.reason);
+        assert_eq!(count(&calls, Role::Planner), 2, "{dir_path}");
+        assert_eq!(count(&calls, Role::Critic), 1, "{dir_path}");
+        let first = critique_at(&fx, &proposal.job.dir(), 1);
+        assert_eq!(first.invocation_seq, None, "no critic invocation");
+        assert_eq!(first.final_verdict, CritiqueVerdict::Revise);
+        assert!(
+            first.findings.iter().any(|f| f.severity == Severity::Major
+                && f.source == FindingSource::Athena
+                && f.summary.contains(dir_path)),
+            "{dir_path}: {:?}",
+            first.findings
+        );
+    }
+}
+
+#[test]
 fn a_file_outside_the_deliverables_is_a_minor_finding_that_does_not_send_the_plan_back() {
     let fx = Fixture::with_config(&planned_config());
     let mut scenario = Scenario::default();
