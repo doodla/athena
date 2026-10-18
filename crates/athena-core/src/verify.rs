@@ -1,7 +1,7 @@
 //! The final verdict, and the type that alone can land (design §6.3, §7.2; M7, M16).
 //!
 //! The core computes the final verdict. It passes only if the agent says pass, every criterion is met, no
-//! finding is a blocker or major, and every check passed. Each `behavior` criterion must cite at least one
+//! finding is a blocker or major, and every check passed or was already failing on the base commit. Each `behavior` criterion must cite at least one
 //! command, and every cited command must be one the core saw the verifier run, either as a whole command or
 //! as one whole simple command inside a chained or piped one; otherwise the criterion counts as unmet, with a
 //! finding that says so (D43, D63).
@@ -11,8 +11,8 @@
 
 use athena_context::outputs::{SeverityOutput, VerdictOutput, VerdictValue};
 use athena_data::records::{
-    CheckRun, Criterion, CriterionKind, CriterionResult, Finding, FindingSource, Severity, Verdict,
-    Verification,
+    Baseline, CheckRun, Criterion, CriterionKind, CriterionResult, Finding, FindingSource,
+    PRE_EXISTING_NOTE, Severity, Verdict, Verification,
 };
 
 /// A candidate that passed verification: the only input landing accepts.
@@ -112,6 +112,29 @@ pub struct VerdictInputs<'a> {
     pub map_base: Option<&'a str>,
     /// The same file at the candidate, if it exists there.
     pub map_candidate: Option<&'a str>,
+    /// The checks on the base commit, if a usable baseline for this job's base exists. A check that failed
+    /// there and fails again is pre-existing and does not fail the verdict.
+    pub baseline: Option<&'a Baseline>,
+}
+
+/// True when `check` failed now and the baseline shows the same check failing on the base commit.
+pub fn is_pre_existing(check: &CheckRun, baseline: Option<&Baseline>) -> bool {
+    !check.passed && baseline.is_some_and(|b| b.failed_before(&check.name))
+}
+
+/// Prefixes the note of each pre-existing failed check with [`PRE_EXISTING_NOTE`], so the record shows
+/// which failures were already on the base. Safe to call twice.
+pub fn mark_pre_existing(checks: &mut [CheckRun], baseline: Option<&Baseline>) {
+    for check in checks.iter_mut() {
+        if !is_pre_existing(check, baseline) {
+            continue;
+        }
+        match &check.note {
+            Some(note) if note.starts_with(PRE_EXISTING_NOTE) => {}
+            Some(note) => check.note = Some(format!("{PRE_EXISTING_NOTE}; {note}")),
+            None => check.note = Some(PRE_EXISTING_NOTE.to_string()),
+        }
+    }
 }
 
 /// What a system fault's finding starts with.
@@ -252,7 +275,8 @@ pub fn judge(inputs: &VerdictInputs<'_>) -> Judgment {
         .flat_map(|c| simple_commands(c))
         .collect();
 
-    for check in inputs.checks.iter().filter(|c| !c.passed) {
+    let blocking_checks = |c: &&CheckRun| !c.passed && !is_pre_existing(c, inputs.baseline);
+    for check in inputs.checks.iter().filter(blocking_checks) {
         reasons.push(format!("check {} failed", check.name));
     }
     if let Some(failure) = &inputs.verifier_failure {
@@ -366,7 +390,7 @@ pub fn judge(inputs: &VerdictInputs<'_>) -> Judgment {
                 mismatch.to_string(),
             ));
         }
-    } else if inputs.verifier_failure.is_none() && inputs.checks.iter().all(|c| c.passed) {
+    } else if inputs.verifier_failure.is_none() {
         reasons.push("the verifier returned no verdict".into());
     }
 
@@ -394,7 +418,7 @@ pub fn judge(inputs: &VerdictInputs<'_>) -> Judgment {
     let pass = agent_verdict == Some(Verdict::Pass)
         && unmet == 0
         && serious == 0
-        && inputs.checks.iter().all(|c| c.passed)
+        && inputs.checks.iter().filter(blocking_checks).count() == 0
         && inputs.verifier_failure.is_none();
     Judgment {
         criteria,
@@ -507,7 +531,102 @@ mod tests {
             verifier_failure: None,
             map_base: None,
             map_candidate: None,
+            baseline: None,
         })
+    }
+
+    fn baseline_with(checks: Vec<CheckRun>, note: Option<&str>) -> Baseline {
+        Baseline {
+            job: athena_data::JobId::parse("20261018-073510-m3yh").unwrap(),
+            base_commit: "a".repeat(40),
+            before_invocation: 1,
+            checks,
+            note: note.map(String::from),
+        }
+    }
+
+    fn judge_against(baseline: Option<&Baseline>, checks: &[CheckRun]) -> Judgment {
+        let ran = ["cargo test".to_string()];
+        judge(&VerdictInputs {
+            criteria: &criteria(),
+            checks,
+            output: Some(&output(vec!["cargo test"], vec![])),
+            commands_run: &ran,
+            system_fault: None,
+            verifier_failure: None,
+            map_base: None,
+            map_candidate: None,
+            baseline,
+        })
+    }
+
+    #[test]
+    fn a_check_failing_on_the_base_and_again_is_pre_existing_and_does_not_fail_the_verdict() {
+        let base = baseline_with(vec![check(false)], None);
+        let mut now = vec![check(false)];
+        mark_pre_existing(&mut now, Some(&base));
+        assert!(
+            now[0]
+                .note
+                .as_deref()
+                .unwrap()
+                .starts_with(PRE_EXISTING_NOTE)
+        );
+        let j = judge_against(Some(&base), &now);
+        assert_eq!(j.final_verdict, Verdict::Pass, "{:?}", j.reasons);
+        assert!(j.reasons.is_empty(), "{:?}", j.reasons);
+        // Marking twice changes nothing.
+        let once = now.clone();
+        mark_pre_existing(&mut now, Some(&base));
+        assert_eq!(now, once);
+        // judge alone, with no mark applied, reaches the same verdict.
+        let j = judge_against(Some(&base), &[check(false)]);
+        assert_eq!(j.final_verdict, Verdict::Pass, "{:?}", j.reasons);
+    }
+
+    #[test]
+    fn a_check_that_passed_or_was_absent_at_the_base_still_fails_the_verdict() {
+        let mut other = check(false);
+        other.name = "fmt".into();
+        let passed_before = baseline_with(vec![check(true)], None);
+        let other_only = baseline_with(vec![other], None);
+        for base in [Some(&passed_before), Some(&other_only), None] {
+            let mut now = vec![check(false)];
+            mark_pre_existing(&mut now, base);
+            assert_eq!(now[0].note, None, "not marked");
+            let j = judge_against(base, &now);
+            assert_eq!(j.final_verdict, Verdict::Fail);
+            assert!(
+                j.reasons.iter().any(|r| r == "check test failed"),
+                "{:?}",
+                j.reasons
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_or_noted_baseline_excuses_nothing() {
+        let empty = baseline_with(vec![], None);
+        let noted = baseline_with(
+            vec![check(false)],
+            Some("the baseline could not run: no snapshot"),
+        );
+        for base in [&empty, &noted] {
+            let mut now = vec![check(false)];
+            mark_pre_existing(&mut now, Some(base));
+            assert_eq!(now[0].note, None);
+            let j = judge_against(Some(base), &now);
+            assert_eq!(j.final_verdict, Verdict::Fail);
+            assert!(j.reasons.iter().any(|r| r == "check test failed"));
+        }
+    }
+
+    #[test]
+    fn a_failed_check_does_not_hide_the_criteria_the_verifier_judged() {
+        let j = judge_against(None, &[check(false)]);
+        assert_eq!(j.final_verdict, Verdict::Fail);
+        assert!(j.criteria.iter().all(|c| c.met));
+        assert!(!j.reasons.iter().any(|r| r.contains("returned no verdict")));
     }
 
     fn map(a: &str, b: &str) -> String {
@@ -527,6 +646,7 @@ mod tests {
             verifier_failure: None,
             map_base: Some(base),
             map_candidate: Some(candidate),
+            baseline: None,
         })
     }
 
@@ -697,6 +817,7 @@ mod tests {
             verifier_failure: None,
             map_base: None,
             map_candidate: None,
+            baseline: None,
         })
     }
 

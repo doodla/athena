@@ -922,7 +922,18 @@ fn failure_details(v: &Verification) -> String {
         .iter()
         .filter(|f| matches!(f.severity, Severity::Blocker | Severity::Major))
         .collect();
-    let checks: Vec<&CheckRun> = v.checks.iter().filter(|c| !c.passed).collect();
+    // A pre-existing failure was already on the base and did not cause this verdict.
+    let checks: Vec<&CheckRun> = v
+        .checks
+        .iter()
+        .filter(|c| {
+            !c.passed
+                && !c
+                    .note
+                    .as_deref()
+                    .is_some_and(|n| n.starts_with(athena_data::records::PRE_EXISTING_NOTE))
+        })
+        .collect();
     if unmet.is_empty() && findings.is_empty() && checks.is_empty() {
         return "\n\nThe stored verification lists no unmet criterion, blocker or major finding, or \
                 failed check, so the cause is not in the stored result."
@@ -1696,6 +1707,20 @@ mod tests {
         );
         assert!(!what.contains("Unmet acceptance criteria"), "{what}");
         assert!(!what.contains("fmt"), "{what}");
+    }
+
+    #[test]
+    fn a_pre_existing_failed_check_is_not_listed_as_a_cause() {
+        let mut old = check("fmt", false, "already broken");
+        old.note = Some(athena_data::records::PRE_EXISTING_NOTE.to_string());
+        let what = what_of(Some(verification(
+            vec![criterion("The tests pass", false)],
+            Vec::new(),
+            vec![old, check("test", false, "thread panicked")],
+            Verdict::Fail,
+        )));
+        assert!(what.contains("- test: thread panicked"), "{what}");
+        assert!(!what.contains("already broken"), "{what}");
     }
 
     #[test]

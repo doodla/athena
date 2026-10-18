@@ -11,7 +11,7 @@ use crate::pin::{is_full_sha, mount};
 use crate::reading::{Proposal, same_scope};
 use crate::scoring::{self, Happened, score, totals};
 use crate::store::{JobRecords, JobState, Records};
-use crate::verify::{MAP_PATH, VerdictInputs, Verified, judge, verified};
+use crate::verify::{MAP_PATH, VerdictInputs, Verified, judge, mark_pre_existing, verified};
 use crate::{Athena, Ui};
 use anyhow::{Context, Result, bail};
 use athena_agent::env::{EnvSpec, Side};
@@ -1218,7 +1218,7 @@ impl Athena {
     /// Runs the capability's configured checks on a fresh snapshot of the base commit and returns the
     /// baseline record. It never fails: a snapshot or environment error, or a nested run, gives a record
     /// with no checks and a note saying why. `before_invocation` is the sequence number the first
-    /// producer invocation will get. Nothing here reads the result; it is only recorded.
+    /// producer invocation will get. Verification reads the result to mark pre-existing failures.
     fn take_baseline(&self, ctx: &RunContext<'_>, job_dir: &std::path::Path, seq: u32) -> Baseline {
         let mut baseline = Baseline {
             job: ctx.id().clone(),
@@ -1715,7 +1715,13 @@ impl Athena {
             checks_line.join(" · "),
             check_started.elapsed().as_secs_f64()
         ));
-        let all_passed = check_runs.iter().all(|r| r.passed);
+        // A check that failed on this job's base commit and fails again is marked pre-existing. A baseline
+        // taken on any other commit says nothing about this base.
+        let usable_baseline = closing
+            .baseline
+            .as_ref()
+            .filter(|b| b.base_commit == p.as_str());
+        mark_pre_existing(&mut check_runs, usable_baseline);
 
         let criteria = ctx.reading.acceptance_criteria.clone();
         let verifier_grant = ctx.capability.verifier_grant(jc);
@@ -1777,7 +1783,9 @@ impl Athena {
         // Set when the verifier changed its snapshot: the system failed to keep it still, so the work is
         // not at fault. The verdict is discarded and verification reruns once on a fresh snapshot.
         let mut system_fault: Option<String> = None;
-        if all_passed {
+        // The verifier always runs, so a failed check never leaves the criteria unjudged; the check still
+        // fails the final verdict unless it is pre-existing.
+        {
             closing.files.push(NewFile::text(
                 format!("{}/brief-verifier.md", id.dir()),
                 verifier_brief_with_plan(&inputs, verifier_plan.as_ref(), false),
@@ -1952,6 +1960,7 @@ impl Athena {
             verifier_failure: verifier_failure.clone(),
             map_base: map_base.as_deref(),
             map_candidate: map_candidate.as_deref(),
+            baseline: usable_baseline,
         });
         let verification = Verification {
             job: id.clone(),
