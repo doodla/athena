@@ -1,0 +1,225 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261018-133651-1ncn",
+  "round": 1,
+  "at": "2026-10-18T13:39:04.381121447Z",
+  "invocation_seq": 3,
+  "approach": "Write docs/spec.toml as `[[requirement]]` and `[[question]]` tables. Each requirement has id, statement, kind, status, optional supersedes, and a `sources` list of {quote, heading}. Each question has id, text and sources. Add xtask/tests/spec.rs with a pure `check(spec_toml, brief_text) -> Result<Report, Vec<String>>` function using the toml and serde crates that xtask already lists as dev-dependencies. The real test runs it on docs/spec.toml and BRIEF.md. Whitespace-collapsed substring matching is used for quotes. In-memory negative tests cover a bad quote, a duplicate id, a missing supersedes target, and a requirement with no source. A coverage test maps each source's heading to Olympus sections 1-5 and R1-R8, and requires at least one requirement for each of those 13 groups. Then add the CHANGELOG entry, a decisions.md record (D111), and an M33 row in docs/enforcement.md so the map names the new tests. docs/ontology.toml gets a term only if one is needed (see open_questions).",
+  "decisions": [
+    {
+      "choice": "TOML with [[requirement]] tables, parsed with toml+serde in a Rust test",
+      "reason": "The repo already uses TOML for docs/ontology.toml, and toml and serde are already xtask dev-dependencies, so nothing is hand-parsed (buy-first). Quotes can be multi-line strings. Agents and Sri can both read it.",
+      "rejected": [
+        {
+          "option": "Markdown with ids",
+          "why": "It needs a hand-written parser and is easy to drift."
+        },
+        {
+          "option": "JSON",
+          "why": "It has no comments, escaping long quotes is painful, and it is hard for Sri to approve by reading."
+        },
+        {
+          "option": "YAML",
+          "why": "It needs a new crate, and its implicit typing and indentation rules make errors easy."
+        }
+      ]
+    },
+    {
+      "choice": "Normalize both quote and BRIEF.md with `split_whitespace().join(\" \")` before a substring check. Keep markdown characters in the quote.",
+      "reason": "This matches the 'collapsing whitespace' criterion and lets multi-line quotes pass. 'Verbatim' stays strict apart from whitespace.",
+      "rejected": [
+        {
+          "option": "Stripping markdown or case-folding",
+          "why": "It weakens the verbatim guarantee."
+        }
+      ]
+    },
+    {
+      "choice": "Derive each source's section from its `heading` string (e.g. '1. Vision', 'R1 — Causal investigation', '3.2 …', 'Stage C — …'). The coverage test also checks that the heading text appears as a heading line in BRIEF.md, so a heading cannot be invented.",
+      "reason": "The criterion counts by the sources' headings. Checking the heading against BRIEF.md keeps the count honest.",
+      "rejected": [
+        {
+          "option": "A separate `section` field",
+          "why": "It duplicates the heading and can disagree with it."
+        }
+      ]
+    },
+    {
+      "choice": "Coverage is limited to sections 1 to 6 now. The expected groups are listed in one const array that job two can extend.",
+      "reason": "Halved scope per the user; the test must pass now.",
+      "rejected": [
+        {
+          "option": "Requiring all sections now",
+          "why": "It would fail until the second job."
+        }
+      ]
+    },
+    {
+      "choice": "Pure `check` function that takes strings, with the negative tests built from a small valid in-memory spec mutated four ways.",
+      "reason": "It shows the checker fails for each defect without touching files.",
+      "rejected": [
+        {
+          "option": "Negative fixtures as files",
+          "why": "Extra files, and the negative cases would need tracking."
+        }
+      ]
+    },
+    {
+      "choice": "Question format: `[[question]]` with id, text, and `sources` (two or more quotes). The test validates the quotes the same way, and an empty list is allowed.",
+      "reason": "Criterion 5 asks for the format to be supported. The planner has not read sections 1 to 6 in full for conflicts, so the producer decides whether any exists. If none, put a top-of-file comment saying so and include one in-memory test that parses a question.",
+      "rejected": [
+        {
+          "option": "Inventing a conflict",
+          "why": "It would put a false claim in Sri's spec."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "docs/spec.toml",
+      "action": "create",
+      "purpose": "The spec for Olympus sections 1-6: requirements and questions, each with verbatim quotes and headings. It has a header comment on the format and the scope.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "xtask/tests/spec.rs",
+      "action": "create",
+      "purpose": "The `check` function, the real-file test, the four negative tests, the schema tests and the section 1-6 coverage test.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Entry for docs/spec.toml and its checking test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Add D111: the spec format, TOML with alternatives, buy-first for toml+serde, and a note that sections 7-10, governing philosophy and the 2026-10-17 addenda come in job two.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/enforcement.md",
+      "action": "modify",
+      "purpose": "Add a row (M33) naming the spec tests: negative `a_quote_not_in_the_brief_is_flagged`, positive `the_spec_is_valid_against_the_brief`, so M24 stays true. Test names must be defined under xtask/tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "xtask/Cargo.toml",
+      "action": "modify",
+      "purpose": "Only if needed. toml, serde and regex are already dev-dependencies, so likely no change. Cargo.lock then also stays unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/ontology.toml",
+      "action": "modify",
+      "purpose": "Only if the producer finds a term in the spec that caused a misread. Per the file's own rule a term is added only when it caused a misread, so expect no change.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read BRIEF.md lines 550-865 in full. Also read the M19 and `named_tests` logic in xtask/tests/policy.rs, and the enforcement map's row format.",
+    "Write xtask/tests/spec.rs. Define serde structs for Spec, Requirement, Source and Question with `deny_unknown_fields`. Add `normalize`, `check`, the section grouping and the coverage function.",
+    "Write the negative and schema tests, starting from one valid in-memory spec and mutating it, plus a question parse test. Run `cargo test -p xtask --test spec` and see them fail on an empty spec.",
+    "Author docs/spec.toml: a header comment on the format and scope. Then requirements for sections 1-6, merged where they repeat, with statements, kinds, statuses and quotes. Add questions if the text has any, or a comment that it has none.",
+    "Run the test and fix mismatched quotes and coverage gaps until it passes.",
+    "Add the M33 row to docs/enforcement.md, D111 to docs/decisions.md and the CHANGELOG entry. Touch docs/ontology.toml only if a term caused a misread.",
+    "Run cargo fmt --all --check, cargo clippy --all-targets --locked -- -D warnings and cargo test --locked. Confirm Cargo.lock needs no change."
+  ],
+  "risks": [
+    {
+      "risk": "Quotes with smart punctuation, tables, em dashes or markdown pipes fail to match BRIEF.md.",
+      "mitigation": "Copy quotes straight from the file, keep them to a sentence or a table row cell sequence, and run the test after each batch of requirements."
+    },
+    {
+      "risk": "The spec file is large and takes more than one run.",
+      "mitigation": "Aim for one requirement per distinct idea, merge duplicates, and write a short statement. About 40 to 60 requirements is an estimate, not measured."
+    },
+    {
+      "risk": "The coverage test fails on headings with em dashes or unusual spacing.",
+      "mitigation": "Normalize whitespace in headings, and match section groups by a prefix list: '1. Vision', '2. The Pantheon', '3', '4', '5', and 'R1' to 'R8'. Sub-headings such as '3.1' and 'Stage A' fold into their parent sections."
+    },
+    {
+      "risk": "The spec could assert who runs Athena or where.",
+      "mitigation": "State only Olympus behavior. Run the policy test."
+    },
+    {
+      "risk": "Clippy with the workspace lints rejects test code patterns.",
+      "mitigation": "Mirror the style of xtask/tests/policy.rs and run clippy on all targets before finishing."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Run the test that loads docs/spec.toml and BRIEF.md and runs `check`.",
+      "command": "cargo test -p xtask --test spec",
+      "observes": "`the_spec_is_valid_against_the_brief` passes. Every quote is a whitespace-collapsed substring of BRIEF.md, ids are unique, supersedes targets exist, and every requirement has at least one source.",
+      "fails_without": "A quote not in BRIEF.md, a duplicate id, a dangling supersedes or an unsourced requirement in docs/spec.toml would make the test fail. A missing docs/spec.toml would too."
+    },
+    {
+      "criterion": 2,
+      "method": "Four in-memory tests, each mutating a valid spec string, and each asserting that `check` returns an error containing a specific message.",
+      "command": "cargo test -p xtask --test spec",
+      "observes": "`a_quote_not_in_the_brief_is_flagged`, `a_duplicate_id_is_flagged`, `a_missing_supersedes_target_is_flagged` and `a_requirement_without_a_source_is_flagged` pass. A valid baseline in the same file passes `check`, so the failures come from the mutation.",
+      "fails_without": "If `check` skipped any of the four checks, the matching negative test would see Ok and fail."
+    },
+    {
+      "criterion": 3,
+      "method": "`sections_one_to_six_are_covered` groups requirements by their sources' headings and asserts a count of at least 1 for each of 13 groups: the headings of sections 1-5 and R1-R8.",
+      "command": "cargo test -p xtask --test spec",
+      "observes": "The test passes. On failure it prints the groups with no requirement.",
+      "fails_without": "If a group such as R6 had no sourced requirement, the test would fail and name it. A negative test with a spec that lacks a group asserts the coverage function reports it."
+    },
+    {
+      "criterion": 4,
+      "method": "The checker also validates the schema. `kind` is one of goal, requirement, constraint, acceptance. `status` is active or superseded. The statement is non-empty and each source has a quote and a heading. The producer authors the file from sections 1-6 of BRIEF.md and merges duplicates into one requirement with several sources. Review is by reading docs/spec.toml.",
+      "command": "cargo test -p xtask --test spec",
+      "observes": "The test passes with the schema enforced. A review of the file shows requirement-bearing sentences from the Vision list, the Pantheon table, the three feedback sub-sections, Stages A-F, 5.1 and R1-R8 covered.",
+      "fails_without": "An invalid kind or status, or an empty statement, would fail the schema check."
+    },
+    {
+      "criterion": 5,
+      "method": "If a conflict or open choice exists in sections 1-6, docs/spec.toml has a `[[question]]` with both verbatim quotes. If not, a header comment says none was found, and an in-memory test shows a question with two quotes parses and one with a bad quote is flagged.",
+      "command": "cargo test -p xtask --test spec",
+      "observes": "The test passes. The question quotes are validated like requirement quotes, and the question is not turned into a requirement.",
+      "fails_without": "A question quote not in BRIEF.md would fail the check."
+    },
+    {
+      "criterion": 6,
+      "method": "Run the existing policy tests, which include the M19 check that no file refers to who runs Athena or where. docs/spec.toml is a tracked file and is scanned.",
+      "command": "cargo test -p xtask --test policy",
+      "observes": "policy.rs passes. Read docs/spec.toml to confirm no statement about who runs Athena or where.",
+      "fails_without": "A line in docs/spec.toml naming the operator or machine would trip M19, if the file is scanned."
+    },
+    {
+      "criterion": 7,
+      "method": "Run cargo fmt --check, then clippy, then cargo test over the workspace. The test code uses no unwrap-style patterns that the workspace lints forbid; the producer follows xtask/tests/policy.rs style.",
+      "command": "cargo clippy --all-targets --locked -- -D warnings",
+      "observes": "All three exit 0, including the M24 test that every test named in docs/enforcement.md exists.",
+      "fails_without": "A lint, a format difference or a misnamed test in the enforcement map would fail it."
+    },
+    {
+      "criterion": 8,
+      "method": "Inspect the diff of CHANGELOG.md and docs/decisions.md.",
+      "command": "git diff",
+      "observes": "CHANGELOG.md has an entry for the spec. docs/decisions.md has a new D111 stating the format, the choice of TOML with Markdown with ids, JSON and YAML as the rejected alternatives, and that sections 7-10, the governing philosophy and the 2026-10-17 addenda follow in a second job.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Whether sections 1-6 contain a conflict or open choice in Sri's words. I read only the Vision and Pantheon text (lines 550-609), not sections 3-6 in full. The producer must read all of lines 550-865 and decide.",
+    "Whether docs/spec.toml, as a tracked .toml document, is scanned by M19 for words like the operator's name. The producer should read the M19 test in xtask/tests/policy.rs first and avoid those words.",
+    "Whether `named_tests` in policy.rs reads the new enforcement row as expected, and whether `defined_tests` scans xtask/tests/spec.rs. The producer should check both before adding the M33 row.",
+    "Cargo.toml and Cargo.lock are listed as deliverables, but toml and serde already appear in xtask's dev-dependencies, so they may not change. The producer should run `cargo build --locked` to confirm."
+  ],
+  "producer_section_sha256": "f5a6faf5b42610f6846189cdbeee294130cc6123032069fc86a912081fe3392e"
+}
