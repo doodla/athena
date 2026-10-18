@@ -1,0 +1,191 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261018-073510-m3yh",
+  "round": 2,
+  "at": "2026-10-18T08:29:03.714234293Z",
+  "invocation_seq": 3,
+  "approach": "Fix at two origins. (1) verify.rs: VerdictInputs gains `baseline: Option<&Baseline>`. A check is pre-existing only when it failed and the baseline has no note and holds an entry with the same name and passed=false. judge leaves such checks out of the reasons and the pass condition. New mark_pre_existing(&mut [CheckRun], Option<&Baseline>) prefixes the check note with a fixed phrase (no new CheckRun field, no schema change). (2) run.rs: always run the verifier (drop the all_passed gate); pass closing.baseline (only if its base_commit equals the job base) to mark_pre_existing and judge. A real failed check still fails the verdict, but every criterion gets its own result. introspect.rs and records.rs get small consistency edits; tests and CHANGELOG follow.",
+  "decisions": [
+    {
+      "choice": "Carry the pre-existing mark in CheckRun.note via a constant prefix PRE_EXISTING_NOTE in records.rs, with Baseline::failed_before(name) returning false when the baseline has a note or no entry.",
+      "reason": "CheckRun is deny_unknown_fields, and the brief prefers the note. One helper makes the missing/empty/could-not-run rule live in one place (criterion 6).",
+      "rejected": [
+        {
+          "option": "Add pre_existing: bool to CheckRun",
+          "why": "Schema change on a deny_unknown_fields record."
+        },
+        {
+          "option": "Compute pre-existing only inside judge, no recorded mark",
+          "why": "The record would not show the reader which failures were on the base (criterion 5)."
+        }
+      ]
+    },
+    {
+      "choice": "judge takes the baseline and decides pre-existing itself; run.rs also calls mark_pre_existing before building verifier inputs.",
+      "reason": "Criterion 1 requires judge() alone to pass a base-failing check; the verifier also sees the note.",
+      "rejected": [
+        {
+          "option": "Flip passed to true for pre-existing checks",
+          "why": "Falsifies the check record and the CI routing reads passed."
+        }
+      ]
+    },
+    {
+      "choice": "Always run the verifier; judge still fails the verdict for a non-pre-existing failed check; the 'verifier returned no verdict' reason no longer depends on checks passing.",
+      "reason": "The fault starts at the gate: one unrelated failing check left every criterion unjudged.",
+      "rejected": [
+        {
+          "option": "Run the verifier only when failures are pre-existing",
+          "why": "Fails criterion 3."
+        }
+      ]
+    },
+    {
+      "choice": "Ignore a baseline whose base_commit differs from the job base (in run.rs).",
+      "reason": "A baseline for another commit says nothing about this base.",
+      "rejected": [
+        {
+          "option": "Trust any baseline in closing",
+          "why": "Could wrongly mark failures pre-existing."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "action": "modify",
+      "purpose": "Add baseline to VerdictInputs, is_pre_existing, mark_pre_existing, judge changes, unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "purpose": "Drop the all_passed gate; mark pre-existing checks with the matching-base baseline; pass baseline to judge.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "purpose": "Add PRE_EXISTING_NOTE and Baseline::failed_before; update the Baseline doc comment; unit test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/introspect.rs",
+      "action": "modify",
+      "purpose": "failure_details skips pre-existing failed checks; add test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "purpose": "Rewrite the verifier-skipped test; add pre-existing landing test and counter case; fix tests assuming no verifier on check failure.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Record the new behavior in plain language.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "records.rs: add PRE_EXISTING_NOTE and Baseline::failed_before (false if note is set; true only for same name and !passed); update doc; add unit test for empty, noted, missing cases.",
+    "verify.rs: add baseline to VerdictInputs; add is_pre_existing and mark_pre_existing (idempotent prefix).",
+    "verify.rs judge: only failed, non-pre-existing checks add reasons and block pass; the no-verdict reason no longer depends on checks passing; update existing test constructors with baseline: None; add tests for criteria 1, 2, 5, 6.",
+    "run.rs: filter closing.baseline by base_commit; call mark_pre_existing on check_runs; remove all_passed and the wrapper; pass baseline to judge.",
+    "Fix other VerdictInputs constructors (land.rs tests, run_pin_tests.rs).",
+    "introspect.rs: failure_details skips notes starting with PRE_EXISTING_NOTE; add test.",
+    "lifecycle.rs: rewrite the skipped-verifier test; add pre-existing landing test and counter case; fix other affected tests.",
+    "CHANGELOG.md: add entry under unreleased.",
+    "Run cargo fmt --all, cargo clippy --all-targets --locked -- -D warnings, cargo test --locked."
+  ],
+  "risks": [
+    {
+      "risk": "Spending a verifier run on a job that will fail anyway raises cost.",
+      "mitigation": "The budget check already runs before each verifier call; the request accepts this cost."
+    },
+    {
+      "risk": "A flaky base check failing in the baseline could hide a real regression.",
+      "mitigation": "Needs same name, passed=false, and a baseline for the same base commit; the note marks it for the reader. Retrying is out of scope."
+    },
+    {
+      "risk": "Existing tests assert no verifier on check failure.",
+      "mitigation": "Update them in the same change; check-failure reasons still appear."
+    },
+    {
+      "risk": "The verifier sees a failed check and may be confused.",
+      "mitigation": "The note is applied before the verifier inputs are built."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit test in verify.rs: baseline holds check `test` passed=false with no note; verification check `test` also fails.",
+      "command": "cargo test -p athena-core verify",
+      "observes": "final_verdict is Pass; reasons contain no 'check test failed'; mark_pre_existing gives the check a note starting with the pre-existing phrase.",
+      "fails_without": "Without baseline handling judge pushes 'check test failed' and the verdict is Fail, so the assertion fails."
+    },
+    {
+      "criterion": 2,
+      "method": "Unit tests: baseline has `test` passed=true; baseline None; baseline with only another check name. `test` fails at verification in each.",
+      "command": "cargo test -p athena-core verify",
+      "observes": "final_verdict is Fail, reasons include 'check test failed', note not marked pre-existing.",
+      "fails_without": "If every failed check were treated as pre-existing the verdict would pass and the assertion fails."
+    },
+    {
+      "criterion": 3,
+      "method": "Lifecycle test (rewrite of the 'without spending a verifier' test): candidate fails a check not failing at base. Read verification.json.",
+      "command": "cargo test -p athena-cli --test lifecycle",
+      "observes": "Verifier role invoked; one result per acceptance criterion, each from the verifier (not 'did not assess'); final_verdict Fail; state Rejected; nothing landed.",
+      "fails_without": "With the gate in place the verifier is never invoked and every criterion shows 'the verifier did not assess this criterion'."
+    },
+    {
+      "criterion": 4,
+      "method": "Lifecycle test: config with a check `sh -c 'exit 1'` failing at base and after the change; everything else passes. Counter case: check passes at base, fails after.",
+      "command": "cargo test -p athena-cli --test lifecycle",
+      "observes": "State Landed; baseline.json has the check failed; verification.json check failed with pre-existing note; final_verdict Pass. Counter case is Rejected.",
+      "fails_without": "Without pre-existing handling the job is Rejected on the failing check."
+    },
+    {
+      "criterion": 5,
+      "method": "Assertions on the stored check note in the verify.rs unit test and lifecycle test 4, plus an introspect.rs unit test that failure_details omits pre-existing checks.",
+      "command": "cargo test -p athena-core verify && cargo test -p athena-cli --test lifecycle",
+      "observes": "The pre-existing check note begins with the pre-existing phrase; a non-pre-existing failure's note lacks it.",
+      "fails_without": "With no mark, the note assertion fails."
+    },
+    {
+      "criterion": 6,
+      "method": "Unit tests on Baseline::failed_before and judge: baseline None, empty checks with no note, a note 'the baseline could not run: ...', and a matching failed entry plus a note.",
+      "command": "cargo test -p athena-core verify",
+      "observes": "No check is pre-existing and the failure still fails the verdict in each case.",
+      "fails_without": "Reading an empty or noted baseline as success would pass the verdict and fail the assertion."
+    },
+    {
+      "criterion": 7,
+      "method": "Run the full gates, then confirm the new tests are in the run.",
+      "command": "cargo test",
+      "observes": "All tests pass, including the new verify, records, introspect and lifecycle tests; then `cargo clippy --all-targets` and `cargo fmt --check` report no warnings or diffs.",
+      "fails_without": "If the change broke an existing test (for example one still expecting no verifier on a failed check, or a VerdictInputs call missing the baseline field) cargo test or cargo clippy --all-targets fails to pass or compile; unformatted code makes cargo fmt --check fail."
+    },
+    {
+      "criterion": 8,
+      "method": "Read the new CHANGELOG entry under the unreleased heading.",
+      "command": "git diff CHANGELOG.md",
+      "observes": "A plain-language entry says base-failing checks are marked pre-existing and no longer reject a job, and the verifier now judges every criterion even when a check fails.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Other tests may assume no verifier runs on a failed check (lifecycle.rs ~lines 508 and 753, run_pin_tests.rs); not read. The producer should run cargo test and adjust.",
+    "Whether the verifier prompt says a failing check ends the job; not read. If so, update it.",
+    "Other VerdictInputs constructors (land.rs tests, run_pin_tests.rs) need baseline: None."
+  ],
+  "producer_section_sha256": "894fa70f6403c9e0d04015a466131b19edc5b2601b2e21e74782987d2b70472c"
+}

@@ -1896,7 +1896,8 @@ pub const BASELINE_SCHEMA: &str = "athena.baseline/1";
 
 /// `athena.baseline/1`: the job's configured checks run on the base commit, before the first producer
 /// invocation, at `<job>/baseline.json`. It records which checks already fail before the producer touches
-/// anything. It is recorded only: nothing reads it to judge a candidate yet.
+/// anything. At verification, a check that failed here and fails again is marked pre-existing and does not
+/// fail the verdict.
 ///
 /// A check that fails, times out or cannot start is recorded as not passed, with a note; none of these stops
 /// the job. When the baseline could not run at all, `checks` is empty and `note` says why.
@@ -1914,7 +1915,17 @@ pub struct Baseline {
     pub note: Option<String>,
 }
 
+/// What a verification check's note starts with when the same check already failed on the base commit.
+pub const PRE_EXISTING_NOTE: &str = "pre-existing: this check already failed on the base commit";
+
 impl Baseline {
+    /// True only when this baseline ran without a note and holds a failed entry named `name`. A baseline
+    /// with a note (it could not run, or is partial), an empty one, or one without that check says nothing
+    /// about the check, so it is never read as a reason to excuse a failure.
+    pub fn failed_before(&self, name: &str) -> bool {
+        self.note.is_none() && self.checks.iter().any(|c| c.name == name && !c.passed)
+    }
+
     /// Why this record is not acceptable, if it is not.
     pub fn validate(&self) -> Result<(), String> {
         if self.base_commit.trim().is_empty() {
@@ -3052,6 +3063,28 @@ mod tests {
             checks: vec![check("fmt"), check("test")],
             note: None,
         }
+    }
+
+    #[test]
+    fn only_a_noteless_baseline_with_a_failed_entry_excuses_a_check() {
+        let b = sample_baseline();
+        assert!(b.failed_before("fmt") && b.failed_before("test"));
+        assert!(!b.failed_before("clippy"), "no entry");
+        let mut passed = sample_baseline();
+        passed.checks[0].passed = true;
+        assert!(!passed.failed_before("fmt"), "it passed at the base");
+        let mut empty = sample_baseline();
+        empty.checks.clear();
+        assert!(
+            !empty.failed_before("fmt"),
+            "an empty baseline is not success or failure"
+        );
+        let mut noted = sample_baseline();
+        noted.note = Some("the baseline could not run: no snapshot".into());
+        assert!(
+            !noted.failed_before("fmt"),
+            "a noted baseline excuses nothing"
+        );
     }
 
     #[test]

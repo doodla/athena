@@ -14,8 +14,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `athena.baseline/1` (`baseline.json`). A check that fails, times out or cannot start is recorded as failed
   and never stops the job. The baseline is recorded only: verification judges as before, and part 2 will use
   the record at verification.
+- Verification now uses the baseline. A check that already failed on the job's base commit and fails again is
+  marked pre-existing in its note in `verification.json`; it no longer rejects the job. A check that passed
+  on the base, or has no baseline entry, still rejects it, and a missing, empty or could-not-run baseline
+  excuses nothing.
 
 ### Fixed
+
+- When one check fails, the verifier now still runs, so every acceptance criterion gets its own result in the
+  verification record instead of none. The final verdict still fails on that check.
 
 - Job planning no longer crashes `athena go` when a plan lists a directory. The first planned job
   (20261017-204355-358k) listed `docs/`; `Git::show_file` checked existence with `git cat-file -e`, which

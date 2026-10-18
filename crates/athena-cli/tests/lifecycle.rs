@@ -145,8 +145,9 @@ fn baseline_failure_does_not_stop_the_job() {
         .unwrap();
     assert_eq!(missing.exit_code, None);
     assert!(missing.note.as_ref().unwrap().contains("could not start"));
-    // The verdict is the candidate's: the command that cannot start fails there too.
-    assert_eq!(f.state, OutcomeState::Rejected, "{}", f.reason);
+    // The command that cannot start fails on the candidate too, exactly as it failed on the base, so it is
+    // pre-existing and the job lands.
+    assert_eq!(f.state, OutcomeState::Landed, "{}", f.reason);
 
     // With only the check that fails on the base, the same job lands.
     let config = config_with_change_checks(&[("greeting", &["grep", "-q", "Hello", "README.md"])]);
@@ -379,7 +380,7 @@ fn the_verifier_never_sees_the_producers_report_or_hidden_content() {
 }
 
 #[test]
-fn a_failing_check_rejects_the_job_without_spending_a_verifier() {
+fn a_failing_check_still_runs_the_verifier_and_every_criterion_is_judged() {
     let fx = Fixture::new();
     let mut scenario = Scenario::default();
     scenario.edits = vec![("README.md".into(), None)];
@@ -392,9 +393,77 @@ fn a_failing_check_rejects_the_job_without_spending_a_verifier() {
             .unwrap(),
     );
     assert_eq!(f.state, OutcomeState::Rejected);
-    assert!(!calls.lock().unwrap().contains(&Role::Verifier));
+    assert!(calls.lock().unwrap().contains(&Role::Verifier));
     assert!(fx.file("README.md").is_some(), "nothing landed");
     assert!(athena.check_history().unwrap().violations.is_empty());
+    let verification = match record_at(
+        &fx,
+        "HEAD",
+        &format!("{}/verification.json", proposal.job.dir()),
+    ) {
+        Some(AnyRecord::Verification(v)) => *v,
+        other => panic!("unexpected {other:?}"),
+    };
+    assert_eq!(verification.criteria.len(), 2);
+    for c in &verification.criteria {
+        assert_ne!(c.evidence, "the verifier did not assess this criterion");
+        assert!(c.met, "the verifier judged it on its own: {c:?}");
+    }
+    assert_eq!(verification.final_verdict, Verdict::Fail);
+    let failed: Vec<_> = verification.checks.iter().filter(|c| !c.passed).collect();
+    assert!(!failed.is_empty());
+    for c in failed {
+        assert!(
+            !c.note
+                .as_deref()
+                .unwrap_or("")
+                .starts_with(athena_data::records::PRE_EXISTING_NOTE),
+            "it passed at the base, so it is not pre-existing"
+        );
+        assert!(
+            verification
+                .reasons
+                .contains(&format!("check {} failed", c.name))
+        );
+    }
+}
+
+#[test]
+fn a_check_already_failing_on_the_base_does_not_reject_a_job_that_leaves_it_failing() {
+    let config = config_with_change_checks(&[("old", &["sh", "-c", "exit 1"])]);
+    let fx = Fixture::with_config(&config);
+    let (job, f) = run_with_checks(&fx, Scenario::default());
+    assert_eq!(f.state, OutcomeState::Landed, "{}", f.reason);
+    assert!(!baseline_of(&fx, &job).checks[0].passed);
+    let verification = match record_at(&fx, "HEAD", &format!("{}/verification.json", job.dir())) {
+        Some(AnyRecord::Verification(v)) => *v,
+        other => panic!("unexpected {other:?}"),
+    };
+    let old = verification
+        .checks
+        .iter()
+        .find(|c| c.name == "old")
+        .unwrap();
+    assert!(!old.passed, "the record still says it failed");
+    assert!(
+        old.note
+            .as_deref()
+            .unwrap()
+            .starts_with(athena_data::records::PRE_EXISTING_NOTE)
+    );
+    assert_eq!(verification.final_verdict, Verdict::Pass);
+    assert!(
+        verification.reasons.is_empty(),
+        "{:?}",
+        verification.reasons
+    );
+
+    // Counter case: the same check passes on the base and fails after the change.
+    let config = config_with_change_checks(&[("new", &["sh", "-c", "! grep -q Hello README.md"])]);
+    let fx = Fixture::with_config(&config);
+    let (job, f) = run_with_checks(&fx, Scenario::default());
+    assert_eq!(f.state, OutcomeState::Rejected, "{}", f.reason);
+    assert!(baseline_of(&fx, &job).checks[0].passed);
 }
 
 #[test]
