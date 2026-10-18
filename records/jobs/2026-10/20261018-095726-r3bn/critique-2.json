@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261018-095726-r3bn",
+  "round": 2,
+  "at": "2026-10-18T11:33:08.874018564Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/gh.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/gh.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The criterion 1 test may never run the code that held the resync, so it would pass with the old behavior.",
+      "evidence": "The resync ran only inside Athena::land_pr after report.link.state == Landed (gh.rs:1625-1631). The test is described as \"run the merge-time path and check nothing changed\" and then asserts `plan` returns Plan::Tree. If the test only simulates the squash on a side ref and calls `plan`, nothing rewrites HEAD whether or not the resync call is removed, so the test passes either way. Fix: Have the test call Athena::land_pr (or one extracted function that land_pr calls after a Landed report), using a fake runner/host that reports A's PR as merged with the side-ref squash commit. Then assert HEAD, B's base and B's worktree are unchanged and that `plan` for B returns Plan::Tree. Confirm by temporarily putting the resync call back: the test must fail. Also cut B's head after the merge, so the test shows 'its candidate still lands cleanly' on the host side and not only locally.",
+      "location": "Demonstrations, Criterion 1 (second_job_survives_a_squash_merge)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan does not say that the push guards and the replace comparison must use the cut commit and the stored source.",
+      "evidence": "check_push and check_replace (pr.rs:134-192) take local_head, and publish/replace_head pass job.commit today (gh.rs:1365, 1385). land_pr replaces the head when link.head != job.commit (gh.rs:1297). After the cut, link.head is the cut commit and not job.commit, so every rerun would re-cut unless the comparison switches to source. Fix: State that PushRequest/ReplaceRequest.local_head is the cut commit and that the comparison at gh.rs:1297 uses link.source.unwrap_or(link.head). Add a test where a rerun with an unchanged source makes no push.",
+      "location": "Steps 3-4 (publish / replace_head with cut_head); gh.rs:1297",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The docs should say how the never-rebased local branch takes in outside changes on main.",
+      "evidence": "Once resync is gone, the local branch never takes in the host's merged commits or any outside commit on main. Replay then always starts from an ever-older merge-base. An outside governed change on main makes every later cut fail the fingerprint check, until the maintainer merges main in by hand. Fix: Say this in §5.2a and D103: how the maintainer brings outside main changes into the local branch (a hand merge, which replay rebuilds as one change), and that the cut is refused until then. Label the replay cost as an estimate, as the plan already does.",
+      "location": "Open questions 2-3; docs/design/native-pr-landing.md §5.2a",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The code half of criterion 4 is shown only by reading the diff; the grep is the real check.",
+      "evidence": "'cargo build succeeds with no resync code path' and the git diff reading only show that code is gone. That is acceptable for a [content] criterion, but the grep in step 8 is the real check. Fix: Name the grep (`rg resync_onto_merge crates/` returns nothing) as the observation for criterion 4's code half.",
+      "location": "Demonstrations, Criterion 4",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The design is sound, and it fixes the fault where it starts. I checked it against the snapshot. The only call to resync_onto_merge is in Athena::land_pr (gh.rs:1630). The function and resync_tip are in land.rs:95-141. Git::replay (athena-git lib.rs:701) already skips commits that become empty (line 722), so a landed commit that a squash already carries drops out, as the plan claims. publish and replace_head (gh.rs:1356-1408) are the right places to cut the pull request head. PrLink (pr.rs:39) already uses serde defaults. Git::signs_commits is public (lib.rs:556), so GitRemote can reach it and the plan's last open question is answered. Editing gh.rs outside the listed deliverables is needed and well argued, so I agree with Athena's minor finding and accept the extension. The main gap is the criterion 1 demonstration. As written it runs `plan` and an unspecified \"merge-time path\". A test that never calls Athena::land_pr would pass even with the resync call still in place, so it would not fail without the behavior. Smaller points: the guard calls must use the cut commit, and the docs should cover how the never-rebased local branch picks up outside changes on main."
+}
