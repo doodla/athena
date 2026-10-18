@@ -25,6 +25,156 @@ fn record_at(fx: &Fixture, rev: &str, path: &str) -> Option<AnyRecord> {
         .map(|bytes| AnyRecord::parse(path, &bytes).unwrap())
 }
 
+/// Runs one job to its end under `config` and returns it with its result.
+fn run_with_checks(
+    fx: &Fixture,
+    scenario: Scenario,
+) -> (athena_data::JobId, athena_core::run::Finished) {
+    let athena = fx.athena(scenario.script());
+    let ui = Lines::default();
+    let proposal = athena.ask("add a greeting to the readme", &ui).unwrap();
+    let f = finished(
+        athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &ui)
+            .unwrap(),
+    );
+    (proposal.job, f)
+}
+
+fn baseline_of(fx: &Fixture, job: &athena_data::JobId) -> athena_data::records::Baseline {
+    match record_at(fx, "HEAD", &format!("{}/baseline.json", job.dir())) {
+        Some(AnyRecord::Baseline(b)) => *b,
+        other => panic!("expected a baseline record, got {other:?}"),
+    }
+}
+
+#[test]
+fn baseline_records_failing_and_passing_checks() {
+    let config = config_with_change_checks(&[
+        ("bad", &["sh", "-c", "exit 1"]),
+        ("good", &["sh", "-c", "exit 0"]),
+    ]);
+    let fx = Fixture::with_config(&config);
+    let (job, _) = run_with_checks(&fx, Scenario::default());
+    let baseline = baseline_of(&fx, &job);
+    let by_name = |n: &str| baseline.checks.iter().find(|c| c.name == n).unwrap();
+    assert!(!by_name("bad").passed);
+    assert_eq!(by_name("bad").exit_code, Some(1));
+    assert!(by_name("good").passed);
+    assert_eq!(by_name("good").exit_code, Some(0));
+    assert_eq!(baseline.checks.len(), 2);
+    // The records check accepts the file where it is.
+    let path = format!("{}/baseline.json", job.dir());
+    let bytes = fx.git.show_file("HEAD", &path).unwrap().unwrap();
+    assert!(athena_data::records::check_record_file(&path, &bytes).is_ok());
+}
+
+#[test]
+fn baseline_is_taken_from_the_base_before_the_producer() {
+    // `grep -q Hello README.md` fails on the base and passes once the producer has edited README.md.
+    let config = config_with_change_checks(&[("greeting", &["grep", "-q", "Hello", "README.md"])]);
+    let fx = Fixture::with_config(&config);
+    let (job, f) = run_with_checks(&fx, Scenario::default());
+    assert_eq!(f.state, OutcomeState::Landed, "{}", f.reason);
+    let baseline = baseline_of(&fx, &job);
+    // The base commit has no greeting; the baseline names it and the check failed there.
+    let readme = fx
+        .git
+        .show_file(&baseline.base_commit, "README.md")
+        .unwrap()
+        .unwrap();
+    assert!(!String::from_utf8(readme).unwrap().contains("Hello"));
+    assert!(!baseline.checks[0].passed, "taken from the base");
+    // The same check on the candidate passes.
+    let dir = job.dir();
+    let candidate = match record_at(&fx, "HEAD", &format!("{dir}/candidate.json")) {
+        Some(AnyRecord::Candidate2(c)) => *c,
+        other => panic!("unexpected {other:?}"),
+    };
+    assert_eq!(candidate.base_commit, baseline.base_commit);
+    let verification = match record_at(&fx, "HEAD", &format!("{dir}/verification.json")) {
+        Some(AnyRecord::Verification(v)) => *v,
+        other => panic!("unexpected {other:?}"),
+    };
+    assert!(verification.checks[0].passed);
+    // It precedes the producer: the first producer invocation has the number the baseline names.
+    let producer = record_at(
+        &fx,
+        "HEAD",
+        &format!(
+            "{dir}/invocations/{:02}-producer.json",
+            baseline.before_invocation
+        ),
+    );
+    match producer {
+        Some(AnyRecord::Invocation(i)) => assert_eq!(i.role, Role::Producer),
+        other => panic!("expected the first producer invocation, got {other:?}"),
+    }
+    assert!(
+        record_at(
+            &fx,
+            "HEAD",
+            &format!(
+                "{dir}/invocations/{:02}-producer.json",
+                baseline.before_invocation - 1
+            )
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn baseline_failure_does_not_stop_the_job() {
+    // A check that fails on the base but passes on the candidate: the job still lands.
+    let config = config_with_change_checks(&[
+        ("greeting", &["grep", "-q", "Hello", "README.md"]),
+        ("missing", &["/nonexistent/athena-baseline-check"]),
+    ]);
+    let fx = Fixture::with_config(&config);
+    let scenario = Scenario::default();
+    let calls = scenario.invocations.clone();
+    let (job, f) = run_with_checks(&fx, scenario);
+    // The producer ran although both baseline checks failed.
+    assert!(calls.lock().unwrap().contains(&Role::Producer));
+    let baseline = baseline_of(&fx, &job);
+    assert!(baseline.checks.iter().all(|c| !c.passed));
+    let missing = baseline
+        .checks
+        .iter()
+        .find(|c| c.name == "missing")
+        .unwrap();
+    assert_eq!(missing.exit_code, None);
+    assert!(missing.note.as_ref().unwrap().contains("could not start"));
+    // The verdict is the candidate's: the command that cannot start fails there too.
+    assert_eq!(f.state, OutcomeState::Rejected, "{}", f.reason);
+
+    // With only the check that fails on the base, the same job lands.
+    let config = config_with_change_checks(&[("greeting", &["grep", "-q", "Hello", "README.md"])]);
+    let fx = Fixture::with_config(&config);
+    let (job, f) = run_with_checks(&fx, Scenario::default());
+    assert_eq!(f.state, OutcomeState::Landed, "{}", f.reason);
+    assert!(!baseline_of(&fx, &job).checks[0].passed);
+}
+
+#[test]
+fn baseline_tail_is_capped() {
+    let config = config_with_change_checks(&[(
+        "noisy",
+        &[
+            "sh",
+            "-c",
+            "i=0; while [ $i -lt 600 ]; do echo 0123456789; i=$((i+1)); done; exit 2",
+        ],
+    )]);
+    let fx = Fixture::with_config(&config);
+    let (job, _) = run_with_checks(&fx, Scenario::default());
+    let check = &baseline_of(&fx, &job).checks[0];
+    assert_eq!(check.exit_code, Some(2));
+    assert!(!check.output_tail.is_empty());
+    // The tail keeps at most 4 KiB, plus the three-byte ellipsis that marks the cut.
+    assert!(check.output_tail.len() <= athena_core::checks::TAIL_BYTES + 3);
+}
+
 #[test]
 fn the_change_capability_never_pins() {
     // A change job reads no studied repository: the pinner is never called and the job record has no pin.

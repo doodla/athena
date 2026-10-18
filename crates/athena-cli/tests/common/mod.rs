@@ -53,6 +53,25 @@ run = ["sh", "-c", "test -f README.md && ! test -f .cargo/config.toml && echo 't
     format!("{}{}{}", &base[..start], checks, &base[end..])
 }
 
+/// [`test_config`] with the change capability's checks replaced by `checks`: each is a name and the
+/// command line to run, as a program and its arguments.
+pub fn config_with_change_checks(checks: &[(&str, &[&str])]) -> String {
+    let base = test_config();
+    let start = base
+        .find("[[capabilities.change.checks]]")
+        .expect("the config has checks");
+    let end = base.find("[classes]").expect("the config has classes");
+    let mut block = String::new();
+    for (name, run) in checks {
+        let argv: Vec<String> = run.iter().map(|a| format!("{a:?}")).collect();
+        block.push_str(&format!(
+            "[[capabilities.change.checks]]\nname = {name:?}\nrun = [{}]\n\n",
+            argv.join(", ")
+        ));
+    }
+    format!("{}{}{}", &base[..start], block, &base[end..])
+}
+
 /// `config` with its job budget set to `value` (whatever it was).
 pub fn with_job_usd(config: &str, value: &str) -> String {
     let out: Vec<String> = config

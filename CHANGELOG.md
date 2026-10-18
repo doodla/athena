@@ -7,6 +7,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- Before the producer starts, Athena runs the capability's configured checks on the base commit and records
+  each one's name, pass or fail, exit code and bounded redacted output tail in a new per-job record,
+  `athena.baseline/1` (`baseline.json`). A check that fails, times out or cannot start is recorded as failed
+  and never stops the job. The baseline is recorded only: verification judges as before, and part 2 will use
+  the record at verification.
+
 ### Fixed
 
 - Job planning no longer crashes `athena go` when a plan lists a directory. The first planned job

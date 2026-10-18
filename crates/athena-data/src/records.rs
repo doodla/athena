@@ -1890,6 +1890,47 @@ impl Critique {
 }
 
 // ---------------------------------------------------------------------------------------------------------
+// The baseline of checks
+
+pub const BASELINE_SCHEMA: &str = "athena.baseline/1";
+
+/// `athena.baseline/1`: the job's configured checks run on the base commit, before the first producer
+/// invocation, at `<job>/baseline.json`. It records which checks already fail before the producer touches
+/// anything. It is recorded only: nothing reads it to judge a candidate yet.
+///
+/// A check that fails, times out or cannot start is recorded as not passed, with a note; none of these stops
+/// the job. When the baseline could not run at all, `checks` is empty and `note` says why.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Baseline {
+    pub job: JobId,
+    /// The commit the checks ran on: the job's base commit.
+    pub base_commit: String,
+    /// The sequence number the first producer invocation gets. The baseline was taken before it.
+    pub before_invocation: u32,
+    /// One entry per configured check. No path-skipping applies, since no change list exists yet.
+    pub checks: Vec<CheckRun>,
+    /// Why the baseline is empty or partial, if it is.
+    pub note: Option<String>,
+}
+
+impl Baseline {
+    /// Why this record is not acceptable, if it is not.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.base_commit.trim().is_empty() {
+            return Err("a baseline names the base commit it ran on".into());
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for c in &self.checks {
+            if !seen.insert(c.name.as_str()) {
+                return Err(format!("a baseline lists check {} twice", c.name));
+            }
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------
 // The envelope
 
 /// Any record, tagged by its `schema` field.
@@ -1950,6 +1991,8 @@ pub enum AnyRecord {
     JobPlan(Box<JobPlan>),
     #[serde(rename = "athena.critique/1")]
     Critique(Box<Critique>),
+    #[serde(rename = "athena.baseline/1")]
+    Baseline(Box<Baseline>),
 }
 
 /// Why a file under `records/` is not acceptable.
@@ -2032,6 +2075,7 @@ impl AnyRecord {
             AnyRecord::Audit(a) => a.validate().map_err(invalid)?,
             AnyRecord::JobPlan(p) => p.validate().map_err(invalid)?,
             AnyRecord::Critique(c) => c.validate().map_err(invalid)?,
+            AnyRecord::Baseline(b) => b.validate().map_err(invalid)?,
             AnyRecord::DefaultsProposal(p) => p.validate().map_err(invalid)?, // Totals are what reconciliation checks an outcome against; only the bootstrap has none
             // (acceptance verification 2).
             AnyRecord::Outcome(o) if o.job.is_request() && o.totals.is_none() => {
@@ -2125,6 +2169,7 @@ impl AnyRecord {
             AnyRecord::Audit(r) => format!("records/audits/{}/{}.json", r.id.month(), r.id),
             AnyRecord::JobPlan(r) => format!("{}/job-plan-{}.json", r.job.dir(), r.round),
             AnyRecord::Critique(r) => format!("{}/critique-{}.json", r.job.dir(), r.round),
+            AnyRecord::Baseline(r) => format!("{}/baseline.json", r.job.dir()),
         }
     }
 
@@ -2157,6 +2202,7 @@ impl AnyRecord {
             AnyRecord::Audit(_) => AUDIT_SCHEMA,
             AnyRecord::JobPlan(_) => JOB_PLAN_SCHEMA,
             AnyRecord::Critique(_) => CRITIQUE_SCHEMA,
+            AnyRecord::Baseline(_) => BASELINE_SCHEMA,
         }
     }
 }
@@ -2984,6 +3030,57 @@ mod tests {
             assert!(matches!(
                 check_record_file(&wrong, json.as_bytes()),
                 Err(RecordError::Misplaced { .. })
+            ));
+        }
+    }
+
+    fn sample_baseline() -> Baseline {
+        let check = |name: &str| CheckRun {
+            name: name.into(),
+            command: vec!["true".into()],
+            exit_code: Some(1),
+            passed: false,
+            tests_ran: None,
+            duration: Quantity::measured(0.5, crate::Unit::Seconds, "test"),
+            output_tail: "boom".into(),
+            note: None,
+        };
+        Baseline {
+            job: job(),
+            base_commit: "a".repeat(40),
+            before_invocation: 1,
+            checks: vec![check("fmt"), check("test")],
+            note: None,
+        }
+    }
+
+    #[test]
+    fn a_baseline_belongs_at_baseline_json_and_nowhere_else() {
+        let record = AnyRecord::Baseline(Box::new(sample_baseline()));
+        assert_eq!(record.schema(), "athena.baseline/1");
+        let json = record.to_json();
+        assert_eq!(AnyRecord::parse("x", json.as_bytes()).unwrap(), record);
+        let right = format!("{}/baseline.json", job().dir());
+        assert_eq!(record.canonical_path(), right);
+        assert!(check_record_file(&right, json.as_bytes()).is_ok());
+        let wrong = format!("{}/baseline-1.json", job().dir());
+        assert!(matches!(
+            check_record_file(&wrong, json.as_bytes()),
+            Err(RecordError::Misplaced { .. })
+        ));
+    }
+
+    #[test]
+    fn a_baseline_without_a_base_or_with_a_repeated_check_is_refused() {
+        let mut bad = sample_baseline();
+        bad.checks[1].name = "fmt".into();
+        let mut empty = sample_baseline();
+        empty.base_commit = " ".into();
+        for b in [bad, empty] {
+            let record = AnyRecord::Baseline(Box::new(b));
+            assert!(matches!(
+                AnyRecord::parse("x", record.to_json().as_bytes()),
+                Err(RecordError::Invalid { .. })
             ));
         }
     }

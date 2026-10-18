@@ -33,6 +33,7 @@ records/
     correction-<n>.json          athena.correction/1    a one-line correction of reading n, or an answer
     job.json                     athena.job/1           the dispatched job: accepted reading, owner, models, caps
     brief-producer.md            the producer brief, verbatim
+    baseline.json                athena.baseline/1      the configured checks run on the base commit before the producer; recorded only
     invocations/<seq>-<role>.json athena.invocation/1   one model invocation
     candidate.json               athena.candidate/2     the change list, fingerprint, admission, producer report, chain links (/1 for older jobs)
     brief-verifier.md            the verifier brief, with the diff elided

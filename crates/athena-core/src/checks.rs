@@ -230,9 +230,103 @@ pub fn run_check(spec: &CheckSpec, ctx: &CheckContext<'_>) -> Result<CheckRun> {
     })
 }
 
+/// Runs every spec on the base commit for the job's baseline record. Unlike [`run_check`] it never fails:
+/// a check that cannot be run at all (an error from `run_check`) is recorded as not passed, with a note.
+/// A check that fails, times out or cannot start is already recorded that way by `run_check`. Every
+/// spec runs, whatever the earlier ones did, and `skip_when_only` is not applied, since no change list
+/// exists yet. The result is recorded only; nothing here judges a candidate.
+pub fn baseline_runs(specs: &[CheckSpec], ctx: &CheckContext<'_>) -> Vec<CheckRun> {
+    specs
+        .iter()
+        .map(|spec| match run_check(spec, ctx) {
+            Ok(run) => run,
+            Err(e) => CheckRun {
+                name: spec.name.clone(),
+                command: spec.run.clone(),
+                exit_code: None,
+                passed: false,
+                tests_ran: None,
+                duration: Quantity::measured(0.0, Unit::Seconds, "not run"),
+                output_tail: String::new(),
+                note: Some(format!("baseline check could not run: {e}")),
+            },
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sh_spec(name: &str, script: &str) -> CheckSpec {
+        CheckSpec {
+            name: name.into(),
+            run: vec!["sh".into(), "-c".into(), script.into()],
+            kind: CheckKind::Command,
+            skip_when_only: None,
+        }
+    }
+
+    #[test]
+    fn baseline_records_each_check_whatever_the_others_did() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let registry = Registry::new(state.path());
+        let redactor = Redactor::new(&athena_gate::builtin_config()).unwrap();
+        let env = BTreeMap::from([("PATH".to_string(), std::env::var("PATH").unwrap())]);
+        let ctx = CheckContext {
+            dir: dir.path(),
+            env: &env,
+            timeout: Duration::from_secs(30),
+            registry: &registry,
+            job: "j",
+            redactor: &redactor,
+        };
+        let specs = [
+            sh_spec("bad", "exit 3"),
+            sh_spec("good", "exit 0"),
+            CheckSpec {
+                name: "missing".into(),
+                run: vec!["/nonexistent/athena-baseline-check".into()],
+                kind: CheckKind::Command,
+                skip_when_only: Some(vec!["*.md".into()]),
+            },
+            CheckSpec {
+                name: "empty".into(),
+                run: vec![],
+                kind: CheckKind::Command,
+                skip_when_only: None,
+            },
+        ];
+        let runs = baseline_runs(&specs, &ctx);
+        assert_eq!(runs.len(), 4);
+        assert!(!runs[0].passed && runs[0].exit_code == Some(3));
+        assert!(runs[1].passed && runs[1].exit_code == Some(0));
+        assert!(!runs[2].passed);
+        assert!(runs[2].note.as_ref().unwrap().contains("could not start"));
+        assert!(!runs[3].passed);
+        assert!(runs[3].note.as_ref().unwrap().contains("could not run"));
+    }
+
+    #[test]
+    fn baseline_records_a_timeout_as_failed_with_a_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let registry = Registry::new(state.path());
+        let redactor = Redactor::new(&athena_gate::builtin_config()).unwrap();
+        let env = BTreeMap::from([("PATH".to_string(), std::env::var("PATH").unwrap())]);
+        let ctx = CheckContext {
+            dir: dir.path(),
+            env: &env,
+            timeout: Duration::from_millis(300),
+            registry: &registry,
+            job: "j",
+            redactor: &redactor,
+        };
+        let runs = baseline_runs(&[sh_spec("slow", "sleep 30")], &ctx);
+        assert!(!runs[0].passed);
+        assert!(runs[0].note.as_ref().unwrap().contains("deadline"));
+    }
 
     #[test]
     fn tests_are_counted_from_the_harness_summary() {
