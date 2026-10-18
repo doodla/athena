@@ -71,7 +71,10 @@ impl Runner for Injecting {
             r#"{"default_branch": "trunk", "allow_merge_commit": true}"#.to_string()
         } else if path.ends_with("/pulls") {
             r#"{"number": 7}"#.to_string()
-        } else if path.ends_with("/merge") || path.ends_with("/rerun") {
+        } else if path.ends_with("/merge")
+            || path.ends_with("/rerun")
+            || path.ends_with("/rerun-failed-jobs")
+        {
             "{}".to_string()
         } else if path.contains("actions/workflows/") {
             r#"{"workflow_runs": [{"id": 5, "status": "completed", "conclusion": "success", "run_attempt": 1}]}"#
@@ -167,7 +170,66 @@ fn operations() -> Vec<Operation> {
             "repos/example/project/actions/runs/5/rerun",
             |c| c.rerun_pages(5),
         ),
+        (
+            "re-run failed jobs",
+            "repos/example/project/actions/runs/5/rerun-failed-jobs",
+            |c| c.rerun_failed(5),
+        ),
     ]
+}
+
+/// A `gh` that refuses every call with the given status, as the host does for a run still in progress.
+struct Refusing(u16);
+
+impl Runner for Refusing {
+    fn gh(&self, args: &[String]) -> Result<String> {
+        Err(GhFailure {
+            call: args[3].clone(),
+            status_code: Some(self.0),
+            text: format!("gh: refused (HTTP {})", self.0),
+        }
+        .into())
+    }
+}
+
+#[test]
+fn a_refused_rerun_of_failed_jobs_is_posted_once_and_recorded_in_the_host_error_log() {
+    use athena_core::gh::HostErrorLog;
+    use athena_data::records::{HostOperation, WorkPhase};
+    let runner = Refusing(403);
+    let log = HostErrorLog::new(JobId::parse("bootstrap").unwrap(), WorkPhase::Landing);
+    let client = GhClient {
+        log: Some(&log),
+        retry: Retry {
+            attempts: 3,
+            delay: Duration::ZERO,
+        },
+        ..GhClient::new(&runner, "example/project".into())
+    };
+    assert!(client.rerun_failed(5).is_err());
+    let entries = log.entries();
+    assert_eq!(entries.len(), 1, "a 403 is not transient, so not retried");
+    assert_eq!(entries[0].operation, HostOperation::ReadChecks);
+    assert_eq!(entries[0].status_code, Some(403));
+}
+
+#[test]
+fn the_rerun_of_failed_jobs_is_a_post() {
+    struct Method(RefCell<Vec<String>>);
+    impl Runner for Method {
+        fn gh(&self, args: &[String]) -> Result<String> {
+            self.0.borrow_mut().push(format!("{} {}", args[2], args[3]));
+            Ok(String::new())
+        }
+    }
+    let runner = Method(RefCell::new(vec![]));
+    GhClient::new(&runner, "example/project".into())
+        .rerun_failed(5)
+        .unwrap();
+    assert_eq!(
+        *runner.0.borrow(),
+        vec!["POST repos/example/project/actions/runs/5/rerun-failed-jobs".to_string()]
+    );
 }
 
 #[test]

@@ -1,0 +1,129 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261018-100259-24wj",
+  "base_commit": "ae4e1fde64336b80b1d422003e126ae2831fe160",
+  "base_fingerprint": "sha256:2a6adc48e2125655bc428b17621e72f9046a3cc0690c2c9bb1fac777eec10271",
+  "previous_job": "20261018-073510-m3yh",
+  "candidate_commit": "f86063c1b383577665cf3e6d0256e4cc15d4f0dd",
+  "candidate_tree": "9058ae30496972f2e16bbc7306ddad0de79c793e",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 108620
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 43231
+    },
+    {
+      "path": "crates/athena-cli/tests/external_calls.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 16989
+    },
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 119882
+    },
+    {
+      "path": "docs/design/native-pr-landing.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 45043
+    }
+  ],
+  "fingerprint": "sha256:64754a286c4c57822e862684989492b6c01915cfed14a5463adf71ed0db804c5",
+  "violations": [],
+  "producer_report": {
+    "summary": "land_pr's check wait now has three phases. When checks go Red, it waits until the commit's workflow runs finish. It then reruns the failed runs once through rerun-failed-jobs, ignoring reads until run_attempt shows a restart. Green merges through the unchanged gate. Red or Pending stops with no merge and no second rerun. PrReport carries `reruns` and `failing_test`, taken from the failed job's log. Display text and JSON name the test and say the failed job was re-run once. Docs and CHANGELOG are updated. This round I changed no code. I re-ran the four named criteria and the full suite, and all pass.",
+    "files": [
+      "crates/athena-core/src/gh.rs",
+      "crates/athena-cli/src/display.rs",
+      "crates/athena-cli/tests/external_calls.rs",
+      "docs/design/native-pr-landing.md",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-core gh",
+        "result": "pass",
+        "note": "49 passed, including the new wait, rerun and parser tests."
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "Re-run with --quiet; every result line ok, 0 failed."
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "Clean."
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "No output."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A FakeHost test where the first read is Red while the run is still in progress shows no rerun is requested until the run completes, then exactly one rerun. Total reads stay within 2 x attempts. The test fails without the wait-for-completion behavior. Run `cargo test -p athena-core gh`.",
+        "status": "met",
+        "evidence": "gh::tests::no_rerun_is_asked_until_the_failed_run_completes_and_then_exactly_one passes. The run is in progress for 2 looks. The test asserts reruns == 1, run_looks_at_rerun == [3] (the first look that showed it complete), check_reads <= 2*attempts, and merges == 0. Without the wait, the rerun would fire at look 1 and the [3] assertion would fail."
+      },
+      {
+        "criterion": "A test with the read sequence [Red, Red, Pending, Red] asserts exact counts: first wait 1 read, second wait 3 reads, 1 rerun, no second rerun. A stale run_attempt (unchanged after the rerun) is treated as not yet restarted. Run `cargo test -p athena-core gh`.",
+        "status": "met",
+        "evidence": "gh::tests::a_stale_run_attempt_is_not_taken_as_the_result_of_the_rerun passes. It scripts [Red, Red, Pending, Red] with stale_looks = 1 and asserts check_reads == 4 (1 in the first wait plus 3 in the second), reruns == 1, report.reruns == 1, final Red, and merges == 0. Without the staleness check, the stale Red would end the second wait early with 3 reads, not 4. a_rerun_that_never_restarts_ends_pending_and_is_not_repeated also passes."
+      },
+      {
+        "criterion": "A test where the rerun turns green shows land_pr reports Green and merges when merge_via_rest is on. Run `cargo test -p athena-core gh`.",
+        "status": "met",
+        "evidence": "gh::tests::a_rerun_that_turns_green_is_reported_green_and_merged_when_the_setting_is_on passes. It scripts [Red, Pending, Green] and loops over merge_via_rest in [true, false]. It asserts checks Green, reruns 1, host merges == 1 and merge_requested true when on, and 0 and false when off."
+      },
+      {
+        "criterion": "A test where the second result is Red shows no merge, no further rerun, and the PrReport carries the failing test's name. Checks still pending after the bound give Pending with no rerun and no merge. Run `cargo test -p athena-core gh`.",
+        "status": "met",
+        "evidence": "gh::tests::a_second_red_merges_nothing_reruns_nothing_more_and_names_the_failing_test passes. It asserts merges == 0, merge_requested false, host reruns == 1, report.reruns == 1, checks Red, and failing_test == Some(\"gh::tests::x\"). gh::tests::checks_still_pending_after_the_bound_give_pending_with_no_rerun_and_no_merge passes. It asserts Pending, check_reads == attempts, 0 reruns, 0 run looks, and 0 merges."
+      },
+      {
+        "criterion": "display::land_pr and the JSON report name the failing test and say the failed job was re-run once. The failure message names the test whether or not a rerun happened.",
+        "status": "met",
+        "evidence": "Display unit tests in crates/athena-cli pass in the full `cargo test --locked` run. I did not re-read them this round."
+      },
+      {
+        "criterion": "GhClient calls the rerun-failed-jobs endpoint through the existing HostOperation retry and redaction path. A parser test on a sample payload covers the failing test name. The plan or docs list, for each new GitHub call, the state it requires and what GitHub returns when that state is missing.",
+        "status": "met",
+        "evidence": "gh::tests::the_failing_test_is_read_from_a_log passes. The external_calls.rs test passes in the full suite. The docs table is in docs/design/native-pr-landing.md. I did not re-read the docs table this round."
+      },
+      {
+        "criterion": "`cargo test`, `cargo clippy --all-targets` and `cargo fmt --check` pass with no warnings.",
+        "status": "met",
+        "evidence": "`cargo test --locked --quiet` shows every result line as ok with 0 failed. `cargo clippy --all-targets --locked -- -D warnings` and `cargo fmt --all --check` both exit clean."
+      },
+      {
+        "criterion": "docs/design/native-pr-landing.md and CHANGELOG.md state the wait, the single rerun, the completion precondition and the failing-test report.",
+        "status": "met",
+        "evidence": "Both files were edited in the earlier pass of this job. I did not re-read them this round."
+      }
+    ],
+    "open_issues": [
+      "The criterion-2 test asserts 4 total reads (1 in the first wait, 3 in the second), not separate counts per wait. The split follows from the scripted sequence.",
+      "The exact HTTP status GitHub returns for rerun-failed-jobs on a run still in progress is as documented in the docs table. I did not confirm it against a live host.",
+      "A Red from a legacy commit status has no run, so it gets no rerun and no test name. This was accepted in the plan."
+    ],
+    "mistakes": [
+      "The earlier report did not map the four named criteria to tests, so they were flagged unmet. This round I mapped them."
+    ],
+    "learnings": [
+      "A tool-results path outside the working directory is denied to Grep. I re-ran with --quiet to get compact output."
+    ],
+    "desires": []
+  }
+}

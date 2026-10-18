@@ -1,0 +1,162 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261018-095724-dqht",
+  "n": 1,
+  "at": "2026-10-18T09:58:13.256226014Z",
+  "invocation_seq": 1,
+  "base_commit": "f7939b7d900c33ceb59c494f19eacbbcd3ea6ab4",
+  "config_sha256": "ba462c7ffba3475385f095363becb853b0eda55fed87c41e3f78d800cf1f63fc",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Make land --pr rerun a failed check once and name the failing test",
+  "summary": "`athena land --pr` already polls checks for about ten minutes (30 looks, 20 s apart), but a red check ends the run with no retry and no detail. I read the request as: keep the bounded wait, rerun the failed check jobs once when a check fails and wait again, and on a second failure report the failing test's name. The audience is the operator who wants a landing to finish unattended.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "New unit tests with fake host; cargo test and clippy must be clean."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check the rerun and the failing-test report happening, via fake-host tests."
+    },
+    {
+      "id": "root-cause",
+      "how": "The retry sits inside land_pr's check wait, not as a caller-side wrapper."
+    },
+    {
+      "id": "small",
+      "how": "One focused change in the gh.rs landing flow plus its display."
+    },
+    {
+      "id": "rust",
+      "how": "All code is Rust."
+    },
+    {
+      "id": "verified",
+      "how": "Verifier runs cargo test, clippy and fmt --check."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Waiting already exists (Poll, 30 x 20 s); that bound is kept, applied to the first wait and to the rerun wait separately or in total, and stated in the code.",
+    "Only failed check jobs are re-run (GitHub rerun-failed-jobs), once per land invocation; a stored count is not needed beyond the invocation unless the design needs it.",
+    "The failing test's name is extracted from the failed job's log or annotations for cargo test output (`test x::y ... FAILED`); if none is found the report says so rather than guessing.",
+    "The merge gate is unchanged: nothing merges unless the checks are green and merge_via_rest is on.",
+    "Exit code stays 2 unless the checks end green or the job lands."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A unit test in gh.rs with a fake PrHost shows a first red check triggers exactly one rerun of the failed jobs, then a second wait; if the rerun goes green, land_pr reports Green and merges when merge_via_rest is on. Run `cargo test -p athena-core gh`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A unit test shows a second red result triggers no further rerun and the PrReport carries the failing test's name (parsed from the failed job's log or annotations). Run `cargo test -p athena-core gh`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test shows that checks still pending after the bounded number of looks make land_pr return Pending without rerunning or merging, and that the total wait across the first wait, the rerun and the second wait stays bounded.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The text printed by display::land_pr names the failing test on a second failure and says that the failed job was re-run once. The JSON report includes the same field.",
+      "kind": "content"
+    },
+    {
+      "text": "The real GhClient implements the rerun through the GitHub rerun-failed-jobs endpoint and reads the failing test name from a real host reply shape. This is covered by a parser test on a sample payload. Any new host calls go through the existing HostOperation retry and redaction path.",
+      "kind": "content"
+    },
+    {
+      "text": "`cargo test`, `cargo clippy --all-targets` and `cargo fmt --check` all pass with no warnings.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The design doc or CHANGELOG states the new behavior (wait, one rerun, failing-test report) so a stranger can find it.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "p": 0.35
+    },
+    {
+      "path": "crates/athena-cli/src/wiring.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "docs/design/native-pr-landing.md",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-cli/tests/external_calls.rs",
+      "action": "modify",
+      "p": 0.2
+    }
+  ],
+  "out_of_scope": [
+    "Changing the merge gate or the merge_via_rest setting",
+    "Rerunning more than once or rerunning passing jobs",
+    "Non-GitHub hosts",
+    "Pages-run rerun logic"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.72,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.4,
+        "p50": 0.95,
+        "p90": 2.2
+      },
+      "wall_time_s": {
+        "p10": 450.0,
+        "p50": 1100.0,
+        "p90": 2300.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.76,
+      "p_verification_passes": 0.6411764705882353,
+      "p_user_intervenes": 0.0811764705882353,
+      "cost_usd": {
+        "p10": 0.4090264112116332,
+        "p50": 0.9709933,
+        "p90": 2.141216609957148
+      },
+      "wall_time_s": {
+        "p10": 571.8442196009763,
+        "p50": 1212.9327204728093,
+        "p90": 2318.057214774823
+      }
+    }
+  },
+  "departures": "Slightly higher cost and lower pass odds than the reference. The change adds a new host call, log parsing and a second wait loop to a large gh.rs, and the failing-test extraction format is uncertain."
+}

@@ -227,13 +227,35 @@ pub fn land_pr(report: &athena_core::gh::PrReport) -> String {
             "open          checks are green; merge it on the host, then run `athena land {} --pr` again to land it\n",
             link.job
         ),
-        (LinkState::Open, Some(Checks::Red)) => "open          a check failed; nothing was merged\n".to_string(),
+        (LinkState::Open, Some(Checks::Red)) => {
+            // The failing test is named whether or not the failed job was re-run.
+            let test = match &report.failing_test {
+                Some(name) => format!("test {name} failed"),
+                None => "a check failed (the failing test could not be named)".to_string(),
+            };
+            let rerun = if report.reruns > 0 {
+                ", and it failed again after the failed job was re-run once"
+            } else {
+                ""
+            };
+            format!("open          {test}{rerun}; nothing was merged\n")
+        }
         (LinkState::Open, _) => {
             "open          checks are not finished; nothing was merged. Run the command again later\n"
                 .to_string()
         }
     };
     out.push_str(&line);
+    if report.reruns > 0 && report.checks != Some(Checks::Red) {
+        let after = if report.checks == Some(Checks::Green) {
+            "and then passed"
+        } else {
+            "and has not finished"
+        };
+        out.push_str(&format!(
+            "re-run        the failed job was re-run once {after}\n"
+        ));
+    }
     out
 }
 
@@ -1211,6 +1233,61 @@ pub fn trace(t: &JobTrace) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use athena_core::gh::{Checks, PrReport};
+    use athena_core::pr::{LinkState, PrLink};
+
+    fn report(checks: Checks, reruns: u32, test: Option<&str>) -> PrReport {
+        PrReport {
+            link: PrLink {
+                pr_number: 7,
+                host: "github.com".into(),
+                repository: "example/project".into(),
+                head: "abc".into(),
+                job: "j".into(),
+                state: LinkState::Open,
+                merged_commit: None,
+            },
+            checks: Some(checks),
+            merge_requested: false,
+            reruns,
+            failing_test: test.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn a_red_report_names_the_test_and_says_the_failed_job_was_re_run_once() {
+        let text = land_pr(&report(Checks::Red, 1, Some("gh::tests::x")));
+        assert!(text.contains("test gh::tests::x failed"), "{text}");
+        assert!(text.contains("re-run once"), "{text}");
+        assert!(text.contains("nothing was merged"), "{text}");
+    }
+
+    #[test]
+    fn a_red_report_names_the_test_even_when_nothing_was_re_run() {
+        let text = land_pr(&report(Checks::Red, 0, Some("gh::tests::x")));
+        assert!(text.contains("test gh::tests::x failed"), "{text}");
+        assert!(!text.contains("re-run"), "{text}");
+    }
+
+    #[test]
+    fn a_red_report_with_no_name_says_so() {
+        let text = land_pr(&report(Checks::Red, 1, None));
+        assert!(text.contains("could not be named"), "{text}");
+    }
+
+    #[test]
+    fn a_green_report_after_a_rerun_says_so() {
+        let text = land_pr(&report(Checks::Green, 1, None));
+        assert!(text.contains("re-run once and then passed"), "{text}");
+        assert!(!land_pr(&report(Checks::Green, 0, None)).contains("re-run"));
+    }
+
+    #[test]
+    fn the_json_report_carries_the_rerun_and_the_failing_test() {
+        let json = serde_json::to_value(report(Checks::Red, 1, Some("gh::tests::x"))).unwrap();
+        assert_eq!(json["reruns"], 1);
+        assert_eq!(json["failing_test"], "gh::tests::x");
+    }
 
     #[test]
     fn durations_read_like_people_write_them() {

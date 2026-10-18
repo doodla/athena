@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261018-095724-dqht",
+  "round": 2,
+  "at": "2026-10-18T10:00:48.647680476Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The plan does not say what the second wait returns when it sees only Red, and criterion 2's demonstration depends on that case.",
+      "evidence": "Decision 3 says a Red seen after the rerun but before any Pending is stale, and polling continues. Criterion 2's FakeHost is 'scripted Red every time', so every Red in the second wait comes before any Pending and is ignored until the bound runs out. The plan does not say whether wait_for_checks then returns Red, which the test needs (it asserts checks Red and a failing_test name), or Pending, which would skip the name lookup and fail the test. On a real host, classify_checks returns Red whenever any check run failed, even while others are pending (gh.rs:1007). So a check that cannot be re-run, such as a failed commit status, keeps the result Red and Pending is never seen. The planner's own open question admits this costs a full second wait for a genuine second failure. Fix: Define the end state: when the second wait runs out after seeing only Red, return Red and look up the failing test. Better, decide staleness from data, not from a Pending look: for example, compare the failed check-run ids or run_attempt before and after the rerun. Or cap the stale-Red allowance at a few looks. Add a demonstration with [Red, Red(stale), Pending, Red] and one with Red throughout, asserting the outcome and the number of reads for each.",
+      "location": "Plan Decision 3 / Step 5 / Demonstration for criterion 2",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "A rerun that is refused, or that has nothing to rerun, can change the outcome instead of falling back to today's Red report.",
+      "evidence": "Today a Red result returns a PrReport and land_pr_code gives exit 2 (main.rs:443-449). The reading assumes 'Exit code stays 2 unless the checks end green or the job lands'. Under the plan, a 403 or 404 on POST actions/runs/{id}/rerun-failed-jobs makes land_pr return Err. A likely cause is a token without Actions write permission. The landing then fails with an error instead of a Red report, and the stored link update at gh.rs:1152 is skipped. The plan also never says whether the second wait is skipped when rerun_failed returns 0. Without that, a check that cannot be re-run costs a pointless second wait. Fix: State the behavior. When rerun_failed returns 0, skip the second wait, report rerun false and look up the failing test at once. When the rerun call is refused with a non-transient error, it is still recorded in the error log (api already does that), and land_pr reports Red with rerun false and a note instead of returning Err. Add a FakeHost test for each case that asserts exit-code-2 semantics (checks Some(Red), no merge).",
+      "location": "Plan Risks ('a rerun error propagates as a host error') and the open question on rerun_failed returning 0",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The happy-path script never exercises the stale-Red rule.",
+      "evidence": "The script [Red, Pending, Green] gives the same result whether or not the rule exists, so the rule this plan adds has no test showing it matters. Fix: Add a script [Red, Red, Pending, Green] that asserts a merge with rerun count 1. Without the rule, the stale Red would end the run as a second failure, so this test would fail.",
+      "location": "Demonstration for criterion 1",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Reading job logs departs from an existing stated rule and needs a size and safety note.",
+      "evidence": "parse_ci_run's doc says 'Only fixed fields are read; log text is never used.' The plan reads full job logs through api_text, and those logs can be large. On failure, GhFailure.text is put into an error message (gh.rs:585). Fix: In the design doc, state why log text is read now and that only the matched test name is kept. Make sure a failure while reading the log cannot put log text into the error context: the lookup already maps errors to None, so drop the error without formatting it. Optionally scan only the tail of the log.",
+      "location": "Decision 4 / gh.rs:712 comment",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Recording the rerun POST under ReadChecks makes the error log misleading.",
+      "evidence": "HostOperation has only Merge, CreatePr, ReadRepo, ReadPr and ReadChecks (athena-data records.rs:887-899). rerun_pages already uses ReadChecks for a POST (gh.rs:848), so this follows precedent. Fix: Keep it, but add a short code comment like the one at gh.rs:822 so a reader of the error log knows read-checks can mean a rerun POST.",
+      "location": "Decision 5",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan reads the request correctly and puts the retry where the fault starts: inside land_pr's check wait in gh.rs. It also reuses the existing GhClient retry, error-log and redaction path through an api_text split. I confirmed the code it builds on in the snapshot: PrHost at gh.rs:395, GhClient::api at gh.rs:552, wait_for_checks at gh.rs:1244, PrReport at gh.rs:1119, the existing practice of logging Actions POSTs under ReadChecks (rerun_pages at gh.rs:848), land_pr_code in main.rs:443, and the FakeHost at gh.rs:1661. The FakeHost in pr.rs implements only Host, so adding PrHost methods breaks no other implementer. The weak point is the new \"stale Red\" rule. The plan never says what the second wait returns when it sees only Red. That is exactly the scenario of criterion 2's demonstration (\"Red every time\"), so either that test cannot pass as described or every real second failure costs a full second ten-minute wait. classify_checks also makes a failed check outrank a pending one (gh.rs:1007), so the host may never report Pending. The plan also does not say what happens when rerun_failed returns 0. A refused rerun POST is propagated as an error, which would turn today's Red report (exit 2) into an error exit. These are fixable in the plan, so the verdict is revise."
+}

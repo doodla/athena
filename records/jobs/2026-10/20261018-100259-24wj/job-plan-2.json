@@ -1,0 +1,225 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261018-100259-24wj",
+  "round": 2,
+  "at": "2026-10-18T10:05:24.607588841Z",
+  "invocation_seq": 3,
+  "approach": "Extend the check wait in `land_pr` (crates/athena-core/src/gh.rs) from one loop into three phases sharing one look budget. Phase 1 is the existing loop. If it ends Red, phase 2 reads the commit's workflow runs until none is still running, names the failing test from the failed job's log, then calls `POST actions/runs/{id}/rerun-failed-jobs` once per failed run. Phase 3 polls checks again and ignores a result until `run_attempt` shows the run restarted. Green merges through the unchanged gate. Red or Pending stops with no merge and no second rerun. `PrReport` carries `reruns` and `failing_test`. New `PrHost` methods (`ci_runs`, `rerun_failed`, `failing_test`) go through the existing `GhClient::api` retry and error-log path under `HostOperation::ReadChecks`, the operation `rerun_pages` already uses because the operation list is closed. `api` is split so a plain-text log can use the same path. Display and docs report the test name and the single rerun. Round 2 change: criterion 7 now has a fails_without.",
+  "decisions": [
+    {
+      "choice": "Keep PrHost::checks returning Checks; add separate ci_runs, rerun_failed and failing_test methods.",
+      "reason": "Existing fakes and the Green path keep working, and tests can count reads, runs and reruns separately.",
+      "rejected": [
+        {
+          "option": "Make checks return a struct carrying runs and the test name",
+          "why": "Changes every caller and puts a log fetch into every poll, including Green."
+        }
+      ]
+    },
+    {
+      "choice": "Phase 2 waits for completion using ci_runs (GET actions/runs?head_sha=...).",
+      "reason": "GitHub refuses rerun-failed-jobs on a run still in progress; checks can be Red while sibling jobs run. This is the premature-Red cause.",
+      "rejected": [
+        {
+          "option": "Rerun as soon as checks go Red",
+          "why": "The call is refused in progress and would not give the final result."
+        }
+      ]
+    },
+    {
+      "choice": "Share one look budget: phases 1 and 2 together get N looks (phase 2 at least 1), phase 3 gets N; total about 2N.",
+      "reason": "Meets the accepted bound without changing Poll or wiring.",
+      "rejected": [
+        {
+          "option": "N looks per phase",
+          "why": "Bound would be 3N."
+        }
+      ]
+    },
+    {
+      "choice": "In phase 3 ignore a checks read until every rerun run shows run_attempt above its prior value; if the reply has no run_attempt, accept after 2 looks; if never restarted, end Pending.",
+      "reason": "Right after the POST the commit still shows the old Red; taking it as final would report a stale failure. Pending never merges.",
+      "rejected": [
+        {
+          "option": "Fixed sleep after rerun",
+          "why": "Slow and racy."
+        },
+        {
+          "option": "Accept a stale Red after the allowance",
+          "why": "Could report a failure the rerun already cleared."
+        }
+      ]
+    },
+    {
+      "choice": "Take the failing test name from the failed job's plain-text log (GET actions/jobs/{id}/logs, jobs from actions/runs/{id}/jobs?filter=latest) via pure parser failing_test_name(&str): first `test <name> ... FAILED`, else first `---- <name> stdout ----`; names with chars outside [A-Za-z0-9_:] are dropped; name length limited. Read before the rerun and kept as fallback.",
+      "reason": "Only the log carries test names; the filter keeps log text out of the report.",
+      "rejected": [
+        {
+          "option": "Check-run output summary",
+          "why": "Empty for plain cargo test steps."
+        }
+      ]
+    },
+    {
+      "choice": "Rerun every failed or timed-out completed run once, recorded as reruns: 1.",
+      "reason": "Smallest rule covering more than one workflow; merge gate and one-retry limit hold.",
+      "rejected": [
+        {
+          "option": "Rerun only the ci workflow",
+          "why": "Another failing workflow would keep the PR Red."
+        }
+      ]
+    },
+    {
+      "choice": "Leave exit-code mapping, Poll and wiring unchanged beyond compile needs.",
+      "reason": "Red still exits 2, Green 0; the bound comes from Poll.attempts.",
+      "rejected": []
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "action": "modify",
+      "purpose": "CiRunState, PrHost methods ci_runs/rerun_failed/failing_test on GhClient (api_text split from api), failing_test_name parser, three-phase wait, PrReport reruns and failing_test, FakeHost and tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "purpose": "land_pr text and JSON name the failing test and say the failed job was re-run once; unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "purpose": "Only if compiling needs it; exit mapping unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/wiring.rs",
+      "action": "modify",
+      "purpose": "Only if needed; Poll stays 30 x 20 s.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/external_calls.rs",
+      "action": "modify",
+      "purpose": "Test that the rerun-failed-jobs POST goes through retry and the error log.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/native-pr-landing.md",
+      "action": "modify",
+      "purpose": "Document the wait, single rerun, completion precondition, failing-test report and the table of new calls.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Entry under the unreleased heading.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Split GhClient::api into api_text (retry/log loop returning text) and api (parse JSON) with no behaviour change.",
+    "Add CiRunState {id, status, conclusion, attempt: Option<u64>}, failing_test_name and parser unit tests.",
+    "Add ci_runs, rerun_failed, failing_test to PrHost and implement on GhClient under HostOperation::ReadChecks.",
+    "Add reruns: u32 and failing_test: Option<String> to PrReport and set them in every constructor, including confirm_existing_merge.",
+    "Rewrite wait_for_checks into the three phases sharing the look budget; keep the merge gate.",
+    "Extend FakeHost (scripted checks, runs by rerun state, rerun counter, log-derived name, run looks at rerun) and add tests for criteria 1-4.",
+    "Update display::land_pr and add display tests including JSON fields; touch main.rs and wiring.rs only if compiling needs it.",
+    "Add the external_calls.rs test for the rerun POST through retry and the error log.",
+    "Write the native-pr-landing.md section with the new-calls table, then the CHANGELOG entry.",
+    "Run cargo fmt --all, cargo clippy --all-targets --locked -- -D warnings and cargo test --locked."
+  ],
+  "risks": [
+    {
+      "risk": "Phase 1 ends Red on its last look, leaving 1 look for the completion wait.",
+      "mitigation": "Phase 2 always gets at least 1 look; an unfinished run reports Red with no rerun; stated in docs."
+    },
+    {
+      "risk": "Log text puts unexpected content into the failing test name.",
+      "mitigation": "Parser accepts only [A-Za-z0-9_:] names, first match, length limited."
+    },
+    {
+      "risk": "Changing PrHost breaks other implementors.",
+      "mitigation": "Only GhClient and the gh.rs FakeHost implement it; cargo test compiles the workspace."
+    },
+    {
+      "risk": "GitHub refuses rerunning cancelled runs.",
+      "mitigation": "A refusal surfaces through the error log with its status; report stays Red, nothing merges."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit test in gh.rs. FakeHost scripts checks [Red, ...] and ci_runs in_progress for the first looks, then completed; it records how many ci_runs looks had happened at each rerun_failed. attempts >= 4.",
+      "command": "cargo test -p athena-core gh",
+      "observes": "Zero reruns while the run is in progress; exactly one rerun_failed, made only after the completed look; check reads <= 2 x attempts.",
+      "fails_without": "Without the wait for completion the rerun fires at the first Red with the run still in progress, so the recorded run state is in_progress and the test fails."
+    },
+    {
+      "criterion": 2,
+      "method": "Unit test with checks [Red, Red, Pending, Red]; ci_runs attempt 1 until rerun, then 1 on the first look afterwards (stale), 2 from the next.",
+      "command": "cargo test -p athena-core gh",
+      "observes": "Phase 1 makes 1 read, phase 3 makes 3 reads, 4 in all; one rerun_failed; stale Red not taken as final; report Red with reruns 1; no second rerun.",
+      "fails_without": "Without the run_attempt staleness check, phase 3 stops at the second read (stale Red) and the 3-read assertion fails."
+    },
+    {
+      "criterion": 3,
+      "method": "Unit test with checks [Red, Pending, Green], a completed failed run, merge_via_rest true; second case with it false.",
+      "command": "cargo test -p athena-core gh",
+      "observes": "checks Green, reruns 1, merges 1 and merge_requested true when on; merges 0 when off.",
+      "fails_without": "Without the rerun, checks stay Red, no merge happens and the Green and merge assertions fail."
+    },
+    {
+      "criterion": 4,
+      "method": "Two unit tests: (a) checks [Red, Red(restarted), Red] with a failed job log containing `test gh::tests::x ... FAILED`; (b) checks always Pending.",
+      "command": "cargo test -p athena-core gh",
+      "observes": "(a) merges 0, exactly one rerun_failed, report Red, failing_test Some(\"gh::tests::x\"). (b) report Pending, reruns 0, 0 rerun calls, merges 0, reads equal attempts.",
+      "fails_without": "Without the single-rerun cap (a) calls rerun_failed more than once; without the name lookup failing_test is None; without the Pending path (b) a rerun or merge would occur."
+    },
+    {
+      "criterion": 5,
+      "method": "Display unit tests on constructed PrReports: Red with test and rerun, Red with test and no rerun, Green after rerun, Red with unknown name; serde_json::to_value check of JSON fields.",
+      "command": "cargo test -p athena-cli display",
+      "observes": "Text names the test and says the failed job was re-run once; Red message names the test when reruns is 0; JSON has failing_test and reruns.",
+      "fails_without": "Without the new display branches the Red text stays 'a check failed; nothing was merged' and the name assertions fail."
+    },
+    {
+      "criterion": 6,
+      "method": "gh.rs parser test on a sample log (timestamp-prefixed line, `---- name stdout ----` fallback, rejected odd name); external_calls.rs test drives rerun_failed through the Injecting runner; docs table lists each new call with required state and reply when missing (rerun-failed-jobs: refused while the run is in progress, 404 for unknown run, empty 201 on success; the exact in-progress status is to be confirmed from GitHub docs).",
+      "command": "cargo test --locked",
+      "observes": "Runner sees POST repos/example/project/actions/runs/{id}/rerun-failed-jobs; a one-off 500 is retried with a retry line; a refusal is recorded in the host error log under read-checks; parser returns expected names.",
+      "fails_without": "If the call bypassed api, no retry line or log entry would appear and the injected-500 test fails; with no parser the name assertions fail."
+    },
+    {
+      "criterion": 7,
+      "method": "Run the full suite, clippy and fmt as the checks Athena runs; the new tests are part of the suite, so they must pass for it to be green.",
+      "command": "cargo test --locked",
+      "observes": "Tests exit 0 including the new gh and display tests; then `cargo clippy --all-targets --locked -- -D warnings` and `cargo fmt --all --check` exit 0 with no warnings.",
+      "fails_without": "If any new test, a trait implementor (FakeHost or GhClient) or the new PrReport fields were left inconsistent, the workspace would fail to compile or a test would fail; an unused item, needless clone or unformatted code would make clippy -D warnings or fmt --check exit non-zero."
+    },
+    {
+      "criterion": 8,
+      "method": "Inspect the diff of both files.",
+      "command": "git diff --stat -- docs/design/native-pr-landing.md CHANGELOG.md",
+      "observes": "native-pr-landing.md has a section on the wait on Red, completion precondition, single rerun, look budget and failing-test report, plus the table of new calls; CHANGELOG.md has an entry under the unreleased heading.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Whether gh api returns the job log as plain text through the redirect for actions/jobs/{id}/logs; producer should check the runner's gh output handling and adjust api_text.",
+    "The exact status GitHub returns for rerun-failed-jobs on a run in progress (believed 403); docs must state what GitHub documents.",
+    "A Red from a legacy commit status has no run, so no rerun and no test name; accepted.",
+    "If run_attempt is missing from the actions/runs reply, the 2-look fallback applies."
+  ],
+  "producer_section_sha256": "7966a4e66da88a7ad92027229b2f2d92d3900176160de1cb83be2274af92c590"
+}
