@@ -402,6 +402,94 @@ pub trait PrHost: Host {
     /// Asks the host to merge the pull request, guarded by the head commit it was opened with, by a merge
     /// method the repository allows (see [`MergeMethods::choose`]). `text` is the message a squash carries.
     fn merge(&self, number: u64, head: &str, text: &CommitText) -> Result<()>;
+    /// The workflow runs of a commit: whether each is still going, how it ended, and which try it is on.
+    fn ci_runs(&self, commit: &str) -> Result<Vec<CiRunState>>;
+    /// Asks the host to run the failed jobs of one completed workflow run again. The host refuses while the
+    /// run is still in progress.
+    fn rerun_failed(&self, run_id: u64) -> Result<()>;
+    /// The name of the first test that failed in the latest try of a completed run, read from the failed
+    /// job's log; none when the log names none.
+    fn failing_test(&self, run_id: u64) -> Result<Option<String>>;
+}
+
+/// One workflow run of a commit, as the host reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CiRunState {
+    pub id: u64,
+    /// `queued`, `in_progress` or `completed`.
+    pub status: String,
+    /// Set once the run is completed: `success`, `failure`, `timed_out`, and so on.
+    pub conclusion: Option<String>,
+    /// The try the run is on (1 for the first; a re-run raises it); none when the host does not say.
+    pub attempt: Option<u64>,
+}
+
+impl CiRunState {
+    /// A completed run that failed or timed out: the runs whose failed jobs are re-run.
+    pub fn failed(&self) -> bool {
+        self.status == "completed"
+            && matches!(self.conclusion.as_deref(), Some("failure" | "timed_out"))
+    }
+}
+
+/// Reads the workflow-runs reply into [`CiRunState`]s. Only fixed fields are read.
+pub fn parse_ci_runs(reply: &Value) -> Vec<CiRunState> {
+    reply["workflow_runs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|r| {
+            Some(CiRunState {
+                id: r["id"].as_u64()?,
+                status: r["status"].as_str().unwrap_or("").to_string(),
+                conclusion: r["conclusion"].as_str().map(str::to_string),
+                attempt: r["run_attempt"].as_u64(),
+            })
+        })
+        .collect()
+}
+
+/// The longest test name kept from a log.
+const TEST_NAME_LIMIT: usize = 200;
+
+/// The name of the first failed test in a job log: the first `test <name> ... FAILED` line, else the first
+/// `---- <name> stdout ----` line. A line may start with a timestamp. A name with a character outside
+/// `[A-Za-z0-9_:]`, or longer than [`TEST_NAME_LIMIT`], is dropped, so log text never reaches the report.
+pub fn failing_test_name(log: &str) -> Option<String> {
+    let valid = |name: &str| {
+        !name.is_empty()
+            && name.len() <= TEST_NAME_LIMIT
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':')
+    };
+    let lines: Vec<&str> = log
+        .lines()
+        .map(|line| {
+            let line = line.trim();
+            match line.split_once(' ') {
+                Some((stamp, rest))
+                    if stamp.ends_with('Z')
+                        && stamp.contains('T')
+                        && stamp.starts_with(|c: char| c.is_ascii_digit()) =>
+                {
+                    rest.trim_start()
+                }
+                _ => line,
+            }
+        })
+        .collect();
+    lines
+        .iter()
+        .filter_map(|l| l.strip_prefix("test ")?.strip_suffix(" ... FAILED"))
+        .find(|n| valid(n))
+        .or_else(|| {
+            lines
+                .iter()
+                .filter_map(|l| l.strip_prefix("---- ")?.strip_suffix(" stdout ----"))
+                .find(|n| valid(n))
+        })
+        .map(str::to_string)
 }
 
 /// A way the host can merge a pull request.
@@ -556,6 +644,21 @@ impl<'a> GhClient<'a> {
         path: &str,
         fields: &[(&str, &str)],
     ) -> Result<Value> {
+        let text = self.api_text(operation, method, path, fields)?;
+        if text.trim().is_empty() {
+            return Ok(Value::Null);
+        }
+        serde_json::from_str(&text).with_context(|| format!("parsing the reply to {path}"))
+    }
+
+    /// The retry and error-log loop of [`GhClient::api`], returning the reply as text (a job log is not JSON).
+    fn api_text(
+        &self,
+        operation: HostOperation,
+        method: &str,
+        path: &str,
+        fields: &[(&str, &str)],
+    ) -> Result<String> {
         let mut args: Vec<String> = ["api", "--method", method, path]
             .iter()
             .map(|s| s.to_string())
@@ -599,10 +702,7 @@ impl<'a> GhClient<'a> {
                 }
             }
         };
-        if text.trim().is_empty() {
-            return Ok(Value::Null);
-        }
-        serde_json::from_str(&text).with_context(|| format!("parsing the reply to {path}"))
+        Ok(text)
     }
 
     fn repo_path(&self, rest: &str) -> String {
@@ -699,6 +799,59 @@ impl PrHost for GhClient<'_> {
             &fields,
         )?;
         Ok(())
+    }
+
+    fn ci_runs(&self, commit: &str) -> Result<Vec<CiRunState>> {
+        let reply = self.api(
+            HostOperation::ReadChecks,
+            "GET",
+            &self.repo_path(&format!("actions/runs?head_sha={commit}&per_page=100")),
+            &[],
+        )?;
+        Ok(parse_ci_runs(&reply))
+    }
+
+    fn rerun_failed(&self, run_id: u64) -> Result<()> {
+        // Recorded under the checks operation: the host operation list is closed (as for `rerun_pages`).
+        self.api(
+            HostOperation::ReadChecks,
+            "POST",
+            &self.repo_path(&format!("actions/runs/{run_id}/rerun-failed-jobs")),
+            &[],
+        )?;
+        Ok(())
+    }
+
+    fn failing_test(&self, run_id: u64) -> Result<Option<String>> {
+        let jobs = self.api(
+            HostOperation::ReadChecks,
+            "GET",
+            &self.repo_path(&format!(
+                "actions/runs/{run_id}/jobs?filter=latest&per_page=100"
+            )),
+            &[],
+        )?;
+        let failed = jobs["jobs"].as_array().into_iter().flatten().filter(|j| {
+            matches!(
+                j["conclusion"].as_str(),
+                Some("failure" | "timed_out" | "cancelled")
+            )
+        });
+        for job in failed {
+            let Some(id) = job["id"].as_u64() else {
+                continue;
+            };
+            let log = self.api_text(
+                HostOperation::ReadChecks,
+                "GET",
+                &self.repo_path(&format!("actions/jobs/{id}/logs")),
+                &[],
+            )?;
+            if let Some(name) = failing_test_name(&log) {
+                return Ok(Some(name));
+            }
+        }
+        Ok(None)
     }
 }
 
@@ -1122,6 +1275,10 @@ pub struct PrReport {
     pub checks: Option<Checks>,
     /// Whether this run asked the host to merge.
     pub merge_requested: bool,
+    /// How many times the failed jobs were re-run: 0 or 1.
+    pub reruns: u32,
+    /// The first failing test's name, read from the failed job's log, when the checks were red.
+    pub failing_test: Option<String>,
 }
 
 /// Runs the flow. With no stored link: guard and push the branch, open the pull request, store the link.
@@ -1134,12 +1291,17 @@ pub fn land_pr(job: &LandPr) -> Result<PrReport> {
     };
     let mut checks = None;
     let mut merge_requested = false;
+    let mut reruns = 0;
+    let mut failing_test = None;
     observe_merge(job.host, job.content, &mut link, job.verified_fingerprint)?;
     if link.state == LinkState::Open && link.head != job.commit {
         replace_head(job, &mut link)?;
     }
     if link.state == LinkState::Open {
-        let seen = wait_for_checks(job, &link.head)?;
+        let waited = wait_for_checks(job, &link.head)?;
+        let seen = waited.checks;
+        reruns = waited.reruns;
+        failing_test = waited.failing_test;
         checks = Some(seen);
         // The merge gate: the setting is on and every check is green. Nothing else reaches the host's
         // merge endpoint.
@@ -1154,6 +1316,8 @@ pub fn land_pr(job: &LandPr) -> Result<PrReport> {
         link,
         checks,
         merge_requested,
+        reruns,
+        failing_test,
     })
 }
 
@@ -1180,6 +1344,8 @@ pub fn confirm_existing_merge(
         link,
         checks: None,
         merge_requested: false,
+        reruns: 0,
+        failing_test: None,
     }))
 }
 
@@ -1241,19 +1407,110 @@ fn publish(job: &LandPr) -> Result<PrLink> {
     Ok(link)
 }
 
-fn wait_for_checks(job: &LandPr, head: &str) -> Result<Checks> {
+/// What the wait for checks found.
+struct Waited {
+    checks: Checks,
+    reruns: u32,
+    failing_test: Option<String>,
+}
+
+/// The first test name found in the logs of the failed runs; a failed lookup names nothing.
+fn name_failure(host: &dyn PrHost, runs: &[CiRunState]) -> Option<String> {
+    runs.iter()
+        .filter(|r| r.failed())
+        .find_map(|r| host.failing_test(r.id).ok().flatten())
+}
+
+/// Waits for the checks, in at most three steps that share one look budget of about twice `poll.attempts`.
+///
+/// 1. Look at the checks up to `attempts` times until they are not pending.
+/// 2. If they are red, the failing run may still have sibling jobs running, and the host refuses to re-run a
+///    run in progress. So look at the commit's runs (the rest of the `attempts` looks, at least one) until
+///    none is in progress, and name the failing test from the failed job's log.
+/// 3. Ask the host to re-run the failed jobs of each failed run, once, and look at the checks up to
+///    `attempts` more times. A read is ignored until every re-run run shows a higher `run_attempt`, since
+///    right after the request the commit still shows the old red. Green or red is then final; anything else
+///    is pending. There is no second re-run.
+fn wait_for_checks(job: &LandPr, head: &str) -> Result<Waited> {
     let attempts = job.poll.attempts.max(1);
+    let nap = |more: bool| {
+        if more {
+            (job.poll.sleep)(job.poll.delay);
+        }
+    };
     let mut seen = Checks::Pending;
+    let mut looks = 0;
     for n in 0..attempts {
         seen = job.host.checks(head)?;
+        looks += 1;
         if seen != Checks::Pending {
             break;
         }
-        if n + 1 < attempts {
-            (job.poll.sleep)(job.poll.delay);
+        nap(n + 1 < attempts);
+    }
+    let done = |checks, reruns, failing_test| {
+        Ok(Waited {
+            checks,
+            reruns,
+            failing_test,
+        })
+    };
+    if seen != Checks::Red {
+        return done(seen, 0, None);
+    }
+    // Step 2: wait for the runs to complete.
+    let run_looks = (attempts - looks.min(attempts)).max(1);
+    let mut runs = Vec::new();
+    for n in 0..run_looks {
+        runs = job.host.ci_runs(head)?;
+        if runs.iter().all(|r| r.status == "completed") {
+            break;
+        }
+        nap(n + 1 < run_looks);
+    }
+    let failing_test = name_failure(job.host, &runs);
+    if runs.iter().any(|r| r.status != "completed") {
+        return done(Checks::Red, 0, failing_test);
+    }
+    // Step 3: re-run each failed run once.
+    let mut rerun: Vec<(u64, Option<u64>)> = Vec::new();
+    for run in runs.iter().filter(|r| r.failed()) {
+        if job.host.rerun_failed(run.id).is_ok() {
+            rerun.push((run.id, run.attempt));
         }
     }
-    Ok(seen)
+    if rerun.is_empty() {
+        // Nothing to re-run (a red the runs do not explain), or the host refused: the refusal is in the log.
+        return done(Checks::Red, 0, failing_test);
+    }
+    let mut seen = Checks::Pending;
+    let mut last_runs = Vec::new();
+    for n in 0..attempts {
+        let now = job.host.ci_runs(head)?;
+        let read = job.host.checks(head)?;
+        let restarted = rerun.iter().all(|(id, before)| {
+            match (
+                before,
+                now.iter().find(|r| r.id == *id).and_then(|r| r.attempt),
+            ) {
+                (Some(before), Some(after)) => after > *before,
+                // The host does not say which try it is on: accept after the second look.
+                _ => n >= 1,
+            }
+        });
+        last_runs = now;
+        seen = if restarted { read } else { Checks::Pending };
+        if seen != Checks::Pending {
+            break;
+        }
+        nap(n + 1 < attempts);
+    }
+    let failing_test = if seen == Checks::Red {
+        name_failure(job.host, &last_runs).or(failing_test)
+    } else {
+        None
+    };
+    done(seen, 1, failing_test)
 }
 
 impl Athena {
@@ -1672,10 +1929,34 @@ mod tests {
         bases: RefCell<Vec<String>>,
         /// The commits whose checks were read.
         checked: RefCell<Vec<String>>,
+        /// Reads taken from the front before `checks` is returned for every later read.
+        script: RefCell<Vec<Checks>>,
+        /// How many of the first run looks (before any re-run) show the run still in progress.
+        in_progress_looks: Cell<u32>,
+        /// How many run looks after the re-run still show the old try.
+        stale_looks: Cell<u32>,
+        /// Whether the host reports `run_attempt`.
+        reports_attempt: Cell<bool>,
+        run_looks: Cell<u32>,
+        looks_after_rerun: Cell<u32>,
+        reruns: Cell<u32>,
+        /// How many run looks had happened at each re-run request.
+        run_looks_at_rerun: RefCell<Vec<u32>>,
+        /// The job log the failing test is read from.
+        log: RefCell<String>,
     }
     impl FakeHost {
         fn new(checks: Checks) -> Self {
             FakeHost {
+                script: RefCell::new(vec![]),
+                in_progress_looks: Cell::new(0),
+                stale_looks: Cell::new(0),
+                reports_attempt: Cell::new(true),
+                run_looks: Cell::new(0),
+                looks_after_rerun: Cell::new(0),
+                reruns: Cell::new(0),
+                run_looks_at_rerun: RefCell::new(vec![]),
+                log: RefCell::new(String::new()),
                 checks,
                 merged: RefCell::new(None),
                 merge_makes: "merged1",
@@ -1706,7 +1987,44 @@ mod tests {
         fn checks(&self, commit: &str) -> Result<Checks> {
             self.check_reads.set(self.check_reads.get() + 1);
             self.checked.borrow_mut().push(commit.to_string());
-            Ok(self.checks)
+            let mut script = self.script.borrow_mut();
+            Ok(if script.is_empty() {
+                self.checks
+            } else {
+                script.remove(0)
+            })
+        }
+        fn ci_runs(&self, _: &str) -> Result<Vec<CiRunState>> {
+            self.run_looks.set(self.run_looks.get() + 1);
+            let attempt = if self.reruns.get() == 0 {
+                1
+            } else {
+                self.looks_after_rerun.set(self.looks_after_rerun.get() + 1);
+                if self.looks_after_rerun.get() <= self.stale_looks.get() {
+                    1
+                } else {
+                    2
+                }
+            };
+            let going =
+                self.reruns.get() == 0 && self.run_looks.get() <= self.in_progress_looks.get();
+            Ok(vec![CiRunState {
+                id: 9,
+                status: if going { "in_progress" } else { "completed" }.into(),
+                conclusion: (!going).then(|| "failure".to_string()),
+                attempt: self.reports_attempt.get().then_some(attempt),
+            }])
+        }
+        fn rerun_failed(&self, run_id: u64) -> Result<()> {
+            assert_eq!(run_id, 9);
+            self.run_looks_at_rerun
+                .borrow_mut()
+                .push(self.run_looks.get());
+            self.reruns.set(self.reruns.get() + 1);
+            Ok(())
+        }
+        fn failing_test(&self, _: u64) -> Result<Option<String>> {
+            Ok(failing_test_name(&self.log.borrow()))
         }
         fn merge(&self, _: u64, _: &str, _: &CommitText) -> Result<()> {
             self.merges.set(self.merges.get() + 1);
@@ -1727,11 +2045,14 @@ mod tests {
         job: JobId,
         remote: FakeRemote,
         content: FakeContent,
+        /// The poll's look budget.
+        attempts: u32,
     }
 
     impl Rig {
         fn new() -> Self {
             Rig {
+                attempts: 3,
                 dir: tempfile::tempdir().unwrap(),
                 job: JobId::parse("bootstrap").unwrap(),
                 remote: FakeRemote::default(),
@@ -1772,7 +2093,7 @@ mod tests {
                 repository: "example/project",
                 merge_via_rest,
                 poll: Poll {
-                    attempts: 3,
+                    attempts: self.attempts,
                     delay: Duration::from_secs(1),
                     sleep: &nap,
                 },
@@ -1837,6 +2158,144 @@ mod tests {
         let host = FakeHost::new(Checks::Pending);
         rig.run(&host, true, "athena/bootstrap").unwrap();
         assert_eq!(host.check_reads.get(), 3);
+    }
+
+    #[test]
+    fn no_rerun_is_asked_until_the_failed_run_completes_and_then_exactly_one() {
+        let mut rig = Rig::new();
+        rig.attempts = 4;
+        let host = FakeHost::new(Checks::Red);
+        // The first read is red while the run is still going; it is in progress for two looks.
+        host.in_progress_looks.set(2);
+        *host.script.borrow_mut() = vec![Checks::Red, Checks::Red, Checks::Red];
+        let report = rig.run(&host, true, "athena/bootstrap").unwrap();
+        assert_eq!(host.reruns.get(), 1);
+        // The request came at the third look, the first that showed the run completed.
+        assert_eq!(*host.run_looks_at_rerun.borrow(), vec![3]);
+        assert!(host.check_reads.get() <= 2 * rig.attempts);
+        assert_eq!(report.reruns, 1);
+        assert_eq!(report.checks, Some(Checks::Red));
+        assert_eq!(host.merges.get(), 0);
+    }
+
+    #[test]
+    fn a_stale_run_attempt_is_not_taken_as_the_result_of_the_rerun() {
+        let rig = Rig::new();
+        let host = FakeHost::new(Checks::Red);
+        host.stale_looks.set(1);
+        *host.script.borrow_mut() = vec![Checks::Red, Checks::Red, Checks::Pending, Checks::Red];
+        let report = rig.run(&host, true, "athena/bootstrap").unwrap();
+        // One read in the first wait and three in the second: the first of them is stale and ignored.
+        assert_eq!(host.check_reads.get(), 4);
+        assert_eq!(host.reruns.get(), 1);
+        assert_eq!(report.reruns, 1);
+        assert_eq!(report.checks, Some(Checks::Red));
+        assert_eq!(host.merges.get(), 0);
+    }
+
+    #[test]
+    fn a_host_that_reports_no_run_attempt_is_trusted_from_the_second_look() {
+        let rig = Rig::new();
+        let host = FakeHost::new(Checks::Red);
+        host.reports_attempt.set(false);
+        *host.script.borrow_mut() = vec![Checks::Red, Checks::Red, Checks::Green];
+        let report = rig.run(&host, false, "athena/bootstrap").unwrap();
+        assert_eq!(host.check_reads.get(), 3);
+        assert_eq!(report.checks, Some(Checks::Green));
+    }
+
+    #[test]
+    fn a_rerun_that_turns_green_is_reported_green_and_merged_when_the_setting_is_on() {
+        for merge_via_rest in [true, false] {
+            let rig = Rig::new();
+            let host = FakeHost::new(Checks::Red);
+            *host.script.borrow_mut() = vec![Checks::Red, Checks::Pending, Checks::Green];
+            let report = rig.run(&host, merge_via_rest, "athena/bootstrap").unwrap();
+            assert_eq!(report.checks, Some(Checks::Green), "{merge_via_rest}");
+            assert_eq!(report.reruns, 1);
+            assert_eq!(report.failing_test, None);
+            assert_eq!(host.reruns.get(), 1);
+            assert_eq!(host.merges.get(), u32::from(merge_via_rest));
+            assert_eq!(report.merge_requested, merge_via_rest);
+        }
+    }
+
+    #[test]
+    fn a_second_red_merges_nothing_reruns_nothing_more_and_names_the_failing_test() {
+        let rig = Rig::new();
+        let host = FakeHost::new(Checks::Red);
+        *host.log.borrow_mut() =
+            "2026-01-01T00:00:00.1Z test gh::tests::x ... FAILED\n".to_string();
+        let report = rig.run(&host, true, "athena/bootstrap").unwrap();
+        assert_eq!(host.merges.get(), 0);
+        assert!(!report.merge_requested);
+        assert_eq!(host.reruns.get(), 1);
+        assert_eq!(report.reruns, 1);
+        assert_eq!(report.checks, Some(Checks::Red));
+        assert_eq!(report.failing_test.as_deref(), Some("gh::tests::x"));
+        assert_eq!(report.link.state, LinkState::Open);
+    }
+
+    #[test]
+    fn checks_still_pending_after_the_bound_give_pending_with_no_rerun_and_no_merge() {
+        let rig = Rig::new();
+        let host = FakeHost::new(Checks::Pending);
+        let report = rig.run(&host, true, "athena/bootstrap").unwrap();
+        assert_eq!(report.checks, Some(Checks::Pending));
+        assert_eq!(host.check_reads.get(), rig.attempts);
+        assert_eq!(host.reruns.get(), 0);
+        assert_eq!(host.run_looks.get(), 0);
+        assert_eq!(report.reruns, 0);
+        assert_eq!(host.merges.get(), 0);
+    }
+
+    #[test]
+    fn a_rerun_that_never_restarts_ends_pending_and_is_not_repeated() {
+        let rig = Rig::new();
+        let host = FakeHost::new(Checks::Red);
+        host.stale_looks.set(100);
+        let report = rig.run(&host, true, "athena/bootstrap").unwrap();
+        assert_eq!(report.checks, Some(Checks::Pending));
+        assert_eq!(host.reruns.get(), 1);
+        assert_eq!(host.merges.get(), 0);
+        assert!(host.check_reads.get() <= 2 * rig.attempts);
+    }
+
+    #[test]
+    fn the_failing_test_is_read_from_a_log() {
+        let log = "2026-10-18T10:00:00.1234567Z running 2 tests\n\
+                   2026-10-18T10:00:00.2Z test gh::tests::ok ... ok\n\
+                   2026-10-18T10:00:00.3Z test odd name here ... FAILED\n\
+                   2026-10-18T10:00:00.4Z test gh::tests::bad_one ... FAILED\n\
+                   test result: FAILED. 1 passed; 1 failed\n";
+        assert_eq!(
+            failing_test_name(log).as_deref(),
+            Some("gh::tests::bad_one")
+        );
+        let stdout_only = "---- core::thing stdout ----\nthread panicked\n";
+        assert_eq!(
+            failing_test_name(stdout_only).as_deref(),
+            Some("core::thing")
+        );
+        assert_eq!(failing_test_name("test a b ... FAILED\n"), None);
+        assert_eq!(failing_test_name("test result: FAILED. 0 passed\n"), None);
+        let long = format!("test {} ... FAILED\n", "a".repeat(TEST_NAME_LIMIT + 1));
+        assert_eq!(failing_test_name(&long), None);
+    }
+
+    #[test]
+    fn the_runs_reply_is_read_into_states() {
+        let reply = json!({"workflow_runs": [
+            {"id": 3, "status": "completed", "conclusion": "failure", "run_attempt": 2},
+            {"id": 4, "status": "in_progress", "conclusion": null},
+            {"status": "queued"}
+        ]});
+        let runs = parse_ci_runs(&reply);
+        assert_eq!(runs.len(), 2);
+        assert!(runs[0].failed());
+        assert_eq!(runs[0].attempt, Some(2));
+        assert!(!runs[1].failed());
+        assert_eq!(runs[1].attempt, None);
     }
 
     #[test]

@@ -19,6 +19,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   on the base, or has no baseline entry, still rejects it, and a missing, empty or could-not-run baseline
   excuses nothing.
 
+- `athena land --pr` no longer gives up at the first red check. It waits until the failed workflow runs
+  complete (GitHub refuses to re-run a run in progress), re-runs the failed jobs once with
+  `rerun-failed-jobs`, and waits again, within about twice the old wait. Green then merges as before when
+  `merge_via_rest` is on; red or pending after the re-run merges nothing and is never re-run again. The
+  report names the failing test (from the failed job's log), in the text and in `--json` (`failing_test`,
+  `reruns`), whether or not a re-run happened. See `docs/design/native-pr-landing.md` §5.8.
+
 ### Fixed
 
 - When one check fails, the verifier now still runs, so every acceptance criterion gets its own result in the

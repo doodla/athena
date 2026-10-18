@@ -429,6 +429,44 @@ The roadmap lists the parallel pool before this design (`docs/design/roadmap.md`
 parallel-jobs review ask for the opposite order. **The roadmap order is to be changed in a separate job;
 this document does not edit it.**
 
+### 5.8 When the checks go red: wait for the run, re-run the failed jobs once, name the failing test
+
+`land_pr` (`crates/athena-core/src/gh.rs`) used to stop at the first red read. A check run can report a
+failure while sibling jobs of the same workflow run are still going, and a flaky job can fail a run that
+passes on a second try. The wait now has three steps that share one look budget (`Poll.attempts`, 30 looks 20
+seconds apart by default, so at most about twice that in all):
+
+1. **Wait for the checks.** Up to `attempts` looks until they are not pending, as before. Green, or still
+   pending at the bound, ends the wait: there is nothing to re-run.
+2. **Wait for completion, then name the test.** On red, the commit's workflow runs are read until none is
+   still in progress (the rest of the `attempts` looks, and at least one). This is the precondition for the
+   re-run: GitHub refuses to re-run the failed jobs of a run that has not completed. The first failing test
+   is then read from the failed job's log (`test <name> ... FAILED`, else `---- <name> stdout ----`). Only
+   names made of letters, digits, `_` and `:` and at most 200 characters are kept, so log text never reaches
+   the report. If a run is still going when the looks run out, nothing is re-run and the result is red.
+3. **Re-run once, wait again.** The failed jobs of each run that failed or timed out are re-run, once, with
+   `POST actions/runs/{id}/rerun-failed-jobs`. The checks are then read up to `attempts` more times. Right
+   after the request the commit still shows the old red, so a read is ignored until every re-run run shows a
+   `run_attempt` above the value it had before (a host reply with no `run_attempt` is trusted from the second
+   look). Green is then final and goes through the merge gate unchanged. Red is final and nothing is
+   re-run again. A rerun that has not restarted or finished by the bound is reported as pending. If the
+   host refuses the re-run, the refusal is in the host error log and the result is red.
+
+The merge gate is unchanged: `merge_via_rest` on, and green checks. The pull request report carries
+`reruns` (0 or 1) and `failing_test`. `athena land --pr` names the failing test in its red message whether
+or not a re-run happened, and says when the failed job was re-run once; `--json` has the same two fields. A
+red that comes from a legacy commit status has no workflow run, so it is neither re-run nor named.
+
+New GitHub calls. All go through `GhClient::api` or `api_text` (the retry and error-log path, recorded under
+the checks operation because the operation list is closed), and only `gh api` with REST paths.
+
+| Call | State it requires | What GitHub returns when the state is missing |
+|---|---|---|
+| `GET repos/{r}/actions/runs?head_sha={sha}&per_page=100` | The commit exists. | A commit with no workflow run gets an empty `workflow_runs` list; the wait then finds nothing to re-run. |
+| `POST repos/{r}/actions/runs/{id}/rerun-failed-jobs` | The run is completed and has a failed job. | Refused with an error status while the run is in progress (documented as 403); 404 for an unknown run; an empty 201 on success. The code does not depend on the exact refusal. |
+| `GET repos/{r}/actions/runs/{id}/jobs?filter=latest` | The run exists. | 404 for an unknown run; only the latest try's jobs are listed. |
+| `GET repos/{r}/actions/jobs/{id}/logs` | The job has finished and its log has not expired. | 404 when the log has expired or the job has none. The name then stays unknown and the red message says so. |
+
 ## 6. Risks
 
 - **Host differences.** Merge methods, auto-merge and fork permissions vary. Athena should support one host
