@@ -18,10 +18,11 @@ use athena_context::outputs::{
 };
 use athena_context::{CONTRACT, Component, Composed, READER_FRAME, compose};
 use athena_data::records::{
-    AnyRecord, Correction, CorrectionKind, Criterion, CriterionKind, DefaultApplied, Deliverable,
-    DeliverableAction, Forecast, Forecasts, Intervention, InterventionCategory, InterventionSource,
-    IntrospectionRecord, IntrospectionStatus, IntrospectionTrigger, Invocation, OutcomeState,
-    PreventionKind, Quantiles, Reading, Request, Role,
+    AnyRecord, Correction, CorrectionKind, Criterion, CriterionKind, CritiqueVerdict,
+    DefaultApplied, Deliverable, DeliverableAction, Forecast, Forecasts, Intervention,
+    InterventionCategory, InterventionSource, IntrospectionRecord, IntrospectionStatus,
+    IntrospectionTrigger, Invocation, OutcomeState, PreventionKind, Quantiles, Reading, Request,
+    Role,
 };
 use athena_data::{JobId, RecordId};
 use athena_gate::redact::Redactor;
@@ -1085,6 +1086,35 @@ fn carry(job: &JobRecords, redactor: &Redactor) -> Result<Option<EarlierAttempt>
                 c.command.join(" "),
                 tail(&c.output_tail, CARRIED_CHECK_OUTPUT_BYTES)
             )
+        }));
+    }
+    // A job stopped in planning has no verification: the findings of the critique that stopped it say what
+    // was wrong with the plan, so a retry carries them and not only the outcome reason (review F11).
+    if let Some(critique) = job
+        .critiques
+        .last()
+        .filter(|c| c.final_verdict != CritiqueVerdict::Accept)
+    {
+        if let Some(how) = &critique.request_reading_mismatch {
+            texts.push(format!(
+                "plan critique, round {}: the reading misread the request: {how}",
+                critique.round
+            ));
+        }
+        texts.extend(critique.findings.iter().map(|f| {
+            let location = f
+                .location
+                .as_deref()
+                .map_or(String::new(), |l| format!(" ({l})"));
+            format!(
+                "plan critique, round {}, {}{location}: {} {}",
+                critique.round,
+                format!("{:?}", f.severity).to_lowercase(),
+                f.summary,
+                f.evidence
+            )
+            .trim_end()
+            .to_string()
         }));
     }
     // A job closed before verification has only its outcome reason to say why; a failed job's reason

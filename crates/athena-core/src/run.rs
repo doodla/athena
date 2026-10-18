@@ -1,6 +1,6 @@
 //! `athena go`: dispatch, produce, verify independently, and land (design §2.3, §3.4, §7).
 
-use crate::admission::{AdmissionInput, Changed, admit, is_governance};
+use crate::admission::{AdmissionInput, Changed, admit, is_governance, plan_findings};
 use crate::capability::{Capability, ChangeList, JobConfig};
 use crate::chain::latest_landed_job;
 use crate::checks::{CheckContext, run_check};
@@ -15,10 +15,12 @@ use crate::verify::{MAP_PATH, VerdictInputs, Verified, judge, verified};
 use crate::{Athena, Ui};
 use anyhow::{Context, Result, bail};
 use athena_agent::env::{EnvSpec, Side};
+use athena_agent::policy::Policy;
 use athena_context::briefs::{
     AcceptedReading, CandidateView, CheckResultView, CheckView, CriticInputs, DeliverableFact,
-    PlannerInputs, ProducerInputs, VerifierInputs, VerifierPlan, critic_brief, planner_brief,
-    producer_brief, producer_prompt_with_plan, render_plan_section, verifier_brief_with_plan,
+    PlanRevision, PlannerInputs, ProducerInputs, VerifierInputs, VerifierPlan, critic_brief,
+    planner_brief, producer_brief, producer_prompt_with_plan, render_plan_section,
+    verifier_brief_with_plan,
 };
 use athena_context::outputs::{
     CriterionStatusOutput, CriticOutput, CritiqueVerdictOutput, DeliverableActionOutput,
@@ -380,18 +382,22 @@ impl Athena {
         self.close_dispatched(&ctx, closing)
     }
 
-    /// Ends the job in planning: it fails before any code was written.
+    /// Ends the job in planning: it fails before any code was written. Its verification result is unknown,
+    /// not false: no verification could have failed (review F11).
     fn stop_planning(&self, ctx: &RunContext<'_>, closing: &mut Closing, reason: &str) {
         closing.happened = self.failure(
             ctx,
             &format!("planning stopped before any code was written: {reason}"),
         );
+        closing.happened.verification_passed = None;
     }
 
-    /// One planning round, accept only: a planner invocation and a critic invocation in a read-only
-    /// snapshot of the prediction commit. On accept, the invocations, the `job-plan-1` and `critique-1`
-    /// records go into `closing`, and the rendered producer section is returned. On any other end the job is
-    /// failed in `closing` and `None` is returned (revising and stopping on a verdict are job 4).
+    /// Job planning: up to `max_rounds` rounds of planner, Athena's own checks and critic, in a read-only
+    /// snapshot of the prediction commit. A revise sends the planner a revision brief that quotes the previous
+    /// plan and every finding. On accept, the invocations, plans and critiques go into `closing` and the
+    /// rendered producer section is returned. Reject, a reading the critic judged a misread, revise in the
+    /// last round, or a failure of either agent stops the job: it is failed in `closing` and `None` is
+    /// returned.
     fn plan_round(
         &self,
         ctx: &RunContext<'_>,
@@ -399,11 +405,38 @@ impl Athena {
         checks: &[CheckView],
         closing: &mut Closing,
     ) -> Result<Option<String>> {
+        let cfg = ctx
+            .jc
+            .config
+            .job_plan
+            .expect("planning runs only with [job_plan]");
+        let mut revision: Option<PlanRevision> = None;
+        for round in 1..=cfg.max_rounds {
+            match self.planning_round(ctx, accepted, checks, closing, round, revision.take())? {
+                RoundEnd::Accepted(section) => return Ok(Some(section)),
+                RoundEnd::Stopped => return Ok(None),
+                RoundEnd::Revise(next) => revision = Some(*next),
+            }
+        }
+        unreachable!("the last round either accepts or stops the job")
+    }
+
+    /// One planning round; see [`Self::plan_round`].
+    fn planning_round(
+        &self,
+        ctx: &RunContext<'_>,
+        accepted: &AcceptedReading,
+        checks: &[CheckView],
+        closing: &mut Closing,
+        round: u32,
+        revision: Option<PlanRevision>,
+    ) -> Result<RoundEnd> {
         let jc = ctx.jc;
         let cfg = jc
             .config
             .job_plan
             .expect("planning runs only with [job_plan]");
+        let last_round = round >= cfg.max_rounds;
         let id = ctx.id().clone();
         let p = ctx.prediction.clone();
         let budget = &jc.config.budget;
@@ -420,8 +453,9 @@ impl Athena {
             writes: false,
             permission_mode: "dontAsk".into(),
         };
-        let snap_dir = self.state.job_dir(&id).join("plan-1");
+        let snap_dir = self.state.job_dir(&id).join(format!("plan-{round}"));
         let no_env = std::collections::BTreeMap::new();
+        let verifier_commands = ctx.capability.verifier_grant(jc).commands;
 
         // The planner.
         if let Err(e) = self.check_budget(
@@ -431,7 +465,7 @@ impl Athena {
             "planner, with the producer and verifier",
         ) {
             self.stop_planning(ctx, closing, &format!("{e}"));
-            return Ok(None);
+            return Ok(RoundEnd::Stopped);
         }
         let mut facts = Vec::new();
         for d in &accepted.deliverables {
@@ -447,11 +481,9 @@ impl Athena {
             request: request.clone(),
             reading: accepted.clone(),
             checks: checks.to_vec(),
-            verifier_commands: athena_agent::policy::describe_commands(
-                &ctx.capability.verifier_grant(jc).commands,
-            ),
+            verifier_commands: athena_agent::policy::describe_commands(&verifier_commands),
             deliverable_facts: facts,
-            revision: None,
+            revision,
         });
         let composed = compose(&[CONTRACT.into(), PLANNER_FRAME.into()]);
         crate::pin::remove_tree(&snap_dir)?;
@@ -489,7 +521,7 @@ impl Athena {
             Ok(done) => done,
             Err(error) => {
                 self.stop_planning(ctx, closing, &format!("the planner could not run: {error}"));
-                return Ok(None);
+                return Ok(RoundEnd::Stopped);
             }
         };
         ctx.ui.line(&format!(
@@ -505,7 +537,7 @@ impl Athena {
                 closing,
                 &format!("the planner did not complete: {why}"),
             );
-            return Ok(None);
+            return Ok(RoundEnd::Stopped);
         }
         let plan_output = match output
             .structured
@@ -515,17 +547,61 @@ impl Athena {
             Some(Ok(raw)) => redacted(raw, ctx.redactor)?,
             _ => {
                 self.stop_planning(ctx, closing, "the planner returned no valid plan");
-                return Ok(None);
+                return Ok(RoundEnd::Stopped);
             }
         };
-        let mut plan = plan_record(&id, 1, seq, plan_output, &|path| {
+        let mut plan = plan_record(&id, round, seq, plan_output, &|path| {
             Ok(self.git.show_file(&p, path)?.is_some())
         })?;
         let section = render_plan_section(&plan);
         plan.producer_section_sha256 = sha256_hex(section.as_bytes());
         if let Err(e) = plan.validate() {
             self.stop_planning(ctx, closing, &format!("the plan is invalid: {e}"));
-            return Ok(None);
+            return Ok(RoundEnd::Stopped);
+        }
+
+        // Athena's own checks, at no model cost. A major finding sends the plan back without a critic call.
+        let athena_findings = plan_findings(
+            &plan,
+            ctx.reading,
+            &Policy {
+                role: Role::Verifier,
+                root: self.state.job_dir(&id),
+                commands: verifier_commands,
+                writes: false,
+            },
+        );
+        if athena_findings
+            .iter()
+            .any(|f| matches!(f.severity, Severity::Blocker | Severity::Major))
+        {
+            ctx.ui.line(&format!(
+                "athena     plan round {round}: {} finding(s); no critic call",
+                athena_findings.len()
+            ));
+            let critique = Critique {
+                job: id.clone(),
+                round,
+                at: crate::now(),
+                invocation_seq: None,
+                agent_verdict: None,
+                final_verdict: CritiqueVerdict::Revise,
+                findings: athena_findings,
+                request_reading_mismatch: None,
+                summary: Some(
+                    "Athena's own checks found a major problem in the plan; the critic was not called."
+                        .into(),
+                ),
+            };
+            return self.end_round(
+                ctx,
+                closing,
+                plan,
+                critique,
+                section,
+                last_round,
+                cfg.max_rounds,
+            );
         }
 
         // The critic.
@@ -536,14 +612,16 @@ impl Athena {
             "critic, with the producer and verifier",
         ) {
             self.stop_planning(ctx, closing, &format!("{e}"));
-            return Ok(None);
+            // The plan stands as a record even though no critic reviewed it.
+            closing.plans.push(plan);
+            return Ok(RoundEnd::Stopped);
         }
         let critic_brief_text = critic_brief(&CriticInputs {
             job: id.as_str().to_string(),
             request,
             reading: accepted.clone(),
             plan: plan.clone(),
-            athena_findings: Vec::new(),
+            athena_findings: athena_findings.clone(),
         });
         let composed = compose(&[CONTRACT.into(), CRITIC_FRAME.into()]);
         Snapshot::create(&self.git, &p, &p, &snap_dir, SnapshotRepo::None)?;
@@ -580,7 +658,7 @@ impl Athena {
             Ok(done) => done,
             Err(error) => {
                 self.stop_planning(ctx, closing, &format!("the critic could not run: {error}"));
-                return Ok(None);
+                return Ok(RoundEnd::Stopped);
             }
         };
         ctx.ui.line(&format!(
@@ -592,7 +670,7 @@ impl Athena {
         if output.outcome != InvocationOutcome::Success {
             let why = record.detail.clone().unwrap_or_default();
             self.stop_planning(ctx, closing, &format!("the critic did not complete: {why}"));
-            return Ok(None);
+            return Ok(RoundEnd::Stopped);
         }
         let critic_output = match output
             .structured
@@ -602,60 +680,111 @@ impl Athena {
             Some(Ok(raw)) => redacted(raw, ctx.redactor)?,
             _ => {
                 self.stop_planning(ctx, closing, "the critic returned no valid critique");
-                return Ok(None);
+                return Ok(RoundEnd::Stopped);
             }
         };
-        let verdict = match critic_output.verdict {
+        let agent_verdict = match critic_output.verdict {
             CritiqueVerdictOutput::Accept => CritiqueVerdict::Accept,
             CritiqueVerdictOutput::Revise => CritiqueVerdict::Revise,
             CritiqueVerdictOutput::Reject => CritiqueVerdict::Reject,
         };
+        // Athena's own findings (minor ones only, here) come first, then the critic's.
+        let mut findings = athena_findings;
+        findings.extend(critic_output.findings.iter().map(|f| Finding {
+            severity: match f.severity {
+                SeverityOutput::Blocker => Severity::Blocker,
+                SeverityOutput::Major => Severity::Major,
+                SeverityOutput::Minor => Severity::Minor,
+                SeverityOutput::Nit => Severity::Nit,
+            },
+            summary: f.summary.clone(),
+            evidence: format!("{} Fix: {}", f.evidence.trim(), f.fix.trim()),
+            location: Some(f.location.clone()),
+            source: FindingSource::Critic,
+        }));
+        let verdict = if agent_verdict == CritiqueVerdict::Accept
+            && findings
+                .iter()
+                .any(|f| matches!(f.severity, Severity::Blocker | Severity::Major))
+        {
+            CritiqueVerdict::Revise
+        } else {
+            agent_verdict
+        };
         let critique = Critique {
             job: id.clone(),
-            round: 1,
+            round,
             at: crate::now(),
             invocation_seq: Some(critic_seq),
-            agent_verdict: Some(verdict),
+            agent_verdict: Some(agent_verdict),
             final_verdict: verdict,
-            findings: critic_output
-                .findings
-                .iter()
-                .map(|f| Finding {
-                    severity: match f.severity {
-                        SeverityOutput::Blocker => Severity::Blocker,
-                        SeverityOutput::Major => Severity::Major,
-                        SeverityOutput::Minor => Severity::Minor,
-                        SeverityOutput::Nit => Severity::Nit,
-                    },
-                    summary: f.summary.clone(),
-                    evidence: format!("{} Fix: {}", f.evidence.trim(), f.fix.trim()),
-                    location: Some(f.location.clone()),
-                    source: FindingSource::Critic,
-                })
-                .collect(),
+            findings,
             request_reading_mismatch: critic_output.request_reading_mismatch.clone(),
             summary: Some(critic_output.summary.clone()),
         };
         if let Err(e) = critique.validate() {
             self.stop_planning(ctx, closing, &format!("the critique is invalid: {e}"));
-            return Ok(None);
+            return Ok(RoundEnd::Stopped);
         }
-        if verdict != CritiqueVerdict::Accept || critique.request_reading_mismatch.is_some() {
+        self.end_round(
+            ctx,
+            closing,
+            plan,
+            critique,
+            section,
+            last_round,
+            cfg.max_rounds,
+        )
+    }
+
+    /// Files a round's plan and critique and decides what follows. Athena decides the verdict as
+    /// `verify::judge` does: the plan is accepted only when the critic accepts and neither source holds a
+    /// blocker or major finding. Reject, a misread reading, or revise in the last round stops the job.
+    #[allow(clippy::too_many_arguments)]
+    fn end_round(
+        &self,
+        ctx: &RunContext<'_>,
+        closing: &mut Closing,
+        plan: JobPlan,
+        critique: Critique,
+        section: String,
+        last_round: bool,
+        max_rounds: u32,
+    ) -> Result<RoundEnd> {
+        let round = plan.round;
+        let verdict = critique.final_verdict;
+        let misread = critique.request_reading_mismatch.clone();
+        let findings = critique.findings.clone();
+        let summary = critique.summary.clone().unwrap_or_default();
+        closing.plans.push(plan.clone());
+        closing.critiques.push(critique);
+        let mut stop = |why: String| -> Result<RoundEnd> {
             self.stop_planning(
                 ctx,
                 closing,
                 &format!(
-                    "the critic did not accept the plan ({verdict:?}): {}; revising a plan is not built yet",
-                    critic_output.summary
+                    "{why} (round {round} of {max_rounds}). {summary} Findings: {}",
+                    findings_line(&findings)
                 ),
             );
-            closing.plans.push(plan);
-            closing.critiques.push(critique);
-            return Ok(None);
+            Ok(RoundEnd::Stopped)
+        };
+        if let Some(how) = misread {
+            return stop(format!(
+                "the critic judged that the reading misread the request: {how}"
+            ));
         }
-        closing.plans.push(plan);
-        closing.critiques.push(critique);
-        Ok(Some(section))
+        match verdict {
+            CritiqueVerdict::Accept => Ok(RoundEnd::Accepted(section)),
+            CritiqueVerdict::Reject => stop("the critic rejected the plan".into()),
+            CritiqueVerdict::Revise if last_round => {
+                stop("the plan still needed revising in the last round".into())
+            }
+            CritiqueVerdict::Revise => Ok(RoundEnd::Revise(Box::new(PlanRevision {
+                previous: plan,
+                findings: findings.clone(),
+            }))),
+        }
     }
 
     /// For a capability that pins, resolves the commit to read and checks its tree out under the job's
@@ -846,6 +975,38 @@ impl Athena {
             commit,
         })
     }
+}
+
+/// How one planning round ended.
+enum RoundEnd {
+    /// The plan was accepted; the producer's section, rendered from it.
+    Accepted(String),
+    /// The planner is asked again, with the previous plan and every finding.
+    Revise(Box<PlanRevision>),
+    /// The job failed in planning; `closing` holds the failure.
+    Stopped,
+}
+
+/// Findings on one line each, joined by `; `, for a failure reason.
+fn findings_line(findings: &[Finding]) -> String {
+    if findings.is_empty() {
+        return "(none recorded)".into();
+    }
+    findings
+        .iter()
+        .map(|f| {
+            let location = f
+                .location
+                .as_deref()
+                .map_or(String::new(), |l| format!(" ({l})"));
+            format!(
+                "{}: {}{location}",
+                format!("{:?}", f.severity).to_lowercase(),
+                f.summary.trim()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// What every phase of a dispatched job needs.

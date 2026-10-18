@@ -21,6 +21,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The revise and stop paths of job planning, and Athena's own checks on a plan (job 4 of
+  `docs/design/job-planning.md`). Planning now runs up to `[job_plan] max_rounds` rounds (default 3). A revise
+  sends the planner a revision brief that quotes the previous plan and every finding. Reject, a critic that
+  judges the reading misread the request, or a revise in the last round stops the job: it fails through
+  `failure()` with the reason "planning stopped before any code was written:" and the findings, with every
+  plan and critique committed and no producer or verifier run. A job stopped in planning scores its
+  `verification_passes` event as unknown, not as a failed verification (review finding F11); the scoring rule
+  is in `athena-score`. A retry's carry quotes the findings of the last critique that stopped the job, not
+  only the outcome reason (F11). Before each critic call, `admission::plan_findings` checks the plan at no
+  model cost: one demonstration per criterion; for a behavior criterion, `fails_without` and a command the
+  verifier's grant allows (`athena_agent::policy::evaluate`); files to modify exist and files to create do
+  not; a governance file must be listed and named (`governance_change_is_listed`) or the finding is major;
+  any other path outside the reading's deliverables is a minor finding. A major finding writes an Athena
+  critique with no critic invocation and sends the plan back. A critic that accepts while holding a major
+  finding is treated as a revise, as `verify::judge` does. `crates/athena-cli/tests/job_plan.rs` covers each
+  path with scripted planner and critic turns.
 - The verifier receives an accepted plan's demonstrations and planned files (job 3b of
   `docs/design/job-planning.md`). When a job has an accepted plan, `produce_and_verify` builds the verifier's
   brief with `verifier_brief_with_plan` from `VerifierPlan::from_plan`, for both the stored

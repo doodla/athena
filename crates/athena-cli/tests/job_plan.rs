@@ -9,9 +9,14 @@ mod common;
 
 use athena_context::briefs::render_plan_section;
 use athena_core::run::GoResult;
-use athena_data::records::{AcceptedBy, AnyRecord, JobPlan, OutcomeState, Role};
+use athena_data::records::{
+    AcceptedBy, AnyRecord, Critique, CritiqueVerdict, Finding, FindingSource, JobPlan,
+    OutcomeState, Role, Severity,
+};
 use athena_data::sha256_hex;
 use common::*;
+use serde_json::{Value, json};
+use std::sync::{Arc, Mutex};
 
 fn finished(result: GoResult) -> athena_core::run::Finished {
     match result {
@@ -280,6 +285,557 @@ fn with_planning_off_the_verifier_brief_and_inputs_have_no_plan() {
         !v.inputs.iter().any(|i| i.contains("planned")),
         "{:?}",
         v.inputs
+    );
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Job 4: revise and stop paths, and Athena's own checks on a plan.
+
+/// One demonstration of the default reading's criterion `n`.
+fn demo(n: u32, command: &str, fails_without: Option<&str>) -> Value {
+    json!({
+        "criterion": n,
+        "method": "run the tests",
+        "command": command,
+        "observes": format!("criterion {n} holds"),
+        "fails_without": fails_without
+    })
+}
+
+/// A plan for the default reading (two criteria, README.md to modify) with these files and demonstrations.
+fn plan_of(files: Value, demonstrations: Vec<Value>) -> Value {
+    json!({
+        "approach": "Add a greeting line to README.md.",
+        "decisions": [],
+        "files": files,
+        "steps": ["Edit README.md."],
+        "risks": [],
+        "demonstrations": demonstrations,
+        "open_questions": []
+    })
+}
+
+fn readme_file() -> Value {
+    json!([{ "path": "README.md", "action": "modify", "purpose": "Hold the greeting." }])
+}
+
+fn good_demos() -> Vec<Value> {
+    vec![
+        demo(1, "cargo test --locked", Some("the greeting test fails")),
+        demo(2, "cargo test --locked", Some("the suite fails")),
+    ]
+}
+
+fn good_plan() -> Value {
+    plan_of(readme_file(), good_demos())
+}
+
+/// A critique with these `(severity, summary)` findings.
+fn critique_of(verdict: &str, findings: &[(&str, &str)], mismatch: Option<&str>) -> Value {
+    json!({
+        "verdict": verdict,
+        "findings": findings.iter().map(|(severity, summary)| json!({
+            "severity": severity,
+            "summary": summary,
+            "location": "demonstrations",
+            "evidence": "the second demonstration is the same as the first",
+            "fix": "name a test that fails without the greeting"
+        })).collect::<Vec<_>>(),
+        "request_reading_mismatch": mismatch,
+        "summary": format!("The critic says {verdict}.")
+    })
+}
+
+fn read_record(fx: &Fixture, path: &str) -> AnyRecord {
+    let bytes = fx.git.show_file("HEAD", path).unwrap().unwrap();
+    AnyRecord::parse(path, &bytes).unwrap()
+}
+
+fn critique_at(fx: &Fixture, dir: &str, round: u32) -> Critique {
+    match read_record(fx, &format!("{dir}/critique-{round}.json")) {
+        AnyRecord::Critique(c) => *c,
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+fn count(calls: &Arc<Mutex<Vec<Role>>>, role: Role) -> usize {
+    calls.lock().unwrap().iter().filter(|r| **r == role).count()
+}
+
+#[test]
+fn after_a_revise_the_second_planner_prompt_quotes_the_first_finding_and_the_job_lands() {
+    const FINDING: &str = "Demonstration 2 repeats demonstration 1 and shows nothing new";
+    let fx = Fixture::with_config(&planned_config());
+    let mut scenario = Scenario::default();
+    scenario.plans = vec![good_plan(), good_plan()];
+    scenario.critiques = vec![
+        critique_of("revise", &[("major", FINDING)], None),
+        critique_of("accept", &[], None),
+    ];
+    let calls = scenario.invocations.clone();
+    let briefs = scenario.seen_by_planner.clone();
+    let athena = fx.athena(scenario.script());
+    let proposal = athena.ask("tidy the readme", &Lines::default()).unwrap();
+    let f = finished(
+        athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(f.state, OutcomeState::Landed, "{}", f.reason);
+    assert_eq!(
+        *calls.lock().unwrap(),
+        [
+            Role::Reader,
+            Role::Planner,
+            Role::Critic,
+            Role::Planner,
+            Role::Critic,
+            Role::Producer,
+            Role::Verifier
+        ]
+    );
+    let briefs = briefs.lock().unwrap().clone();
+    assert!(!briefs[0].contains(FINDING) && !briefs[0].contains("Revision"));
+    let second = &briefs[1];
+    assert!(second.contains(FINDING), "{second}");
+    assert!(
+        second.contains("Revision: your plan for round 1"),
+        "{second}"
+    );
+    assert!(
+        second.contains("Add a greeting line to README.md."),
+        "the previous plan is quoted: {second}"
+    );
+    let dir = proposal.job.dir();
+    assert_eq!(
+        critique_at(&fx, &dir, 1).final_verdict,
+        CritiqueVerdict::Revise
+    );
+    assert_eq!(
+        critique_at(&fx, &dir, 2).final_verdict,
+        CritiqueVerdict::Accept
+    );
+    // The producer is given the accepted plan, which is the second round's.
+    assert!(
+        fx.git
+            .path_exists("HEAD", &format!("{dir}/job-plan-2.json"))
+            .unwrap()
+    );
+    assert!(athena.check_history().unwrap().violations.is_empty());
+}
+
+#[test]
+fn when_every_round_says_revise_the_job_fails_in_planning_with_nothing_built_and_an_unknown_verification()
+ {
+    const FINDING: &str = "No demonstration would fail without the greeting";
+    let fx = Fixture::with_config(&planned_config());
+    let mut scenario = Scenario::default();
+    scenario.plans = vec![good_plan(), good_plan(), good_plan()];
+    scenario.critiques = (0..3)
+        .map(|_| critique_of("revise", &[("major", FINDING)], None))
+        .collect();
+    let calls = scenario.invocations.clone();
+    let athena = fx.athena(scenario.script());
+    let proposal = athena.ask("tidy the readme", &Lines::default()).unwrap();
+    let f = finished(
+        athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(f.state, OutcomeState::Failed);
+    assert!(
+        f.reason
+            .starts_with("planning stopped before any code was written:"),
+        "{}",
+        f.reason
+    );
+    assert!(f.reason.contains(FINDING), "{}", f.reason);
+    assert!(f.reason.contains("round 3 of 3"), "{}", f.reason);
+    // No producer or verifier ran. (A failed job is introspected afterwards by one reader-role call.)
+    let planning: Vec<Role> = calls.lock().unwrap()[..7].to_vec();
+    assert_eq!(
+        planning,
+        [
+            Role::Reader,
+            Role::Planner,
+            Role::Critic,
+            Role::Planner,
+            Role::Critic,
+            Role::Planner,
+            Role::Critic
+        ]
+    );
+    assert_eq!(
+        count(&calls, Role::Producer) + count(&calls, Role::Verifier),
+        0
+    );
+
+    let dir = proposal.job.dir();
+    for round in 1..=3 {
+        for kind in ["job-plan", "critique"] {
+            assert!(
+                fx.git
+                    .path_exists("HEAD", &format!("{dir}/{kind}-{round}.json"))
+                    .unwrap(),
+                "{kind}-{round}"
+            );
+        }
+    }
+    assert!(
+        !fx.git
+            .path_exists("HEAD", &format!("{dir}/candidate.json"))
+            .unwrap()
+    );
+    assert!(
+        !fx.git
+            .path_exists("HEAD", &format!("{dir}/verification.json"))
+            .unwrap()
+    );
+    // The totals count the reader and all six planning invocations.
+    assert_eq!(f.totals.as_ref().unwrap().invocations, 7);
+    // Verification never ran, so its result is unknown, not false (review F11).
+    let score = f.score.as_ref().expect("a closed job is scored");
+    let event = score
+        .events
+        .iter()
+        .find(|e| e.event == "verification_passes")
+        .expect("the verification event is scored");
+    assert_eq!(event.outcome, None, "unknown, not false");
+    assert!(athena.check_history().unwrap().violations.is_empty());
+}
+
+#[test]
+fn a_reject_a_misread_reading_or_a_revise_in_the_last_round_stops_the_job() {
+    // (the critic's turns, the round the job stops in, a phrase of the reason)
+    let cases: [(Vec<Value>, usize, &str); 3] = [
+        (
+            vec![critique_of(
+                "reject",
+                &[("blocker", "The plan is unsound")],
+                None,
+            )],
+            1,
+            "the critic rejected the plan",
+        ),
+        (
+            vec![critique_of(
+                "accept",
+                &[],
+                Some("It reads the request as a refactor"),
+            )],
+            1,
+            "misread the request: It reads the request as a refactor",
+        ),
+        (
+            vec![
+                critique_of("revise", &[("major", "Not yet")], None),
+                critique_of("revise", &[("major", "Still not")], None),
+            ],
+            2,
+            "still needed revising in the last round",
+        ),
+    ];
+    for (critiques, rounds, phrase) in cases {
+        let config = format!(
+            "{}\n[job_plan]\nenabled = true\nmax_rounds = {}\n",
+            test_config(),
+            if rounds == 2 { 2 } else { 3 }
+        );
+        let fx = Fixture::with_config(&config);
+        let mut scenario = Scenario::default();
+        scenario.plans = vec![good_plan(); 3];
+        scenario.critiques = critiques;
+        let calls = scenario.invocations.clone();
+        let athena = fx.athena(scenario.script());
+        let proposal = athena.ask("tidy the readme", &Lines::default()).unwrap();
+        let f = finished(
+            athena
+                .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
+                .unwrap(),
+        );
+        assert_eq!(f.state, OutcomeState::Failed, "{phrase}");
+        assert!(f.reason.contains(phrase), "{}", f.reason);
+        assert_eq!(count(&calls, Role::Planner), rounds, "{phrase}");
+        assert_eq!(count(&calls, Role::Critic), rounds, "{phrase}");
+        assert_eq!(count(&calls, Role::Producer), 0, "{phrase}");
+    }
+}
+
+#[test]
+fn a_plan_that_edits_an_unlisted_governance_file_gets_an_athena_critique_and_no_critic_call() {
+    let fx = Fixture::with_config(&planned_config());
+    let mut scenario = Scenario::default();
+    scenario.plans = vec![
+        plan_of(
+            json!([
+                { "path": "README.md", "action": "modify", "purpose": "Hold the greeting." },
+                { "path": "athena.toml", "action": "modify", "purpose": "Turn something on." }
+            ]),
+            good_demos(),
+        ),
+        good_plan(),
+    ];
+    scenario.critiques = vec![critique_of("accept", &[], None)];
+    let calls = scenario.invocations.clone();
+    let briefs = scenario.seen_by_planner.clone();
+    let athena = fx.athena(scenario.script());
+    let proposal = athena.ask("tidy the readme", &Lines::default()).unwrap();
+    let f = finished(
+        athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(f.state, OutcomeState::Landed, "{}", f.reason);
+    // Round 1 went back to the planner without the critic; only round 2 reached it.
+    assert_eq!(
+        *calls.lock().unwrap(),
+        [
+            Role::Reader,
+            Role::Planner,
+            Role::Planner,
+            Role::Critic,
+            Role::Producer,
+            Role::Verifier
+        ]
+    );
+    let first = critique_at(&fx, &proposal.job.dir(), 1);
+    assert_eq!(first.invocation_seq, None, "no critic invocation");
+    assert_eq!(first.agent_verdict, None);
+    assert_eq!(first.final_verdict, CritiqueVerdict::Revise);
+    let major: Vec<&Finding> = first
+        .findings
+        .iter()
+        .filter(|f| f.severity == Severity::Major)
+        .collect();
+    assert_eq!(major.len(), 1, "{:?}", first.findings);
+    assert_eq!(major[0].source, FindingSource::Athena);
+    assert!(
+        major[0].summary.contains("athena.toml"),
+        "{}",
+        major[0].summary
+    );
+    // The planner is shown Athena's finding in its revision brief.
+    assert!(briefs.lock().unwrap()[1].contains("athena.toml is a governance file"));
+}
+
+#[test]
+fn a_plan_citing_a_command_outside_the_verifiers_grant_gets_an_athena_critique_and_no_critic_call()
+{
+    let fx = Fixture::with_config(&planned_config());
+    let mut scenario = Scenario::default();
+    scenario.plans = vec![
+        plan_of(
+            readme_file(),
+            vec![
+                demo(1, "cargo test --locked", Some("the greeting test fails")),
+                demo(2, "python3 check_greeting.py", Some("the check fails")),
+            ],
+        ),
+        good_plan(),
+    ];
+    let calls = scenario.invocations.clone();
+    let athena = fx.athena(scenario.script());
+    let proposal = athena.ask("tidy the readme", &Lines::default()).unwrap();
+    let f = finished(
+        athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(f.state, OutcomeState::Landed, "{}", f.reason);
+    assert_eq!(
+        count(&calls, Role::Critic),
+        1,
+        "only the second plan reached the critic"
+    );
+    let first = critique_at(&fx, &proposal.job.dir(), 1);
+    assert_eq!(first.invocation_seq, None);
+    assert!(
+        first.findings.iter().any(|f| f.severity == Severity::Major
+            && f.source == FindingSource::Athena
+            && f.summary.contains("python3 check_greeting.py")),
+        "{:?}",
+        first.findings
+    );
+}
+
+#[test]
+fn athena_checks_a_demonstration_for_every_criterion_and_a_fails_without_for_behavior_ones() {
+    let fx = Fixture::with_config(&planned_config());
+    let mut scenario = Scenario::default();
+    scenario.plans = vec![
+        // Criterion 2 (behavior) has no fails_without, and criterion 1 is shown twice.
+        plan_of(
+            readme_file(),
+            vec![
+                demo(1, "cargo test --locked", Some("x")),
+                demo(1, "cargo test --locked", Some("y")),
+                demo(2, "cargo test --locked", None),
+            ],
+        ),
+        // Criterion 2 is not shown at all.
+        plan_of(
+            readme_file(),
+            vec![demo(1, "cargo test --locked", Some("x"))],
+        ),
+        good_plan(),
+    ];
+    let calls = scenario.invocations.clone();
+    let athena = fx.athena(scenario.script());
+    let proposal = athena.ask("tidy the readme", &Lines::default()).unwrap();
+    let f = finished(
+        athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(f.state, OutcomeState::Landed, "{}", f.reason);
+    assert_eq!(count(&calls, Role::Critic), 1);
+    let dir = proposal.job.dir();
+    let summaries = |round| -> Vec<String> {
+        critique_at(&fx, &dir, round)
+            .findings
+            .into_iter()
+            .map(|f| f.summary)
+            .collect()
+    };
+    let first = summaries(1);
+    assert!(
+        first
+            .iter()
+            .any(|s| s.contains("Criterion 1 has 2 demonstrations")),
+        "{first:?}"
+    );
+    assert!(
+        first
+            .iter()
+            .any(|s| s.contains("does not say what fails without")),
+        "{first:?}"
+    );
+    let second = summaries(2);
+    assert!(
+        second
+            .iter()
+            .any(|s| s.contains("Criterion 2 has 0 demonstrations")),
+        "{second:?}"
+    );
+}
+
+#[test]
+fn athena_checks_that_files_to_modify_exist_and_files_to_create_do_not() {
+    let fx = Fixture::with_config(&planned_config());
+    let mut scenario = Scenario::default();
+    scenario.plans = vec![
+        plan_of(
+            json!([
+                { "path": "NOPE.md", "action": "modify", "purpose": "Not there." },
+                { "path": "README.md", "action": "create", "purpose": "Already there." }
+            ]),
+            good_demos(),
+        ),
+        good_plan(),
+    ];
+    let athena = fx.athena(scenario.script());
+    let proposal = athena.ask("tidy the readme", &Lines::default()).unwrap();
+    let f = finished(
+        athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(f.state, OutcomeState::Landed, "{}", f.reason);
+    let first = critique_at(&fx, &proposal.job.dir(), 1);
+    let majors: Vec<&str> = first
+        .findings
+        .iter()
+        .filter(|f| f.severity == Severity::Major)
+        .map(|f| f.summary.as_str())
+        .collect();
+    assert!(
+        majors
+            .iter()
+            .any(|s| s.contains("NOPE.md") && s.contains("does not exist")),
+        "{majors:?}"
+    );
+    assert!(
+        majors
+            .iter()
+            .any(|s| s.contains("README.md") && s.contains("already exists")),
+        "{majors:?}"
+    );
+}
+
+#[test]
+fn a_file_outside_the_deliverables_is_a_minor_finding_that_does_not_send_the_plan_back() {
+    let fx = Fixture::with_config(&planned_config());
+    let mut scenario = Scenario::default();
+    scenario.plans = vec![plan_of(
+        json!([
+            { "path": "README.md", "action": "modify", "purpose": "Hold the greeting." },
+            { "path": "NOTES.md", "action": "create", "purpose": "Also write notes." }
+        ]),
+        good_demos(),
+    )];
+    let calls = scenario.invocations.clone();
+    let briefs = scenario.seen_by_planner.clone();
+    let athena = fx.athena(scenario.script());
+    let proposal = athena.ask("tidy the readme", &Lines::default()).unwrap();
+    let f = finished(
+        athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(f.state, OutcomeState::Landed, "{}", f.reason);
+    assert_eq!(count(&calls, Role::Planner), 1);
+    assert_eq!(count(&calls, Role::Critic), 1);
+    assert_eq!(briefs.lock().unwrap().len(), 1);
+    let critique = critique_at(&fx, &proposal.job.dir(), 1);
+    assert_eq!(critique.final_verdict, CritiqueVerdict::Accept);
+    assert_eq!(critique.findings.len(), 1, "{:?}", critique.findings);
+    assert_eq!(critique.findings[0].severity, Severity::Minor);
+    assert_eq!(critique.findings[0].source, FindingSource::Athena);
+    assert!(critique.findings[0].summary.contains("NOTES.md"));
+}
+
+#[test]
+fn a_retry_of_a_job_stopped_in_planning_carries_the_last_critiques_findings() {
+    const FIRST: &str = "The first round finding about demonstrations";
+    const LAST: &str = "The last round finding about the greeting test";
+    let fx = Fixture::with_config(&planned_config());
+    let mut scenario = Scenario::default();
+    scenario.plans = vec![good_plan(); 3];
+    scenario.critiques = vec![
+        critique_of("revise", &[("major", FIRST)], None),
+        critique_of("revise", &[("major", "Middle")], None),
+        critique_of("revise", &[("major", LAST)], None),
+    ];
+    let readers: Arc<Mutex<Vec<String>>> = Arc::default();
+    let inner = scenario.script();
+    let seen = readers.clone();
+    let athena = fx.athena(Box::new(move |spec| {
+        if spec.role == Role::Reader {
+            seen.lock().unwrap().push(spec.user_prompt.clone());
+        }
+        inner(spec)
+    }));
+    let proposal = athena.ask("tidy the readme", &Lines::default()).unwrap();
+    let f = finished(
+        athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(f.state, OutcomeState::Failed);
+
+    athena
+        .retry(proposal.job.as_str(), &Lines::default())
+        .unwrap();
+    let brief = readers.lock().unwrap().last().cloned().unwrap();
+    assert!(brief.contains("# Earlier attempt"), "{brief}");
+    assert!(
+        brief.contains(LAST),
+        "the last critique's finding is carried: {brief}"
+    );
+    assert!(!brief.contains(FIRST), "earlier critiques are not: {brief}");
+    assert!(
+        brief.contains("planning stopped before any code was written"),
+        "{brief}"
     );
 }
 
