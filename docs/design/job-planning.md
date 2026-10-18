@@ -199,6 +199,13 @@ one producer run; review 1 split jobs 3 and 5.
 6. **5a: status and recovery.** `crates/athena-core/src/{status.rs, manage.rs}`, `crates/athena-cli/src/display.rs`.
    Done when: plan state appears only for planned jobs and `status <job> --json` includes plans and critiques;
    closing a job killed during planning adds no producer invocation.
+   *Built as:* a job's plan state is that of its last critique (accepted unless it is not an accept or it names a
+   misread request), shown on the job's line in `athena status`; the summary's first-round counts are the planned
+   jobs whose planning ended accepted or stopped in round 1. `status <job>` prints each round's verdict and
+   findings, and the trace's `plan`, `plans` and `critiques` keys are skipped when empty, so an unplanned job's
+   text and JSON are unchanged. `recover_interrupted` records the planner and critic invocations it finds and
+   adds the missing-producer record only when no planner, critic or producer invocation exists. Tests are in
+   `crates/athena-cli/tests/job_plan.rs`.
 7. **5b: turning it on.** Only `athena.toml`, `crates/athena-cli/tests/common/mod.rs` (the test config drops
    `[job_plan]` so existing tests keep today's path), `docs/decisions.md` and `CHANGELOG.md`. The reading lists
    `athena.toml` as a deliverable and names it in a criterion (`governance_change_is_listed`). Queue it only after
