@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- Job planning is on for this repository (job 5b of `docs/design/job-planning.md`). `athena.toml` now has
+  `[job_plan]` with `enabled = true`, planner and critic caps of $0.75 each, 600 s timeouts and at most 3
+  rounds, so a change job gets a planner and a critic before its producer. Set `enabled = false` to turn it
+  off. Decision D110 in `docs/decisions.md` records the alternatives, the keep rule and the reversal. Tests
+  that need the unplanned path strip the section (test-only edits in `crates/athena-cli/tests/common/mod.rs`,
+  `crates/athena-data/src/config.rs` and `crates/athena-core/src/run_pin_tests.rs`).
 - The firstmate explainer page answers the open newcomer findings. "Agent" is firstmate's own deciding AI and
   "worker" is the separate AI tool that does a task, and the page says that "decided by agent" means the
   former; no agent-decided trigger names another decider's event (the t4 trigger now only says the agent runs

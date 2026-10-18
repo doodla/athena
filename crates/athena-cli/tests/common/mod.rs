@@ -13,12 +13,29 @@ use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-/// The repository's own configuration, with checks that are fast and observable:
+/// `config` without its `[job_plan]` table, wherever it sits: the lines from its header to the next table
+/// header. Tests of the unplanned path use it, and tests that append their own `[job_plan]` need it to avoid
+/// a duplicate table.
+pub fn without_job_plan(config: &str) -> String {
+    let mut skipping = false;
+    config
+        .split_inclusive('\n')
+        .filter(|line| {
+            let head = line.trim_start();
+            if head.starts_with('[') {
+                skipping = head.trim_end() == "[job_plan]";
+            }
+            !skipping
+        })
+        .collect()
+}
+
+/// The repository's own configuration, without job planning, and with checks that are fast and observable:
 /// - `fmt` fails when `src/lib.rs` contains `BADLY`, unless `rustfmt.toml` says `relaxed`;
 /// - `test` fails without `README.md` or with a `.cargo/config.toml` in the tree, and otherwise reports
 ///   one test.
 pub fn test_config() -> String {
-    let base = include_str!("../../../../athena.toml");
+    let base = &without_job_plan(include_str!("../../../../athena.toml"));
     let start = base
         .find("[[capabilities.change.checks]]")
         .expect("the config has checks");
