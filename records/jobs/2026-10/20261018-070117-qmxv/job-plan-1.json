@@ -1,0 +1,241 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261018-070117-qmxv",
+  "round": 1,
+  "at": "2026-10-18T07:03:33.751204546Z",
+  "invocation_seq": 2,
+  "approach": "Before the first producer invocation in produce_and_verify (non-nested only), create a base-only snapshot, run the routed checks in it with an empty change list so none is skipped and none stops the run, and keep the failures by name as a Baseline. After the candidate's checks, a check that failed and also failed in the baseline gets `pre_existing = true` and a note saying it also failed on the base commit. Candidate checks continue past a baseline-failing check, so a later check can still fail for real. `CheckRun::blocks()` (failed and not pre-existing) replaces `passed` wherever the verdict, the checks line, or the verifier gate decides blocking. The `if all_passed` gate goes: the verifier always runs. The job is still rejected for a blocking failure, and every criterion is judged. The baseline is stored on the Verification record, so it is in the job's committed records. The verifier brief labels each pre-existing check. No config key.",
+  "decisions": [
+    {
+      "choice": "Mark pre-existing with a new `pre_existing: bool` on CheckRun (serde default, skipped when false), keeping `passed` truthful. Add `CheckRun::blocks()`.",
+      "reason": "A pre-existing failure stays visible as failed in records and display. Old records still parse. One method gives verify.rs, run.rs and the brief a single blocking rule.",
+      "rejected": [
+        {
+          "option": "Rewrite pre-existing failures to passed=true",
+          "why": "Hides the failure, and criterion 6 asks for a marker and a note."
+        },
+        {
+          "option": "A list of pre-existing names on Verification only",
+          "why": "Criterion 2 asks for the marker in the check record."
+        }
+      ]
+    },
+    {
+      "choice": "Fix the root cause: remove the `if all_passed` gate around the verifier, and drop the all-passed condition on the 'returned no verdict' reason in judge().",
+      "reason": "The gate is why one unrelated failing check leaves every criterion unjudged. Judgment is the verifier's job whatever the checks say. The final verdict still fails on any blocking check.",
+      "rejected": [
+        {
+          "option": "Only open the gate when every failure is pre-existing",
+          "why": "Does not meet criterion 4, which needs judging when an unrelated non-pre-existing check fails."
+        }
+      ]
+    },
+    {
+      "choice": "Add a stop rule to routing::run_routed/run_local: baseline run = never stop; candidate run = stop at the first failure unless that check failed on the base.",
+      "reason": "run_local stops after the first failure. A pre-existing failure early in the list (fmt, say) would otherwise stop clippy and test from ever running on the candidate, hiding a new failure.",
+      "rejected": [
+        {
+          "option": "Keep stop-at-first-failure for both runs",
+          "why": "Hides real failures behind pre-existing ones and baselines only the first failing check."
+        }
+      ]
+    },
+    {
+      "choice": "Run the baseline in a fresh `Snapshot::create(.., SnapshotRepo::Base)` of the base, pin mounted, using the same check env and `SnapExec`, with an empty changed list.",
+      "reason": "Same routed checks and runner, no candidate involved. An empty change list means skip_when_only (checks::skip_note) never skips, so a check the candidate later skips is still baselined. Skips are not pre-existing failures: they pass.",
+      "rejected": [
+        {
+          "option": "Reuse the verifier snapshot",
+          "why": "It does not exist until after the producer."
+        }
+      ]
+    },
+    {
+      "choice": "If the baseline snapshot or runner errors, record Baseline::Unavailable(reason) and treat no check as pre-existing. A stop request (refuse_if_stopped) still propagates as an error.",
+      "reason": "This follows the accepted reading. A failed baseline must never excuse a failure.",
+      "rejected": [
+        {
+          "option": "Fail the job when the baseline cannot start",
+          "why": "Makes the new feature able to block jobs that ran fine before."
+        }
+      ]
+    },
+    {
+      "choice": "Persist the baseline as an optional `baseline` field on the Verification record. Its status is ran or unavailable, with the base CheckRuns. It is emitted as a ui line before the producer starts.",
+      "reason": "Additive and optional, so no schema bump and no new record type. It is committed with the job's other records. The ui line lets a test show baseline-before-producer ordering.",
+      "rejected": [
+        {
+          "option": "A new athena.baseline/1 record type",
+          "why": "Needs AnyRecord, schema and parse plumbing, which is too big for one run."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "purpose": "Add `pre_existing` to CheckRun, `CheckRun::blocks()`, a `Baseline` type, and `baseline: Option<Baseline>` on Verification (serde default). Round-trip tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/checks.rs",
+      "action": "modify",
+      "purpose": "Set the new field in every CheckRun literal. Add a helper that marks a run pre-existing with the 'also failed on the base commit' note. Tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/routing.rs",
+      "action": "modify",
+      "purpose": "Add the stop rule to run_routed/run_local (never / except-baseline-failures / first-failure), also on the Fallback path. Tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "purpose": "Run the baseline before the first producer invocation (skipped when nested), print a `baseline` ui line, mark pre-existing after the candidate checks, remove the `if all_passed` gate, pass labelled check views, store the baseline on Verification. Use blocks() in the checks line.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "action": "modify",
+      "purpose": "Not in the brief's deliverables but needed: judge() decides blocking with `blocks()`, so a pre-existing failure no longer fails the verdict. A reason is added for blocking failures only, the 'returned no verdict' reason no longer depends on checks passing, and unit tests are added.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Add `pre_existing` to CheckResultView and render 'failed, pre-existing: also failed on the base commit' in the verifier brief. Tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/prompts/verifier.md",
+      "action": "modify",
+      "purpose": "Tell the verifier that a check marked pre-existing failed on the base too and is not the change's fault, and that it must judge every criterion even when a check failed.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "purpose": "Lifecycle tests for criteria 1-5.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased entry for the baseline, pre-existing marking and per-criterion judging.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/records.md",
+      "action": "modify",
+      "purpose": "Document `pre_existing` and `baseline` in athena.verification/1. It stands in for the deliverable docs/design.md, which does not exist.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "records.rs: add `#[serde(default, skip_serializing_if = \"is_false\")] pub pre_existing: bool` to CheckRun, `blocks()`, the Baseline type (Ran(Vec<CheckRun>) or Unavailable(String)), and the optional Verification.baseline. Fix every CheckRun literal (checks.rs, routing.rs, run.rs nested branch, introspect.rs, reading.rs and verify.rs tests, drain.rs, briefs.rs as the compiler lists them). Add round-trip tests, including an old record without the fields.",
+    "checks.rs: add `mark_pre_existing(run: &mut CheckRun)`, which sets the flag and appends 'also failed on the base commit' to the note. Test it.",
+    "routing.rs: add `StopRule` and thread it through run_routed, run_local and Fallback. Update callers and tests; the default stays first-failure.",
+    "run.rs: after the producer snapshot is created and before the first agent_spec/invoke_and_record, when `self.nested.is_none()` build a base snapshot in a separate dir (e.g. job_dir/baseline, removed afterwards), route with an empty changed list, run with SnapExec and StopRule::Never, and collect Baseline::Ran. Catch non-stop errors into Baseline::Unavailable. Print a `baseline` line. Build check_env for the base snapshot with Side::Verify as the verifier does.",
+    "run.rs: for the candidate run use the stop rule that continues past baseline failures. Mark failures whose name is in the baseline as pre-existing. Compute blocking with blocks(). Delete the `if all_passed` gate so the verifier brief and invocation always happen. Pass the pre-existing flag and note into CheckResultView. Set Verification.baseline.",
+    "verify.rs: replace `!c.passed` / `all(|c| c.passed)` with blocks() (three sites). Drop the all-passed condition on the 'returned no verdict' reason. Add unit tests: pre-existing alone passes; new failure fails; criteria judged with a failing check.",
+    "briefs.rs and verifier.md: render and explain the label. Add a brief test.",
+    "lifecycle.rs: add the five tests using the fake agent. Check that existing tests still pass, especially the test-check deletion test (the base's test check passes there, so it stays blocking).",
+    "docs/records.md and CHANGELOG.md. Run cargo fmt, clippy -D warnings and cargo test --locked."
+  ],
+  "risks": [
+    {
+      "risk": "The extra base snapshot and check run adds wall time and disk to every non-nested job.",
+      "mitigation": "The baseline uses the check timeout already configured, is removed after use, and the nested path skips it. The cost is accepted by the request."
+    },
+    {
+      "risk": "Flaky checks fail on the base, then fail on the candidate, and are wrongly excused.",
+      "mitigation": "A check is excused only when it failed on both, matched by name. The note and the brief label make this visible to the verifier, which still judges the criteria."
+    },
+    {
+      "risk": "A candidate could edit a check so it fails on the base only for a new reason, or rename it.",
+      "mitigation": "Checks come from the base's capability config and run against base tool config, as today. A renamed check does not match by name, so it still blocks."
+    },
+    {
+      "risk": "The verifier now runs on every failed job and spends budget it did not before.",
+      "mitigation": "It runs under the existing verifier_usd budget and check_budget. The budget itself is unchanged, as required."
+    },
+    {
+      "risk": "A literal-heavy change to CheckRun touches many files and may break an unseen constructor.",
+      "mitigation": "The field defaults and is skipped when false in serialization. The compiler lists every literal; cargo clippy --all-targets covers the tests."
+    },
+    {
+      "risk": "Existing tests assume the verifier does not run after a check failure, for example the try-again carries-failed-output test.",
+      "mitigation": "The producer reruns the whole suite and updates only assertions about the gate, keeping the rejected outcome. The fake agent handles a verifier call."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "New lifecycle test with the fake agent and a configured check that always fails. It captures the Lines output of `go` and reads the committed verification.json.",
+      "command": "cargo test --locked --test lifecycle a_check_failing_on_the_base_is_recorded_before_the_producer_runs",
+      "observes": "A `baseline` line naming the failing check appears before the first producer line. verification.baseline lists that check as failed on the base.",
+      "fails_without": "With no baseline step there is no baseline line, no `baseline` field, and the ordering assertion fails."
+    },
+    {
+      "criterion": 2,
+      "method": "New lifecycle test (check failing on base and candidate) plus unit tests in verify.rs and briefs.rs.",
+      "command": "cargo test --locked",
+      "observes": "The check record has passed=false, pre_existing=true and a note containing 'also failed on the base commit'. The brief line for it carries that label. final_verdict is pass when the verifier passes and no other check fails, and the job is not rejected for that check alone.",
+      "fails_without": "Without marking, the failed check makes the verdict fail and the job rejected, so the pass assertion fails."
+    },
+    {
+      "criterion": 3,
+      "method": "New lifecycle test: the check passes on the base and the fake agent's edit makes it fail on the candidate. A routing unit test checks that a check later in the list still runs after a pre-existing failure and can fail.",
+      "command": "cargo test --locked",
+      "observes": "pre_existing is false, the verdict is fail, the state is Rejected, and the reasons name the check.",
+      "fails_without": "If marking matched by name without requiring a base failure, the job would pass or be wrongly marked, and the test fails."
+    },
+    {
+      "criterion": 4,
+      "method": "New lifecycle test where an unrelated, non-pre-existing check fails after a clean baseline, and the fake verifier returns a verdict for each criterion. A verify.rs unit test covers judge() with a blocking failed check and an output.",
+      "command": "cargo test --locked",
+      "observes": "The verifier invocation exists, verification.criteria has one entry per criterion with the verifier's evidence, the failed check is listed, and the state is Rejected. The reasons include 'check X failed' and not 'returned no verdict'.",
+      "fails_without": "With the all_passed gate, no verifier runs and criteria are all 'the verifier did not assess this criterion', so the test fails."
+    },
+    {
+      "criterion": 5,
+      "method": "The existing lifecycle tests, unchanged, plus a new assertion that the baseline has no failures and no check is pre_existing. A routing unit test checks that the stop rule for a base with no failures equals the old behavior.",
+      "command": "cargo test --locked",
+      "observes": "All checks ran, none has pre_existing, and the jobs land as before.",
+      "fails_without": "A baseline that marked passing checks, or changed stop behavior, would break an existing lifecycle test or the new assertion."
+    },
+    {
+      "criterion": 6,
+      "method": "Records round-trip tests in records.rs: a CheckRun with pre_existing and a Verification with a baseline serialize and parse, and an old JSON without the fields still parses. Read docs/records.md and CHANGELOG.md.",
+      "command": "cargo test --locked",
+      "observes": "The marker and note are present in the record. docs/records.md describes `pre_existing` and `baseline` under athena.verification/1, and CHANGELOG.md [Unreleased] has an Added/Changed entry.",
+      "fails_without": "Without the fields the round-trip test does not compile or fails."
+    },
+    {
+      "criterion": 7,
+      "method": "Run the full suite, then clippy and fmt. Each changed module (records.rs, checks.rs, routing.rs, verify.rs, briefs.rs, run.rs via lifecycle) has a new test.",
+      "command": "cargo test --locked",
+      "observes": "All pass. `cargo clippy --all-targets --locked -- -D warnings` and `cargo fmt --all --check` are clean.",
+      "fails_without": "Any compile, lint, format or test regression fails the command."
+    }
+  ],
+  "open_questions": [
+    "docs/design.md does not exist in the base. The plan documents the records in docs/records.md (and the changelog) instead; confirm that is acceptable or whether a new docs/design.md is wanted.",
+    "outputs.rs and display.rs are listed as deliverables, but I found nothing in them to change: the verifier's output schema is unchanged, and display.rs has no check listing. I left them out unless the producer finds a real need.",
+    "The baseline is stored on the Verification record, so a job that fails before verification (producer failure or admission refusal) keeps no baseline. Is a separate baseline file needed for those jobs?",
+    "The accepted reading says 'baseline unavailable'. I assume this is recorded as Baseline::Unavailable(reason), with a ui line."
+  ],
+  "producer_section_sha256": "49678ee139abd9424929febd1ac0a81ff41f42ab37a3c1fc8f460048f4f789c4"
+}

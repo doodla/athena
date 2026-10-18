@@ -4,7 +4,7 @@
 
 use anyhow::{Result, anyhow, bail};
 use athena_data::records::{
-    AnyRecord, Candidate, Correction, Critique, DecisionState, DecisionStateKind,
+    AnyRecord, Baseline, Candidate, Correction, Critique, DecisionState, DecisionStateKind,
     DefaultExpectations, FailureClass, HostError, Intervention, IntrospectionRecord, Invocation,
     Job, JobPlan, Outcome, OutcomeState, ProposalRecord, Reading, Request, Resolution, Restart,
     Role, Score, Verification, fold_decision_states,
@@ -33,6 +33,8 @@ pub struct JobRecords {
     pub plans: Vec<JobPlan>,
     /// The critiques of those plans, by round (`athena.critique/1`).
     pub critiques: Vec<Critique>,
+    /// The checks run on the base commit before the producer (`athena.baseline/1`). Recorded only.
+    pub baseline: Option<Baseline>,
     pub briefs: BTreeMap<String, String>,
 }
 
@@ -150,6 +152,7 @@ impl JobRecords {
             AnyRecord::Score(s) => self.scores.push(*s),
             AnyRecord::JobPlan(p) => self.plans.push(*p),
             AnyRecord::Critique(c) => self.critiques.push(*c),
+            AnyRecord::Baseline(b) => self.baseline = Some(*b),
             other => {
                 let _ = (path, other);
             }
@@ -226,6 +229,7 @@ fn job_of(record: &AnyRecord) -> Option<&JobId> {
         AnyRecord::Score(r) => Some(&r.job),
         AnyRecord::JobPlan(r) => Some(&r.job),
         AnyRecord::Critique(r) => Some(&r.job),
+        AnyRecord::Baseline(r) => Some(&r.job),
         _ => None,
     }
 }

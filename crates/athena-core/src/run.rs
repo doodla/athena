@@ -31,9 +31,9 @@ use athena_context::{
     CONTRACT, CRITIC_FRAME, Component, PLANNER_FRAME, PRODUCER_FRAME, VERIFIER_FRAME, compose,
 };
 use athena_data::records::{
-    AcceptedBy, AnyRecord, Build, Candidate, Caps, ChangeEntry, ChangeStatus, CheckRun, Critique,
-    CritiqueVerdict, DeliverableAction, Demonstration, Finding, FindingSource, Invocation,
-    InvocationOutcome, Job, JobKind, JobPlan, Outcome, OutcomeState, Owner, PinnedRepo,
+    AcceptedBy, AnyRecord, Baseline, Build, Candidate, Caps, ChangeEntry, ChangeStatus, CheckRun,
+    Critique, CritiqueVerdict, DeliverableAction, Demonstration, Finding, FindingSource,
+    Invocation, InvocationOutcome, Job, JobKind, JobPlan, Outcome, OutcomeState, Owner, PinnedRepo,
     PlanDecision, PlanFile, PlanRisk, PolicyViolation, ProducerReport, Reading, RejectedOption,
     ReportedCheck, ReportedCriterion, Role, Score, Severity, Totals, Verdict, Verification,
 };
@@ -93,11 +93,14 @@ struct Closing {
     plans: Vec<JobPlan>,
     /// The critiques of those plans.
     critiques: Vec<Critique>,
+    /// The checks run on the base commit before the producer. Recorded only.
+    baseline: Option<Baseline>,
 }
 
 impl Closing {
     fn new() -> Closing {
         Closing {
+            baseline: None,
             plans: Vec::new(),
             critiques: Vec::new(),
             files: Vec::new(),
@@ -1212,6 +1215,74 @@ fn criterion_key(text: &str) -> String {
 }
 
 impl Athena {
+    /// Runs the capability's configured checks on a fresh snapshot of the base commit and returns the
+    /// baseline record. It never fails: a snapshot or environment error, or a nested run, gives a record
+    /// with no checks and a note saying why. `before_invocation` is the sequence number the first
+    /// producer invocation will get. Nothing here reads the result; it is only recorded.
+    fn take_baseline(&self, ctx: &RunContext<'_>, job_dir: &std::path::Path, seq: u32) -> Baseline {
+        let mut baseline = Baseline {
+            job: ctx.id().clone(),
+            base_commit: ctx.prediction.clone(),
+            before_invocation: seq,
+            checks: Vec::new(),
+            note: None,
+        };
+        if self.nested.is_some() {
+            baseline.note =
+                Some("not run: a nested run skips checks; the outer job runs its own".into());
+            return baseline;
+        }
+        let dir = job_dir.join("baseline");
+        let outcome = self.baseline_checks(ctx, job_dir, &dir);
+        let _ = crate::pin::remove_tree(&dir);
+        match outcome {
+            Ok(checks) => baseline.checks = checks,
+            Err(e) => baseline.note = Some(format!("the baseline could not run: {e:#}")),
+        }
+        baseline
+    }
+
+    fn baseline_checks(
+        &self,
+        ctx: &RunContext<'_>,
+        job_dir: &std::path::Path,
+        dir: &std::path::Path,
+    ) -> Result<Vec<CheckRun>> {
+        let jc = ctx.jc;
+        if dir.exists() {
+            crate::pin::remove_tree(dir)?;
+        }
+        let p = ctx.prediction.clone();
+        let snapshot = Snapshot::create(&self.git, &p, &p, dir, SnapshotRepo::Base)?;
+        if let Some(pin_dir) = &ctx.pin_dir {
+            mount(pin_dir, snapshot.dir())?;
+        }
+        let env = athena_agent::env::build(
+            &EnvSpec {
+                agents: &jc.config.agents,
+                job: ctx.id().as_str(),
+                job_dir,
+                snapshot: snapshot.dir(),
+                side: Side::Verify,
+                capability_env: &ctx.capability.env(jc),
+            },
+            |key| std::env::var(key).ok(),
+        )
+        .map_err(anyhow::Error::msg)?;
+        let registry = self.state.registry();
+        Ok(crate::checks::baseline_runs(
+            &ctx.capability.checks(jc),
+            &CheckContext {
+                dir: snapshot.dir(),
+                env: &env,
+                timeout: std::time::Duration::from_secs(jc.config.budget.check_timeout_s),
+                registry: &registry,
+                job: ctx.id().as_str(),
+                redactor: ctx.redactor,
+            },
+        ))
+    }
+
     fn produce_and_verify(
         &self,
         ctx: &RunContext<'_>,
@@ -1225,6 +1296,29 @@ impl Athena {
         let p = ctx.prediction.clone();
         // After any planning invocations the closing already holds.
         let mut seq = ctx.next_seq(&closing);
+
+        // The baseline: the configured checks on the base commit, before the producer starts. It is
+        // recorded only and never stops the job.
+        let baseline = self.take_baseline(ctx, &job_dir, seq);
+        let baseline_line: Vec<String> = baseline
+            .checks
+            .iter()
+            .map(|r| format!("{} {}", r.name, if r.passed { "ok" } else { "FAILED" }))
+            .collect();
+        ctx.ui.line(&format!(
+            "baseline   {}{}",
+            if baseline_line.is_empty() {
+                "no checks".to_string()
+            } else {
+                baseline_line.join(" · ")
+            },
+            baseline
+                .note
+                .as_ref()
+                .map(|n| format!(" ({n})"))
+                .unwrap_or_default()
+        ));
+        closing.baseline = Some(baseline);
 
         // The producer, in a detached snapshot of the base with a one-commit repository of its own.
         let work = job_dir.join("work");
@@ -2035,6 +2129,13 @@ impl Athena {
                 .files
                 .push(NewFile::record(&AnyRecord::Critique(Box::new(
                     critique.clone(),
+                ))));
+        }
+        if let Some(baseline) = &closing.baseline {
+            closing
+                .files
+                .push(NewFile::record(&AnyRecord::Baseline(Box::new(
+                    baseline.clone(),
                 ))));
         }
         if let Some(candidate) = &closing.candidate {
