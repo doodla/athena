@@ -392,11 +392,27 @@ impl Git {
         parse_ls_tree(&out)
     }
 
-    /// The bytes of `path` in `treeish`, or `None` if it does not exist there.
-    pub fn show_file(&self, treeish: &str, path: &str) -> Result<Option<Vec<u8>>> {
+    /// The object type (`blob`, `tree`, `commit`) of `path` in `treeish`, or `None` if nothing is there.
+    fn object_type(&self, treeish: &str, path: &str) -> Result<Option<String>> {
         let spec = format!("{treeish}:{path}");
         let exists = self.exit(["cat-file", "-e", &spec], None, &[])?;
         if exists.code != Some(0) {
+            return Ok(None);
+        }
+        let kind = self.run_bytes(["cat-file", "-t", &spec], None, &[])?;
+        Ok(Some(String::from_utf8_lossy(&kind).trim().to_string()))
+    }
+
+    /// Whether `path` in `treeish` is a directory (a tree).
+    pub fn path_is_tree(&self, treeish: &str, path: &str) -> Result<bool> {
+        Ok(self.object_type(treeish, path)?.as_deref() == Some("tree"))
+    }
+
+    /// The bytes of the file at `path` in `treeish`, or `None` if there is no file there. A directory is not a
+    /// file, so it also gives `None`.
+    pub fn show_file(&self, treeish: &str, path: &str) -> Result<Option<Vec<u8>>> {
+        let spec = format!("{treeish}:{path}");
+        if self.object_type(treeish, path)?.as_deref() != Some("blob") {
             return Ok(None);
         }
         Ok(Some(self.run_bytes(
@@ -979,6 +995,22 @@ mod tests {
         // A missing path is still just nothing to read.
         assert_eq!(git.show_file(&head, "missing.txt").unwrap(), None);
         assert_eq!(git.show_file(&"0".repeat(40), "a.txt").unwrap(), None);
+    }
+
+    #[test]
+    fn show_file_on_a_directory_is_none_not_an_error() {
+        let (_dir, git) = repo_with(&[("docs/a.md", "a"), ("top.txt", "t")]);
+        let head = git.head().unwrap().unwrap();
+        for dir in ["docs", "docs/"] {
+            assert_eq!(git.show_file(&head, dir).unwrap(), None, "{dir}");
+            assert!(git.path_is_tree(&head, dir).unwrap(), "{dir}");
+        }
+        assert_eq!(
+            git.show_file(&head, "docs/a.md").unwrap(),
+            Some(b"a".to_vec())
+        );
+        assert!(!git.path_is_tree(&head, "top.txt").unwrap());
+        assert!(!git.path_is_tree(&head, "missing").unwrap());
     }
 
     #[test]

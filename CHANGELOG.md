@@ -7,6 +7,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+- Job planning no longer crashes `athena go` when a plan lists a directory. The first planned job
+  (20261017-204355-358k) listed `docs/`; `Git::show_file` checked existence with `git cat-file -e`, which
+  succeeds for a tree, and then read it as a blob, failing with `git cat-file blob <base>:docs/ failed`.
+  `show_file` now returns `None` for anything that is not a blob, so no caller can crash on a directory.
+  Athena's plan checks also give a major finding, which sends the plan back to the planner, for a planned path
+  that is empty, absolute, contains `..`, ends in `/`, or is a directory in the base. `[job_plan]` is
+  enabled again in `athena.toml`; it had been turned off by hand after the crash.
+
 ### Changed
 
 - Job planning is on for this repository (job 5b of `docs/design/job-planning.md`). `athena.toml` now has

@@ -152,8 +152,16 @@ fn athena_finding(
 ///   that is a major finding otherwise;
 /// - any other path outside the reading's deliverables is a minor finding.
 ///
+/// - every planned path is a plain relative file path: not empty, not absolute, no `..`, no trailing `/`, and
+///   not a directory in the base (`is_directory` says whether a path is one); a major finding otherwise.
+///
 /// A major finding sends the plan back to the planner without a critic call.
-pub fn plan_findings(plan: &JobPlan, reading: &Reading, verifier: &Policy) -> Vec<Finding> {
+pub fn plan_findings(
+    plan: &JobPlan,
+    reading: &Reading,
+    verifier: &Policy,
+    is_directory: &dyn Fn(&str) -> bool,
+) -> Vec<Finding> {
     let mut findings = Vec::new();
     let count = reading.acceptance_criteria.len();
     for (i, criterion) in reading.acceptance_criteria.iter().enumerate() {
@@ -225,6 +233,15 @@ pub fn plan_findings(plan: &JobPlan, reading: &Reading, verifier: &Policy) -> Ve
     }
     for f in &plan.files {
         let location = format!("files, {}", f.path);
+        if let Some(problem) = path_problem(&f.path, is_directory) {
+            findings.push(athena_finding(
+                Severity::Major,
+                location,
+                format!("The plan lists {:?}, which {problem}", f.path),
+                "List each file by its plain relative path, such as `src/lib.rs`; never a directory.".into(),
+            ));
+            continue;
+        }
         match f.action {
             DeliverableAction::Create if f.exists => findings.push(athena_finding(
                 Severity::Major,
@@ -270,6 +287,27 @@ pub fn plan_findings(plan: &JobPlan, reading: &Reading, verifier: &Policy) -> Ve
         }
     }
     findings
+}
+
+/// Why `path` cannot be a planned file, or `None` if it is a plain relative file path. The shape checks need
+/// no filesystem; `is_directory` is asked only for a path of a good shape.
+fn path_problem(path: &str, is_directory: &dyn Fn(&str) -> bool) -> Option<&'static str> {
+    if path.trim().is_empty() {
+        Some("is empty")
+    } else if path.starts_with('/')
+        || path.starts_with('\\')
+        || path.as_bytes().get(1) == Some(&b':')
+    {
+        Some("is an absolute path")
+    } else if path.split(['/', '\\']).any(|part| part == "..") {
+        Some("contains `..`")
+    } else if path.ends_with('/') {
+        Some("ends in `/`, so it names a directory")
+    } else if is_directory(path) {
+        Some("is a directory in the base")
+    } else {
+        None
+    }
 }
 
 /// The core's admission rules. Returns every violation found.
@@ -443,6 +481,72 @@ mod tests {
     use athena_data::records::{
         Criterion, CriterionKind, Deliverable, DeliverableAction, Forecast, Forecasts, Quantiles,
     };
+
+    /// Athena's findings on a plan that lists only `path` (to create), where `dirs` are directories in the base.
+    fn findings_for_path(path: &str, dirs: &[&str]) -> Vec<Finding> {
+        use athena_data::records::{PlanFile, Role};
+        let plan = JobPlan {
+            job: JobId::parse("20261012-084936-n1p0").unwrap(),
+            round: 1,
+            at: jiff::Timestamp::UNIX_EPOCH,
+            invocation_seq: 2,
+            approach: "Approach.".into(),
+            decisions: vec![],
+            files: vec![PlanFile {
+                path: path.into(),
+                action: DeliverableAction::Create,
+                purpose: "Purpose.".into(),
+                governance: false,
+                exists: false,
+            }],
+            steps: vec![],
+            risks: vec![],
+            demonstrations: vec![],
+            open_questions: vec![],
+            producer_section_sha256: "0".repeat(64),
+        };
+        let verifier = Policy {
+            role: Role::Verifier,
+            root: std::path::PathBuf::from("."),
+            commands: Default::default(),
+            writes: false,
+        };
+        plan_findings(&plan, &reading(), &verifier, &|p| dirs.contains(&p))
+            .into_iter()
+            .filter(|f| f.location.as_deref() == Some(&format!("files, {path}")))
+            .collect()
+    }
+
+    #[test]
+    fn a_planned_path_that_is_not_a_plain_relative_file_is_a_major_finding() {
+        let dirs = ["docs", "src/deep"];
+        for path in [
+            "docs/",
+            "docs",
+            "src/deep",
+            "",
+            "   ",
+            "/etc/passwd",
+            "C:/x.txt",
+            "../x.rs",
+            "a/../b.rs",
+            "a\\..\\b.rs",
+            "src/",
+        ] {
+            let found = findings_for_path(path, &dirs);
+            assert_eq!(found.len(), 1, "{path:?}: {found:?}");
+            assert_eq!(found[0].severity, Severity::Major, "{path:?}");
+            assert_eq!(found[0].source, FindingSource::Athena, "{path:?}");
+        }
+        // A plain file path is not a major finding (it is only outside the deliverables).
+        for path in ["src/new.rs", "a..b.rs", "docs/new.md"] {
+            let found = findings_for_path(path, &dirs);
+            assert!(
+                found.iter().all(|f| f.severity == Severity::Minor),
+                "{path:?}: {found:?}"
+            );
+        }
+    }
 
     const BASE_CONFIG: &str = include_str!("../../../athena.toml");
     const BASE_DEFAULTS: &str = include_str!("../../../defaults.toml");
