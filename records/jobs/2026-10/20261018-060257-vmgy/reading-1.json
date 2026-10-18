@@ -1,0 +1,170 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261018-060257-vmgy",
+  "n": 1,
+  "at": "2026-10-18T06:03:31.438152961Z",
+  "invocation_seq": 1,
+  "base_commit": "60b6827a922763c7feccba51ffa24a391b522f1f",
+  "config_sha256": "ba462c7ffba3475385f095363becb853b0eda55fed87c41e3f78d800cf1f63fc",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Fix directory crash in plan check and re-enable job planning",
+  "summary": "Git::show_file returns None for a non-blob path, so no caller can crash on a directory. Athena's plan checks turn a planned directory or non-plain-relative path into a major finding that sends the plan back. Then job_plan is re-enabled and the crash and job 20261017-204355-358k go in the changelog. Audience: the Athena maintainer running athena go.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "New unit and integration tests; cargo test --locked, clippy -D warnings, fmt --check pass."
+    },
+    {
+      "id": "root-cause",
+      "how": "Fix show_file itself so no caller can crash on a directory, and also harden the plan check."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run tests that exercise a directory path and a docs/ plan."
+    },
+    {
+      "id": "mechanism",
+      "how": "Enforced by tests and the plan check, not by prose."
+    },
+    {
+      "id": "strangers",
+      "how": "The changelog entry and doc comments are written for an outside reader."
+    },
+    {
+      "id": "verified",
+      "how": "The behavior criteria name the cargo commands the verifier runs."
+    },
+    {
+      "id": "small",
+      "how": "One focused change across the git crate, the plan check, config and changelog."
+    },
+    {
+      "id": "rust",
+      "how": "All changes are Rust and TOML."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Root cause is in Git::show_file, which uses cat-file -e (true for trees) and then cat-file blob. The fix checks the object type, for example with cat-file -t or by resolving to a blob, and returns None for non-blobs.",
+    "The plan_findings function in crates/athena-core/src/admission.rs, or the exists closure passed to plan_record in run.rs, is where the directory and bad-path checks go. The path shape check must not need the filesystem.",
+    "A directory has no blob, so after the show_file fix exists=false. For Modify or Delete that already gives a major finding, but 'docs/' with Create would slip through. So an explicit path-shape and is-directory check is needed, and the directory check can use the git tree.",
+    "The fake-agent test harness in crates/athena-cli/tests/job_plan.rs can script a planner output with a directory path.",
+    "athena.toml is a governance file, and the request names it explicitly, so it is a listed deliverable."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A git test in crates/athena-git shows that show_file on a directory path (for example a tree such as 'docs/' or 'docs') returns Ok(None) with no error, and that it still returns the bytes for a real file. Run: cargo test -p athena-git.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test with a fake planner whose plan lists 'docs/' shows that Athena emits a major finding for that path, that the job moves on to the next plan round, and that nothing crashes or returns an error. Run: cargo test.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Plan checks give a major finding, not an error, for any planned path that is a directory, is absolute, contains '..', is empty, or ends in '/'. A unit test covers each case. Run: cargo test.",
+      "kind": "behavior"
+    },
+    {
+      "text": "cargo test --locked, cargo clippy --all-targets -- -D warnings and cargo fmt --check all pass, as does xtask's boundary test.",
+      "kind": "behavior"
+    },
+    {
+      "text": "athena.toml has [job_plan] enabled = true, and no other setting in that file changes.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md under [Unreleased] names the job-planning crash on a directory path and job 20261017-204355-358k.",
+      "kind": "content"
+    },
+    {
+      "text": "Outcome check: replaying the failing input, a plan that lists docs/, no longer produces the 'git cat-file blob <base>:docs/ failed' error. This is shown by the new tests failing on the old code and passing on the new.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-git/src/lib.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/admission.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "athena.toml",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-cli/tests/job_plan.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "action": "modify",
+      "p": 0.1
+    }
+  ],
+  "out_of_scope": [
+    "Changing the planner prompt or the critic stage",
+    "Changing planner or critic budgets in athena.toml",
+    "Fixing the other callers of show_file individually",
+    "Pre-existing-check handling from job 20261017-204355-358k's own request"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.8,
+      "p_verification_passes": 0.66,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.35,
+        "p50": 0.9,
+        "p90": 2.0
+      },
+      "wall_time_s": {
+        "p10": 450.0,
+        "p50": 1100.0,
+        "p90": 2200.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.755223880597015,
+      "p_verification_passes": 0.6385542168674698,
+      "p_user_intervenes": 0.08313253012048193,
+      "cost_usd": {
+        "p10": 0.40225607969551186,
+        "p50": 0.9600687444190806,
+        "p90": 2.1488576164010182
+      },
+      "wall_time_s": {
+        "p10": 570.9502461824569,
+        "p50": 1182.0435873079546,
+        "p90": 2152.258602825604
+      }
+    }
+  },
+  "departures": "Slightly higher acceptance than the reference because the request is detailed and gives a numbered plan. Cost and time are a bit higher because the change touches three crates and needs a full workspace test, clippy and xtask run."
+}
