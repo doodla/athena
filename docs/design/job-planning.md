@@ -212,6 +212,17 @@ one producer run; review 1 split jobs 3 and 5.
    Athena has been rebuilt with `./setup.sh` from a main that holds jobs 1 to 5a. Done when: the repository's
    `athena.toml` parses with planning on; the decision entry names the alternatives above and the reversal (set
    `enabled = false`).
+   *Built as:* `athena.toml` ends with `[job_plan]` set to the design's caps (`enabled = true`, `planner_usd` and
+   `critic_usd` 0.75, both timeouts 600 s, `max_rounds` 3), and decision D110 records the choice. Test-only edits
+   keep the unplanned path where tests need it, each stripping the table wherever it sits (from its header to
+   the next table header); the helper is repeated in three places because the crates cannot share test code
+   without non-test code. (1) `crates/athena-cli/tests/common/mod.rs`: new `without_job_plan`, which
+   `test_config` now applies, so tests that append their own `[job_plan]` (`job_plan.rs`) do not get it twice.
+   (2) `crates/athena-data/src/config.rs` tests: a private `unplanned` helper, used by the digest, defaults and
+   bad-settings tests, which append their own section; and a new test that the repository's `athena.toml` parses
+   with planning on and the design's caps. (3) `crates/athena-core/src/run_pin_tests.rs`: the `config` helper
+   drops the `[job_plan]` lines, so a study stays unplanned and the test that enables planning appends its own.
+   No non-test code changed.
 
 ## 9. Measuring it, and when to keep it
 

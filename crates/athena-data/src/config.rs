@@ -492,6 +492,35 @@ pub(crate) mod tests {
     /// The repository's own `athena.toml`, which every Athena build must be able to read.
     pub(crate) const REPO_CONFIG: &str = include_str!("../../../athena.toml");
 
+    /// `athena.toml` without its `[job_plan]` table, wherever it sits: the lines from the header to the next
+    /// table header. For tests that append their own `[job_plan]` or need job planning absent.
+    fn unplanned(text: &str) -> String {
+        let mut skipping = false;
+        text.split_inclusive('\n')
+            .filter(|line| {
+                let head = line.trim_start();
+                if head.starts_with('[') {
+                    skipping = head.trim_end() == "[job_plan]";
+                }
+                !skipping
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_repository_config_turns_job_planning_on_with_the_designs_caps() {
+        let plan = Config::parse(REPO_CONFIG).unwrap().job_plan.unwrap();
+        assert!(plan.enabled);
+        assert_eq!(plan.planner_usd, 0.75);
+        assert_eq!(plan.critic_usd, 0.75);
+        assert_eq!(plan.planner_timeout_s, 600);
+        assert_eq!(plan.critic_timeout_s, 600);
+        assert_eq!(plan.max_rounds, 3);
+        let stripped = unplanned(REPO_CONFIG);
+        assert!(!stripped.contains("[job_plan]"));
+        assert!(Config::parse(&stripped).unwrap().job_plan.is_none());
+    }
+
     #[test]
     fn repository_config_parses_and_validates() {
         // The rules, not the values: a job may change the values through a listed governance change.
@@ -533,10 +562,11 @@ pub(crate) mod tests {
 
     #[test]
     fn reading_inputs_digest_is_unchanged_by_the_job_plan_section() {
-        let base = Config::parse(REPO_CONFIG).unwrap();
+        let unplanned = unplanned(REPO_CONFIG);
+        let base = Config::parse(&unplanned).unwrap();
         assert!(base.job_plan.is_none());
         assert_eq!(digest(&base), REPO_READING_INPUTS_SHA256);
-        let text = format!("{REPO_CONFIG}\n[job_plan]\nenabled = true\n");
+        let text = format!("{unplanned}\n[job_plan]\nenabled = true\n");
         let on = Config::parse(&text).unwrap();
         assert!(on.job_plan.as_ref().is_some_and(|j| j.enabled));
         assert_eq!(digest(&on), REPO_READING_INPUTS_SHA256);
@@ -545,7 +575,7 @@ pub(crate) mod tests {
 
     #[test]
     fn job_plan_defaults_are_off_and_bounded() {
-        let text = format!("{REPO_CONFIG}\n[job_plan]\n");
+        let text = format!("{}\n[job_plan]\n", unplanned(REPO_CONFIG));
         let config = Config::parse(&text).unwrap();
         let plan = config.job_plan.unwrap();
         assert!(!plan.enabled);
@@ -566,7 +596,10 @@ pub(crate) mod tests {
             ("critic_timeout_s = 0", "critic_timeout_s"),
             ("surprise = true", "surprise"),
         ] {
-            let text = format!("{REPO_CONFIG}\n[job_plan]\nenabled = true\n{line}\n");
+            let text = format!(
+                "{}\n[job_plan]\nenabled = true\n{line}\n",
+                unplanned(REPO_CONFIG)
+            );
             let error = Config::parse(&text).expect_err(line).to_string();
             assert!(error.contains(field), "{line}: {error}");
         }

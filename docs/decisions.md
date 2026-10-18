@@ -2549,3 +2549,30 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Provenance:** read: `BRIEF.md`, the 2026-10-17 Olympus relay note, item 5A; measured: the tests in
   `crates/athena-cli/tests/ontology.rs`, including the negative cases for a missing sources field, a
   non-existent source, a dangling relation target and a duplicate term.
+
+## D110 · Job planning is on in `athena.toml`
+
+- **Case:** The planner, critic, records and status for job planning were built in jobs 1 to 5a of
+  `docs/design/job-planning.md` and sat behind `[job_plan] enabled`, off because no `athena.toml` set it. Job 5b
+  of that design is the step that turns it on.
+- **Decision:** `athena.toml` has `[job_plan]` with `enabled = true`, `planner_usd = 0.75`, `critic_usd = 0.75`,
+  `planner_timeout_s = 600`, `critic_timeout_s = 600` and `max_rounds = 3`, the design's caps. Every change
+  job now has a planner and a critic before its producer. A study is not planned. Tests that need the unplanned
+  path strip the table (test-only edits, listed in the "Built as" note of job 5b in the design).
+- **Alternatives:** The design's section 7 (not repeated here): (a) Athena's own checks on the reading only;
+  (b) a stronger reader that also designs; (c) a plan section inside the producer's run; (d) a critic alone,
+  reviewing the reading; (e) plans written by hand for every job; (f) a different model family as critic.
+  Each was set aside there for the reason given in that table.
+- **Keep rule:** From section 9 of the design. The primary measure is the landed share of dispatched change
+  jobs, counting a job stopped in planning as not landed; the baseline is 64% (152 of 237 dispatched jobs).
+  Through the first 30 planned jobs, keep planning on unless the landed share falls below the baseline. At 100
+  planned jobs, keep it if the landed share is at least 72% and cost per landed job is at most $2.50; turn it
+  off at or below 64%; otherwise record the result as inconclusive and keep measuring.
+- **Tradeoff:** Each round costs money and time (about $0.30 to $0.70, an estimate in the design), and an
+  over-strict critic can stop jobs that would have landed. The reader's forecasts do not include planning.
+- **Reversal cost:** Low: set `enabled = false` in `[job_plan]` (a governance change through a job). Jobs read
+  their configuration from their base commit, so it governs later jobs only.
+- **Provenance:** read: `docs/design/job-planning.md` sections 7, 8 and 9 (the baseline there is read from
+  records, the 12-of-85 and cost figures are marked there as unchecked or estimates); measured: the
+  `athena-data` test `the_repository_config_turns_job_planning_on_with_the_designs_caps`, and a full
+  `cargo test --locked` with planning on.

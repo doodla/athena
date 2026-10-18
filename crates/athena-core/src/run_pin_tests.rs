@@ -78,11 +78,17 @@ impl Capability for PinningStudy {
 /// `athena.toml` with the study section naming a repository to pin (or not).
 fn config(with_repo: bool) -> String {
     let raw = include_str!("../../../athena.toml");
+    // Without `[job_plan]`, wherever it sits (the lines from its header to the next table header): a study is
+    // not planned, and the test that enables planning appends its own section.
+    let mut in_job_plan = false;
     let base: String = raw
         .split_inclusive('\n')
         .filter(|line| {
             let key = line.trim_start();
-            !(key.starts_with("repo_url") || key.starts_with("repo_ref"))
+            if key.starts_with('[') {
+                in_job_plan = key.trim_end() == "[job_plan]";
+            }
+            !(in_job_plan || key.starts_with("repo_url") || key.starts_with("repo_ref"))
         })
         .collect();
     let header = "[capabilities.study]\n";

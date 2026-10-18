@@ -1022,3 +1022,8 @@ It should become demonstrably less likely to make the same kind of mistake again
 
 * You are the brain until Athena's brain starts working properly
 * Relay note: the operator now does Athena's thinking (strategy, requirements, planning, critique and diagnosis) and Athena's machinery does the work, until Athena's own brain can take each part over. Every act of the operator's that Athena should have done is logged as an intervention, so the log names what Athena's brain still lacks.
+
+### 2026-10-18: The 39962ed history exemption
+
+* Approved.
+* Relay note: Sri approved, after the fact, the [history] exempt entry for squash 39962ed (job 20261017-133559-1b3d), which an audit found had weakened a protected check without owner approval. No further exemption is added without Sri's yes; the cause (squash merges that carry several jobs) is to be fixed instead.
