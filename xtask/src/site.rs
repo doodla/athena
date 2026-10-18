@@ -221,6 +221,17 @@ fn split_tag(text: &str) -> (Option<&str>, &str) {
     (None, text)
 }
 
+/// The words shown for a state or finding kind. The data keeps the study format's own names; a reader
+/// of the page gets plain ones.
+fn kind_label(kind: &str) -> &str {
+    match kind {
+        "terminal-success" => "ends the task",
+        "model-limit" => "what this page cannot show",
+        "could-not-run" => "not run",
+        other => other,
+    }
+}
+
 /// Renders the page. Every factual statement cites a claim id; the pinned commit is stated up front.
 pub fn render(study: &Study) -> Result<String> {
     let known = claim_ids(&study.claims)?;
@@ -251,7 +262,8 @@ pub fn render(study: &Study) -> Result<String> {
          the folder under <code>studies/</code> that holds the data this page is generated from. \
          Each statement below ends with the id of the claim that supports it; the claims, with links to \
          their sources, are listed at the end.</p>\
-         <p class=\"pin\">Pinned {sys} commit: <code>{sha}</code> in {repo_link}</p></header>",
+         <p class=\"pin\">Pinned {sys} commit: <code>{sha}</code> in {repo_link}</p>\
+         <p class=\"lede\">Next step: <a href=\"#next-steps\">install Athena or read {sys} itself</a>.</p></header>",
         sys = escape(system),
         athena = escape(str_of(about, "athena", "intro.json about")?),
         study_text = escape(str_of(about, "study", "intro.json about")?),
@@ -304,7 +316,7 @@ pub fn render(study: &Study) -> Result<String> {
             body,
             "<li><strong>{}</strong> <span class=\"tag\">{}</span> {}</li>",
             escape(id),
-            escape(kind),
+            escape(kind_label(kind)),
             cites(state, &format!("state {id}"), &known)?
         );
     }
@@ -467,7 +479,7 @@ pub fn render(study: &Study) -> Result<String> {
             body,
             "<li><strong>{}</strong> <span class=\"tag\">{}</span> {}</li>",
             escape(id),
-            escape(str_of(f, "kind", &format!("finding {id}"))?),
+            escape(kind_label(str_of(f, "kind", &format!("finding {id}"))?)),
             escape(str_of(f, "detail", &format!("finding {id}"))?)
         );
     }
@@ -482,7 +494,7 @@ pub fn render(study: &Study) -> Result<String> {
     };
     let _ = write!(
         body,
-        "<section><h2>Next steps</h2><ul>\
+        "<section id=\"next-steps\"><h2>Next steps</h2><ul>\
          <li>Learn about Athena, and how to install and try it: <a href=\"{a}\">{a}</a>.</li>\
          <li>Learn about {sys}, the project studied here, and see how to use it: {firstmate_link}.</li>\
          <li>Check a statement: follow a bracketed claim id to the claim, then its source link to the \
@@ -839,6 +851,104 @@ mod tests {
         ] {
             assert!(html.contains(&format!("<dt id=\"term-{term}\">")), "{term}");
         }
+    }
+
+    fn real_study() -> Study {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        load(&root.join(STUDY_DIR)).unwrap()
+    }
+
+    #[test]
+    fn a_link_to_the_next_step_comes_before_the_first_transition_card() {
+        let dir = study_dir("[mechanism] A thing happens.", "c1");
+        for html in [
+            render(&load(dir.path()).unwrap()).unwrap(),
+            render(&real_study()).unwrap(),
+        ] {
+            let link = html.find("<a href=\"#next-steps\">").unwrap();
+            let card = html.find("<article class=\"card\">").unwrap();
+            assert!(link < card);
+            assert!(html.contains("<section id=\"next-steps\">"));
+        }
+    }
+
+    #[test]
+    fn no_transition_decided_by_the_agent_names_another_deciders_event() {
+        let study = real_study();
+        for t in study.model["transitions"].as_array().unwrap() {
+            if t["trigger_evaluated_by"] == "agent" {
+                let trigger = t["trigger"].as_str().unwrap();
+                let id = &t["id"];
+                assert!(
+                    trigger.contains("agent") || trigger.contains("firstmate"),
+                    "{id}"
+                );
+                for event in ["lands", "landed", "report exists", "reports a"] {
+                    assert!(!trigger.contains(event), "{id}: {trigger}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_page_uses_agent_for_the_decider_and_worker_for_the_task_doer_and_says_which_is_which() {
+        let html = render(&real_study()).unwrap();
+        assert!(html.contains("Decided by agent"));
+        assert!(html.contains("never a worker"));
+        let terms = real_study().intro["glossary"].clone();
+        let definition = |term: &str| {
+            terms
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|e| e["term"] == term)
+                .unwrap()["definition"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        assert!(definition("agent").contains("deciding AI"));
+        assert!(definition("agent").contains("never a worker"));
+        assert!(!definition("worker").contains("An agent"));
+        assert!(definition("worker").contains("not the agent"));
+    }
+
+    #[test]
+    fn in_scope_is_defined_in_the_start_terms_and_the_glossary_with_a_citation() {
+        let html = render(&real_study()).unwrap();
+        let start = html.find("<h2>Start here</h2>").unwrap();
+        let first_use = html.find("<h3>What firstmate is</h3>").unwrap();
+        let at = html.find("<dt>in scope</dt>").unwrap();
+        assert!(start < at && at < first_use);
+        let entry = html.find("<dt id=\"term-in-scope\">in scope</dt>").unwrap();
+        let entry = &html[entry..];
+        let entry = entry.split("</dd>").next().unwrap();
+        assert!(entry.contains("<span class=\"cites\">"));
+        assert!(!entry.contains("about this page"));
+    }
+
+    #[test]
+    fn reopened_no_longer_carries_the_bare_terminal_success_tag_and_it_is_explained() {
+        let html = render(&real_study()).unwrap();
+        assert!(!html.contains("terminal-success"));
+        assert!(!html.contains("model-limit"));
+        let at = html.find("<strong>reopened</strong>").unwrap();
+        assert!(
+            html[at..]
+                .starts_with("<strong>reopened</strong> <span class=\"tag\">ends the task</span>")
+        );
+        assert!(html.contains("Reopened is not a failure"));
+    }
+
+    #[test]
+    fn the_t10_card_explains_why_a_merge_stays_ready_and_cites_claims() {
+        let html = render(&real_study()).unwrap();
+        let at = html
+            .find("<h3>t10 <span class=\"arrow\">ready &rarr; ready</span>")
+            .unwrap();
+        let card = html[at..].split("</article>").next().unwrap();
+        assert!(card.contains("The task stays Ready because merging does not end it"));
+        assert!(card.contains("[c13]") || card.contains("c13"));
     }
 
     /// The ids of the claims listed at the end of the page, in page order.

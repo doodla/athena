@@ -7,6 +7,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- The firstmate explainer page answers the open newcomer findings. "Agent" is firstmate's own deciding AI and
+  "worker" is the separate AI tool that does a task, and the page says that "decided by agent" means the
+  former; no agent-decided trigger names another decider's event (the t4 trigger now only says the agent runs
+  teardown, and the landing is a code-checked guard). The t10 card explains why a yolo merge is drawn Ready to
+  Ready while t4 reaches Done, citing claims c12, c13 and c29. The `terminal-success` tag shows as "ends the
+  task" and the states lead-in explains Reopened. Finding f2 is removed and the `model-limit` and
+  `could-not-run` finding tags get plain labels. "In scope" is defined in the start terms and the glossary
+  (the cited instruction gives no test for it, and the page says so). A "Next step" link near the top points
+  to the Next steps section. `xtask/src/site.rs` has tests for each.
+
 ### Added
 
 - The verifier receives an accepted plan's demonstrations and planned files (job 3b of
