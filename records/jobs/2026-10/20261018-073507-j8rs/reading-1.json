@@ -1,0 +1,173 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261018-073507-j8rs",
+  "n": 1,
+  "at": "2026-10-18T07:35:54.94078162Z",
+  "invocation_seq": 1,
+  "base_commit": "83926b54d4b3fa16f678950b3a0f42c02ccc312e",
+  "config_sha256": "ba462c7ffba3475385f095363becb853b0eda55fed87c41e3f78d800cf1f63fc",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Record which checks already fail on the base commit before producing",
+  "summary": "Before the producer starts, Athena runs the capability's configured checks (fmt, clippy, test) on the base commit and writes a job record listing each check's name, pass/fail and exit code. Only recording is added. The verifier's judgment is unchanged, because part 2 will consume the record. The audience is the maintainer, who reads the job's records, and part 2's verifier.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "The change is in Rust in the athena-core and athena-data crates."
+    },
+    {
+      "id": "tested",
+      "how": "Tests cover the new recording, and cargo test and clippy stay clean."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check that a failing base check shows up as failed in the job's records, not only that a type exists."
+    },
+    {
+      "id": "small",
+      "how": "Recording only; no consumption by the verifier (that is part 2)."
+    },
+    {
+      "id": "strangers",
+      "how": "Doc comments and the design/CHANGELOG note are written for an outside reader."
+    },
+    {
+      "id": "verified",
+      "how": "Behavior criteria name the cargo commands the verifier can run."
+    },
+    {
+      "id": "outcome-check",
+      "how": "The check is that a failing base check is recorded as failing."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "The baseline reuses run_check from crates/athena-core/src/checks.rs on a snapshot of the base commit, with the capability's env and check_timeout_s, and stores the existing CheckRun shape (name, exit_code, passed, tests_ran, output tail, note).",
+    "It is stored as part of the job's records (a new record kind or a field on an existing record), written with the job's other records; the exact schema is the producer's choice, following the pattern of the existing records in crates/athena-data/src/records.rs.",
+    "It is recorded for every capability with configured checks (change and study), taken at the base commit before the first producer invocation; skip_when_only is not applied, since no change list exists yet.",
+    "A baseline check that fails or times out is recorded as failing and never blocks or aborts the job. If the baseline cannot run at all, the job proceeds and the record says so.",
+    "Nothing in verify.rs or routing.rs changes, and verdict logic is untouched. athena.toml and defaults.toml are not changed.",
+    "Changing the records schema may require updating the docs and the record-validation or policy tests that enumerate record kinds."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A test run by `cargo test --locked` drives a job with a fake or failing check on the base commit (for example `sh -c 'exit 1'`) and asserts that the job's records contain a baseline entry for that check with passed=false and its exit code, and passed=true for a check that succeeds.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test run by `cargo test --locked` shows the baseline is taken before the first producer invocation and from the base commit, not from the candidate. For example, the entry's SHA equals the job's base and its position precedes the producer's invocation record.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test run by `cargo test --locked` shows a baseline that fails, times out, or cannot start does not stop the job or change its verdict. The job continues and the record notes the failure.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The existing verification tests still pass unchanged with no edits to the verdict logic. `git diff` shows no changes to crates/athena-core/src/verify.rs judgment code or to the routing of checks, and `cargo test --locked`, `cargo clippy --all-targets --locked -- -D warnings`, and `cargo fmt --all --check` all pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The baseline record is part of the job's records: it lists each configured check by name with passed, exit code and a redacted output tail capped at the existing 4 KiB, and it is registered wherever record kinds are validated, so the records check accepts it.",
+      "kind": "content"
+    },
+    {
+      "text": "The docs or CHANGELOG state in a sentence or two that the baseline is recorded only and that part 2 will use it at verification.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-core/src/checks.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-gate/src/records.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "docs/design/athena-v0.md",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-cli/tests/common/mod.rs",
+      "action": "modify",
+      "p": 0.25
+    }
+  ],
+  "out_of_scope": [
+    "Using the baseline at verification, or any change to how the verifier judges checks (part 2).",
+    "Changing the checks themselves or their configuration in athena.toml.",
+    "Fixing the checks that already fail on the base.",
+    "Changing the producer's brief or the planner and critic."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.12,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.2,
+        "p90": 2.8
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 1400.0,
+        "p90": 2800.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7576354679802956,
+      "p_verification_passes": 0.6369047619047619,
+      "p_user_intervenes": 0.08214285714285714,
+      "cost_usd": {
+        "p10": 0.406573,
+        "p50": 0.9492671,
+        "p90": 2.1472445999999996
+      },
+      "wall_time_s": {
+        "p10": 571.3970580596234,
+        "p50": 1193.7754386054562,
+        "p90": 2237.297165934685
+      }
+    }
+  },
+  "departures": "The change touches the records schema and the core run path, and baseline-running needs a snapshot of the base plus a cold cargo build of the checks, so cost and time run above the reference. Verification is also less likely to pass first time, because the records schema is validated in several places."
+}
