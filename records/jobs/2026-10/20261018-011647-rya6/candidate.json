@@ -1,0 +1,133 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261018-011647-rya6",
+  "base_commit": "9edd8fba931a71b032257a71407c4d11a5a55f1b",
+  "base_fingerprint": "sha256:02d6b45771053791967a7db406109013edc65275769ea2480361d2674c86568e",
+  "previous_job": "20261018-002354-1bmf",
+  "candidate_commit": "8eacf15e3358c2c275e53cf4d53bfe874e3629e0",
+  "candidate_tree": "87abc7c5f0d02ddfa8c7d242ad5d3b9aa397b43f",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 105664
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 40337
+    },
+    {
+      "path": "crates/athena-cli/tests/job_plan.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 42122
+    },
+    {
+      "path": "crates/athena-core/src/manage.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 25523
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 28861
+    },
+    {
+      "path": "docs/design/job-planning.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 21140
+    }
+  ],
+  "fingerprint": "sha256:ce8ee529213941a49a7338f65c9f791095fdb92dfb1b03fbbfd4ca5f3397426b",
+  "violations": [],
+  "producer_report": {
+    "summary": "`athena status` now shows job planning, and `athena close` no longer invents a missing producer for a job killed during planning. The full `cargo test --locked`, clippy and fmt pass.\n\n- **Status line:** a planned job's line ends with \"· plan accepted r<n>\" or \"· plan stopped r<n>\", read from its last critique. A critique that names a misread request counts as stopped, even if it says accept.\n- **Summary:** a new \"planning    first round: N accepted · M stopped\" line appears only when some job was planned. A job accepted in round 2 counts in neither number.\n- **`athena status <job>`:** it prints a \"planning\" line, then one \"plan round N\" entry per round with its verdict and each finding (severity, summary, evidence).\n- **JSON:** the job trace gains `plan`, `plans` and `critiques`, and the status view gains `planning` and a per-line `plan`. All are skipped when empty, so unplanned output is unchanged.\n- **Recovery:** `recover_interrupted` in `manage.rs` adds the missing-producer record only when no planner, critic or producer invocation exists. A job with no trace of any invocation still gets it.\n- **Tests:** I added eight to `crates/athena-cli/tests/job_plan.rs`, covering status text, the per-round listing, JSON, the unplanned job, and both close cases.\n- **Docs:** `CHANGELOG.md` has the entry, and `docs/design/job-planning.md` has a \"Built as\" note on job 5a.\n\nThe \"byte-identical\" test checks the recent-jobs line against the old format exactly and checks the status text has no \"plan\". It does not compare the whole text against a stored copy of the old output.\n\n`athena.toml` is untouched and planning is not turned on.",
+    "files": [
+      "crates/athena-core/src/status.rs",
+      "crates/athena-cli/src/display.rs",
+      "crates/athena-core/src/manage.rs",
+      "crates/athena-cli/tests/job_plan.rs",
+      "CHANGELOG.md",
+      "docs/design/job-planning.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "all suites pass, including xtask's boundary test and the 8 new tests in job_plan.rs"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "ran cargo fmt --all first"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Run `cargo test`. A test shows a planned job's status line contains \"plan accepted r<n>\" or \"plan stopped r<n>\" with the correct round, and the summary shows first-round accept and stop counts.",
+        "status": "met",
+        "evidence": "job_plan.rs: status_shows_each_planned_jobs_plan_state_and_round_and_the_first_round_counts (accepted r1, stopped r1, '1 accepted · 1 stopped') and a_second_round_accept_shows_as_plan_accepted_r2... (r2, counts 0/0). Both pass."
+      },
+      {
+        "criterion": "Run `cargo test`. A test compares an unplanned job's status output with its pre-change text and finds it byte-identical, with no new lines or columns.",
+        "status": "met",
+        "evidence": "an_unplanned_jobs_status_text_and_json_gain_nothing asserts the recent line equals the pre-change format exactly, the text has no 'plan', and the new JSON keys are absent. It does not compare the whole text against a stored copy of the old output. Passes."
+      },
+      {
+        "criterion": "Run `cargo test`. A test shows `athena status <job>` for a planned job lists each round with its verdict and findings.",
+        "status": "met",
+        "evidence": "status_of_a_planned_job_lists_each_round_with_its_verdict_and_findings: two rounds, verdicts and 'Major:'/'Minor:' findings in round order. Passes."
+      },
+      {
+        "criterion": "Run `cargo test`. A test shows `status <job> --json` for a multi-round planned job includes every round's plan and critique, with verdicts and findings, and that an unplanned job's JSON gains no new keys.",
+        "status": "met",
+        "evidence": "status_json_of_a_planned_job_includes_every_rounds_plan_and_critique (2 plans, 2 critiques, verdicts, findings) and the unplanned test (no plan, plans, critiques or planning keys). Both pass."
+      },
+      {
+        "criterion": "Run `cargo test`. A test closes a job whose process died during planning (planner or critic records or usage partials exist, no producer). The planning invocations are recorded and no Missing producer invocation is added. A job with no trace of any invocation still gets the existing missing-producer behavior.",
+        "status": "met",
+        "evidence": "closing_a_job_killed_during_planning_records_its_planning_and_adds_no_producer (invocations 01-reader, 02-planner, 03-critic, none Missing, check_history clean) and closing_a_job_with_no_trace_of_any_invocation_still_records_a_missing_producer (02-producer Missing). Both pass."
+      },
+      {
+        "criterion": "Run `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check` and xtask's boundary test (`cargo test -p xtask`). All pass.",
+        "status": "met",
+        "evidence": "clippy with -D warnings and fmt --check clean. xtask tests were part of the full `cargo test --locked` run, which passed."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry describing planning in status and the recovery fix.",
+        "status": "met",
+        "evidence": "A new bullet under Unreleased > Added."
+      },
+      {
+        "criterion": "athena.toml is unchanged and planning is not turned on.",
+        "status": "met",
+        "evidence": "No edit to athena.toml; the planned tests turn planning on through the test config only."
+      }
+    ],
+    "open_issues": [
+      "A job with plans but no critique yet (killed mid-round) shows no plan state, though `status <job>` still lists the round as 'no critique'. The brief only asked for accepted and stopped.",
+      "The recovery fix also skips the missing-producer record when planning had finished and the job died before the producer's first trace. I judged that right, since the producer's absence is then not a loss of data.",
+      "crates/athena-cli/tests/common/mod.rs, listed as an expected deliverable, needed no change."
+    ],
+    "mistakes": [
+      "My first attempt to append tests used a shell heredoc, which the policy blocked. I re-did it with the edit tool, and nothing was written by the blocked call."
+    ],
+    "learnings": [
+      "The fake scenario indexes scripted plans and critiques by call count across the whole Athena instance, so one fixture can run two planned jobs with different critic turns.",
+      "A job's directory in the state dir is removed on close, so a test that simulates a killed job writes the usage/NN.json partials itself (path <state>/repo/jobs/<job>/usage).",
+      "Bash here refuses heredocs; files must be written with the edit tools."
+    ],
+    "desires": []
+  }
+}

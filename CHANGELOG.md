@@ -21,6 +21,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Job planning in `athena status`, and a recovery fix (job 5a of `docs/design/job-planning.md`). A job that went
+  through planning shows "plan accepted r<n>" or "plan stopped r<n>" on its status line, the summary shows how
+  many planned jobs the first round accepted and stopped, `athena status <job>` lists each round with its
+  verdict and findings, and `status <job> --json` carries the plans and critiques. A job that was not planned
+  prints and serializes exactly as before. `athena close` no longer adds a "missing producer" invocation for a
+  job whose process died during planning: it records the planner and critic invocations it has and nothing for
+  the producer, which never started. A job with no trace of any invocation still gets the missing producer.
 - The revise and stop paths of job planning, and Athena's own checks on a plan (job 4 of
   `docs/design/job-planning.md`). Planning now runs up to `[job_plan] max_rounds` rounds (default 3). A revise
   sends the planner a revision brief that quotes the previous plan and every finding. Reject, a critic that

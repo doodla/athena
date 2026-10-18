@@ -231,8 +231,8 @@ impl Athena {
     }
 
     /// Collects what an interrupted job left in the state directory: completed invocation records, and
-    /// lower-bound records for invocations whose process died. If nothing shows the producer ran, its
-    /// invocation is recorded as missing, with both bounds from its cap.
+    /// lower-bound records for invocations whose process died. If nothing shows the producer ran, and the job
+    /// did not die in planning, its invocation is recorded as missing, with both bounds from its cap.
     fn recover_interrupted(
         &self,
         job: &JobRecords,
@@ -273,7 +273,12 @@ impl Athena {
                 invocations.push(record);
             }
         }
-        if !invocations.iter().any(|i| i.role == Role::Producer) {
+        // A job that died while planning has planner or critic invocations and no producer yet: the producer
+        // never started, so there is nothing to bound and no missing producer to record.
+        let planned = invocations
+            .iter()
+            .any(|i| matches!(i.role, Role::Planner | Role::Critic));
+        if !planned && !invocations.iter().any(|i| i.role == Role::Producer) {
             let seq = invocations.iter().map(|i| i.seq).max().unwrap_or(0) + 1;
             let model = job
                 .latest_reading()

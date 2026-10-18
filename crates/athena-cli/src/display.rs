@@ -581,6 +581,13 @@ pub fn score_line(score: &Score) -> String {
     }
 }
 
+/// The plan state at the end of a job's line, empty for a job that was not planned.
+fn plan_suffix(j: &athena_core::status::JobLine) -> String {
+    j.plan
+        .as_ref()
+        .map_or(String::new(), |plan| format!(" · {plan}"))
+}
+
 /// `athena status`.
 pub fn status(v: &StatusView) -> String {
     let mut out = String::new();
@@ -625,17 +632,32 @@ pub fn status(v: &StatusView) -> String {
             let label = if i == 0 { "recent" } else { "" };
             let _ = writeln!(
                 out,
-                "{label:<11} {} {:<11} {} · {}",
+                "{label:<11} {} {:<11} {} · {}{}",
                 j.id,
                 j.state,
                 usd(j.cost_usd),
-                j.title
+                j.title,
+                plan_suffix(j)
             );
         }
     }
+    if let Some(p) = &v.planning {
+        let _ = writeln!(
+            out,
+            "planning    first round: {} accepted · {} stopped",
+            p.accepted, p.stopped
+        );
+    }
     for (i, j) in v.open.iter().enumerate() {
         let label = if i == 0 { "open" } else { "" };
-        let _ = writeln!(out, "{label:<11} {} {} · {}", j.id, j.state, j.title);
+        let _ = writeln!(
+            out,
+            "{label:<11} {} {} · {}{}",
+            j.id,
+            j.state,
+            j.title,
+            plan_suffix(j)
+        );
     }
     for (i, n) in v.open_interventions.iter().enumerate() {
         let label = if i == 0 { "follow-up" } else { "" };
@@ -1089,6 +1111,45 @@ pub fn trace(t: &JobTrace) -> String {
             }
         );
         let _ = writeln!(out, "            tokens {}", i.tokens);
+    }
+    if let Some(plan) = &t.plan {
+        let _ = writeln!(out, "planning    {plan}");
+    }
+    let rounds = t
+        .plans
+        .iter()
+        .map(|p| p.round)
+        .chain(t.critiques.iter().map(|c| c.round))
+        .collect::<std::collections::BTreeSet<u32>>();
+    for round in rounds {
+        let plan = t.plans.iter().find(|p| p.round == round);
+        let critique = t.critiques.iter().find(|c| c.round == round);
+        let plan_text = plan.map_or("no plan", |p| p.approach.trim());
+        let verdict = critique.map_or("no critique".to_string(), |c| {
+            let mut text = format!("{:?}", c.final_verdict).to_lowercase();
+            if let Some(agent) = c.agent_verdict
+                && agent != c.final_verdict
+            {
+                text.push_str(&format!(
+                    " (critic said {})",
+                    format!("{agent:?}").to_lowercase()
+                ));
+            }
+            text
+        });
+        let _ = writeln!(out, "plan round {round}  {verdict} · {plan_text}");
+        if let Some(c) = critique {
+            if let Some(m) = &c.request_reading_mismatch {
+                let _ = writeln!(out, "            misread the request: {m}");
+            }
+            for f in &c.findings {
+                let _ = writeln!(
+                    out,
+                    "            {:?}: {} ({})",
+                    f.severity, f.summary, f.evidence
+                );
+            }
+        }
     }
     if let Some(c) = &t.candidate {
         let paths: Vec<String> = c["changes"]

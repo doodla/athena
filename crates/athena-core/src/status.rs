@@ -5,7 +5,10 @@ use crate::Athena;
 use crate::manage::pending_quantities;
 use crate::store::{JobRecords, JobState, Records};
 use anyhow::Result;
-use athena_data::records::{Build, InterventionSource, Invocation, OutcomeState, Reading};
+use athena_data::records::{
+    Build, Critique, CritiqueVerdict, InterventionSource, Invocation, JobPlan, OutcomeState,
+    Reading,
+};
 use athena_gate::invariant::{BOOTSTRAP_OUTCOME, BootstrapRange, bootstrap_range};
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -18,6 +21,45 @@ pub struct JobLine {
     pub title: String,
     pub class: Option<String>,
     pub cost_usd: f64,
+    /// "plan accepted r<n>" or "plan stopped r<n>", for a job that went through job planning; absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+}
+
+/// How job planning ended for one job: the round of the last critique and whether it let the job go on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlanState {
+    pub accepted: bool,
+    pub round: u32,
+}
+
+impl PlanState {
+    /// "plan accepted r2" or "plan stopped r3".
+    pub fn text(self) -> String {
+        format!(
+            "plan {} r{}",
+            if self.accepted { "accepted" } else { "stopped" },
+            self.round
+        )
+    }
+}
+
+/// The plan state of a job: that of its last critique. A critique that accepts stands unless it also says the
+/// reading misread the request, which stops the job. A job with no critique has no plan state.
+pub fn plan_state(job: &JobRecords) -> Option<PlanState> {
+    let last = job.critiques.last()?;
+    Some(PlanState {
+        accepted: last.final_verdict == CritiqueVerdict::Accept
+            && last.request_reading_mismatch.is_none(),
+        round: last.round,
+    })
+}
+
+/// How many planned jobs the first planning round accepted and stopped.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct FirstRoundCounts {
+    pub accepted: usize,
+    pub stopped: usize,
 }
 
 /// One class's forecast headline.
@@ -60,6 +102,9 @@ pub struct StatusView {
     pub jobs_by_state: BTreeMap<String, usize>,
     pub recent: Vec<JobLine>,
     pub open: Vec<JobLine>,
+    /// First-round accept and stop counts over planned jobs; absent when no job was planned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub planning: Option<FirstRoundCounts>,
     pub interventions_by_category: BTreeMap<String, usize>,
     pub interventions_by_class: BTreeMap<String, usize>,
     /// Interventions that call for follow-up and that no later request job cites yet (see
@@ -357,6 +402,13 @@ pub struct JobTrace {
     pub owner: Option<String>,
     pub verifier: Option<String>,
     pub invocations: Vec<InvocationLine>,
+    /// The job's plan state, plans and critiques by round; all absent for a job that was not planned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub plans: Vec<JobPlan>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub critiques: Vec<Critique>,
     pub candidate: Option<serde_json::Value>,
     pub verification: Option<serde_json::Value>,
     pub outcome: Option<serde_json::Value>,
@@ -376,6 +428,7 @@ fn job_line(job: &JobRecords, state: &str) -> JobLine {
         title: job.title(),
         class: job.class().map(str::to_string),
         cost_usd: job.spent_usd(),
+        plan: plan_state(job).map(PlanState::text),
     }
 }
 
@@ -452,7 +505,24 @@ impl Athena {
         let mut jobs_by_state: BTreeMap<String, usize> = BTreeMap::new();
         let mut recent = Vec::new();
         let mut open = Vec::new();
+        let mut first_round: Option<FirstRoundCounts> = None;
         for job in records.request_jobs() {
+            if let Some(first) = job.critiques.first()
+                && let Some(state) = plan_state(job)
+            {
+                let counts = first_round.get_or_insert(FirstRoundCounts {
+                    accepted: 0,
+                    stopped: 0,
+                });
+                let accepted = first.final_verdict == CritiqueVerdict::Accept
+                    && first.request_reading_mismatch.is_none();
+                // A round-1 revise sends the plan back; only a job whose planning ended in round 1 stopped there.
+                if accepted {
+                    counts.accepted += 1;
+                } else if !state.accepted && state.round == 1 {
+                    counts.stopped += 1;
+                }
+            }
             let state = self.state_name(job);
             *jobs_by_state.entry(state.clone()).or_default() += 1;
             // Queued requests have not run; they show under open work.
@@ -596,6 +666,7 @@ impl Athena {
             jobs_by_state,
             recent,
             open,
+            planning: first_round,
             interventions_by_category: by_category,
             interventions_by_class: by_class,
             open_interventions,
@@ -652,6 +723,9 @@ impl Athena {
             }),
             verifier: job.job.as_ref().and_then(|j| j.verifier_model.clone()),
             invocations: job.invocations.iter().map(invocation_line).collect(),
+            plan: plan_state(job).map(PlanState::text),
+            plans: job.plans.clone(),
+            critiques: job.critiques.clone(),
             candidate: job.candidate.as_ref().map(|c| to_value(c)),
             verification: job.verification.as_ref().map(|v| to_value(v)),
             outcome: job.outcome.as_ref().map(|o| to_value(o)),

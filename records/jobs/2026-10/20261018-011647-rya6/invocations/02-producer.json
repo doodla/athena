@@ -1,0 +1,150 @@
+{
+  "schema": "athena.invocation/1",
+  "job": "20261018-011647-rya6",
+  "seq": 2,
+  "role": "producer",
+  "driver": {
+    "name": "claude-code",
+    "version": "2.1.302"
+  },
+  "athena": {
+    "version": "0.1.0",
+    "source_commit": "6e30f22efb7eca3c10322689a6aa0cc918afeebe",
+    "dirty": false
+  },
+  "model": "claude-sonnet-5-5",
+  "context": {
+    "components": [
+      {
+        "id": "contract",
+        "version": 1,
+        "sha256": "420e706cc7ecea6f1ebf06864f4a87fb9822cf83d9551199e9e4d4840dbe6650",
+        "tokens": {
+          "value": 326.0,
+          "unit": "tokens",
+          "provenance": "estimated",
+          "basis": "ceil(bytes/3.0), prose tripwire"
+        }
+      },
+      {
+        "id": "frame.producer",
+        "version": 1,
+        "sha256": "c317d15f9c9039f4b8a8fd90670a860d43e0f479f20ffab7e1f70a087faaaf1e",
+        "tokens": {
+          "value": 631.0,
+          "unit": "tokens",
+          "provenance": "estimated",
+          "basis": "ceil(bytes/3.0), prose tripwire"
+        }
+      },
+      {
+        "id": "capability.change.producer",
+        "version": 1,
+        "sha256": "efce1014d83328ef846db7566f70bbcc544f599dc7cf08bd5f80054b328dde97",
+        "tokens": {
+          "value": 124.0,
+          "unit": "tokens",
+          "provenance": "estimated",
+          "basis": "ceil(bytes/3.0), prose tripwire"
+        }
+      }
+    ],
+    "prompt_sha256": "33f09a4af9d064be3a5c8eec37ee2b91250ca7f291b52b76c8bda0b59ef0bc02",
+    "prompt_tokens": {
+      "value": 1081.0,
+      "unit": "tokens",
+      "provenance": "estimated",
+      "basis": "ceil(bytes/3.0), prose tripwire"
+    },
+    "host_baseline": {
+      "value": 1070.0,
+      "unit": "tokens",
+      "provenance": "estimated",
+      "basis": "measured once with the pinned host and a role's structured-output tool (athena.toml [agents]); not measured per invocation"
+    },
+    "tools": [
+      "Read",
+      "Grep",
+      "Glob",
+      "Edit",
+      "Write",
+      "Bash"
+    ]
+  },
+  "caps": {
+    "max_budget_usd": 3.0,
+    "timeout_s": 1800
+  },
+  "started_at": "2026-10-18T01:17:17.386724247Z",
+  "ended_at": "2026-10-18T01:35:10.547018736Z",
+  "wall_time": {
+    "value": 1073.160295173,
+    "unit": "seconds",
+    "provenance": "measured",
+    "basis": "athena monotonic clock"
+  },
+  "tokens": {
+    "input": {
+      "value": 46.0,
+      "unit": "tokens",
+      "provenance": "measured",
+      "basis": "Claude Code result.modelUsage for the requested model"
+    },
+    "output": {
+      "value": 25512.0,
+      "unit": "tokens",
+      "provenance": "measured",
+      "basis": "Claude Code result.modelUsage for the requested model"
+    },
+    "cache_read": {
+      "value": 1737562.0,
+      "unit": "tokens",
+      "provenance": "measured",
+      "basis": "Claude Code result.modelUsage for the requested model"
+    },
+    "cache_write": {
+      "value": 120158.0,
+      "unit": "tokens",
+      "provenance": "measured",
+      "basis": "Claude Code result.modelUsage for the requested model"
+    }
+  },
+  "models_used": {
+    "claude-sonnet-5-5": {
+      "input": 46,
+      "output": 25512,
+      "cache_read": 1737562,
+      "cache_write": 120158,
+      "cost_usd": 0.9096002
+    }
+  },
+  "cost": {
+    "value": 0.9096002,
+    "unit": "usd",
+    "provenance": "reported",
+    "basis": "Claude Code total_cost_usd, at list price"
+  },
+  "outcome": "success",
+  "detail": null,
+  "turns": 52,
+  "commands_run": [
+    "ls crates/athena-core/src crates/athena-cli/tests crates/athena-cli/tests/common",
+    "cargo check --locked --all-targets",
+    "cargo test --locked -p athena-cli --test job_plan",
+    "cargo fmt --all",
+    "cargo clippy --all-targets --locked -- -D warnings",
+    "cargo test --locked",
+    "cargo fmt --all --check",
+    "cargo test --locked --quiet"
+  ],
+  "policy_denials": [
+    {
+      "tool": "Bash",
+      "detail": "cat >> crates/athena-cli/tests/job_plan.rs <<'EOF'\n\n// ---------------------------------------------------------------------------------------------------------\n// Job 5a: job planning in `athena status`, and recovery of a job killed during planning.\n\n/// Asks for and runs a job to the end.\nfn run_job(athena: &athena_core::Athena) -> (athena_data::JobId, athena_core::run::Finished) {\n    let proposal = athena.ask(\"tidy the readme\", &Lines::default()).unwrap();\n    let f = finished(\n        athena\n            .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())\n            .unwrap(),\n    );\n    (proposal.job, f)\n}\n\n#[test]\nfn status_shows_each_planned_jobs_plan_state_and_round_and_the_first_round_counts() {\n    let fx = Fixture::with_config(&planned_config());\n    let mut scenario = Scenario::default();\n    // Job one: the first critique accepts. Job two: the first critique rejects.\n    scenario.critiques = vec![\n        critique_of(\"accept\", &[], None),\n        critique_of(\"reject\", &[(\"blocker\", \"The plan is unsound\")], None),\n    ];\n    let athena = fx.athena(scenario.script());\n    let (accepted, f) = run_job(&athena);\n    assert_eq!(f.state, OutcomeState::Landed, \"{}\", f.reason);\n    let (stopped, f) = run_job(&athena);\n    assert_eq!(f.state, OutcomeState::Failed);\n\n    let text = athena_cli::display::status(&athena.status().unwrap());\n    let line = |job: &athena_data::JobId| -> String {\n        text.lines()\n            .find(|l| l.contains(job.as_str()))\n            .unwrap_or_else(|| panic!(\"no line for {job}: {text}\"))\n            .to_string()\n    };\n    assert!(line(&accepted).ends_with(\" · plan accepted r1\"), \"{text}\");\n    assert!(line(&stopped).ends_with(\" · plan stopped r1\"), \"{text}\");\n    assert!(\n        text.contains(\"planning    first round: 1 accepted · 1 stopped\\n\"),\n        \"{text}\"\n    );\n}\n\n#[test]\nfn a_second_round_accept_shows_as_plan_accepted_r2_and_is_not_a_first_round_accept() {\n    let fx = Fixture::with_config(&planned_config());\n    let mut scenario = Scenario::default();\n    scenario.plans = vec![good_plan(), good_plan()];\n    scenario.critiques = vec![\n        critique_of(\"revise\", &[(\"major\", \"Demonstration 2 repeats 1\")], None),\n        critique_of(\"accept\", &[], None),\n    ];\n    let athena = fx.athena(scenario.script());\n    let (job, f) = run_job(&athena);\n    assert_eq!(f.state, OutcomeState::Landed, \"{}\", f.reason);\n    let text = athena_cli::display::status(&athena.status().unwrap());\n    assert!(\n        text.lines()\n            .any(|l| l.contains(job.as_str()) && l.ends_with(\" · plan accepted r2\")),\n        \"{text}\"\n    );\n    assert!(\n        text.contains(\"planning    first round: 0 accepted · 0 stopped\\n\"),\n        \"{text}\"\n    );\n}\n\n#[test]\nfn status_of_a_planned_job_lists_each_round_with_its_verdict_and_findings() {\n    const FINDING: &str = \"Demonstration 2 repeats demonstration 1 and shows nothing new\";\n    let fx = Fixture::with_config(&planned_config());\n    let mut scenario = Scenario::default();\n    scenario.plans = vec![good_plan(), good_plan()];\n    scenario.critiques = vec![\n        critique_of(\"revise\", &[(\"major\", FINDING)], None),\n        critique_of(\"accept\", &[(\"minor\", \"Name the file in step 1\")], None),\n    ];\n    let athena = fx.athena(scenario.script());\n    let (job, f) = run_job(&athena);\n    assert_eq!(f.state, OutcomeState::Landed, \"{}\", f.reason);\n\n    let text = athena_cli::display::trace(&athena.trace(job.as_str()).unwrap());\n    assert!(text.contains(\"planning    plan accepted r2\\n\"), \"{text}\");\n    let round = |n: u32| -> usize {\n        text.find(&format!(\"plan round {n}  \"))\n            .unwrap_or_else(|| panic!(\"round {n} is listed: {text}\"))\n    };\n    let (first, second) = (round(1), round(2));\n    assert!(first < second);\n    assert!(text[first..second].contains(\"revise\"), \"{text}\");\n    assert!(\n        text[first..second].contains(&format!(\"Major: {FINDING}\")),\n        \"{text}\"\n    );\n    assert!(text[second..].contains(\"accept\"), \"{text}\");\n    assert!(\n        text[second..].contains(\"Minor: Name the file in step 1\"),\n        \"{text}\"\n    );\n}\n\n#[test]\nfn status_json_of_a_planned_job_includes_every_rounds_plan_and_critique() {\n    const FINDING: &str = \"Demonstration 2 repeats demonstration 1 and shows nothing new\";\n    let fx = Fixture::with_config(&planned_config());\n    let mut scenario = Scenario::default();\n    scenario.plans = vec![good_plan(), good_plan()];\n    scenario.critiques = vec![\n        critique_of(\"revise\", &[(\"major\", FINDING)], None),\n        critique_of(\"accept\", &[], None),\n    ];\n    let athena = fx.athena(scenario.script());\n    let (job, f) = run_job(&athena);\n    assert_eq!(f.state, OutcomeState::Landed, \"{}\", f.reason);\n\n    let json = serde_json::to_value(athena.trace(job.as_str()).unwrap()).unwrap();\n    assert_eq!(json[\"plan\"], \"plan accepted r2\");\n    let plans = json[\"plans\"].as_array().unwrap();\n    assert_eq!(plans.len(), 2);\n    assert_eq!(plans[0][\"round\"], 1);\n    assert_eq!(plans[1][\"round\"], 2);\n    assert_eq!(plans[1][\"approach\"], \"Add a greeting line to README.md.\");\n    let critiques = json[\"critiques\"].as_array().unwrap();\n    assert_eq!(critiques.len(), 2);\n    assert_eq!(critiques[0][\"final_verdict\"], \"revise\");\n    assert_eq!(critiques[0][\"findings\"][0][\"summary\"], FINDING);\n    assert_eq!(critiques[0][\"findings\"][0][\"severity\"], \"major\");\n    assert_eq!(critiques[1][\"final_verdict\"], \"accept\");\n    assert_eq!(critiques[1][\"findings\"].as_array().unwrap().len(), 0);\n}\n\n#[test]\nfn an_unplanned_jobs_status_text_and_json_gain_nothing() {\n    let fx = Fixture::with_config(&test_config());\n    let athena = fx.athena(Scenario::default().script());\n    let (job, f) = run_job(&athena);\n    assert_eq!(f.state, OutcomeState::Landed, \"{}\", f.reason);\n\n    let view = athena.status().unwrap();\n    let text = athena_cli::display::status(&view);\n    // The recent line is exactly what it was before planning existed: id, state padded to 11, cost, title.\n    let expected = format!(\n        \"recent      {job} {:<11} ${:.2} · {}\\n\",\n        \"landed\", view.recent[0].cost_usd, view.recent[0].title\n    );\n    assert!(text.contains(&expected), \"{text}\");\n    assert!(!text.contains(\"plan\"), \"{text}\");\n    let json = serde_json::to_value(&view).unwrap();\n    assert!(json.get(\"planning\").is_none());\n    assert!(json[\"recent\"][0].get(\"plan\").is_none());\n\n    let trace = athena.trace(job.as_str()).unwrap();\n    let trace_text = athena_cli::display::trace(&trace);\n    assert!(\n        !trace_text.contains(\"plan round\") && !trace_text.contains(\"planning\"),\n        \"{trace_text}\"\n    );\n    let json = serde_json::to_value(&trace).unwrap();\n    for key in [\"plan\", \"plans\", \"critiques\"] {\n        assert!(json.get(key).is_none(), \"{key} appears in {json}\");\n    }\n}\n\n/// Runs a planned job to its end, then cuts the history back to just before the closing commit: the job is\n/// dispatched with no closing record and no process, as after a machine restart in the middle of its run.\nfn killed_after_dispatch(fx: &Fixture, athena: &athena_core::Athena) -> athena_data::JobId {\n    use athena_core::store::{JobState, Records};\n    let (job, _) = run_job(athena);\n    for _ in 0..8 {\n        let records = Records::load(&fx.git, &fx.head()).unwrap();\n        if records.jobs[job.as_str()].state() == JobState::Dispatched {\n            return job;\n        }\n        fx.git.run([\"reset\", \"-q\", \"--hard\", \"HEAD~1\"]).unwrap();\n    }\n    panic!(\"the job never was dispatched without an outcome\");\n}\n\n/// A partial usage file such as a running invocation leaves in the state directory.\nfn leave_partial_usage(fx: &Fixture, job: &athena_data::JobId, seq: u32, role: &str) {\n    let dir = fx.state.path().join(\"repo/jobs\").join(job.as_str()).join(\"usage\");\n    std::fs::create_dir_all(&dir).unwrap();\n    let partial = json!({\n        \"seq\": seq, \"role\": role, \"model\": \"fake-model\", \"cap_usd\": 1.0, \"timeout_s\": 600,\n        \"started_at\": null, \"input\": 5, \"output\": 7, \"cache_read\": 0, \"cache_write\": 0, \"commands\": []\n    });\n    std::fs::write(dir.join(format!(\"{seq:02}.json\")), partial.to_string()).unwrap();\n}\n\nfn closed_invocation_roles(fx: &Fixture, job: &athena_data::JobId) -> Vec<(String, String)> {\n    let dir = job.dir();\n    invocation_names(fx, &fx.head(), &dir)\n        .into_iter()\n        .map(|name| {\n            let path = format!(\"{dir}/invocations/{name}\");\n            match read_record(fx, &path) {\n                AnyRecord::Invocation(i) => (name, format!(\"{:?}\", i.outcome)),\n                other => panic!(\"unexpected {other:?}\"),\n            }\n        })\n        .collect()\n}\n\n#[test]\nfn closing_a_job_killed_during_planning_records_its_planning_and_adds_no_producer() {\n    let fx = Fixture::with_config(&planned_config());\n    let athena = fx.athena(Scenario::default().script());\n    let job = killed_after_dispatch(&fx, &athena);\n    // The planner and critic were running when the process died.\n    leave_partial_usage(&fx, &job, 2, \"planner\");\n    leave_partial_usage(&fx, &job, 3, \"critic\");\n\n    athena\n        .close(job.as_str(), \"died while planning\", &Lines::default())\n        .unwrap();\n    let invocations = closed_invocation_roles(&fx, &job);\n    let names: Vec<&str> = invocations.iter().map(|(n, _)| n.as_str()).collect();\n    assert_eq!(\n        names,\n        [\"01-reader.json\", \"02-planner.json\", \"03-critic.json\"],\n        \"{invocations:?}\"\n    );\n    assert!(\n        invocations.iter().all(|(_, outcome)| outcome != \"Missing\"),\n        \"{invocations:?}\"\n    );\n    assert!(athena.check_history().unwrap().violations.is_empty());\n}\n\n#[test]\nfn closing_a_job_with_no_trace_of_any_invocation_still_records_a_missing_producer() {\n    let fx = Fixture::with_config(&planned_config());\n    let athena = fx.athena(Scenario::default().script());\n    let job = killed_after_dispatch(&fx, &athena);\n\n    athena\n        .close(job.as_str(), \"died at once\", &Lines::default())\n        .unwrap();\n    let invocations = closed_invocation_roles(&fx, &job);\n    assert_eq!(\n        invocations,\n        [\n            (\"01-reader.json\".to_string(), \"Succeeded\".to_string()),\n            (\"02-producer.json\".to_string(), \"Missing\".to_string())\n        ],\n        \"{invocations:?}\"\n    );\n}\nEOF\ncargo test --locked -p athena-cli --test job_plan 2>&1 | tail -60"
+    },
+    {
+      "tool": "Grep",
+      "detail": "{\"output_mode\":\"count\",\"path\":\"~/.claude/projects/-root--local-state-athena-athena-77cba81fd890-jobs-20261018-011647-rya6-work/402bc030-91f0-4112-8f41-abf393a4f6ce/tool-results/bl0n0v3q2.txt\",\"pattern\":\"^test result: (FAILED|failed)|FAILED|panicked\"}"
+    }
+  ]
+}
