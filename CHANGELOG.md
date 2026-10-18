@@ -9,6 +9,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `docs/spec.toml`: the first part of the Olympus spec, covering `BRIEF.md` "Project Olympus" sections 1 to 6
+  (vision, pantheon, feedback, the example, the two loops, R1 to R8). Each requirement has an id, statement,
+  kind, status and verbatim quotes with headings. `xtask/tests/spec.rs` checks that every quote is in
+  `BRIEF.md`, ids are unique, `supersedes` targets exist and every requirement has a source. Sections 7 to 10,
+  the governing philosophy and the 2026-10-17 addenda follow in a second job (D111).
 - Before the producer starts, Athena runs the capability's configured checks on the base commit and records
   each one's name, pass or fail, exit code and bounded redacted output tail in a new per-job record,
   `athena.baseline/1` (`baseline.json`). A check that fails, times out or cannot start is recorded as failed

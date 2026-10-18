@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261018-095726-r3bn",
+  "round": 3,
+  "at": "2026-10-18T11:34:33.985773917Z",
+  "invocation_seq": 6,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/gh.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/gh.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The criterion 1 test cannot pass a fake Remote or host into Athena::land_pr as the plan describes",
+      "evidence": "Athena::land_pr (gh.rs:1519) takes only `runner: &dyn Runner`. It builds `GitRemote { git, name: \"origin\" }` and `GhClient::new(runner, ..)` itself. It calls `parse_remote` on `git remote get-url origin`, which bails unless the URL names github.com (gh.rs:1175-1187). No test in the repository calls Athena::land_pr; the only callers are main.rs:759 and drain.rs:1263. A test therefore needs one of two things: a fake Runner that answers every gh API call land_pr makes (PR view, checks, merge state, Pages), plus an origin whose URL parses as github.com while pushes and ls-remote reach a local bare repo. Note that `remote get-url` expands insteadOf. Or it needs a new seam. The plan names neither, and step 1 only reads the FakeRemote tests of the free function `land_pr`. Fix: Choose and state the seam. Either (a) split Athena::land_pr so a crate-private inner function takes `&dyn Remote` and a host, and have the test call that inner function, which still contains the resync call site; or (b) set out exactly how the test configures origin (a github.com fetch URL and a pushurl to a local bare repo, or similar) and which Runner responses it fakes. Keep the check that the test fails when the resync call is restored.",
+      "location": "Demonstrations, Criterion 1; Decision 5; gh.rs:1519-1570",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The assertion that B's head holds only B's own commits conflicts with how replay works",
+      "evidence": "Git::replay (athena-git lib.rs:701-728) replays every first-parent commit in merge-base..B and skips only commits whose tree does not change. The plan's local branch has P, A's landed commit, a records commit, then B's landed commit. After A's squash, A's commit replays to empty, but the records commit between A and B is not inside A's squash. It is carried into B's head as a separate commit. Fix: Assert what the request needs: no merge commits, A's changes carried by the squash and not added again, and the tree fingerprint matching. Either allow records commits in B's head, or say where they are dropped. One squash merge still produces one commit on main.",
+      "location": "Demonstrations, Criterion 2 (\"B's head holds only B's own commits\")",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The signs_commits open question can be closed now",
+      "evidence": "`Git::signs_commits` exists (athena-git/src/lib.rs:556) and GitRemote holds `git: &Git` (gh.rs:1567-1570), so GitRemote::cut_head can call `self.git.signs_commits()` directly. The same pattern is used in land.rs:115 and commits.rs:170. Fix: Remove the open question and state in step 3 that cut_head uses self.git.signs_commits().",
+      "location": "Open questions (signs_commits reachability)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The claim that clippy fails on leftover dead code does not hold for pub items",
+      "evidence": "resync_tip and Athena::resync_onto_merge are `pub` (land.rs:95, 112), so the dead_code lint does not fire if they stay after the call is removed. Fix: Rely on the `rg resync_onto_merge crates/` check from criterion 4 instead of clippy for this claim.",
+      "location": "Demonstrations, Criterion 3 (fails without)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read land.rs, gh.rs (land_pr, Athena::land_pr, parse_remote) and athena-git's replay, and checked them against the plan. The approach is sound and starts where the fault starts. The only rewrite of the local branch after a merge is the resync_onto_merge call at gh.rs:1630. Removing it keeps every running job's base an ancestor of HEAD, so `plan` in land.rs still lands the job. Moving the squash-conflict fix into a cut of the pull request head onto the remote tip reuses Git::replay, which already skips commits that become empty, so one merge still lands one job. The new `source` field on PrLink keeps reruns from pushing again, and the fingerprint check before any push keeps the P5 and merged-unverified protections. Extending the scope to gh.rs is justified; Athena's own finding about it carries less weight because the fault lives there. The main gap is criterion 1's demonstration: Athena::land_pr cannot take a fake Remote or host. It builds GitRemote on \"origin\" and GhClient itself, requires a github.com remote URL, and has no existing test harness. As written, the producer would have to invent a seam or a remote setup that the plan does not describe. Smaller points: criterion 2 asserts something about B's head that conflicts with records commits, the signs_commits open question can be closed now, and the claim that clippy catches leftover dead code does not hold for pub items. Verdict: revise; the planner can fix all of these."
+}

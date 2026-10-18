@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261018-113512-gvcs",
+  "round": 2,
+  "at": "2026-10-18T11:38:50.7795716Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "Without the resync, and with no cut on clean merges, every later PR head carries jobs that already landed, so PR diffs grow with each job.",
+      "evidence": "Once the resync is gone, the local branch never moves onto the host's squash commit, so B's pushed head (`job.commit` from `landed_commit`, gh.rs:1571) still carries A's original landed commit. Its merge-base with remote main stays at the commit before A's squash and never advances, so this grows with every later job. A pull request diff is taken from that merge-base, so B's PR, and every PR after it, would show the changes of every job that already landed. In the clean case the plan never cuts, so this is the normal path, not an edge case. None of the Risks, the demonstrations or the docs criterion mention it. Fix: Change the cut trigger to: cut when the remote default tip is not an ancestor of the head. Do not wait for a conflict. `replay` drops commits that become empty, so the published head holds only the job's own commits. This rewrites only the pushed PR head, never the local branch, so running jobs' bases stay safe. Add an assertion to the criterion 2 test that B's PR head sits on A's squash and its diff against main holds only B's change. If the planner keeps clean-case heads uncut, the docs must name the growing PR diff and the ever-older merge-base as an accepted cost, with a reason.",
+      "location": "Plan Decision 2 (\"Skip the cut when the head merges cleanly\"; \"Rejected: Always cut\") and Risks",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The rerun push check is in the free `land_pr` at gh.rs:1297, not in `publish` or `replace_head`.",
+      "evidence": "The comparison that triggers a second push is in the free function `land_pr(&LandPr)` at gh.rs:1297 (`link.state == LinkState::Open && link.head != job.commit`). A cut head never equals `job.commit`, so this line would call `replace_head` on every rerun unless it reads the sidecar. Fix: Name gh.rs:1297 as the place where the sidecar source (falling back to `link.head`) is compared with `job.commit`. Make the no-second-push rerun test go through that path.",
+      "location": "Plan Step 3 / Decision 3 (rerun comparison)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan does not say where the inner function's boundary falls: the self receiver, the host traits, and the Pages watch.",
+      "evidence": "The resync call site (gh.rs:1625-1631) uses `self` (Athena state lock and HEAD). The same tail of `Athena::land_pr` calls `watch_landing(&log, ui)` and `watch_pages(&client, ...)`, which need a PagesHost and a 12-attempt poll (gh.rs:1632-1644). Fix: State that `land_pr_with` is a `&self` method on Athena. Say which host traits its host parameter implements, and whether the Pages watch stays in the wrapper or the inner function gets an injectable poll. That keeps the tests fast and deterministic.",
+      "location": "Plan Step 4 (`land_pr_with(&dyn Remote, host, host_name)`)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read gh.rs (the `Remote` trait, `publish`, `replace_head`, the free `land_pr` and `Athena::land_pr`), land.rs (`plan`, `resync_tip`, `resync_onto_merge`), the push guards in pr.rs, and where run.rs sets `base_commit`. The plan matches the request and the accepted reading. The fault is where the plan says: the `resync_onto_merge` call at gh.rs:1630. Dispatch does take its base from local HEAD (run.rs:315), and `Git::replay` and `signs_commits` exist. The `Remote` trait has no default method yet, so adding one is non-breaking. The demonstrations for criteria 1-3 would fail if the resync were restored: HEAD would move, and `plan` would return Stale. The main gap is a design one. Because the local branch is never resynced and clean heads are never cut, every later PR head still carries the original commits of jobs that already landed. Its merge-base with main never advances, so each PR's diff shows all earlier jobs' changes. The plan neither handles this nor documents it. Two smaller points: the rerun comparison sits at gh.rs:1297, not in `publish` or `replace_head`, and the inner function's host and Pages-watch boundary is left unspecified. These are fixable, so the verdict is revise."
+}
