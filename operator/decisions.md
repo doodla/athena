@@ -238,3 +238,14 @@ Athena's decision log, not here. Newest last.
 - Also relayed: Sri's three lines of ~17:45 (design review every few jobs toward a stable design; the producer and
   verifier as a planner-critic loop; the API surface not settled), held until the drain ended so that two Athena
   commands would not commit at once.
+
+## OP-18. No merges around athena land (2026-10-19)
+
+- What happened: on 2026-10-18 the operator merged PR #149 (job 20261018-145008-k7fq, the spec layer) by hand
+  through the GitHub API, because `athena land` judged checks on the job's own commit and not on the pull
+  request's head, where a hand test fix had made CI green. The squash 02837e0 also carried two hand changes.
+- Decision (Sri, 2026-10-19, "2 then restart"): revert 02837e0 (PR #150) and re-land the spec through Athena once
+  `athena land` judges the pull request's current head; then restart the operator session.
+- Rule: the operator never merges a pull request outside `athena land`. A gap in land is fixed in land.
+- Also from 2026-10-18: the verifier's 1200 s limit was raised to 2400 s by hand (the suite now takes ~11 min and
+  the verifier reruns it); the root fix is the verifier reusing recorded check results.
