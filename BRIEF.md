@@ -1027,3 +1027,14 @@ It should become demonstrably less likely to make the same kind of mistake again
 
 * Approved.
 * Relay note: Sri approved, after the fact, the [history] exempt entry for squash 39962ed (job 20261017-133559-1b3d), which an audit found had weakened a protected check without owner approval. No further exemption is added without Sri's yes; the cause (squash merges that carry several jobs) is to be fixed instead.
+
+### 2026-10-23: Records in their own history, no trailers
+
+* How are history checks ending up on main? Failing ones
+* Build me an artifact about what happens in this check, and if it's needed. And if there are better approaches
+* Seems like this will take a while if we ever get to 10k commits
+* I gave you admin
+* Can we do attribution at the pr level?
+* Wouldn't a db or a shadow repo solve this entire class of issues?
+* Yeah. Also copy over whatever. We shouldn't depend on trailers in commit messages
+* Relay note: the context was the history check failing on main after squash merges (02837e0, and the earlier exemptions). "Yeah" answered the operator's proposal: Athena designs, before building, moving its records out of the code's commit history into a history of their own (the operator recommended a `records` branch in this repository over a database or a second repository), with pull-request-level attribution folded in. "Copy over whatever" means the existing records move too rather than staying on main. Attribution must not depend on trailers in commit messages. "I gave you admin" gave the operator repository admin; Sri's squash-only, linear-history choice (OP-8) stands. The design comes to Sri for a decision before any code.
