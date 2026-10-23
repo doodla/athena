@@ -9,6 +9,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `docs/design/records-history.md` and the proposed decision D112: a design (no code) for moving Athena's
+  records onto their own history, a separate-root branch in the repository, with migration by copy,
+  attribution of main's commits from records alone, and an eight-job build plan. Awaiting Sri's decision.
 - `docs/spec.toml`: the first part of the Olympus spec, covering `BRIEF.md` "Project Olympus" sections 1 to 6
   (vision, pantheon, feedback, the example, the two loops, R1 to R8). Each requirement has an id, statement,
   kind, status and verbatim quotes with headings. `xtask/tests/spec.rs` checks that every quote is in

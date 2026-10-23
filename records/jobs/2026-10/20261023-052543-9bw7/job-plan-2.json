@@ -1,0 +1,233 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261023-052543-9bw7",
+  "round": 2,
+  "at": "2026-10-23T05:30:19.652355051Z",
+  "invocation_seq": 5,
+  "approach": "Producer reads the history check source, athena.toml [history] comments, the records/history design (§7.3), native-pr-landing.md and xtask/tests/policy.rs word lists, then writes docs/design/records-history.md (design only) organised by the seven points, appends D112 (Status Proposed) after D111 in docs/decisions.md in the existing format, and adds one Added bullet under [Unreleased] in CHANGELOG.md. Recommendation: a records branch in this repository (refs/athena/records, separate root, never merged into main); in D72 stealth mode the same branch lives in a local bare repository in Athena's state directory. Gate ordering is explicit: unverified content is stopped by a required pre-merge status on the PR head; attribution is a post-merge check with a bounded 'pending reconciliation' state. No code or config changes.",
+  "decisions": [
+    {
+      "choice": "Recommend a records branch with a separate root (refs/athena/records) in this repository, never merged into main; in D72 stealth mode the same branch lives in a local bare repository in Athena's state directory.",
+      "reason": "Keeps A5 (records machine-readable, in the repo, full-history secret scan over both histories) and A4 (mirror clone or fetch of the refs carries history; lift-out keeps it) with no new service. Git's fast-forward-only ref update gives append-only and parallel-writer safety without inventing a mechanism.",
+      "rejected": [
+        {
+          "option": "A second repository",
+          "why": "Lift-out must move and authenticate two things, adds a second access and secret surface and a cross-repo atomicity gap; its D72 benefit is met by the stealth-mode local bare repo."
+        },
+        {
+          "option": "A database",
+          "why": "Fails A5 'live in the repo' and diffable machine-readable history unless exported; append-only and history-wide secret scan must be rebuilt; lift-out needs a dump format; adds a dependency and failure class."
+        },
+        {
+          "option": "Keep records on main and add more exempt entries",
+          "why": "Status quo that produced six exempt entries and the red check on 02837e0."
+        }
+      ]
+    },
+    {
+      "choice": "Gate ordering: (a) a required pre-merge status on the PR head verifies the head's content, each PR commit's verification, and that the prediction record precedes the outcome; this is where 'nothing unverified reaches main' is enforced. (b) After the host merge, the landing record is written; the main check runs on the records-branch push and also on the main push, treating a tip with a matching landing-intent record as 'pending reconciliation' for a bounded window (configurable, e.g. 15 min) before failing as unattributed.",
+      "reason": "Without trailers the content gate must move before the merge; attribution of the host-made commit can only be known after it, so main must not go red on every landing during the gap.",
+      "rejected": [
+        {
+          "option": "Fail main's check immediately on any unattributed tip",
+          "why": "Red on every landing, the same class of problem the request is ending."
+        },
+        {
+          "option": "Skip the check on the newest commit",
+          "why": "Leaves an unbounded unattributed hole; a bounded pending state fails closed."
+        }
+      ]
+    },
+    {
+      "choice": "Attribution from records alone: a 'landing' record written after the merge names the PR head sha, the PR's commits and the commit the host made on main. The check walks first-parent main commits and requires each be named by a landing or declared-intervention record. Squash rule at PR level: squash tree equals the PR head tree, and each PR commit is a verified landing or declared intervention from the squash's parent.",
+      "reason": "Removes the Athena-Verified-Content trailer and fingerprint rules; the record can name the host-made commit because it is written after.",
+      "rejected": [
+        {
+          "option": "Keep trailers as fallback",
+          "why": "Sri said not to depend on trailers."
+        }
+      ]
+    },
+    {
+      "choice": "PR-commit reachability: a single mechanism. Each landing record commit on the records branch takes the PR head as an additional parent (a merge-style commit on the records history), so the PR's commits are reachable from the records ref, survive garbage collection, and travel with any fetch or mirror clone of that ref. In D72 stealth mode the local bare repo holds the same ref and objects.",
+      "reason": "Parent links are the only reference git's garbage collection and clone honour without extra refs; no host ref needed. Records tree files stay untouched by the parent link.",
+      "rejected": [
+        {
+          "option": "refs/athena/pr/<n> keep-refs",
+          "why": "Extra refs must be separately mirrored and can be pruned or forgotten; parent linkage ties them to the records ref automatically."
+        },
+        {
+          "option": "Storing commit objects as tree entries or gitlinks",
+          "why": "Not reachable for garbage collection, so the commits would be lost."
+        },
+        {
+          "option": "Rely on the host's refs/pull/N/head",
+          "why": "Host-dependent; absent in stealth mode."
+        }
+      ]
+    },
+    {
+      "choice": "Incremental check: a checkpoint (last passing main sha, records-branch sha, verifier version) stored in the records branch; each check judges only commits and records after it, plus a scheduled full replay (weekly and on verifier-version change) that must reproduce the checkpoint.",
+      "reason": "Cost depends on new commits only, not the ~4,000 records; replay bounds trust in the checkpoint.",
+      "rejected": [
+        {
+          "option": "Local cache of validated records",
+          "why": "Not shared or auditable; hides drift."
+        }
+      ]
+    },
+    {
+      "choice": "Migration by copy: one commit on the new root imports every records/ file with a manifest of source paths and content hashes; records/ on main is frozen, then removed in a late job; pre-cutover commits (six exempt entries 49c6ac1, 64ecdc9, ee4b0dd, f2a8453, 5a73478, 39962ed, and 02837e0) are judged by a frozen legacy rule against a recorded cutover sha, the exempt list moving into the records history as a legacy list.",
+      "reason": "Nothing is rewritten, so reversal is cheap; hash manifest proves completeness.",
+      "rejected": [
+        {
+          "option": "Rewrite main to drop records",
+          "why": "Violates the rule that published history on main is never rewritten (A5)."
+        }
+      ]
+    },
+    {
+      "choice": "Reconciliation: a landing-intent record (PR number, head sha, head tree) is written before the merge. A reconcile step (at the start of any command and in the check) matches unattributed main commits locally first (commit tree equals a recorded intent's head tree, parent is the expected base) and writes the landing record; only if no intent matches does it ask the host which PR merged, and if the host is unavailable it reports unattributed rather than guessing. Parallel writers: fast-forward-only compare-and-swap push to the records ref; on rejection fetch, replay the writer's new job-keyed files on the new tip, retry; shared append-only files become per-record files.",
+      "reason": "The crash window is detectable and repairable from local facts; host is only a fallback.",
+      "rejected": [
+        {
+          "option": "Write the outcome before merge as today",
+          "why": "Cannot name the squash commit."
+        },
+        {
+          "option": "Always ask the host",
+          "why": "Adds host dependence the design aims to avoid."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "docs/design/records-history.md",
+      "action": "create",
+      "purpose": "The design: problem, options vs A4/A5/D72, recommendation, migration and cutover, gate ordering, attribution, guarantees table, reconciliation, parallel writers, incremental check, build plan, reversal cost, measurements.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append D112 (Proposed) after D111 summarising recommendation and alternatives.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One Added bullet under [Unreleased] for the design and proposed decision.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read the history check source, athena.toml [history] comments, the records invariant design (§7.3), native-pr-landing.md, and xtask/tests/policy.rs word lists.",
+    "Draft the problem, requirements, and options comparison (branch, second repo, database) against A4/A5/D72, with one recommendation.",
+    "Write migration and cutover: copy with hash manifest, records/ on main afterwards, legacy treatment of the six exempt entries and 02837e0.",
+    "Write the gate ordering: pre-merge status on PR head, post-merge attribution check with bounded pending state.",
+    "Write attribution without trailers: landing-intent and landing records, PR-level squash rule, parent-link reachability, D72 stealth mode.",
+    "Write the guarantees table with both enforcement locations, reconciliation (local-first, host fallback) and parallel writers.",
+    "Write the incremental check with checkpoint, periodic full replay and measurement plan (reported figures labelled).",
+    "Write the ordered build plan of jobs and the reversal cost.",
+    "Append D112 (Proposed) to docs/decisions.md and add the CHANGELOG bullet.",
+    "Run cargo fmt --all --check, clippy and cargo test --locked; confirm git status --porcelain and git diff --stat list only the three files."
+  ],
+  "risks": [
+    {
+      "risk": "Design misdescribes current check behavior.",
+      "mitigation": "Producer reads the check source and athena.toml [history] comments, cites paths, labels anything unread."
+    },
+    {
+      "risk": "Document trips the boundary scan or policy tests.",
+      "mitigation": "Read xtask/tests/policy.rs word lists first; run cargo test --locked."
+    },
+    {
+      "risk": "D112 alters an existing entry or uses a wrong number.",
+      "mitigation": "Append only after the last entry; confirm the number and that git diff shows only additions."
+    },
+    {
+      "risk": "Build-plan jobs too large for one producer run.",
+      "mitigation": "Split by seam: schema/writer, importer, landing record plus reconcile, pre-merge status, check rewrite, incremental, cutover/removal; each with its own test statement."
+    },
+    {
+      "risk": "Parent-linked PR heads bloat the records history.",
+      "mitigation": "State size as an estimate and a periodic measurement in the plan."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Grep the working-tree document for the three options and the A4/A5/D72 rows and a single recommendation heading.",
+      "command": "git status --porcelain",
+      "observes": "Lists docs/design/records-history.md as new; the producer's file, read with Read/Grep (headings 'records branch', 'second repository', 'database', 'A4', 'A5', 'D72', 'Recommendation'), shows a comparison with each option weighed against all three and exactly one recommended option.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Grep the working-tree document for the migration section and each exempt sha.",
+      "command": "git diff --stat",
+      "observes": "Document (read via Grep for 49c6ac1, 64ecdc9, ee4b0dd, f2a8453, 5a73478, 39962ed, 02837e0, 'manifest', 'records/ on main') has a copy-with-hash-manifest procedure, the state of records/ on main after, and the legacy treatment of the seven commits.",
+      "fails_without": null
+    },
+    {
+      "criterion": 3,
+      "method": "Grep the working-tree document for the attribution section, landing record fields, squash rule and reachability mechanism.",
+      "command": "git status --porcelain",
+      "observes": "Document (Grep 'landing', 'PR head', 'squash', 'parent', 'trailer') shows records written after the merge naming PR head and host-made commit, the PR-level squash rule, parent-link reachability without the host, and no step that reads commit-message trailers.",
+      "fails_without": null
+    },
+    {
+      "criterion": 4,
+      "method": "Grep the working-tree document for the guarantees table rows.",
+      "command": "git status --porcelain",
+      "observes": "A table with rows append-only, nothing unverified reaches main (pre-merge status on PR head, plus post-merge attribution check), prediction precedes outcome, secrets and personal data (full-history scan on both histories), each with an enforcement location.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "Grep the working-tree document for reconciliation and parallel-writer text.",
+      "command": "git status --porcelain",
+      "observes": "Document (Grep 'reconcil', 'pending', 'compare-and-swap', 'retry') shows the crash scenario, local-first matching with host fallback, the bounded pending state, and parallel-writer rules.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Grep the working-tree document for checkpoint, full replay and measurement plan.",
+      "command": "git status --porcelain",
+      "observes": "Document (Grep 'checkpoint', 'full replay', '65 s', '4,000') shows cost bound by new commits, periodic replay, and a measurement plan comparing against the reported ~65 s / ~4,000 records, labelled reported or estimate.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Grep the working-tree document for the numbered job list and reversal cost.",
+      "command": "git status --porcelain",
+      "observes": "Document (Grep 'Job', 'Reversal cost') shows numbered jobs each sized for one producer run, ordered so landing records and the attribution rule exist before records/ leaves the check, and a stated reversal cost.",
+      "fails_without": null
+    },
+    {
+      "criterion": 8,
+      "method": "Inspect the decisions diff.",
+      "command": "git diff docs/decisions.md",
+      "observes": "Only added lines at the end: '## D112' with Decision beginning 'Proposed', in Case/Decision/Alternatives/Tradeoff/Reversal cost/Provenance format; no removed or changed lines.",
+      "fails_without": null
+    },
+    {
+      "criterion": 9,
+      "method": "List changed and untracked files.",
+      "command": "git status --porcelain",
+      "observes": "Exactly CHANGELOG.md, docs/decisions.md modified and docs/design/records-history.md untracked; combined with git diff --stat showing only the two modified docs; no athena.toml, defaults.toml, workflow or .rs file.",
+      "fails_without": "If a config or Rust file were edited, it would appear in git status --porcelain and git diff --stat and the criterion would fail."
+    }
+  ],
+  "open_questions": [
+    "I did not read athena.toml [history] comments, the history check code, or design §7.3; the producer must read them before describing current rules.",
+    "Whether Athena can push refs/athena/* to the user's host (affects the records ref); to be stated as an assumption.",
+    "The ~65 s / ~4,000 figures come from the request, not a run; label them as reported.",
+    "The bounded pending window length is a design parameter for Sri to set."
+  ],
+  "producer_section_sha256": "cb99546e15e0bebc2f4f2a986afe43b3ecc806e4c951d7fe805d833502c8e90b"
+}

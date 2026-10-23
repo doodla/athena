@@ -2600,3 +2600,35 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Provenance:** measured: the tests in `xtask/tests/spec.rs`, including negative cases for a bad quote, a
   duplicate id, a missing `supersedes` target and a requirement with no source; read: `BRIEF.md` sections 1
   to 6 of "Project Olympus".
+
+## D112 · Athena's records move to a history of their own: a records branch in this repository
+
+- **Case:** Records ride in the same commits as code. That produced six `[history] exempt` entries (four of them
+  squash merges), a red history check on the squash 02837e0 (reported), failed code reverts (a revert deletes
+  records), the `Athena-Verified-Content` trailer and fingerprint rules, a work-branch rebuild on every landing,
+  and a check that spends most of its time (about 65 s, reported) on about 4,000 records (reported).
+- **Decision:** Proposed, design only: `docs/design/records-history.md`. For Sri to decide; not accepted. Records
+  would live on `refs/athena/records`, a separate root in this repository, never merged into main; in D72
+  stealth mode the same branch lives in a local bare repository in Athena's state directory. Existing records are
+  copied with a hash manifest, not rewritten; `records/` on main is frozen, then removed in a late job; commits
+  before the cutover, including the six exempt entries and 02837e0, are judged by a frozen legacy rule whose
+  exempt list becomes a record. Every main commit is attributed from records written after the merge (a landing
+  record naming the pull request's head and the commit the host made), with no commit-message trailers; a squash
+  is valid when its content equals the head of a pull request whose commits are each a verified landing or a
+  declared intervention. Pull request commits stay reachable because each landing record commit takes the head
+  as a second parent. Content is gated before the merge by a required status on the head; attribution after the
+  merge, with a bounded pending state. The check judges only what is new since a checkpoint, with a periodic
+  full replay. Eight build jobs.
+- **Alternatives:** A second repository (lift-out moves two things; a second credential and a cross-repository
+  gap; D72's benefit met by the local bare repository). A database (fails A5's "live in the repo" and
+  diffable history; append-only and the full-history scan must be rebuilt; lift-out needs a dump format). Keep
+  records on main and add exemptions (the status quo). Keep trailers as a fallback (Sri said not to depend on
+  them).
+- **Tradeoff:** Two histories to scan, mirror and lift out together; a pending window between merge and landing
+  record; depends on the host accepting `refs/athena/*` pushes (unchecked). The pre-merge gate needs a required
+  status from the host (local only in stealth mode).
+- **Reversal cost:** Low before the cutover job (delete the ref and writers; migration is a copy); medium after
+  it; higher after `records/` leaves main, though no data is lost.
+- **Provenance:** read: `BRIEF.md` A4, A5 and the 2026-10-23 addendum, `athena.toml` `[history]`,
+  `docs/design/athena-v0.md` 7.3 and 7.4, D72, `docs/enforcement.md`. The 65 s and 4,000 figures are reported
+  in the request, not measured. No command was run to time the check.
