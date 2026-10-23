@@ -1,7 +1,13 @@
 # A history of its own for Athena's records
 
-Status: proposed, design only (D112). Nothing here is built. Audience: Sri, who decides, and anyone checking
-the design.
+Status: accepted, design only (D112), under Sri's delegation in the `BRIEF.md` addenda of 2026-10-23. Nothing
+here is built. Audience: Sri, who decides, and anyone checking the design.
+
+Three changes were decided in those addenda after the first draft. (1) The records history is a branch named
+`athena/records` with its own root, not the custom ref `refs/athena/records` the first draft proposed (§3).
+(2) §13 lists the readers of `records/` and how each reads from the branch. (3) The pre-merge status depends on
+the host requiring branches to be up to date before merging (§5.1). The open points are filled: pending window
+15 minutes, cutover after build job 6, two weeks between job 7 and job 8.
 
 Sri's words (`BRIEF.md`, addendum of 2026-10-23): "Wouldn't a db or a shadow repo solve this entire class of
 issues?" and "Yeah. Also copy over whatever. We shouldn't depend on trailers in commit messages".
@@ -46,29 +52,36 @@ main's commits do not.
 
 Each option is weighed against A4, A5 and D72.
 
-| | A records branch in this repository (separate root, never merged into main) | A second repository | A database |
+| | A records branch in this repository, `athena/records` (own root, never merged into main) | A second repository | A database |
 |---|---|---|---|
-| A4: lift out with history intact | Good. One repository. A mirror clone or a fetch of `refs/athena/*` carries both histories. Lifting out means pushing two refs. | Weaker. Two repositories to move, each with its own access and secrets. The link between a code commit and its record spans repositories, so it can break in transit. | Weaker. History is in a file or server, not in git. Lift-out needs a dump format and a loader. Intact history means the database's own audit log, which Athena would have to build. |
+| A4: lift out with history intact | Good. One repository. `athena/records` is an ordinary branch, so a plain clone carries both histories with no special refspec. Lifting out means pushing two branches. | Weaker. Two repositories to move, each with its own access and secrets. The link between a code commit and its record spans repositories, so it can break in transit. | Weaker. History is in a file or server, not in git. Lift-out needs a dump format and a loader. Intact history means the database's own audit log, which Athena would have to build. |
 | A5: machine-readable, in the repo | Good. The same JSON files under `records/`, diffable, in the repository's object store. | Partly. Machine-readable, but not "in the repo". | Fails as written unless exported back into the repo, which recreates the problem. |
-| A5: every commit traces to its work | Good. A landing record on the same repository's ref names the commit; reachability is by parent link (§6). | Cross-repository names only. No shared garbage-collection or reachability. | Names only. |
-| A5: append-only | Git's fast-forward-only ref update, plus the existing check on the records history. | Same, in the second repository. | Must be rebuilt: triggers or permissions, and a story for the administrator. |
-| A5: secrets across full history | The existing gitleaks scan, pointed at two refs. | Two scans, two configurations. | A new scanner over rows, or an export. No history to scan. |
-| A5: published history never rewritten | Same rule on both refs. | Same. | Not applicable; needs its own equivalent. |
+| A5: every commit traces to its work | Good. A landing record on the same repository's branch names the commit; reachability is by parent link (§6). | Cross-repository names only. No shared garbage-collection or reachability. | Names only. |
+| A5: append-only | Git's fast-forward-only branch update, enforced by the host's rule forbidding force-pushes, plus the existing check on the records history. | Same, in the second repository. | Must be rebuilt: triggers or permissions, and a story for the administrator. |
+| A5: secrets across full history | The existing gitleaks scan, pointed at two branches. | Two scans, two configurations. | A new scanner over rows, or an export. No history to scan. |
+| A5: published history never rewritten | Same rule on both branches. | Same. | Not applicable; needs its own equivalent. |
 | D72 stealth mode | The same branch in a local bare repository in Athena's state directory (§5.4). Same code path, different location. | Natural fit: the second repository is local. But it is the same thing as the bare repository, with a second remote added for the owned case. | Natural fit: a local file. |
-| New moving parts | One ref namespace, a writer, a checkpoint file. | A second repository, a second credential, cross-repository atomicity. | A dependency, a schema migration story, a backup story, a failure class git does not have. |
+| New moving parts | One branch, a writer, a checkpoint file. | A second repository, a second credential, cross-repository atomicity. | A dependency, a schema migration story, a backup story, a failure class git does not have. |
 
 ### Recommendation
 
-**A records branch in this repository: `refs/athena/records`, a separate root, never merged into main.**
+**A records branch in this repository: `athena/records`, with its own root, never merged into main.**
 In D72 stealth mode the same branch lives in a local bare repository in Athena's state directory.
+
+Why a branch and not the custom ref `refs/athena/records` the first draft proposed: the host's branch rules can
+forbid force-pushes and deletion on a branch, which protects append-only at the host, and a plain clone carries a
+branch, where a custom ref needs a special refspec or a mirror clone and a host may refuse to accept it.
 
 Reasons: it is the only option that keeps A5's "live in the repo" and full-history scan with no new service,
 it keeps A4's single-repository lift-out, and git already gives fast-forward-only refs for append-only and
 parallel-writer safety. A second repository's one advantage, D72's separation, is met by the local bare
 repository. A database fails A5 as written and replaces mechanisms git gives for free.
 
-Assumption: the user's host accepts pushes of refs under `refs/athena/`. If it does not, the records ref is
-local until pushed by command, and the pre-merge status of §5.1 runs locally. This needs a check before job 1.
+Requirement on the host, replacing the first draft's assumption that the host accepts `refs/athena/*` pushes:
+branch rules on `athena/records` that (a) forbid force-pushes, (b) forbid deletion, and, on main, (c) require
+branches to be up to date before merging (§5.1). These are host settings, configured by the user; this design
+does not create them. If the host cannot enforce (a) and (b), append-only rests on the records check alone and
+the records branch is not protected against a force-push until the rules exist.
 
 Rejected: keep records on main and add more exempt entries. That is the status quo that produced six
 exemptions and a red check on 02837e0.
@@ -78,7 +91,8 @@ exemptions and a red check on 02837e0.
 **Copy, do not rewrite.** Published history on main is never rewritten (A5), so main keeps every commit and
 every record it has.
 
-1. Freeze: pick the cutover commit `C0` on main. Record its full sha.
+1. Freeze: pick the cutover commit `C0` on main, after build job 6 has passed (decided in the 2026-10-23
+   addenda), and record its full sha. Job 7 is the cutover job.
 2. Import: one commit on the new root writes every file of `records/` at `C0` to the same paths. Alongside
    them it writes `import-manifest.json`: each source path, its git blob id at `C0`, and the SHA-256 of its
    contents. The importer then re-reads the new commit and fails if any path or hash differs from `C0`, or if
@@ -87,11 +101,12 @@ every record it has.
 4. The per-job history of how each record reached main stays in main's commits; the records branch holds the
    result, not a replay of every commit. A reader who wants the original commit uses the manifest's `C0`.
 
-**What happens to `records/` on main afterwards.** In three stages, each its own job (§9):
+**What happens to `records/` on main afterwards.** In three stages, each its own job (§10):
 
 - Stage 1, from the import: `records/` on main is frozen and unchanged; new records go only to the records
   branch. The check on main stops requiring records for new commits only after the rule of §5.3 is in force.
-- Stage 2, after the new check passes on main for a period Sri sets: a late job removes `records/` from main's
+- Stage 2, after the new check passes on main for two weeks between job 7 and job 8 (decided in the
+  2026-10-23 addenda): a late job removes `records/` from main's
   tree. This is an ordinary forward commit; the old files remain in main's history. Because the history check
   judges pre-cutover commits by the frozen legacy rule below, the removal does not trip the append-only rule.
 - A revert of code no longer deletes records, because records are not in main's tree. This ends the revert
@@ -108,8 +123,9 @@ ancestors of `C0` (and `C0` itself):
 - Post-cutover commits are judged only by the records-based rule of §6. No `athena.toml` exemption is ever
   needed for them. The `[history] exempt` table stays in `athena.toml` until stage 2, then is emptied by a
   governance job (a change to a governance file, so the accepted reading must list it).
-- Whether 02837e0 sits before or after `C0` depends on when the cutover is chosen. If after, the design needs a
-  landing record for it written by hand as a declared intervention (§6), which is what that record type is for.
+- Because `C0` is chosen after job 6, 02837e0 is expected to sit before it, so the legacy list covers it. If
+  02837e0 is somehow after `C0`, the design needs a landing record for it written by hand as a declared
+  intervention (§6), which is what that record type is for.
 
 ## 5. How main is protected without trailers
 
@@ -122,6 +138,14 @@ commit cannot be known before the merge. So there are two gates:
    each commit of the pull request is a verified landing or a declared intervention from the squash's parent
    (§6), and that the prediction record precedes the outcome (§7). The host's branch protection makes it
    required. This is where "nothing unverified reaches main" is enforced.
+
+   **Dependency on up-to-date branches.** The status judges each commit "from the squash's parent". That parent
+   equals the head's base only if the host requires branches to be up to date before merging, so main cannot
+   move between the status and the merge. This design therefore requires that host rule (§3). If the host does
+   not require it, the squash's parent can differ from the head's base: the status verified the head against a
+   base the merge did not use, the §6 squash rule cannot be proved from the status, and the landing is treated
+   as pending (§5.2) and then fails as unattributed. Recovery: Athena re-verifies the head against the actual
+   parent after the merge and writes the landing record, or the user declares an intervention.
 2. **After the merge: the attribution check.** It runs on the push to the records branch and on the push to
    main. It requires every commit on main's first-parent line after `C0` to be named by a landing record or a
    declared-intervention record.
@@ -134,7 +158,7 @@ landing, which is the class of problem this design ends. The rule:
 - Before merging, Athena writes a **landing-intent** record: PR number, head sha, head tree, the expected
   base. This is the only thing the check needs to recognize the incoming commit.
 - A main tip with no landing record but a matching landing-intent record is **pending reconciliation**. The
-  check passes with a notice for a bounded window (a design parameter Sri sets; 15 minutes as an example).
+  check passes with a notice for a bounded window of 15 minutes (decided in the 2026-10-23 addenda).
   After the window it fails as unattributed. Failing closed stops this from being an unbounded hole.
 - A tip with no matching intent fails at once.
 
@@ -181,16 +205,16 @@ be rechecked. One mechanism: **each landing record's commit on the records branc
 as an additional parent.** The records commit's tree is its first parent's tree plus the new files; the
 second parent only carries reachability.
 
-- Garbage collection keeps everything reachable from `refs/athena/records`. The pull request's commits survive
-  with no host ref.
-- A fetch or mirror clone of that ref carries them, which keeps A4's lift-out intact.
-- In stealth mode the local bare repository holds the same ref and objects.
+- Garbage collection keeps everything reachable from the branch `athena/records`. The pull request's commits
+  survive with no host ref.
+- A plain clone or fetch of that branch carries them, which keeps A4's lift-out intact.
+- In stealth mode the local bare repository holds the same branch and objects.
 - Reading the records history uses first-parent, so the extra parents do not change record order.
 
 Size: the pull request's objects are already in the repository's object store, so the second parent adds a
 commit pointer, not new bytes. Estimate: a few hundred bytes per landing; to be measured in job 4.
 
-Rejected: `refs/athena/pr/<n>` keep-refs (must be mirrored separately and can be forgotten or pruned); commit
+Rejected: one keep-ref per pull request in a custom namespace (must be mirrored separately and can be forgotten or pruned); commit
 ids stored as tree entries or gitlinks (not reachable for garbage collection); the host's `refs/pull/N/head`
 (host-dependent and absent in stealth mode).
 
@@ -198,11 +222,11 @@ ids stored as tree entries or gitlinks (not reachable for garbage collection); t
 
 | Guarantee today | Where it is enforced now | Where it is enforced after |
 |---|---|---|
-| Records are append-only (D06, D07; M4): no existing record path modified, deleted or renamed | The gate in three places and `athena check --history`, on main's tree | Two ref-level rules on the records branch: the update must be a fast-forward (no non-fast-forward push), and the check rejects any commit on that ref that modifies, deletes or renames an existing path. The legacy list is a record, so append-only covers it. Main no longer holds records after stage 2, so a revert cannot violate it. |
+| Records are append-only (D06, D07; M4): no existing record path modified, deleted or renamed | The gate in three places and `athena check --history`, on main's tree | Two rules on `athena/records`: the update must be a fast-forward (the host's branch rules forbid force-pushes and deletion), and the check rejects any commit on that ref that modifies, deletes or renames an existing path. The legacy list is a record, so append-only covers it. Main no longer holds records after stage 2, so a revert cannot violate it. |
 | Nothing unverified reaches main (A5) | Landing algorithm under the repository lock, plus the history check's fingerprint match on main | The required status on the pull request's head (§5.1, step 1) verifies content and each commit's verification before the merge. The attribution check after the merge (§5.1, step 2) proves every first-parent main commit is named. Both read records from the records branch. |
-| The prediction precedes the outcome (A2; M23) | The `Athena-Prediction` trailer and a CI check that the prediction commit is an ancestor | Records history order: the pre-merge status requires the accepted-reading (prediction) record to be an ancestor of the outcome record on the records branch. This is by commit order on the records ref, not a trailer. |
-| Secrets never enter any commit (M1, M3) | Pre-commit gitleaks run; `athena check --history` over every commit | The same configuration, run at commit time on the records branch writer, and in the history check over both `main` and `refs/athena/records` (which reach the pull request commits through the second parent). Full history scan is part of the periodic replay (§8). |
-| Personal data never reaches committed content (M22) | Redaction before recording; personal-data gate on added lines | Unchanged in the writer: redaction before the record is written, and the personal-data gate on added lines for both refs. |
+| The prediction precedes the outcome (A2; M23) | The `Athena-Prediction` trailer and a CI check that the prediction commit is an ancestor | Records history order: the pre-merge status requires the accepted-reading (prediction) record to be an ancestor of the outcome record on the records branch. This is by commit order on the records branch, not a trailer. |
+| Secrets never enter any commit (M1, M3) | Pre-commit gitleaks run; `athena check --history` over every commit | The same configuration, run at commit time on the records branch writer, and in the history check over both `main` and `athena/records` (which reach the pull request commits through the second parent). Full history scan is part of the periodic replay (§8). |
+| Personal data never reaches committed content (M22) | Redaction before recording; personal-data gate on added lines | Unchanged in the writer: redaction before the record is written, and the personal-data gate on added lines for both branches. |
 
 Everything else in §7.4 of the v0 design (valid records, size, reconciliation of costs) keeps applying; it moves
 from "added files in a main commit" to "added files in a records-branch commit".
@@ -276,8 +300,9 @@ keeps running until the new one has passed alongside it.
 
 1. **Schema and writer.** New record types (`landing-intent`, `landing`, `intervention`, `checkpoint`,
    `legacy-exempt`, `import-manifest`) in `athena-data`; a writer that creates the records ref with
-   compare-and-swap and retry (§8.2). Test: two simultaneous writers both land; a rejected push retries.
-   Also confirm the host accepts `refs/athena/*` (§3 assumption).
+   compare-and-swap and retry (§8.2), writing the branch `athena/records` (own root). Test: two simultaneous
+   writers both land; a rejected push retries. Also confirm the host rules of §3 are in force on
+   `athena/records` (no force-push, no deletion) and on main (branches up to date before merging).
 2. **Importer.** Copy `records/` at `C0` to the new root with the manifest and the self-check of §4. Test:
    a missing, changed or extra file fails the import. Run once into a scratch repository first; main is
    unchanged.
@@ -292,17 +317,24 @@ keeps running until the new one has passed alongside it.
    on real history. Test: each of the seven named commits (six exempt entries and 02837e0) is judged as §4 says.
 6. **Incremental check and replay.** Checkpoint record, new-since-checkpoint judging, weekly full replay and
    the measurement of §9. Test: the incremental count equals new records; a tampered checkpoint fails replay.
-7. **Cutover.** Make the new check the required one and the old one retire for post-cutover commits; stop
-   writing trailers; `records/` on main frozen. Test: a revert of code passes.
-8. **Removal.** After the period Sri sets, remove `records/` from main's tree and empty `[history] exempt`
+7. **Cutover.** `C0` is chosen after job 6 passes. Make the new check the required one and the old one retire
+   for post-cutover commits; stop writing trailers; `records/` on main frozen. Also move the readers of §13:
+   keep a worktree of `athena/records` at a fixed path in Athena's state directory, point the two reader seams
+   at it (a branch-tip treeish for `Records::load` and `RecordSet::load`; the worktree path as the root for
+   `read_records` and the walltime reader). Test: a revert of code passes; every reader of §13 returns the same
+   result from the branch as from `records/` at `C0`. If this is too large for one producer run, split it inside
+   job 7 (cutover, then readers) without renumbering.
+8. **Removal.** Two weeks after job 7, remove `records/` from main's tree and empty `[history] exempt`
    (a governance job). Test: the check on a new main passes with no `records/`; legacy commits still judged.
 
 Main is never unattributed: until job 7 the old rules remain required and the new records are written in
-addition; job 7 changes the required check only after job 5's comparison showed the same verdicts.
+addition; job 7 changes the required check only after job 5's comparison showed the same verdicts. Readers keep
+reading `records/` from the working tree until job 7 moves them, and `records/` stays on main until job 8, so
+no reader is left without records.
 
 ## 11. Reversal cost
 
-- Before job 7: low. Delete the ref and the new writers; main and its records are untouched because nothing was
+- Before job 7: low. Delete the branch and the new writers; main and its records are untouched because nothing was
   moved or rewritten (migration is a copy).
 - After job 7, before job 8: medium. Main still holds all records up to `C0`; records written since live only on
   the records branch and would need a copy back onto main as a normal commit, then the old check re-enabled.
@@ -310,9 +342,41 @@ addition; job 7 changes the required check only after job 5's comparison showed 
   check's trailer rules would need to be restored for the commits made in between. The records branch remains,
   so no data is lost.
 
-## 12. Open points for Sri
+## 12. Points still for the user
 
-- Length of the pending window (§5.2).
-- When `C0` is chosen, and whether 02837e0 is before or after it (§4).
-- The period between job 7 and job 8.
-- Whether the user's host accepts pushes of `refs/athena/*` (§3).
+Decided in the 2026-10-23 addenda and no longer open: pending window 15 minutes (§5.2); `C0` chosen after build
+job 6 (§4, §10); two weeks between job 7 and job 8 (§4, §10, §11). The host-accepts-`refs/athena/*` question is
+gone with the custom ref; in its place the user configures the host rules of §3 (no force-push or deletion on
+`athena/records`; branches up to date before merging on main). Whether the host offers those rules is not
+visible from the code and is checked in job 1.
+
+## 13. Readers of `records/` today, and how each reads after the cutover
+
+Found by searching the code for reads of `records/` (function names and files; no line numbers, which drift).
+Nearly all readers go through one of two seams, so the move is two edits plus the worktree:
+
+- **Seam A, git tree reads.** `Records::load(git, treeish)` (`crates/athena-core/src/store.rs`) and
+  `RecordSet::load(git, treeish)` (`crates/athena-gate/src/records.rs`) read `records/` from a git tree, today
+  at the repository's HEAD. After the cutover the treeish is the tip of `athena/records`.
+- **Seam B, filesystem reads.** `read_records(root)` (`crates/athena-core/src/introspect.rs`) and the walltime
+  reader read `<root>/records/...` as files. After the cutover `root` is a worktree of `athena/records` kept at
+  a fixed path in Athena's state directory (for example `<state>/records-worktree`), updated to the branch tip
+  before a read.
+
+| Reader | Reads now | Reads after the cutover | Job |
+|---|---|---|---|
+| Status | `status.rs`: `Records::load` and `RecordSet::load` at HEAD (also `records/resolutions/...` paths it formats) | Seam A: branch tip as treeish | 7 |
+| Forecasting and the reference forecaster | `scoring.rs`: `history(&Records)` and `reference(priors, class, &Records)`, fed by `Records::load`; the arithmetic is in `athena-score` (`reference_forecast`) | Seam A: unchanged code given records loaded from the branch tip | 7 |
+| Scoring | `athena-score`: `score_records`, fed by `Records` loaded as above | Seam A | 7 |
+| Retry carry | `reading.rs`: `carry(job, redactor)` over the `JobRecords` of a `Records::load` | Seam A | 7 |
+| Audit | `auditor.rs`: `Records::load(&athena.git, &head)` | Seam A | 7 |
+| Introspection | `introspect.rs`: `read_records(root)` reads `records/jobs`, `interventions`, `host-errors` as files; its `GitRecords::load` callers use seam A | Seam B for `read_records` (worktree path as `root`); seam A for the rest | 7 |
+| Study site generator | `xtask/src/site.rs` reads `STUDY_DIR` = `studies/firstmate-work-handling` (the `load` calls); the search found no read of `records/` in it | No change: it does not read `records/`, so no job moves it | none |
+| Wall time (not in the request's list) | `xtask/src/walltime.rs`: reads `records/jobs` under a directory | Seam B | 7 |
+| Other `Records::load` callers | `review.rs`, `run.rs`, `manage.rs`, `proposals.rs`, `work_decisions.rs`, `watcher.rs`, `audience.rs`, `gh.rs`, `steward.rs` | Seam A | 7 |
+| Gate history and reconcile | `athena-gate`: `history.rs` and `reconcile.rs` call `RecordSet::load` on a tip or parent | Seam A, with the legacy rule of §4 for pre-cutover commits | 5 (alongside), 7 |
+| Others reading files under `records/` | `labeled.rs` (`root/records/`) and `steward.rs` (copies `records/` into a read-only workspace) | Seam B: root is the worktree; the steward copies from it | 7 |
+
+The study site generator row differs from the request, which listed it as a reader; the code read shows
+otherwise, and the table says what the code does. Until job 7, all rows keep reading `records/` on main, which
+is frozen from the cutover and removed in job 8, after the two-week period.

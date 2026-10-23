@@ -9,9 +9,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
-- `docs/design/records-history.md` and the proposed decision D112: a design (no code) for moving Athena's
-  records onto their own history, a separate-root branch in the repository, with migration by copy,
-  attribution of main's commits from records alone, and an eight-job build plan. Awaiting Sri's decision.
+- `docs/design/records-history.md` and decision D112: a design (no code) for moving Athena's records onto
+  their own history, a separate-root branch in the repository, with migration by copy, attribution of main's
+  commits from records alone, and an eight-job build plan.
+- D112 accepted under Sri's delegation (`BRIEF.md` addenda of 2026-10-23), with three changes: the history is
+  the branch `athena/records` with its own root, not the custom ref `refs/athena/records`, so the host can forbid
+  force-pushes and deletion and a plain clone carries it; a new section lists the readers of `records/` and how
+  each reads from the branch after the cutover (job 7); and the pre-merge status is stated to depend on the host
+  requiring branches to be up to date before merging. Open points filled: pending window 15 minutes, cutover
+  after build job 6, two weeks between job 7 and job 8.
 - `docs/spec.toml`: the first part of the Olympus spec, covering `BRIEF.md` "Project Olympus" sections 1 to 6
   (vision, pantheon, feedback, the example, the two loops, R1 to R8). Each requirement has an id, statement,
   kind, status and verbatim quotes with headings. `xtask/tests/spec.rs` checks that every quote is in

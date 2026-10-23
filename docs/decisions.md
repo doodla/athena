@@ -2607,9 +2607,14 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   squash merges), a red history check on the squash 02837e0 (reported), failed code reverts (a revert deletes
   records), the `Athena-Verified-Content` trailer and fingerprint rules, a work-branch rebuild on every landing,
   and a check that spends most of its time (about 65 s, reported) on about 4,000 records (reported).
-- **Decision:** Proposed, design only: `docs/design/records-history.md`. For Sri to decide; not accepted. Records
-  would live on `refs/athena/records`, a separate root in this repository, never merged into main; in D72
-  stealth mode the same branch lives in a local bare repository in Athena's state directory. Existing records are
+- **Decision:** Accepted, design only: `docs/design/records-history.md`, decided by Sri's delegation in the
+  `BRIEF.md` addenda of 2026-10-23. Records live on the branch `athena/records`, with its own root in this
+  repository, never merged into main (not the custom ref `refs/athena/records` of the first draft); in D72
+  stealth mode the same branch lives in a local bare repository in Athena's state directory. Decided values:
+  pending window 15 minutes; cutover (`C0`) after build job 6, job 7 being the cutover; two weeks between job 7
+  and job 8. The design lists every reader of `records/` and moves them in job 7 (seams: `Records::load` and
+  `RecordSet::load` take the branch tip; `read_records` reads a worktree of `athena/records` at a fixed path).
+  Existing records are
   copied with a hash manifest, not rewritten; `records/` on main is frozen, then removed in a late job; commits
   before the cutover, including the six exempt entries and 02837e0, are judged by a frozen legacy rule whose
   exempt list becomes a record. Every main commit is attributed from records written after the merge (a landing
@@ -2625,10 +2630,15 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   records on main and add exemptions (the status quo). Keep trailers as a fallback (Sri said not to depend on
   them).
 - **Tradeoff:** Two histories to scan, mirror and lift out together; a pending window between merge and landing
-  record; depends on the host accepting `refs/athena/*` pushes (unchecked). The pre-merge gate needs a required
-  status from the host (local only in stealth mode).
-- **Reversal cost:** Low before the cutover job (delete the ref and writers; migration is a copy); medium after
+  record; depends on host rules the user configures: no force-push or deletion on `athena/records`, and branches
+  required to be up to date before merging, without which the pre-merge status cannot prove a squash's parent
+  equals the head's base and the landing fails as unattributed unless re-verified or declared. The pre-merge
+  gate needs a required status from the host (local only in stealth mode).
+- **Reversal cost:** Low before the cutover job (delete the branch and writers; migration is a copy); medium after
   it; higher after `records/` leaves main, though no data is lost.
-- **Provenance:** read: `BRIEF.md` A4, A5 and the 2026-10-23 addendum, `athena.toml` `[history]`,
-  `docs/design/athena-v0.md` 7.3 and 7.4, D72, `docs/enforcement.md`. The 65 s and 4,000 figures are reported
-  in the request, not measured. No command was run to time the check.
+- **Provenance:** accepted by the `BRIEF.md` addenda of 2026-10-23 (branch `athena/records`, readers section,
+  pre-merge up-to-date requirement, the three values). read: `BRIEF.md` A4, A5, `athena.toml` `[history]`,
+  `docs/design/athena-v0.md` 7.3 and 7.4, D72, `docs/enforcement.md`; the code for the readers of `records/`
+  (`store.rs`, `introspect.rs`, `scoring.rs`, `reading.rs`, `auditor.rs`, `status.rs`, `xtask/src/walltime.rs`,
+  `xtask/src/site.rs`). The 65 s and 4,000 figures are reported in the request, not measured. No command was
+  run to time the check.
