@@ -1044,3 +1044,8 @@ It should become demonstrably less likely to make the same kind of mistake again
 * Don't involve me unless you have to
 * Go for it
 * Relay note: the first line answered the operator's questions on D112 (accept the records-history design with three fixes) and its open points; the operator decides those and similar questions within the brief and records each with its reason in operator/decisions.md. "Go for it" answered the one question the 2026-10-18 note reserved to Sri: Sri approves the [history] exempt entry for 02837e0, the hand-merged squash of PR #149, because no landing can reach main until it is excused.
+
+### 2026-10-23: Track every mistake
+
+* Start tracking every mistake you make as work Athena should start being intelligent about as well
+* Relay note: "you" is the operator, who is Athena's brain for now (2026-10-17). Each operator mistake is logged as it happens as an intervention whose text starts "Mistake:", saying what went wrong, what it cost, and what Athena would have had to know or check to prevent it, so Athena's introspection turns it into improvement work. Mistakes made before this addendum are logged the same way.

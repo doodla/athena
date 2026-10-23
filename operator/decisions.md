@@ -271,3 +271,11 @@ Athena's decision log, not here. Newest last.
 - The design re-runs as one new job based on main, starting from the archived text. Lesson for the D112
   build: a revert on main strands every job verified on the old base, which records in their own history
   would avoid.
+
+## OP-21. Every operator mistake is logged as work for Athena (2026-10-23)
+
+- Sri: "Start tracking every mistake you make as work Athena should start being intelligent about as well".
+- Each mistake is an `athena intervene` record whose text starts "Mistake:", category `other` until Athena
+  has a category of its own for it, with the `--why` naming what Athena would have had to know or check to
+  prevent it. Introspection then proposes the work. The mistakes of this session are back-filled.
+- Asked of Athena: a mistake category, and counting mistakes in status and the audit, as a queued request.
