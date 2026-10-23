@@ -2618,3 +2618,38 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   (`store.rs`, `introspect.rs`, `scoring.rs`, `reading.rs`, `auditor.rs`, `status.rs`, `xtask/src/walltime.rs`,
   `xtask/src/site.rs`). The 65 s and 4,000 figures are reported in the request, not measured. No command was
   run to time the check.
+
+## D112 · Closing a job deletes its directory and reports the space; build directories stay per job
+
+- **Case:** Each job's state directory holds its own Rust target directory, 11 to 12 GB (reported, not measured
+  here). On 2026-10-23 two of them, one from an interrupted job of 2026-10-17, filled the session's disk
+  allowance mid-run and job 20261019-013306-zvmr died while committing its candidate. `StateDir::clean_job`
+  already removed the directory after some closes, but it threw away the removal error, said nothing, and was
+  skipped whenever an earlier step failed; so leftovers piled up unseen.
+- **Decision:** Every closing path (landed, failed, rejected, abandoned, a close of an interrupted job, a close
+  while blocked, a landing retried) calls `clean_job` once its closing commit has succeeded, and never before.
+  A job still running or blocked keeps its directory. `clean_job` measures the directory's allocated size
+  (blocks, each hard link once, symlinks not followed) just before removal and returns it with any error. The
+  closing output then says `reclaimed 11.4 GB` (decimal units), or, if removal failed,
+  `warning: could not remove <path>: <error>` and no reclaimed line, so space is never claimed that was not
+  freed. A failed removal does not fail the close: the records are already committed. One shared
+  `CARGO_TARGET_DIR` is not adopted; `athena.toml` keeps the per-job directory.
+- **Alternatives:** (a) One `CARGO_TARGET_DIR` shared by all jobs: it would stop the growth, but review 2
+  (`docs/design/reviews/athena-v0-review-2.md`, R14) measured that two copies of one package with different
+  sources on one shared target directory made the second copy's `cargo test` recompile nothing (0.01 s) and run
+  the first copy's test binaries ("built from job A"); with a private directory it ran its own code. A check
+  that runs another job's binaries is worthless, and concurrent jobs would also contend for cargo's build lock.
+  (b) A shared directory cleaned between jobs: it loses the sharing it was for and is still exposed while two
+  jobs run at once. (c) Delete only `target/` and keep the rest: it frees nearly the same space but leaves
+  snapshots, and reports a number that under-describes what is freed. (d) A sweep that deletes the caches of
+  jobs already closed: an action on one machine, not a code change.
+- **Tradeoff:** Deleting the cache means a retried job rebuilds from nothing, and the measuring walk reads
+  metadata for every file once (slow on a very large tree, reported as unmeasured). A failed removal leaves the
+  directory, named in the warning, for the user to delete. Disk use of a job that is still running is not
+  capped.
+- **Reversal cost:** Low: stop calling `clean_job` or change the reported line; no record format changes.
+- **Provenance:** read: `crates/athena-core/src/{state,manage,run}.rs`, `docs/design/reviews/athena-v0-review-2.md`
+  R14 and its evidence table; measured: the `state` unit tests and the lifecycle tests
+  (`a_landed_job_deletes_its_build_cache_and_reports_the_space` and the other closing-path tests), run with
+  `cargo test --locked`. The 11 to 12 GB size and the 2026-10-23 failure are reported in the request, not
+  measured.

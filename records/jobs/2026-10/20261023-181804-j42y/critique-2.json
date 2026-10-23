@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261023-181804-j42y",
+  "round": 2,
+  "at": "2026-10-23T19:46:14.051209718Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The removal-failure lifecycle test cannot reach the commit: the job lock fails first when a regular file sits at the job-dir path.",
+      "evidence": "manage.rs:94 calls self.state.try_lock_job(&id) before any commit. state.rs:75-76 calls lock_file(job_dir.join(\"job.lock\")), which runs create_dir_all(parent) (state.rs:56-57) and opens the file. With a regular file at the job-dir path, create_dir_all fails with ENOTDIR or EEXIST, so close returns Err before it commits. The planned assertions ('close returns Ok' and 'a warning line names the path') can never hold. The go path also takes the same lock (run.rs:163). Fix: Make the removal fail after the lock is taken and the commit is done. One way: give StateDir a test-visible seam for the remover (for example a field or cfg(test) hook that returns an injected io::Error), then drive it from a lifecycle test. Another: have the test make a subdirectory unremovable for root in a way that does not depend on the top-level path, and fail rather than skip if that cannot be enforced. Keep the control step that shows a normal directory is removed. Separately, unit-test clean_job and report_clean with a regular file at the path, where no lock is involved.",
+      "location": "Plan Decision 6 / Demonstration for criterion 3 (lifecycle test: regular file at the job-dir path, then close)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The job directory is never missing or empty at close, so the 'prints nothing' case does not exist as described.",
+      "evidence": "try_lock_job always creates job_dir/job.lock before close, so the directory is never missing at clean time. The directory inode itself has allocated blocks (st_blocks > 0 on ext4, tmpfs and overlay), so bytes > 0 always holds and a 'reclaimed 4.1 KB'-style line appears even when there is nothing of note. The nothing-to-remove test as described ('absent or empty' directory) cannot actually be set up through close. Fix: Define the no-cache case concretely: a job directory holding only job.lock. State what is expected for it, either a small reclaimed line or a threshold below which nothing prints, and assert that exact behavior plus no 'warning' line.",
+      "location": "Plan Approach ('A missing or empty directory prints nothing') and Risks ('Emit the line only when bytes > 0')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "When removal fails, the report could still claim the space measured beforehand was reclaimed.",
+      "evidence": "The walk runs before remove_tree. If removal fails partway, report.bytes still holds the full pre-removal size. If report_clean prints both lines, it could claim 'reclaimed N' for space that was not freed. Fix: State that on error report_clean prints only the warning (or the actually freed amount), and assert in the criterion-3 test that no 'reclaimed' line appears.",
+      "location": "Plan Approach / Decision 4 (CleanReport with bytes and error)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The independent walk shares its rules with the code under test, so a shared mistake would go unseen.",
+      "evidence": "The test-local walk uses the same blocks()*512 and (dev,ino) rules as the code under test, so a shared conceptual error, such as following symlinks, would go unseen. The 'at least the planted target/ allocation' bound and the hard-link-counted-once unit test reduce this risk. Fix: Add one assertion that a hard-linked pair counts once, measured against a hand-computed value (one file's blocks*512 plus directory blocks), in addition to the walk comparison.",
+      "location": "Demonstration for criterion 1 (unit test compares against an independent test-local walk)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan fits the request and the accepted reading. It finds the real fault: StateDir::clean_job (state.rs:113-116) does `let _ = pin::remove_tree(...)`, so it measures nothing and swallows errors. I confirmed all five call sites it names (manage.rs:135, 224; run.rs:2276, 2451, 2568). Keeping per-job targets is argued from R14 and is within scope. One major problem: the criterion-3 lifecycle test cannot work as designed. `athena close` takes the job lock first (manage.rs:94 → state.rs:75-76). That lock calls create_dir_all on the job directory and opens job.lock inside it. If a regular file sits at the job-dir path, close fails before the commit, so the test can never see \"close returns Ok with a warning\". A smaller problem: because job.lock always exists, the job directory is never missing or empty at close. The directory inode alone has allocated blocks, so the \"nothing to remove\" case will still print a reclaimed line."
+}

@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261023-181804-j42y",
+  "round": 3,
+  "at": "2026-10-23T19:47:50.741473264Z",
+  "invocation_seq": 7,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "The way a closing commit is made to fail in the criterion 4 test is not specified.",
+      "evidence": "The plan says the commit failure comes from a 'gate violation or unwritable record' but does not say how. In manage.rs:190-223, commit_records_in runs reconcile checks; a reliable trigger exists, for example the 'usage records reconcile' failure that manage.rs:216 already handles. Fix: Name the concrete trigger, such as a non-reconciling usage record with --allow-legacy-usage off. Assert Err, the job dir still present, and no 'reclaimed' line.",
+      "location": "Demonstrations, Criterion 4 (close whose commit fails)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Open question 1 is already answered: tests can inject the remover through the public state field.",
+      "evidence": "tests/common/mod.rs:153-156 builds `Athena { state: StateDir::new(...), .. }` and lib.rs:116 has `pub state: StateDir`. So a test can inject the remover directly, and no harness hook is needed. Fix: Close the open question: the test sets `athena.state = StateDir::new(..).with_remover(f)` or changes the field after `harness.athena(script)`. Make with_remover a consuming builder.",
+      "location": "Open questions 1 / Decision 3 (remover seam)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Hard-link dedup can still overstate the space freed.",
+      "evidence": "Counting each (dev,ino) once still counts a file whose other hard link sits outside the job dir. Deleting the job dir does not free that file. Fix: Optionally count an inode only when all its st_nlink links were seen inside the tree. Or document that the figure is the job dir's allocation.",
+      "location": "Decision 2 (hard-link dedup)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The order of the closing line and the reclaimed line differs between call sites.",
+      "evidence": "At this call site the closing state line is printed before clean_job. At manage.rs:135/224 cleanup runs before the line is printed. Fix: Pick one order, for example the closing line first and then 'reclaimed …', and have the exact-output tests check it.",
+      "location": "run.rs:2275-2276",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "Checked by reading the snapshot. clean_job is at state.rs:113 and drops the error from pin::remove_tree (pin.rs:221). The five call sites are where the plan says: manage.rs:135 (closed while blocked) and 224 (queued, declined and interrupted closes), and run.rs:2276 (failed and rejected), 2451 (landed, non-blocked only) and 2568 (retry landing). Each comes after its closing commit. try_lock_job (state.rs:75-76) does create job.lock in the job dir, so a regular file at the job-dir path would fail at the lock. The plan's reason for the remover seam is therefore correct. The introspection that runs after a rejected or failed go uses a scratch dir and does not recreate the job dir. The test harness builds Athena with a public StateDir field, so the seam can be injected. The demonstrations would fail without the behavior: a skipped cleanup leaves the dir, a swallowed error gives no warning, and a missing helper gives no 'reclaimed' line. The plan covers every criterion, keeps athena.toml unchanged as the decision allows, and fits one producer run. Remaining issues are minor: the trigger for a failed commit is vague, an open question is already answered by the harness, hard-link counting has an edge case, and output order differs between paths."
+}

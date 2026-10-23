@@ -9,6 +9,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Closing a job deletes its directory, build cache included (11 to 12 GB each), on every closing path (landed,
+  failed, rejected, abandoned, a close of an interrupted job, a close while blocked), and prints the space
+  reclaimed, for example `reclaimed 11.4 GB`. A removal that fails prints `warning: could not remove <path>`
+  and no reclaimed line, instead of passing silently; the close still succeeds. A running or blocked job keeps
+  its directory. Sharing one target directory across jobs was considered and not adopted (decision D112).
 - `docs/design/records-history.md` and decision D111: a design (no code) for moving Athena's records onto
   their own history, a separate-root branch in the repository, with migration by copy, attribution of main's
   commits from records alone, and an eight-job build plan.
