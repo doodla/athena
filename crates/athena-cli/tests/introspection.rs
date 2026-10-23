@@ -134,6 +134,158 @@ fn intervene(athena: &Athena, what: &str) -> RecordId {
         .id
 }
 
+fn log(athena: &Athena, what: &str, class: &str, category: &str) -> RecordId {
+    athena
+        .intervene(
+            &InterveneArgs {
+                what: what.into(),
+                why: "It went wrong.".into(),
+                class: class.into(),
+                category: category.into(),
+                job: None,
+                with_staged: false,
+            },
+            &Lines::default(),
+        )
+        .unwrap()
+        .intervention
+        .id
+}
+
+/// The model answers with a registry class (the first it is shown, or `new`) and the given cause.
+fn say_cause(model: &Model, cause: &'static str, prevention_kind: &'static str) {
+    model.say_with(move |prompt| {
+        let class = prompt["class_registry"][0]["id"]
+            .as_str()
+            .unwrap_or("new")
+            .to_string();
+        let mut answer = reply(&class, "A step was skipped by the builder.", cause);
+        answer["prevention_kind"] = json!(prevention_kind);
+        answer["prevention"] = json!(format!("Prevention for: {cause}"));
+        answer
+    });
+}
+
+#[test]
+fn a_mistake_intervention_is_introspected_with_guidance_for_the_preventing_check_or_knowledge() {
+    let model = Model::default();
+    say_cause(&model, "Nothing runs the docs test.", "code-check");
+    say_cause(&model, "The brief never says which files.", "default");
+    say_cause(&model, "Nothing runs the docs test.", "code-check");
+    let (fx, athena) = setup(Scenario::default(), &model);
+    // `intervene` introspects what it records.
+    log(&athena, "Shipped without the docs test", "docs", "mistake");
+    log(&athena, "Edited the README", "docs", "other");
+    log(&athena, "Mistake: forgot the changelog", "docs", "other");
+    let records = introspections(&fx);
+    assert_eq!(records.len(), 3);
+    for record in &records {
+        assert_eq!(
+            record.status,
+            IntrospectionStatus::Recorded,
+            "{:?}",
+            record.failure
+        );
+    }
+
+    let prompts = model.prompts.lock().unwrap();
+    assert_eq!(prompts.len(), 3);
+    let guidance = prompts[0]["mistake_guidance"].as_str().expect("guidance");
+    assert!(guidance.contains("check"), "{guidance}");
+    assert!(guidance.contains("knowledge"), "{guidance}");
+    assert!(
+        prompts[1].get("mistake_guidance").is_none(),
+        "{}",
+        prompts[1]
+    );
+    assert!(
+        prompts[2]["mistake_guidance"].is_string(),
+        "the legacy Mistake: record gets it too"
+    );
+
+    // The proposal names the preventing check and the cause.
+    let report = athena.mistakes().unwrap();
+    assert_eq!(report.total, 2, "the ordinary record is not a mistake");
+    let [shared, ..] = report.proposals.as_slice() else {
+        panic!("a proposal, got {:?}", report.proposals)
+    };
+    assert_eq!(shared.kind, "check");
+    assert!(
+        shared.prevention.contains("Nothing runs the docs test."),
+        "{shared:?}"
+    );
+}
+
+#[test]
+fn mistakes_with_the_same_cause_aggregate_into_one_proposal() {
+    let model = Model::default();
+    say_cause(&model, "Nothing runs the docs test.", "code-check");
+    say_cause(&model, "nothing runs the docs test", "code-check");
+    say_cause(&model, "The brief never says which files.", "default");
+    let (fx, athena) = setup(Scenario::default(), &model);
+    for (what, class) in [
+        ("Shipped without the docs test", "docs"),
+        ("Shipped again without the docs test", "code"),
+        ("Edited the wrong file", "code"),
+    ] {
+        log(&athena, what, class, "mistake");
+    }
+    let report = athena.mistakes().unwrap();
+    assert_eq!(report.total, 3);
+    assert_eq!(report.proposals.len(), 2, "{:?}", report.proposals);
+    let shared = report.proposals.iter().find(|p| p.mistakes == 2).unwrap();
+    assert_eq!(shared.introspections.len(), 2);
+    assert_eq!(report.by_cause["Nothing runs the docs test."], 2);
+    assert_eq!(report.by_cause["The brief never says which files."], 1);
+
+    // `athena status` shows the recurring cause and the prevention proposed for it, in text and in JSON.
+    let out = athena_bin(&fx).arg("status").output().unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    for needle in [
+        "mistakes 3: by class: code 2, docs 1",
+        "Nothing runs the docs test. 2",
+        "prevention (check, 2 mistake(s)): Prevention for: Nothing runs the docs test.",
+        "prevention (knowledge, 1 mistake(s))",
+    ] {
+        assert!(text.contains(needle), "missing {needle:?} in:\n{text}");
+    }
+    let out = athena_bin(&fx).args(["status", "--json"]).output().unwrap();
+    let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["mistakes"]["by_class"]["code"], 2);
+    assert_eq!(
+        json["mistakes"]["by_cause"]["Nothing runs the docs test."],
+        2
+    );
+    assert_eq!(json["interventions_by_category"], json!({ "mistake": 3 }));
+}
+
+#[test]
+fn athena_audit_prints_mistakes_before_any_audit() {
+    // No job exists, so no audit can be produced; the command still reports the mistakes per class and cause.
+    let model = Model::default();
+    say_cause(&model, "Nothing runs the docs test.", "code-check");
+    let (fx, athena) = setup(Scenario::default(), &model);
+    log(&athena, "Shipped without the docs test", "docs", "mistake");
+    // The model has no second reply, so this legacy mistake's introspection fails: no cause is recorded.
+    log(&athena, "Mistake: a legacy one", "code", "other");
+
+    let out = athena_bin(&fx).arg("audit").output().unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    for needle in [
+        "mistakes 2: by class: code 1, docs 1",
+        "mistakes by cause: Nothing runs the docs test. 1, no cause recorded 1",
+        "prevention (check, 1 mistake(s)): Prevention for: Nothing runs the docs test.",
+    ] {
+        assert!(text.contains(needle), "missing {needle:?} in:\n{text}");
+    }
+
+    let out = athena_bin(&fx).args(["audit", "--json"]).output().unwrap();
+    let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["mistakes"]["total"], 2);
+    assert_eq!(json["mistakes"]["by_class"]["docs"], 1);
+    assert_eq!(json["mistakes"]["by_cause"]["no cause recorded"], 1);
+}
+
 fn athena_bin(fx: &Fixture) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_athena"));
     cmd.env_remove("ATHENA_NESTED")

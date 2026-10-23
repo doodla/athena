@@ -107,6 +107,9 @@ pub struct StatusView {
     pub planning: Option<FirstRoundCounts>,
     pub interventions_by_category: BTreeMap<String, usize>,
     pub interventions_by_class: BTreeMap<String, usize>,
+    /// Mistakes per class and per cause, with the prevention proposed. Apart from `interventions_by_category`,
+    /// which counts each mistake under its own category as before.
+    pub mistakes: MistakeReport,
     /// Interventions that call for follow-up and that no later request job cites yet (see
     /// [`open_interventions`]). They are not in `open`, which lists jobs.
     pub open_interventions: Vec<OpenIntervention>,
@@ -169,6 +172,87 @@ pub fn open_interventions(records: &Records) -> Vec<OpenIntervention> {
             ),
         })
         .collect()
+}
+
+/// The cause text under which a mistake is counted when no recorded introspection gives one.
+pub const NO_CAUSE: &str = "no cause recorded";
+
+/// Prevention work proposed for the mistakes that share one cause.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MistakeProposal {
+    pub cause: String,
+    /// `check` (a code check), `knowledge` (a default the readers are given) or `design change`.
+    pub kind: String,
+    /// What would have prevented the mistakes of this cause.
+    pub prevention: String,
+    /// The introspections that propose it.
+    pub introspections: Vec<String>,
+    /// How many mistakes it would have prevented.
+    pub mistakes: usize,
+}
+
+/// The mistakes in the records: counted per class of work and per cause, apart from the intervention
+/// categories. A mistake is an intervention for which [`athena_data::records::is_mistake`] holds: category
+/// `mistake`, or a legacy record with category `other` whose text starts "Mistake:". Records are not rewritten.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct MistakeReport {
+    pub total: usize,
+    pub by_class: BTreeMap<String, usize>,
+    /// The cause the recorded introspection gives, grouped by [`crate::introspect::normalise`]; a mistake with
+    /// no recorded introspection counts under [`NO_CAUSE`].
+    pub by_cause: BTreeMap<String, usize>,
+    /// One proposal per cause.
+    pub proposals: Vec<MistakeProposal>,
+}
+
+/// Counts the mistakes in `records` and gathers the prevention proposed for them, one proposal per cause.
+pub fn mistake_report(records: &Records) -> MistakeReport {
+    use athena_data::records::{IntrospectionStatus, PreventionKind};
+    let mut report = MistakeReport::default();
+    // Normalised cause -> (display text, proposal).
+    let mut groups: BTreeMap<String, MistakeProposal> = BTreeMap::new();
+    for i in records.interventions.iter().filter(|i| i.is_mistake()) {
+        report.total += 1;
+        *report.by_class.entry(i.class_of_work.clone()).or_default() += 1;
+        let recorded = records
+            .introspections
+            .iter()
+            .rfind(|n| n.intervention.as_ref() == Some(&i.id))
+            .filter(|n| n.status == IntrospectionStatus::Recorded);
+        let Some(n) = recorded else {
+            *report.by_cause.entry(NO_CAUSE.into()).or_default() += 1;
+            continue;
+        };
+        let cause = n.cause.as_deref().unwrap_or("").trim();
+        let key = crate::introspect::normalise(cause);
+        if key.is_empty() {
+            *report.by_cause.entry(NO_CAUSE.into()).or_default() += 1;
+            continue;
+        }
+        let proposal = groups.entry(key).or_insert_with(|| MistakeProposal {
+            cause: cause.to_string(),
+            kind: match n.prevention_kind {
+                Some(PreventionKind::CodeCheck) => "check",
+                Some(PreventionKind::Default) => "knowledge",
+                Some(PreventionKind::DesignChange) => "design change",
+                None => "unknown",
+            }
+            .into(),
+            prevention: n.prevention.clone().unwrap_or_default(),
+            introspections: Vec::new(),
+            mistakes: 0,
+        });
+        proposal.mistakes += 1;
+        let id = n.id.to_string();
+        if !proposal.introspections.contains(&id) {
+            proposal.introspections.push(id);
+        }
+    }
+    for p in groups.into_values() {
+        *report.by_cause.entry(p.cause.clone()).or_default() += p.mistakes;
+        report.proposals.push(p);
+    }
+    report
 }
 
 /// The latest audience rating as `athena status` lists it.
@@ -496,6 +580,12 @@ impl Athena {
         }
     }
 
+    /// The mistakes in the records at `HEAD`, per class and per cause, with the prevention proposed.
+    pub fn mistakes(&self) -> Result<MistakeReport> {
+        let head = self.head()?;
+        Ok(mistake_report(&Records::load(&self.git, &head)?))
+    }
+
     /// The state of the work.
     pub fn status(&self) -> Result<StatusView> {
         self.state.registry().reap();
@@ -669,6 +759,7 @@ impl Athena {
             planning: first_round,
             interventions_by_category: by_category,
             interventions_by_class: by_class,
+            mistakes: mistake_report(&records),
             open_interventions,
             restarts: records.restarts.len(),
             forecasts,
@@ -746,6 +837,167 @@ impl Athena {
 /// Whether a state is terminal.
 pub fn is_terminal(state: OutcomeState) -> bool {
     !matches!(state, OutcomeState::Blocked)
+}
+
+#[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
+mod mistake_tests {
+    use super::*;
+    use athena_data::RecordId;
+    use athena_data::records::{
+        Intervention, InterventionCategory, IntrospectionRecord, IntrospectionStatus,
+        IntrospectionTrigger, PreventionKind,
+    };
+    use jiff::Timestamp;
+
+    fn at() -> Timestamp {
+        "2026-10-17T12:00:00Z".parse().unwrap()
+    }
+
+    fn rid(n: u32) -> RecordId {
+        RecordId::parse(&format!("20261017-1200{n:02}-1abc")).unwrap()
+    }
+
+    fn intervention(
+        n: u32,
+        class: &str,
+        category: InterventionCategory,
+        what: &str,
+    ) -> Intervention {
+        Intervention {
+            id: rid(n),
+            at: at(),
+            what: what.into(),
+            why: "why".into(),
+            class_of_work: class.into(),
+            category,
+            job: None,
+            source: InterventionSource::User,
+            with_staged_changes: false,
+        }
+    }
+
+    fn introspection(
+        n: u32,
+        of: u32,
+        cause: &str,
+        kind: PreventionKind,
+        prevention: &str,
+    ) -> IntrospectionRecord {
+        IntrospectionRecord {
+            id: rid(n),
+            at: at(),
+            trigger: IntrospectionTrigger::Intervention,
+            job: None,
+            intervention: Some(rid(of)),
+            class_of_work: "docs".into(),
+            category: "mistake".into(),
+            what_happened: Some("it happened".into()),
+            failure_class: None,
+            new_class: false,
+            earlier_cases: Vec::new(),
+            decisions_matched: Vec::new(),
+            cause: Some(cause.into()),
+            prevention_kind: Some(kind),
+            prevention: Some(prevention.into()),
+            proposed_request: Some("do it".into()),
+            evidence: None,
+            status: IntrospectionStatus::Recorded,
+            failure: None,
+            flags: Vec::new(),
+            dropped_ids: Vec::new(),
+            from_jev: false,
+            jev: None,
+        }
+    }
+
+    #[test]
+    fn mistakes_count_per_class_and_per_cause_and_same_cause_gives_one_proposal() {
+        use InterventionCategory::Mistake;
+        let mut records = Records::default();
+        records.interventions = vec![
+            intervention(1, "docs", Mistake, "skipped the check"),
+            intervention(2, "docs", Mistake, "skipped it again"),
+            intervention(3, "code", Mistake, "wrong file"),
+            intervention(4, "code", Mistake, "no introspection"),
+            intervention(5, "code", InterventionCategory::CorrectedOutput, "not one"),
+        ];
+        records.introspections = vec![
+            introspection(
+                11,
+                1,
+                "Nothing runs the docs test.",
+                PreventionKind::CodeCheck,
+                "Run it.",
+            ),
+            introspection(
+                12,
+                2,
+                "nothing runs the docs test",
+                PreventionKind::CodeCheck,
+                "Run it.",
+            ),
+            introspection(
+                13,
+                3,
+                "The brief omits file names.",
+                PreventionKind::Default,
+                "Name files.",
+            ),
+        ];
+        let report = mistake_report(&records);
+        assert_eq!(report.total, 4);
+        assert_eq!(report.by_class["docs"], 2);
+        assert_eq!(report.by_class["code"], 2);
+        assert_eq!(report.by_cause["Nothing runs the docs test."], 2);
+        assert_eq!(report.by_cause["The brief omits file names."], 1);
+        assert_eq!(report.by_cause[NO_CAUSE], 1);
+        assert_eq!(report.proposals.len(), 2, "same cause, one proposal");
+        let shared = report
+            .proposals
+            .iter()
+            .find(|p| p.mistakes == 2)
+            .expect("the shared cause");
+        assert_eq!(shared.kind, "check");
+        assert_eq!(shared.introspections.len(), 2);
+        let other = report.proposals.iter().find(|p| p.mistakes == 1).unwrap();
+        assert_eq!(other.kind, "knowledge");
+        assert_eq!(other.prevention, "Name files.");
+    }
+
+    #[test]
+    fn a_legacy_other_record_starting_mistake_colon_is_counted_and_not_rewritten() {
+        use InterventionCategory::Other;
+        let mut records = Records::default();
+        records.interventions = vec![
+            intervention(1, "docs", Other, "Mistake: forgot the changelog"),
+            intervention(2, "docs", Other, "A mistake: not counted"),
+        ];
+        let before = records.interventions.clone();
+        let report = mistake_report(&records);
+        assert_eq!(report.total, 1);
+        assert_eq!(report.by_class["docs"], 1);
+        assert_eq!(records.interventions, before, "the records are unchanged");
+        assert_eq!(records.interventions[0].category, Other);
+    }
+
+    #[test]
+    fn a_failed_introspection_gives_no_cause() {
+        let mut records = Records::default();
+        records.interventions = vec![intervention(1, "docs", InterventionCategory::Mistake, "x")];
+        let mut n = introspection(11, 1, "c", PreventionKind::Default, "p");
+        n.status = IntrospectionStatus::Failed;
+        n.failure = Some("no".into());
+        records.introspections = vec![n];
+        let report = mistake_report(&records);
+        assert_eq!(report.by_cause[NO_CAUSE], 1);
+        assert!(report.proposals.is_empty());
+    }
+
+    #[test]
+    fn the_report_is_empty_with_no_mistakes() {
+        assert_eq!(mistake_report(&Records::default()).total, 0);
+    }
 }
 
 mod erased {

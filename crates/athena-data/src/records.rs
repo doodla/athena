@@ -145,11 +145,13 @@ pub enum InterventionCategory {
     AnsweredQuestion,
     CarriedState,
     FixedEnvironment,
+    /// A mistake Athena or a model made, logged so status and the audit can count it per class and per cause.
+    Mistake,
     Other,
 }
 
 impl InterventionCategory {
-    pub const ALL: [InterventionCategory; 8] = [
+    pub const ALL: [InterventionCategory; 9] = [
         InterventionCategory::DidWorkThemselves,
         InterventionCategory::CorrectedOutput,
         InterventionCategory::GaveDetailedInstructions,
@@ -157,6 +159,7 @@ impl InterventionCategory {
         InterventionCategory::AnsweredQuestion,
         InterventionCategory::CarriedState,
         InterventionCategory::FixedEnvironment,
+        InterventionCategory::Mistake,
         InterventionCategory::Other,
     ];
     pub fn as_str(self) -> &'static str {
@@ -168,11 +171,35 @@ impl InterventionCategory {
             InterventionCategory::AnsweredQuestion => "answered-question",
             InterventionCategory::CarriedState => "carried-state",
             InterventionCategory::FixedEnvironment => "fixed-environment",
+            InterventionCategory::Mistake => "mistake",
             InterventionCategory::Other => "other",
         }
     }
     pub fn parse(text: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|c| c.as_str() == text)
+    }
+}
+
+/// The text prefix that marks a legacy mistake: an intervention logged with category `other` before the
+/// `mistake` category existed.
+pub const LEGACY_MISTAKE_PREFIX: &str = "Mistake:";
+
+/// Whether an intervention is a mistake. Two rules, and no record is ever rewritten:
+/// the category is `mistake`; or the category is `other` and `what` starts with "Mistake:" (case sensitive;
+/// the legacy rule for records written before the category existed). Any other category is not a mistake,
+/// whatever its text.
+pub fn is_mistake(category: InterventionCategory, what: &str) -> bool {
+    match category {
+        InterventionCategory::Mistake => true,
+        InterventionCategory::Other => what.starts_with(LEGACY_MISTAKE_PREFIX),
+        _ => false,
+    }
+}
+
+impl Intervention {
+    /// Whether this intervention is a mistake; see [`is_mistake`].
+    pub fn is_mistake(&self) -> bool {
+        is_mistake(self.category, &self.what)
     }
 }
 
@@ -2503,6 +2530,32 @@ mod tests {
             record.canonical_path(),
             "records/interventions/2026-10/20261010-153012-k7q2.json"
         );
+    }
+
+    #[test]
+    fn mistake_is_a_category_and_in_all() {
+        assert_eq!(InterventionCategory::ALL.len(), 9);
+        assert!(InterventionCategory::ALL.contains(&InterventionCategory::Mistake));
+        assert_eq!(InterventionCategory::Mistake.as_str(), "mistake");
+    }
+
+    #[test]
+    fn parse_accepts_mistake() {
+        assert_eq!(
+            InterventionCategory::parse("mistake"),
+            Some(InterventionCategory::Mistake)
+        );
+        assert_eq!(InterventionCategory::parse("mistakes"), None);
+    }
+
+    #[test]
+    fn is_mistake_rule() {
+        use InterventionCategory::*;
+        assert!(is_mistake(Mistake, "anything"));
+        assert!(is_mistake(Other, "Mistake: the verifier was skipped"));
+        assert!(!is_mistake(Other, "A mistake: not a prefix"));
+        assert!(!is_mistake(Other, "mistake: case differs"));
+        assert!(!is_mistake(CorrectedOutput, "Mistake: wrong category"));
     }
 
     fn host_error(status: Option<u16>) -> HostError {

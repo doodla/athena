@@ -288,7 +288,7 @@ Exit code: 0 only when the target was met; 2 for any other stop; 1 when Athena i
         #[arg(long)]
         class: String,
         /// did-work-themselves, corrected-output, gave-detailed-instructions, overrode-decision,
-        /// answered-question, carried-state, fixed-environment, or other.
+        /// answered-question, carried-state, fixed-environment, mistake, or other.
         #[arg(long)]
         category: String,
         #[arg(long)]
@@ -709,16 +709,28 @@ fn run(cli: Cli) -> Result<u8> {
         }
         Command::Audit { job, json } => {
             let athena = open(true)?;
-            let Some(audited) = athena.audit(&job)? else {
-                return Ok(0);
+            // The mistake report does not depend on a job audit: it prints when none is produced, and when the
+            // audit errors.
+            let mistakes = athena.mistakes()?;
+            let audited = match athena.audit(&job) {
+                Ok(audited) => audited,
+                Err(error) => {
+                    if json {
+                        print_json(&serde_json::json!({ "mistakes": mistakes }))?;
+                    } else {
+                        print!("{}", display::mistakes(&mistakes));
+                    }
+                    return Err(error);
+                }
             };
             if json {
                 print_json(&serde_json::json!({
-                    "audit": audited.audit,
-                    "invocation": audited.invocation_path(),
+                    "mistakes": mistakes,
+                    "audit": audited.as_ref().map(|a| &a.audit),
+                    "invocation": audited.as_ref().map(|a| a.invocation_path()),
                 }))?;
             } else {
-                print!("{}", display::audit(&audited));
+                print!("{}", display::audit_report(&mistakes, audited.as_ref()));
             }
             Ok(0)
         }

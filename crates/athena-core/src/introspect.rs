@@ -1028,6 +1028,12 @@ fn answer_schema() -> serde_json::Value {
     })
 }
 
+/// Added to the prompt of a mistake event: what the prevention must name.
+const MISTAKE_GUIDANCE: &str = "This event is a mistake. In `prevention`, name the check (prevention_kind \
+code-check) or the knowledge (prevention_kind default) that would have prevented it. In `cause`, state the \
+shared cause in the same words you would use for any other mistake with that cause, because mistakes with \
+the same cause are counted together and get one proposal.";
+
 /// What the model is given: the listed stored fields and nothing else.
 fn user_prompt(
     event: &Event,
@@ -1035,7 +1041,7 @@ fn user_prompt(
     cases: &[&CaseRow],
     decisions: &[String],
 ) -> String {
-    let value = json!({
+    let mut value = json!({
         "event": {
             "trigger": event.trigger.as_str(),
             "what": event.what,
@@ -1049,6 +1055,13 @@ fn user_prompt(
         "earlier_cases": cases,
         "decisions_that_may_be_matched": decisions,
     });
+    // A mistake (category `mistake`, or the legacy `other` with text starting "Mistake:") is asked for the check
+    // or the knowledge that would have prevented it; mistakes with the same cause are then counted together.
+    let is_mistake = InterventionCategory::parse(&event.category)
+        .is_some_and(|c| athena_data::records::is_mistake(c, &event.what));
+    if is_mistake {
+        value["mistake_guidance"] = json!(MISTAKE_GUIDANCE);
+    }
     serde_json::to_string_pretty(&value).expect("a JSON value serializes")
 }
 

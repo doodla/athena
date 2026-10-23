@@ -1945,6 +1945,142 @@ fn an_intervention_leaves_open_work_once_a_later_request_cites_its_id() {
     assert_eq!(status.interventions_by_category["corrected-output"], 1);
 }
 
+fn log_as(
+    athena: &athena_core::Athena,
+    class: &str,
+    category: &str,
+    what: &str,
+) -> Result<String, String> {
+    athena
+        .intervene(
+            &athena_core::manage::InterveneArgs {
+                what: what.into(),
+                why: "It went wrong.".into(),
+                class: class.into(),
+                category: category.into(),
+                job: None,
+                with_staged: false,
+            },
+            &Lines::default(),
+        )
+        .map(|done| done.intervention.id.to_string())
+        .map_err(|e| format!("{e:#}"))
+}
+
+fn status_bin(fx: &Fixture, args: &[&str]) -> String {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_athena"))
+        .env_remove("ATHENA_NESTED")
+        .env_remove("ATHENA_SCRATCH_DIR")
+        .env("ATHENA_STATE_DIR", fx.state.path())
+        .current_dir(fx.root())
+        .args(args)
+        .output()
+        .unwrap();
+    // Not every command succeeds here (`audit` of a repository with no job fails); callers read the output.
+    String::from_utf8(out.stdout).unwrap()
+}
+
+#[test]
+fn intervene_accepts_mistake_and_rejects_unknown_category_listing_mistake() {
+    let fx = Fixture::new();
+    let athena = fx.athena(Scenario::default().script());
+    log_as(&athena, "docs", "mistake", "Shipped without the docs test").expect("accepted");
+    let status = athena.status().unwrap();
+    assert_eq!(status.interventions_by_category["mistake"], 1);
+    let error = log_as(&athena, "docs", "blunder", "x").unwrap_err();
+    assert!(
+        error.contains("mistake"),
+        "the error lists the category: {error}"
+    );
+    assert!(error.contains("blunder"), "{error}");
+}
+
+#[test]
+fn status_reports_mistakes_per_class_and_per_cause_apart_from_categories() {
+    let fx = Fixture::new();
+    let athena = fx.athena(Scenario::default().script());
+    log_as(&athena, "docs", "mistake", "Skipped the docs test").unwrap();
+    log_as(&athena, "docs", "mistake", "Skipped it again").unwrap();
+    log_as(&athena, "code", "mistake", "Edited the wrong file").unwrap();
+    log_as(&athena, "code", "corrected-output", "Reworded a line").unwrap();
+
+    let view = athena.status().unwrap();
+    assert_eq!(view.mistakes.total, 3);
+    assert_eq!(view.mistakes.by_class["docs"], 2);
+    assert_eq!(view.mistakes.by_class["code"], 1);
+    assert_eq!(view.mistakes.by_cause["no cause recorded"], 3);
+    // The category counts are their own field and still count every intervention by its category.
+    assert_eq!(view.interventions_by_category["mistake"], 3);
+    assert_eq!(view.interventions_by_category["corrected-output"], 1);
+
+    let text = athena_cli::display::status(&view);
+    assert!(
+        text.contains("mistakes 3: by class: code 1, docs 2"),
+        "{text}"
+    );
+    assert!(
+        text.contains("mistakes by cause: no cause recorded 3"),
+        "{text}"
+    );
+
+    let json: serde_json::Value =
+        serde_json::from_str(&status_bin(&fx, &["status", "--json"])).unwrap();
+    assert_eq!(json["mistakes"]["total"], 3);
+    assert_eq!(json["mistakes"]["by_class"]["docs"], 2);
+    assert_eq!(json["mistakes"]["by_cause"]["no cause recorded"], 3);
+    assert_eq!(json["interventions_by_category"]["mistake"], 3);
+
+    // With no mistakes the status text has no mistake line.
+    let clean = Fixture::new();
+    let text = status_bin(&clean, &["status"]);
+    assert!(!text.contains("mistakes"), "{text}");
+}
+
+#[test]
+fn a_legacy_other_record_starting_mistake_colon_is_counted_in_status_and_audit_and_not_rewritten() {
+    let fx = Fixture::new();
+    let athena = fx.athena(Scenario::default().script());
+    let id = log_as(&athena, "docs", "other", "Mistake: forgot the changelog").unwrap();
+    log_as(&athena, "docs", "other", "A mistake: only mentioned").unwrap();
+    let path = format!(
+        "records/interventions/{}/{id}.json",
+        athena_data::RecordId::parse(&id).unwrap().month()
+    );
+    let before = fx.file(&path).expect("the record file");
+
+    let view = athena.status().unwrap();
+    assert_eq!(view.mistakes.total, 1);
+    assert_eq!(view.mistakes.by_class["docs"], 1);
+    // It is still an `other` intervention in the category counts; nothing was rewritten.
+    assert_eq!(view.interventions_by_category["other"], 2);
+    assert!(!view.interventions_by_category.contains_key("mistake"));
+    assert!(athena_cli::display::status(&view).contains("mistakes 1:"));
+    let audit_text = status_bin(&fx, &["audit"]);
+    assert!(
+        audit_text.contains("mistakes 1: by class: docs 1"),
+        "{audit_text}"
+    );
+    assert_eq!(fx.file(&path).unwrap(), before, "the record is unchanged");
+    assert!(before.contains("\"category\": \"other\""), "{before}");
+}
+
+#[test]
+fn the_readme_changelog_and_design_name_the_mistake_category() {
+    for (name, text) in [
+        ("README.md", include_str!("../../../README.md")),
+        ("CHANGELOG.md", include_str!("../../../CHANGELOG.md")),
+        (
+            "docs/design/athena-v0.md",
+            include_str!("../../../docs/design/athena-v0.md"),
+        ),
+    ] {
+        assert!(
+            text.contains("`mistake`"),
+            "{name} does not name the mistake category"
+        );
+    }
+}
+
 #[test]
 fn hand_work_is_declared_with_staged_changes_and_rescores_the_job() {
     // M6 (allows): an intervention commit with its record. §9.5: a late intervention re-scores a job.

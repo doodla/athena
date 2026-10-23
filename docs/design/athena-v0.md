@@ -363,7 +363,7 @@ required fields, plus a link to a job when one applies:
 | `what` | what happened, in one or two sentences |
 | `why` | why the user had to step in |
 | `class` | the class of work it concerns, from the closed list in `athena.toml` (D42) |
-| `category` | one of `did-work-themselves`, `corrected-output`, `gave-detailed-instructions`, `overrode-decision`, `answered-question`, `carried-state`, `fixed-environment`, `other`. These are the brief's own categories. |
+| `category` | one of `did-work-themselves`, `corrected-output`, `gave-detailed-instructions`, `overrode-decision`, `answered-question`, `carried-state`, `fixed-environment`, `mistake`, `other`. These are the brief's own categories, plus `mistake`. A mistake is an intervention with category `mistake`, or a legacy one with category `other` whose `what` starts with `Mistake:` (case sensitive); existing records are not rewritten. `athena status` and `athena audit` count mistakes per class of work and per cause, apart from the category counts. |
 | `job` | optional; the job it concerns |
 
 `source` is `user` for interventions the user records, and `observed` for those Athena captures itself
