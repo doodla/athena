@@ -9,6 +9,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A `mistake` intervention category (`athena intervene --category mistake`). `athena status` and `athena audit`
+  (and their JSON) count mistakes per class of work and per cause, in a `mistakes` field apart from
+  `interventions_by_category`, and list the prevention (a check, knowledge, or a design change) proposed for
+  each cause; mistakes with the same cause share one proposal. Introspecting a mistake asks the model for the
+  check or knowledge that would have prevented it. Records with category `other` whose text starts `Mistake:`
+  count as mistakes too and are not rewritten. `athena audit` prints the mistake report even when no job audit
+  is produced.
 - Closing a job deletes its directory, build cache included (11 to 12 GB each), on every closing path (landed,
   failed, rejected, abandoned, a close of an interrupted job, a close while blocked), and prints the space
   reclaimed, for example `reclaimed 11.4 GB`. A removal that fails prints `warning: could not remove <path>`

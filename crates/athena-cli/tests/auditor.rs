@@ -232,6 +232,66 @@ fn with_no_commit_to_read_the_audit_refuses_before_paying() {
     assert!(after.auditor_runs.is_empty());
 }
 
+/// Logs a mistake of `class` by the command a user would run.
+fn log_mistake(athena: &Athena, class: &str, what: &str) {
+    athena
+        .intervene(
+            &athena_core::manage::InterveneArgs {
+                what: what.into(),
+                why: "It went wrong.".into(),
+                class: class.into(),
+                category: "mistake".into(),
+                job: None,
+                with_staged: false,
+            },
+            &common::Lines::default(),
+        )
+        .unwrap();
+}
+
+#[test]
+fn the_audit_output_reports_mistakes_per_class_and_per_cause() {
+    let mut scenario = Scenario::default();
+    scenario.auditor = finding("README.md line 3: Hello, reader.");
+    let (_fx, athena) = landed(scenario);
+    log_mistake(&athena, "docs", "Skipped the docs test");
+    log_mistake(&athena, "docs", "Skipped it again");
+    log_mistake(&athena, "code", "Wrong file");
+    let audited = athena.audit("latest").unwrap().expect("an audit");
+
+    let shown = athena_cli::display::audit_report(&athena.mistakes().unwrap(), Some(&audited));
+    assert!(
+        shown.contains("mistakes 3: by class: code 1, docs 2"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("mistakes by cause: no cause recorded 3"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("The greeting is there."),
+        "the audit still prints: {shown}"
+    );
+}
+
+#[test]
+fn the_audit_output_reports_mistakes_when_no_audit_is_produced() {
+    let (_fx, mut athena) = landed(Scenario::default());
+    log_mistake(&athena, "docs", "Skipped the docs test");
+    log_mistake(&athena, "code", "Wrong file");
+    athena.nested = Some("20261014-120000-outr".into());
+    let audited = athena.audit("latest").unwrap();
+    assert!(audited.is_none(), "a nested run produces no audit");
+
+    let shown = athena_cli::display::audit_report(&athena.mistakes().unwrap(), audited.as_ref());
+    assert!(
+        shown.contains("mistakes 2: by class: code 1, docs 1"),
+        "{shown}"
+    );
+    assert!(shown.contains("mistakes by cause:"), "{shown}");
+    assert!(shown.contains("no job audit produced"), "{shown}");
+}
+
 #[test]
 fn a_nested_run_audits_nothing() {
     let (fx, mut athena) = landed(Scenario::default());

@@ -196,6 +196,48 @@ pub fn audit(a: &athena_core::auditor::Audited) -> String {
     out
 }
 
+/// The mistake report: how many, which classes and causes recur, and the prevention proposed for each cause.
+/// Counts are apart from the intervention categories. Empty-handed it says `mistakes none`.
+pub fn mistakes(m: &athena_core::status::MistakeReport) -> String {
+    if m.total == 0 {
+        return "mistakes none\n".into();
+    }
+    let join = |map: &std::collections::BTreeMap<String, usize>| {
+        map.iter()
+            .map(|(k, n)| format!("{k} {n}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut out = format!("mistakes {}: by class: {}\n", m.total, join(&m.by_class));
+    let _ = writeln!(out, "mistakes by cause: {}", join(&m.by_cause));
+    for p in &m.proposals {
+        let _ = writeln!(
+            out,
+            "prevention ({}, {} mistake(s)): {} · for the cause: {} · from introspection {}",
+            p.kind,
+            p.mistakes,
+            p.prevention,
+            p.cause,
+            p.introspections.join(", ")
+        );
+    }
+    out
+}
+
+/// What `athena audit` prints: the mistake report first, so it shows even when no job audit was produced, then
+/// the job audit when there is one.
+pub fn audit_report(
+    m: &athena_core::status::MistakeReport,
+    audited: Option<&athena_core::auditor::Audited>,
+) -> String {
+    let mut out = mistakes(m);
+    match audited {
+        Some(a) => out.push_str(&audit(a)),
+        None => out.push_str("no job audit produced\n"),
+    }
+    out
+}
+
 pub fn queued(job: &str, commit: &str) -> String {
     format!(
         "queued     {job} · {} (nothing read, no model called)\nnext       athena go {job}   # reads it, then asks to run it\n",
@@ -709,6 +751,9 @@ pub fn status(v: &StatusView) -> String {
         );
     } else {
         let _ = writeln!(out, "interventions none");
+    }
+    if v.mistakes.total > 0 {
+        out.push_str(&mistakes(&v.mistakes));
     }
     let _ = writeln!(out, "restarts    {}", v.restarts);
     for (i, h) in v.forecasts.iter().enumerate() {
