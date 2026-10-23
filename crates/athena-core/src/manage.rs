@@ -132,8 +132,8 @@ impl Athena {
                         &[("Athena-Job", id.as_str().to_string())],
                     ),
                 )?;
-                self.state.clean_job(&id);
                 ui.line(&format!("abandoned  {id} · {}", short(&commit)));
+                crate::state::report_clean(ui, &self.state.clean_job(&id));
                 return Ok(Closed {
                     job: id,
                     state: OutcomeState::Abandoned,
@@ -221,8 +221,8 @@ impl Athena {
                 e
             }
         })?;
-        self.state.clean_job(&id);
         ui.line(&format!("{:<10} {id} · {}", state.as_str(), short(&commit)));
+        crate::state::report_clean(ui, &self.state.clean_job(&id));
         Ok(Closed {
             job: id,
             state,

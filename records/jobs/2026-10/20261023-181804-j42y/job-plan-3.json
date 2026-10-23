@@ -1,0 +1,221 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261023-181804-j42y",
+  "round": 3,
+  "at": "2026-10-23T19:46:46.311454291Z",
+  "invocation_seq": 6,
+  "approach": "Fault: StateDir::clean_job (state.rs:113) discards the removal error and measures nothing. Make it return CleanReport {bytes, error: Option<(PathBuf,String)>}. Bytes are the job directory's allocated size (st_blocks*512, each (dev,ino) once, symlink_metadata, no symlink following), measured just before removal. StateDir gains a fn-pointer remover field (default pin::remove_tree) with a public with_remover(fn(&Path)->io::Result<()>) seam, so a test can inject a failure after the job lock is taken and the commit is done. A helper report_clean(&dyn Ui,&CleanReport) in state.rs prints 'reclaimed 11.4 GB' on success. On error it prints only 'warning: could not remove <path>: <err>' and never a reclaimed line. Call it at manage.rs:135 and 224 and run.rs:2276, 2451 (non-blocked only) and 2568, each after the closing commit succeeds. Ui has only line(), so display.rs, pin.rs and athena.toml need no change. Shared target dir is recorded as not adopted.",
+  "decisions": [
+    {
+      "choice": "Keep per-job target dirs; delete the job dir on close and report bytes; record the shared-target question in decisions.md; athena.toml unchanged.",
+      "reason": "Review 2 R14: a shared target dir executed another job's stale test binaries; per-job isolation (D46) is needed by the checks. Deleting on close removes the disk growth.",
+      "rejected": [
+        {
+          "option": "One shared CARGO_TARGET_DIR",
+          "why": "Stale binaries (R14), build-lock contention, out of scope."
+        },
+        {
+          "option": "Sweep of historical closed jobs",
+          "why": "Operational, out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "Report the allocated size of the whole job dir (what is actually freed), counting hard links once.",
+      "reason": "The dir also holds snapshots, live/, usage/, job.lock; cargo hard-links artifacts; sparse files differ in length.",
+      "rejected": [
+        {
+          "option": "Sum len()",
+          "why": "Double-counts hard links, overstates sparse files."
+        },
+        {
+          "option": "Report target/ only",
+          "why": "Under-describes freed space and adds a second measurement."
+        }
+      ]
+    },
+    {
+      "choice": "Failure injection through a StateDir remover seam (fn pointer, pub with_remover) returning an injected io::Error; plus unit tests in state.rs with a regular file at the path where no lock is involved.",
+      "reason": "A regular file at the job-dir path makes try_lock_job (manage.rs:94, state.rs:75 create_dir_all) fail before any commit, so the lifecycle test could never reach cleanup. The seam fails removal after lock and commit. A control step in the same test shows the default remover removes a normal dir.",
+      "rejected": [
+        {
+          "option": "Regular file at job-dir path in the lifecycle test",
+          "why": "Close fails at the lock, before the commit."
+        },
+        {
+          "option": "chattr +i or mode bits on nested files",
+          "why": "Root bypasses modes; chattr depends on filesystem and needs teardown."
+        }
+      ]
+    },
+    {
+      "choice": "On removal success always print the reclaimed line, with no threshold. A job dir holding only job.lock reports its small exact allocated size (e.g. 'reclaimed 4.1 KB') and no warning. On error print only the warning.",
+      "reason": "The dir is never missing or empty at close (the lock creates job.lock) and the dir inode itself has blocks, so a threshold would be arbitrary. A uniform line is simple, and a reclaimed line must never claim space that was not freed.",
+      "rejected": [
+        {
+          "option": "Print nothing for small or empty dirs",
+          "why": "Case cannot arise through close; threshold is arbitrary."
+        },
+        {
+          "option": "Print reclaimed with the pre-measured bytes even on failure",
+          "why": "Overclaims space freed."
+        }
+      ]
+    },
+    {
+      "choice": "Removal failure only warns; the close stays Ok. Write format_bytes in state.rs (decimal, one decimal: B, KB, MB, GB, TB).",
+      "reason": "Records are already committed, so failing would make the job look unclosed. No formatter exists, and a new crate is not worth a lockfile change.",
+      "rejected": [
+        {
+          "option": "Fail the close on removal error",
+          "why": "Commit is done."
+        },
+        {
+          "option": "New fields on Closed/Finished",
+          "why": "Wider change; a ui line meets the criterion."
+        },
+        {
+          "option": "Edit display.rs",
+          "why": "It does not render ui.line."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/state.rs",
+      "action": "modify",
+      "purpose": "CleanReport, remover seam with with_remover, allocated-bytes walk with dedup, format_bytes, report_clean, unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/manage.rs",
+      "action": "modify",
+      "purpose": "Use clean_job and report_clean at lines 135 and 224 after the commit.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "purpose": "Use report_clean at 2276, 2451 (non-blocked only) and 2568.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "purpose": "Per-path, removal-failure, no-cache and kept-dir tests; fix exact-output assertions.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Shared target directory decision with alternatives and R14 evidence.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Entry for build cache deletion and space reclaimed.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "README.md",
+      "action": "modify",
+      "purpose": "One-line note on deletion and reporting.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In state.rs add the remover fn-pointer field (default pin::remove_tree) and with_remover. Make clean_job return CleanReport (walk with symlink_metadata, blocks()*512, (dev,ino) set, then remove; on error record the path and message). Add format_bytes and report_clean (success prints reclaimed; error prints only the warning). Unit tests: hand-computed hard-link tree, walk comparison, regular file at the path, format_bytes.",
+    "Replace the five call sites in manage.rs and run.rs with clean_job plus report_clean, each after its closing commit; keep the Blocked exception at run.rs:2451.",
+    "Add lifecycle.rs tests: each closing path, no-cache job (job.lock only), removal failure via injected remover with a control, and kept-dir cases (blocked, failed commit). Fix exact-output tests.",
+    "Write the decisions.md entry, CHANGELOG entry and README note; leave athena.toml, display.rs and pin.rs untouched.",
+    "Run cargo fmt --all, cargo clippy --all-targets --locked -- -D warnings, cargo test --locked."
+  ],
+  "risks": [
+    {
+      "risk": "Block counts differ across filesystems, so exact tests could flake.",
+      "mitigation": "Compare to an independent walk, plant files of at least a block, and use a hand-computed value only in the state.rs unit test, with sizes from blocks() of the created files."
+    },
+    {
+      "risk": "Existing tests assert exact closing output that the new line breaks.",
+      "mitigation": "Find and update those assertions."
+    },
+    {
+      "risk": "The remover seam adds public surface only for tests.",
+      "mitigation": "Keep it a small documented fn-pointer field defaulting to pin::remove_tree."
+    },
+    {
+      "risk": "A removal failure leaves a 12 GB dir.",
+      "mitigation": "The warning names the path; the close still succeeds."
+    },
+    {
+      "risk": "Walking a 12 GB tree is slow.",
+      "mitigation": "One metadata-only pass."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "state.rs unit tests: a dir with target/ files, job.lock, live/x, and a hard-linked pair. Assert the dir is gone and report.bytes equals a hand-computed value for a small tree (one file's blocks*512 once for the linked pair, plus each directory's blocks*512). Also compare to a test-local walk and check it is at least the planted target allocation. lifecycle.rs: one test per path (landed, failed, rejected, abandoned, interrupted then athena close, closed while blocked). Plant a multi-block target/ file before the closing commit (fake producer on go paths; pre-planted for close paths). Record an independent walk just before closing, then assert the dir is absent and the output has 'reclaimed ' plus format_bytes of that number.",
+      "command": "cargo test --locked",
+      "observes": "No job directory remains on any closing path and the reported figure matches the independent measurement.",
+      "fails_without": "A path that skipped cleanup leaves the dir; without measurement no 'reclaimed' line appears."
+    },
+    {
+      "criterion": 2,
+      "method": "format_bytes unit test (11_400_000_000 -> '11.4 GB', plus B/KB/MB/TB). Lifecycle tests capture the Lines ui output of go and close and assert a 'reclaimed <N> <unit>' line. A job whose dir holds only job.lock yields a 'reclaimed' line equal to format_bytes of its measured size and no line containing 'warning'.",
+      "command": "cargo test --locked",
+      "observes": "Human-unit reclaimed line appears; the no-cache job shows no failure.",
+      "fails_without": "Missing helper means no line; a spurious warning would fail the no-warning assertion."
+    },
+    {
+      "criterion": 3,
+      "method": "Lifecycle test with the injected remover returning an io::Error: close a job (lock taken, commit succeeds). Assert close returns Ok, a line starts with 'warning' and contains the job-dir path, and no line contains 'reclaimed'. A control in the same test uses the default remover on a normal dir and sees it removed with no error. state.rs unit tests put a regular file at the path and assert report.error carries the path and report_clean prints only the warning.",
+      "command": "cargo test --locked",
+      "observes": "Warning naming the path, no reclaimed claim, close Ok.",
+      "fails_without": "With `let _ =` swallowing, no warning line and the assertion fails."
+    },
+    {
+      "criterion": 4,
+      "method": "Tests: a job left Blocked after go still has its dir and no reclaimed line. A close whose commit fails (gate violation or unwritable record) returns Err with the dir intact and no reclaimed line. An interrupted job's dir exists before athena close.",
+      "command": "cargo test --locked",
+      "observes": "Dir present and no reclaimed output in each case.",
+      "fails_without": "Cleanup before or regardless of the commit would remove the dir."
+    },
+    {
+      "criterion": 5,
+      "method": "Inspect the diff: a new decisions.md entry (next free number) on the shared target dir, with alternatives, R14 evidence from docs/design/reviews/athena-v0-review-2.md, and the decision not to share. athena.toml has no diff.",
+      "command": "git diff -- docs/decisions.md athena.toml",
+      "observes": "Entry present with evidence and decision; athena.toml unchanged.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Run the three checks.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All exit 0.",
+      "fails_without": "Format, lint or test failures give nonzero exit."
+    },
+    {
+      "criterion": 7,
+      "method": "Inspect the diff for the CHANGELOG entry under the unreleased heading and the README note.",
+      "command": "git diff -- CHANGELOG.md README.md",
+      "observes": "Entry says closing deletes the build cache and reports space reclaimed; README line present.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "How tests/common builds its StateDir, and whether it can inject with_remover into the Athena instance used by close; the producer must read the harness and, if needed, add a small constructor hook there.",
+    "How the fake producer in the go-path tests writes a multi-block file into the job's target dir before the closing commit.",
+    "Whether any existing test asserts exact closing output that the new line changes."
+  ],
+  "producer_section_sha256": "c7ef1603c27f87919eaab43a7efa0eddfae9db7b9291e3fd359a5aa02b79f8ac"
+}

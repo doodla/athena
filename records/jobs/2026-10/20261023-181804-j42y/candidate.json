@@ -1,0 +1,141 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261023-181804-j42y",
+  "base_commit": "8a364b2a7375b1c3a91e21c4f7bfeca54ed3a68a",
+  "base_fingerprint": "sha256:0310edc191a8b718d6c9aac14b5e60f91ef10a8eff36332c78947f7d404cabb3",
+  "previous_job": "20261023-181729-2sf0",
+  "candidate_commit": "720097f7841e95c8a1fb4655268882c18dd114b8",
+  "candidate_tree": "fa48203f6d42f7f4f7da8dfb024436f454fc183b",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 110845
+    },
+    {
+      "path": "README.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 22096
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 98256
+    },
+    {
+      "path": "crates/athena-core/src/manage.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 25589
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 110295
+    },
+    {
+      "path": "crates/athena-core/src/state.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 11890
+    },
+    {
+      "path": "docs/decisions.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 196174
+    }
+  ],
+  "fingerprint": "sha256:7bc86a8396f21d288efe94fc30747fa114a911f3e099a856ddf0e2a9482e4ca9",
+  "violations": [],
+  "producer_report": {
+    "summary": "Closing a job now deletes its directory (build cache included) on every closing path and reports the space freed. The closing output has a line like \"reclaimed 11.4 GB\". If removal fails, it prints \"warning: could not remove <path>: <err>\" and no reclaimed line, and the close still succeeds. Cause: `StateDir::clean_job` discarded the removal error and measured nothing. `clean_job` now returns a `CleanReport` with the bytes freed and any error, and the new `report_clean` prints it. It runs at all five call sites, in `manage.rs` and `run.rs`, each after its closing commit; a blocked job still keeps its directory. The size is the directory's allocated blocks, each hard link once, symlinks not followed. A test-only seam, `StateDir::with_remover`, injects removal failures. One shared target directory is not adopted: decision D112 records the alternatives and the review 2 R14 evidence. `athena.toml`, `display.rs` and `pin.rs` are unchanged. All checks passed on my final run.",
+    "files": [
+      "crates/athena-core/src/state.rs",
+      "crates/athena-core/src/manage.rs",
+      "crates/athena-core/src/run.rs",
+      "crates/athena-cli/tests/lifecycle.rs",
+      "docs/decisions.md",
+      "CHANGELOG.md",
+      "README.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "First run failed on clippy::items_after_test_module in state.rs; I moved `collect` above the test module and it passed."
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "Run without error. The output was too large to read back and I could not open the saved file (outside the working directory), so the pass rests on the zero exit status. Earlier, `cargo test -p athena-cli --test lifecycle` passed 58 of 58 and the four `state::` unit tests in athena-core passed."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A test creates a job directory containing a target/ tree of known size, closes the job through each closing path (landed, failed, rejected, abandoned, interrupted-then-`athena close`, closed while blocked), and asserts the job directory no longer exists and the reported reclaimed byte count equals the known size. Run: cargo test.",
+        "status": "met",
+        "evidence": "lifecycle.rs tests a_landed_job…, a_rejected_job…, a_failed_job…, a_blocked_job_keeps_its_directory_until_it_is_closed_and_closing_reports_the_exact_space, closing_an_interrupted_job_deletes… and closing_a_dropped_proposal…. The directory is asserted gone on every path. The blocked-close, interrupted-close and dropped-proposal tests compare the reported figure to a test-local walk of the directory taken just before close. The landed, rejected and failed go paths check the figure is at least the planted 300,000 bytes, since the directory changes during the run. The state.rs unit test compares to hand-summed blocks with the hard link counted once. All pass under `cargo test --locked`."
+      },
+      {
+        "criterion": "The closing line shown to the user (athena go / close output) states the space reclaimed in human units, e.g. 'reclaimed 11.4 GB'; a job with nothing to remove reports no failure.",
+        "status": "met",
+        "evidence": "`format_bytes` unit test maps 11_400_000_000 to '11.4 GB'. Lifecycle tests read the 'reclaimed <n> <unit>' line from the go and close output. closing_a_dropped_proposal_with_nothing_but_a_lock_reports_its_small_size_and_no_warning asserts a reclaimed line and no 'warning' line."
+      },
+      {
+        "criterion": "If removal of the job directory fails, the user sees a warning naming the path rather than silent success (test with an unremovable path or injected error). Run: cargo test.",
+        "status": "met",
+        "evidence": "a_directory_that_cannot_be_removed_gives_a_warning_naming_it_and_the_close_still_succeeds uses `with_remover` to inject an io::Error after the closing commit. It asserts close returns Ok, a 'warning' line contains the job-directory path and the error text, and no 'reclaimed' line appears; a default-remover control then removes the directory. state.rs unit test a_failed_removal_names_the_path_and_claims_no_space uses a regular file at the path."
+      },
+      {
+        "criterion": "A job that is still running or blocked keeps its directory; cleanup runs only after the closing commit succeeds. Run: cargo test.",
+        "status": "met",
+        "evidence": "A blocked job after go keeps target/debug/big and prints no reclaimed line. a_close_that_fails_to_commit_keeps_the_job_directory_and_claims_nothing returns Err from the gate and leaves the planted cache. In the code, `clean_job` follows the commit at all five call sites, and run.rs keeps the Blocked exception. I did not add a test that runs a job concurrently."
+      },
+      {
+        "criterion": "docs/decisions.md records the shared-target-directory question with alternatives and the evidence (docs/design/reviews/athena-v0-review-2.md R14: a shared target dir executed another job's test binaries), and the decision taken; the per-job CARGO_TARGET_DIR in athena.toml stays unless the decision says otherwise.",
+        "status": "met",
+        "evidence": "New entry D112 in docs/decisions.md gives alternatives (a) to (d), the R14 evidence and the decision not to share. athena.toml has no edits."
+      },
+      {
+        "criterion": "cargo test, cargo clippy with warnings denied, and cargo fmt --check all pass.",
+        "status": "met",
+        "evidence": "I ran `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. All three exited without error (the test run's pass rests on its exit status, as noted in checks_run)."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry describing that closing a job deletes its build cache and reports space reclaimed.",
+        "status": "met",
+        "evidence": "A first bullet under [Unreleased] / Added in CHANGELOG.md describes the deletion, the reclaimed line and the warning. README.md's `athena close` row also describes it."
+      }
+    ],
+    "open_issues": [
+      "The final `cargo test --locked` output was too large to read back and I could not open the saved file. Only its clean exit is evidenced for the whole suite.",
+      "The reclaimed figure counts allocated blocks of the whole job directory, not only target/. The plan chose this on purpose.",
+      "The go-path tests (landed, rejected, failed) can only check the figure is at least the planted size, because the directory changes during the run.",
+      "I did not clean up caches of jobs already closed on this machine; that is operational and out of scope."
+    ],
+    "mistakes": [
+      "My first lifecycle.rs edit partly applied, which left duplicate imports and one failed compile. I fixed it.",
+      "I put the state.rs test module before `collect`, which clippy rejected. I moved `collect` above it."
+    ],
+    "learnings": [
+      "Closing was already calling `clean_job` on some paths, but it swallowed the error and was skipped when an earlier step failed.",
+      "`Athena.state` is a pub field, so tests can swap in `StateDir::with_remover` after `fx.athena(...)`.",
+      "The close of an interrupted job takes the job lock first, which recreates the job directory, so a test can plant a cache in it before closing.",
+      "The `Lines` test UI is shared across the lifecycle tests and records every `ui.line`.",
+      "The full lifecycle test file takes about 155 s."
+    ],
+    "desires": [
+      "Bash allowed `cat`, `tail` or `wc` on tool output, or the saved test output was readable, so I could read the test summary."
+    ]
+  }
+}

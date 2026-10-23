@@ -9,6 +9,8 @@ use athena_core::run::GoResult;
 use athena_data::records::{AcceptedBy, AnyRecord, OutcomeState, Role, Verdict};
 use athena_gate::invariant::{PREDICTION, VERIFIED_CONTENT};
 use common::*;
+use std::os::unix::fs::MetadataExt;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 fn finished(result: GoResult) -> athena_core::run::Finished {
@@ -2399,4 +2401,303 @@ fn merging_a_branch_where_a_job_landed_passes() {
         .unwrap();
     let report = athena.check_history().unwrap();
     assert!(report.violations.is_empty(), "{:?}", report.violations);
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Closing a job deletes its directory, build cache included, and reports the space reclaimed.
+
+/// Size of the planted build file: several blocks, so its allocation is clearly visible.
+const PLANTED: usize = 300_000;
+
+fn jobs_dir(fx: &Fixture) -> PathBuf {
+    fx.state.path().join("repo").join("jobs")
+}
+
+fn job_dir_of(fx: &Fixture, job: &athena_data::JobId) -> PathBuf {
+    jobs_dir(fx).join(job.as_str())
+}
+
+/// Gives the job directory a lock file and a build cache holding one large file.
+fn plant_cache(dir: &Path) {
+    std::fs::create_dir_all(dir.join("target/debug")).unwrap();
+    std::fs::write(dir.join("job.lock"), b"").unwrap();
+    std::fs::write(dir.join("target/debug/big"), vec![7u8; PLANTED]).unwrap();
+}
+
+/// What the directory occupies on disk, measured here and not by the code under test: allocated blocks of
+/// every entry, each inode once, symlinks not followed.
+fn occupied(path: &Path) -> u64 {
+    fn walk(path: &Path, seen: &mut std::collections::HashSet<(u64, u64)>) -> u64 {
+        let Ok(meta) = std::fs::symlink_metadata(path) else {
+            return 0;
+        };
+        let mut total = if seen.insert((meta.dev(), meta.ino())) {
+            meta.blocks() * 512
+        } else {
+            0
+        };
+        if meta.is_dir() {
+            for entry in std::fs::read_dir(path).unwrap().flatten() {
+                total += walk(&entry.path(), seen);
+            }
+        }
+        total
+    }
+    walk(path, &mut Default::default())
+}
+
+/// A script that, whenever the producer runs, leaves a build cache in every job directory.
+fn planting(base: athena_agent::fake::Script, jobs: PathBuf) -> athena_agent::fake::Script {
+    Box::new(move |spec| {
+        if spec.role == Role::Producer {
+            for entry in std::fs::read_dir(&jobs).unwrap().flatten() {
+                plant_cache(&entry.path());
+            }
+        }
+        base(spec)
+    })
+}
+
+fn said(ui: &Lines) -> Vec<String> {
+    ui.0.lock().unwrap().clone()
+}
+
+/// The text after `reclaimed ` on the one line that reports it.
+fn reclaimed(lines: &[String]) -> String {
+    let found: Vec<&String> = lines
+        .iter()
+        .filter(|l| l.starts_with("reclaimed "))
+        .collect();
+    assert_eq!(found.len(), 1, "one reclaimed line: {lines:?}");
+    found[0]["reclaimed ".len()..].to_string()
+}
+
+/// The reported figure in bytes, read back from its unit (to one decimal, so approximate).
+fn bytes_of(figure: &str) -> f64 {
+    let (value, unit) = figure.split_once(' ').expect("a number and a unit");
+    let scale = match unit {
+        "B" => 1.0,
+        "KB" => 1e3,
+        "MB" => 1e6,
+        "GB" => 1e9,
+        "TB" => 1e12,
+        other => panic!("unknown unit {other}"),
+    };
+    value.parse::<f64>().unwrap() * scale
+}
+
+/// Runs a job to its end with a build cache planted by the producer; returns its job, result and output.
+fn go_with_cache(
+    fx: &Fixture,
+    scenario: Scenario,
+) -> (athena_data::JobId, athena_core::run::Finished, Lines) {
+    go_with_script(fx, scenario.script())
+}
+
+fn go_with_script(
+    fx: &Fixture,
+    script: athena_agent::fake::Script,
+) -> (athena_data::JobId, athena_core::run::Finished, Lines) {
+    let athena = fx.athena(planting(script, jobs_dir(fx)));
+    let ui = Lines::default();
+    let proposal = athena.ask("add a greeting", &ui).unwrap();
+    std::fs::create_dir_all(job_dir_of(fx, &proposal.job)).unwrap();
+    let f = finished(
+        athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &ui)
+            .unwrap(),
+    );
+    (proposal.job, f, ui)
+}
+
+fn assert_cache_gone_and_reported(fx: &Fixture, job: &athena_data::JobId, ui: &Lines) {
+    assert!(
+        !job_dir_of(fx, job).exists(),
+        "the closed job's directory is gone"
+    );
+    let figure = reclaimed(&said(ui));
+    assert!(
+        bytes_of(&figure) >= PLANTED as f64 * 0.99,
+        "reclaimed {figure} covers the planted {PLANTED} bytes"
+    );
+    assert!(
+        !said(ui).iter().any(|l| l.contains("warning")),
+        "{:?}",
+        said(ui)
+    );
+}
+
+#[test]
+fn a_landed_job_deletes_its_build_cache_and_reports_the_space() {
+    let fx = Fixture::new();
+    let (job, f, ui) = go_with_cache(&fx, Scenario::default());
+    assert_eq!(f.state, OutcomeState::Landed, "{}", f.reason);
+    assert_cache_gone_and_reported(&fx, &job, &ui);
+}
+
+#[test]
+fn a_rejected_job_deletes_its_build_cache_and_reports_the_space() {
+    let fx = Fixture::new();
+    let mut scenario = Scenario::default();
+    scenario.verdict = failing_verdict("the greeting is missing");
+    let (job, f, ui) = go_with_cache(&fx, scenario);
+    assert_eq!(f.state, OutcomeState::Rejected);
+    assert_cache_gone_and_reported(&fx, &job, &ui);
+}
+
+#[test]
+fn a_failed_job_deletes_its_build_cache_and_reports_the_space() {
+    let fx = Fixture::new();
+    let (job, f, ui) = go_with_script(&fx, killed_producer());
+    assert_eq!(f.state, OutcomeState::Failed);
+    assert_cache_gone_and_reported(&fx, &job, &ui);
+}
+
+/// A scenario whose local edit during verification blocks the landing.
+fn blocking_scenario(root: PathBuf) -> Scenario {
+    let mut scenario = Scenario::default();
+    scenario.during_verification = Some(Arc::new(move || {
+        std::fs::write(root.join("README.md"), "# Demo\n\nmy own local edit\n").unwrap();
+    }));
+    scenario
+}
+
+#[test]
+fn a_blocked_job_keeps_its_directory_until_it_is_closed_and_closing_reports_the_exact_space() {
+    let fx = Fixture::new();
+    let (job, f, ui) = go_with_cache(&fx, blocking_scenario(fx.root().to_path_buf()));
+    assert_eq!(f.state, OutcomeState::Blocked, "{}", f.reason);
+    let dir = job_dir_of(&fx, &job);
+    assert!(
+        dir.join("target/debug/big").exists(),
+        "a blocked job keeps its build cache"
+    );
+    assert!(
+        !said(&ui).iter().any(|l| l.contains("reclaimed")),
+        "{:?}",
+        said(&ui)
+    );
+
+    // Closing it abandons it and deletes the directory; the figure is what the directory occupied.
+    let athena = fx.athena(Scenario::default().script());
+    let expected = occupied(&dir);
+    assert!(expected >= PLANTED as u64);
+    let ui = Lines::default();
+    let closed = athena
+        .close(job.as_str(), "not going to resolve the edit", &ui)
+        .unwrap();
+    assert_eq!(closed.state, OutcomeState::Abandoned);
+    assert!(!dir.exists());
+    assert_eq!(
+        reclaimed(&said(&ui)),
+        athena_core::state::format_bytes(expected)
+    );
+}
+
+#[test]
+fn closing_an_interrupted_job_deletes_its_build_cache_and_reports_the_exact_space() {
+    let fx = Fixture::new();
+    let athena = fx.athena(Scenario::default().script());
+    let proposal = athena.ask("add a greeting", &Lines::default()).unwrap();
+    let job = proposal.job.to_string();
+    athena
+        .go(&job, AcceptedBy::User, &Lines::default())
+        .unwrap();
+    // Cut the history back to just before the closing commit, as after a restart mid-run.
+    for _ in 0..6 {
+        let records = athena_core::store::Records::load(&fx.git, &fx.head()).unwrap();
+        if records.jobs[&job].state() == athena_core::store::JobState::Dispatched {
+            break;
+        }
+        fx.git.run(["reset", "-q", "--hard", "HEAD~1"]).unwrap();
+    }
+    let dir = job_dir_of(&fx, &proposal.job);
+    plant_cache(&dir);
+    let expected = occupied(&dir);
+    assert!(expected >= PLANTED as u64);
+    let ui = Lines::default();
+    let closed = athena.close(&job, "interrupted", &ui).unwrap();
+    assert_eq!(closed.state, OutcomeState::Abandoned);
+    assert!(!dir.exists());
+    assert_eq!(
+        reclaimed(&said(&ui)),
+        athena_core::state::format_bytes(expected)
+    );
+}
+
+#[test]
+fn closing_a_dropped_proposal_with_nothing_but_a_lock_reports_its_small_size_and_no_warning() {
+    let fx = Fixture::new();
+    let athena = fx.athena(Scenario::default().script());
+    let proposal = athena.ask("add a greeting", &Lines::default()).unwrap();
+    let dir = job_dir_of(&fx, &proposal.job);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("job.lock"), b"").unwrap();
+    let expected = occupied(&dir);
+    let ui = Lines::default();
+    athena.close(proposal.job.as_str(), "no", &ui).unwrap();
+    assert!(!dir.exists());
+    assert_eq!(
+        reclaimed(&said(&ui)),
+        athena_core::state::format_bytes(expected)
+    );
+    assert!(!said(&ui).iter().any(|l| l.contains("warning")));
+}
+
+#[test]
+fn a_directory_that_cannot_be_removed_gives_a_warning_naming_it_and_the_close_still_succeeds() {
+    let fx = Fixture::new();
+    let mut athena = fx.athena(Scenario::default().script());
+    athena.state = athena.state.clone().with_remover(|_| {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "injected failure",
+        ))
+    });
+    let proposal = athena.ask("add a greeting", &Lines::default()).unwrap();
+    let dir = job_dir_of(&fx, &proposal.job);
+    plant_cache(&dir);
+    let ui = Lines::default();
+    let closed = athena.close(proposal.job.as_str(), "no", &ui).unwrap();
+    assert_eq!(closed.state, OutcomeState::Dropped);
+    let lines = said(&ui);
+    let warning = lines
+        .iter()
+        .find(|l| l.starts_with("warning"))
+        .unwrap_or_else(|| panic!("a warning: {lines:?}"));
+    assert!(warning.contains(&dir.display().to_string()), "{warning}");
+    assert!(warning.contains("injected failure"), "{warning}");
+    assert!(
+        !lines.iter().any(|l| l.contains("reclaimed")),
+        "no space is claimed: {lines:?}"
+    );
+    assert!(dir.join("target/debug/big").exists());
+
+    // Control: the default remover removes the same directory without complaint.
+    let default = athena_core::state::StateDir::new(fx.state.path().join("repo"));
+    let report = default.clean_job(&proposal.job);
+    assert_eq!(report.error, None);
+    assert!(report.bytes >= PLANTED as u64);
+    assert!(!dir.exists());
+}
+
+#[test]
+fn a_close_that_fails_to_commit_keeps_the_job_directory_and_claims_nothing() {
+    let fx = Fixture::new();
+    let athena = fx.athena(killed_producer());
+    let (job, _path) = interrupted_job_with_legacy_record(&fx, &athena);
+    let dir = job_dir_of(&fx, &job);
+    plant_cache(&dir);
+    let ui = Lines::default();
+    let error = athena.close(job.as_str(), "stuck", &ui).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("usage records reconcile"),
+        "{error:#}"
+    );
+    assert!(dir.join("target/debug/big").exists(), "nothing was removed");
+    assert!(
+        !said(&ui).iter().any(|l| l.contains("reclaimed")),
+        "{:?}",
+        said(&ui)
+    );
 }

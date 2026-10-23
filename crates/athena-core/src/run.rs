@@ -2273,7 +2273,7 @@ impl Athena {
             .into_inner()
             .expect("a committed closing has a score");
         ctx.ui.line(&format!("{:<10} {reason}", state.as_str()));
-        self.state.clean_job(&id);
+        crate::state::report_clean(ctx.ui, &self.state.clean_job(&id));
         Ok(GoResult::Finished(Box::new(Finished {
             job: id,
             state,
@@ -2448,7 +2448,7 @@ impl Athena {
             other => ctx.ui.line(&format!("{:<10} {reason}", other.as_str())),
         }
         if state != OutcomeState::Blocked {
-            self.state.clean_job(&id);
+            crate::state::report_clean(ctx.ui, &self.state.clean_job(&id));
         }
         Ok(GoResult::Finished(Box::new(Finished {
             job: id,
@@ -2565,7 +2565,7 @@ impl Athena {
                                 reading.title,
                                 branch_suffix(self)
                             ));
-                            self.state.clean_job(&id);
+                            crate::state::report_clean(ui, &self.state.clean_job(&id));
                             return Ok(Finished {
                                 job: id,
                                 state: OutcomeState::Landed,

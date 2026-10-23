@@ -1,0 +1,192 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261023-181804-j42y",
+  "round": 1,
+  "at": "2026-10-23T19:43:17.590668991Z",
+  "invocation_seq": 2,
+  "approach": "Fault: StateDir::clean_job (state.rs) discards both the removal error and the size, so cleanup is silent and unmeasurable. Change it to return a CleanReport {bytes, error}; measure the tree size before pin::remove_tree. Add one helper (in state.rs) that each of the five call sites uses after its closing commit succeeds: it calls clean_job and emits a ui line 'reclaimed 11.4 GB' (human units) or 'warning: could not remove <path>: <err>'. Nothing to remove prints nothing and is not a failure. Call sites: manage.rs 135 (closed while blocked) and 224 (dropped/declined/interrupted-abandoned), run.rs 2276, 2451 (non-blocked only) and 2568 (retry landing). Cleanup stays after the commit, so running or blocked jobs keep their directory. Shared CARGO_TARGET_DIR is not adopted; the evidence goes in docs/decisions.md and athena.toml is left as is.",
+  "decisions": [
+    {
+      "choice": "Keep per-job target directories; delete them on close and report bytes reclaimed.",
+      "reason": "Review 2 R14 showed a shared target dir ran another job's stale test binaries; per-job isolation (D46) is what the checks need. Deleting on close removes the disk growth without weakening checks.",
+      "rejected": [
+        {
+          "option": "One shared CARGO_TARGET_DIR across jobs",
+          "why": "Reuses another job's stale test binaries (R14); out of scope; concurrent jobs would also contend for the cargo build lock."
+        },
+        {
+          "option": "Sweep that deletes caches of already-closed historical jobs",
+          "why": "Operational action on this machine, out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "clean_job returns a report (bytes, optional error with path) and the caller prints one ui line.",
+      "reason": "One place measures and formats, so all closing paths report the same way; errors surface as a warning naming the path instead of being swallowed. The closing itself still succeeds, since the commit is already made.",
+      "rejected": [
+        {
+          "option": "Make removal failure fail the close",
+          "why": "The records are already committed; failing would make the job look unclosed."
+        },
+        {
+          "option": "Add a reclaimed field to Closed/Finished structs",
+          "why": "Wider change across consumers; a ui line meets the criterion."
+        }
+      ]
+    },
+    {
+      "choice": "Human-unit formatting helper (decimal GB/MB/KB, one decimal) placed with the cleanup helper in state.rs, with display.rs only needing to render the line if the CLI's Ui wrapper formats lines.",
+      "reason": "No existing byte formatter was found in the crates (grep), so add a small tested one.",
+      "rejected": [
+        {
+          "option": "Pull in a crate for byte formatting",
+          "why": "Needless dependency; a lockfile change."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/state.rs",
+      "action": "modify",
+      "purpose": "clean_job returns CleanReport (size via tree walk, error with path); reporting helper and byte formatter, with unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/manage.rs",
+      "action": "modify",
+      "purpose": "Use the report helper at the blocked-close and normal close paths.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "purpose": "Use the report helper at the three go-path call sites, keeping the blocked exception.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "purpose": "Only if closing lines are styled there: render the reclaimed and warning lines.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "purpose": "End-to-end tests for each closing path, removal failure, and kept dirs.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Record shared target directory question, alternatives, R14 evidence, decision.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Entry for build cache deletion and space reclaimed.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "README.md",
+      "action": "modify",
+      "purpose": "One-line note that closing deletes the job's build cache.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/pin.rs",
+      "action": "modify",
+      "purpose": "Only if needed: remove_tree gets a testable error path; otherwise untouched.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Change StateDir::clean_job to compute bytes (size walk) then call pin::remove_tree, returning CleanReport; add format_bytes and a report-to-ui helper; unit-test them.",
+    "Replace the five clean_job call sites in manage.rs and run.rs with the helper, keeping each after its commit and keeping the Blocked exception.",
+    "Adjust display.rs if closing lines are formatted there.",
+    "Add lifecycle.rs tests per closing path, removal failure (verified to succeed without injection as root) and kept-dir cases; fix any exact-output tests.",
+    "Write the decisions.md entry, CHANGELOG entry and README note; leave athena.toml unchanged.",
+    "Run cargo fmt, clippy -D warnings, test."
+  ],
+  "risks": [
+    {
+      "risk": "Size walk is slow or miscounts symlinks/hard links on 12 GB trees.",
+      "mitigation": "Walk without following symlinks (symlink_metadata) and count file lengths; tests plant plain files."
+    },
+    {
+      "risk": "A warning-only failure leaves a 12 GB directory.",
+      "mitigation": "Cleanup is best-effort and only warns; the commit is already made."
+    },
+    {
+      "risk": "Existing tests that match exact closing output break.",
+      "mitigation": "Add a 'reclaimed' line only when bytes > 0, and update tests asserting exact output lines."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "New tests in lifecycle.rs (and a unit test in state.rs) plant a target/ tree of known byte size in the job dir, close via landed, failed, rejected, abandoned, interrupted then `athena close`, and closed while blocked, then assert the dir is gone and the reclaimed count equals the planted size.",
+      "command": "cargo test --locked",
+      "observes": "All pass; job_dir absent and bytes equal the planted size for each path.",
+      "fails_without": "If clean_job did not measure or if any path skipped cleanup, the directory would remain or the reported count would be 0 and the assertions would fail."
+    },
+    {
+      "criterion": 2,
+      "method": "Tests capture the ui lines and assert one contains 'reclaimed 11.4 GB' for a planted ~11.4 GB sparse or scaled size via the formatter unit test, plus a no-cache job producing no warning/failure.",
+      "command": "cargo test --locked",
+      "observes": "Line text matches; no failure text when nothing to remove.",
+      "fails_without": "Without the formatted line the output assertion fails; with an empty job dir the test would show a spurious failure line."
+    },
+    {
+      "criterion": 3,
+      "method": "Test makes removal fail (job dir path replaced so remove_tree errors, e.g. a path whose parent is not removable, run as root, so use an immutable or non-directory injection such as a regular file at a path that read_dir fails on). First show the same removal succeeds without the injection, then assert the warning names the path and the close still returns Ok.",
+      "command": "cargo test --locked",
+      "observes": "Warning line contains the job directory path.",
+      "fails_without": "With errors swallowed, no warning line is emitted and the test fails."
+    },
+    {
+      "criterion": 4,
+      "method": "Tests: a blocked job after go (state Blocked) still has its job dir; a close whose commit is forced to fail (gate violation) leaves the dir intact.",
+      "command": "cargo test --locked",
+      "observes": "Directory exists and no 'reclaimed' line.",
+      "fails_without": "If cleanup ran before or regardless of commit success, the dir would be gone after a failed commit or while blocked."
+    },
+    {
+      "criterion": 5,
+      "method": "Inspect the diff: a new decision entry with alternatives, citing athena-v0-review-2.md R14, and the decision not to share; athena.toml has no diff.",
+      "command": "git diff -- docs/decisions.md athena.toml",
+      "observes": "Entry present with the evidence and decision; athena.toml unchanged.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Run the three checks in turn: cargo fmt --all --check, cargo clippy --all-targets --locked -- -D warnings, cargo test --locked.",
+      "command": "cargo fmt --all --check",
+      "observes": "All exit 0.",
+      "fails_without": "Unformatted or lint-failing code would fail these."
+    },
+    {
+      "criterion": 7,
+      "method": "Inspect the diff for a CHANGELOG entry stating that closing a job deletes its build cache and reports space reclaimed (and a README note).",
+      "command": "git diff -- CHANGELOG.md README.md",
+      "observes": "Entry present under the unreleased heading.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Does the interrupted-job close path ever have the job dir locked or a running cargo? close_with checks the registry, so assumed safe.",
+    "Whether display.rs needs changes depends on how Ui lines are rendered; not read.",
+    "How to inject a removal failure when tests run as root (mode bits do not block root); producer must pick a method that truly fails as root and show it succeeds without the injection."
+  ],
+  "producer_section_sha256": "13036098ea76ef824dd14a10db1d05a6c4f7749a662b88b47d4897c90e2f5509"
+}

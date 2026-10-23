@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261023-181804-j42y",
+  "round": 1,
+  "at": "2026-10-23T19:44:27.650219733Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The plan says the reported count will equal the planted target/ size, but clean_job removes the whole job directory, and that directory holds much more than target/.",
+      "evidence": "I read the code. clean_job calls remove_tree on job_dir, not on target/ (state.rs:115). The job directory also holds plan-N and read-N snapshots (run.rs:459, reading.rs:247), job.lock (state.rs:76), live/ records, usage/ and pr-link.json. On every go path, and on close of a dispatched job, the reported bytes will be larger than the planted target/ size. The planned equality assertion would then fail. The other way out is to weaken it until it is circular, for example computing the expected value with the same size function under test. The plan also does not say how a target/ tree gets planted on the go paths (landed, failed, rejected), where the job directory is created mid-run. Fix: Pick one of two fixes and state it. (a) The test measures the whole job directory with its own independent walk just before closing, and asserts that the reported bytes equal that number and are at least the planted size. (b) Report the target/ size separately from the whole directory. Also say how each go-path test plants target/: for example, the fake producer writes it, or the test plants it after dispatch and before the closing commit.",
+      "location": "Plan › Demonstrations › Criterion 1; crates/athena-core/src/run.rs:459, 572, 1295; reading.rs:247; state.rs:76",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Summing file lengths overstates the space reclaimed on real cargo target directories.",
+      "evidence": "Cargo hard-links final artifacts (target/debug/<bin> and target/debug/deps/<bin>-<hash>), so summing len() counts them twice. Sparse or partially written files make apparent length differ from blocks actually freed. The plan's mitigation covers only symlinks, and its tests plant plain files, so the tests would not catch this. The criterion is about space reclaimed. Fix: Count allocated bytes (st_blocks*512 via MetadataExt) and count each (dev, ino) only once. Add a unit test with a hard-linked pair that asserts the pair is counted once.",
+      "location": "Plan › Risks (size walk) and Decision 2; state.rs clean_job",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The method for making removal fail as root is left open and described in a muddled way.",
+      "evidence": "remove_tree calls unlock_dir, which clears the immutable flag on the top directory only, and make_writable restores write bits. So mode bits cannot block removal, and neither can +i on the job directory itself. Two things do make it fail for root: a regular file sitting at the job-directory path (remove_dir_all returns ENOTDIR), or chattr +i on a nested file. The plan lists both vaguely and leaves the choice as an open question. Fix: Name one method. Either chattr +i on a file nested inside the job directory, with the test failing rather than skipping if chattr is unsupported, or a regular file at the job-directory path. Show the same setup without the injection removes cleanly, then assert the warning names the path and close returns Ok. Clear the flag in test teardown.",
+      "location": "Plan › Demonstrations › Criterion 3; crates/athena-core/src/pin.rs:221-229; athena-git/src/snapshot.rs:254",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The criterion 2 demonstration mixes the formatter unit test with an end-to-end check, so it is unclear what proves the closing line itself.",
+      "evidence": "The text reads 'a planted ~11.4 GB sparse or scaled size via the formatter unit test'. A sparse file conflicts with counting by allocated blocks, and a formatter unit test alone does not show that the closing line printed by athena go or athena close contains the text. Fix: Split it into two checks. (1) A format_bytes unit test: 11_400_000_000 renders as '11.4 GB'. (2) A lifecycle test that captures the ui output of both a close and a go and asserts a line containing 'reclaimed ' followed by the formatted measured size. Assert that a job with nothing to remove produces no 'warning' line.",
+      "location": "Plan › Demonstrations › Criterion 2",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Two files are listed as conditional ('only if needed'), which leaves the producer guessing.",
+      "evidence": "display.rs was 'not read'. In the code I read, closing lines are emitted through ui.line in core (manage.rs:136, 225; run.rs:2275, 2439-2448, 2562), so the CLI probably needs no change. Fix: Read how the CLI implements Ui and decide now. Most likely there is no display.rs change, and the new lines go through ui.line next to the existing closing line.",
+      "location": "Plan › Files: pin.rs, display.rs; Open questions",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the code the plan cites. It matches the snapshot: clean_job at state.rs:113 swallows the error from pin::remove_tree, and the five call sites the plan names exist (manage.rs:135 and 224; run.rs:2276, 2451 with the Blocked exception, and 2568). Each runs after its closing commit. The early failure paths feed close_dispatched, so I found no other closing path. The design fits the accepted reading and is one focused change: clean_job returns a report, one shared helper prints 'reclaimed X' or a warning naming the path, and the shared target directory is recorded as a decision and not adopted. Its main flaw is the criterion 1 demonstration. clean_job removes the whole job directory, which also holds snapshots, locks and records, so the reported bytes cannot equal the planted target/ size on most paths. The planned assertion would fail or would have to become circular. The plan also does not say how go-path tests plant target/. Smaller issues: summing file lengths double-counts cargo's hard-linked artifacts, and the method for making removal fail as root and the split of the criterion 2 checks are left vague. All of these are fixable, so the verdict is revise."
+}
