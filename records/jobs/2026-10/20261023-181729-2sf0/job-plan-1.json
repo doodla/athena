@@ -1,0 +1,189 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261023-181729-2sf0",
+  "round": 1,
+  "at": "2026-10-23T18:19:44.216595803Z",
+  "invocation_seq": 2,
+  "approach": "The fault is in `gh::land_pr`. It treats the job's own landing commit as the pull request's head: it judges the checks of `link.head`, which is the stored or job commit. It also force-replaces a different remote head with the job's commit via `replace_head`. Fix: after the merge observation, for an open PR, read the PR branch's current head from the remote (`Remote::remote_head`). Delete `replace_head` and `Remote::replace`, so nothing can overwrite a newer head. Set `link.head` to the observed head. If the head equals the job's landing commit, wait for checks on it and merge with it as the guard (the existing `host.merge(number, &link.head, ..)`). If it differs, judge that head's checks with one look (never the old commit's), do not merge, and return an error. The error names the head, each extra commit (short sha and subject, from a new `Remote::commits_after(landed, head)`), and why: until the records-history build (D111), a squash of a landing plus any later commit is not a valid landing, and that holds for a declared intervention too. Then add tests, a README section and a CHANGELOG entry.",
+  "decisions": [
+    {
+      "choice": "Refuse with an `Err` carrying the head's check state in its text, rather than a new PrReport field.",
+      "reason": "It keeps the change small: PrReport, display.rs and the exit-code logic are untouched, and the existing error path prints the message and exits nonzero. The one look at the head's checks makes the message say whether the head is green, so the maintainer sees the old commit's red is not what is blocking.",
+      "rejected": [
+        {
+          "option": "Add `refusal: Option<String>` to PrReport and teach display.rs and main.rs to print it.",
+          "why": "It touches more files and every PrReport constructor, for no behavior gain."
+        },
+        {
+          "option": "Refuse before reading any checks.",
+          "why": "Criterion 1 needs land to judge the head's checks, not the old commit's."
+        }
+      ]
+    },
+    {
+      "choice": "Read the PR's current head from the remote branch with `Remote::remote_head` instead of adding a PrHost method.",
+      "reason": "The PR head ref is the job's work branch, and `remote_head` already exists with fakes. No new host API call or JSON parsing is needed. The merge request's `sha` still guards against a push between the read and the merge.",
+      "rejected": [
+        {
+          "option": "New `PrHost::pr_head` over `GET pulls/N`.",
+          "why": "Adds a REST call and a trait method on every fake, and gives the same value."
+        }
+      ]
+    },
+    {
+      "choice": "Remove `replace_head` and `Remote::replace` outright.",
+      "reason": "The request says never to force-replace a newer head. Deleting the capability makes that structural, and a test fake with no `replace` proves it at compile time. `publish` keeps its fast-forward-only `check_push`.",
+      "rejected": [
+        {
+          "option": "Keep `replace` but skip it when the head is newer.",
+          "why": "It leaves a path that can overwrite a head with the job's older commit."
+        }
+      ]
+    },
+    {
+      "choice": "Add `Remote::commits_after(landed, head)`, implemented on GitRemote by fetching the head with `git.ensure_commit(name, head)` and then `git log --reverse --format='%H %s' landed..head`.",
+      "reason": "The head may not be in the local object store, and GitRemote has the remote name for the fetch. When the list is empty (the head is older than or equal to the landing), the message names the head itself.",
+      "rejected": [
+        {
+          "option": "Put it on `Ancestry`.",
+          "why": "Ancestry has no remote name, so it cannot fetch an unknown head."
+        }
+      ]
+    },
+    {
+      "choice": "The refusal applies to any head other than the job's landing commit, with no exception for a declared intervention.",
+      "reason": "This is what the request states. The reason text mentions both the squash rule and D111.",
+      "rejected": [
+        {
+          "option": "Allow a head that is a descendant of the landing, or one with an intervention record.",
+          "why": "That is the squash-of-landing-plus-later-commit case that broke the history check (02837e0)."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "action": "modify",
+      "purpose": "Core fix. In `land_pr`, read the remote head, drop `replace_head` and `Remote::replace`, add `Remote::commits_after` (GitRemote impl, using `ensure_commit`). Judge and merge-guard the observed head, and refuse with a message naming each extra commit and the D111 reason. Update the doc comments. Rework the FakeRemote tests, replace the replace-path tests with new ones, and make FakeRemote.push update its head.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/external_calls.rs",
+      "action": "modify",
+      "purpose": "Its test Remote impl must drop `replace`, add `commits_after`, and report the pushed head so the integration flow still compiles and passes.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "purpose": "Only if the land --pr help text or error handling mentions replacing the head; update the wording so the refusal is shown and exits nonzero. Otherwise no change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "README.md",
+      "action": "modify",
+      "purpose": "Document the land --pr behavior: judges and guards the PR's current head, never replaces a newer head, and the D111 interim refusal.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Record the change in the unreleased section, naming PR #149 and the D111 interim refusal.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/land.rs",
+      "action": "modify",
+      "purpose": "Likely no change: this module is the local landing decision, not the PR flow. Listed only because the brief lists it. Touch it only for a doc note if needed.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-gate/src/landing_tests.rs",
+      "action": "modify",
+      "purpose": "Likely no change. If wanted, add one test pinning that a squash of the landing plus a later commit is the case D111 will handle. Not needed for any criterion.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read the CHANGELOG head and the README land section for format. In gh.rs, replace the `Remote::replace` trait method and its GitRemote impl with `commits_after(&self, landed, head) -> Result<Vec<(String, String)>>`. The GitRemote impl runs `ensure_commit(name, head)` and then `git log --reverse --format=%H %s landed..head`.",
+    "Rewrite the middle of `land_pr`. After `observe_merge`, if the link is Open: `head = job.remote.remote_head(job.branch)?`, with a bail if it is None. Set `link.head = head` and store the link. If `head != job.commit`, take one look at `job.host.checks(&head)`, build the refusal text, store the link, and return Err. Otherwise `wait_for_checks(job, &head)` and `host.merge(link.pr_number, &head, ..)`. Delete `replace_head` and its `check_replace` and `ReplaceRequest` imports if unused.",
+    "Write a helper `refusal_text(number, landed, head, checks, extras)` that lists each extra commit as `<sha12> <subject>`, followed by the reason: a squash of a landing plus a later commit is not a valid landing until the records-history build (D111) lands, declared interventions included. Name the head itself when `extras` is empty.",
+    "Update the gh.rs tests. FakeRemote.head becomes a RefCell updated by `push`. Delete the replace-path tests (`a_rerun_replaces_a_bare_candidate_head...`, `an_ancestry_error_on_the_replace_path...`, `a_remote_head_unknown_locally...`, `the_replace_path_is_refused...`, `the_replacement_is_atomic...`, and `Racy`). Keep `a_rerun_at_the_same_commit_pushes_nothing`. Add the three new groups: `land_pr_judges_*`, `land_pr_guards_*`, `land_pr_refuses_*`. Give FakeHost per-commit check results and have merge record its head argument.",
+    "Update the test Remote impl in crates/athena-cli/tests/external_calls.rs. Check main.rs and display.rs for wording that mentions replacing the head.",
+    "Add the README paragraph and the CHANGELOG entry, then run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`."
+  ],
+  "risks": [
+    {
+      "risk": "A pull request opened earlier with a bare candidate head now gets refused instead of fixed up.",
+      "mitigation": "This matches the request (refuse for anything but the landing commit). The message names the head, and the docs say how to proceed."
+    },
+    {
+      "risk": "`commits_after` fails when the head is not fetchable, which hides the refusal.",
+      "mitigation": "Fall back to naming the head alone if the listing fails. Still refuse and never push."
+    },
+    {
+      "risk": "Removing `Remote::replace` breaks other implementers.",
+      "mitigation": "The only implementers are GitRemote, the gh.rs test fakes and external_calls.rs. All are updated, and clippy and test run over the workspace."
+    },
+    {
+      "risk": "`check_replace`, `ReplaceRequest` and `Git::push_if_remote_at` become unused.",
+      "mitigation": "They are pub, so there is no lint. Leave them and name them as follow-up cleanup, to keep this change focused."
+    },
+    {
+      "risk": "The host's `sha` guard on merge is bypassed if a stale head is passed.",
+      "mitigation": "Only the head just read from the remote is passed, and the test asserts the recorded merge head."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit tests in gh.rs using the existing Rig/FakeHost. FakeHost gives different Checks per commit (landing commit red, other head green) and records every commit passed to `checks`. FakeRemote reports a head different from the landing commit. A second case has the head equal to the landing commit and merge_via_rest on.",
+      "command": "cargo test -p athena-core land_pr_judges",
+      "observes": "Differing head: the error text says the head's checks are green and does not mention a red or old-commit failure, and the `checks` log holds only the head sha, never the landing sha. Equal head: the report has `merge_requested` true and the host merge call is recorded.",
+      "fails_without": "The old code takes `link.head` as the job's commit (it force-replaces first), so the checks log would hold the landing sha and the red result would be reported. The old code would never refuse, so the differing-head test would fail."
+    },
+    {
+      "criterion": 2,
+      "method": "Unit test in gh.rs. FakeHost.merge records its `head` argument. FakeRemote has no `replace`, and its `push` calls are recorded. Run once with the head equal to the landing commit, and once with a newer head.",
+      "command": "cargo test -p athena-core land_pr_guards",
+      "observes": "The recorded merge head equals the remote's current head sha (distinct from any stored value). With a newer remote head there are no pushes after the first publish, no merge call, and `link.head` stored is the newer head, never the job's commit.",
+      "fails_without": "The old flow called replace/push to put the job's commit over the newer head and merged with the job's commit."
+    },
+    {
+      "criterion": 3,
+      "method": "Unit test in gh.rs with a real temporary git repo and a bare remote through GitRemote. The job's landing L has later commits X and Y on the PR branch, where Y's message declares an Athena intervention. Land with merge_via_rest true. A second case uses a head older than L.",
+      "command": "cargo test -p athena-core land_pr_refuses",
+      "observes": "`land_pr` returns Err. The message contains the short sha and subject of X and Y, the text 'records-history build (D111)', and says a declared intervention does not change it. No merge is requested and the remote branch is unchanged. For the older head, the message names the head itself.",
+      "fails_without": "Without the refusal, the old code would replace the head or merge it, and the test's Err assertion would fail."
+    },
+    {
+      "criterion": 4,
+      "method": "Read the docs and search for the new text.",
+      "command": "git diff -- README.md CHANGELOG.md",
+      "observes": "README has a land --pr paragraph saying it judges and guards the PR's current head, never replaces a newer head, and refuses any head other than the landing commit until D111, naming the extra commits. CHANGELOG has an entry under the unreleased section recording the change.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "Run the project checks.",
+      "command": "cargo fmt --all --check",
+      "observes": "No diff. Then `cargo clippy --all-targets --locked -- -D warnings` is clean, and `cargo test --locked` passes. The pre-existing reading_inputs_digest failure is noted if it persists.",
+      "fails_without": "A leftover use of the removed `replace`, an unused import, or a missed test impl of the changed Remote trait (such as crates/athena-cli/tests/external_calls.rs) would fail to compile or lint."
+    }
+  ],
+  "open_questions": [
+    "I did not read `Athena::land_pr` error printing in main.rs. If a plain Err is not shown clearly or does not exit nonzero, main.rs needs a small change; that would also explain why it is a listed deliverable.",
+    "land.rs and landing_tests.rs (athena-gate) concern the local landing decision and the history check, not the PR flow. I plan no change to them; confirm no D111 test is wanted there.",
+    "Whether the PR head should be read from the remote branch or from the host's pulls API. I chose the remote branch because the job's PR head ref is its own work branch.",
+    "check_replace/ReplaceRequest in pr.rs become dead after this change. Remove them in a follow-up?"
+  ],
+  "producer_section_sha256": "4630c1e2a016d1f00783b15d2354381d73e3c684e8948f969d1e6143b85c2821"
+}

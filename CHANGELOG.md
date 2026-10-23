@@ -37,6 +37,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- `athena land --pr` now judges the checks of the pull request's current head and guards the merge with
+  that head. Before, it judged the job's own commit and force-replaced a different remote head with it, so
+  after a fix was pushed to PR #149 (job 20261018-145008-k7fq) land kept reporting the old commit's failure
+  though the new head was green. The replace path is removed: nothing can overwrite a newer head. Until the
+  records-history build (D111) lands, a squash of a landing plus any later commit is not a valid landing
+  (squash 02837e0 broke the history check), so land refuses when the head is anything other than the job's
+  landing commit, declared intervention or not. The refusal names the head's check state, each extra commit
+  and why, merges nothing and exits nonzero.
+
 - When one check fails, the verifier now still runs, so every acceptance criterion gets its own result in the
   verification record instead of none. The final verdict still fails on that check.
 

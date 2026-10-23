@@ -11,8 +11,8 @@
 //! fingerprint, and `merged-unverified` otherwise. The merged commit is never found by reading trailers.
 
 use crate::pr::{
-    Ancestry, Content, GitContent, Host, LinkState, PrLink, PushRequest, ReplaceRequest,
-    check_push, check_replace, load_link, observe_merge, store_link,
+    Ancestry, Content, GitContent, Host, LinkState, PrLink, PushRequest, check_push, load_link,
+    observe_merge, store_link,
 };
 use crate::state::StateDir;
 use crate::{Athena, Ui};
@@ -561,9 +561,9 @@ pub trait Remote {
     fn remote_head(&self, branch: &str) -> Result<Option<String>>;
     /// A regular push of `commit` to `branch`. There is no force option.
     fn push(&self, branch: &str, commit: &str) -> Result<()>;
-    /// Replaces `branch` with `commit` in one atomic push that succeeds only if the remote branch still holds
-    /// `expected`. If the remote moved since `expected` was read, the push fails and the remote is unchanged.
-    fn replace(&self, branch: &str, commit: &str, expected: &str) -> Result<()>;
+    /// The commits after `landed` up to `head`, oldest first, as (full sha, subject). Empty when `head` is
+    /// `landed` or does not descend from it. There is deliberately no way to replace a remote head.
+    fn commits_after(&self, landed: &str, head: &str) -> Result<Vec<(String, String)>>;
 }
 
 /// [`Remote`] over a named git remote.
@@ -594,10 +594,22 @@ impl Remote for GitRemote<'_> {
         Ok(())
     }
 
-    fn replace(&self, branch: &str, commit: &str, expected: &str) -> Result<()> {
-        Ok(self
-            .git
-            .push_if_remote_at(self.name, branch, commit, expected)?)
+    fn commits_after(&self, landed: &str, head: &str) -> Result<Vec<(String, String)>> {
+        self.git.ensure_commit(self.name, head)?;
+        let listing = self.git.run([
+            "log",
+            "--reverse",
+            "--format=%H %s",
+            &format!("{landed}..{head}"),
+        ])?;
+        Ok(listing
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| match l.split_once(' ') {
+                Some((sha, subject)) => (sha.to_string(), subject.to_string()),
+                None => (l.to_string(), String::new()),
+            })
+            .collect())
     }
 }
 
@@ -1294,8 +1306,26 @@ pub fn land_pr(job: &LandPr) -> Result<PrReport> {
     let mut reruns = 0;
     let mut failing_test = None;
     observe_merge(job.host, job.content, &mut link, job.verified_fingerprint)?;
-    if link.state == LinkState::Open && link.head != job.commit {
-        replace_head(job, &mut link)?;
+    if link.state == LinkState::Open {
+        // The pull request's head is whatever its branch holds now, not the job's commit: a fix may have
+        // been pushed since. Everything below judges and guards that head, and nothing replaces it.
+        let Some(head) = job.remote.remote_head(job.branch)? else {
+            bail!(
+                "the pull request's branch {} is not on the remote, so its head cannot be judged",
+                job.branch
+            );
+        };
+        link.head = head.clone();
+        store_link(job.state, job.job, &link)?;
+        if head != job.commit {
+            let seen = job.host.checks(&head);
+            let extras = job
+                .remote
+                .commits_after(job.commit, &head)
+                .unwrap_or_default();
+            let text = refusal_text(link.pr_number, job.commit, &head, &seen, &extras);
+            bail!("{text}");
+        }
     }
     if link.state == LinkState::Open {
         let waited = wait_for_checks(job, &link.head)?;
@@ -1349,28 +1379,48 @@ pub fn confirm_existing_merge(
     }))
 }
 
-/// An open pull request whose stored head is not the commit to push: moves the job's own branch to that
-/// commit with one atomic push that is conditional on the remote head just observed, keeps the pull request,
-/// and updates the stored head. A remote head that is missing, unknown locally, or whose ancestry check fails
-/// is an error and nothing is pushed.
-fn replace_head(job: &LandPr, link: &mut PrLink) -> Result<()> {
-    let allowed = work_branch(job.job);
-    let remote_head = job.remote.remote_head(job.branch)?;
-    check_replace(
-        job.ancestry,
-        &ReplaceRequest {
-            allowed_branch: &allowed,
-            branch: job.branch,
-            local_head: job.commit,
-            remote_head: remote_head.as_deref(),
-        },
-    )?;
-    let expected = remote_head.expect("check_replace accepts only an observed remote head");
-    if expected != job.commit {
-        job.remote.replace(job.branch, job.commit, &expected)?;
+/// The refusal for a pull request whose head is not the job's landing commit. It names the head, how its
+/// checks stand (one look, so the old commit's result is never what is reported), each extra commit, and why
+/// the head is refused. Nothing is merged or pushed.
+fn refusal_text(
+    number: u64,
+    landed: &str,
+    head: &str,
+    checks: &Result<Checks>,
+    extras: &[(String, String)],
+) -> String {
+    let short = |sha: &str| sha.chars().take(12).collect::<String>();
+    let standing = match checks {
+        Ok(Checks::Green) => "green".to_string(),
+        Ok(Checks::Red) => "red".to_string(),
+        Ok(Checks::Pending) => "pending".to_string(),
+        Err(e) => format!("unreadable ({e:#})"),
+    };
+    let mut text = format!(
+        "pull request #{number} is not merged: its current head {} is not the job's landing commit {}. \
+         The checks of that head are {standing}.",
+        short(head),
+        short(landed)
+    );
+    if extras.is_empty() {
+        text.push_str(&format!(
+            "\nRefused head: {} (it adds no commit after the landing commit, so it is older than it or \
+             unrelated to it).",
+            short(head)
+        ));
+    } else {
+        text.push_str("\nExtra commits after the landing commit:");
+        for (sha, subject) in extras {
+            text.push_str(&format!("\n  {} {subject}", short(sha)));
+        }
     }
-    link.head = job.commit.to_string();
-    store_link(job.state, job.job, link)
+    text.push_str(
+        "\nWhy it is refused: until the records-history build (D111) lands, a squash of a job's landing \
+         plus any later commit is not a valid landing (it breaks the history check). This holds for a \
+         declared intervention too. Athena did not merge it and did not replace the head with the job's \
+         commit.",
+    );
+    text
 }
 
 fn publish(job: &LandPr) -> Result<PrLink> {
@@ -1890,28 +1940,25 @@ mod tests {
 
     #[derive(Default)]
     struct FakeRemote {
-        head: Option<String>,
+        /// What the remote branch holds; a push moves it.
+        head: RefCell<Option<String>>,
         pushes: RefCell<Vec<(String, String)>>,
-        /// (branch, commit, expected) of each replacement.
-        replaces: RefCell<Vec<(String, String, String)>>,
+        /// The commits `commits_after` reports.
+        extras: RefCell<Vec<(String, String)>>,
     }
     impl Remote for FakeRemote {
         fn remote_head(&self, _: &str) -> Result<Option<String>> {
-            Ok(self.head.clone())
-        }
-        fn replace(&self, branch: &str, commit: &str, expected: &str) -> Result<()> {
-            self.replaces.borrow_mut().push((
-                branch.to_string(),
-                commit.to_string(),
-                expected.to_string(),
-            ));
-            Ok(())
+            Ok(self.head.borrow().clone())
         }
         fn push(&self, branch: &str, commit: &str) -> Result<()> {
             self.pushes
                 .borrow_mut()
                 .push((branch.to_string(), commit.to_string()));
+            *self.head.borrow_mut() = Some(commit.to_string());
             Ok(())
+        }
+        fn commits_after(&self, _: &str, _: &str) -> Result<Vec<(String, String)>> {
+            Ok(self.extras.borrow().clone())
         }
     }
 
@@ -1944,10 +1991,16 @@ mod tests {
         run_looks_at_rerun: RefCell<Vec<u32>>,
         /// The job log the failing test is read from.
         log: RefCell<String>,
+        /// Checks that depend on the commit asked about; other commits use `script` and `checks`.
+        per_commit: RefCell<BTreeMap<String, Checks>>,
+        /// The head each merge request carried as its guard.
+        merge_heads: RefCell<Vec<String>>,
     }
     impl FakeHost {
         fn new(checks: Checks) -> Self {
             FakeHost {
+                per_commit: RefCell::new(BTreeMap::new()),
+                merge_heads: RefCell::new(vec![]),
                 script: RefCell::new(vec![]),
                 in_progress_looks: Cell::new(0),
                 stale_looks: Cell::new(0),
@@ -1987,6 +2040,9 @@ mod tests {
         fn checks(&self, commit: &str) -> Result<Checks> {
             self.check_reads.set(self.check_reads.get() + 1);
             self.checked.borrow_mut().push(commit.to_string());
+            if let Some(known) = self.per_commit.borrow().get(commit) {
+                return Ok(*known);
+            }
             let mut script = self.script.borrow_mut();
             Ok(if script.is_empty() {
                 self.checks
@@ -2026,8 +2082,9 @@ mod tests {
         fn failing_test(&self, _: u64) -> Result<Option<String>> {
             Ok(failing_test_name(&self.log.borrow()))
         }
-        fn merge(&self, _: u64, _: &str, _: &CommitText) -> Result<()> {
+        fn merge(&self, _: u64, head: &str, _: &CommitText) -> Result<()> {
             self.merges.set(self.merges.get() + 1);
+            self.merge_heads.borrow_mut().push(head.to_string());
             *self.merged.borrow_mut() = Some(self.merge_makes.to_string());
             Ok(())
         }
@@ -2449,7 +2506,6 @@ mod tests {
         assert_eq!(host.asked.borrow().last(), Some(&42));
         // Nothing was pushed or opened, and no merge was requested.
         assert_eq!(rig.remote.pushes.borrow().len(), 1);
-        assert!(rig.remote.replaces.borrow().is_empty());
         assert_eq!(host.opened.get(), 1);
         assert_eq!(host.merges.get(), 0);
     }
@@ -2505,125 +2561,125 @@ mod tests {
             *rig.remote.pushes.borrow(),
             vec![("athena/bootstrap".to_string(), "landed1".to_string())]
         );
-        assert!(rig.remote.replaces.borrow().is_empty());
         assert_eq!(report.link.head, "landed1");
-    }
-
-    #[test]
-    fn a_rerun_replaces_a_bare_candidate_head_with_the_landed_commit_and_reuses_the_pull_request() {
-        let mut rig = Rig::new();
-        let host = FakeHost::new(Checks::Green);
-        rig.run(&host, false, "athena/bootstrap").unwrap();
-        assert_eq!(rig.stored().head, "cand1");
-        // The remote still holds the bare candidate pushed earlier.
-        rig.remote.head = Some("cand1".into());
-        let report = rig
-            .run_with(&host, false, "athena/bootstrap", "landed1", &Anc(false))
-            .unwrap();
-        assert_eq!(
-            *rig.remote.replaces.borrow(),
-            vec![(
-                "athena/bootstrap".to_string(),
-                "landed1".to_string(),
-                "cand1".to_string()
-            )]
-        );
-        assert_eq!(rig.remote.pushes.borrow().len(), 1, "no plain push again");
-        assert_eq!(host.opened.get(), 1, "no second pull request");
-        assert_eq!(report.link.pr_number, 42);
-        assert_eq!(report.link.head, "landed1");
-        assert_eq!(rig.stored().head, "landed1");
-        assert_eq!(*host.checked.borrow().last().unwrap(), "landed1");
     }
 
     #[test]
     fn a_rerun_at_the_same_commit_pushes_nothing() {
-        let mut rig = Rig::new();
+        let rig = Rig::new();
         let host = FakeHost::new(Checks::Green);
         rig.run(&host, false, "athena/bootstrap").unwrap();
-        rig.remote.head = Some("cand1".into());
         rig.run(&host, false, "athena/bootstrap").unwrap();
-        assert!(rig.remote.replaces.borrow().is_empty());
         assert_eq!(rig.remote.pushes.borrow().len(), 1);
     }
 
-    /// Opens a pull request at `cand1`, then reruns for `landed1` and returns the error.
-    fn rerun_error(
-        remote_head: Option<&str>,
-        branch: &str,
-        ancestry: &dyn Ancestry,
-    ) -> (Rig, anyhow::Error) {
-        let mut rig = Rig::new();
+    /// A pull request opened at `cand1`; then a fix `fix1` is pushed to its branch (the job's commit stays
+    /// `cand1`, red, and `fix1` is green). Returns the rig and host.
+    fn pushed_fix() -> (Rig, FakeHost) {
+        let rig = Rig::new();
         let host = FakeHost::new(Checks::Green);
+        host.per_commit
+            .borrow_mut()
+            .insert("cand1".into(), Checks::Red);
+        host.per_commit
+            .borrow_mut()
+            .insert("fix1".into(), Checks::Green);
         rig.run(&host, false, "athena/bootstrap").unwrap();
-        rig.remote.head = remote_head.map(str::to_string);
+        *rig.remote.head.borrow_mut() = Some("fix1".into());
+        *rig.remote.extras.borrow_mut() = vec![("fix1".repeat(10), "Fix the failing test".into())];
+        host.checked.borrow_mut().clear();
+        (rig, host)
+    }
+
+    #[test]
+    fn land_pr_judges_the_current_head_not_the_old_commit() {
+        let (rig, host) = pushed_fix();
+        let reruns_before = host.reruns.get();
         let err = rig
-            .run_with(&host, false, branch, "landed1", ancestry)
-            .unwrap_err();
-        assert_eq!(host.opened.get(), 1);
-        (rig, err)
+            .run(&host, true, "athena/bootstrap")
+            .unwrap_err()
+            .to_string();
+        // Only the head's checks were read, and they are green; the old red is not reported or re-run.
+        assert_eq!(*host.checked.borrow(), vec!["fix1".to_string()]);
+        assert!(err.contains("checks of that head are green"), "{err}");
+        assert!(!err.contains("are red"), "{err}");
+        assert_eq!(host.reruns.get(), reruns_before);
+        assert_eq!(host.merges.get(), 0);
+        assert_eq!(rig.stored().head, "fix1");
     }
 
     #[test]
-    fn an_ancestry_error_on_the_replace_path_pushes_nothing() {
-        struct Broken;
-        impl Ancestry for Broken {
-            fn is_ancestor(&self, _: &str, _: &str) -> Result<bool> {
-                bail!("merge-base blew up")
-            }
-        }
-        let (rig, err) = rerun_error(Some("cand1"), "athena/bootstrap", &Broken);
-        assert!(format!("{err:#}").contains("merge-base blew up"));
-        assert!(rig.remote.replaces.borrow().is_empty());
-        assert_eq!(rig.remote.pushes.borrow().len(), 1);
-        assert_eq!(rig.stored().head, "cand1");
+    fn land_pr_merges_when_the_head_is_the_landing_commit() {
+        let rig = Rig::new();
+        let host = FakeHost::new(Checks::Green);
+        let report = rig.run(&host, true, "athena/bootstrap").unwrap();
+        assert!(report.merge_requested);
+        assert_eq!(host.merges.get(), 1);
+        assert_eq!(report.link.state, LinkState::Landed);
     }
 
     #[test]
-    fn a_remote_head_unknown_locally_pushes_nothing() {
-        let dir = tempfile::tempdir().unwrap();
-        let git = Git::isolated(dir.path());
-        git.run(["init", "-q", "-b", "main"]).unwrap();
-        git.run(["commit", "-q", "--allow-empty", "-m", "base"])
-            .unwrap();
-        let unknown = "0123456789abcdef0123456789abcdef01234567";
-        let (rig, err) = rerun_error(Some(unknown), "athena/bootstrap", &git);
-        assert!(format!("{err:#}").contains(unknown));
-        assert!(rig.remote.replaces.borrow().is_empty());
-        // A remote branch that cannot be read at all is also an error.
-        let (rig, _) = rerun_error(None, "athena/bootstrap", &Anc(true));
-        assert!(rig.remote.replaces.borrow().is_empty());
+    fn land_pr_guards_the_merge_with_the_current_head_and_pushes_nothing_over_a_newer_one() {
+        // Head equals the landing commit: the guard is that head.
+        let rig = Rig::new();
+        let host = FakeHost::new(Checks::Green);
+        rig.run(&host, true, "athena/bootstrap").unwrap();
+        assert_eq!(*host.merge_heads.borrow(), vec!["cand1".to_string()]);
+
+        // A newer head: no merge, and no push of any kind after the first publish.
+        let (rig, host) = pushed_fix();
+        assert!(rig.run(&host, true, "athena/bootstrap").is_err());
+        assert!(host.merge_heads.borrow().is_empty());
+        assert_eq!(
+            *rig.remote.pushes.borrow(),
+            vec![("athena/bootstrap".to_string(), "cand1".to_string())]
+        );
+        assert_eq!(rig.remote.head.borrow().as_deref(), Some("fix1"));
+        assert_eq!(rig.stored().head, "fix1");
     }
 
     #[test]
-    fn the_replace_path_is_refused_for_any_other_branch() {
-        let (rig, err) = rerun_error(Some("cand1"), "main", &Anc(true));
-        assert!(err.downcast_ref::<crate::pr::PushRefusal>().is_some());
-        assert!(rig.remote.replaces.borrow().is_empty());
-        assert_eq!(rig.remote.pushes.borrow().len(), 1);
-    }
+    fn land_pr_refuses_any_other_head_naming_each_extra_commit_and_why() {
+        let (rig, host) = pushed_fix();
+        *rig.remote.extras.borrow_mut() = vec![
+            ("a".repeat(40), "Fix the failing test".into()),
+            ("b".repeat(40), "Declared intervention: hand edit".into()),
+        ];
+        let err = rig
+            .run(&host, true, "athena/bootstrap")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(&format!("{} Fix the failing test", "a".repeat(12))));
+        assert!(err.contains(&format!("{} Declared intervention", "b".repeat(12))));
+        assert!(err.contains("records-history build (D111)"), "{err}");
+        assert!(err.contains("declared intervention too"), "{err}");
+        assert!(err.contains("squash"), "{err}");
+        assert_eq!(host.merges.get(), 0);
 
-    /// A real remote whose branch moves right after Athena reads it.
-    struct Racy<'a> {
-        inner: GitRemote<'a>,
-        moved_to: &'a str,
-    }
-    impl Remote for Racy<'_> {
-        fn remote_head(&self, branch: &str) -> Result<Option<String>> {
-            let seen = self.inner.remote_head(branch)?;
-            self.inner.push(branch, self.moved_to)?;
-            Ok(seen)
-        }
-        fn push(&self, branch: &str, commit: &str) -> Result<()> {
-            self.inner.push(branch, commit)
-        }
-        fn replace(&self, branch: &str, commit: &str, expected: &str) -> Result<()> {
-            self.inner.replace(branch, commit, expected)
-        }
+        // A head the remote cannot list commits for is still refused, and named.
+        *rig.remote.extras.borrow_mut() = vec![];
+        let err = rig
+            .run(&host, true, "athena/bootstrap")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Refused head: fix1"), "{err}");
+        assert_eq!(host.merges.get(), 0);
     }
 
     #[test]
-    fn the_replacement_is_atomic_and_a_remote_that_moved_is_reported_and_left_alone() {
+    fn a_missing_remote_branch_is_an_error_and_nothing_is_merged() {
+        let (rig, host) = pushed_fix();
+        *rig.remote.head.borrow_mut() = None;
+        let err = rig
+            .run(&host, true, "athena/bootstrap")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not on the remote"), "{err}");
+        assert_eq!(host.merges.get(), 0);
+    }
+
+    #[test]
+    fn git_remote_lists_the_commits_after_the_landing_commit() {
         let bare_dir = tempfile::tempdir().unwrap();
         let bare = Git::isolated(bare_dir.path());
         bare.run(["init", "-q", "--bare", "-b", "main"]).unwrap();
@@ -2636,46 +2692,67 @@ mod tests {
             git.run(["commit", "-q", "-m", text]).unwrap();
             git.head().unwrap().unwrap()
         };
-        let base = step("base");
-        let candidate = step("candidate");
-        let moved = step("moved");
-        git.run(["checkout", "-q", "-b", "landed", &base]).unwrap();
         let landed = step("landed");
+        let x = step("extra one");
+        let y = step("extra two");
         git.run(["remote", "add", "origin", bare_dir.path().to_str().unwrap()])
             .unwrap();
-        let branch = "athena/bootstrap";
-        git.run([
-            "push",
-            "-q",
-            "origin",
-            &format!("{candidate}:refs/heads/{branch}"),
-        ])
-        .unwrap();
+        git.run(["push", "-q", "origin", &format!("{y}:refs/heads/work")])
+            .unwrap();
+        let remote = GitRemote {
+            git: &git,
+            name: "origin",
+        };
+        assert_eq!(
+            remote.commits_after(&landed, &y).unwrap(),
+            vec![
+                (x.clone(), "extra one".to_string()),
+                (y.clone(), "extra two".to_string())
+            ]
+        );
+        assert!(remote.commits_after(&y, &landed).unwrap().is_empty());
+        assert!(remote.commits_after(&y, &y).unwrap().is_empty());
+        // Nothing here can replace the remote branch.
+        assert_eq!(remote.remote_head("work").unwrap(), Some(y));
+    }
 
+    /// End to end over real git: the branch holds the landing commit plus a declared-intervention commit.
+    /// Land refuses naming that commit, requests no merge, and leaves the remote branch untouched.
+    #[test]
+    fn land_pr_refuses_a_real_branch_with_a_declared_intervention_after_the_landing() {
+        let bare_dir = tempfile::tempdir().unwrap();
+        let bare = Git::isolated(bare_dir.path());
+        bare.run(["init", "-q", "--bare", "-b", "main"]).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let git = Git::isolated(dir.path());
+        git.run(["init", "-q", "-b", "main"]).unwrap();
+        let step = |text: &str| {
+            std::fs::write(dir.path().join("a.txt"), text).unwrap();
+            git.run(["add", "-A"]).unwrap();
+            git.run(["commit", "-q", "-m", text]).unwrap();
+            git.head().unwrap().unwrap()
+        };
+        let landed = step("landed");
+        let branch = "athena/bootstrap";
+        git.run(["remote", "add", "origin", bare_dir.path().to_str().unwrap()])
+            .unwrap();
+        let remote = GitRemote {
+            git: &git,
+            name: "origin",
+        };
         let rig = Rig::new();
-        let state = StateDir::new(rig.dir.path().to_path_buf());
-        crate::pr::store_link(
-            &state,
-            &rig.job,
-            &PrLink {
-                pr_number: 42,
-                host: HOST.into(),
-                repository: "example/project".into(),
-                head: candidate.clone(),
-                job: "bootstrap".into(),
-                state: LinkState::Open,
-                merged_commit: None,
-            },
-        )
-        .unwrap();
         let host = FakeHost::new(Checks::Green);
-        let nap = |_: Duration| {};
-        let run = |remote: &dyn Remote| {
+        host.per_commit
+            .borrow_mut()
+            .insert(landed.clone(), Checks::Red);
+        let run = |commit: &str| {
+            let state = StateDir::new(rig.dir.path().to_path_buf());
+            let nap = |_: Duration| {};
             land_pr(&LandPr {
                 state: &state,
                 job: &rig.job,
                 branch,
-                commit: &landed,
+                commit,
                 verified_fingerprint: "verified",
                 pr: PrDraft {
                     title: "t",
@@ -2685,46 +2762,47 @@ mod tests {
                 squash: &text(),
                 host_name: HOST,
                 repository: "example/project",
-                merge_via_rest: false,
+                merge_via_rest: true,
                 poll: Poll {
                     attempts: 1,
                     delay: Duration::ZERO,
                     sleep: &nap,
                 },
                 ancestry: &git,
-                remote,
+                remote: &remote,
                 host: &host,
                 content: &rig.content,
             })
         };
-        let plain = GitRemote {
-            git: &git,
-            name: "origin",
-        };
-
-        // The remote moves after it is read: the push is rejected, reported, and changes nothing.
-        let racy = Racy {
-            inner: GitRemote {
-                git: &git,
-                name: "origin",
-            },
-            moved_to: &moved,
-        };
-        assert!(run(&racy).is_err());
-        let held = bare.rev_parse(&format!("refs/heads/{branch}")).unwrap();
-        assert_eq!(held.as_deref(), Some(moved.as_str()));
-        assert_eq!(
-            load_link(&state, &rig.job).unwrap().unwrap().head,
-            candidate
+        // Publish the landing commit; it is red, so it is not merged.
+        let first = run(&landed).unwrap();
+        assert!(!first.merge_requested);
+        let fix = step("fix the failure");
+        let intervention = step("Declared intervention: edit by hand");
+        git.run([
+            "push",
+            "-q",
+            "origin",
+            &format!("{intervention}:refs/heads/{branch}"),
+        ])
+        .unwrap();
+        let err = run(&landed).unwrap_err().to_string();
+        assert!(
+            err.contains(&format!("{} fix the failure", &fix[..12])),
+            "{err}"
         );
-
-        // Nothing moves it: the branch becomes the landed commit, on the same pull request.
-        let report = run(&plain).unwrap();
+        assert!(
+            err.contains(&format!(
+                "{} Declared intervention: edit by hand",
+                &intervention[..12]
+            )),
+            "{err}"
+        );
+        assert!(err.contains("records-history build (D111)"), "{err}");
+        assert!(err.contains("are green"), "{err}");
+        assert_eq!(host.merges.get(), 0);
         let held = bare.rev_parse(&format!("refs/heads/{branch}")).unwrap();
-        assert_eq!(held.as_deref(), Some(landed.as_str()));
-        assert_eq!(report.link.pr_number, 42);
-        assert_eq!(report.link.head, landed);
-        assert_eq!(host.opened.get(), 0);
+        assert_eq!(held.as_deref(), Some(intervention.as_str()));
     }
 
     #[test]
@@ -2737,8 +2815,8 @@ mod tests {
         assert_eq!(host.opened.get(), 0);
 
         // A remote branch that is not an ancestor of the candidate.
-        let mut rig = Rig::new();
-        rig.remote.head = Some("rewritten".into());
+        let rig = Rig::new();
+        *rig.remote.head.borrow_mut() = Some("rewritten".into());
         let state = StateDir::new(rig.dir.path().to_path_buf());
         let nap = |_: Duration| {};
         let host = FakeHost::new(Checks::Green);
