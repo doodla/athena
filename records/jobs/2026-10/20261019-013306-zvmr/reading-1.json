@@ -1,0 +1,171 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261019-013306-zvmr",
+  "n": 1,
+  "at": "2026-10-23T17:24:36.106970777Z",
+  "invocation_seq": 1,
+  "base_commit": "68cdd77ed8006231936181a5d5be16690b5654c8",
+  "config_sha256": "723abb81b8cdcc25033d7d9653128a919911c4b5950c306183153235b21717e7",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Make land --pr judge the PR's current head and refuse undeclared extras",
+  "summary": "`athena land --pr` reads the checks of the job's own landed commit (`wait_for_checks(job, &link.head)`, and `replace_head` resets the PR head to that commit). It should ask the host for the pull request's current head, judge that head's checks, merge guarded by that head, and refuse when the head holds commits beyond the verified content and records that are not declared interventions. The audience is the user running `athena land --pr` after pushing a fix to the PR.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "Change is Rust in athena-core and athena-cli."
+    },
+    {
+      "id": "tested",
+      "how": "New unit tests in gh.rs. Clippy and the cargo test suites must pass."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run land_pr against fake hosts and check the checks judged, the merge guard and the refusal."
+    },
+    {
+      "id": "root-cause",
+      "how": "The fix reads the PR's current head throughout, rather than special-casing PR #149."
+    },
+    {
+      "id": "small",
+      "how": "One focused change, mainly in gh.rs."
+    },
+    {
+      "id": "verified",
+      "how": "Behavior is checked with cargo test."
+    },
+    {
+      "id": "strangers",
+      "how": "Docs and error messages are written for an outside reader."
+    },
+    {
+      "id": "outcome-check",
+      "how": "The check is the merge of a fixed PR head, not that wiring exists."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Goal: after a fix is pushed to the job's PR, `athena land --pr` must evaluate and merge that PR's current head. Merging around land should no longer be needed.",
+    "The PR's current head is read from the host (a new PrHost method, for example the PR's head sha), with the remote branch head as a possible fallback. Existing test doubles of PrHost and Remote gain the method.",
+    "'Declared intervention' means a commit that carries or is tied to an `athena.intervention` record for the job, recorded with `athena intervene` (Intervention.job). The check walks the commits from the job's landed commit to the PR head. A commit counts as allowed if it is a records-only commit or a declared intervention. Anything else makes land refuse.",
+    "Content beyond the verified fingerprint is detected by comparing the head's governed content, fingerprint(head), with the verified fingerprint. An extra commit is acceptable only if the content is unchanged or the commit is a declared intervention.",
+    "The `reading_inputs_digest_is_unchanged_by_the_job_plan_section` test fails on the base commit. It is unrelated and not part of this change.",
+    "Only the --pr flow changes. The local `athena land` plan in land.rs is not changed."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A test in gh.rs drives land_pr with a stored link at the job's commit A, a host reporting the PR's current head as a later commit B, red checks on A and green checks on B. It shows the report has Green checks, reruns 0, and the merge is requested guarded by B. Run `cargo test --locked -p athena-core gh::`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test shows that when the PR head holds a commit beyond the verified content and records that is not a declared intervention, land_pr refuses to merge. It returns an error or report naming that commit, and the host's merge endpoint is not called. Run `cargo test --locked -p athena-core gh::`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test shows that when every extra commit on the PR head is a declared intervention (a commit with an intervention record for the job), land_pr judges that head's checks and merges when they are green. Run `cargo test --locked -p athena-core gh::`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test shows land_pr no longer force-replaces a newer PR head with the job's older landed commit. It checks that the remote's replace is not called when the remote head descends from the job's commit. Run `cargo test --locked -p athena-core gh::`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The existing external_calls tests (retries, persistent 500s) and the display tests for the land --pr report still pass. Run `cargo test --locked -p athena-cli`. `cargo clippy --all-targets --locked` is clean and `cargo fmt --check` passes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The failing-test report and re-run logic (wait_for_checks) are keyed to the pull request's current head, not to PrLink.head set from the job's landed commit. The module and function docs say so, and the refusal message tells the user which extra commit is undeclared and how to declare it (`athena intervene`).",
+      "kind": "content"
+    },
+    {
+      "text": "No governance file (athena.toml, defaults.toml, workflows) changes. The CHANGELOG, if touched, describes the fix for an outside reader.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-cli/tests/external_calls.rs",
+      "action": "modify",
+      "p": 0.45
+    },
+    {
+      "path": "crates/athena-core/src/land.rs",
+      "action": "modify",
+      "p": 0.15
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.35
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "p": 0.1
+    },
+    {
+      "path": "crates/athena-git/src/lib.rs",
+      "action": "modify",
+      "p": 0.15
+    }
+  ],
+  "out_of_scope": [
+    "The pre-existing failing config digest test in athena-data.",
+    "The local (non-PR) landing plan and resync logic.",
+    "Changing the one-re-run policy for red checks.",
+    "Changes to athena.toml, defaults.toml or CI workflows."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.2,
+        "p90": 2.8
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 1400.0,
+        "p90": 2800.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7620853080568721,
+      "p_verification_passes": 0.6395348837209303,
+      "p_user_intervenes": 0.07885714285714286,
+      "cost_usd": {
+        "p10": 0.4139777373327592,
+        "p50": 0.9807187000000002,
+        "p90": 2.1292113497491143
+      },
+      "wall_time_s": {
+        "p10": 563.2069567445859,
+        "p50": 1201.5739391829998,
+        "p90": 2402.7172780905603
+      }
+    }
+  },
+  "departures": "Higher cost and time than the reference. The change touches a large gh.rs with several test doubles, adds a host method and a commit-classification rule, and has a design ambiguity around 'declared intervention'."
+}
