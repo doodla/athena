@@ -1,0 +1,176 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261019-013309-nvbb",
+  "round": 1,
+  "at": "2026-10-23T23:00:29.218464323Z",
+  "invocation_seq": 2,
+  "approach": "Add one fixed paragraph under the verifier brief's \"Checks Athena ran on this tree\" heading in briefs.rs saying the listed fmt/clippy/test results are recorded for this candidate, are not to be rerun, and that the full `cargo test` suite is never rerun (only targeted `cargo test -p <crate> <filter>`). A failed or missing check stays failed or unverified. Mirror this in both verifier prompts, add a reader.md rule that full-suite, fmt and clippy outcomes are content criteria satisfied by the recorded checks, and record the change in CHANGELOG.md and docs/decisions.md. Prompt and brief text only; no allow-list, timeout or check-running change.",
+  "decisions": [
+    {
+      "choice": "Put the instruction in the brief body under the checks heading, as static text, and also in both verifier prompts.",
+      "reason": "The brief is what the verifier reads next to the results, and the prompt is the standing rule. Both are needed for criterion 1 and 2. A test can assert the brief text.",
+      "rejected": [
+        {
+          "option": "Prompt only",
+          "why": "Not adjacent to the results and not testable from the rendered brief."
+        },
+        {
+          "option": "Wire verify::reuse_statement into the brief",
+          "why": "No caller exists, it only yields text on a SHA match, and it adds code and risk for no extra effect; the checks list is already for the candidate."
+        }
+      ]
+    },
+    {
+      "choice": "Keep `cargo test` in the verifier allow-list; forbid only the full-suite rerun by instruction.",
+      "reason": "Targeted tests are needed to exercise new behavior.",
+      "rejected": [
+        {
+          "option": "Remove cargo test from the allow-list",
+          "why": "Prevents targeted tests; out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "Brief text states a failed check stays failed; a missing check is not treated as passed (verifier should report it, not rerun the full suite).",
+      "reason": "Criterion 3: nothing may turn a failed or missing result into a pass.",
+      "rejected": [
+        {
+          "option": "Say all checks passed",
+          "why": "The checks list can contain failures; the text must not override it."
+        }
+      ]
+    },
+    {
+      "choice": "verify.rs gets only a doc-comment note that reuse_statement is not part of the brief path and reuse is limited to the same SHA; no logic change.",
+      "reason": "Listed deliverable, keeps the same-SHA limit explicit without behavior change. Skip if it adds nothing.",
+      "rejected": [
+        {
+          "option": "Change reuse_statement behavior",
+          "why": "Out of scope (different-SHA reuse excluded)."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Emit the no-rerun paragraph under the checks heading in the verifier brief; add test; update stored brief snapshot constant(s).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/prompts/verifier.md",
+      "action": "modify",
+      "purpose": "Tell verifiers to cite recorded checks and run only targeted tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cap-change/prompts/verifier.md",
+      "action": "modify",
+      "purpose": "Align the change capability's verifier line with recorded-check reuse.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/prompts/reader.md",
+      "action": "modify",
+      "purpose": "Tell readers not to write behavior criteria needing full-suite, fmt or clippy reruns.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Record the change and the 2026-10-18 timeouts as the reason.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Record the decision and rejected options.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "action": "modify",
+      "purpose": "Doc-comment note only on same-SHA reuse; no logic change.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Grep for 'Checks Athena ran' across the repo to find every stored copy and test.",
+    "Edit briefs.rs: add the paragraph after the heading writeln; update VERIFIER_BRIEF_WITHOUT_A_PLAN and any other snapshot; add the placement test (with one failed check).",
+    "Edit both verifier.md prompts and reader.md.",
+    "Add the doc-comment note in verify.rs.",
+    "Add CHANGELOG.md entry naming the 2026-10-18 timeouts and the docs/decisions.md entry.",
+    "Run cargo fmt --all --check, cargo clippy --all-targets --locked -- -D warnings, cargo test -p athena-context."
+  ],
+  "risks": [
+    {
+      "risk": "Instruction read as permission to skip judging failed checks.",
+      "mitigation": "State explicitly in the brief and prompt that a failed check is a failed check and a missing one is reported, not assumed passed; the new test asserts the failed line is unchanged."
+    },
+    {
+      "risk": "Stored brief snapshots elsewhere break.",
+      "mitigation": "Run cargo test -p athena-context and grep all crates for the heading text before finishing."
+    },
+    {
+      "risk": "Verifier stops running targeted tests too.",
+      "mitigation": "Keep each addition to a few sentences; do not touch the allow-list."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the diff of the checks-section writer in briefs.rs.",
+      "command": "git diff HEAD~1 -- crates/athena-context/src/briefs.rs",
+      "observes": "Text under '## Checks Athena ran on this tree' says the fmt, clippy and test results are recorded for this candidate, must not be rerun, and the full `cargo test` suite is not rerun.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Read the prompt diffs.",
+      "command": "git diff HEAD~1 -- crates/athena-context/prompts/verifier.md crates/athena-cap-change/prompts/verifier.md",
+      "observes": "The verifier prompt says to cite the recorded check for a 'cargo test passes' criterion and to run only targeted tests such as `cargo test -p <crate> <filter>`; the change prompt's 'ran the tests' line does not conflict.",
+      "fails_without": null
+    },
+    {
+      "criterion": 3,
+      "method": "Read the reader prompt diff and the brief text.",
+      "command": "git diff HEAD~1 -- crates/athena-context/prompts/reader.md",
+      "observes": "Readers are told full suite, fmt and clippy outcomes are content criteria satisfied by recorded checks; the wording states a failed or missing recorded check is not a pass, and no code path changes check pass/fail.",
+      "fails_without": null
+    },
+    {
+      "criterion": 4,
+      "method": "New test in briefs.rs renders a verifier brief with a failing and a passing check and asserts the no-rerun sentence appears after the checks heading and before the first check line (and before '## Commands Bash may run'), and that the failed line still reads 'failed'.",
+      "command": "cargo test -p athena-context verifier_brief",
+      "observes": "Test passes; reverting the brief text makes the assertion fail.",
+      "fails_without": "The assertion that the no-rerun instruction sits between the checks heading and the check list fails if the sentence is absent or misplaced."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the crate tests, then `cargo clippy --all-targets` and `cargo fmt --check`.",
+      "command": "cargo test -p athena-context",
+      "observes": "All pass; VERIFIER_BRIEF_WITHOUT_A_PLAN (and any other stored brief copy) was updated deliberately to include the new paragraph; clippy and fmt are clean.",
+      "fails_without": "The byte-identical snapshot test a_verifier_brief_without_a_plan_is_byte_identical_to_the_stored_copy fails if the constant is not updated."
+    },
+    {
+      "criterion": 6,
+      "method": "Inspect the diff stat and the CHANGELOG.md and docs/decisions.md hunks.",
+      "command": "git diff HEAD~1 --stat",
+      "observes": "Only the listed deliverables changed; CHANGELOG.md entry names the 2026-10-18 verifier timeouts (full suite about 11 minutes) as the reason; no secrets or personal data.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Other stored brief copies or snapshot tests (beyond VERIFIER_BRIEF_WITHOUT_A_PLAN) that include the checks section may exist in briefs.rs or other crates; the producer should grep for 'Checks Athena ran' after the edit.",
+    "Whether the study capability shares crates/athena-context/prompts/verifier.md (out of scope for its own verifier prompt); the producer should check that the shared prompt edit is acceptable there."
+  ],
+  "producer_section_sha256": "e9f0cdea82ff502ac668dd86ed63749e1ce51d8152dd34e0091b2f0613c6d906"
+}
