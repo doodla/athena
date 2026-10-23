@@ -432,16 +432,18 @@ impl Ancestry for Anc {
     }
 }
 
-struct NoRemote;
+/// A remote that holds nothing until the first push, then the pushed commit.
+struct NoRemote(RefCell<Option<String>>);
 impl Remote for NoRemote {
     fn remote_head(&self, _: &str) -> Result<Option<String>> {
-        Ok(None)
+        Ok(self.0.borrow().clone())
     }
-    fn push(&self, _: &str, _: &str) -> Result<()> {
+    fn push(&self, _: &str, commit: &str) -> Result<()> {
+        *self.0.borrow_mut() = Some(commit.to_string());
         Ok(())
     }
-    fn replace(&self, _: &str, _: &str, _: &str) -> Result<()> {
-        Ok(())
+    fn commits_after(&self, _: &str, _: &str) -> Result<Vec<(String, String)>> {
+        Ok(vec![])
     }
 }
 
@@ -481,7 +483,7 @@ fn land(runner: &Injecting) -> (Result<athena_core::gh::PrReport>, Vec<String>) 
             sleep: &nap,
         },
         ancestry: &Anc,
-        remote: &NoRemote,
+        remote: &NoRemote(RefCell::new(None)),
         host: &client,
         content: &Fingerprints,
     });

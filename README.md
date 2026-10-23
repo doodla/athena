@@ -93,6 +93,14 @@ commit adds, and proves the prediction came before the work from those records, 
 method the repository allows (merge commit, else squash, else rebase); after a squash it rebuilds your local
 branch on the squash commit, keeping later landed jobs and records, so the next pull request opens clean.
 
+**Which commit `land --pr` judges.** It judges and guards the pull request's current head, read from the
+job's branch on the remote, never the job's own commit once the branch has moved. It never replaces a
+newer head with the job's commit. Until the records-history build (D111) lands, a squash of a job's
+landing plus any later commit is not a valid landing, so `land --pr` refuses when the head is anything
+other than the job's landing commit, even when the extra commit is a declared intervention. The refusal
+names the head's check state, each extra commit (short id and subject), and this reason, merges nothing and
+exits nonzero. If you see it, land the job's own commit, or wait for D111.
+
 Wherever a command takes `<job>`, it accepts a full id, a unique suffix, or `latest`. Every command except
 `stop` and `start` takes `--json`, so an agent can drive Athena through a shell as well as a person can.
 

@@ -238,3 +238,44 @@ Athena's decision log, not here. Newest last.
 - Also relayed: Sri's three lines of ~17:45 (design review every few jobs toward a stable design; the producer and
   verifier as a planner-critic loop; the API surface not settled), held until the drain ended so that two Athena
   commands would not commit at once.
+
+## OP-18. No merges around athena land (2026-10-19)
+
+- What happened: on 2026-10-18 the operator merged PR #149 (job 20261018-145008-k7fq, the spec layer) by hand
+  through the GitHub API, because `athena land` judged checks on the job's own commit and not on the pull
+  request's head, where a hand test fix had made CI green. The squash 02837e0 also carried two hand changes.
+- Decision (Sri, 2026-10-19, "2 then restart"): revert 02837e0 (PR #150) and re-land the spec through Athena once
+  `athena land` judges the pull request's current head; then restart the operator session.
+- Rule: the operator never merges a pull request outside `athena land`. A gap in land is fixed in land.
+- Also from 2026-10-18: the verifier's 1200 s limit was raised to 2400 s by hand (the suite now takes ~11 min and
+  the verifier reruns it); the root fix is the verifier reusing recorded check results.
+
+## OP-19. D112 accepted with fixes; 02837e0 exempted (2026-10-23)
+
+- Sri: "Don't involve me unless you have to", then "Go for it" for the 02837e0 exemption (BRIEF.md addendum
+  of 2026-10-23).
+- 02837e0 goes into `[history] exempt` together with its revert, as one intervention commit on the revert PR
+  (#150). Every PR's full-history check walks main, so until 02837e0 is excused nothing can land.
+- D112 is accepted with three fixes: the records history is a branch (`athena/records`), not a custom ref, so
+  the ruleset can protect it and a plain clone carries it; the design covers every reader of records (status,
+  forecasting, scoring, the study site); the ruleset requires branches to be up to date. Open points: pending
+  window 15 minutes; cutover after build job 6; two weeks between job 7 and job 8.
+
+## OP-20. After the revert, work moves to operator/next5 (2026-10-23)
+
+- The revert of 02837e0 (2a86df5, PR #150) made main's content differ from the base every later job on
+  operator/next4 was verified against, so those landings can never be valid on main. Jobs 9bw7 and fy1x (the
+  records-history design and its acceptance) were closed as abandoned with that reason; their landing commits
+  stay on `archive/next4-2026-10-23`. Every other commit after PR #149's head was replayed onto main as
+  `operator/next5` (records, owner files and BRIEF.md only; the full history check passes on it).
+- The design re-runs as one new job based on main, starting from the archived text. Lesson for the D112
+  build: a revert on main strands every job verified on the old base, which records in their own history
+  would avoid.
+
+## OP-21. Every operator mistake is logged as work for Athena (2026-10-23)
+
+- Sri: "Start tracking every mistake you make as work Athena should start being intelligent about as well".
+- Each mistake is an `athena intervene` record whose text starts "Mistake:", category `other` until Athena
+  has a category of its own for it, with the `--why` naming what Athena would have had to know or check to
+  prevent it. Introspection then proposes the work. The mistakes of this session are back-filled.
+- Asked of Athena: a mistake category, and counting mistakes in status and the audit, as a queued request.

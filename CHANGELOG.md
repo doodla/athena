@@ -9,6 +9,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `docs/design/records-history.md` and decision D111: a design (no code) for moving Athena's records onto
+  their own history, a separate-root branch in the repository, with migration by copy, attribution of main's
+  commits from records alone, and an eight-job build plan.
+- D111 accepted under Sri's delegation (`BRIEF.md` addenda of 2026-10-23), with three changes: the history is
+  the branch `athena/records` with its own root, not the custom ref `refs/athena/records`, so the host can forbid
+  force-pushes and deletion and a plain clone carries it; a new section lists the readers of `records/` and how
+  each reads from the branch after the cutover (job 7); and the pre-merge status is stated to depend on the host
+  requiring branches to be up to date before merging. Open points filled: pending window 15 minutes, cutover
+  after build job 6, two weeks between job 7 and job 8.
 - Before the producer starts, Athena runs the capability's configured checks on the base commit and records
   each one's name, pass or fail, exit code and bounded redacted output tail in a new per-job record,
   `athena.baseline/1` (`baseline.json`). A check that fails, times out or cannot start is recorded as failed
@@ -27,6 +36,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `reruns`), whether or not a re-run happened. See `docs/design/native-pr-landing.md` §5.8.
 
 ### Fixed
+
+- `athena land --pr` now judges the checks of the pull request's current head and guards the merge with
+  that head. Before, it judged the job's own commit and force-replaced a different remote head with it, so
+  after a fix was pushed to PR #149 (job 20261018-145008-k7fq) land kept reporting the old commit's failure
+  though the new head was green. The replace path is removed: nothing can overwrite a newer head. Until the
+  records-history build (D111) lands, a squash of a landing plus any later commit is not a valid landing
+  (squash 02837e0 broke the history check), so land refuses when the head is anything other than the job's
+  landing commit, declared intervention or not. The refusal names the head's check state, each extra commit
+  and why, merges nothing and exits nonzero.
 
 - When one check fails, the verifier now still runs, so every acceptance criterion gets its own result in the
   verification record instead of none. The final verdict still fails on that check.
