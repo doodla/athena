@@ -260,3 +260,14 @@ Athena's decision log, not here. Newest last.
   the ruleset can protect it and a plain clone carries it; the design covers every reader of records (status,
   forecasting, scoring, the study site); the ruleset requires branches to be up to date. Open points: pending
   window 15 minutes; cutover after build job 6; two weeks between job 7 and job 8.
+
+## OP-20. After the revert, work moves to operator/next5 (2026-10-23)
+
+- The revert of 02837e0 (2a86df5, PR #150) made main's content differ from the base every later job on
+  operator/next4 was verified against, so those landings can never be valid on main. Jobs 9bw7 and fy1x (the
+  records-history design and its acceptance) were closed as abandoned with that reason; their landing commits
+  stay on `archive/next4-2026-10-23`. Every other commit after PR #149's head was replayed onto main as
+  `operator/next5` (records, owner files and BRIEF.md only; the full history check passes on it).
+- The design re-runs as one new job based on main, starting from the archived text. Lesson for the D112
+  build: a revert on main strands every job verified on the old base, which records in their own history
+  would avoid.
