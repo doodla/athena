@@ -2576,27 +2576,3 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   records, the 12-of-85 and cost figures are marked there as unchecked or estimates); measured: the
   `athena-data` test `the_repository_config_turns_job_planning_on_with_the_designs_caps`, and a full
   `cargo test --locked` with planning on.
-
-## D111 · The Olympus spec is a TOML file whose quotes a test checks against the brief
-
-- **Case:** The Olympus requirements live in prose in `BRIEF.md`. Agents re-read and re-interpret them each
-  job, and nothing shows whether a stated requirement is really Sri's words.
-- **Decision:** `docs/spec.toml` holds requirements as `[[requirement]]` tables: `id`, `statement`, `kind`
-  (goal, requirement, constraint, acceptance), `status` (active or superseded), optional `supersedes`, and one
-  or more `[[requirement.source]]` with a verbatim `quote` and its `heading`. Duplicates are merged into one
-  requirement with several sources. Unresolved conflicts or open choices go in `[[open_question]]` with two or
-  more quotes; if there are none, `no_open_questions_reason` says so. `xtask/tests/spec.rs` parses the file
-  with the `toml` and `serde` crates and fails on a quote not in `BRIEF.md` (after collapsing whitespace), a
-  heading that is not a `BRIEF.md` heading, a duplicate id, a missing `supersedes` target, a requirement with
-  no source or an unknown kind or status. This first part covers only Olympus sections 1 to 6; sections 7 to
-  10, the governing philosophy and the 2026-10-17 addenda follow in a second job.
-- **Alternatives:** (a) Markdown with ids: needs a hand-written parser and its structure is not enforced.
-  (b) JSON: no comments, awkward multi-line quotes, noisy for Sri to approve. (c) YAML: implicit typing
-  pitfalls and a new dependency; the repository already uses TOML for data. (d) Prose only: nothing checks
-  quotes.
-- **Tradeoff:** The test proves the quotes are real, not that a statement paraphrases them faithfully; Sri's
-  approval and the verifier cover that. Statements can drift from quotes if edited alone.
-- **Reversal cost:** Low: delete the file and the test. Nothing reads the spec yet.
-- **Provenance:** measured: the tests in `xtask/tests/spec.rs`, including negative cases for a bad quote, a
-  duplicate id, a missing `supersedes` target and a requirement with no source; read: `BRIEF.md` sections 1
-  to 6 of "Project Olympus".
