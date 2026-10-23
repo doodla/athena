@@ -1,0 +1,226 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261023-183334-aej6",
+  "round": 1,
+  "at": "2026-10-23T20:52:55.621011247Z",
+  "invocation_seq": 2,
+  "approach": "Add `Mistake` to InterventionCategory (ALL becomes 9, as_str \"mistake\") and one shared predicate `Intervention::is_mistake()` in records.rs: category is mistake, or category is other and `what` starts with \"Mistake:\" (documented in a doc comment; records untouched). In status.rs add a `MistakeReport` built from store::Records: total, counts per class_of_work, and counts per cause. Cause is the failure-class name of the mistake's introspection (an existing field, so no new record field). A mistake with no introspection yet is counted under \"not yet introspected\". Each cause entry carries the prevention proposed (prevention_kind, prevention, proposed_request from the newest introspection of that cause), so repeat causes collapse into one line and one proposal. StatusView gets separate `mistakes` JSON, leaving `interventions_by_category` raw. Introspection: event_of_intervention maps is_mistake records to category \"mistake\" so back-filled ones are introspected as mistakes, and user_prompt adds an instruction for category mistake: name the check or knowledge that would have prevented it in `prevention`, and state the cause as a recurring class. A Recorded mistake introspection whose prevention is blank gets a flag. `athena audit` prints and emits the same report (main.rs and display.rs). The change is local to the existing intervention pipeline; the existing REPEAT_THRESHOLD defaults proposals are unchanged.",
+  "decisions": [
+    {
+      "choice": "Derive cause from the mistake's introspection failure class (registry class name), not a new field on the intervention",
+      "reason": "Introspection already records failure_class, cause, prevention_kind and prevention. A class name is a stable key that lets repeats aggregate. Free-text `cause` cannot be grouped. Intervention has deny_unknown_fields and is immutable, so a new field would break the old records.",
+      "rejected": [
+        {
+          "option": "Add a `cause` field to Intervention",
+          "why": "Schema change; the eleven back-filled records could not carry it; larger than needed."
+        },
+        {
+          "option": "Group by free-text cause string",
+          "why": "Model-written prose rarely repeats exactly, so nothing would aggregate."
+        }
+      ]
+    },
+    {
+      "choice": "Detect mistakes with one `is_mistake()` predicate (category mistake, or other with text prefix 'Mistake:'), used by status, audit report and introspection",
+      "reason": "Fixes the root cause (the back-filled records are mislabelled) without rewriting records, and keeps one definition of a mistake.",
+      "rejected": [
+        {
+          "option": "Re-categorize the eleven records",
+          "why": "Out of scope and records are immutable."
+        },
+        {
+          "option": "Count only category mistake",
+          "why": "Would miss the eleven back-filled records."
+        }
+      ]
+    },
+    {
+      "choice": "Keep interventions_by_category as the raw stored categories and add a separate `mistakes` object",
+      "reason": "Criterion 2 requires the breakdown to be separate. The raw count stays true to the stored records.",
+      "rejected": [
+        {
+          "option": "Fold prefix-marked records into the `mistake` key of interventions_by_category",
+          "why": "Hides the stored category and double-defines the count."
+        }
+      ]
+    },
+    {
+      "choice": "Aggregate repeat-cause prevention inside the mistake report, one entry per cause, rather than editing proposals.rs",
+      "reason": "proposals.rs ignores cases without a job and needs 3 distinct jobs. Operator mistakes often have no job, so it would never fire. proposals.rs is not a deliverable.",
+      "rejected": [
+        {
+          "option": "Make proposals.rs generate defaults for mistake classes",
+          "why": "Not a listed deliverable, and it touches defaults.toml flow, which is out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "The audit surface is `athena audit` output (display::audit plus JSON) carrying the same MistakeReport as status",
+      "reason": "The audit command is the only one named 'audit'; the report is not job-specific, so it is appended to the job audit.",
+      "rejected": [
+        {
+          "option": "Change the Audit record or the auditor model schema",
+          "why": "Needs the model to count; the counts are computed by code from records."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "purpose": "Add Mistake variant, ALL length 9, as_str 'mistake'; add documented Intervention::is_mistake() with the text-prefix rule; unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "Add MistakeReport (total, by_class, by_cause with prevention), build it from records, add `mistakes` to StatusView, expose a method for audit; unit test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/introspect.rs",
+      "action": "modify",
+      "purpose": "Map is_mistake records to category 'mistake' in event_of_intervention; add the prevention instruction to user_prompt for mistakes; flag a blank prevention.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "purpose": "Render mistakes in the status text and after the audit text: counts, per class, per cause, prevention proposed.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "purpose": "Add the mistakes report to `athena audit` output and JSON; mention mistake in the intervene help text if categories are listed.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/manage.rs",
+      "action": "modify",
+      "purpose": "Check that the unknown-category message lists mistake (it uses ALL); adjust only if it hard-codes the list.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Update only if a category list or exhaustive match there needs the new variant; otherwise leave unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/introspection.rs",
+      "action": "modify",
+      "purpose": "Tests for mistake introspection, the prevention prompt, and repeat-cause aggregation.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "purpose": "Tests: mistake accepted, bogus rejected listing mistake, status/audit counts with a prefix-marked 'other' record left byte-identical.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "README.md",
+      "action": "modify",
+      "purpose": "Document the mistake category, the 'Mistake:' prefix rule and the mistake report in status and audit.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Record the change, naming the root cause: mistakes were uncounted because they had no category.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "records.rs: add the variant, ALL [..;9], as_str, and Intervention::is_mistake() with its doc comment; add unit tests for parse, ALL and the prefix rule.",
+    "Fix every exhaustive match the compiler flags (cargo check), including reading.rs and the manage.rs message.",
+    "status.rs: add MistakeReport and a builder over store::Records. Cause = the failure-class name of the newest recorded introspection naming the intervention, else 'not yet introspected'. Group by class and cause. Cause entries carry count, classes, prevention_kind, prevention and proposed_request. Add `mistakes` to StatusView and a public method for audit. Unit test.",
+    "introspect.rs: use the effective category 'mistake' in event_of_intervention. Add a prompt instruction for mistake events to name the preventing check or knowledge and a recurring cause class. Add a flag when prevention is blank. Keep the schema unchanged.",
+    "display.rs and main.rs: render the report in status text and in audit text and JSON, with recurring causes marked and un-introspected mistakes pointing to the introspect command.",
+    "Write the tests in introspection.rs and lifecycle.rs with the stub model, as in the demonstrations.",
+    "README.md and CHANGELOG.md.",
+    "Run cargo fmt --all, cargo clippy --all-targets --locked -- -D warnings, cargo test --locked."
+  ],
+  "risks": [
+    {
+      "risk": "An existing test asserting category counts or the ALL length breaks.",
+      "mitigation": "Grep for ALL and interventions_by_category usage; update the expectation. The raw category map is not changed."
+    },
+    {
+      "risk": "Cause by failure class depends on the model assigning classes consistently, so repeats could be split.",
+      "mitigation": "The introspection prompt already offers the class registry and earlier cases. Un-introspected mistakes are listed apart, never guessed."
+    },
+    {
+      "risk": "Existing introspection records for a prefix-marked intervention have category 'other'; those need not move.",
+      "mitigation": "Link mistakes to introspections by the intervention id, not by the category string."
+    },
+    {
+      "risk": "Status line grows long.",
+      "mitigation": "Print the mistakes block only when total > 0, one line per cause."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit test in records.rs: parse(\"mistake\") is Some(Mistake), ALL contains it and has length 9. Integration test in lifecycle.rs: `athena intervene --category mistake` succeeds and commits a record with category mistake. A second test with category `bogus` fails, and its error text lists `mistake`. The error text comes from ALL in manage.rs.",
+      "command": "cargo test",
+      "observes": "The new tests pass: mistake is accepted, bogus is rejected with a message listing mistake.",
+      "fails_without": "With no Mistake variant, parse returns None and the intervene call is refused, so the acceptance test fails; the rejection message would not list mistake."
+    },
+    {
+      "criterion": 2,
+      "method": "Test in lifecycle.rs (and a unit test in status.rs) logs several mistakes of two classes of work and two causes. One has category mistake and one has category other with 'Mistake:' text. It reads `athena status --json` and the `athena audit` output with a stub model. It asserts mistakes.total, mistakes.by_class and mistakes.by_cause and that interventions_by_category is unchanged and separate. It also asserts the human status line prints the same counts.",
+      "command": "cargo test",
+      "observes": "Counts per class and per cause appear in the status JSON, the status text and the audit output.",
+      "fails_without": "Without the report, the `mistakes` key is missing and the test fails on the lookup."
+    },
+    {
+      "criterion": 3,
+      "method": "Test in introspection.rs with the stub model: introspect a mistake intervention and assert the stored record has category mistake, a prevention_kind, and non-empty prevention and proposed_request. Assert the prompt sent contains the mistake instruction. Then introspect two mistakes sharing a failure class and assert the report has one cause entry with count 2 and one prevention proposal, shown in status.",
+      "command": "cargo test",
+      "observes": "A mistake introspection names a check or knowledge. Repeat causes appear as a single entry with a single proposal.",
+      "fails_without": "Without the mistake handling, the prompt carries no instruction and the category stays other. Without aggregation, two entries would appear instead of one."
+    },
+    {
+      "criterion": 4,
+      "method": "Test seeds a category-other intervention whose text starts 'Mistake:' and checks the status JSON and audit count it. It compares the record file bytes before and after to show it is not rewritten. It also checks that the is_mistake doc comment in records.rs states the text-prefix rule (read by the reviewer).",
+      "command": "cargo test",
+      "observes": "The prefix-marked record is counted under mistakes and its file is byte-identical.",
+      "fails_without": "A category-only check would count zero for the back-filled records, and the test fails."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the format and lint checks.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings",
+      "observes": "Both finish with no diagnostics.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "The test for criterion 2 and 3 asserts on the rendered text of `athena status` and `athena audit`: total mistakes, per-class and per-cause counts, recurring causes marked, and a line per cause with prevention kind and text (or 'not yet introspected' with the athena introspect command to run). A fresh reader can read this output without the code.",
+      "command": "cargo test",
+      "observes": "Rendered output shows how many mistakes occurred, which classes and causes recur, and the proposed prevention.",
+      "fails_without": "A type-only change would leave the rendered output unchanged, so these assertions fail."
+    }
+  ],
+  "open_questions": [
+    "Is 'the audit' `athena audit` (job auditor), or something else? I assumed `athena audit`, since no other audit command exists. The report is repository-wide, not job-specific.",
+    "I did not read reading.rs and manage.rs in full. The deliverable list suggests they mention categories, but I saw only the ALL use in manage.rs and a construction in reading.rs.",
+    "The model prompt text and the intervene help text were not inspected in full; the producer should find the system prompt for introspection (probably in athena-data/roles.rs or athena-context) and keep the mistake instruction in user_prompt unless that is cleaner.",
+    "Mistakes without a job never reach proposals.rs (it needs 3 distinct jobs). Proposals for them live in the report only. Whether to feed them into defaults proposals is a later decision."
+  ],
+  "producer_section_sha256": "4d5f6b9de2edf0616991ba46a71549b239802e72ca04b6d82c7174c79870011a"
+}
