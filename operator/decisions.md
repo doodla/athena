@@ -249,3 +249,14 @@ Athena's decision log, not here. Newest last.
 - Rule: the operator never merges a pull request outside `athena land`. A gap in land is fixed in land.
 - Also from 2026-10-18: the verifier's 1200 s limit was raised to 2400 s by hand (the suite now takes ~11 min and
   the verifier reruns it); the root fix is the verifier reusing recorded check results.
+
+## OP-19. D112 accepted with fixes; 02837e0 exempted (2026-10-23)
+
+- Sri: "Don't involve me unless you have to", then "Go for it" for the 02837e0 exemption (BRIEF.md addendum
+  of 2026-10-23).
+- 02837e0 goes into `[history] exempt` together with its revert, as one intervention commit on the revert PR
+  (#150). Every PR's full-history check walks main, so until 02837e0 is excused nothing can land.
+- D112 is accepted with three fixes: the records history is a branch (`athena/records`), not a custom ref, so
+  the ruleset can protect it and a plain clone carries it; the design covers every reader of records (status,
+  forecasting, scoring, the study site); the ruleset requires branches to be up to date. Open points: pending
+  window 15 minutes; cutover after build job 6; two weeks between job 7 and job 8.

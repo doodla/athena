@@ -1038,3 +1038,9 @@ It should become demonstrably less likely to make the same kind of mistake again
 * Wouldn't a db or a shadow repo solve this entire class of issues?
 * Yeah. Also copy over whatever. We shouldn't depend on trailers in commit messages
 * Relay note: the context was the history check failing on main after squash merges (02837e0, and the earlier exemptions). "Yeah" answered the operator's proposal: Athena designs, before building, moving its records out of the code's commit history into a history of their own (the operator recommended a `records` branch in this repository over a database or a second repository), with pull-request-level attribution folded in. "Copy over whatever" means the existing records move too rather than staying on main. Attribution must not depend on trailers in commit messages. "I gave you admin" gave the operator repository admin; Sri's squash-only, linear-history choice (OP-8) stands. The design comes to Sri for a decision before any code.
+
+### 2026-10-23: Don't involve me; the 02837e0 exemption
+
+* Don't involve me unless you have to
+* Go for it
+* Relay note: the first line answered the operator's questions on D112 (accept the records-history design with three fixes) and its open points; the operator decides those and similar questions within the brief and records each with its reason in operator/decisions.md. "Go for it" answered the one question the 2026-10-18 note reserved to Sri: Sri approves the [history] exempt entry for 02837e0, the hand-merged squash of PR #149, because no landing can reach main until it is excused.
