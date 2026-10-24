@@ -2730,3 +2730,49 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Provenance:** read: `judge`, its tests and the `run.rs` call; measured: `cargo test -p athena-core verify`
   (passing, failed, other-tree, missing-tree, placeholder and unrecorded cases). Prompted by job
   20261024-033933-ta60 and commit 88562f1.
+
+## D116 · The producer brief lists the criteria to copy, one `criteria_check` entry each
+
+- **Case:** Jobs 20261024-025358-kb23, -033758-c2h3, -045548-7qht, -055549-0qcy, -033935-c4w4 and -082859-skh5
+  were each sent back once because the first report did not account for every acceptance criterion; the second
+  producer run cost 9 to 17 minutes (reported in the request, not measured here). Cause, read in the code:
+  `unmet_criteria` in `crates/athena-core/src/run.rs` matches a report entry to a criterion by `criterion_key`,
+  which ignores only numbering, the `[kind]` tag, case, spacing and trailing punctuation; any other change in
+  wording is a different criterion. So a paraphrased, shortened or merged entry counts as missing. Three things
+  made the producer retype from memory. *Display (main cause):* `reading_sections` in
+  `crates/athena-context/src/briefs.rs` showed criteria only as `N. [kind] text` lines, which cannot be copied
+  without editing, and gave no instruction on entry count. *Schema:* the `CriterionCheckOutput` doc in
+  `crates/athena-context/src/outputs.rs` said "exactly as the accepted reading gives it, without its number or
+  kind tag", asking for an edit of each line. *Prompt:* one line in `crates/athena-context/prompts/producer.md`
+  repeated that wording, and `crates/athena-cap-change/prompts/producer.md` said nothing on the subject. The send-back
+  text in `run.rs` repeated it as well and listed only the missing criteria.
+- **Decision:** (1) `producer_brief` gains a "criteria_check: copy the line" section: one entry per criterion,
+  in order, including criteria already satisfied, each with status and evidence, and every criterion as a bare
+  line to copy (no number, no tag). Planner and verifier briefs are unchanged. (2) The change producer prompt
+  gets one sentence pointing to that section. (3) The shared producer prompt line is shortened and its
+  "number or kind tag" wording removed; the `CriterionCheckOutput` doc and the send-back text now say to copy the
+  line from the section. (4) The send-back text moves into `send_back_text` in `run.rs` so a test can check it
+  names each missing criterion's exact text. `unmet_criteria` matching is unchanged.
+- **Alternatives:** (a) Prompt only: the shared prompt is at 1276 of 1300 tokens, and with no copyable form the
+  model still retypes. (b) Schema only: field docs are short, are read less than the brief, and cannot carry the
+  exact text. (c) Tolerant matching in `unmet_criteria`: could accept a different criterion as met and hides the
+  drift instead of removing it.
+- **Tradeoff:** The brief is longer by the criteria text, repeated once. A producer can still skip a criterion;
+  the send-back remains for that case.
+- **Reversal cost:** Low: remove the section, `send_back_text` and the prompt sentence.
+- **Send-back rate before the change:** *not measured*. `records/` is absent from the producer's working copy
+  (the brief says so, and `ls records` fails there), so none of the six records was read. Per job, estimate
+  only, sample size 0 records read: kb23 (unreadable), c2h3 (unreadable), 7qht (unreadable), 0qcy (unreadable),
+  c4w4 (unreadable), skh5 (unreadable); none is a measured number. The request states that each of the six had
+  a send-back; that is a claim in the request, not a count from the records, and six jobs picked because they
+  were sent back cannot give a rate anyway. Repeatable procedure for a fair rate over all change jobs in a
+  period: for each `records/<job>/invocations/`, count producer invocation records; a job with more than one was
+  sent back, and the extra record's `detail` begins "self-check failed" and lists the missing criteria. Rate =
+  jobs sent back / jobs with a producer run. The before set is jobs landed before this change; the after set is jobs
+  whose base commit includes it.
+- **Send-back rate after the change:** none yet: no job has run since this change, so it is not measurable
+  (sample size 0). Run the procedure above on later jobs. A small sample is a trend only, not a measured effect.
+- **Provenance:** read: `run.rs`, `briefs.rs`, `outputs.rs`, both producer prompts; measured:
+  `cargo test -p athena-context` (the section's lines and instruction), `cargo test -p athena-core` (a complete
+  first report is not sent back; one omitting a criterion is sent back once with its exact text), and the
+  prompt budgets test. The job counts and times are from the request, not measured.

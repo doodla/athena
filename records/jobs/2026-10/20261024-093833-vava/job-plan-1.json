@@ -1,0 +1,181 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261024-093833-vava",
+  "round": 1,
+  "at": "2026-10-24T10:44:07.118748189Z",
+  "invocation_seq": 3,
+  "approach": "The cause is in how criteria are shown and asked for. The producer brief shows criteria as \"N. [kind] text\" (briefs.rs reading_sections). The shared producer.md has one line on criteria_check. The CriterionCheckOutput docs say \"without its number or kind tag\". So the producer retypes each criterion from memory with its number and tag stripped, and unmet_criteria (run.rs) matches only after cosmetic normalisation, so any paraphrase or merged entry counts as missing. The schema docs contribute only slightly. Fix: producer_brief (not the planner brief) gets a \"Report criteria_check\" section. It lists each criterion as a bare verbatim line in a copyable block, and says to write one entry per criterion, in order, with evidence, including criteria already satisfied, and to copy the line unchanged. The change-capability producer.md gets one short sentence pointing to that section. The shared producer.md line 10 is shortened so it does not grow. The outputs.rs doc is reworded to say \"copy the line from the brief's criteria list\". The send-back text in run.rs is aligned with the same wording. run.rs matching stays as it is. A test covers send-back behavior. The decisions note records the cause, the alternatives, and the before/after rates. The producer reads whatever job records are present and labels the numbers measured or estimate. If it cannot read them, it names the gap and invents nothing.",
+  "decisions": [
+    {
+      "choice": "Add a verbatim, copyable criteria list and an explicit one-entry-per-criterion instruction to the producer brief only, and keep the numbered list for cross-reference.",
+      "reason": "Copying removes the retyping that causes wording drift. The brief is not token-budgeted like the shared prompt, and the planner brief keeps its numbering.",
+      "rejected": [
+        {
+          "option": "Prompt only (more text in producer.md)",
+          "why": "The shared prompt is at 1276/1300 tokens. Without a copyable form, the model still retypes from memory."
+        },
+        {
+          "option": "Schema only (stronger field docs)",
+          "why": "Field docs are short and read less than the brief. They also cannot supply the exact text to copy."
+        },
+        {
+          "option": "Tolerant matching in unmet_criteria (fuzzy or prefix matching)",
+          "why": "It risks accepting a different criterion as met, and it hides the producer's drift instead of fixing it. The existing cosmetic normalisation stays."
+        }
+      ]
+    },
+    {
+      "choice": "Shorten the existing criteria_check line in the shared producer.md rather than add to it. Put the new detail in the brief.",
+      "reason": "The deliverables list the file, but the budget forbids growing it.",
+      "rejected": [
+        {
+          "option": "Leave the shared file untouched",
+          "why": "Its line says 'no number or kind tag', which conflicts with the brief's copy-the-line instruction."
+        }
+      ]
+    },
+    {
+      "choice": "Do not change the matching in run.rs. Only align the send-back message wording and add tests.",
+      "reason": "Matching is not the root cause. The send-back already names the exact criterion text.",
+      "rejected": [
+        {
+          "option": "Make the send-back list every criterion with its status",
+          "why": "Out of scope. It does not reduce first-report misses."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Add the producer-only 'Report criteria_check' section with a verbatim copyable criteria list and the one-entry-per-criterion instruction. Add tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cap-change/prompts/producer.md",
+      "action": "modify",
+      "purpose": "One short sentence: copy each criterion line from the brief's criteria_check section, one entry each, in order, including satisfied ones.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/prompts/producer.md",
+      "action": "modify",
+      "purpose": "Shorten the criteria_check line (line 10) so it does not contradict the brief and is no longer than before.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/outputs.rs",
+      "action": "modify",
+      "purpose": "Reword the CriterionCheckOutput docs: copy the line from the brief's list; no retyping.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "purpose": "Align the send-back wording with the new instruction. Matching is unchanged. Update the docs of unmet_criteria if needed.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "action": "modify",
+      "purpose": "Tests: a complete report is not sent back; a report omitting one criterion is sent back once and the message names its exact text.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Record the cause, the alternatives, and the before/after send-back rates with their sources.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Record the change.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read the job records that are available for the six jobs. Count first-run send-backs and their causes, and note what is unreadable.",
+    "Edit briefs.rs: add the producer-only criteria_check section after the criteria and deliverables, listing each criterion as a bare verbatim line with the one-entry-per-criterion, in-order, with-evidence instruction (including criteria already satisfied). Add the unit tests.",
+    "Edit crates/athena-cap-change/prompts/producer.md with one sentence. Shorten the criteria_check line in the shared producer.md. Reword the CriterionCheckOutput docs in outputs.rs.",
+    "Align the send-back wording in run.rs. Add the run_pin_tests.rs tests for a complete report and for one omitted criterion, checking that the send-back names the exact text.",
+    "Write the decisions.md note (cause, citations, alternatives, rates marked measured or estimate with sample sizes, unreadable records, after-rate status) and the CHANGELOG.md entry.",
+    "Run cargo test -p athena-context, cargo test -p athena-core and the budgets test. Then run cargo fmt and cargo clippy --all-targets."
+  ],
+  "risks": [
+    {
+      "risk": "The shared producer.md budget (1276/1300) is exceeded.",
+      "mitigation": "Keep the shared producer.md edit to a shortening, and check the budgets test passes."
+    },
+    {
+      "risk": "Changing reading_sections would affect planner briefs and their tests.",
+      "mitigation": "Add the section in producer_brief only and keep the numbered list for cross-reference. Existing brief tests such as the '1. [content] ...' assertion keep passing."
+    },
+    {
+      "risk": "The before/after rate is thin or unreadable.",
+      "mitigation": "State the sample size (6 jobs) and label rates as measured or estimate. Do not claim an after rate until jobs have run."
+    },
+    {
+      "risk": "The fix may not remove the send-backs, because a model can still skip a criterion.",
+      "mitigation": "The note says plainly that the fix is measured only on later jobs, with a repeatable way to count send-backs from the records."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the diff of the note.",
+      "command": "git diff -- docs/decisions.md",
+      "observes": "The note names the cause: display (numbered, tagged list), the prompt line, and the 'without its number or kind tag' field doc. It cites run.rs unmet_criteria and criterion_key, briefs.rs reading_sections, both producer prompts and outputs.rs CriterionCheckOutput. It states which of prompt, schema and display contributed, and lists the three alternatives.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Read the rates section of the note.",
+      "command": "git diff -- docs/decisions.md",
+      "observes": "One rate per job (kb23, c2h3, 7qht, 0qcy, c4w4, skh5) with the records read, each marked measured or estimate with its sample size. Unreadable records are named. The after rate is given, or the note says there are no jobs since the change.",
+      "fails_without": null
+    },
+    {
+      "criterion": 3,
+      "method": "A new unit test in briefs.rs builds a producer brief for a reading with several criteria. It asserts that each criterion text appears as its own bare line with no number or tag, and that the brief instructs one criteria_check entry per criterion, in order, with evidence, including criteria already satisfied. It also asserts that the planner brief is unchanged.",
+      "command": "cargo test -p athena-context",
+      "observes": "The test passes. It checks the lines in order and exact text.",
+      "fails_without": "With the old brief, which has only '1. [kind] text', the bare-line and 'one entry per criterion' assertions fail."
+    },
+    {
+      "criterion": 4,
+      "method": "Run the budget test, then compare file sizes by diff.",
+      "command": "cargo test --locked -p athena-cli --test budgets -- --nocapture",
+      "observes": "The test passes. crates/athena-context/prompts/producer.md is not longer than before. crates/athena-cap-change/prompts/verifier.md is untouched. The new instructions are in the change producer.md and briefs.rs.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "New tests in run_pin_tests.rs call unmet_criteria with (a) a report that has a met entry copied verbatim for every criterion and (b) a report omitting one criterion. A harness test using the existing Tweak mechanism drops one criteria_check entry on the first attempt and checks that exactly one send-back happens and that its message contains the missing criterion's exact text.",
+      "command": "cargo test -p athena-core",
+      "observes": "(a) gives no unmet criteria and no send-back. (b) gives one send-back whose text contains the exact criterion.",
+      "fails_without": "If unmet_criteria ignored a missing entry, or the send-back omitted the criterion text, the assertions would fail."
+    },
+    {
+      "criterion": 6,
+      "method": "Run cargo test, cargo clippy --all-targets and cargo fmt --check.",
+      "command": "cargo test",
+      "observes": "All pass with no warnings or diffs.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "The records of the six named jobs are not in this snapshot. It is unknown whether the producer can read them, so the before rate may have to be reported as unmeasured.",
+    "Whether the exact token cost of the new brief section matters to any brief budget test. The budgets test seems to cover prompt files only, but I did not read it."
+  ],
+  "producer_section_sha256": "ff0cb5479bbac72a4f09be1d62aeb882c09ed2316f457e1c2e2b4a6262a60b65"
+}

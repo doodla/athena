@@ -225,11 +225,31 @@ pub fn producer_brief(inputs: &ProducerInputs) -> String {
          records/, the owner's private files, and history are absent by design. Your edits become the candidate.\n"
     );
     let _ = writeln!(out, "## What the verifier sees\n\n{VERIFIER_VISIBILITY}\n");
+    criteria_check_section(&mut out, &inputs.reading);
     let _ = writeln!(
         out,
         "## Report\n\nEnd with the producer report as your structured output."
     );
     out
+}
+
+/// The producer's "criteria_check" section: each accepted criterion as a bare line to copy, then the
+/// instruction. Matching a report entry to a criterion needs the exact words, and a producer that retypes
+/// the criteria from memory drifts from them and is sent back.
+fn criteria_check_section(out: &mut String, reading: &AcceptedReading) {
+    let _ = writeln!(
+        out,
+        "## criteria_check: copy the line\n\n\
+         Report exactly one criteria_check entry per acceptance criterion, in the order below, including \
+         criteria that were already satisfied before you began. For each entry copy the line below as the \
+         entry's criterion text, character for character; do not retype, shorten, merge or reword it. Give \
+         its status (met or unmet) and your evidence: what you read or ran. A criterion with no entry is \
+         sent back.\n"
+    );
+    for (text, _) in &reading.criteria {
+        let _ = writeln!(out, "{text}");
+    }
+    out.push('\n');
 }
 
 /// Words the boundary scan (M19) rejects, built from fragments so no tracked file contains them. This
@@ -1137,6 +1157,48 @@ mod tests {
                 "the producer brief must not contain {forecast}"
             );
         }
+    }
+
+    #[test]
+    fn producer_briefs_list_every_criterion_to_copy_and_ask_for_one_entry_each() {
+        let accepted = AcceptedReading::new(&reading(), &defaults(), |_| false);
+        let brief = producer_brief(&ProducerInputs {
+            job: "20261010-153012-k7q2".into(),
+            request: "add a changelog".into(),
+            reading: accepted,
+            checks: vec![],
+            commands: vec![],
+            pin: None,
+        });
+        let (_, section) = brief
+            .split_once("## criteria_check: copy the line\n")
+            .expect("the producer brief has a criteria_check section");
+        let section = section.split("\n## ").next().unwrap();
+        // Each criterion is its own bare line (no number, no kind tag), in order.
+        let lines: Vec<&str> = section.lines().filter(|l| !l.is_empty()).collect();
+        let n = lines.len();
+        assert_eq!(
+            &lines[n - 2..],
+            ["CHANGELOG.md exists", "cargo test passes"],
+            "the last lines of the section are the criteria, verbatim and in order"
+        );
+        for needle in [
+            "exactly one criteria_check entry per acceptance criterion",
+            "in the order below",
+            "already satisfied",
+            "evidence",
+        ] {
+            assert!(section.contains(needle), "missing instruction: {needle}");
+        }
+    }
+
+    #[test]
+    fn planner_briefs_have_no_criteria_check_section() {
+        // Only the producer reports criteria_check.
+        let accepted = AcceptedReading::new(&reading(), &defaults(), |_| false);
+        let mut out = String::new();
+        reading_sections(&mut out, &accepted);
+        assert!(!out.contains("criteria_check"));
     }
 
     #[test]

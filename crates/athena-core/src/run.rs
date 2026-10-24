@@ -1181,6 +1181,25 @@ pub(crate) fn unmet_criteria(report: &ProducerOutput, accepted: &AcceptedReading
         .collect()
 }
 
+/// The brief for the producer's one send-back: the original brief, then the criteria the report did not
+/// show as met, each with its exact text.
+pub(crate) fn send_back_text(brief: &str, unmet: &[String]) -> String {
+    let mut text = format!("{brief}\n\n## Sent back\n\n");
+    text.push_str(
+        "Your previous report did not show every acceptance criterion as met in criteria_check. \
+         Your edits are still in your working directory. Fix the work for each criterion below, \
+         then report every acceptance criterion in criteria_check, copying each line from the brief's \
+         criteria_check section as its text, with its status and your evidence. This is the only send-back: \
+         if your changes are still in place afterwards, they go to the verifier with the criteria \
+         your report still leaves unmet or unreported flagged, and the verifier judges them. \
+         A run that leaves no change fails.\n\nCriteria not met or not reported:\n\n",
+    );
+    for criterion in unmet {
+        text.push_str(&format!("- {criterion}\n"));
+    }
+    text
+}
+
 /// A criterion's text reduced for comparison: no leading number (`1.`, `2)`, `3:`), no leading `[kind]`
 /// tag, lowercase, single spaces, no trailing punctuation.
 fn criterion_key(text: &str) -> String {
@@ -1439,20 +1458,7 @@ impl Athena {
             send_backs += 1;
             ctx.ui
                 .line(&format!("producer   sent back: {}", problems.join("; ")));
-            let mut sent_back = format!("{brief}\n\n## Sent back\n\n");
-            sent_back.push_str(
-                "Your previous report did not show every acceptance criterion as met in criteria_check. \
-                 Your edits are still in your working directory. Fix the work for each criterion below, \
-                 then report every acceptance criterion in criteria_check, with its text exactly as given \
-                 (without its number or kind tag), its status and your evidence. This is the only send-back: \
-                 if your changes are still in place afterwards, they go to the verifier with the criteria \
-                 your report still leaves unmet or unreported flagged, and the verifier judges them. \
-                 A run that leaves no change fails.\n\nCriteria not met or not reported:\n\n",
-            );
-            for criterion in &unmet {
-                sent_back.push_str(&format!("- {criterion}\n"));
-            }
-            attempt_brief = sent_back;
+            attempt_brief = send_back_text(brief, &unmet);
         };
 
         // The candidate: the snapshot's change list, applied to the base's full tree in the user's repository.
