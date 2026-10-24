@@ -1,0 +1,211 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261024-093652-rh71",
+  "round": 1,
+  "at": "2026-10-24T09:39:39.446028575Z",
+  "invocation_seq": 2,
+  "approach": "Add athena-core module `records_import` with `import_records(git, c0) -> Result<String, ImportError>`. It lists records/ at C0 with Git::ls_tree, reads each blob with cat_blob, and builds an ImportManifest (RecordId::generate(crate::now()), athena_data::sha256_hex for hashes). It refuses if RecordsWriter::tip() is Some. It then does one RecordsWriter::append of a Change::put per file plus import-manifest.json, and calls a public `verify_import(git, c0, commit)` that re-reads the new commit and compares it with C0. The checks, in order: manifest parses as HistoryRecord::ImportManifest and validates; every non-manifest tree file against C0 for Missing, Extra, BlobMismatch and HashMismatch (sha256 of the bytes against the manifest); then counts for the tree and the manifest against C0. Each failure is its own ImportError variant. Tests run on scratch repositories. The doc-only edits to athena-git, the design doc and the CHANGELOG say the importer exists and is not wired in.",
+  "decisions": [
+    {
+      "choice": "Put the importer in athena-core and use athena_data::sha256_hex for hashing.",
+      "reason": "athena-core depends on athena-git and athena-data. sha256_hex is already exported and used in proposals.rs, so no new hashing dependency is needed. The only new dependency is thiserror (workspace 2) for the error enum.",
+      "rejected": [
+        {
+          "option": "Add sha2 to athena-core",
+          "why": "It duplicates sha256_hex and adds a dependency for nothing."
+        },
+        {
+          "option": "Put it in athena-git",
+          "why": "athena-git cannot see ImportManifest."
+        }
+      ]
+    },
+    {
+      "choice": "Refuse a second import by checking RecordsWriter::tip() is None before writing. Return ImportError::AlreadyImported without touching the branch.",
+      "reason": "The writer's same-bytes no-op would make a repeat import look like success (the new manifest id differs, so it would be refused only by accident). An explicit check gives a clear error and the tip stays unchanged. A race is still safe: the first write uses the all-zero expected id, so the compare-and-swap rejects a concurrent branch creation.",
+      "rejected": [
+        {
+          "option": "Rely on the writer's refusal",
+          "why": "It would not be a distinct, deliberate error. Because the generated id differs each run, the manifest put would be refused as a changed file, which is accidental."
+        }
+      ]
+    },
+    {
+      "choice": "Keep a private `import_with(git, c0, tamper)` hook that lets tests alter the change list before writing. `verify_import` is public and always runs on the committed tree.",
+      "reason": "Tests can then produce a really-committed bad commit (file dropped, bytes changed, extra file, duplicated manifest entry). The self-check is exercised against real commits without hand-built git plumbing.",
+      "rejected": [
+        {
+          "option": "Craft bad commits with git checkout/commit in the work tree",
+          "why": "It is more fragile and slower. It also needs manifest tampering by hand."
+        }
+      ]
+    },
+    {
+      "choice": "Refuse any records/ entry that is not a regular 100644 blob, and refuse an empty records/ at C0.",
+      "reason": "The writer always writes mode 100644, so a symlink or executable would silently differ. An empty import must not count as success (no-empty-success). Both get their own error variant.",
+      "rejected": [
+        {
+          "option": "Copy modes or skip the odd entries",
+          "why": "The writer cannot store other modes, and skipping would make the self-check misleading."
+        }
+      ]
+    },
+    {
+      "choice": "Edit athena-git lib.rs and records_branch.rs as doc comments only, replacing 'Nothing calls this writer yet' with a pointer to the importer. Change no code.",
+      "reason": "Both files are listed as deliverables. The stale statement would otherwise be wrong once the importer uses the writer.",
+      "rejected": [
+        {
+          "option": "Make testutil public",
+          "why": "athena-core tests can build their own scratch repo with Git::isolated, as chain.rs does, so no API change is needed."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/records_import.rs",
+      "action": "create",
+      "purpose": "ImportError, import_records, verify_import, the private import_with hook, module docs (what it does, the self-check, not wired in, append-only), and the scratch-repo tests.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "purpose": "Add `pub mod records_import;` in alphabetical order (after `reading`).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/Cargo.toml",
+      "action": "modify",
+      "purpose": "Add `thiserror.workspace = true` for the error enum.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "Cargo.lock",
+      "action": "modify",
+      "purpose": "Record thiserror as a dependency of athena-core. No new package.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-git/src/lib.rs",
+      "action": "modify",
+      "purpose": "Doc-comment edit only, if a stale 'nothing uses the records writer' note exists near the `records_branch` module. Otherwise leave the file unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-git/src/records_branch.rs",
+      "action": "modify",
+      "purpose": "Doc-comment only: replace 'Nothing calls this writer yet' (line 22) with a pointer to the importer in athena-core, which is not wired into the pipeline.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/records-history.md",
+      "action": "modify",
+      "purpose": "Update the line 276 status ('the importer ... still to do') and add a 'Built (job 2)' note under §10 item 2. It says the importer exists at crates/athena-core/src/records_import.rs and is not yet run against main.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an entry under [Unreleased] > Added.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Add thiserror.workspace to crates/athena-core/Cargo.toml and let cargo update Cargo.lock (cargo build --locked will fail until it is updated, so run cargo build once).",
+    "Create records_import.rs. Module docs cover: the purpose; the steps; the self-check; append-only, so a second import is refused; and the note that it is not wired into the pipeline, the CLI or CI and has not been run against main (job 7 will do that).",
+    "Write ImportError (thiserror) with variants: Git(GitError) and Records(RecordsError) transparent, AlreadyImported{tip}, EmptyRecords{c0}, UnsupportedEntry{path,mode}, ManifestMissing, ManifestInvalid(String), Missing{path}, Extra{path}, BlobMismatch{path,expected,found}, HashMismatch{path}, CountMismatch{expected,found,what}.",
+    "Write import_records(git,&str c0) -> Result<String,ImportError>. It calls import_with(git,c0,|_|{}). import_with does: resolve c0 and fail if it is not a commit; check writer.tip() is None; ls_tree(c0) filtered to paths starting 'records/', refusing non-blob or non-100644 entries; refuse if empty; cat_blob each file; build the ImportManifest (c0 full sha, entries sorted by path, sha256_hex); validate it; serialize with serde_json::to_vec_pretty over HistoryRecord::ImportManifest; apply the tamper hook to the Vec<Change>; RecordsWriter::append once; then verify_import. Decide what to do if verification fails: return the error, and the commit stays on the branch because the branch is append-only (say so in the docs).",
+    "Write pub verify_import(git,c0,commit). Re-list C0's records/ files. Read import-manifest.json from the commit with show_file, parse it with HistoryRecord::parse, and require the ImportManifest variant with c0 equal. List the commit's tree. Compare files other than the manifest path against C0 in this order: Missing, Extra, BlobMismatch. Read each blob and compare its sha256_hex to the manifest entry (HashMismatch). Compare manifest entries against C0 (blob ids, sha256). Compare the tree count and the manifest count to C0's count (CountMismatch).",
+    "Register the module in lib.rs.",
+    "Write tests with a local repo() helper like chain.rs's (Git::isolated, init -b main, write files, add, commit): full import; manifest content; missing, changed, extra, count-mismatch and manifest-hash cases using the hook; a control; second import refused with the tip unchanged; empty records/ refused; a non-blob entry (a symlink) refused; an import that leaves main and the work tree untouched.",
+    "Update the doc comments in records_branch.rs (and lib.rs if stale text exists), the design doc and the CHANGELOG.",
+    "Run cargo fmt --all, cargo clippy --workspace --all-targets --locked -- -D warnings, and cargo test --workspace --locked."
+  ],
+  "risks": [
+    {
+      "risk": "Test-only tamper hook leaks into production behavior.",
+      "mitigation": "The hook is a closure parameter of a private fn. The public import_records passes a no-op, and the self-check always runs on the committed tree."
+    },
+    {
+      "risk": "A bad import leaves a commit on the append-only branch that cannot be removed.",
+      "mitigation": "This is by design for the append-only branch. Document it. The failure is loud, and the real run is out of scope here (job 7 runs it after a scratch run)."
+    },
+    {
+      "risk": "Scratch repos need git identity or signing config.",
+      "mitigation": "Use Git::isolated as the existing tests do. The writer reads signs_commits from the isolated config."
+    },
+    {
+      "risk": "Large files read into memory.",
+      "mitigation": "records/ files are small JSON/text. Note the assumption in the docs."
+    },
+    {
+      "risk": "Cargo.lock edit rejected by --locked.",
+      "mitigation": "Run cargo build once to update Cargo.lock and commit the result. thiserror is already in the lockfile."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Test `full_import_passes_self_check_and_copies_every_file`. It builds a scratch repo whose C0 has several nested files under records/ (including a non-UTF-8 binary file), plus a file outside records/. It calls import_records, then lists the new commit with ls_tree.",
+      "command": "cargo test -p athena-core records_import",
+      "observes": "import_records returns Ok. athena/records points at the returned commit. The tree holds exactly the records/ paths with blob ids equal to C0's, plus import-manifest.json, and nothing from outside records/.",
+      "fails_without": "If the copy or the self-check were missing or wrong, the tree listing or blob-id assertions would fail, or the import would return an error."
+    },
+    {
+      "criterion": 2,
+      "method": "Test `manifest_lists_each_path_with_blob_and_sha256`. It reads import-manifest.json from the new commit and parses it with HistoryRecord::parse. It checks the variant is ImportManifest and that validate() is Ok. It compares the entries with C0's ls_tree output and an independent sha256_hex of each file's bytes.",
+      "command": "cargo test -p athena-core records_import",
+      "observes": "The manifest c0 equals the C0 id. The entry count equals the number of records/ files at C0. Each entry's path and blob_id match C0, and each sha256 matches the content hash.",
+      "fails_without": "If the manifest were missing an entry or carried wrong hashes or blob ids, the equality assertions would fail."
+    },
+    {
+      "criterion": 3,
+      "method": "Tests `self_check_fails_on_missing_file`, `..._changed_file`, `..._extra_file`, `..._count_mismatch` (plus a manifest-hash-mismatch case). Each uses the import_with tamper hook to commit a bad import on a fresh scratch repo, then asserts the specific ImportError variant. A control test asserts the untampered import is Ok.",
+      "command": "cargo test -p athena-core records_import",
+      "observes": "The variants are Missing{path}, BlobMismatch/HashMismatch{path}, Extra{path} and CountMismatch{..}, each distinct, using matches!. The control import passes, so the failures come from the tampering.",
+      "fails_without": "A self-check that only compared counts, or that was skipped, would return Ok or the wrong variant for at least one tampering case."
+    },
+    {
+      "criterion": 4,
+      "method": "Test `second_import_is_refused_and_tip_unchanged`. It imports once and records the tip. It imports again into the same repo and asserts AlreadyImported, then asserts the tip and the commit count are unchanged. A second test shows an unrelated pre-existing athena/records branch also blocks the import.",
+      "command": "cargo test -p athena-core records_import",
+      "observes": "The second call returns ImportError::AlreadyImported. rev-parse of athena/records is identical before and after, and the rev-list count is 1.",
+      "fails_without": "Without the tip check, the second call would either add a commit or fail with a different writer error, and the variant or tip assertion would fail."
+    },
+    {
+      "criterion": 5,
+      "method": "Inspect the diff and search for callers. Confirm the module docs state the importer is not wired in.",
+      "command": "git diff --stat",
+      "observes": "The diff lists only the deliverable files, with no athena.toml, defaults.toml, .github/workflows or CLI file. Grep for `records_import` and `import_records` shows hits only in records_import.rs, lib.rs (the `pub mod` line), the docs and the CHANGELOG. The module //! text says it is not wired into the pipeline, the CLI or CI, and has not been run against main.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Run the full gates. Review confirms the module calls RecordsWriter::append and ImportManifest, with no copy of the writer's logic.",
+      "command": "cargo test --workspace",
+      "observes": "All tests pass. `cargo clippy --workspace --all-targets` and `cargo fmt --check` are clean. A grep of records_import.rs shows RecordsWriter and ImportManifest in use, and no update-ref, commit_tree or hash-object calls.",
+      "fails_without": "A compile error, a failing test, a clippy warning or a formatting diff would fail the respective command."
+    },
+    {
+      "criterion": 7,
+      "method": "Read the changed text. The design doc gets a 'Built (job 2)' note under §10 item 2 or §4 that names crates/athena-core/src/records_import.rs and says the importer exists and has not yet been run against main. The CHANGELOG [Unreleased] > Added gets a matching entry.",
+      "command": "git diff docs/design/records-history.md CHANGELOG.md",
+      "observes": "Both diffs name `records_import` / `crates/athena-core/src/records_import.rs`, say the importer exists, and say it has not yet been run against main and is not wired into the pipeline.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "I did not check whether crates/athena-git/src/lib.rs has stale text about the writer. It is listed as a deliverable, so the producer should grep it for 'records_branch' or 'nothing calls' and edit only if something is stale.",
+    "Should a failed self-check be recorded anywhere beyond the error? The brief says only 'fails', so the plan returns the error and leaves the commit in place."
+  ],
+  "producer_section_sha256": "ac2b60158155ed2adb72479b83172e7d4f64189785e9ea7ac14529becc01586e"
+}

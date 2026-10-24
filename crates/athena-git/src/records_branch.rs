@@ -19,7 +19,8 @@
 //! - [`Change::Delete`] and [`Change::Rename`] are always refused: they would modify or remove a record.
 //!
 //! A refused batch changes nothing: the whole batch is checked before any commit is made. Trees are built in
-//! a temporary index, so the user's index and work tree are never touched. Nothing calls this writer yet.
+//! a temporary index, so the user's index and work tree are never touched. The only caller is the importer
+//! in `athena-core` (`records_import`), which is not wired into the pipeline and has not been run against main.
 
 use crate::index::{IndexEdit, TempIndex};
 use crate::{Git, GitError, null_oid};
