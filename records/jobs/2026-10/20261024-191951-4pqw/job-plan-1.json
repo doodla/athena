@@ -1,0 +1,234 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261024-191951-4pqw",
+  "round": 1,
+  "at": "2026-10-24T19:22:54.643640921Z",
+  "invocation_seq": 2,
+  "approach": "Add `athena_core::pr_check`: for each commit in base..head it calls a new per-commit classifier extracted from `land::pr_commits` (same rules and messages, so one bad commit no longer hides the rest), then judges the classified list: job landings need a passing verification and an accepted prediction that precedes the work; a declared intervention after the last job landing (or with no landing) fails with the squash message; the head's governed fingerprint must equal the last landing's verified fingerprint. All offences are collected and reported by sha. The CLI gets `check --pr-head <base> <head>` (conflicts with `--history`), exit 2 on failure and 0 on pass. A new pull_request-only, non-required CI job runs it. Tests build real git fixtures on the existing land.rs fixtures.",
+  "decisions": [
+    {
+      "choice": "Extract the body of the `pr_commits` loop into `pub fn classify_commit(git, remote_base, head, sha) -> Result<PrCommit>`. `pr_commits` calls it per sha, unchanged in behaviour and messages; pr_check calls it per sha and collects the errors.",
+      "reason": "`pr_commits` bails on the first bad commit, but criterion 4 requires every offending commit listed. Extraction keeps classification rules and the single source of truth (closing_jobs) intact.",
+      "rejected": [
+        {
+          "option": "Call `pr_commits(git, sha^, sha)` once per commit from pr_check",
+          "why": "Breaks for merge commits (the range widens), and runs rev-list per commit for no gain."
+        },
+        {
+          "option": "Change pr_commits to return partial results plus errors",
+          "why": "Alters its contract, which the brief puts out of scope, and breaks its callers and tests."
+        }
+      ]
+    },
+    {
+      "choice": "Judge prediction order by the gate's existing rule, `prediction_problem` in athena-gate invariant.rs, made `pub` (one-word visibility change, no logic change) and called with the landing tree's `JobFiles` and the job's `accepted_reading`. Verification passing means `verification.final_verdict == Verdict::Pass`, read from `JobFiles::load` on the landing's tree.",
+      "reason": "Reuses the rule the gate applies to landings today (reading in the tree, not after dispatch or any non-reader invocation), so the pre-merge check and the gate cannot disagree.",
+      "rejected": [
+        {
+          "option": "Re-implement the timestamp comparison in pr_check",
+          "why": "Two copies of the rule would drift."
+        },
+        {
+          "option": "Check ancestry of the prediction commit",
+          "why": "Design §7 notes a squash or rebase breaks ancestry; the records-in-tree rule survives it."
+        }
+      ]
+    },
+    {
+      "choice": "Content rule: `fingerprint(git, head, landing_parent) == verification.verified_fingerprint` of the last job landing, where `landing_parent` supplies the exclusion rules (the same convention as `land::plan`). Every commit after that landing must be `RecordsOnly`. A `DeclaredIntervention` after the last landing, or with no landing at all, fails with a message saying a squash of it is not a valid landing until the cutover. Interventions before the last landing are allowed.",
+      "reason": "Matches the brief: the head equals the last verified content plus records-only commits only. It also matches the realistic range in the existing land.rs test, where an intervention precedes the landing.",
+      "rejected": [
+        {
+          "option": "Forbid interventions anywhere in the PR",
+          "why": "The brief allows declared interventions; only those after the landing are unsafe to squash."
+        },
+        {
+          "option": "Compare whole trees",
+          "why": "Records-only commits legitimately change the tree."
+        }
+      ]
+    },
+    {
+      "choice": "CLI: a `pr_head: Option<Vec<String>>` field on the existing `Check` (`#[arg(long, num_args = 2, value_names = [\"BASE\", \"HEAD\"], conflicts_with = \"history\")]`), reusing `--json`. Output is rendered by a function in display.rs. Exit 2 on failure, as the other checks do.",
+      "reason": "Smallest change; the existing `check` and `check --history` paths are untouched.",
+      "rejected": [
+        {
+          "option": "A separate `check-pr` subcommand",
+          "why": "The request names `athena check --pr-head`."
+        }
+      ]
+    },
+    {
+      "choice": "The CI job `pr-head` has `if: github.event_name == 'pull_request'`, `continue-on-error: true`, a comment saying it becomes required at the cutover (job 7), checkout with fetch-depth 0 at the PR head sha, and shas passed through env vars. It does not touch the cache steps.",
+      "reason": "The job must not block merging, and the existing jobs stay unchanged. Env vars avoid putting expressions into shell text. It is not added to branch protection.",
+      "rejected": [
+        {
+          "option": "Copy the cache restore/save steps",
+          "why": "Larger diff and more governance surface; the check is cheap and installs via setup.sh --ci like the history job."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/pr_check.rs",
+      "action": "create",
+      "purpose": "The pre-merge check: per-commit classification with collected errors, landing verification/prediction/content rules, the intervention-after-landing rule, the report type, and the tests.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-core/src/land.rs",
+      "action": "modify",
+      "purpose": "Extract `classify_commit` from `pr_commits` (no behaviour change); extend the test `fixtures` with job.json, reading and invocation builders, and a verification builder taking a fingerprint and verdict.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-gate/src/invariant.rs",
+      "action": "modify",
+      "purpose": "Make `prediction_problem` `pub` so pr_check reuses the gate's prediction-order rule. Visibility only.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "purpose": "Declare `pub mod pr_check;`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "purpose": "Add `--pr-head <base> <head>` to `Check` and dispatch to the check; exit 2 on failure.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "purpose": "Render the report: one line per offending commit (sha, reason), and a summary line.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "action": "modify",
+      "purpose": "Governance deliverable: add the non-required `pr-head` job on pull_request.",
+      "governance": true,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Changelog entry for outside readers: the new command and the non-blocking CI job.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/records-history.md",
+      "action": "modify",
+      "purpose": "Record job 4 part 1 as built (§5.1 and §10): what the command checks, that it is non-required until job 7, and that interventions after the landing fail until the cutover.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "README.md",
+      "action": "modify",
+      "purpose": "List `athena check --pr-head <base> <head>` beside the other check commands.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read the Reading, Job, Invocation, Verification structs in athena-data records.rs, then `Git` helpers in athena-git. `Judged`/`fingerprint` usage is shown in land.rs.",
+    "In land.rs, move the loop body of `pr_commits` into `pub fn classify_commit(git, remote_base, head, sha) -> Result<PrCommit>` with identical messages; have `pr_commits` call it. Run the existing land.rs tests to confirm no change.",
+    "Make `prediction_problem` in athena-gate invariant.rs `pub`, with a doc line. Add `pub mod pr_check;` to lib.rs.",
+    "Write pr_check.rs. `check_pr_head(git, base, head) -> Result<PrReport>`: rev-list base..head, oldest first. An empty range is a single offence. Classify each sha with `classify_commit`, turning an error into an offence for that sha with the error text. Then, among the classified commits, find the last JobLanding. For each JobLanding, load `JobFiles` on its tree and offend if the verification is missing or its final_verdict is not Pass, or if `accepted_reading` is missing or `prediction_problem` returns a reason. For each DeclaredIntervention after the last landing or with no landing, offend with the squash-not-valid-until-cutover message. A commit after the last landing that is not RecordsOnly is an offence. If the last landing exists and no offence was found on it, compare `fingerprint(head, landing_parent)` with its verified_fingerprint; on mismatch offend naming the landing sha. `PrReport { commits, offences: Vec<Offence{sha, reason}> }` with `passed()`.",
+    "Extend land.rs fixtures: a job.json with dispatched_at and accepted_reading, reading-N.json with `at` and invocation_seq, a producer invocation, and a verification taking verdict and fingerprint. A helper builds a landing with the real fingerprint by committing once, computing `fingerprint`, then `git commit --amend` with the record.",
+    "Write the tests in pr_check.rs: unverified commit (names sha); Athena-shaped head passes; intervention after the landing (squash wording, names sha); late prediction; content mismatch; failing verdict; combined range listing all offending shas in order.",
+    "CLI: add `pr_head: Option<Vec<String>>` to `Check` and handle it before the existing branches. Open the repo as the other arms do, call the check, print the report via display.rs (and JSON if `--json`), and return 2 on failure. Leave the history and working paths untouched.",
+    "Add the `pr-head` job to ci.yml (additive), then the CHANGELOG, README and design-doc entries.",
+    "Run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`."
+  ],
+  "risks": [
+    {
+      "risk": "Fixture fingerprints are circular: the landing's verification record holds the fingerprint of content in the same commit.",
+      "mitigation": "Closing records are excluded from the governed fingerprint (the existing realistic land.rs test lands a.txt with records). Commit, compute, amend, and assert the fingerprint is unchanged after the amend."
+    },
+    {
+      "risk": "Exclusion rules at the head differ from the landing's, shifting the fingerprint.",
+      "mitigation": "Use the landing's parent as the rules source, as `land::plan` does. A rules change shows as a content mismatch, which is the safe outcome."
+    },
+    {
+      "risk": "Rewriting reader code or `prediction_problem` visibility reaches into athena-gate.",
+      "mitigation": "Visibility change only, no logic change; the gate's tests run unchanged."
+    },
+    {
+      "risk": "CI: the base sha may be missing from the checkout, or the job might show red on PRs.",
+      "mitigation": "fetch-depth 0 brings the history that holds the base sha; `continue-on-error: true` and no branch-protection entry keep it non-blocking."
+    },
+    {
+      "risk": "Merge commits inside the range are classified against the first parent only.",
+      "mitigation": "This is `pr_commits`' existing behaviour; unchanged, and noted in the doc entry."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit test on a git fixture: a PR range holding one commit that edits a.txt with no job records or intervention. The test runs the check and asserts it fails and the report names that commit's sha and the reason.",
+      "command": "cargo test --locked pr_check::tests::an_unverified_commit_fails_and_is_named",
+      "observes": "Report is a failure whose offence list contains exactly that sha (and its 'no verification covers it' reason).",
+      "fails_without": "With no per-commit classification error collected, the check would pass or report no sha."
+    },
+    {
+      "criterion": 2,
+      "method": "Fixture: a records-only reading commit, a dispatch commit with job.json and an accepted reading recorded before it, an intervention before the landing, a landing commit whose verification passed and whose verified_fingerprint is the real fingerprint, then a records-only commit. Run the check.",
+      "command": "cargo test --locked pr_check::tests::a_head_shaped_like_an_athena_pull_request_passes",
+      "observes": "The report passes with no offences; the classified commits are RecordsOnly…, JobLanding, RecordsOnly.",
+      "fails_without": "A check that rejected valid shapes (e.g. an intervention before the landing, or trailing records-only) would fail this test."
+    },
+    {
+      "criterion": 3,
+      "method": "Same valid head, plus an intervention commit (a governed edit with an intervention record) after the landing. Assert it fails, names that commit's sha, and the message contains 'a squash of it is not a valid landing until the cutover'.",
+      "command": "cargo test --locked pr_check::tests::a_declared_intervention_after_the_landing_fails",
+      "observes": "Failure naming the intervention sha with the squash wording; the landing is not named.",
+      "fails_without": "Without the after-landing rule the head would pass."
+    },
+    {
+      "criterion": 4,
+      "method": "Three tests. (a) A landing whose reading is recorded after the dispatch or an invocation start fails naming the landing sha. (b) A landing whose verified_fingerprint differs from the head's content fails naming that landing sha. (c) One range with an unverified commit, a late-prediction landing and a trailing intervention reports all three shas, not only the first.",
+      "command": "cargo test --locked pr_check::tests",
+      "observes": "Each failure message contains the expected sha(s); in (c) the offence list has three entries in commit order.",
+      "fails_without": "Stopping at the first error (as `pr_commits` does) would omit shas in (c); skipping the prediction or content rule would make (a) or (b) pass."
+    },
+    {
+      "criterion": 5,
+      "method": "Inspect the diff. `Check` gains a `pr_head` option conflicting with `history`; its branch calls `athena_core::pr_check`, which classifies through `land::classify_commit`/`pr_commits`, and returns 2 on failure and 0 on pass. The `history` and working-state branches are untouched. `pr_commits` tests still pass.",
+      "command": "git diff -- crates/athena-cli/src/main.rs crates/athena-core/src/land.rs",
+      "observes": "Only additions in the Check arm plus the behaviour-preserving extraction in land.rs; the existing land.rs `pr_commits` tests pass unchanged under `cargo test --locked`.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Inspect the diff: a new `pr-head` job gated by `if: github.event_name == 'pull_request'`, fetch-depth 0, running `athena check --pr-head \"$BASE\" \"$HEAD\"` with env from `github.event.pull_request.base.sha` and `.head.sha`, commented as not yet required (becomes required at the cutover, job 7). The diff shows no changes to the `checks` or `history` jobs.",
+      "command": "git diff -- .github/workflows/ci.yml",
+      "observes": "The diff is purely additive and contains the comment text.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Run clippy, then `cargo fmt --all --check`, then `cargo test --locked`.",
+      "command": "cargo clippy --all-targets --locked -- -D warnings",
+      "observes": "All three exit 0 with no warnings and no failing tests.",
+      "fails_without": "A lint, format drift or a broken existing test would make a command exit non-zero."
+    }
+  ],
+  "open_questions": [
+    "A PR with no job landing: the plan passes it if it holds only records-only commits and fails any intervention, since there is no verified landing to squash. The brief does not say; the design doc could be stricter.",
+    "Whether `athena check --pr-head` should open the repo through `open(false)` like Check, or take a repo path. The producer should follow the existing Check arm.",
+    "The brief's deliverable list omits athena-gate invariant.rs; the plan makes one visibility change there. If that is unwanted, copy the rule into pr_check at the cost of duplication."
+  ],
+  "producer_section_sha256": "e98256d187cdf95dfa3ef3eac0219b808c4cef96bb457759d88deb46f3ebac36"
+}

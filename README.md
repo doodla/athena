@@ -187,6 +187,7 @@ athena restart --cost "..." --lost "..."                            # a restart 
 athena status                                       # the state of the work, from the repository alone
 cargo test && cargo clippy --all-targets -- -D warnings
 athena check --history                              # what CI runs over the full history
+athena check --pr-head <base> <head>                # the pre-merge check on a pull request (CI runs it, not yet required)
 ```
 
 The tests that call real models are opt-in: `cargo test -p athena-cli --test live -- --ignored

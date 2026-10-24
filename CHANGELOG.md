@@ -9,6 +9,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `athena check --pr-head <base> <head>`, the pre-merge check on a pull request (job 4, part 1 of
+  `docs/design/records-history.md`). It passes only when every commit between the base and the head is a
+  verified job landing whose prediction (the accepted reading) was recorded before the work, a declared
+  intervention made before the last landing, or a records-only commit, and the head's governed content equals
+  what the last landing verified. Otherwise it exits 2 and prints each offending commit's sha and the reason;
+  all offending commits are listed, not only the first. A declared intervention after the last landing fails,
+  because a squash of it is not a valid landing until the cutover. A new `pr-head` job in
+  `.github/workflows/ci.yml` runs it on pull requests; it does not block merging yet and becomes required at
+  the cutover (job 7). Classification is `land::classify_commit`, the per-commit step of `land::pr_commits`
+  (whose results and messages are unchanged); `athena_gate::invariant::prediction_problem` is now public so the
+  check applies the same prediction-order rule as the gate. Tests: `crates/athena-core/src/pr_check.rs`.
 - A retry starts the producer from the rejected candidate, not the base, when every check of the rejected job
   passed and every unmet criterion is a content criterion; the producer is sent only the verifier's findings.
   Any other rejection (a failed check, an unmet or unverified behavior criterion, no candidate tree, a failed

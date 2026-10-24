@@ -321,9 +321,16 @@ Exit code: 0 only when the target was met; 2 for any other stop; 1 when Athena i
         json: bool,
     },
     /// Check every record, reconciliation, and gate over the working state, or over the full history.
+    ///
+    /// With `--pr-head <BASE> <HEAD>`, the pre-merge check on a pull request: every commit in BASE..HEAD must
+    /// be a verified job landing (prediction before outcome), a declared intervention before the last
+    /// landing, or records only, and the head must hold the last landing's verified content. Exit 2 on a
+    /// finding.
     Check {
         #[arg(long)]
         history: bool,
+        #[arg(long, num_args = 2, value_names = ["BASE", "HEAD"], conflicts_with = "history")]
+        pr_head: Option<Vec<String>>,
         #[arg(long)]
         json: bool,
     },
@@ -932,8 +939,31 @@ fn run(cli: Cli) -> Result<u8> {
             }
             Ok(0)
         }
-        Command::Check { history, json } => {
+        Command::Check {
+            history,
+            pr_head,
+            json,
+        } => {
             let athena = open(false)?;
+            if let Some(range) = pr_head {
+                let report =
+                    athena_core::pr_check::check_pr_head(&athena.git, &range[0], &range[1])?;
+                if json {
+                    print_json(&serde_json::json!({
+                        "base": report.base,
+                        "head": report.head,
+                        "commits": report.commits.len(),
+                        "passed": report.passed(),
+                        "offences": report.offences.iter().map(|o| serde_json::json!({
+                            "sha": o.sha,
+                            "reason": o.reason,
+                        })).collect::<Vec<_>>(),
+                    }))?;
+                } else {
+                    print!("{}", display::pr_head_report(&report));
+                }
+                return Ok(if report.passed() { 0 } else { 2 });
+            }
             let report = if history {
                 athena.check_history()?
             } else {

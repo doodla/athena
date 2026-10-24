@@ -9,6 +9,24 @@ use athena_data::records::{
 };
 use std::fmt::Write;
 
+/// The result of `athena check --pr-head`: one line per offending commit (its sha and why), then a summary.
+pub fn pr_head_report(report: &athena_core::pr_check::PrReport) -> String {
+    let mut out = String::new();
+    for o in &report.offences {
+        let _ = writeln!(out, "  - {}: {}", o.sha, o.reason);
+    }
+    let verdict = if report.passed() { "pass" } else { "FAIL" };
+    let _ = writeln!(
+        out,
+        "pr-head {verdict}: {} commit(s) between {} and {}, {} offending",
+        report.commits.len(),
+        report.base,
+        report.head,
+        report.offences.len()
+    );
+    out
+}
+
 fn pct(p: f64) -> String {
     format!("{:.0}%", p * 100.0)
 }
