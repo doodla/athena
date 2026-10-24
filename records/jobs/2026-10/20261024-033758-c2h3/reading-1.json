@@ -1,0 +1,223 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261024-033758-c2h3",
+  "n": 1,
+  "at": "2026-10-24T03:38:40.362116487Z",
+  "invocation_seq": 1,
+  "base_commit": "857ce966d49171906ac42fee38483b6f98a43964",
+  "config_sha256": "723abb81b8cdcc25033d7d9653128a919911c4b5950c306183153235b21717e7",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Add records-branch schemas, CAS writer and host-rules check",
+  "summary": "Job 1 of records-history: add six record types (landing-intent, landing, intervention, checkpoint, legacy-exempt, import-manifest) with validation to athena-data. Add a compare-and-swap writer with bounded retry for the own-root branch athena/records (§8.2), and a read-only report on host branch rules. Audience: the maintainer and the verifier, who run cargo test. Nothing in the job pipeline uses the branch yet.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "All code, including tests, is Rust."
+    },
+    {
+      "id": "tested",
+      "how": "Every new module has passing tests, and cargo test and clippy are clean."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run the concurrent-writer, retry and no-rewrite scenarios, not only check that types exist."
+    },
+    {
+      "id": "verified",
+      "how": "The verifier runs cargo test, clippy and fmt --check."
+    },
+    {
+      "id": "buy-first",
+      "how": "Use the git CLI through the existing athena-git wrapper and existing crates; record the call if any dependency is added."
+    },
+    {
+      "id": "small",
+      "how": "Only job 1 of the plan; the importer and the pipeline wiring stay out."
+    },
+    {
+      "id": "mechanism",
+      "how": "Append-only and the retry bound are enforced in code and tests, not prose."
+    },
+    {
+      "id": "strangers",
+      "how": "Doc comments cite the design section for an outside reader."
+    },
+    {
+      "id": "public",
+      "how": "Tests use synthetic data only, with no secrets and no personal data."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "The writer goes in athena-git, which drives the git CLI and has no Athena dependencies. It takes opaque (path, bytes) files, so athena-data stays free of git. A thin typed layer may combine the two.",
+    "The host-rules check goes in athena-core beside gh.rs, as a read-only query through the existing runner and gh abstraction, with the API replies parsed in unit tests with fixtures. It exposes no CLI wiring into the pipeline.",
+    "The new 'intervention' record is distinct from the existing athena.intervention record. It is a user declaration about a main commit and gets its own schema tag and type name.",
+    "Compare-and-swap uses git update-ref with the expected old value, or a push with a lease option. Retry is bounded (default 5). On rejection the writer fetches, replays its new files on the new tip, and retries.",
+    "Each record is a separate file keyed by job and record id. The writer refuses to modify, delete or rename an existing path in the tree.",
+    "Landing commits take the PR head as an extra parent; the writer supports additional parents but job 3 uses them.",
+    "The records/ tree on main, the history check, gate and job pipeline are unchanged. No governance file changes."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Run cargo test: a test starts two writers at once against one repository, and both records are present on athena/records afterward, each as its own path, with the branch history fast-forward only.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run cargo test: a test makes the compare-and-swap reject the first update because the tip moved. The writer refetches, replays its files on the new tip, retries and succeeds. A test also shows that after the retry bound it returns a failure instead of looping.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run cargo test: a test shows the writer refuses a write that would modify, delete or rename an existing record path on the branch. The branch tip is unchanged after the refusal.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run cargo test: the branch athena/records is created as its own root, with no parent in common with main.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run cargo test: each of the six new record types round-trips through serde with a schema tag, and validation rejects malformed examples. Examples are an empty required field, an unknown field, and a bad sha.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run cargo test: the host-rules check run against fixture replies reports 'forbidden' versus 'allowed' for force-push and deletion on athena/records, and 'required' versus 'not required' for up-to-date branches on main. It also reports an unavailable host as unknown rather than passing. It issues only read requests, and a test asserts no write call is made.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run cargo clippy and cargo fmt --check, then cargo test for the whole workspace: all pass. The existing history check and the records/ tests are unchanged.",
+      "kind": "behavior"
+    },
+    {
+      "text": "No existing code path in athena-core, athena-cli or athena-gate calls the new writer or reads athena/records. records/ on main has no diff.",
+      "kind": "content"
+    },
+    {
+      "text": "Public items carry doc comments citing docs/design/records-history.md §8.2 and D111. Any new crate dependency is recorded with the buy-first reasoning.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has an entry for the new record types, the writer and the check.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-data/src/records_branch.rs",
+      "action": "create",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-data/src/lib.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-git/src/records_branch.rs",
+      "action": "create",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-git/src/lib.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-git/tests/records_branch.rs",
+      "action": "create",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-core/src/host_rules.rs",
+      "action": "create",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "p": 0.55
+    },
+    {
+      "path": "crates/athena-git/Cargo.toml",
+      "action": "modify",
+      "p": 0.15
+    },
+    {
+      "path": "crates/athena-data/Cargo.toml",
+      "action": "modify",
+      "p": 0.1
+    },
+    {
+      "path": "Cargo.lock",
+      "action": "modify",
+      "p": 0.1
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "docs/design/records-history.md",
+      "action": "modify",
+      "p": 0.1
+    }
+  ],
+  "out_of_scope": [
+    "The importer (job 2), landing intent and reconcile (job 3), the pre-merge status (job 4), the attribution check (job 5), the incremental check (job 6), the cutover and the removal.",
+    "Changing any host setting, branch protection, or workflow under .github/workflows/.",
+    "Any change to records/ on main, the history check, or the job pipeline.",
+    "Wiring the host-rules check into a CLI command or CI, beyond a callable function."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.65,
+      "p_verification_passes": 0.45,
+      "p_user_intervenes": 0.12,
+      "cost_usd": {
+        "p10": 0.8,
+        "p50": 1.8,
+        "p90": 4.0
+      },
+      "wall_time_s": {
+        "p10": 900.0,
+        "p50": 2000.0,
+        "p90": 4200.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7627272727272728,
+      "p_verification_passes": 0.6368715083798883,
+      "p_user_intervenes": 0.07582417582417583,
+      "cost_usd": {
+        "p10": 0.41964823902933546,
+        "p50": 1.0025543393358087,
+        "p90": 2.1585611924443238
+      },
+      "wall_time_s": {
+        "p10": 564.2344018515648,
+        "p50": 1265.722125148,
+        "p90": 2530.6554042241623
+      }
+    }
+  },
+  "departures": "This is larger than a typical change: a new schema, a concurrent git writer with tests, and a host-rules check across three crates. I raise cost and time above the reference and lower the pass odds."
+}
