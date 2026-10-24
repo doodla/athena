@@ -20,6 +20,10 @@ pub enum SnapshotRepo {
     Base,
     /// Two commits, "base" then "candidate" (the verifier); the work tree holds the candidate.
     BaseAndCandidate { candidate_commit: String },
+    /// One commit, "base" (as [`SnapshotRepo::Base`]), but the work tree holds the visible files of
+    /// `tree_commit`, uncommitted (a producer retry seeded from a rejected candidate). The change list is
+    /// still against the base, and [`Snapshot::unchanged_since_seed`] tells whether the work tree is as seeded.
+    BaseThenTree { tree_commit: String },
 }
 
 /// A materialized snapshot.
@@ -28,6 +32,8 @@ pub struct Snapshot {
     dir: PathBuf,
     base: Option<String>,
     candidate: Option<String>,
+    /// The work tree's tree right after seeding (`BaseThenTree` only).
+    seed_tree: Option<String>,
 }
 
 impl Snapshot {
@@ -52,6 +58,7 @@ impl Snapshot {
             dir: dir.to_path_buf(),
             base: None,
             candidate: None,
+            seed_tree: None,
         };
         if repo == SnapshotRepo::None {
             return Ok(snapshot);
@@ -59,12 +66,29 @@ impl Snapshot {
         let git = snapshot.git();
         git.run(["init", "-q", "-b", "athena"])?;
         snapshot.base = Some(snapshot.commit_all("base")?);
-        if let SnapshotRepo::BaseAndCandidate { candidate_commit } = repo {
-            clear_work_tree(dir)?;
-            materialize(user, &candidate_commit, rules_commit, dir)?;
-            snapshot.candidate = Some(snapshot.commit_all("candidate")?);
+        match repo {
+            SnapshotRepo::BaseAndCandidate { candidate_commit } => {
+                clear_work_tree(dir)?;
+                materialize(user, &candidate_commit, rules_commit, dir)?;
+                snapshot.candidate = Some(snapshot.commit_all("candidate")?);
+            }
+            SnapshotRepo::BaseThenTree { tree_commit } => {
+                clear_work_tree(dir)?;
+                materialize(user, &tree_commit, rules_commit, dir)?;
+                snapshot.seed_tree = Some(snapshot.work_tree_tree()?);
+            }
+            SnapshotRepo::None | SnapshotRepo::Base => {}
         }
         Ok(snapshot)
+    }
+
+    /// Whether the work tree is exactly as seeded by [`SnapshotRepo::BaseThenTree`]. Always false for any
+    /// other snapshot, which has no seed.
+    pub fn unchanged_since_seed(&self) -> Result<bool> {
+        match &self.seed_tree {
+            Some(seed) => Ok(*seed == self.work_tree_tree()?),
+            None => Ok(false),
+        }
     }
 
     /// The snapshot's own, isolated git.
@@ -498,6 +522,58 @@ mod tests {
                 .unwrap()
                 .contains("candidate")
         );
+    }
+
+    #[test]
+    fn a_seeded_snapshot_diffs_against_the_base_and_notices_an_untouched_seed() {
+        let (dir, git, head) = user_repo();
+        write_files(
+            dir.path(),
+            &[
+                ("src/main.rs", "fn main() { println!(\"candidate\"); }\n"),
+                ("src/added.rs", "// added\n"),
+            ],
+        );
+        let candidate = commit_all(&git, "candidate");
+        let parent = tempfile::tempdir().unwrap();
+        let snap = Snapshot::create(
+            &git,
+            &head,
+            &head,
+            &parent.path().join("snap-seed"),
+            SnapshotRepo::BaseThenTree {
+                tree_commit: candidate,
+            },
+        )
+        .unwrap();
+        assert_eq!(snap.git().rev_list_reverse("HEAD").unwrap().len(), 1);
+        assert!(snap.dir().join("src/added.rs").exists());
+        let mut paths: Vec<String> = snap
+            .change_list()
+            .unwrap()
+            .into_iter()
+            .map(|c| c.path)
+            .collect();
+        paths.sort();
+        assert_eq!(paths, ["src/added.rs", "src/main.rs"]);
+        assert!(snap.unchanged_since_seed().unwrap());
+        std::fs::write(snap.dir().join("src/added.rs"), "// edited\n").unwrap();
+        assert!(!snap.unchanged_since_seed().unwrap());
+    }
+
+    #[test]
+    fn a_snapshot_without_a_seed_is_never_unchanged_since_seed() {
+        let (_dir, git, head) = user_repo();
+        let parent = tempfile::tempdir().unwrap();
+        let snap = Snapshot::create(
+            &git,
+            &head,
+            &head,
+            &parent.path().join("snap-base"),
+            SnapshotRepo::Base,
+        )
+        .unwrap();
+        assert!(!snap.unchanged_since_seed().unwrap());
     }
 
     /// A verifier-shaped snapshot of the test repository.

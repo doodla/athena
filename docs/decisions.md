@@ -2776,3 +2776,61 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   `cargo test -p athena-context` (the section's lines and instruction), `cargo test -p athena-core` (a complete
   first report is not sent back; one omitting a criterion is sent back once with its exact text), and the
   prompt budgets test. The job counts and times are from the request, not measured.
+
+## D117 · A retry starts from the rejected candidate when every check passed and only content criteria were unmet
+
+- **Case:** A retry started from the base and redid all the work even when the rejected job passed fmt, clippy
+  and the full tests and failed only a content criterion. Job 20261024-161559-rxjg was rejected only for a missing
+  change description; job 20261023-234313-h49d for one CHANGELOG line. The request puts the redone code at about
+  40 minutes and 3 dollars per retry; that figure is from the request and was not measured here. Root cause: the
+  producer's snapshot in `produce_and_verify` (`run.rs`) was always `SnapshotRepo::Base`, and the retry brief said
+  the retry starts from the base, whatever the rejection was.
+- **Decision:** (1) `qualifies_for_tree_retry(state, candidate, verification)` in `reading.rs` is the one rule.
+  It reads records only: the job is rejected; the candidate has a commit, a tree and no violations; the
+  verification recorded at least one check, all passed, and no reading mismatch; at least one criterion is unmet,
+  every unmet one is of kind content, and no behavior criterion is unmet or cites a command never seen. (2)
+  `tree_retry_seed` resolves "try again on <job>" with `retried_job` and returns the candidate commit and the
+  redacted unmet criteria and findings. (3) `Athena::tree_seed` (`run.rs`) also requires the candidate and base
+  commits to exist and that no path outside `records/` differs between the rejected job's base and the retry's
+  starting commit; otherwise the retry starts from the base, because the old candidate would silently undo later
+  landed work. (4) `SnapshotRepo::BaseThenTree` commits the base, then writes the candidate's visible files into
+  the work tree uncommitted, so `change_list` is still against the original base and admission, the fingerprint,
+  landing, the full checks and the verifier are unchanged. (5) `Snapshot::unchanged_since_seed` makes an idle
+  seeded producer fail as "the producer made no change", as an idle producer does today; the inherited changes
+  would otherwise make the change list non-empty. (6) `producer_brief` gains a retry section with the findings
+  and says the work starts from the rejected candidate; `reader_brief` says a retry starts from the base except
+  in this case. README and the `drain.rs` doc say the same.
+- **Callers and writers touched, with the covering test:** `qualifies_for_tree_retry` and `tree_retry_seed`:
+  `only_a_rejection_with_every_check_passed_and_content_criteria_unmet_qualifies`,
+  `the_seed_is_found_from_the_request_and_carries_redacted_findings` (`reading.rs`). `Athena::tree_seed` and
+  `Athena::dispatch`: `a_content_only_rejection_retries_from_the_rejected_tree`,
+  `a_changed_base_retries_from_the_base`. `Athena::produce_and_verify`:
+  `a_content_only_rejection_retries_from_the_rejected_tree` (checks, verifier and landing against the original
+  base), `a_seeded_retry_that_changes_nothing_fails_as_an_empty_candidate`, `a_failed_check_retries_from_the_base`,
+  `an_unmet_behavior_criterion_retries_from_the_base`, `a_failed_job_retries_from_the_base` (all in
+  `crates/athena-cli/tests/retry.rs`). `Snapshot::create` and `Snapshot::unchanged_since_seed`:
+  `a_seeded_snapshot_diffs_against_the_base_and_notices_an_untouched_seed`,
+  `a_snapshot_without_a_seed_is_never_unchanged_since_seed` (`snapshot.rs`). `producer_brief` and
+  `reader_brief`: `a_seeded_producer_brief_carries_the_findings_and_says_the_work_starts_from_the_candidate`,
+  `an_unseeded_producer_brief_is_a_base_snapshot_without_a_retry_section`,
+  `reader_briefs_carry_the_earlier_reading_corrections_and_the_discard_notice` (`briefs.rs`).
+- **Alternatives:** (a) Always start from the base (the status quo): repeats passing work. (b) Always start from
+  the rejected candidate: a failed check or an unmet behavior criterion may come from the code itself, so a clean
+  start is safer, and a failed or interrupted job has no candidate to inherit. (c) Ask a model whether the
+  rejection is content-only: the records already hold the verdict, and a call adds cost and nondeterminism. (d)
+  Replay the candidate's change list onto a newer base: can conflict; left for later. (e) The rule above (chosen).
+- **Earlier text:** Any CHANGELOG or decision text that says a retry always starts from the base, or that the
+  attempt's changes are discarded for every retry, is superseded by this decision. That includes the discard
+  notice described in D82, which now holds for every rejection except the one this decision names; the reader
+  never sees the changes either way.
+- **Tradeoff:** A rejection with no unmet criterion (for example a blocker finding alone) has an unknown cause and
+  restarts from the base. A content criterion that depends on wrong code is still seeded from the old candidate;
+  the new candidate is fully verified, so a wrong start is caught, not landed.
+- **Reversal cost:** Low. Make `tree_retry_seed` return `None`; the snapshot variant and brief section go unused.
+- **Provenance:** read: `run.rs`, `reading.rs`, `briefs.rs`, `snapshot.rs`; measured: `cargo test --locked -p
+  athena-git seed`, `cargo test --locked -p athena-context`, `cargo test --locked -p athena-core --lib --
+  only_a_rejection the_seed_is_found`, `cargo test --locked -p athena-cli --test retry`, `cargo fmt --all
+  --check`, `cargo clippy --all-targets --locked -- -D warnings`, and `cargo test --locked --no-fail-fast` on
+  the workspace, which had two failures caused by this change (the log's own backtest, and a lifecycle test whose
+  retry wrote the same content as the seeded tree and so failed as an empty candidate). Both were fixed and only
+  those two tests were rerun, and passed. The saving itself (time and cost of a seeded retry) is not measured.

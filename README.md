@@ -48,7 +48,11 @@ To retry a rejected or failed job, ask `athena ask "try again on <job>"` (the fu
 matched case-insensitively at the start of the request). The reader then sees that job's request and its final
 verification's findings, redacted, in an "Earlier attempt" section. That section also shows the job's final
 reading (summary, acceptance criteria, deliverables) and the corrections and answers the user gave, and it says the
-attempt's changes were discarded, so the retry starts from the base. A failed job (for example one refused at
+attempt's changes are not in what the reader sees. The retry's producer starts from the base, except when the
+attempt was rejected with every check passed and only content criteria unmet: then it starts from that attempt's
+candidate (the base's files with the attempt's changes applied) and is sent the verifier's findings. The new candidate
+is always checked and verified in full and compared with the base, and a producer that changes nothing fails as an
+empty candidate. If other work has landed since, the retry starts from the base. A failed job (for example one refused at
 admission, which has no verification) also has its recorded reason carried there. Jobs that are landed, stale,
 in flight, or unknown are refused.
 

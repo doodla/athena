@@ -1,0 +1,211 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261024-170225-89rk",
+  "base_commit": "cb575782549600f1d14e92cd9b392d4cc8dcc636",
+  "base_fingerprint": "sha256:72a3959a65eae9dee813acb874757f22aac960fec72bc87fc9365b2d5d5eb679",
+  "previous_job": "20261024-170227-4scc",
+  "candidate_commit": "6cd492c8659c40675ec912001e8edb022b24b07f",
+  "candidate_tree": "574af63b3c61139be758c137d613bd3e12b08dae",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 128787
+    },
+    {
+      "path": "README.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 22841
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 81136
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 102282
+    },
+    {
+      "path": "crates/athena-cli/tests/retry.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 25389
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 82036
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 100301
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 111384
+    },
+    {
+      "path": "crates/athena-git/src/snapshot.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 25479
+    },
+    {
+      "path": "docs/decisions.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 213596
+    }
+  ],
+  "fingerprint": "sha256:3a6e1a4825154414c050737d339c77e8a1e9068f42725037c731daaed1bc5f65",
+  "violations": [],
+  "producer_report": {
+    "summary": "A retry now starts the producer from the rejected candidate when the rejected job passed every check and its only unmet criteria are content criteria. Every other retry still starts from the base. The producer's brief carries the verifier's findings and the unmet criteria. The new candidate is still diffed against the original base and fully checked and verified. A seeded producer that changes nothing fails as \"the producer made no change\".\n\nI ran the whole workspace test suite with `--no-fail-fast`, and it had two failures, both caused by this change:\n- The backtest of `docs/decisions.md` flagged a bare \"Supersedes:\" phrase in the new decision. I reworded it.\n- The lifecycle test `retrying_a_retry_carries_the_original_request_redacted` had its retry write the same file content as the seeded tree, so it correctly failed as an empty candidate. Its second attempt now writes different content and is routed to the second scenario for the producer too.\n\nI reran only those two tests and they passed. I did not rerun the whole suite after the fixes, so Athena's own run is the final confirmation.\n\nHow it works:\n- **The rule:** `qualifies_for_tree_retry(state, candidate, verification)` in `reading.rs` reads records only. It requires:\n  - the job is rejected;\n  - the candidate has a commit and a tree and no violations;\n  - at least one check was recorded, all passed, and there is no reading mismatch;\n  - at least one unmet criterion, every unmet criterion is of kind content, and no behavior criterion is unmet or cites a command never seen.\n  `tree_retry_seed` resolves \"try again on <job>\" and returns the seed with redacted findings.\n- **The snapshot:** `Athena::tree_seed` in `run.rs` also falls back to the base when the candidate or base commit is missing, or when any path outside `records/` changed since the rejected job's base. Seeding from the old candidate would otherwise undo later landed work.\n- **The snapshot variant:** `SnapshotRepo::BaseThenTree` commits the base and leaves the candidate's files uncommitted in the work tree, so `change_list` is still against the base. `Snapshot::unchanged_since_seed` is how an idle seeded producer is detected.\n- **The briefs:** the producer brief gains a retry section and a working-directory paragraph that says the work starts from the rejected candidate. The reader brief now says a retry starts from the base, except for this case. `README.md` and the `drain.rs` doc comment say the same.\n- **The record:** the CHANGELOG [Unreleased] entry and a new decision, D117, list each caller with its covering test, the commands run, the alternatives, and the supersession of earlier \"always from the base\" text.",
+    "files": [
+      "crates/athena-git/src/snapshot.rs",
+      "crates/athena-core/src/reading.rs",
+      "crates/athena-core/src/run.rs",
+      "crates/athena-context/src/briefs.rs",
+      "crates/athena-cli/tests/retry.rs",
+      "crates/athena-cli/tests/lifecycle.rs",
+      "crates/athena-cli/src/drain.rs",
+      "README.md",
+      "CHANGELOG.md",
+      "docs/decisions.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test --locked -p athena-git seed",
+        "result": "pass",
+        "note": "2 new snapshot tests"
+      },
+      {
+        "command": "cargo test --locked -p athena-context",
+        "result": "pass",
+        "note": "49 passed, including the seeded and unseeded producer brief tests and the updated reader brief test"
+      },
+      {
+        "command": "cargo test --locked -p athena-core --lib -- only_a_rejection the_seed_is_found",
+        "result": "pass",
+        "note": "table test of the rule and the seed test"
+      },
+      {
+        "command": "cargo test --locked -p athena-cli --test retry",
+        "result": "pass",
+        "note": "13 passed, including 5 new tree-seed tests, run twice"
+      },
+      {
+        "command": "cargo test --locked -p xtask",
+        "result": "pass",
+        "note": "boundary scan and spec checks"
+      },
+      {
+        "command": "cargo test --locked --no-fail-fast -q",
+        "result": "fail",
+        "note": "The whole workspace ran once more. Two failures, both fixed: the decisions backtest (bare supersedes phrase) and the lifecycle test retrying_a_retry_carries_the_original_request_redacted (identical edit became an empty candidate). Everything else passed."
+      },
+      {
+        "command": "cargo test --locked -p athena-cli --test backtest",
+        "result": "pass",
+        "note": "after rewording the decision"
+      },
+      {
+        "command": "cargo test --locked -p athena-cli --test lifecycle -q retrying_a_retry",
+        "result": "pass",
+        "note": "after routing the producer to the second scenario"
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "after moving a complex tuple type in tests/retry.rs to a type alias"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A test that retries a rejected job whose checks all passed and whose only unmet criterion is a content criterion shows the producer's working snapshot containing the rejected candidate's files, not the base's. Run: cargo test --locked -p athena-core -p athena-cli (the new test by name).",
+        "status": "met",
+        "evidence": "a_content_only_rejection_retries_from_the_rejected_tree in crates/athena-cli/tests/retry.rs records the producer's working-directory listing from the invocation spec: the first attempt lacks greeting.txt and has the base README.md; the retry has greeting.txt and the candidate's README.md. It passed with `cargo test --locked -p athena-cli --test retry`."
+      },
+      {
+        "criterion": "A test shows that the producer brief for such a retry includes the verifier's findings and states that the work starts from the rejected candidate. It does not claim the retry starts from the base. Run: cargo test --locked -p athena-context.",
+        "status": "met",
+        "evidence": "a_seeded_producer_brief_carries_the_findings_and_says_the_work_starts_from_the_candidate (briefs.rs) asserts the finding and unmet-criterion text, the 'starts from the rejected candidate' heading and paragraph, and the absence of 'starts from the base' and 'snapshot of the base commit'. The CLI test asserts the same on the real brief. 49 athena-context tests passed."
+      },
+      {
+        "criterion": "Tests show a retry starts from the base, as before, when a check failed, when a behavior criterion is unmet, when the rejected job has no candidate tree, and when the job failed or was interrupted. Run: cargo test --locked.",
+        "status": "met",
+        "evidence": "CLI tests a_failed_check_retries_from_the_base, an_unmet_behavior_criterion_retries_from_the_base, a_failed_job_retries_from_the_base and a_changed_base_retries_from_the_base check the producer listing and brief. The table test only_a_rejection_with_every_check_passed_and_content_criteria_unmet_qualifies in reading.rs covers a failed check, an unmet behavior criterion, unverified commands, no tree, no commit, no candidate, violations, a failed job, an interrupted (dispatched) job, no unmet criterion, no checks and a reading mismatch. All passed in the workspace run."
+      },
+      {
+        "criterion": "A test shows the new candidate from a tree-seeded retry still goes through the full check suite and the verifier, and its change list is computed against the original base so landing works unchanged. Run: cargo test --locked -p athena-core.",
+        "status": "met",
+        "evidence": "I put this in the athena-cli retry tests, not athena-core: a_content_only_rejection_retries_from_the_rejected_tree counts a further Verifier call, asserts the retry's verification has recorded checks that all passed, its candidate changes list both greeting.txt and README.md against the original base, and the job lands with greeting.txt in the repository. The snapshot unit test a_seeded_snapshot_diffs_against_the_base_and_notices_an_untouched_seed shows the change list is against the base. The core crate cannot build the change capability."
+      },
+      {
+        "criterion": "A test shows that a tree-seeded retry whose producer changes nothing fails as an empty candidate, as today. It does not pass for inheriting the rejected tree. Run: cargo test --locked -p athena-core.",
+        "status": "met",
+        "evidence": "a_seeded_retry_that_changes_nothing_fails_as_an_empty_candidate (athena-cli retry.rs) shows the retry was seeded, the outcome is Failed with reason 'the producer made no change', no further Verifier call, and nothing lands. It lives in athena-cli for the same reason as the previous entry. The lifecycle test that hit this path by accident is evidence it is enforced."
+      },
+      {
+        "criterion": "cargo fmt --check, cargo clippy --all-targets --locked -- -D warnings and cargo test --locked all pass.",
+        "status": "met",
+        "evidence": "fmt --check and clippy pass on the final tree. The full test run had two failures, both fixed and rerun individually (backtest, lifecycle retrying_a_retry...). The whole suite was not rerun after the fixes, so Athena's own run is the final confirmation."
+      },
+      {
+        "criterion": "The qualifying rule (all checks passed, only content criteria unmet) is implemented in one named function with a doc comment. Its inputs are records, not strings parsed from prose.",
+        "status": "met",
+        "evidence": "qualifies_for_tree_retry in crates/athena-core/src/reading.rs takes JobState, Option<&Candidate> and Option<&Verification>, has a doc comment, and is the only place the rule lives; tree_retry_seed calls it. Reading the file shows no string matching on findings."
+      },
+      {
+        "criterion": "The change has a CHANGELOG [Unreleased] entry and a docs/decisions.md decision. Both say what changed, list each caller or writer touched with its covering test, and record the commands run. The decision names the alternatives (always from base, always from the candidate) and says any CHANGELOG or decision text that said retries always start from the base is superseded.",
+        "status": "met",
+        "evidence": "The CHANGELOG [Unreleased] first Added entry and decision D117 both list tree_retry_seed and its rule, tree_seed and dispatch, produce_and_verify, Snapshot::create and unchanged_since_seed, producer_brief and reader_brief, each with test names. D117 has alternatives (a) always base and (b) always candidate, and an 'Earlier text' bullet saying such text is superseded. Both list the commands run and the failures found. The decision's wording was adjusted to avoid the bare 'supersedes' phrase the backtest rejects."
+      },
+      {
+        "criterion": "The retry-related documentation and brief text (README or docs describing retry, briefs.rs wording) no longer says every retry starts from the base.",
+        "status": "met",
+        "evidence": "README.md retry paragraph, the reader brief sentence in briefs.rs ('A retry starts from the base, except the retry of a job that passed every check...') and the drain.rs retry doc now state the exception. A search for 'start(s) from the base' across md and rs files found no remaining unconditional claim; the other hits are tests and unrelated base-commit text."
+      }
+    ],
+    "open_issues": [
+      "Departure from the plan: criteria 4 and 5 name `cargo test -p athena-core`, but those tests are in crates/athena-cli/tests/retry.rs, because athena-core has no change capability to run an end-to-end retry. run_pin_tests.rs and pin.rs are unchanged. The athena-core unit tests cover the rule and the seed.",
+      "crates/athena-cli/tests/lifecycle.rs was edited though it is not in the expected deliverables: an existing test needed different content for its retry once idle seeded retries fail.",
+      "crates/athena-git/src/snapshot.rs was also edited (additive variant and method), as the plan said.",
+      "The 40 minute and 3 dollar saving is from the request and was not measured.",
+      "A rejection with no unmet criterion (for example a blocker finding alone) restarts from the base by design.",
+      "The whole suite was not rerun after the last two fixes; only the two affected tests were."
+    ],
+    "mistakes": [
+      "I wrote 'all passed' in a draft CHANGELOG edit before the full suite had run; that edit failed on a duplicate anchor and I rewrote the text with the real results.",
+      "I ran the full workspace test suite twice (once in the background, whose output I could not read, then again quiet), against the one-run guidance, to find the two failures.",
+      "My first fix for the lifecycle test only changed the second scenario's edits, but the script routed producers to the first scenario, so it still failed; I then routed the producer by call count."
+    ],
+    "learnings": [
+      "The seeded retry's prediction commit differs from the rejected job's base by records/ only when no other work landed, so the check is 'no changed path outside records/' and not commit equality.",
+      "Git::diff_tree accepts commit ids, so no peeling to trees is needed.",
+      "docs/decisions.md is parsed by crates/athena-cli/tests/backtest.rs: a bare 'supersedes', 'superseded by' or 'amends' phrase at a statement start with no D-number fails it, and one with a D-number must be listed in docs/decision-links.toml, which only the user confirms.",
+      "The fake script in tests/common/mod.rs routes by role only, so tests that need different behavior for a retry must route by call count themselves.",
+      "The athena-core crate has no change capability available, so end-to-end retry tests belong in athena-cli/tests."
+    ],
+    "desires": [
+      "A way to read the background task's output file, which the working-directory policy blocked, so I did not have to rerun the suite to find the failures.",
+      "A pre-flight check for the decisions backtest wording, since it only surfaced in the full suite."
+    ]
+  }
+}

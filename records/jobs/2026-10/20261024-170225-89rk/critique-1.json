@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261024-170225-89rk",
+  "round": 1,
+  "at": "2026-10-24T18:15:02.518274338Z",
+  "invocation_seq": 3,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-git/src/snapshot.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-git/src/snapshot.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "A missing candidate commit object would make the retry error instead of falling back to a base start.",
+      "evidence": "`materialize(user, &candidate_commit, ...)` needs the rejected candidate's commit object in the user's repository. A grep for `refs/athena` found nothing, so I found no ref that keeps rejected candidate commits alive. A `git gc` between the rejection and the retry could remove the object. Fix: Have `tree_retry_seed` (or dispatch) check that the candidate commit object exists, for example with `cat-file -e`. If it is missing, fall back to a base start. Add that case to the criterion 3 tests.",
+      "location": "Decision 1 / Step 2 (BaseThenTree materializes candidate_commit from the user's repository)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The seeded brief should tell the producer to keep the uncommitted inherited changes.",
+      "evidence": "With BaseThenTree, the inherited changes sit uncommitted in the work tree on top of the 'base' commit. A producer that runs `git checkout .`, `git stash` or `git restore` would silently throw away the rejected work and redo it. Fix: In the seeded Working directory paragraph, say that the rejected candidate's changes are present as uncommitted changes against 'base' and must be kept. Assert that sentence in the criterion 2 test.",
+      "location": "Decision 5 / producer brief Working directory paragraph",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The rule does not say whether blocker findings disqualify a rejection.",
+      "evidence": "The rule accepts a rejection whose unmet criteria are all content criteria even when `Verification.findings` holds a blocker about the code. The send-back sends those findings and full verification still runs, so this is not unsafe, but the choice is not written down. Fix: State explicitly, in the doc comment and the decision, whether blocker-severity findings disqualify a rejection. Cover the chosen behavior with one row in the table test.",
+      "location": "Decision 2 (qualifies_for_tree_retry)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "pin.rs is an expected deliverable but needs no change.",
+      "evidence": "The producer path only calls `pin::remove_tree` and `mount` (run.rs:1335-1339). Fix: Leave pin.rs untouched and say so in the change description, so the deliverable mismatch is explained.",
+      "location": "Open questions: pin.rs",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read snapshot.rs, the producer section of run.rs and the record types in records.rs. The plan matches the request and the accepted reading, and it puts the change where the fault starts: run.rs:1337 always builds the producer snapshot with `SnapshotRepo::Base`. The proposed `BaseThenTree` variant fits the existing code. `Snapshot::create` already uses `clear_work_tree` and `materialize` for `BaseAndCandidate` (snapshot.rs:62-66), and `change_list` diffs the work tree against `base` (snapshot.rs:149-156), so the new candidate's change list stays against the original base. The empty-candidate gate at run.rs:1482 does need the proposed `unchanged_since_seed` replacement. The rule can be built from records alone: `CriterionResult` carries `kind`, `met` and `commands_verified`, and `Verification` carries `checks`, `findings` and `request_reading_mismatch` (records.rs:695-732). Every demonstration watches the behavior happen (the producer's directory listing, the brief text, verifier invocation, a failed outcome) and would fail without it. Athena's finding about snapshot.rs being outside the deliverables is justified by the design, and the plan says why. I found only minor gaps."
+}
