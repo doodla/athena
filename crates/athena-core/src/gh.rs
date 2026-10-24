@@ -34,6 +34,12 @@ pub trait Runner {
     fn gh(&self, args: &[String]) -> Result<String>;
 }
 
+/// The arguments of a plain read of a REST path: `gh api <path>`. `gh api` defaults to GET, so no method
+/// override and no field or body argument is added.
+pub fn get_args(path: &str) -> Vec<String> {
+    vec!["api".to_string(), path.to_string()]
+}
+
 /// [`Runner`] over the installed `gh` program. It never reads or stores a credential: `gh` holds it.
 #[derive(Debug, Default)]
 pub struct GhCli;
