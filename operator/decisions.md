@@ -279,3 +279,11 @@ Athena's decision log, not here. Newest last.
   has a category of its own for it, with the `--why` naming what Athena would have had to know or check to
   prevent it. Introspection then proposes the work. The mistakes of this session are back-filled.
 - Asked of Athena: a mistake category, and counting mistakes in status and the audit, as a queued request.
+
+## OP-22. The operator tracks nothing outside Athena (2026-10-24)
+
+- Sri: "Everything you're keeping track of, Athena should" (BRIEF.md addendum of 2026-10-24).
+- The remaining records-history steps, measurements, and other pending work are queued as Athena requests with
+  their dependencies in their own words; next work is taken from `athena plan`, and run through `athena drain`
+  instead of the operator's own go-and-land scripts. Readings are still reviewed (via `athena plan`, which
+  reads queued requests) before a drain runs them. Tracking that must stay outside Athena is an intervention.

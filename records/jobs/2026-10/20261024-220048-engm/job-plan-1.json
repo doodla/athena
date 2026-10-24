@@ -1,0 +1,234 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261024-220048-engm",
+  "round": 1,
+  "at": "2026-10-24T22:05:08.770428702Z",
+  "invocation_seq": 3,
+  "approach": "Extend the gate's attribution walk with a mode (incremental or full replay). Incremental reads the newest checkpoint record (`checkpoints/<id>.json`) and judges only first-parent main commits after its main_sha, counting only intent/landing records added since its records_sha. It falls back to a full replay, with the reason reported, when the checkpoint's check version differs, its main_sha is off main, or its records_sha is not an ancestor of the records tip. Full replay ignores checkpoints for trust, judges everything, then compares with the newest checkpoint and reports a `CheckpointDisagrees` finding naming the checkpoint when any commit at or before its main_sha has a finding or when the checkpoint cannot be located. Every report carries seconds, commits judged and records judged, in text and JSON. A new gate function writes a checkpoint only after a pass. The CLI calls it unless `--read-only` is given or the CI environment variable is set, and after a landing. CI passes `--read-only`, runs incrementally on push and with `--full-replay` on schedule. Timings come from an ignored fixture test with about 200 landings, and the real numbers go into the CHANGELOG.",
+  "decisions": [
+    {
+      "choice": "The checkpoint names the last passing main commit before the first pending commit (none if the first judged commit is pending). It is written only when the report has no findings.",
+      "reason": "A pending commit passes for now, but its 15-minute window can still expire into a finding. A checkpoint past it would hide that finding from later incremental runs.",
+      "rejected": [
+        {
+          "option": "Checkpoint at the main tip even with pending commits",
+          "why": "An expired pending commit would never be judged again."
+        }
+      ]
+    },
+    {
+      "choice": "Incremental runs read every intent and landing for matching, but count as 'records judged' only the intents and landings added since the checkpoint's records_sha (a `diff-tree --diff-filter=A` between the two records commits).",
+      "reason": "A new main commit may cite an intent written before the checkpoint, so matching needs the full set. The judged count still reflects the new work, as the request asks.",
+      "rejected": [
+        {
+          "option": "Read only new records",
+          "why": "A landing for a new commit can cite an older intent, which would then be wrongly reported as missing."
+        }
+      ]
+    },
+    {
+      "choice": "The check version is a constant in attribution.rs (`ATTRIBUTION_CHECK_VERSION`, e.g. \"attribution/1\") stored in Checkpoint.verifier_version. A mismatch with the newest checkpoint forces a full replay and the report says why.",
+      "reason": "The version must change when the check's rules change, not with every crate release. A rule change is the only reason a past pass could become untrustworthy.",
+      "rejected": [
+        {
+          "option": "env!(CARGO_PKG_VERSION)",
+          "why": "Every release would invalidate the checkpoints without any rule change."
+        }
+      ]
+    },
+    {
+      "choice": "Read-only is an explicit `--read-only` flag, also implied when the CI environment variable is set. CI passes the flag, and the workflow keeps `permissions: contents: read`.",
+      "reason": "The no-write mode is enforced by code, and the workflow permission backs it up. This follows the 'mechanism' default.",
+      "rejected": [
+        {
+          "option": "Rely on workflow permissions alone",
+          "why": "It is prose-level for the local code path, and a failed write would be noisy."
+        }
+      ]
+    },
+    {
+      "choice": "The land checkpoint is written from the CLI Land command after land_pr returns with the link Landed and a merged_commit. It runs the incremental check against that commit and writes a checkpoint only on a pass. gh.rs is untouched.",
+      "reason": "gh.rs is not in the deliverables, and the CLI already holds the report. The write comes after the landing record, which land_pr writes first.",
+      "rejected": [
+        {
+          "option": "Add a checkpoint method to the LandingRecords trait in gh.rs",
+          "why": "It is outside the listed deliverables and touches the fake sinks in tests."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-gate/src/attribution.rs",
+      "action": "modify",
+      "purpose": "Add the Mode enum, ATTRIBUTION_CHECK_VERSION, the checkpoint reader (newest by created_at then id), the incremental walk start, the fallback reasons, the full-replay comparison with FindingKind::CheckpointDisagrees, the report fields (mode, replay_reason, records_judged, seconds, records_tip, checkpoint_main) and write_checkpoint. Add the tests, including the ignored fixture timing test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-gate/src/lib.rs",
+      "action": "modify",
+      "purpose": "Re-export or wire the new attribution API if needed; adjust legacy::check_attribution_with_legacy callers for the changed walk signature.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/history.rs",
+      "action": "modify",
+      "purpose": "Add a CHECKPOINT_DIR constant (\"checkpoints\") and a Checkpoint constructor/path helper. The record type itself is reused unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "purpose": "Add --full-replay and --read-only to Check (conflicting with history and pr_head), call the mode function, write a checkpoint on pass unless read-only or CI is set, add a post-landing checkpoint helper in Command::Land, and document the modes in the Check doc comment.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "purpose": "Show mode, replay reason, seconds, commits judged and records judged in the text and JSON, and label the new finding kind.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/binary.rs",
+      "action": "modify",
+      "purpose": "Binary tests for help text, JSON keys, exit codes (full replay with a tampered checkpoint), and read-only/CI writing nothing.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "action": "modify",
+      "purpose": "Attribution job: incremental --read-only on push, a --read-only --full-replay step on schedule; permissions unchanged.",
+      "governance": true,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Entry for incremental checking with the measured-on-fixture timings and a note that the real-repository timing is taken after landing.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/records-history.md",
+      "action": "modify",
+      "purpose": "Record the build-job-6 decisions in sections 9 and 10: checkpoint semantics, the pending cut-off, the version rule, the read-only rule and the full-replay comparison.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "history.rs: add the CHECKPOINT_DIR constant and a path helper, with a small test.",
+    "attribution.rs: add Mode, ATTRIBUTION_CHECK_VERSION, the new report fields and FindingKind::CheckpointDisagrees with its label.",
+    "attribution.rs: read the checkpoints, pick the newest, decide incremental versus forced replay (version, main_sha off main, records_sha not an ancestor), and start the walk after the checkpoint's main_sha. Count the records added since via diff-tree and time the whole run with Instant.",
+    "attribution.rs: for a full replay, after the walk compare with the newest checkpoint and add CheckpointDisagrees when findings exist at or before its main_sha or it cannot be located. Compute checkpoint_main as the last passing commit before the first pending one, and add write_checkpoint, which acts only on a clean report.",
+    "lib.rs and legacy.rs: keep the wrappers compiling.",
+    "attribution.rs tests: incremental judges only new commits, tampered checkpoint, version change, write and no-write cases, and the ignored fixture_timings test.",
+    "main.rs: add the flags and the CI-env rule, write the checkpoint on pass, add the post-landing helper in Command::Land with a unit test, and update the doc comment.",
+    "display.rs: update the text and JSON output with unit tests.",
+    "binary.rs: add the help, JSON and exit-code tests.",
+    "ci.yml: split the attribution step by event and add --read-only.",
+    "Run cargo fmt, clippy and test; run the ignored fixture test; record the printed numbers in the CHANGELOG entry and update docs/design/records-history.md."
+  ],
+  "risks": [
+    {
+      "risk": "A fixture of about 200 landings makes the timing test slow, since each commit costs a git process.",
+      "mitigation": "Write all records in one RecordsWriter::append with many Changes, and mark the test #[ignore] so the normal cargo test stays fast."
+    },
+    {
+      "risk": "Changing walk's signature breaks check_attribution_with_legacy and its tests.",
+      "mitigation": "Keep check_attribution's existing signature as a full-replay wrapper, and add the mode function beside it."
+    },
+    {
+      "risk": "A tampered checkpoint whose records_sha is not an ancestor of the records tip could crash the diff.",
+      "mitigation": "Check ancestry first, and fall back to a full replay with a CheckpointDisagrees finding when it fails."
+    },
+    {
+      "risk": "Timing numbers in the CHANGELOG could be invented or copied from a stale run.",
+      "mitigation": "Run the ignored test, copy the printed values, and label them measured-on-fixture."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Gate unit test: build N attributed commits, run the incremental check (a pass writes a checkpoint), add 2 more attributed commits, run incrementally again. Assert checked == 2, records_judged equals the new intents plus landings, and mode is Incremental. Assert a FullReplay run on the same repo has checked == N+2, which is greater than 2.",
+      "command": "cargo test",
+      "observes": "The test passes: the incremental judged count equals the number of new commits and is less than the full replay's.",
+      "fails_without": "Without checkpoint reading, the incremental run would judge all N+2 commits and the equality assertion would fail."
+    },
+    {
+      "criterion": 2,
+      "method": "Gate unit test: write a checkpoint record naming a main commit that no landing names (unattributed) and a valid records_sha. Show the incremental run passes, since it starts after that commit. Then show the FullReplay run fails with an Unattributed finding and a CheckpointDisagrees finding whose detail contains the checkpoint id. Check the exit code through the binary test in crates/athena-cli/tests/binary.rs: `check --attribution --full-replay` exits 2.",
+      "command": "cargo test",
+      "observes": "The test passes: the replay reports a finding naming the checkpoint and fails.",
+      "fails_without": "If the replay trusted the checkpoint, it would skip the commits up to it and pass, and the disagreement assertion would fail."
+    },
+    {
+      "criterion": 3,
+      "method": "Gate unit test: write a valid checkpoint with verifier_version \"attribution/0\" naming a recent commit. Run in incremental mode. Assert the effective mode is FullReplay, the replay_reason mentions the version, and checked equals the total commit count.",
+      "command": "cargo test",
+      "observes": "The test passes: the version mismatch forces a full replay that judges everything from the start.",
+      "fails_without": "Without the version comparison, the run would judge only the commits after the checkpoint and checked would be too small."
+    },
+    {
+      "criterion": 4,
+      "method": "Gate and CLI tests. (a) A passing check writes exactly one checkpoint with the main sha, the records tip judged against and ATTRIBUTION_CHECK_VERSION. (b) A failing check leaves the records tip unchanged. (c) `--read-only`, and CI=true in the environment, leave the records tip unchanged on a passing repo, which is the same repo that writes without them. (d) A CLI unit test of the post-landing helper shows a checkpoint appears after the landing record in the records history. (e) A pending commit makes the checkpoint stop before it.",
+      "command": "cargo test",
+      "observes": "The tests pass, comparing the records tip before and after each run.",
+      "fails_without": "If read-only mode did not suppress the write, the tip would move in case (c). If failing runs wrote, the tip would move in case (b)."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the lint and format commands.",
+      "command": "cargo clippy --all-targets",
+      "observes": "No warnings. Then `cargo fmt --check` exits 0.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Binary test (check_help_documents_incremental...) asserts the help text contains --full-replay, --read-only, 'incremental' and the no-write wording. Also read the output directly.",
+      "command": "cargo run -- check --help",
+      "observes": "The help documents the incremental mode, `--full-replay`, and that `--read-only` and CI never write checkpoints.",
+      "fails_without": "Without the doc comment on the Check command and the new args, the binary test's contains assertions fail."
+    },
+    {
+      "criterion": 7,
+      "method": "Unit tests on display::attribution_report and attribution_json assert the text contains 'second', 'commit(s) judged' and 'record(s) judged', and the JSON has numeric seconds, commits_judged and records_judged. The binary test runs `check --attribution --json` and parses those keys.",
+      "command": "cargo test",
+      "observes": "The tests pass, so every run reports seconds, commits and records.",
+      "fails_without": "The assertions on the summary line and the JSON keys fail if the fields are missing."
+    },
+    {
+      "criterion": 8,
+      "method": "Inspect the workflow file.",
+      "command": "git diff .github/workflows/ci.yml",
+      "observes": "Top-level `permissions: contents: read` is unchanged. There are two attribution steps: one `--read-only` on push, and one `--read-only --full-replay` with `if: github.event_name == 'schedule'`. No step writes or pushes a checkpoint.",
+      "fails_without": null
+    },
+    {
+      "criterion": 9,
+      "method": "Run the ignored fixture test and put its printed seconds into the CHANGELOG entry. The test builds about 200 landings, runs a full replay, adds one landing and checkpoint, and runs an incremental run one landing behind. The entry labels the numbers measured-on-fixture and says the real-repository timing is taken after landing.",
+      "command": "cargo test -- --ignored --nocapture fixture_timings",
+      "observes": "Printed full-replay and incremental seconds that match the CHANGELOG. The incremental time is lower and judges 1 commit.",
+      "fails_without": null
+    },
+    {
+      "criterion": 10,
+      "method": "The tamper test from criterion 2 also asserts that the full replay judged commits at or before the checkpoint, so it did not use the checkpoint as a starting point, and that the finding's kind label and detail name the checkpoint id. A second test shows a checkpoint with an unknown main_sha makes the replay report CheckpointDisagrees too.",
+      "command": "cargo test",
+      "observes": "The tests pass.",
+      "fails_without": "If the checkpoint were trusted in full replay, checked would be smaller than the total and no CheckpointDisagrees finding would appear."
+    }
+  ],
+  "open_questions": [
+    "Where do local checkpoints get pushed? The plan writes them locally with RecordsWriter::append from `check`. In the land path it is not yet settled whether to use append_to_remote with the same remote that GitLandingRecords::for_remote uses. The CLI call site does not show the remote name; the producer should find it before choosing.",
+    "Does records_branch::audit_history cost scale with the whole records history? The plan keeps it as a full audit on every run. Making it incremental would need a look at that function.",
+    "Is a pass by a local full replay allowed to write a checkpoint? The plan allows it, unless read-only."
+  ],
+  "producer_section_sha256": "cc016d8d4ab2aec9ae0b2a8b7f504d28c5b0ed7a2efbeb47ff148bb852a9d93f"
+}

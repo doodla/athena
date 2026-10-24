@@ -38,10 +38,12 @@
 //! by records alone. [`check_attribution`] without a `C0` is unchanged.
 
 use crate::Result;
-use athena_data::history::{HistoryRecord, Landing, LandingIntent};
+use athena_data::RecordId;
+use athena_data::history::{Checkpoint, HistoryRecord, Landing, LandingIntent};
 use athena_git::Git;
-use athena_git::records_branch::{self, RecordsTip};
+use athena_git::records_branch::{self, Change, RECORDS_REF, RecordsTip, RecordsWriter};
 use jiff::{SignedDuration, Timestamp};
+use std::time::Instant;
 
 /// How long a commit with a matching landing-intent and no landing record may stay pending (§5.2, decided
 /// in the 2026-10-23 addenda of `docs/design/records-history.md`; D111).
@@ -51,6 +53,12 @@ pub const PENDING_WINDOW: SignedDuration = SignedDuration::from_mins(15);
 const INTENT_DIR: &str = "landing-intents";
 /// Directory of landing files on the records branch.
 const LANDING_DIR: &str = "landings";
+/// Directory of checkpoint files on the records branch (§9).
+pub const CHECKPOINT_DIR: &str = "checkpoints";
+
+/// The version of this check (§9; D111). A checkpoint records the version that produced it, and a check whose
+/// version differs ignores that checkpoint and runs a full replay. Change it whenever the judging rules do.
+pub const CHECK_VERSION: &str = "attribution-check/1";
 
 /// What kind of problem a finding is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +87,9 @@ pub enum FindingKind {
     LegacyExemptMissing,
     /// `legacy-exempt.json` was changed after it was first written: it is append-only (§4, §10).
     LegacyExemptChanged,
+    /// A full replay disagrees with the newest checkpoint: the checkpoint names a commit the replay fails, or
+    /// one that is not on main (§9; D111).
+    CheckpointDisagrees,
 }
 
 impl FindingKind {
@@ -97,6 +108,7 @@ impl FindingKind {
             FindingKind::LegacyHistory => "legacy history check",
             FindingKind::LegacyExemptMissing => "legacy-exempt record missing",
             FindingKind::LegacyExemptChanged => "legacy-exempt record changed",
+            FindingKind::CheckpointDisagrees => "checkpoint disagrees with the full replay",
         }
     }
 }
@@ -126,6 +138,9 @@ pub struct AttributionReport {
     pub base: Option<String>,
     /// How many main commits were judged.
     pub checked: usize,
+    /// How many records were judged: every record on the branch for a full walk, only those added since the
+    /// checkpoint for an incremental one. Checkpoint records themselves are not counted.
+    pub records_judged: usize,
     /// The commits named by a matching landing record.
     pub attributed: Vec<String>,
     /// The commits still within the pending window.
@@ -191,7 +206,21 @@ pub(crate) fn walk(
     main_tip: &str,
     now: Timestamp,
     cutover: Option<&str>,
+    report: AttributionReport,
+) -> Result<AttributionReport> {
+    walk_since(git, main_tip, now, cutover, report, None)
+}
+
+/// [`walk`] with an optional records delta. With `records_since` `Some(r)` only the records added after the
+/// records commit `r` are audited and counted; every intent and landing at the records tip is still read, so
+/// a landing in the delta can cite an older intent (§9; D111).
+fn walk_since(
+    git: &Git,
+    main_tip: &str,
+    now: Timestamp,
+    cutover: Option<&str>,
     mut report: AttributionReport,
+    records_since: Option<&str>,
 ) -> Result<AttributionReport> {
     let records_tip = match records_branch::resolve_tip(git)? {
         RecordsTip::Missing => {
@@ -217,7 +246,15 @@ pub(crate) fn walk(
         RecordsTip::At { tip, .. } => tip,
     };
 
-    for problem in records_branch::audit_history(git, &records_tip)? {
+    let problems = match records_since {
+        Some(since) => records_branch::audit_history_since(git, &records_tip, since)?,
+        None => records_branch::audit_history(git, &records_tip)?,
+    };
+    report.records_judged = records_branch::files_added_between(git, records_since, &records_tip)?
+        .iter()
+        .filter(|path| !path.starts_with("checkpoints/"))
+        .count();
+    for problem in problems {
         report.find(
             FindingKind::RecordsHistory,
             Some(&problem.commit),
@@ -349,6 +386,287 @@ pub(crate) fn walk(
         }
     }
     Ok(report)
+}
+
+/// How a run judges (§9; D111).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// Judge only main's commits and the records added since the newest checkpoint. Falls back to a full
+    /// replay, with a stated reason, when there is no usable checkpoint.
+    Incremental,
+    /// Ignore checkpoints, judge everything from the start, and fail if the newest checkpoint disagrees.
+    FullReplay,
+}
+
+impl Mode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Mode::Incremental => "incremental",
+            Mode::FullReplay => "full replay",
+        }
+    }
+}
+
+/// What a run is asked to do.
+#[derive(Debug, Clone)]
+pub struct Options {
+    pub mode: Mode,
+    /// Whether a passing run may write a checkpoint. False in CI and for a read-only run: the check then
+    /// never touches the records branch.
+    pub write_checkpoint: bool,
+    /// The check version a checkpoint must carry to be trusted, and the one a new checkpoint records.
+    pub version: String,
+}
+
+impl Options {
+    /// `mode`, with the current [`CHECK_VERSION`].
+    pub fn new(mode: Mode, write_checkpoint: bool) -> Self {
+        Options {
+            mode,
+            write_checkpoint,
+            version: CHECK_VERSION.to_string(),
+        }
+    }
+}
+
+/// The outcome of [`run_check`]: the verdict and what the run did.
+#[derive(Debug, Clone)]
+pub struct RunReport {
+    pub report: AttributionReport,
+    /// The mode asked for.
+    pub requested: Mode,
+    /// The mode that ran. Differs from `requested` when an incremental run fell back.
+    pub mode: Mode,
+    /// Why an incremental run became a full replay.
+    pub fallback_reason: Option<String>,
+    /// The checkpoint an incremental run started from.
+    pub started_from: Option<Checkpoint>,
+    /// The checkpoint this run wrote, if it wrote one.
+    pub checkpoint_written: Option<Checkpoint>,
+    /// Why a checkpoint that should have been written was not. The verdict is unaffected.
+    pub checkpoint_error: Option<String>,
+    /// Wall-clock seconds the whole run took.
+    pub seconds: f64,
+}
+
+impl RunReport {
+    /// Main commits judged.
+    pub fn commits_judged(&self) -> usize {
+        self.report.checked
+    }
+
+    /// Records judged.
+    pub fn records_judged(&self) -> usize {
+        self.report.records_judged
+    }
+}
+
+/// Reads the newest checkpoint on `tip`: the one added by the newest first-parent records commit that added
+/// any (`None` when there is none). The inner `Err` says why the file cannot be used.
+fn read_newest_checkpoint(
+    git: &Git,
+    tip: &str,
+) -> Result<Option<std::result::Result<Checkpoint, String>>> {
+    let Some(path) = records_branch::newest_added_under(git, tip, CHECKPOINT_DIR)? else {
+        return Ok(None);
+    };
+    let Some(bytes) = git.show_file(tip, &path)? else {
+        return Ok(Some(Err(format!("{path} is missing"))));
+    };
+    Ok(Some(
+        match HistoryRecord::parse(&String::from_utf8_lossy(&bytes)) {
+            Ok(HistoryRecord::Checkpoint(cp)) => Ok(cp),
+            Ok(other) => Err(format!("{path} holds a {} record", other.schema())),
+            Err(error) => Err(format!("{path} is not a valid record: {error}")),
+        },
+    ))
+}
+
+/// Runs the attribution check as `options` direct (§9; D111): incremental from the newest checkpoint, or a
+/// full replay; and on a pass writes a checkpoint when allowed.
+///
+/// An incremental run judges main's commits after the checkpoint's `main_sha` and the records added after its
+/// `records_sha`. Intents and landings are still looked up across the whole records tip, because an intent is
+/// written before its merge and its landing after, so a checkpoint can fall between them. It falls back to a
+/// full replay, and says why, when there is no checkpoint, the checkpoint's version differs from
+/// `options.version`, or it names a commit that is not on main's first-parent line or a records commit that is
+/// not on the records branch. A full replay (asked for or fallen back to) adds a
+/// [`FindingKind::CheckpointDisagrees`] finding when the newest checkpoint names a commit that is not on
+/// main or one the replay fails.
+///
+/// A checkpoint is written only when the run passed with no pending commit, writing is allowed, the records
+/// tip was read from the local branch, and something new was judged (or the run was a full replay). It is
+/// appended to the local records branch only; this function never pushes.
+pub fn run_check(
+    git: &Git,
+    main_tip: &str,
+    now: Timestamp,
+    options: &Options,
+) -> Result<RunReport> {
+    let started = Instant::now();
+    let (records_tip, from) = match records_branch::resolve_tip(git)? {
+        RecordsTip::At { tip, from } => (Some(tip), Some(from)),
+        _ => (None, None),
+    };
+    let newest = match &records_tip {
+        Some(tip) => read_newest_checkpoint(git, tip)?,
+        None => None,
+    };
+    let line = if newest.is_some() {
+        git.run(["rev-list", "--first-parent", main_tip])?
+            .lines()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+
+    let mut fallback_reason = None;
+    let mut started_from = None;
+    if options.mode == Mode::Incremental && records_tip.is_some() {
+        match &newest {
+            None => fallback_reason = Some("no checkpoint on the records branch".to_string()),
+            Some(Err(why)) => {
+                fallback_reason = Some(format!("the newest checkpoint is unusable: {why}"));
+            }
+            Some(Ok(cp)) if cp.verifier_version != options.version => {
+                fallback_reason = Some(format!(
+                    "the check version changed: the newest checkpoint was written by {}, this check is {}",
+                    cp.verifier_version, options.version
+                ));
+            }
+            Some(Ok(cp)) if !line.contains(&cp.main_sha) => {
+                fallback_reason = Some(format!(
+                    "the newest checkpoint names {}, which is not on main's first-parent line",
+                    cp.main_sha
+                ));
+            }
+            Some(Ok(cp))
+                if !(git.commit_exists(&cp.records_sha)?
+                    && records_tip.as_deref().is_some_and(|tip| {
+                        git.is_ancestor(&cp.records_sha, tip).unwrap_or(false)
+                    })) =>
+            {
+                fallback_reason = Some(format!(
+                    "the newest checkpoint names records commit {}, which is not on the records branch",
+                    cp.records_sha
+                ));
+            }
+            Some(Ok(cp)) => started_from = Some(cp.clone()),
+        }
+    }
+
+    let mut report = walk_since(
+        git,
+        main_tip,
+        now,
+        started_from.as_ref().map(|cp| cp.main_sha.as_str()),
+        AttributionReport::default(),
+        started_from.as_ref().map(|cp| cp.records_sha.as_str()),
+    )?;
+    let mode = if started_from.is_some() {
+        Mode::Incremental
+    } else {
+        Mode::FullReplay
+    };
+
+    if mode == Mode::FullReplay && records_tip.is_some() {
+        match &newest {
+            Some(Ok(cp)) => {
+                if !line.contains(&cp.main_sha) {
+                    report.find(
+                        FindingKind::CheckpointDisagrees,
+                        Some(&cp.main_sha),
+                        format!(
+                            "the newest checkpoint names {}, which is not on main's first-parent line",
+                            cp.main_sha
+                        ),
+                    );
+                } else if report
+                    .findings
+                    .iter()
+                    .any(|f| f.commit.as_deref() == Some(cp.main_sha.as_str()))
+                {
+                    report.find(
+                        FindingKind::CheckpointDisagrees,
+                        Some(&cp.main_sha),
+                        format!(
+                            "the newest checkpoint says {} passed, but the full replay fails it",
+                            cp.main_sha
+                        ),
+                    );
+                }
+            }
+            Some(Err(why)) if options.mode == Mode::FullReplay => report.find(
+                FindingKind::CheckpointDisagrees,
+                None,
+                format!("the newest checkpoint is unusable: {why}"),
+            ),
+            _ => {}
+        }
+    }
+
+    let mut checkpoint_written = None;
+    let mut checkpoint_error = None;
+    let something_new = mode == Mode::FullReplay || report.checked > 0 || report.records_judged > 0;
+    if options.write_checkpoint
+        && report.passed()
+        && report.pending.is_empty()
+        && something_new
+        && let Some(tip) = &records_tip
+    {
+        if from != Some(RECORDS_REF) {
+            checkpoint_error = Some(
+                "the records branch is only in its remote-tracking ref; fetch it into athena/records first"
+                    .to_string(),
+            );
+        } else {
+            match write_checkpoint(git, main_tip, tip, now, &options.version) {
+                Ok(cp) => checkpoint_written = Some(cp),
+                Err(error) => checkpoint_error = Some(error),
+            }
+        }
+    }
+
+    Ok(RunReport {
+        report,
+        requested: options.mode,
+        mode,
+        fallback_reason,
+        started_from,
+        checkpoint_written,
+        checkpoint_error,
+        seconds: started.elapsed().as_secs_f64(),
+    })
+}
+
+/// Appends a checkpoint to the local records branch with the records writer.
+fn write_checkpoint(
+    git: &Git,
+    main_sha: &str,
+    records_sha: &str,
+    now: Timestamp,
+    version: &str,
+) -> std::result::Result<Checkpoint, String> {
+    let checkpoint = Checkpoint {
+        id: RecordId::generate(now),
+        created_at: now,
+        main_sha: main_sha.to_string(),
+        records_sha: records_sha.to_string(),
+        verifier_version: version.to_string(),
+    };
+    let json = serde_json::to_string(&HistoryRecord::Checkpoint(checkpoint.clone()))
+        .map_err(|e| e.to_string())?;
+    RecordsWriter::new(git)
+        .append(
+            "checkpoint",
+            &[Change::put(
+                format!("{CHECKPOINT_DIR}/{}.json", checkpoint.id),
+                json,
+            )],
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(checkpoint)
 }
 
 #[cfg(test)]
@@ -644,6 +962,372 @@ mod tests {
         let report = check_attribution(&git, &squash, ts(T0)).unwrap();
         assert_eq!(report.findings.len(), 1);
         assert_eq!(report.findings[0].kind, FindingKind::RecordsDiverged);
+    }
+
+    // ---- Incremental checking with checkpoints (§9; D111) ----
+
+    /// Adds one landed squash on top of HEAD: the commit, its intent and its landing. Returns the commit.
+    fn land(dir: &tempfile::TempDir, git: &Git, n: u32) -> String {
+        let base = git.head().unwrap().unwrap();
+        let name = format!("f{n}.txt");
+        write(dir.path(), &[(name.as_str(), "x\n")]);
+        let sha = commit(git, "Squash of a pull request");
+        let tree = git.tree_of(&sha).unwrap();
+        let i = intent(rid(2 * n), T0, &tree, &base);
+        put_intent(git, &i);
+        put_landing(git, rid(2 * n + 1), &sha, &i.id);
+        sha
+    }
+
+    fn now() -> Timestamp {
+        ts("2026-10-24T10:01:00Z")
+    }
+
+    fn head(git: &Git) -> String {
+        git.head().unwrap().unwrap()
+    }
+
+    fn records_tip(git: &Git) -> String {
+        git.rev_parse(RECORDS_REF).unwrap().unwrap()
+    }
+
+    fn incremental() -> Options {
+        Options::new(Mode::Incremental, true)
+    }
+
+    fn put_checkpoint(git: &Git, name: &str, main_sha: &str, version: &str) {
+        let cp = Checkpoint {
+            id: rid(900),
+            created_at: ts(T0),
+            main_sha: main_sha.to_string(),
+            records_sha: records_tip(git),
+            verifier_version: version.to_string(),
+        };
+        put(
+            git,
+            &format!("{CHECKPOINT_DIR}/{name}.json"),
+            &HistoryRecord::Checkpoint(cp),
+        );
+    }
+
+    #[test]
+    fn incremental_run_judges_only_new_commits() {
+        let (dir, git) = repo(&[("a.txt", "a\n")]);
+        for n in 1..=3 {
+            land(&dir, &git, n);
+        }
+        let first = run_check(&git, &head(&git), now(), &incremental()).unwrap();
+        assert!(first.report.passed(), "{:?}", first.report.findings);
+        assert_eq!(first.mode, Mode::FullReplay, "no checkpoint yet");
+        assert!(
+            first
+                .fallback_reason
+                .as_deref()
+                .unwrap()
+                .contains("no checkpoint")
+        );
+        assert_eq!((first.commits_judged(), first.records_judged()), (3, 6));
+        let written = first.checkpoint_written.clone().unwrap();
+
+        land(&dir, &git, 4);
+        land(&dir, &git, 5);
+        let second = run_check(&git, &head(&git), now(), &incremental()).unwrap();
+        assert!(second.report.passed(), "{:?}", second.report.findings);
+        assert_eq!(second.mode, Mode::Incremental);
+        assert_eq!(second.started_from, Some(written));
+        // Two landings: two commits, and an intent and a landing record each. The checkpoint is not counted.
+        assert_eq!(second.commits_judged(), 2);
+        assert_eq!(second.records_judged(), 4);
+        assert_eq!(second.report.attributed.len(), 2);
+        assert!(second.seconds >= 0.0);
+
+        let full = run_check(
+            &git,
+            &head(&git),
+            now(),
+            &Options::new(Mode::FullReplay, false),
+        )
+        .unwrap();
+        assert!(full.report.passed(), "{:?}", full.report.findings);
+        assert_eq!((full.commits_judged(), full.records_judged()), (5, 10));
+    }
+
+    #[test]
+    fn intent_before_checkpoint_landing_after_passes() {
+        let (dir, git) = repo(&[("a.txt", "a\n")]);
+        let _ = land(&dir, &git, 1);
+        let two = land(&dir, &git, 2);
+        // Commit 3 is merged and its intent was written, but its landing is not yet.
+        write(dir.path(), &[("f3.txt", "x\n")]);
+        let three = commit(&git, "Squash of a pull request");
+        let i = intent(rid(6), T0, &git.tree_of(&three).unwrap(), &two);
+        put_intent(&git, &i);
+        // The checkpoint is written at commit 2, after the intent and before the landing.
+        let at_two = run_check(&git, &two, now(), &incremental()).unwrap();
+        assert!(at_two.checkpoint_written.is_some());
+        put_landing(&git, rid(7), &three, &i.id);
+
+        let run = run_check(&git, &three, now(), &incremental()).unwrap();
+        assert_eq!(run.mode, Mode::Incremental);
+        assert!(run.report.passed(), "{:?}", run.report.findings);
+        assert_eq!(run.commits_judged(), 1);
+        assert_eq!(run.records_judged(), 1, "only the landing is new");
+        assert_eq!(run.report.attributed, vec![three]);
+    }
+
+    #[test]
+    fn tampered_checkpoint_is_caught_by_full_replay() {
+        let (dir, git) = repo(&[("a.txt", "a\n")]);
+        land(&dir, &git, 1);
+        write(dir.path(), &[("rogue.txt", "r\n")]);
+        let rogue = commit(&git, "Hand-made commit");
+        // A hand-written checkpoint says the rogue commit passed.
+        put_checkpoint(&git, "forged", &rogue, CHECK_VERSION);
+
+        let trusting =
+            run_check(&git, &rogue, now(), &Options::new(Mode::Incremental, false)).unwrap();
+        assert_eq!(trusting.mode, Mode::Incremental);
+        assert!(
+            trusting.report.passed(),
+            "an incremental run trusts the checkpoint"
+        );
+
+        let replay =
+            run_check(&git, &rogue, now(), &Options::new(Mode::FullReplay, false)).unwrap();
+        assert!(!replay.report.passed());
+        let kinds: Vec<_> = replay.report.findings.iter().map(|f| f.kind).collect();
+        assert!(kinds.contains(&FindingKind::Unattributed), "{kinds:?}");
+        assert!(
+            kinds.contains(&FindingKind::CheckpointDisagrees),
+            "{kinds:?}"
+        );
+
+        // A checkpoint naming a commit that is not on main disagrees too.
+        let (dir2, git2) = repo(&[("a.txt", "a\n")]);
+        land(&dir2, &git2, 1);
+        put_checkpoint(&git2, "elsewhere", &"7".repeat(40), CHECK_VERSION);
+        let replay = run_check(
+            &git2,
+            &head(&git2),
+            now(),
+            &Options::new(Mode::FullReplay, false),
+        )
+        .unwrap();
+        assert!(
+            replay
+                .report
+                .findings
+                .iter()
+                .any(|f| f.kind == FindingKind::CheckpointDisagrees),
+            "{:?}",
+            replay.report.findings
+        );
+    }
+
+    #[test]
+    fn check_version_change_forces_full_replay() {
+        let (dir, git) = repo(&[("a.txt", "a\n")]);
+        for n in 1..=3 {
+            land(&dir, &git, n);
+        }
+        let mut old = incremental();
+        old.version = "attribution-check/0".to_string();
+        assert!(
+            run_check(&git, &head(&git), now(), &old)
+                .unwrap()
+                .checkpoint_written
+                .is_some()
+        );
+        land(&dir, &git, 4);
+
+        let run = run_check(&git, &head(&git), now(), &incremental()).unwrap();
+        assert_eq!(run.requested, Mode::Incremental);
+        assert_eq!(run.mode, Mode::FullReplay);
+        let why = run.fallback_reason.clone().unwrap();
+        assert!(
+            why.contains("attribution-check/0") && why.contains(CHECK_VERSION),
+            "{why}"
+        );
+        assert_eq!((run.commits_judged(), run.records_judged()), (4, 8));
+        // The new checkpoint carries the new version, so the next run is incremental again.
+        assert_eq!(
+            run.checkpoint_written.unwrap().verifier_version,
+            CHECK_VERSION
+        );
+        let next = run_check(&git, &head(&git), now(), &incremental()).unwrap();
+        assert_eq!(next.mode, Mode::Incremental);
+    }
+
+    #[test]
+    fn failing_check_writes_no_checkpoint() {
+        let (dir, git) = repo(&[("a.txt", "a\n")]);
+        land(&dir, &git, 1);
+        write(dir.path(), &[("rogue.txt", "r\n")]);
+        let rogue = commit(&git, "Hand-made commit");
+        let before = records_tip(&git);
+        let run = run_check(&git, &rogue, now(), &incremental()).unwrap();
+        assert!(!run.report.passed());
+        assert!(run.checkpoint_written.is_none() && run.checkpoint_error.is_none());
+        assert_eq!(records_tip(&git), before, "the records branch did not move");
+
+        // A pending commit passes but is not a point to start from.
+        let (dir, git) = repo(&[("a.txt", "a\n")]);
+        let one = land(&dir, &git, 1);
+        write(dir.path(), &[("p.txt", "p\n")]);
+        let pending = commit(&git, "Merged, landing due");
+        let i = intent(rid(10), T0, &git.tree_of(&pending).unwrap(), &one);
+        put_intent(&git, &i);
+        let before = records_tip(&git);
+        let run = run_check(&git, &pending, ts("2026-10-24T10:05:00Z"), &incremental()).unwrap();
+        assert!(run.report.passed(), "{:?}", run.report.findings);
+        assert_eq!(run.report.pending.len(), 1);
+        assert!(run.checkpoint_written.is_none());
+        assert_eq!(records_tip(&git), before);
+    }
+
+    #[test]
+    fn passing_check_writes_checkpoint() {
+        let (dir, git) = repo(&[("a.txt", "a\n")]);
+        land(&dir, &git, 1);
+        let main = land(&dir, &git, 2);
+        let before = records_tip(&git);
+        let run = run_check(&git, &main, now(), &incremental()).unwrap();
+        let cp = run.checkpoint_written.clone().unwrap();
+        assert_eq!(cp.main_sha, main);
+        assert_eq!(cp.records_sha, before);
+        assert_eq!(cp.verifier_version, CHECK_VERSION);
+
+        let tip = records_tip(&git);
+        assert_eq!(
+            git.parents(&tip).unwrap(),
+            vec![before],
+            "one new records commit"
+        );
+        let stored = git
+            .show_file(&tip, &format!("{CHECKPOINT_DIR}/{}.json", cp.id))
+            .unwrap()
+            .unwrap();
+        match HistoryRecord::parse(&String::from_utf8(stored).unwrap()).unwrap() {
+            HistoryRecord::Checkpoint(read) => assert_eq!(read, cp),
+            other => panic!("{other:?}"),
+        }
+        // Nothing new since: a second run judges nothing and writes nothing.
+        let again = run_check(&git, &main, now(), &incremental()).unwrap();
+        assert_eq!((again.commits_judged(), again.records_judged()), (0, 0));
+        assert!(again.checkpoint_written.is_none());
+        assert_eq!(records_tip(&git), tip);
+    }
+
+    #[test]
+    fn full_replay_ignores_checkpoints_and_read_only_never_writes() {
+        let (dir, git) = repo(&[("a.txt", "a\n")]);
+        for n in 1..=3 {
+            land(&dir, &git, n);
+        }
+        assert!(
+            run_check(&git, &head(&git), now(), &incremental())
+                .unwrap()
+                .checkpoint_written
+                .is_some()
+        );
+        land(&dir, &git, 4);
+        let before = records_tip(&git);
+
+        let read_only_full = run_check(
+            &git,
+            &head(&git),
+            now(),
+            &Options::new(Mode::FullReplay, false),
+        )
+        .unwrap();
+        assert_eq!(read_only_full.mode, Mode::FullReplay);
+        assert!(
+            read_only_full.fallback_reason.is_none(),
+            "asked for, not fallen back to"
+        );
+        assert!(read_only_full.started_from.is_none());
+        assert_eq!(
+            (
+                read_only_full.commits_judged(),
+                read_only_full.records_judged()
+            ),
+            (4, 8)
+        );
+        assert!(read_only_full.report.passed());
+
+        let read_only_inc = run_check(
+            &git,
+            &head(&git),
+            now(),
+            &Options::new(Mode::Incremental, false),
+        )
+        .unwrap();
+        assert_eq!(read_only_inc.mode, Mode::Incremental);
+        assert_eq!(
+            (
+                read_only_inc.commits_judged(),
+                read_only_inc.records_judged()
+            ),
+            (1, 2)
+        );
+        for run in [&read_only_full, &read_only_inc] {
+            assert!(run.checkpoint_written.is_none() && run.checkpoint_error.is_none());
+        }
+        assert_eq!(records_tip(&git), before, "a read-only run never writes");
+    }
+
+    #[test]
+    fn checkpoint_write_failure_keeps_verdict() {
+        let (dir, git) = repo(&[("a.txt", "a\n")]);
+        land(&dir, &git, 1);
+        let before = records_tip(&git);
+        // A lock on the records ref makes every update fail.
+        let lock = git
+            .common_dir()
+            .unwrap()
+            .join("refs/heads/athena/records.lock");
+        std::fs::write(&lock, "").unwrap();
+        let run = run_check(&git, &head(&git), now(), &incremental()).unwrap();
+        assert!(run.report.passed(), "the verdict does not change");
+        assert!(run.checkpoint_written.is_none());
+        assert!(run.checkpoint_error.is_some());
+        std::fs::remove_file(&lock).unwrap();
+        assert_eq!(records_tip(&git), before);
+    }
+
+    #[test]
+    fn timing_on_synthetic_200_landings() {
+        let (dir, git) = repo(&[("a.txt", "a\n")]);
+        for n in 1..=200 {
+            land(&dir, &git, n);
+        }
+        let full = run_check(
+            &git,
+            &head(&git),
+            now(),
+            &Options::new(Mode::FullReplay, true),
+        )
+        .unwrap();
+        assert!(full.report.passed(), "{:?}", full.report.findings);
+        assert_eq!((full.commits_judged(), full.records_judged()), (200, 400));
+        assert!(full.checkpoint_written.is_some());
+
+        land(&dir, &git, 201);
+        let inc = run_check(&git, &head(&git), now(), &incremental()).unwrap();
+        assert!(inc.report.passed(), "{:?}", inc.report.findings);
+        assert_eq!(inc.mode, Mode::Incremental);
+        assert_eq!((inc.commits_judged(), inc.records_judged()), (1, 2));
+        // Printed, never asserted: seconds vary with the machine.
+        println!(
+            "measured on the synthetic 200-landing fixture: full replay {:.3} s ({} commits, {} records); \
+             incremental {:.3} s ({} commit, {} records)",
+            full.seconds,
+            full.commits_judged(),
+            full.records_judged(),
+            inc.seconds,
+            inc.commits_judged(),
+            inc.records_judged()
+        );
     }
 
     #[test]

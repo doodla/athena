@@ -340,3 +340,231 @@ fn check_attribution_without_a_records_branch_fails_explicitly() {
     assert!(stdout.contains("records branch missing"), "{stdout}");
     assert!(stdout.contains("attribution FAIL"), "{stdout}");
 }
+
+// ---- Incremental attribution checking with checkpoints (docs/design/records-history.md §9; D111) ----
+
+mod incremental {
+    use super::*;
+    use athena_data::history::{
+        Checkpoint, HistoryRecord, Landing, LandingCommit, LandingIntent, LandingKind, MergeMethod,
+    };
+    use athena_data::{JobId, RecordId};
+    use athena_git::records_branch::{self, Change, RECORDS_REF, RecordsWriter};
+
+    fn ts() -> jiff::Timestamp {
+        "2026-10-24T10:00:00Z".parse().unwrap()
+    }
+
+    fn put(fx: &Fixture, dir: &str, id: &RecordId, record: HistoryRecord) {
+        RecordsWriter::new(&fx.git)
+            .append(
+                "record",
+                &[Change::put(
+                    format!("{dir}/{id}.json"),
+                    serde_json::to_string(&record).unwrap(),
+                )],
+            )
+            .unwrap();
+    }
+
+    /// Adds a squash commit on main with its landing-intent and landing record; returns the commit.
+    fn land(fx: &Fixture, n: u32) -> String {
+        let base = fx.head();
+        write(fx.root(), &[(&format!("landed{n}.txt"), "x\n")]);
+        assert!(commit(fx, "Squash of a pull request").status.success());
+        let sha = fx.head();
+        let intent_id = RecordId::from_parts(ts(), 2 * n);
+        let intent = LandingIntent {
+            id: intent_id.clone(),
+            created_at: ts(),
+            pr_number: 1,
+            head_sha: "1".repeat(40),
+            head_tree_sha: fx.git.tree_of(&sha).unwrap(),
+            expected_base: base,
+            job_ids: vec![JobId::parse("20261024-100000-aaaa").unwrap()],
+        };
+        put(
+            fx,
+            "landing-intents",
+            &intent_id,
+            HistoryRecord::LandingIntent(intent),
+        );
+        let landing_id = RecordId::from_parts(ts(), 2 * n + 1);
+        let landing = Landing {
+            id: landing_id.clone(),
+            created_at: ts(),
+            pr_number: 1,
+            head_sha: "1".repeat(40),
+            host_commit: sha.clone(),
+            merge_method: MergeMethod::Squash,
+            commits: vec![LandingCommit {
+                sha: "1".repeat(40),
+                tree: "2".repeat(40),
+                kind: LandingKind::RecordsOnly,
+                job: None,
+                verification: None,
+            }],
+            intent: intent_id,
+        };
+        put(fx, "landings", &landing_id, HistoryRecord::Landing(landing));
+        sha
+    }
+
+    fn tip(fx: &Fixture) -> String {
+        fx.git.rev_parse(RECORDS_REF).unwrap().unwrap()
+    }
+
+    /// `athena check --attribution` with the given extra arguments and environment.
+    fn check(fx: &Fixture, args: &[&str], ci: Option<&str>) -> std::process::Output {
+        let mut cmd = athena();
+        cmd.current_dir(fx.root())
+            .env("ATHENA_STATE_DIR", fx.state.path())
+            .env_remove("CI")
+            .args(["check", "--attribution"])
+            .args(args);
+        if let Some(value) = ci {
+            cmd.env("CI", value);
+        }
+        cmd.output().unwrap()
+    }
+
+    fn newest_checkpoint(fx: &Fixture) -> Checkpoint {
+        let tip = tip(fx);
+        let path = records_branch::newest_added_under(&fx.git, &tip, "checkpoints")
+            .unwrap()
+            .expect("a checkpoint exists");
+        let bytes = fx.git.show_file(&tip, &path).unwrap().unwrap();
+        match HistoryRecord::parse(&String::from_utf8(bytes).unwrap()).unwrap() {
+            HistoryRecord::Checkpoint(cp) => cp,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn check_attribution_writes_checkpoint() {
+        let fx = Fixture::new();
+        land(&fx, 1);
+        land(&fx, 2);
+        let before = tip(&fx);
+        let out = check(&fx, &[], None);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(out.status.code(), Some(0), "{stdout}");
+        assert!(stdout.contains("attribution pass"), "{stdout}");
+        assert!(stdout.contains("checkpoint: written"), "{stdout}");
+        let cp = newest_checkpoint(&fx);
+        assert_eq!(cp.main_sha, fx.head());
+        assert_eq!(cp.records_sha, before);
+        assert_eq!(cp.verifier_version, athena_gate::attribution::CHECK_VERSION);
+        assert_ne!(tip(&fx), before);
+
+        // A failing check writes none.
+        write(fx.root(), &[("rogue.txt", "r\n")]);
+        assert!(commit(&fx, "Hand-made commit").status.success());
+        let before = tip(&fx);
+        let out = check(&fx, &[], None);
+        assert_eq!(out.status.code(), Some(2));
+        assert_eq!(tip(&fx), before);
+    }
+
+    #[test]
+    fn check_attribution_in_ci_writes_nothing() {
+        let fx = Fixture::new();
+        land(&fx, 1);
+        let before = tip(&fx);
+        let out = check(&fx, &[], Some("true"));
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(out.status.code(), Some(0), "{stdout}");
+        assert!(stdout.contains("not written (CI is read-only)"), "{stdout}");
+        assert_eq!(tip(&fx), before, "CI never writes the records branch");
+        // The flag does the same where CI is not set.
+        let out = check(&fx, &["--no-checkpoint"], None);
+        assert_eq!(out.status.code(), Some(0));
+        assert_eq!(tip(&fx), before);
+        // An empty CI variable is not CI.
+        let out = check(&fx, &[], Some(""));
+        assert_eq!(out.status.code(), Some(0));
+        assert_ne!(tip(&fx), before);
+    }
+
+    #[test]
+    fn check_attribution_reports_seconds_and_counts() {
+        let fx = Fixture::new();
+        land(&fx, 1);
+        land(&fx, 2);
+        let out = check(&fx, &[], None);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("mode: full replay, because no checkpoint"),
+            "{stdout}"
+        );
+        assert!(
+            stdout.contains(" s; judged 2 commit(s) and 4 record(s)"),
+            "{stdout}"
+        );
+        assert!(stdout.contains("took "), "{stdout}");
+
+        land(&fx, 3);
+        let out = check(&fx, &[], None);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(stdout.contains("mode: incremental"), "{stdout}");
+        assert!(
+            stdout.contains(" s; judged 1 commit(s) and 2 record(s)"),
+            "{stdout}"
+        );
+
+        land(&fx, 4);
+        let out = check(&fx, &["--json"], None);
+        let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(json["mode"], "incremental");
+        assert_eq!(json["commits_judged"], 1);
+        assert_eq!(json["records_judged"], 2);
+        assert!(json["seconds"].as_f64().unwrap() >= 0.0);
+        assert!(json["checkpoint_written"].is_string());
+        assert_eq!(json["passed"], true);
+
+        // A full replay judges everything and says so.
+        let out = check(&fx, &["--full-replay", "--no-checkpoint", "--json"], None);
+        let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(json["mode"], "full replay");
+        assert_eq!(json["commits_judged"], 4);
+        assert_eq!(json["records_judged"], 8);
+        assert!(json["checkpoint_written"].is_null());
+    }
+
+    #[test]
+    fn full_replay_tampered_checkpoint_exits_2() {
+        let fx = Fixture::new();
+        land(&fx, 1);
+        write(fx.root(), &[("rogue.txt", "r\n")]);
+        assert!(commit(&fx, "Hand-made commit").status.success());
+        let forged = Checkpoint {
+            id: RecordId::from_parts(ts(), 900),
+            created_at: ts(),
+            main_sha: fx.head(),
+            records_sha: tip(&fx),
+            verifier_version: athena_gate::attribution::CHECK_VERSION.to_string(),
+        };
+        put(
+            &fx,
+            "checkpoints",
+            &forged.id.clone(),
+            HistoryRecord::Checkpoint(forged),
+        );
+
+        // The incremental run trusts the forged checkpoint; the full replay does not.
+        let out = check(&fx, &["--no-checkpoint"], None);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        let out = check(&fx, &["--full-replay", "--no-checkpoint"], None);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(out.status.code(), Some(2), "{stdout}");
+        assert!(
+            stdout.contains("checkpoint disagrees with the full replay"),
+            "{stdout}"
+        );
+    }
+}

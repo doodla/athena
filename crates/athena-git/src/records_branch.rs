@@ -100,9 +100,103 @@ pub struct HistoryProblem {
 /// parents are allowed, because a landing record carries the pull request's head as one (§6.1).
 pub fn audit_history(git: &Git, tip: &str) -> Result<Vec<HistoryProblem>, GitError> {
     let out = git.run(["rev-list", "--first-parent", "--reverse", tip])?;
+    audit_commits(git, out.lines().map(str::to_string).collect(), None)
+}
+
+/// Audits only the records commits added after `since` (incremental checking, §9; D111): the first-parent
+/// commits of `tip` that come after `since`, each against its first parent, as [`audit_history`] does. `since`
+/// itself and everything before it are not read. When `since` is not on `tip`'s first-parent line, the one
+/// problem returned says so, because the range cannot be audited.
+pub fn audit_history_since(
+    git: &Git,
+    tip: &str,
+    since: &str,
+) -> Result<Vec<HistoryProblem>, GitError> {
+    let out = git.run(["rev-list", "--first-parent", "--reverse", tip])?;
+    let commits: Vec<String> = out.lines().map(str::to_string).collect();
+    let Some(at) = commits.iter().position(|c| c == since) else {
+        return Ok(vec![HistoryProblem {
+            commit: tip.to_string(),
+            detail: format!(
+                "has no commit {since} on its first-parent line, so the range after it cannot be audited"
+            ),
+        }]);
+    };
+    let rest = commits[at + 1..].to_vec();
+    audit_commits(git, rest, Some(since))
+}
+
+/// The path of the newest file under `dir` on `tip`, newest by first-parent order: the file the newest
+/// first-parent commit that added something under `dir` added (last in path order if it added several).
+/// `None` when no commit added anything there. Writer-supplied ids and times play no part (§9; D111).
+pub fn newest_added_under(git: &Git, tip: &str, dir: &str) -> Result<Option<String>, GitError> {
+    let pathspec = format!("{}/", dir.trim_end_matches('/'));
+    let out = git.run([
+        "log",
+        "--first-parent",
+        "--root",
+        "--diff-filter=A",
+        "--name-only",
+        "--format=",
+        "-n",
+        "1",
+        tip,
+        "--",
+        &pathspec,
+    ])?;
+    Ok(out
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .max())
+}
+
+/// The paths present in `to` and not in `from` (`None` is the empty tree). Both are commits or trees.
+pub fn files_added_between(
+    git: &Git,
+    from: Option<&str>,
+    to: &str,
+) -> Result<Vec<String>, GitError> {
+    let empty;
+    let from = match from {
+        Some(from) => from,
+        None => {
+            empty = git.empty_tree()?;
+            &empty
+        }
+    };
+    let out = git.run([
+        "diff-tree",
+        "-r",
+        "--name-only",
+        "--diff-filter=A",
+        from,
+        to,
+    ])?;
+    Ok(out
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+/// Checks each of `commits` (oldest first) against its predecessor; the first against `base`'s tree when given.
+fn audit_commits(
+    git: &Git,
+    commits: Vec<String>,
+    base: Option<&str>,
+) -> Result<Vec<HistoryProblem>, GitError> {
     let mut problems = Vec::new();
-    let mut previous: Option<BTreeMap<String, String>> = None;
-    for commit in out.lines() {
+    let mut previous: Option<BTreeMap<String, String>> = match base {
+        Some(base) => Some(
+            git.ls_tree(base)?
+                .into_iter()
+                .map(|e| (e.path, e.oid))
+                .collect(),
+        ),
+        None => None,
+    };
+    for commit in commits.iter().map(String::as_str) {
         let files: BTreeMap<String, String> = git
             .ls_tree(commit)?
             .into_iter()
@@ -952,6 +1046,55 @@ mod tests {
             problems[0].detail.contains("changes one.json"),
             "{problems:?}"
         );
+    }
+
+    #[test]
+    fn audit_since_reads_only_the_commits_after_it_and_the_helpers_find_the_new_files() {
+        let (_d, git) = repo_with(&[("a.txt", "a")]);
+        let writer = RecordsWriter::new(&git);
+        let one = writer
+            .append("one", &[Change::put("checkpoints/one.json", "1")])
+            .unwrap();
+        let two = writer
+            .append("two", &[Change::put("landings/two.json", "2")])
+            .unwrap();
+        writer
+            .append("three", &[Change::put("checkpoints/three.json", "3")])
+            .unwrap();
+        let four = writer
+            .append("four", &[Change::put("landings/four.json", "4")])
+            .unwrap();
+        assert_eq!(audit_history_since(&git, &four, &two).unwrap(), vec![]);
+        assert_eq!(
+            newest_added_under(&git, &four, "checkpoints").unwrap(),
+            Some("checkpoints/three.json".to_string())
+        );
+        assert_eq!(
+            newest_added_under(&git, &two, "checkpoints").unwrap(),
+            Some("checkpoints/one.json".to_string())
+        );
+        assert_eq!(newest_added_under(&git, &two, "jobs").unwrap(), None);
+        assert_eq!(
+            files_added_between(&git, Some(&two), &four).unwrap(),
+            vec!["checkpoints/three.json", "landings/four.json"]
+        );
+        assert_eq!(files_added_between(&git, None, &one).unwrap().len(), 1);
+
+        // A rewrite before `since` is not read; one after it is reported.
+        let empty = git.empty_tree().unwrap();
+        let dropped = git.commit_tree(&empty, &[&four], "drop", false).unwrap();
+        let problems = audit_history_since(&git, &dropped, &four).unwrap();
+        assert_eq!(problems.len(), 4, "{problems:?}");
+        // Starting after the rewrite sees nothing wrong with the commits before it.
+        assert_eq!(
+            audit_history_since(&git, &dropped, &dropped).unwrap(),
+            vec![]
+        );
+        // A `since` that is not on the line is itself a problem.
+        let other = git.commit_tree(&empty, &[], "other", false).unwrap();
+        let problems = audit_history_since(&git, &four, &other).unwrap();
+        assert_eq!(problems.len(), 1);
+        assert!(problems[0].detail.contains("cannot be audited"));
     }
 
     #[test]

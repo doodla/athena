@@ -1049,3 +1049,8 @@ It should become demonstrably less likely to make the same kind of mistake again
 
 * Start tracking every mistake you make as work Athena should start being intelligent about as well
 * Relay note: "you" is the operator, who is Athena's brain for now (2026-10-17). Each operator mistake is logged as it happens as an intervention whose text starts "Mistake:", saying what went wrong, what it cost, and what Athena would have had to know or check to prevent it, so Athena's introspection turns it into improvement work. Mistakes made before this addendum are logged the same way.
+
+### 2026-10-24: Athena keeps track
+
+* Everything you're keeping track of, Athena should
+* Relay note: "you" is the operator. What the operator has been tracking outside Athena (the order of next work, the remaining records-history build steps and their preconditions, items waiting on Sri, measurements still owed, known traps) moves into Athena as queued requests with their dependencies stated, so `athena plan` and `athena status` show it. The operator works from Athena's plan and runs work through Athena (`athena drain`), and logs any tracking it still does outside Athena as an intervention.

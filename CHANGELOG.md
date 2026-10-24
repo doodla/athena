@@ -9,6 +9,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Incremental attribution checking with checkpoint records (job 6 of `docs/design/records-history.md`, section
+  9, D111). A passing `athena check --attribution` (on the main branch, with `CI` unset and no
+  `--no-checkpoint`) and `athena land` after its landing record append a `checkpoint` record to the local
+  `athena/records` with the records writer. It names the last passing main commit, the records tip it was
+  judged against, and the check version (`CHECK_VERSION`). It is never pushed by the check. A later check
+  judges only main's commits and the records added since the newest checkpoint (newest in records-branch
+  first-parent order); intents and landings are still looked up across the whole records tip, because a
+  checkpoint can fall between a landing's intent and its landing. It runs a full replay, and says why, when
+  there is no checkpoint, the check version differs, or the checkpoint names a commit that is not on main.
+  `--full-replay` ignores checkpoints, judges everything and fails if the newest checkpoint names a commit
+  the replay fails or one that is not on main. A failing check, or one with a pending commit, writes no
+  checkpoint. CI never writes one: the workflow token stays `contents: read` and the check writes nothing
+  when `CI` is set; its attribution job runs the incremental check on pushes and `--full-replay` on the
+  weekly schedule. Every run prints the mode, seconds taken, and the commits and records judged (text and
+  `--json`). New in `athena-git`: `audit_history_since`, `newest_added_under`, `files_added_between`.
+  Timing, **measured on the synthetic fixture** of 200 landings (one commit, one intent record and one
+  landing record each; test `attribution::tests::timing_on_synthetic_200_landings`, debug build, one run on
+  this machine): full replay 1.731 s (200 commits, 400 records); incremental run after one more landing
+  0.145 s (1 commit, 2 records). Seconds vary by machine and are printed, never asserted. The timing on this
+  repository itself is taken after landing, outside this change.
 - The legacy rule of the attribution check (job 5, part 2 of `docs/design/records-history.md`, sections 4
   and 10, D111): `athena_gate::legacy::check_attribution_with_legacy`. For main's commits up to and
   including a cutover commit `C0`, the existing history check judges them, with its exempt list read from
