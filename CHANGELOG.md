@@ -9,6 +9,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- The change verifier prompt now says each recorded fmt, clippy or test check it cites goes in that criterion's
+  commands list, exactly as shown under "Checks Athena ran on this tree", and that quoting it only in evidence
+  text is not enough. Reason: job 20261024-033935-c4w4 quoted its checks in evidence text with an empty commands
+  list, and D43 (`verify.rs`) reads only the commands list, so the criterion was rejected. Some unrelated
+  wording in the same prompt was shortened to stay inside the verifier's token budget. No code change.
 - A cited command now counts as seen running if the verifier ran it, or Athena ran and recorded it on the same
   candidate tree and it passed (D115, amending D43). A failed record, a record for another tree, and a
   placeholder with no exit code still leave the command unseen. Reason: job 20261024-033933-ta60 was rejected on
