@@ -1,0 +1,282 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261024-115052-bzw6",
+  "round": 1,
+  "at": "2026-10-24T11:54:18.031730821Z",
+  "invocation_seq": 3,
+  "approach": "Add a remote-first publish path to the athena-git RecordsWriter (fetch the remote records tip, build the commit on it with optional extra parents, push with a lease, move the local ref only after the push succeeds, retry a bounded number of times on rejection). In athena-core, add a `LandingRecords` seam, with a git implementation, to the free `gh::land_pr`. It writes and pushes a LandingIntent before `PrHost::merge`. After a confirmed verified merge it writes a Landing whose commit has the PR head as its second parent. A merge that cannot be confirmed writes no landing and adds a warning that names the intent. `land.rs` gets the check of the commits between the remote base and the PR head. `Athena::land_pr` and `PrLander` in drain.rs both go through the same code. The design doc and CHANGELOG record the change.",
+  "decisions": [
+    {
+      "choice": "Add a distinct remote-first path to the athena-git RecordsWriter (`append_published`, which takes extra parents) and leave `append` unchanged. `sync_from` does not exist in the repo (I grepped), so the design doc states that a distinct recover path was added.",
+      "reason": "This fixes the cause, which is the ref moving before the push. The existing `append` is compare-and-swap on the local ref and stays valid for the importer. The new path builds the commit as an unreferenced object on the fetched remote tip, pushes with a lease on that tip via the existing `Git::push_if_remote_at`, and runs `update-ref` on the local ref only after the push succeeds.",
+      "rejected": [
+        {
+          "option": "Push first from the existing local-ref `append`",
+          "why": "The local ref moves before the push. A rejected push leaves a local commit that diverges from the remote, which is the bug."
+        },
+        {
+          "option": "Force-push the records branch",
+          "why": "It would destroy other writers' records and break the append-only rule."
+        }
+      ]
+    },
+    {
+      "choice": "Before every write, fetch the remote records branch into a private ref (not the user's refs). If the remote has the branch, the local ref is reset to the remote tip. If the remote lacks it, the local tip is the base and is published whole.",
+      "reason": "The remote is the source of truth (user decision). A leftover unpushed or diverged local intent can no longer cause a divergence error.",
+      "rejected": [
+        {
+          "option": "Merge or rebase local-only commits onto the remote",
+          "why": "It makes unpushed records authoritative, which contradicts the decision."
+        }
+      ]
+    },
+    {
+      "choice": "Add a `LandingRecords` trait in gh.rs and an `Option<&dyn LandingRecords>` field on `LandPr`. `Athena::land_pr` passes a git implementation. Existing fake-sha tests pass `None`.",
+      "reason": "Existing `land_pr` tests use fake shas such as `cand1` and `merged1` with no repository. The seam keeps them passing with only a `records: None` line added to their `LandPr` literals. New tests use a real tempdir repository, a bare remote and the fake host.",
+      "rejected": [
+        {
+          "option": "Make `land_pr` always call git",
+          "why": "It breaks every existing fake-sha test, which criterion 10 forbids."
+        }
+      ]
+    },
+    {
+      "choice": "The intent is idempotent by (PR number, head sha). A rerun finds the existing intent on the remote and reuses it. The landing is idempotent by intent id, and the writer's same-bytes no-op covers a replay.",
+      "reason": "This gives criterion 7 (no duplicate records on rerun) and lets a later run write the landing once the merge is confirmed.",
+      "rejected": [
+        {
+          "option": "A fresh intent on every call",
+          "why": "Reruns would leave duplicate intents."
+        }
+      ]
+    },
+    {
+      "choice": "Add `warnings: Vec<String>` to `PrReport`. After `PrHost::merge` returns Ok, an error from `observe_merge`, a `NotMerged` result or a `MergedButNotVerified` result becomes a warning that names the intent id. The run returns the report without a landing record. Today that error propagates with `?`.",
+      "reason": "The merge is already done and must not be hidden behind an error. Reconcile (job 3 part 2) is out of scope. `display.rs` prints warnings, and `PrLander` in drain.rs includes them in its NotLanded text.",
+      "rejected": [
+        {
+          "option": "Return an error",
+          "why": "It hides that the host merged, and a rerun would try to merge again."
+        }
+      ]
+    },
+    {
+      "choice": "Put the check of commits between the remote base and the PR head in land.rs as `landing_commits(git, base, head)`. It reads the `Athena-Job` and `Athena-Verified-Content` trailers and builds the `LandingCommit` entries. A commit with neither gives the error \"commit <sha> lies between the remote base and the PR head and carries no landing trailer or verification\".",
+      "reason": "Landing already owns the trailer rules. The check runs before the intent is written, so a refused chain writes nothing.",
+      "rejected": [
+        {
+          "option": "Skip such commits silently",
+          "why": "The landing record would then claim a chain it cannot cover."
+        }
+      ]
+    },
+    {
+      "choice": "The merge method comes from the client: `GhClient::merge` remembers the method that `MergeMethods::choose` picked, exposed through a `PrHost` method with a default of `None`. When it is unknown, infer it from the merged commit: two or more parents is `Merge`, otherwise `Squash`.",
+      "reason": "`PrHost::merge` returns `()` today, so the method is otherwise not known.",
+      "rejected": [
+        {
+          "option": "Change the `merge` signature",
+          "why": "It touches every fake host in the tests for little gain."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-git/src/lib.rs",
+      "action": "modify",
+      "purpose": "Add small helpers: fetch a remote branch into a private ref and return the tip (or None), and a plain push for a branch the remote lacks. The lease push reuses `push_if_remote_at`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-git/src/records_branch.rs",
+      "action": "modify",
+      "purpose": "Add `append_published(remote, message, changes, extra_parents)` with the remote-first sync, build on the remote tip, push with a lease, move the local ref only after success, and a bounded retry. Share the commit-building code with `append`. Add a test hook and the tests for criteria 5 and 6.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/land.rs",
+      "action": "modify",
+      "purpose": "Add `landing_commits(git, base, head)`: trailer and verification checks and the `LandingCommit` entries, with the error naming the sha. Tests for criterion 9.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "action": "modify",
+      "purpose": "Add the `LandingRecords` trait, `GitLandingRecords`, the `records` field on `LandPr`, the intent-before-merge and landing-after-merge steps, `PrReport.warnings`, the merge-method source and the idempotent rerun. `Athena::land_pr` wires it in. Tests for criteria 1 to 4, 6, 7 and 11. Existing `LandPr` literals gain `records: None`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/Cargo.toml",
+      "action": "modify",
+      "purpose": "Only if the new tests need a dev-dependency or feature. Expect no change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Extract the report-to-Landing mapping used by `PrLander` so it includes the warnings. Add a test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "purpose": "Print `PrReport.warnings` and fix the test helper's `PrReport` literal. This file is not a listed deliverable, but the new field forces the edit.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/external_calls.rs",
+      "action": "modify",
+      "purpose": "Add `records: None` to the `LandPr` literal.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/records-history.md",
+      "action": "modify",
+      "purpose": "In §8.2, record the recover path and the failure-path table. In §8.1, state the intent-before-merge order that is now built.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an Unreleased entry written for outside readers.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read `Git::push_if_remote_at` and `RecordsWriter::append_with_hook` again. Add the fetch-to-private-ref and plain-push helpers to athena-git lib.rs, with tests against a bare remote.",
+    "In records_branch.rs, extract the shared commit builder. Add `append_published` with the extra parents, the remote sync, the lease push, the move-after-push and the bounded retry, plus the test hook. Write the rejected-push, reset and idempotence tests.",
+    "In land.rs, write `landing_commits` and its tests (good chain, unmarked commit).",
+    "In gh.rs, add `LandingRecords`, `GitLandingRecords` and `PrHost::merge_method_used` (default None; `GhClient` fills it). Validate records before writing. Add `records` to `LandPr` and `warnings` to `PrReport`. Write the intent before `host.merge` and the landing after a verified merge. Handle the unconfirmed case, and the reuse of the intent on rerun.",
+    "Wire `Athena::land_pr`: build the chain, the intent inputs (PR head, head tree, remote default-branch tip, job ids) and `GitLandingRecords`. Add `records: None` to the existing test literals.",
+    "Add the gh.rs tests for criteria 1 to 4, 6, 7 and 11 using a tempdir repo, a bare remote and the fake host.",
+    "Update display.rs to print warnings and fix its test literal. In drain.rs, extract the mapping and add its test. Add `records: None` in external_calls.rs.",
+    "Update records-history.md (§8.1, §8.2, the failure-path table) and add the CHANGELOG entry. Run fmt, clippy with `-D warnings` and `cargo test --locked`."
+  ],
+  "risks": [
+    {
+      "risk": "Resetting the local records ref to the remote drops unpushed local-only records.",
+      "mitigation": "Per the user's decision the remote is the source of truth. The old commits stay in the object store, and the design doc table says so. Intents are rewritten at the start of every `land_pr`."
+    },
+    {
+      "risk": "Adding `warnings` to `PrReport` and `records` to `LandPr` breaks struct literals elsewhere.",
+      "mitigation": "I grepped them: gh.rs, display.rs tests and external_calls.rs. All three are in the plan."
+    },
+    {
+      "risk": "The landing commit's second parent brings PR history into the records branch, and a missing PR head object breaks the commit.",
+      "mitigation": "The head was pushed by Athena. The code calls `ensure_commit` first and errors clearly if it is absent."
+    },
+    {
+      "risk": "A hung or flaky push loops forever.",
+      "mitigation": "The attempt count is bounded and gives `RecordsError::Contended`, as in the current writer."
+    },
+    {
+      "risk": "Merge method inference is wrong for rebase merges.",
+      "mitigation": "The client reports the method it actually requested. Inference applies only when that is unknown."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "A gh.rs test with a real tempdir repository, a bare remote and the fake host. It runs the successful `land_pr`, then reads `athena/records` with `ls_tree` and `show_file`, parsing with `HistoryRecord::parse`.",
+      "command": "cargo test -p athena-core land_pr_writes_intent_then_landing",
+      "observes": "The history has a landing-intent file first and a landing file second. The intent holds the PR number, head sha, head tree, expected base and job ids. The landing holds the PR number, head sha, host commit, merge method, commits (sha, tree, job, verification) and the intent id.",
+      "fails_without": "With no records seam, or with the landing missing, the branch has no intent or landing file and the test fails."
+    },
+    {
+      "criterion": 2,
+      "method": "The same rig. The test calls `Git::parents` on the records tip, both locally and on the bare remote.",
+      "command": "cargo test -p athena-core landing_commit_has_pr_head_as_second_parent",
+      "observes": "The landing commit's parents are [previous records tip, PR head sha]. The intent commit has one parent.",
+      "fails_without": "Without extra-parent support the landing commit has a single parent and the assertion on parent 2 fails."
+    },
+    {
+      "criterion": 3,
+      "method": "A fake host whose `merge` returns Err. The test asserts the `land_pr` error text equals the existing merge error and lists the files on the records branch locally and in the bare remote.",
+      "command": "cargo test -p athena-core refused_merge_leaves_intent_and_no_landing",
+      "observes": "An intent file and no landing file exist locally and on the remote, and the original error is returned.",
+      "fails_without": "If the intent were written after the merge, or a landing were written on failure, the file assertions fail."
+    },
+    {
+      "criterion": 4,
+      "method": "The fake host's `merge()` reads the bare remote's records branch from inside the call and records what it sees. After `land_pr` returns, the test reads the remote again.",
+      "command": "cargo test -p athena-core intent_is_on_remote_before_merge_landing_after",
+      "observes": "Inside `merge`, the remote already holds the intent and no landing. After the call, the remote holds the landing.",
+      "fails_without": "If the intent is pushed late or never, the check inside `merge` fails."
+    },
+    {
+      "criterion": 5,
+      "method": "A test in records_branch.rs with a bare remote and a private test hook between build and push. The hook has a second clone push another records commit to the remote. It also asserts the local ref is unchanged at that moment. A second case sets `with_max_attempts(1)`.",
+      "command": "cargo test -p athena-git records_branch::tests::rejected_push",
+      "observes": "The first push is rejected. The commit is rebuilt on the fetched remote tip and pushed with a lease on that tip, and the second attempt succeeds. Local and remote tips are equal and contain both files. With one attempt the result is `Contended` and the local ref never moved.",
+      "fails_without": "Without the rebuild and retry loop the first rejection is final. Without the move-after-push ordering, the local ref would differ from the remote after a failure."
+    },
+    {
+      "criterion": 6,
+      "method": "A local test commit is made on the records ref but not pushed. Another clone then writes to the remote, so the two have diverged. The test runs `land_pr` with the git `LandingRecords` and a fake host whose `merge` asserts the remote holds the intent. A records_branch.rs unit test covers the reset alone, for ahead and diverged states.",
+      "command": "cargo test -p athena-core leftover_local_intent_is_reset_to_remote",
+      "observes": "The local ref equals the remote tip before the write. `land_pr` succeeds with no divergence error. The intent is on the remote when `merge` is called.",
+      "fails_without": "Without the reset, the push is rejected as a non-fast-forward or the local history diverges."
+    },
+    {
+      "criterion": 7,
+      "method": "A fake host whose `merge` returns Ok but whose `merged_commit` first reports not merged, or errors. The test runs `land_pr`, then runs it again.",
+      "command": "cargo test -p athena-core merged_but_unconfirmed",
+      "observes": "The first run's `PrReport.warnings` names the intent id and no landing file exists. After the rerun the records tree has the same files (same intent, no duplicates). Once the host confirms the merge, a rerun writes exactly one landing.",
+      "fails_without": "With the old `?` propagation the run errors instead of returning a report. With a fresh intent each run, the file count grows."
+    },
+    {
+      "criterion": 8,
+      "method": "Both callers go through `Athena::land_pr`. A new drain.rs unit test covers the extracted report-to-Landing mapping used by `PrLander`, with a report that has warnings. The existing drain tests are re-run.",
+      "command": "cargo test -p athena-cli",
+      "observes": "A warning text appears in the NotLanded message. The existing drain tests still pass. The records written are covered by criteria 1 to 4, since the same function is called.",
+      "fails_without": "If PrLander dropped the warnings, the mapping test fails."
+    },
+    {
+      "criterion": 9,
+      "method": "A land.rs test with a real repo. One commit between the base and the head has no `Athena-Job` trailer. The test also runs a variant through `land_pr` and asserts nothing was written.",
+      "command": "cargo test -p athena-core landing_commits_refuses",
+      "observes": "The error contains the commit's sha and the phrase \"lies between the remote base and the PR head\". A good chain returns the commits with tree and job.",
+      "fails_without": "Without the check, the commit is silently included or skipped and no error appears."
+    },
+    {
+      "criterion": 10,
+      "method": "Run the full suite, which includes the existing land, `land_pr` and `resync_onto_merge` tests. Their `LandPr` literals gain `records: None` and nothing else changes. Then run `cargo clippy --all-targets --locked -- -D warnings` and `cargo fmt --all --check`.",
+      "command": "cargo test --locked",
+      "observes": "All tests pass and both checks are clean.",
+      "fails_without": null
+    },
+    {
+      "criterion": 11,
+      "method": "A unit test builds the records through the new code path and asserts `validate()` runs before the write. An invalid intent (empty job ids) makes no commit. A review of the diff with `git diff` confirms there is no new writer.",
+      "command": "cargo test -p athena-core landing_records_validate",
+      "observes": "The invalid intent is refused with a `HistoryError` and the branch is unchanged. Writes go through `RecordsWriter`.",
+      "fails_without": "Without validation the invalid intent would be committed."
+    },
+    {
+      "criterion": 12,
+      "method": "Inspect the diff. §8.2 gets a paragraph stating that `sync_from` does not exist and that a distinct recover path was added. It also gets a failure-path table with the columns starting state, function called and cited behavior. The states are: local ahead, local diverged, remote ahead, remote lacks the branch, push rejected, merge refused, and merged but unconfirmed. Each new function has a doc comment citing §8.1 or §8.2. CHANGELOG has an Unreleased entry.",
+      "command": "git diff -- docs/design/records-history.md CHANGELOG.md",
+      "observes": "The table and entry are present, and each table row cites a test.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "The `Verification` record has no `RecordId`, but `LandingCommit.verification` is a `RecordId`. I could not find where a verification's id comes from. The plan mints an id with `RecordId::generate` and notes this in the design doc. The producer should check for an existing id source first.",
+    "Does the Cargo.toml change in the deliverables apply? I found no needed dependency change; tempfile and jiff are already present.",
+    "The `PrLander` test in drain cannot run the real `gh`, so criterion 8 is covered by the mapping test plus the shared `Athena::land_pr` code. Say so if a stronger test is wanted.",
+    "When the remote has no records branch but the local one has leftover commits, the plan publishes the local tip as the base. This is not stated in the brief.",
+    "Two commits are sensitive to ordering: a PR merged by a person outside Athena has no intent and therefore gets no landing record. I treated that as reconcile (job 3 part 2)."
+  ],
+  "producer_section_sha256": "4909034a907efa4ade57669e4504a3ad3052b1c530df4a026bcabe386de065cf"
+}
