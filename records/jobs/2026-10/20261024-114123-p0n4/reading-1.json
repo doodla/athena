@@ -1,0 +1,172 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261024-114123-p0n4",
+  "n": 1,
+  "at": "2026-10-24T11:43:02.297543691Z",
+  "invocation_seq": 1,
+  "base_commit": "9b99eac6213e1f4acd4f3f831f448e482934c2d8",
+  "config_sha256": "723abb81b8cdcc25033d7d9653128a919911c4b5950c306183153235b21717e7",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Write landing intent and landing records from athena land --pr",
+  "summary": "For the maintainers who run athena land --pr: before the host is asked to merge, land_pr writes a LandingIntent to the athena/records branch. After the merge it writes a Landing record in a records commit whose second parent is the PR head. Both are pushed to the remote, and existing landing behavior is unchanged.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "All changes are Rust in the existing crates."
+    },
+    {
+      "id": "tested",
+      "how": "New behavior has tests; cargo test passes and clippy is clean."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check the record contents, their order, and the parent link by running tests."
+    },
+    {
+      "id": "verified",
+      "how": "The verifier runs cargo test, clippy and fmt --check."
+    },
+    {
+      "id": "buy-first",
+      "how": "Reuse the existing RecordsWriter and history types; no new crates."
+    },
+    {
+      "id": "small",
+      "how": "One focused change in the landing path."
+    },
+    {
+      "id": "strangers",
+      "how": "Doc comments cite the design sections."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Goal: land --pr leaves an auditable intent and landing record pair on athena/records (D111 job 3 part 1). The audience is the maintainer and the later history check.",
+    "The hook points are gh.rs land_pr (before job.host.merge) and after observe_merge reports Landed. Athena::land_pr in gh.rs likely supplies the git handle, since the LandPr struct has none.",
+    "The merge method is read from the host or inferred from the merged commit's shape. The PR's commits come from git between the base and the head. Each commit's job and verification come from its Athena-Job trailer and the job's verification record.",
+    "A failed records write or push before the merge blocks the merge. After the merge it is reported as a warning and never undoes the merge. This is my judgment, not stated in the request.",
+    "Fake-host tests use the existing FakeRunner/PrHost fakes in gh.rs and a real temporary git repo with a bare remote.",
+    "I did not read docs/design/records-history.md sections 5.2, 5.3, 6.1 and 10 in full, so details may differ."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A fake-host test of a successful landing through land_pr reads the records branch and finds a landing-intent record and then a landing record, in that order. The intent has the PR number, head sha, head tree, expected base and job ids. The landing has the PR number, head sha, host commit, merge method, commits with tree, job and verification, and the intent's id. Run: cargo test -p athena-core.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test shows the records-branch commit that carries the landing record has the pull request's head sha as its second parent, so the PR commits stay reachable from athena/records.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test with a fake host that refuses the merge shows the records branch holds the intent record and no landing record, and land_pr still returns its existing error. Run: cargo test.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The intent is on the records branch, and pushed to the remote, before PrHost::merge is called. A test records the call order. The records branch is pushed to the remote after each write; a test with a bare remote checks it.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Existing land and land_pr tests (trailers, records under records/, resync_onto_merge rebuild) pass unchanged. cargo test, cargo clippy --all-targets and cargo fmt --check are clean.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The records use the athena-data history.rs types (LandingIntent, Landing, LandingCommit, MergeMethod) and are written through the athena-git RecordsWriter, not a new writer. Each record is validated before it is written.",
+      "kind": "content"
+    },
+    {
+      "text": "Any new function or module has a doc comment that cites the design doc section it implements.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-git/src/records_branch.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-core/src/land.rs",
+      "action": "modify",
+      "p": 0.15
+    },
+    {
+      "path": "crates/athena-git/src/lib.rs",
+      "action": "modify",
+      "p": 0.1
+    },
+    {
+      "path": "crates/athena-core/Cargo.toml",
+      "action": "modify",
+      "p": 0.1
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "docs/design/records-history.md",
+      "action": "modify",
+      "p": 0.15
+    },
+    {
+      "path": "crates/athena-cli/tests/external_calls.rs",
+      "action": "modify",
+      "p": 0.1
+    }
+  ],
+  "out_of_scope": [
+    "The history check (athena-gate) accepting or enforcing the new records, and the squash-refusal text in refusal_text (job 3 part 2 or later)",
+    "Declared interventions, checkpoints, legacy exemptions, and import manifests",
+    "Changing trailers, records under records/, or resync_onto_merge",
+    "Changing athena.toml, defaults.toml, or the CI workflows"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.5,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.4,
+        "p90": 3.0
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 1700.0,
+        "p90": 3600.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.76,
+      "p_verification_passes": 0.6397849462365591,
+      "p_user_intervenes": 0.07301587301587302,
+      "cost_usd": {
+        "p10": 0.4211905,
+        "p50": 1.0033439,
+        "p90": 2.1472445999999996
+      },
+      "wall_time_s": {
+        "p10": 567.4218258194782,
+        "p50": 1319.8057057676776,
+        "p90": 2604.133247693577
+      }
+    }
+  },
+  "departures": "The change needs a multi-record flow, a merge-commit parent edge and a push, all tested with fakes, so cost and time are above the reference."
+}
