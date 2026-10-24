@@ -19,7 +19,9 @@ use crate::reconcile::{CommitHost, MergedPr, ReconcileRecords, RecordsSnapshot};
 use crate::state::StateDir;
 use crate::{Athena, Ui};
 use anyhow::{Context, Result, bail};
-use athena_data::history::{self, HistoryRecord, Landing, LandingCommit, LandingIntent};
+use athena_data::history::{
+    self, HistoryRecord, Landing, LandingCommit, LandingIntent, LandingKind,
+};
 use athena_data::records::{HostError, HostOperation, MessageClass, Verdict, WorkPhase};
 use athena_data::{JobId, RecordId};
 use athena_git::records_branch::{Change, RecordsWriter};
@@ -1421,10 +1423,11 @@ impl<'a> GitLandingRecords<'a> {
             .into_iter()
             .map(|c| {
                 Ok(LandingCommit {
-                    verification: verification_id(&c.job, &c.sha)?,
+                    verification: Some(verification_id(&c.job, &c.sha)?),
                     sha: c.sha,
                     tree: c.tree,
-                    job: c.job,
+                    kind: LandingKind::JobLanding,
+                    job: Some(c.job),
                 })
             })
             .collect()
@@ -1474,9 +1477,9 @@ impl LandingRecords for GitLandingRecords<'_> {
             }
         }
         let mut job_ids: Vec<JobId> = Vec::new();
-        for commit in &commits {
-            if !job_ids.contains(&commit.job) {
-                job_ids.push(commit.job.clone());
+        for job in commits.iter().filter_map(|c| c.job.as_ref()) {
+            if !job_ids.contains(job) {
+                job_ids.push(job.clone());
             }
         }
         let now = crate::now();
@@ -3788,8 +3791,9 @@ mod tests {
                 vec![LandingCommit {
                     sha: world.head.clone(),
                     tree: world.git.tree_of(&world.head).unwrap(),
-                    job,
-                    verification: RecordId::parse(JOB).unwrap(),
+                    kind: LandingKind::JobLanding,
+                    job: Some(job),
+                    verification: Some(RecordId::parse(JOB).unwrap()),
                 }]
             );
             landing.validate().unwrap();

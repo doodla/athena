@@ -9,6 +9,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `LandingCommit` in `crates/athena-data/src/history.rs` has a required `kind` (`job_landing`,
+  `declared_intervention`, `records_only`). `job` and `verification` are now optional and omitted when absent;
+  `Landing::validate` requires both for `job_landing` and refuses them for the other two kinds. `GitLandingRecords`
+  sets `job_landing`; `pr_commits` is unchanged (part 2).
 - The reconcile step of `docs/design/records-history.md` §8.1 (D111, job 3 part 2), in
   `crates/athena-core/src/reconcile.rs`. `athena land` and `athena status` run it first. It walks main's
   first-parent commits after the later of the last landing record and the first landing intent's expected base,

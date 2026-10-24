@@ -37,6 +37,22 @@ pub enum HistoryError {
     /// A pull request number is zero.
     #[error("pr_number must be greater than zero")]
     BadPrNumber,
+    /// A landing commit of this kind must carry the named field and does not.
+    #[error("a {kind} commit must carry {field}")]
+    MissingForKind {
+        /// The commit kind, as written in JSON.
+        kind: &'static str,
+        /// The missing field.
+        field: &'static str,
+    },
+    /// A landing commit of this kind must not carry the named field and does.
+    #[error("a {kind} commit must not carry {field}")]
+    NotAllowedForKind {
+        /// The commit kind, as written in JSON.
+        kind: &'static str,
+        /// The forbidden field.
+        field: &'static str,
+    },
 }
 
 fn is_lower_hex(text: &str, len: usize) -> bool {
@@ -127,6 +143,29 @@ pub enum MergeMethod {
     Rebase,
 }
 
+/// What kind of commit a pull request commit is, which decides the records that cover it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LandingKind {
+    /// Produced by a job; carries the job and its verification record.
+    JobLanding,
+    /// A human commit covered by a declared intervention; claims no job.
+    DeclaredIntervention,
+    /// A commit that touches only records; claims no job.
+    RecordsOnly,
+}
+
+impl LandingKind {
+    /// The kind as written in JSON.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LandingKind::JobLanding => "job_landing",
+            LandingKind::DeclaredIntervention => "declared_intervention",
+            LandingKind::RecordsOnly => "records_only",
+        }
+    }
+}
+
 /// One commit of a pull request, with the records that cover it (§5.3; D111).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -135,10 +174,45 @@ pub struct LandingCommit {
     pub sha: String,
     /// Tree sha of the commit.
     pub tree: String,
-    /// The job that produced the commit.
-    pub job: JobId,
-    /// The verification record that covers the commit.
-    pub verification: RecordId,
+    /// What kind of commit this is. Required.
+    pub kind: LandingKind,
+    /// The job that produced the commit; required for `job_landing`, forbidden otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job: Option<JobId>,
+    /// The verification record that covers the commit; required for `job_landing`, forbidden otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<RecordId>,
+}
+
+impl LandingCommit {
+    /// Checks the sha fields and that `job` and `verification` match `kind`.
+    pub fn validate(&self) -> Result<(), HistoryError> {
+        check_sha(&self.sha, "commits.sha")?;
+        check_sha(&self.tree, "commits.tree")?;
+        let kind = self.kind.as_str();
+        if self.kind == LandingKind::JobLanding {
+            if self.job.is_none() {
+                return Err(HistoryError::MissingForKind { kind, field: "job" });
+            }
+            if self.verification.is_none() {
+                return Err(HistoryError::MissingForKind {
+                    kind,
+                    field: "verification",
+                });
+            }
+        } else {
+            if self.job.is_some() {
+                return Err(HistoryError::NotAllowedForKind { kind, field: "job" });
+            }
+            if self.verification.is_some() {
+                return Err(HistoryError::NotAllowedForKind {
+                    kind,
+                    field: "verification",
+                });
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Written after the merge; names the commit the host made on main (§5.3; D111).
@@ -173,8 +247,7 @@ impl Landing {
             return Err(HistoryError::NoEntries("commits"));
         }
         for commit in &self.commits {
-            check_sha(&commit.sha, "commits.sha")?;
-            check_sha(&commit.tree, "commits.tree")?;
+            commit.validate()?;
         }
         Ok(())
     }
@@ -411,8 +484,9 @@ mod tests {
             commits: vec![LandingCommit {
                 sha: SHA_A.into(),
                 tree: SHA_B.into(),
-                job: jid(),
-                verification: rid(),
+                kind: LandingKind::JobLanding,
+                job: Some(jid()),
+                verification: Some(rid()),
             }],
             intent: rid(),
         }
@@ -529,6 +603,94 @@ mod tests {
         assert!(m.validate().is_err());
         m.paths.clear();
         assert!(m.validate().is_err());
+    }
+
+    fn landing_with(kind: LandingKind, job: bool, verification: bool) -> Landing {
+        let mut l = landing();
+        l.commits[0].kind = kind;
+        l.commits[0].job = job.then(jid);
+        l.commits[0].verification = verification.then(rid);
+        l
+    }
+
+    #[test]
+    fn job_landing_needs_job_and_verification() {
+        landing_with(LandingKind::JobLanding, true, true)
+            .validate()
+            .unwrap();
+        assert_eq!(
+            landing_with(LandingKind::JobLanding, false, true).validate(),
+            Err(HistoryError::MissingForKind {
+                kind: "job_landing",
+                field: "job"
+            })
+        );
+        assert_eq!(
+            landing_with(LandingKind::JobLanding, true, false).validate(),
+            Err(HistoryError::MissingForKind {
+                kind: "job_landing",
+                field: "verification"
+            })
+        );
+    }
+
+    #[test]
+    fn other_kinds_must_not_claim_a_job_or_verification() {
+        for kind in [LandingKind::DeclaredIntervention, LandingKind::RecordsOnly] {
+            landing_with(kind, false, false).validate().unwrap();
+            assert_eq!(
+                landing_with(kind, true, false).validate(),
+                Err(HistoryError::NotAllowedForKind {
+                    kind: kind.as_str(),
+                    field: "job"
+                })
+            );
+            assert_eq!(
+                landing_with(kind, false, true).validate(),
+                Err(HistoryError::NotAllowedForKind {
+                    kind: kind.as_str(),
+                    field: "verification"
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn each_landing_kind_round_trips_and_omits_absent_fields() {
+        for (kind, text) in [
+            (LandingKind::JobLanding, "job_landing"),
+            (LandingKind::DeclaredIntervention, "declared_intervention"),
+            (LandingKind::RecordsOnly, "records_only"),
+        ] {
+            let job = kind == LandingKind::JobLanding;
+            let record = HistoryRecord::Landing(landing_with(kind, job, job));
+            let value = json_of(&record);
+            let commit = &value["commits"][0];
+            assert_eq!(commit["kind"], text);
+            assert_eq!(commit.get("job").is_some(), job);
+            assert_eq!(commit.get("verification").is_some(), job);
+            let parsed = HistoryRecord::parse(&crate::to_pretty_json(&record).unwrap()).unwrap();
+            assert_eq!(parsed, record);
+        }
+    }
+
+    #[test]
+    fn malformed_landing_commits_fail_to_parse() {
+        let base = json_of(&HistoryRecord::Landing(landing()));
+        let parse = |v: &serde_json::Value| HistoryRecord::parse(&v.to_string());
+        parse(&base).unwrap();
+        let mut unknown_kind = base.clone();
+        unknown_kind["commits"][0]["kind"] = "squashed".into();
+        assert!(matches!(parse(&unknown_kind), Err(HistoryError::Parse(_))));
+        let mut missing_kind = base.clone();
+        missing_kind["commits"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("kind");
+        assert!(matches!(parse(&missing_kind), Err(HistoryError::Parse(_))));
+        let mut extra = base.clone();
+        extra["commits"][0]["extra"] = 1.into();
+        assert!(matches!(parse(&extra), Err(HistoryError::Parse(_))));
     }
 
     #[test]

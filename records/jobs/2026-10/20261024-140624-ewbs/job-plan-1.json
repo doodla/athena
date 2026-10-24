@@ -1,0 +1,219 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261024-140624-ewbs",
+  "round": 1,
+  "at": "2026-10-24T14:13:21.905840249Z",
+  "invocation_seq": 2,
+  "approach": "Rewrite land::pr_commits to classify each commit in remote_base..head by content, against its first parent p. (1) Added files via git.diff_tree(p, c): if records/jobs/**/<dir>/ gained candidate.json, verification.json and outcome.json, parse them with AnyRecord::parse and require the verification's job to match, then the outcome to be Landed; kind=job_landing, job and verification set from the records (verification id = job id, as gh::verification_id does). (2) Else if an added file under records/interventions/ parses as an Intervention record: declared_intervention. (3) Else if fingerprint(c, p) == fingerprint(p, p) (same test as plan() and the gate): records_only. (4) Else bail naming the sha, the range, and that it changes governed content but is neither an intervention nor a job's closing records. Add a snake_case `LandingKind` enum to athena-data history.rs; LandingCommit gets required `kind`, with job and verification as Option (skipped when None, required by Landing::validate only for job_landing, forbidden otherwise) and deny_unknown_fields kept. gh.rs passes kind through and derives intent job_ids from job_landing entries only. Tests use real git repos built in land.rs tests with no trailers.",
+  "decisions": [
+    {
+      "choice": "Check closing records and intervention records before the records-only fingerprint test.",
+      "reason": "A job's landing commit and a human intervention usually change governed content, and a pure-records intervention would otherwise be mislabelled records_only. The brief orders kinds that way and the real PR shape expects declared_intervention and job_landing to show.",
+      "rejected": [
+        {
+          "option": "Fingerprint test first",
+          "why": "A records-only intervention commit would be listed as records_only and lose its meaning."
+        },
+        {
+          "option": "Special-case the lease commit by subject or path",
+          "why": "Violates root-cause: the fault is trailer-based attribution, and the fix must work from content."
+        }
+      ]
+    },
+    {
+      "choice": "job and verification become Option<_> with skip_serializing_if, validated per kind; no intervention id field.",
+      "reason": "Only job landings have a job and verification. Strict per-kind validation in Landing::validate keeps the record honest and the diff small.",
+      "rejected": [
+        {
+          "option": "Keep job/verification required and fill placeholders",
+          "why": "Fabricates attribution that does not exist."
+        },
+        {
+          "option": "Add an intervention id field",
+          "why": "Optional per the reading; adds surface without being asked."
+        }
+      ]
+    },
+    {
+      "choice": "Parse records with AnyRecord::parse and read the job from the record, requiring that the job dir matches.",
+      "reason": "Satisfies 'job id read from records, not trailers' and rejects forged or misplaced files.",
+      "rejected": [
+        {
+          "option": "Take the job id from the path only",
+          "why": "Weaker; path can be wrong where record content is checked."
+        }
+      ]
+    },
+    {
+      "choice": "Do not migrate existing landing records; LandingKind is required for new parsing. The producer first greps the records branch fixtures and tests for stored landings and, if real ones lack kind, reports it rather than loosening serde.",
+      "reason": "Brief demands strictness; existing records were all written with job+verification, so a migration (adding kind=job_landing) is a one-time rewrite that is a records-branch operation, not code.",
+      "rejected": [
+        {
+          "option": "serde(default) on kind",
+          "why": "Loosens validation for new records, and criterion 3 requires rejecting a missing kind."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/land.rs",
+      "action": "modify",
+      "purpose": "Replace trailer-based pr_commits with content classification; PrCommit gets kind and Option job; replace tests with PR-shaped and refusal tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/history.rs",
+      "action": "modify",
+      "purpose": "Add LandingKind, required kind on LandingCommit, Option job/verification, per-kind Landing::validate, tests (reject unknown/missing kind, unknown field, incomplete job_landing; round trip each kind).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "action": "modify",
+      "purpose": "commits() passes kind and optional job/verification; intent job_ids from job_landing only; update the landing test's expected LandingCommit and add a refusal-writes-nothing test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Entry for classification by content and the landing kind.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/records-history.md",
+      "action": "modify",
+      "purpose": "Update section 5.3 'Which commits' and failure-path row for the trailer rule.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-gate/src/landing_tests.rs",
+      "action": "modify",
+      "purpose": "Only if it builds LandingCommit or relies on pr_commits; otherwise untouched.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reconcile.rs",
+      "action": "modify",
+      "purpose": "Only if reconcile tests construct Landing/LandingCommit and need kind; no algorithm change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/reconcile.rs",
+      "action": "modify",
+      "purpose": "Only if it builds landing JSON that now needs kind.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-git/src/attrs.rs",
+      "action": "modify",
+      "purpose": "Only if a small helper is wanted (e.g. update the is_owner doc that mentions trailers); otherwise untouched.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-gate/src/reconcile.rs",
+      "action": "modify",
+      "purpose": "Only if it constructs landing records needing kind; no algorithm change.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Check for stored landing records or test fixtures lacking kind (grep for athena.landing/1 in repo tests and docs); decide and note migration.",
+    "In history.rs add LandingKind (snake_case, Copy), kind on LandingCommit, job/verification as Option with skip_serializing_if, per-kind checks in Landing::validate; update tests including round trip per kind.",
+    "In land.rs change PrCommit to {sha, tree, kind, job: Option<JobId>}; write classify_commit using git.parents, git.diff_tree, git.show_file, AnyRecord::parse, and fingerprint(c,p) vs fingerprint(p,p); remove trailer handling and update the doc comment.",
+    "Replace the trailer-count tests with: the PR-shaped range test (no trailers), the refusal test naming the sha, an empty-range test, and a test that a candidate without verification/outcome is not a job landing.",
+    "Update gh.rs commits(): map kinds, call verification_id only for job_landing, build job_ids from job_landing entries; fix the existing gh test expectation; add a refusal-writes-nothing assertion using the existing fake or real records sink.",
+    "Compile the workspace, fix other LandingCommit/Landing constructors in listed reconcile and gate files if needed.",
+    "Update records-history.md 5.3 bullet and table row; add CHANGELOG.md entry.",
+    "Run cargo fmt --all, cargo clippy --all-targets --locked -- -D warnings, cargo test --locked."
+  ],
+  "risks": [
+    {
+      "risk": "A job-landing commit might be misdetected if records are split across commits.",
+      "mitigation": "Require all three records added in the same job dir and parse them; a candidate-only commit falls through to fingerprint/refusal."
+    },
+    {
+      "risk": "An intervention or dispatch commit that also changes governed content could be wrongly refused.",
+      "mitigation": "A dispatch commit that adds job.json and request.json but not candidate falls to records-only because it leaves governed content unchanged; tests cover it."
+    },
+    {
+      "risk": "Bootstrap job handling regresses.",
+      "mitigation": "Bootstrap-job landings still error via verification_id; keep that check for job_landing only."
+    },
+    {
+      "risk": "Making job Option breaks other callers.",
+      "mitigation": "Remaining uses of job in gh.rs intent are updated; compiler and the gh landing test catch them."
+    },
+    {
+      "risk": "Merge commits or root commits in range have no single first parent.",
+      "mitigation": "Root commits (no parent) are refused with a clear error naming the sha."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "New test in land.rs builds a temp git repo: base commit, then reading (records/jobs/.../reading-1.json), dispatch (job.json+request), introspection record, lease record commits (all records-only), an intervention-record commit, then a commit adding candidate/verification/landed outcome plus a governed change. No trailers.",
+      "command": "cargo test -p athena-core land::tests::a_real_pr_shaped_range_is_classified_by_content",
+      "observes": "pr_commits returns [records_only x4, declared_intervention, job_landing] in order, the last carrying the job id and verification id read from the records.",
+      "fails_without": "Under the old trailer rule the first commit with no Athena-Job trailer aborts pr_commits, so the test fails; a classifier that mislabels the intervention or landing fails the kind-order assertion."
+    },
+    {
+      "criterion": 2,
+      "method": "Test adds a commit changing a governed file with no intervention or closing records, then calls pr_commits; a gh.rs test using the fake records sink asserts no record was written.",
+      "command": "cargo test -p athena-core land::tests::a_governed_change_that_is_neither_intervention_nor_closing_records_is_refused",
+      "observes": "Err whose message contains the commit sha and 'governed content'; the sink holds no intent or landing.",
+      "fails_without": "Without the refusal branch the commit would be accepted (or the old code would fail for the wrong reason, a missing trailer, so the test asserts the sha and the governed-content wording)."
+    },
+    {
+      "criterion": 3,
+      "method": "Unit tests in history.rs parse JSON landings with kind \"bogus\", no kind, an extra field, and validate a job_landing with job None and with verification None, and records_only carrying a job.",
+      "command": "cargo test -p athena-data history",
+      "observes": "Each returns HistoryError::Parse or the validation error; a valid one of each kind passes.",
+      "fails_without": "If kind were optional or defaulted, the missing-kind parse would succeed; without per-kind validate, a job_landing without job or verification would pass."
+    },
+    {
+      "criterion": 4,
+      "method": "Read pr_commits in land.rs: no call to git.trailers or Athena-Job there; the old trailer-count tests are gone and the classification tests run.",
+      "command": "cargo test -p athena-core land",
+      "observes": "Tests pass; grep of land.rs pr_commits body shows no 'Athena-Job' (the resync tests keep their own message text).",
+      "fails_without": "If trailer reading remained, the trailer-free PR test would fail."
+    },
+    {
+      "criterion": 5,
+      "method": "The round-trip test builds a Landing with one commit per kind, serializes and parses it back; the gh.rs landing test asserts the recorded LandingCommit has kind JobLanding.",
+      "command": "cargo test -p athena-data history::tests::landing_round_trips",
+      "observes": "Parsed record equals the original; gh test passes.",
+      "fails_without": "If gh.rs did not pass the kind, it would not compile; if serde skipped a kind, the round trip would differ."
+    },
+    {
+      "criterion": 6,
+      "method": "Run cargo fmt --all --check, cargo clippy --all-targets --locked -- -D warnings, and cargo test --locked.",
+      "command": "cargo clippy --all-targets --locked -- -D warnings",
+      "observes": "All three exit clean.",
+      "fails_without": "Any warning or failing existing test (gate landing_tests, reconcile, cli reconcile) would show."
+    },
+    {
+      "criterion": 7,
+      "method": "Inspect the diff: CHANGELOG entry present; section 5.3 'Which commits' bullet and the failure-path table row (line 326) now describe content classification, not the Athena-Job trailer.",
+      "command": "git diff CHANGELOG.md docs/design/records-history.md",
+      "observes": "Both files changed as described.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Do stored landing records on the real records branch lack kind? The snapshot cannot show it; if they exist, they need a one-time rewrite (kind=job_landing) before the stricter parser reads them, which is outside code changes.",
+    "Which exact files does a real dispatch/introspection/lease commit add? The tests assume they add only records/ files and possibly owner paths; the producer should check git log of f499abc-like commits if reachable.",
+    "Several listed deliverables (gate landing_tests, reconcile files, attrs.rs) appeared in grep to construct no LandingCommit; the producer should touch them only if compilation or tests require it."
+  ],
+  "producer_section_sha256": "3adb985a85845958314661a0e5dc6cdcb6c27a0f5453b6aa094d6a2f0d4b7960"
+}
