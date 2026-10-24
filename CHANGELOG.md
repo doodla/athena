@@ -19,6 +19,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `athena-data` gains the six record types of the records branch, schema and validation only (D111, build job 1
+  of `docs/design/records-history.md` section 10): landing-intent, landing, intervention (declared), checkpoint,
+  legacy-exempt and import-manifest, in the new `history` module. Each has a schema tag, unknown fields denied,
+  and a `validate` that rejects empty required fields and any sha that is not 40 lowercase hex. The declared
+  intervention uses `athena.declared-intervention/1` so it does not collide with the existing
+  `athena.intervention/1`. The writer and the host-rules check are later jobs; nothing reads or writes the
+  records branch yet, and `records/` on main and the history check are unchanged.
+
 - `docs/spec.toml`, the first layer of the cohesive spec (D114): sourced requirements for BRIEF.md "Project
   Olympus" sections 1 to 6, each with verbatim quotes under their headings, and `xtask/tests/spec.rs`, which
   fails on a quote not found under its heading, a duplicate id, a missing `supersedes` target, a requirement
