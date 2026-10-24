@@ -1160,18 +1160,8 @@ impl crate::routing::Exec for SnapExec<'_> {
     }
 }
 
-/// The command whose real result every producer report must show.
-const FULL_TEST_COMMAND: &str = "cargo test --locked";
-
-/// How many times a report without that result goes back to the producer before the job fails.
+/// How many times a report with unmet criteria goes back to the producer before the verifier judges it.
 const PRODUCER_SEND_BACKS: u32 = 1;
-
-/// Whether the report lists the full test run with a real result, pass or fail.
-fn ran_full_tests(report: &ProducerReport) -> bool {
-    report.checks_run.iter().any(|c| {
-        c.command.trim() == FULL_TEST_COMMAND && (c.result == "pass" || c.result == "fail")
-    })
-}
 
 /// The accepted criteria the report does not show as met: marked unmet, or missing from `criteria_check`.
 /// A criterion matches an entry by its text with numbering, kind tag, case, spacing and trailing
@@ -1337,9 +1327,8 @@ impl Athena {
         ]);
         let capability_env = ctx.capability.env(jc);
         let model = ctx.reading.producer_model.clone();
-        // A report without a real full test run is sent back to the producer, in the same working
-        // directory, up to `PRODUCER_SEND_BACKS` times; a pinned study is exempt, since it has no tests.
-        let enforce_tests = !ctx.capability.pins_repo();
+        // A report that leaves acceptance criteria unmet or unreported is sent back to the producer, in
+        // the same working directory, up to `PRODUCER_SEND_BACKS` times.
         let mut attempt_brief = brief.to_string();
         let mut send_backs = 0;
         // What the last report still lacked after the send-back, and where that report is kept.
@@ -1408,24 +1397,17 @@ impl Athena {
             };
             let unmet = unmet_criteria(&raw, accepted);
             let report = self.redact_report(raw, ctx.redactor)?;
-            let tests_missing = enforce_tests && !ran_full_tests(&report);
-            if !tests_missing && unmet.is_empty() {
+            if unmet.is_empty() {
                 break Some(report);
             }
-            let mut problems = Vec::new();
-            if tests_missing {
-                problems.push(format!("no real full `{FULL_TEST_COMMAND}` result"));
-            }
-            if !unmet.is_empty() {
-                problems.push(format!(
-                    "acceptance criteria not met or not reported: {}",
-                    unmet
-                        .iter()
-                        .map(|c| format!("\"{c}\""))
-                        .collect::<Vec<_>>()
-                        .join("; ")
-                ));
-            }
+            let problems = vec![format!(
+                "acceptance criteria not met or not reported: {}",
+                unmet
+                    .iter()
+                    .map(|c| format!("\"{c}\""))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )];
             // Keep the redacted report that failed the check: the attempt's invocation record carries it
             // in `detail`, so each attempt's report stays with the job's records.
             let kept = {
@@ -1458,28 +1440,17 @@ impl Athena {
             ctx.ui
                 .line(&format!("producer   sent back: {}", problems.join("; ")));
             let mut sent_back = format!("{brief}\n\n## Sent back\n\n");
-            if tests_missing {
-                sent_back.push_str(&format!(
-                    "Your previous report did not show a real result for the full \
-                     `{FULL_TEST_COMMAND}`: it was missing or `not-run`. Your edits are still in your working \
-                     directory. Run it now, even though this change touches only docs, TOML or data: policy and \
-                     config tests read tracked non-Rust files. Fix what fails, then report its real pass or fail \
-                     result in checks_run under the command `{FULL_TEST_COMMAND}`.\n\n"
-                ));
-            }
-            if !unmet.is_empty() {
-                sent_back.push_str(
-                    "Your previous report did not show every acceptance criterion as met in criteria_check. \
-                     Your edits are still in your working directory. Fix the work for each criterion below, \
-                     then report every acceptance criterion in criteria_check, with its text exactly as given \
-                     (without its number or kind tag), its status and your evidence. This is the only send-back: \
-                     if your changes are still in place afterwards, they go to the verifier with the criteria \
-                     your report still leaves unmet or unreported flagged, and the verifier judges them. \
-                     A run that leaves no change fails.\n\nCriteria not met or not reported:\n\n",
-                );
-                for criterion in &unmet {
-                    sent_back.push_str(&format!("- {criterion}\n"));
-                }
+            sent_back.push_str(
+                "Your previous report did not show every acceptance criterion as met in criteria_check. \
+                 Your edits are still in your working directory. Fix the work for each criterion below, \
+                 then report every acceptance criterion in criteria_check, with its text exactly as given \
+                 (without its number or kind tag), its status and your evidence. This is the only send-back: \
+                 if your changes are still in place afterwards, they go to the verifier with the criteria \
+                 your report still leaves unmet or unreported flagged, and the verifier judges them. \
+                 A run that leaves no change fails.\n\nCriteria not met or not reported:\n\n",
+            );
+            for criterion in &unmet {
+                sent_back.push_str(&format!("- {criterion}\n"));
             }
             attempt_brief = sent_back;
         };
@@ -1768,7 +1739,7 @@ impl Athena {
                 passed: true,
                 detail: format!(
                     "the producer's report was still incomplete after its send-back, so these were not confirmed \
-                     by it; judge them yourself and run `{FULL_TEST_COMMAND}` if a test result is missing: {}",
+                     by it; judge them yourself from the recorded check results: {}",
                     report_gaps.join("; ")
                 ),
             });

@@ -116,9 +116,15 @@ fn a_cap_between_the_producer_alone_and_planning_plus_the_producer_stops_the_job
 fn a_send_back_keeps_the_plan_section_and_its_hash_matches_the_plan_record() {
     let fx = Fixture::with_config(&planned_config());
     let mut scenario = Scenario::default();
-    // The first report shows no full test run, so the producer is sent back once.
-    scenario.report = producer_report("First try.", &[]);
-    scenario.report_when_sent_back = Some(producer_report("Second try.", &["cargo test --locked"]));
+    // The first report marks one acceptance criterion unmet, so the producer is sent back once.
+    let texts = criteria_texts(&default_reading());
+    let mut first = producer_report("First try.", &[]);
+    first["criteria_check"] = json!([
+        criterion_check(&texts[0], "met"),
+        criterion_check(&texts[1], "unmet"),
+    ]);
+    scenario.report = first;
+    scenario.report_when_sent_back = Some(producer_report("Second try.", &[]));
     let prompts = scenario.seen_by_producer.clone();
     let athena = fx.athena(scenario.script());
     let proposal = athena.ask("tidy the readme", &Lines::default()).unwrap();

@@ -2132,6 +2132,7 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 
 ## D95 · The producer must run the full `cargo test --locked`, and a report without it is sent back once
 
+- **Replaced by D113:** the full-suite requirement and its send-back were removed; the text below is history.
 - **Case:** The producer prompt said the producer "may" run the checks. A docs, TOML or data-only candidate could
   therefore reach verification with the full test suite never run, although policy and config tests read tracked
   non-Rust files: boundary words, unlisted file kinds, `defaults.toml` and the study `model.json`.
@@ -2369,6 +2370,7 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 
 ## D103 · A report still incomplete after the send-back goes to the verifier with its gaps flagged, unless nothing changed
 
+- **Changed by D113:** the send-back and the gaps entry now cover unmet criteria only, not a missing test result.
 - **Case:** Job 20261016-005953-582g: the producer had done the work, but on the send-back pass (D95) its
   report covered 3 of the 5 criteria, so the job failed over the unreported ones. Five other jobs failed at the
   same self-check. The self-check judges the producer's report, not the work, so the job failed over a gap that
@@ -2653,3 +2655,25 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   (`a_landed_job_deletes_its_build_cache_and_reports_the_space` and the other closing-path tests), run with
   `cargo test --locked`. The 11 to 12 GB size and the 2026-10-23 failure are reported in the request, not
   measured.
+
+## D113 · The producer is no longer required to run the full suite; Athena runs it on the candidate
+
+- **Case:** D95 made a real full-suite result in the producer's report a condition of finishing, and D103 kept it
+  as a gap flagged to the verifier. A full run takes 9 to 11 minutes. Job nvbb ran the suite six times and hit its
+  1800 s deadline. Athena already runs fmt, clippy and the full suite on every candidate, so the producer's run
+  repeated a check whose result decides the verdict anyway.
+- **Decision:** This changes D95 and D103, which stay as history. (1) *Prose:* the producer prompt says to run
+  targeted tests (`cargo test -p <crate> <filter>`) while working, that Athena runs fmt, clippy and the full suite
+  on the candidate, that the producer runs the full suite at most once, and to list in `checks_run` only checks it
+  ran. (2) *Code:* `produce_and_verify` no longer inspects `checks_run`; the one send-back (`PRODUCER_SEND_BACKS`)
+  is for unmet or unreported acceptance criteria only. The `producer-report-gaps` entry lists unmet criteria and no
+  longer tells the verifier to run the suite; the verifier cites the recorded check results. The fake producer
+  reports no checks. The post-producer fmt, clippy and test checks and the verdict logic are unchanged.
+- **Alternatives:** (a) Keep the gate but accept targeted tests: still sends a producer back and costs a run.
+  (b) Change the prompt only: the code would still send back a report without the result. (c) Forbid the producer
+  from running the suite: the user chose "at most once".
+- **Tradeoff:** A docs, TOML or data-only change that breaks a policy test is found by Athena's test check after
+  the producer finishes, not by the producer, and the failing check rejects the candidate.
+- **Reversal cost:** Low: restore the gate in `produce_and_verify` and the prompt line.
+- **Provenance:** read: `run.rs`, the producer prompt, D95 and D103; measured: the lifecycle and job_plan tests.
+  The six runs, the 1800 s deadline and the 9 to 11 minutes are reported in the request, not measured here.
