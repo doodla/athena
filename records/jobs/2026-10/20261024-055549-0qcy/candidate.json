@@ -1,0 +1,128 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261024-055549-0qcy",
+  "base_commit": "03856d9226d8d6688270708c7c2757e824c40c26",
+  "base_fingerprint": "sha256:4b140dae0c9c7bf4e51499d9d59ba6dc1b92b6c17ad80bf5cd4c74429ef8eb4b",
+  "previous_job": "20261024-045548-7qht",
+  "candidate_commit": "ca59ef63db710087af06bb18e53c8b71b55b587a",
+  "candidate_tree": "9e491905425c0a6859d5f6e550d7e939a0ffd5f7",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 115342
+    },
+    {
+      "path": "crates/athena-git/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 48792
+    },
+    {
+      "path": "crates/athena-git/src/records_branch.rs",
+      "status": "added",
+      "mode": "100644",
+      "bytes": 21155
+    },
+    {
+      "path": "docs/design/records-history.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 31197
+    }
+  ],
+  "fingerprint": "sha256:10b35ec1ffd3a1dea1c6615151b825259fcfc4e1f6cf32ac15664a6b21f0a025",
+  "violations": [],
+  "producer_report": {
+    "summary": "I added a records-branch writer to athena-git, plus a CHANGELOG entry and a note in records-history.md. The writer appends opaque files to the orphan branch athena/records, and no code outside athena-git calls it. The first commit has no parent. Each later commit is a fast-forward of the tip it was built on. It publishes with `git update-ref` using the expected old tip as a compare-and-swap. A rejected swap refetches the tip and replays the files, up to a bounded attempt count (default 8), then returns a Contended error. Modifying, deleting or renaming an existing path is refused. Writing the same bytes at an existing path is a documented no-op that returns the current tip. This round I ran the three gate commands from the repository root. They all pass, and I quote them in checks_run.",
+    "files": [
+      "crates/athena-git/src/records_branch.rs",
+      "crates/athena-git/src/lib.rs",
+      "CHANGELOG.md",
+      "docs/design/records-history.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test",
+        "result": "pass",
+        "note": "Ran from repo root; completed with no failure reported. Output was long, so I reran as `cargo test --quiet` (below) to see the per-suite summary."
+      },
+      {
+        "command": "cargo test --quiet",
+        "result": "pass",
+        "note": "Every suite reported `test result: ok`, 0 failed. Some tests are ignored by design (1 in athena-agent, 3 in one suite, 1 in the 296-test suite)."
+      },
+      {
+        "command": "cargo clippy --all-targets",
+        "result": "pass",
+        "note": "Finished the dev profile with no warnings or errors across all crates and xtask."
+      },
+      {
+        "command": "cargo fmt --check",
+        "result": "pass",
+        "note": "No output; formatting is clean."
+      },
+      {
+        "command": "cargo test -p athena-git records_branch",
+        "result": "pass",
+        "note": "8 passed, 0 failed."
+      },
+      {
+        "command": "git status --short",
+        "result": "pass",
+        "note": "Changed: CHANGELOG.md, crates/athena-git/src/lib.rs, docs/design/records-history.md. New: crates/athena-git/src/records_branch.rs."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Run `cargo test -p athena-git`. A test starts two writers on threads against one repository, with different paths. Both land, both paths are on the final tip, each update is a fast-forward of the previous tip, and no commit is lost.",
+        "status": "met",
+        "evidence": "`cargo test -p athena-git records_branch` passes two_writers_on_threads_both_land."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-git`. A deterministic test makes the expected tip stale. The first update is rejected, the writer refetches and replays its files on the new tip, and the write succeeds with both the earlier and new files in the final tree. The two-thread test needs no forced contention; this test covers the reject path.",
+        "status": "met",
+        "evidence": "stale_tip_is_rejected_then_replayed and a_replayed_file_that_another_writer_already_landed_is_not_duplicated pass."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-git`. Tests show that modifying, deleting or renaming an existing path is refused with an error and the tip is unchanged. A same-bytes write at an existing path is tested and its result documented.",
+        "status": "met",
+        "evidence": "existing_paths_cannot_be_modified_deleted_or_renamed and writing_the_same_bytes_again_is_a_no_op_that_returns_the_tip pass. The no-op behavior is documented in the module docs and in records-history.md."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-git`. A test shows `git merge-base main athena/records` finds nothing and the first records commit has no parent. A second test shows that when every attempt is rejected, the writer returns a clear error after the bounded count.",
+        "status": "met",
+        "evidence": "the_first_commit_is_an_orphan_unrelated_to_main and when_every_attempt_is_rejected_the_writer_stops_with_a_clear_error pass."
+      },
+      {
+        "criterion": "Run `cargo test`, `cargo clippy --all-targets` and `cargo fmt --check` from the repository root. All pass and are clean. The producer's final report quotes each command line and its result so the verifier can cite them (D43).",
+        "status": "met",
+        "evidence": "Ran from the repo root. `cargo test`: pass, and `cargo test --quiet` showed every suite `test result: ok` with 0 failed. `cargo clippy --all-targets`: Finished with no warnings. `cargo fmt --check`: no output, so clean. These are listed in checks_run."
+      },
+      {
+        "criterion": "A new public module in athena-git, exported from lib.rs, takes opaque bytes keyed by path. Its doc comments cite §8.2 and D111. It uses the existing Git wrapper and helpers with no new crate. No code outside athena-git calls it.",
+        "status": "met",
+        "evidence": "lib.rs exports `pub mod records_branch`. Cargo.toml and Cargo.lock do not appear in git status, so no crate was added. I did not run a separate grep for callers outside athena-git, but the workspace builds and only four files changed."
+      },
+      {
+        "criterion": "The CHANGELOG [Unreleased] section has an entry, and docs/design/records-history.md notes the writer as built. No governance file (athena.toml, defaults.toml, workflows, lint tables) and nothing under records/ is changed.",
+        "status": "met",
+        "evidence": "git status --short shows CHANGELOG.md and docs/design/records-history.md modified. No governance file or records/ path appears."
+      }
+    ],
+    "open_issues": [
+      "Cargo.toml and Cargo.lock are listed as deliverables but are unchanged, because no crate was added.",
+      "I ran the gate commands without `--locked`. Athena's checks use `--locked` and `-D warnings`. I did not run those variants, but no dependency changed, so I expect the lockfile to be fine."
+    ],
+    "mistakes": [
+      "My earlier report did not quote the gate commands and their results. Fixed in this report."
+    ],
+    "learnings": [
+      "Plain `cargo test` output is about 88KB. `cargo test --quiet` gives a readable per-suite summary."
+    ],
+    "desires": [
+      "Permission to read the saved tool-output file, so I could confirm the summary of a long test run without rerunning it."
+    ]
+  }
+}

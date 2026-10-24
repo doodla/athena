@@ -24,6 +24,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `athena-git` gains `records_branch`, the writer of the `athena/records` branch (§8.2, D111, build job 1 of
+  `docs/design/records-history.md` section 10). It appends opaque files keyed by path as one commit, built on
+  the tip it read and published with `git update-ref <ref> <new> <expected>`, a compare-and-swap, so every
+  update is a fast-forward. A rejected swap re-reads the tip, re-checks the files and retries, up to 8
+  attempts, then returns a `Contended` error. The first commit is an orphan. The branch is append-only: a
+  changed, deleted or renamed path is refused, and the same bytes at an existing path are a no-op that returns
+  the current tip. Nothing calls the writer yet. Tests cover two threads writing at once, a deterministic stale
+  tip with replay, the refusals, orphan history and the attempt bound.
 - `athena-data` gains the six record types of the records branch, schema and validation only (D111, build job 1
   of `docs/design/records-history.md` section 10): landing-intent, landing, intervention (declared), checkpoint,
   legacy-exempt and import-manifest, in the new `history` module. Each has a schema tag, unknown fields denied,
