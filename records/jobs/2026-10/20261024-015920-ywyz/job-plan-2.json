@@ -1,0 +1,226 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261024-015920-ywyz",
+  "round": 2,
+  "at": "2026-10-24T02:02:18.83005333Z",
+  "invocation_seq": 4,
+  "approach": "Remove the producer's full-suite requirement at its origin: the prompt line (producer.md), the `ran_full_tests`/`tests_missing` gating and its send-back text in `produce_and_verify` (run.rs), and the verifier-facing \"run the full suite\" wording in the producer-report-gaps note. Keep the unmet-criteria send-back, `PRODUCER_SEND_BACKS`, and all post-producer checks and verdict logic untouched. Rewrite the lifecycle and job_plan tests to the new behavior. Add D113 to decisions.md with forward pointers on D95 and D103, amend athena-v0.md B.2 and line 772, and add CHANGELOG entries (a D113 entry, and a supersession note on the kept D95 entry). The prompt says to use targeted tests while working and to run the full suite at most once.",
+  "decisions": [
+    {
+      "choice": "Delete `ran_full_tests`, `FULL_TEST_COMMAND`, `enforce_tests` and `tests_missing`; the loop breaks when `unmet` is empty. Keep `PRODUCER_SEND_BACKS` and the unmet-criteria send-back text.",
+      "reason": "The gate is the root cause of repeated 9 to 11 minute suite runs (job nvbb ran it six times and hit its 1800 s deadline). Athena already runs fmt, clippy and the full test on the candidate. Removing every use avoids dead-code warnings under -D warnings.",
+      "rejected": [
+        {
+          "option": "Keep the gate but allow targeted tests",
+          "why": "Still sends back and costs a producer run."
+        },
+        {
+          "option": "Only change the prompt",
+          "why": "The code would still send back a report lacking the result, so the rule would stay in force."
+        }
+      ]
+    },
+    {
+      "choice": "Reword the producer-report-gaps note to say the listed items were not confirmed and the verifier should judge them, citing recorded check results instead of running the full suite.",
+      "reason": "Criterion 2 requires the note no longer tell the verifier to run the full suite; this matches the verifier prompt's cite-recorded-results rule, which stays unchanged.",
+      "rejected": [
+        {
+          "option": "Drop the note entirely",
+          "why": "Unmet-criteria gaps still need to reach the verifier (D103)."
+        }
+      ]
+    },
+    {
+      "choice": "Producer prompt: run targeted `cargo test -p <crate> <filter>` while working; Athena runs fmt, clippy and the full suite on the candidate; the producer may run the full suite at most once. Report only checks actually run.",
+      "reason": "Matches the user's reply and shortens the prompt.",
+      "rejected": [
+        {
+          "option": "Forbid the full suite",
+          "why": "The user said at most once, not never."
+        }
+      ]
+    },
+    {
+      "choice": "fake.rs stops reporting a passing `cargo test --locked`; outputs.rs gets a doc comment on `checks_run` saying to list only checks actually run.",
+      "reason": "The fake's claim existed only to satisfy the removed gate; the doc comment states the new rule at the type.",
+      "rejected": [
+        {
+          "option": "Leave the fake unchanged",
+          "why": "It would keep encoding the old requirement in test scaffolding."
+        }
+      ]
+    },
+    {
+      "choice": "Docs: new D113 after D112 stating once that earlier text stays as history, with figures. One-line pointers under D95 and D103. Keep the CHANGELOG D95 entry with a supersession note. Edit athena-v0.md in place.",
+      "reason": "Criteria 6 to 8 and the user's reply: keep old entries and supersede with a pointer. athena-v0.md is a current design doc.",
+      "rejected": [
+        {
+          "option": "Delete or rewrite D95",
+          "why": "Out of scope and loses history."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-context/prompts/producer.md",
+      "action": "modify",
+      "purpose": "Replace the full-suite line with targeted-tests guidance; Athena runs fmt, clippy and the full suite; the suite at most once.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "purpose": "Remove the full-suite gating and send-back text; keep the unmet-criteria send-back; reword the producer-report-gaps note; fix comments.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "purpose": "Rewrite the full-test tests to the new behavior; keep the unmet-criteria tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/job_plan.rs",
+      "action": "modify",
+      "purpose": "Trigger the send-back with an unmet criterion instead of a missing full-suite check.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Add D113 and forward pointers on D95 and D103.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/athena-v0.md",
+      "action": "modify",
+      "purpose": "Remove the full-suite requirement at line 772 and in B.2.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add the D113 entry and a supersession note on the kept D95 entry.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-agent/src/fake.rs",
+      "action": "modify",
+      "purpose": "The fake producer no longer reports a passing full suite it did not run.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/outputs.rs",
+      "action": "modify",
+      "purpose": "Doc comment on `ProducerOutput::checks_run`: list only checks actually run.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Edit producer.md: replace the full-suite line with the targeted-tests instruction, state that Athena runs fmt, clippy and the full suite on the candidate, and say the producer may run the full suite at most once. Keep the criteria_check line.",
+    "Edit run.rs: delete FULL_TEST_COMMAND, ran_full_tests, enforce_tests and tests_missing. Make the loop break when `unmet.is_empty()`. Build `problems` from `unmet` only. Remove the test send-back text. Update the comments above the loop and the PRODUCER_SEND_BACKS doc. Reword the producer-report-gaps note to drop the run instruction.",
+    "Edit fake.rs so the fake report no longer claims a passing full suite; add the doc comment on `checks_run` in outputs.rs.",
+    "Edit lifecycle.rs: the not-run test becomes one producer run with no 'sent back' line; the missing-check tests are rewritten the same way; a `fail` result still goes on; a no-change run fails with 'made no change'. Keep the unmet-criteria tests.",
+    "Edit job_plan.rs: the first report marks one default criterion unmet, as `unmet_criterion_report` does in lifecycle.rs, and the second is complete. Update the comment near line 119.",
+    "Edit decisions.md: add pointers under D95 and D103, and D113 after D112 in the file's format, with the figures (nvbb six runs, 1800 s, 9 to 11 minutes). State once that earlier text stays as history, and that it amends D95 and D103.",
+    "Edit athena-v0.md line 772 and the B.2 paragraphs so checks_run lists checks run, there is no full-suite requirement, and the send-back covers criteria only.",
+    "Edit CHANGELOG.md: add the D113 entry under [Unreleased] and a supersession note on the kept D95 entry.",
+    "Run cargo fmt --all --check, cargo clippy --all-targets --locked -- -D warnings, cargo test --locked, and the criterion 8 Grep; report the results."
+  ],
+  "risks": [
+    {
+      "risk": "Existing tests outside the two named files assume a send-back for a missing full-suite check.",
+      "mitigation": "Grep crates/ for 'full test', 'sent back' and 'cargo test --locked' before editing, and run `cargo test --locked -p athena-core`. run_pin_tests.rs near 759 uses an unmet-criteria send-back."
+    },
+    {
+      "risk": "The reworded gaps note breaks tests that assert on its content.",
+      "mitigation": "Keep `report_gaps` unchanged; only the note text is reworded. Lifecycle tests assert on the 'producer-report-gaps' name and the unmet criterion text."
+    },
+    {
+      "risk": "An unused import or constant is left behind and -D warnings fails.",
+      "mitigation": "Grep crates/ for each removed name and run clippy."
+    },
+    {
+      "risk": "A leftover statement of the old rule in the docs (criterion 8).",
+      "mitigation": "Grep the three docs for the three phrases at the end and cite the output; keep old phrases inside D95, D103 or the supersession notes."
+    },
+    {
+      "risk": "The doc comment in outputs.rs changes the generated JSON schema and trips a schema test.",
+      "mitigation": "Run `cargo test --locked -p athena-context`."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the diff and grep the file for the old wording.",
+      "command": "git diff -- crates/athena-context/prompts/producer.md",
+      "observes": "The old line (run the full `cargo test --locked`, `not-run` not acceptable) is gone. In its place: run targeted `cargo test -p <crate> <filter>` while working, and Athena runs fmt, clippy and the full suite on the candidate. A Grep for 'full `cargo test --locked`' in the file returns nothing.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Diff run.rs and grep for the removed names.",
+      "command": "git diff -- crates/athena-core/src/run.rs",
+      "observes": "`ran_full_tests`, `FULL_TEST_COMMAND`, `enforce_tests`, `tests_missing` and the full-suite send-back text are removed. The unmet-criteria send-back remains. The producer-report-gaps note has no instruction to run the full suite.",
+      "fails_without": null
+    },
+    {
+      "criterion": 3,
+      "method": "Show that the diff touches no check or verdict code and that the verifier prompt is unchanged.",
+      "command": "git diff --stat",
+      "observes": "No change under the check or verdict code, and none to crates/athena-cap-change/prompts/verifier.md, which still says to cite recorded results.",
+      "fails_without": null
+    },
+    {
+      "criterion": 4,
+      "method": "Run the rewritten lifecycle tests, then the job_plan tests, as two commands in a single demonstration. Lifecycle covers: a `not-run` report and a report with no full-suite check (one producer run, no send-back, verifier reached); an unmet criterion (two producer runs, sent back once); an unmet criterion still unmet (verifier gets producer-report-gaps); a recorded failing test check (rejected). job_plan's send-back test now triggers the send-back with an unmet criterion.",
+      "command": "cargo test --locked -p athena-cli --test lifecycle && cargo test --locked -p athena-cli --test job_plan",
+      "observes": "Both test binaries pass. Producer call count is 1 for the not-run and missing-check reports and 2 for unmet criteria. The failing-test-check case is still rejected. The job_plan second prompt has '## Sent back' and the plan section, and the hash matches the plan record.",
+      "fails_without": "With the gating still in place, the not-run test would see 2 producer calls and a 'sent back' line and fail. If the unmet-criteria send-back were removed, the 2-call tests in lifecycle and job_plan would fail. If a failing test check no longer rejected, the rejection test would fail."
+    },
+    {
+      "criterion": 5,
+      "method": "Run clippy, then fmt check.",
+      "command": "cargo clippy --locked --all-targets -- -D warnings && cargo fmt --check",
+      "observes": "Both exit 0 with no warnings, including no unused constant, function or import from the removed gating.",
+      "fails_without": "If `FULL_TEST_COMMAND` or `ran_full_tests` were left unused, clippy would report dead code and exit non-zero."
+    },
+    {
+      "criterion": 6,
+      "method": "Read the diff of decisions.md.",
+      "command": "git diff -- docs/decisions.md",
+      "observes": "A new '## D113' after D112 amends D95 and D103, says once that the earlier text stays as history, and gives the figures: job nvbb ran the suite six times, hit its 1800 s deadline, and a run takes 9 to 11 minutes. D95 and D103 each get a one-line pointer to D113.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Read the diff of CHANGELOG.md and athena-v0.md.",
+      "command": "git diff -- CHANGELOG.md docs/design/athena-v0.md",
+      "observes": "CHANGELOG [Unreleased] keeps the D95 entry and adds a note that D113 supersedes it. A new D113 entry gives the same reason and figures. athena-v0.md line 772 and the B.2 paragraphs no longer say the producer must run the full suite or that a second miss fails the job.",
+      "fails_without": null
+    },
+    {
+      "criterion": 8,
+      "method": "Run the Grep tool with pattern 'full `cargo test --locked`|second miss|ran_full_tests' over docs/decisions.md, docs/design/athena-v0.md and CHANGELOG.md, output_mode content, and cite the command and output.",
+      "command": "Grep tool: pattern 'full `cargo test --locked`|second miss|ran_full_tests', paths docs/decisions.md docs/design/athena-v0.md CHANGELOG.md, output_mode content",
+      "observes": "Every hit is in D95 or D103 history, D113 text quoting it, or a 'superseded by D113' note. athena-v0.md has no hit. No hit states the requirement as current.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Whether token-budget or schema tests react to the producer prompt change or the new `checks_run` doc comment; the producer should run the athena-context tests.",
+    "Whether other tests (for example run_pin_tests.rs near line 759, or other crates) rely on the fake producer's passing `cargo test --locked` report; the producer must grep and run them.",
+    "The CHANGELOG D103 'Fixed' entry mentions the verifier being told whether the full test result was missing. It is not a grep-8 phrase; I would leave it as history."
+  ],
+  "producer_section_sha256": "b8ae8593bed4d84322f26b7ea71f25077dfed4191615af3939dc1ea6d5a8574b"
+}

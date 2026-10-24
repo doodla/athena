@@ -7,6 +7,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- The producer is no longer required to run the full suite (D113, amending D95 and D103). The producer prompt
+  says to run targeted tests (`cargo test -p <crate> <filter>`) while working, that Athena runs fmt, clippy and
+  the full suite on the candidate, and that the producer runs the full suite at most once. `produce_and_verify`
+  sends a report back only for unmet or unreported acceptance criteria; the `producer-report-gaps` note no longer
+  tells the verifier to run the suite. Reason: a run takes 9 to 11 minutes, and job nvbb ran the suite six times
+  and hit its 1800 s deadline. Athena's own checks on the candidate and the verdict logic are unchanged. The fake
+  producer reports no checks, and the lifecycle and job_plan tests cover the new behavior.
+
 ### Added
 
 - The change verifier prompt now tells verifiers to cite the recorded fmt, clippy and test results under "Checks
@@ -620,6 +630,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   pinned study is exempt. The producer token budget rises from 1,100 to 1,300 because the study and change
   producers share the frame. The fake producer now reports a passing `cargo test --locked`, and the lifecycle
   tests cover the send-back, the bound, a missing check, and a `fail` result going on to verification.
+  Superseded by D113: the producer is no longer required to run the full suite, and a missing result is no
+  longer sent back.
 - The steward now calls a model (row A9-1 stays Partial). `steward::run` starts an agent with the stored
   `STEWARD_PROMPT` as its system prompt, in a read-only workspace of the code, a copy of `records/`, and a
   `GIT-LOG.txt` of the last 200 commit subjects, and records the invocation (role, usage, cost) as a

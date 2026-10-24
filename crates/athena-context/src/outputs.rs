@@ -108,6 +108,7 @@ pub struct ProducerOutput {
     /// What changed and why, for the user.
     pub summary: String,
     pub files: Vec<String>,
+    /// Only the checks you actually ran.
     pub checks_run: Vec<CheckRunOutput>,
     /// One entry per accepted acceptance criterion: your own check of your work against it.
     pub criteria_check: Vec<CriterionCheckOutput>,

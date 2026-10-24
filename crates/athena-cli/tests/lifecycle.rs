@@ -1374,13 +1374,11 @@ fn full_test_report(result: &str) -> serde_json::Value {
 }
 
 #[test]
-fn a_not_run_full_test_sends_the_producer_back_once_and_then_verifies() {
-    // A report with the full test run `not-run` never reaches the verifier; the producer is re-invoked
-    // with the reason, and a real result on the second run lets the job continue.
+fn a_not_run_full_test_is_not_sent_back_and_reaches_the_verifier() {
+    // Athena runs the full suite on the candidate, so a producer report with it `not-run` goes on.
     let fx = Fixture::new();
     let mut scenario = Scenario::default();
     scenario.report = full_test_report("not-run");
-    scenario.report_when_sent_back = Some(full_test_report("pass"));
     let calls = scenario.invocations.clone();
     let athena = fx.athena(scenario.script());
     let proposal = athena.ask("add a greeting", &Lines::default()).unwrap();
@@ -1394,59 +1392,15 @@ fn a_not_run_full_test_sends_the_producer_back_once_and_then_verifies() {
     let roles = calls.lock().unwrap().clone();
     assert_eq!(
         roles.iter().filter(|r| **r == Role::Producer).count(),
-        2,
-        "{roles:?}"
-    );
-    let first_verifier = roles.iter().position(|r| *r == Role::Verifier).unwrap();
-    assert_eq!(
-        roles[..first_verifier]
-            .iter()
-            .filter(|r| **r == Role::Producer)
-            .count(),
-        2,
-        "both producer runs come before verification: {roles:?}"
-    );
-    assert!(ui.0.lock().unwrap().iter().any(|l| l.contains("sent back")));
-}
-
-#[test]
-fn a_producer_that_still_has_no_full_test_result_reaches_the_verifier_with_the_gap_flagged() {
-    // The send-back is bounded, and a second report with no full test run does not fail finished work:
-    // the verifier gets the change, told the test result is missing.
-    let fx = Fixture::new();
-    let mut scenario = Scenario::default();
-    scenario.report = full_test_report("not-run");
-    let calls = scenario.invocations.clone();
-    let seen_by_verifier = scenario.seen_by_verifier.clone();
-    let athena = fx.athena(scenario.script());
-    let proposal = athena.ask("add a greeting", &Lines::default()).unwrap();
-    let f = finished(
-        athena
-            .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
-            .unwrap(),
-    );
-    assert!(
-        !f.reason.contains("still had problems when sent back"),
-        "{}",
-        f.reason
-    );
-    let roles = calls.lock().unwrap().clone();
-    assert_eq!(
-        roles.iter().filter(|r| **r == Role::Producer).count(),
-        2,
+        1,
         "{roles:?}"
     );
     assert!(roles.contains(&Role::Verifier), "{roles:?}");
-    let seen = seen_by_verifier.lock().unwrap().join("\n");
-    assert!(seen.contains("producer-report-gaps"), "{seen}");
-    assert!(
-        seen.contains("no real full `cargo test --locked` result"),
-        "{seen}"
-    );
+    assert!(!ui.0.lock().unwrap().iter().any(|l| l.contains("sent back")));
 }
 
 #[test]
-fn a_producer_that_still_has_no_full_test_result_and_makes_no_change_fails() {
+fn a_producer_that_makes_no_change_fails_whatever_its_test_result() {
     let fx = Fixture::new();
     let mut scenario = Scenario::default();
     scenario.report = full_test_report("not-run");
@@ -1461,13 +1415,12 @@ fn a_producer_that_still_has_no_full_test_result_and_makes_no_change_fails() {
     );
     assert_eq!(f.state, OutcomeState::Failed, "{}", f.reason);
     assert!(f.reason.contains("made no change"), "{}", f.reason);
-    assert!(f.reason.contains("cargo test --locked"), "{}", f.reason);
     assert!(!calls.lock().unwrap().contains(&Role::Verifier));
 }
 
 #[test]
-fn a_report_with_no_full_test_check_is_sent_back_and_a_failing_run_is_not() {
-    // Listing no full test run counts as not run (sent back once); a real `fail` is a result and goes on as before.
+fn a_report_with_no_full_test_check_or_a_failing_one_goes_to_the_verifier_without_a_send_back() {
+    // The full suite is Athena's check on the candidate, not a report requirement.
     let fx = Fixture::new();
     let mut scenario = Scenario::default();
     scenario.report = producer_report("Added a greeting line.", &["cargo clippy"]);
@@ -1482,9 +1435,10 @@ fn a_report_with_no_full_test_check_is_sent_back_and_a_failing_run_is_not() {
     let roles = calls.lock().unwrap().clone();
     assert_eq!(
         roles.iter().filter(|r| **r == Role::Producer).count(),
-        2,
+        1,
         "{roles:?}"
     );
+    assert!(roles.contains(&Role::Verifier), "{roles:?}");
 
     let fx = Fixture::new();
     let mut scenario = Scenario::default();
