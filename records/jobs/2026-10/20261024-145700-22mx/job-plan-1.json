@@ -1,0 +1,143 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261024-145700-22mx",
+  "round": 1,
+  "at": "2026-10-24T14:58:42.774492395Z",
+  "invocation_seq": 2,
+  "approach": "In history.rs add `LandingKind` (snake_case enum: JobLanding, DeclaredIntervention, RecordsOnly), make `LandingCommit` carry a required `kind` and `Option<JobId>` job / `Option<RecordId>` verification with `#[serde(default, skip_serializing_if = \"Option::is_none\")]`. Landing::validate enforces per kind: job_landing needs both, the others forbid both. Add HistoryError variants for the two failures. gh.rs `commits()` sets kind JobLanding with Some(job)/Some(verification); `intent()` (gh.rs ~1478) reads `commit.job` so it must handle Option; the ~3788 test constructor gets the new fields. Update history.rs tests. Add a CHANGELOG entry. manage.rs needs no code change (it only reads a different `history.commits` count, no LandingCommit use).",
+  "decisions": [
+    {
+      "choice": "Make job and verification Option with default + skip_serializing_if; missing kind stays an error because kind has no default.",
+      "reason": "Non-job kinds must not claim a job; omitted-when-absent keeps JSON clean. Required kind means old records without kind are rejected, as requested.",
+      "rejected": [
+        {
+          "option": "Enum with data (tagged variants carrying job/verification)",
+          "why": "Changes the JSON shape away from the requested flat `kind` field."
+        }
+      ]
+    },
+    {
+      "choice": "Forbid both job and verification for the non-job kinds.",
+      "reason": "Matches the accepted reading of 'must not claim a job'.",
+      "rejected": [
+        {
+          "option": "Forbid only job",
+          "why": "A verification without a job is meaningless for these kinds."
+        }
+      ]
+    },
+    {
+      "choice": "New HistoryError variants (MissingForKind(&'static str), NotAllowedForKind(&'static str)).",
+      "reason": "Tests can assert exact errors.",
+      "rejected": [
+        {
+          "option": "Reuse HistoryError::Empty",
+          "why": "Message 'must not be empty' misleads for forbidden fields."
+        }
+      ]
+    },
+    {
+      "choice": "Leave pr_commits in land.rs untouched; gh.rs only wraps its output.",
+      "reason": "Part 2 scope.",
+      "rejected": [
+        {
+          "option": "Classify commits in pr_commits now",
+          "why": "Explicitly out of scope."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-data/src/history.rs",
+      "action": "modify",
+      "purpose": "Add LandingKind, kind field, optional job/verification, validation, new error variants, tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "action": "modify",
+      "purpose": "commits() sets JobLanding with Some job/verification; intent() handles Option job; update test constructor ~3788.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Record the change under [Unreleased].",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/manage.rs",
+      "action": "modify",
+      "purpose": "Listed as a deliverable, but I found no use of LandingCommit there; edit only if the build shows a need.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In history.rs add `LandingKind` (Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize; rename_all snake_case) with doc comments.",
+    "Change LandingCommit: add `kind: LandingKind`; job: Option<JobId>, verification: Option<RecordId>, each `#[serde(default, skip_serializing_if = \"Option::is_none\")]`; keep deny_unknown_fields.",
+    "Add two HistoryError variants and per-kind checks in the Landing::validate loop.",
+    "Update landing() test helper and add tests: each kind round-trips, unknown kind, missing kind, unknown field, job_landing without job/verification, non-job kinds with job/verification, omitted keys on serialize.",
+    "In gh.rs commits(): set kind JobLanding, job Some(c.job), verification Some(..); compute verification before moving c.job.",
+    "In gh.rs intent(): collect job_ids only from commits where `commit.job` is Some.",
+    "Update the test LandingCommit at ~3788 with kind and Some(..) values.",
+    "Add CHANGELOG.md entry under [Unreleased].",
+    "Run cargo test -p athena-data, cargo test -p athena-core gh, cargo clippy -p athena-data -p athena-core, cargo fmt --check."
+  ],
+  "risks": [
+    {
+      "risk": "Existing landing records on the records branch lack kind and will fail to parse.",
+      "mitigation": "The request makes kind required; the module docs say nothing reads or writes the branch in production yet."
+    },
+    {
+      "risk": "Other code reads commit.job as non-Option and breaks compilation.",
+      "mitigation": "Grep showed only gh.rs ~1478; run cargo check -p athena-core -p athena-gate -p athena-cli."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Inspect source and a test that serializes non-job commits and checks the JSON.",
+      "command": "cargo test -p athena-data history",
+      "observes": "Test asserts serialized declared_intervention/records_only commits have no `job`/`verification` keys and kind serializes as snake_case strings; diff shows deny_unknown_fields retained and exactly three variants.",
+      "fails_without": "Without Option+skip_serializing_if the key-absence assertion fails."
+    },
+    {
+      "criterion": 2,
+      "method": "Unit tests mutating landing() commits per kind and calling Landing::validate.",
+      "command": "cargo test -p athena-data history",
+      "observes": "job_landing missing job or verification -> Err; declared_intervention/records_only with job or verification -> Err; valid combos -> Ok.",
+      "fails_without": "Without per-kind checks in Landing::validate the Err assertions fail."
+    },
+    {
+      "criterion": 3,
+      "method": "Round-trip each kind via HistoryRecord::parse(to_pretty_json); mutate JSON for unknown kind, removed kind, extra field in a commit.",
+      "command": "cargo test -p athena-data history",
+      "observes": "Each kind round-trips equal; the three malformed inputs return Err(Parse).",
+      "fails_without": "Without a required closed enum, missing/unknown kind would parse."
+    },
+    {
+      "criterion": 4,
+      "method": "Run gh tests including the landing test whose expected LandingCommit now has kind JobLanding, Some(job), Some(verification); git diff shows land.rs unchanged.",
+      "command": "cargo test -p athena-core gh",
+      "observes": "Landing test passes comparing records built by commits() to the expected job_landing commit; land.rs not in diff.",
+      "fails_without": "If commits() did not set JobLanding/job/verification the equality assertion at ~3787 fails."
+    },
+    {
+      "criterion": 5,
+      "method": "Lint and format checks.",
+      "command": "cargo clippy -p athena-data -p athena-core",
+      "observes": "No warnings; then `cargo fmt --check` exits clean.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "manage.rs is a listed deliverable but I found no LandingCommit use in it; the producer should leave it unchanged unless the compiler requires an edit.",
+    "Whether intent() should skip non-job commits when collecting job_ids (planned: only collect Some(job))."
+  ],
+  "producer_section_sha256": "d545ea87cbcd0700ffc0a4e7302ddda3ee0ad14cc7fda5d5d98af699e3b1672c"
+}
