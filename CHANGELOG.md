@@ -19,6 +19,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `docs/spec.toml`, the first layer of the cohesive spec (D114): sourced requirements for BRIEF.md "Project
+  Olympus" sections 1 to 6, each with verbatim quotes under their headings, and `xtask/tests/spec.rs`, which
+  fails on a quote not found under its heading, a duplicate id, a missing `supersedes` target, a requirement
+  without a source, or an uncovered R1 to R8 or section 1 to 5 (enforcement row M33). Sections 7 to 10, the
+  governing philosophy and the 2026-10-17 addenda follow in a second job.
+
 - The change verifier prompt now tells verifiers to cite the recorded fmt, clippy and test results under "Checks
   Athena ran on this tree" instead of rerunning the full suite, and to run a check only if its record is missing or
   failed. On 2026-10-18 verifiers rerunning the full suite (about 11 minutes) timed out.

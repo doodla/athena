@@ -2677,3 +2677,29 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Reversal cost:** Low: restore the gate in `produce_and_verify` and the prompt line.
 - **Provenance:** read: `run.rs`, the producer prompt, D95 and D103; measured: the lifecycle and job_plan tests.
   The six runs, the 1800 s deadline and the 9 to 11 minutes are reported in the request, not measured here.
+
+## D114 · The cohesive spec: `docs/spec.toml`, sourced requirements checked against BRIEF.md by test
+
+- **Case:** Decision 3C (BRIEF.md addendum "2026-10-17: Olympus") asks for one cohesive spec in which every
+  line traces to the owner's words. An earlier build of this layer reached main only through a hand merge that
+  was reverted, so it is built again. That build checked a quote against the whole brief, so a real quote filed
+  under the wrong heading passed.
+- **Decision:** `docs/spec.toml` holds `[[requirement]]` tables, each with an id, a plain statement, a kind
+  (goal, requirement, constraint or acceptance), a status (active or superseded), an optional `supersedes` list
+  and one or more `[[requirement.source]]` tables, each a heading and a verbatim quote. A duplicate in the brief
+  is one requirement with several sources. A conflict or open choice in the owner's words is an
+  `[[open_question]]` quoting two or more sides, never resolved; sections 1 to 6 hold none. `xtask/tests/spec.rs`
+  fails on a quote that is not a substring of the text under its stated heading (whitespace collapsed; a heading
+  owns the text up to the next heading of any level), a duplicate id, a `supersedes` target that does not exist,
+  a requirement with no source, or no requirement for any of R1 to R8 or sections 1 to 5. Each rule has an
+  in-memory negative case. This layer covers "Project Olympus" sections 1 to 6; sections 7 to 10, the governing
+  philosophy and the 2026-10-17 addenda follow in a second job. Where a full line would name something the
+  boundary scan rejects, the quote stops before it.
+- **Alternatives:** (a) YAML: adds a dependency and has implicit typing. (b) JSON: no comments and awkward
+  multi-line strings. (c) A Markdown table: the checker would parse prose. (d) Check quotes against the whole
+  brief: the earlier gap. (e) Store a line number instead of a heading: breaks when the brief is edited.
+- **Tradeoff:** A reworded heading in BRIEF.md fails the test until the spec is updated; that is the intended
+  signal. The statements are our wording and are not checked, only the quotes are.
+- **Reversal cost:** Low: delete the file and the test; nothing else reads them.
+- **Provenance:** read: BRIEF.md "Project Olympus" sections 1 to 6, `xtask/tests/policy.rs`; measured:
+  `cargo test -p xtask --test spec`. `toml` and `serde` were already xtask dev-dependencies.
