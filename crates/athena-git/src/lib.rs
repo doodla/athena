@@ -7,12 +7,14 @@
 //! - [`attrs`]: classifying paths as governed, owner-private, owner-maintained, or records, from committed
 //!   `.gitattributes` files only, and the content fingerprint built on that classification;
 //! - [`index`]: temporary indexes for building trees and commits without touching the user's index;
-//! - [`snapshot`]: the detached snapshots agents work in, each with its own throwaway repository.
+//! - [`snapshot`]: the detached snapshots agents work in, each with its own throwaway repository;
+//! - [`records_branch`]: the append-only writer of the `athena/records` branch (§8.2, D111).
 //!
 //! This crate is a leaf: it depends on no other Athena crate.
 
 pub mod attrs;
 pub mod index;
+pub mod records_branch;
 pub mod snapshot;
 
 use std::collections::BTreeMap;

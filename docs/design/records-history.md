@@ -1,7 +1,7 @@
 # A history of its own for Athena's records
 
 Status: accepted, design only (D111), under Sri's delegation in the `BRIEF.md` addenda of 2026-10-23. Nothing
-here is built. Audience: Sri, who decides, and anyone checking the design.
+here is built, except the records-branch writer (§8.2, noted there). Audience: Sri, who decides, and anyone checking the design.
 
 Three changes were decided in those addenda after the first draft. (1) The records history is a branch named
 `athena/records` with its own root, not the custom ref `refs/athena/records` the first draft proposed (§3).
@@ -266,6 +266,14 @@ Several jobs may write to the records branch at once.
   first's host-made commit.
 
 Local repositories use the same ref update with a lock file git already provides.
+
+**Built (part of build job 1, §10).** The writer is `crates/athena-git/src/records_branch.rs`
+(`RecordsWriter`). It takes opaque bytes keyed by path and publishes with `git update-ref <ref> <new>
+<expected>`, using the all-zero id as `<expected>` for the first, parentless commit. The retry bound is 8
+attempts (the "5" above was an example); after that it returns `RecordsError::Contended`. The writer is
+append-only: a changed, deleted or renamed path is refused and the tip stays. Writing the same bytes at an
+existing path is a no-op that makes no commit and returns the current tip, so a replayed write is idempotent.
+Nothing calls the writer yet, and the record types, the importer and the host rules of §3 are still to do.
 
 ## 9. Keeping the check's cost independent of history size
 

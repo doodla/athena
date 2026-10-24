@@ -1,0 +1,197 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261024-055549-0qcy",
+  "round": 1,
+  "at": "2026-10-24T05:57:01.820156425Z",
+  "invocation_seq": 2,
+  "approach": "Add athena-git/src/records_branch.rs with a RecordsWriter over &Git. It reads the tip of refs/heads/athena/records (none gives an orphan first commit). It builds the new tree in a TempIndex from the tip, with Put edits for new paths. It makes the commit with commit_tree, parented on the expected tip. It publishes with `git update-ref <ref> <new> <expected-or-null-oid>`, which is the compare-and-swap. A failed swap means another writer moved the tip, so the writer refetches the tip, rechecks the append-only rules against it, rebuilds on it and retries, up to a bounded attempt count (default 8). It then returns RecordsError::Contended. Because each commit's only parent is the tip it swapped from, every update is a fast-forward. Files are opaque bytes keyed by path. Changes are an enum (Put, Delete, Rename) so the append-only rule can be tested: Delete and Rename of existing paths are refused, Put at an existing path with different bytes is refused, and Put with identical bytes is a documented no-op that makes no commit and returns the current tip. A private `append_with_hook` takes a closure called after the tip is read and before the swap. Tests use it for a deterministic stale-tip case. The producer must run and quote the gate commands in the final report.",
+  "decisions": [
+    {
+      "choice": "Use `git update-ref <ref> <new> <old>` (old = null_oid() for the first commit) as the compare-and-swap.",
+      "reason": "Git itself makes the swap atomic, so it is safe across threads and processes and needs no new crate. It reuses Git::run/exit and null_oid.",
+      "rejected": [
+        {
+          "option": "An in-process Mutex or lock file",
+          "why": "It does not protect against other processes and is not a compare-and-swap."
+        },
+        {
+          "option": "git push to a local remote",
+          "why": "It is heavier and out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "Same-bytes Put at an existing path is a no-op: it makes no commit and returns the current tip. It is documented and tested.",
+      "reason": "It is idempotent for retries, and the brief allows either choice if documented. Retrying after a lost response must not fail.",
+      "rejected": [
+        {
+          "option": "Refuse it",
+          "why": "It makes a replayed write after a contended retry look like an error."
+        }
+      ]
+    },
+    {
+      "choice": "Take the stale-tip hook as a private method, with the public API calling it with a no-op.",
+      "reason": "It makes the reject path deterministic without sleeps or races and adds no public surface.",
+      "rejected": [
+        {
+          "option": "Rely on thread timing",
+          "why": "It is flaky; the brief asks for a deterministic test."
+        }
+      ]
+    },
+    {
+      "choice": "Define a RecordsError enum (Git(GitError), Refused{path,reason}, Contended{attempts}).",
+      "reason": "Callers can tell refusal from contention, and the contention error is clear after the bounded count.",
+      "rejected": [
+        {
+          "option": "Reuse GitError::Refused for everything",
+          "why": "Contention cannot be told apart from refusal."
+        }
+      ]
+    },
+    {
+      "choice": "Leave Cargo.toml and Cargo.lock unchanged unless the tests need a dev-dependency; none is expected.",
+      "reason": "The brief says no new crate. Threads use std::thread::scope and temp repos use the existing tempfile dependency and testutil.",
+      "rejected": [
+        {
+          "option": "Add a crate for concurrency or retry",
+          "why": "It is unneeded and breaks the buy-first and small defaults."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-git/src/records_branch.rs",
+      "action": "create",
+      "purpose": "RecordsWriter, Change, RecordsError, the CAS append loop, and the tests.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-git/src/lib.rs",
+      "action": "modify",
+      "purpose": "Add `pub mod records_branch;` and one line in the crate docs.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an entry under [Unreleased].",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/records-history.md",
+      "action": "modify",
+      "purpose": "Note the writer as built (§8.2, D111), with the same-bytes behavior.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-git/Cargo.toml",
+      "action": "modify",
+      "purpose": "Expected to stay unchanged because no crate is added. It is listed as a deliverable but should be touched only if a tool forces it.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "Cargo.lock",
+      "action": "modify",
+      "purpose": "Expected to stay unchanged for the same reason.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read Git::run/exit/rev_parse/is_ancestor, index::TempIndex, and testutil::repo_with to match conventions (error style, isolated identity).",
+    "Create records_branch.rs. Module docs cite §8.2 and D111. Define RECORDS_REF, Change, RecordsError and RecordsWriter { git, max_attempts }, with new() and with_max_attempts().",
+    "Implement path validation and a plan step against the current tip tree: for each Put, use show_file or ls_tree to compare the blob oid; identical is skipped, different is Refused. Delete or Rename of an existing path is Refused. If nothing is left, return the tip.",
+    "Implement the attempt loop. Read the tip, call the hook, build the tree with TempIndex::from_tree (or the empty tree for the first commit), apply the Put edits, write the tree, then commit_tree with the tip as the sole parent (none for the first). Run `update-ref REF new old`. On a failed swap, loop and re-plan against the new tip. After max attempts, return Contended.",
+    "Add the private append_with_hook and make the public append call it with a no-op.",
+    "Write the tests: two threads; stale tip with replay; modify, delete and rename refused with the tip unchanged; same-bytes no-op; orphan with merge-base empty and no parent; all attempts rejected giving Contended; invalid path.",
+    "Export the module in lib.rs and add the crate-doc bullet. Add the CHANGELOG [Unreleased] entry. Update records-history.md.",
+    "Run `cargo test`, `cargo clippy --all-targets` and `cargo fmt --check` from the root, plus the Athena gate variants. Quote each command line and its result in the final report. Confirm no caller outside athena-git and no governance or records/ changes."
+  ],
+  "risks": [
+    {
+      "risk": "The thread test could be flaky if retries run out.",
+      "mitigation": "Retries are bounded. Under real contention, 2 threads cannot exceed 8 attempts, and the two-thread test needs no forced contention."
+    },
+    {
+      "risk": "update-ref's expected value for a not-yet-existing ref is misused.",
+      "mitigation": "Use update-ref with the ref's full name, so a missing ref is read as None via rev_parse, and null_oid() for create-only."
+    },
+    {
+      "risk": "The writer disturbs the user's checkout.",
+      "mitigation": "Build the trees in a TempIndex per attempt, so the work tree and the user's index are never touched. Tests use main only for the merge-base check."
+    },
+    {
+      "risk": "clippy -D warnings with the workspace lint tables fails on the new code.",
+      "mitigation": "Run all three gate commands and quote their output. Fix lint, such as a function with too many arguments, before reporting."
+    },
+    {
+      "risk": "Odd paths could escape or corrupt the tree.",
+      "mitigation": "Reject paths that are empty, absolute, or contain `..` or empty segments before touching git; add a test for one."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Test two_writers_on_threads_both_land: in a testutil repo, spawn two scoped threads, each appending a different path. Then check the final tree and the commit chain.",
+      "command": "cargo test -p athena-git records_branch",
+      "observes": "Both paths are in the tip tree. `rev_list_reverse` gives 2 commits in a linear chain. The first has no parent, and is_ancestor holds between consecutive tips. No commit is lost.",
+      "fails_without": "Without the CAS and retry, one writer's update would overwrite the other's or fail, and one path would be missing from the final tree."
+    },
+    {
+      "criterion": 2,
+      "method": "Test stale_tip_is_rejected_then_replayed: use the private hook to advance the branch with another writer's commit after the first tip read. The writer's first swap fails, it refetches, and it succeeds on the second attempt. The hook counts attempts.",
+      "command": "cargo test -p athena-git records_branch",
+      "observes": "The attempt count is 2. The final tree holds both the earlier file and the new file. The new commit's parent is the competing commit.",
+      "fails_without": "Without the expected-old-value check, the stale write would succeed on the first attempt and drop the competing file."
+    },
+    {
+      "criterion": 3,
+      "method": "Tests for Put with different bytes, Delete and Rename on an existing path, each asserting Err(Refused). A same-bytes Put test asserts Ok with the tip unchanged. The doc comment records this behavior.",
+      "command": "cargo test -p athena-git records_branch",
+      "observes": "Each refusal returns Refused, and rev_parse of the ref is identical before and after. The same-bytes write makes no new commit.",
+      "fails_without": "Without the append-only check, the tip would change or the tree content would be altered."
+    },
+    {
+      "criterion": 4,
+      "method": "One test checks orphan history: after the first write, `git merge-base main athena/records` exits 1 with empty output (via Git::exit), and parents(first) is empty. A second test uses the hook to move the tip on every attempt, so every swap is rejected. With max attempts set to 3, it expects Contended{attempts:3} and a message naming the count.",
+      "command": "cargo test -p athena-git records_branch",
+      "observes": "No merge base and no parent. The error is Contended with the bounded count, and the hook ran exactly 3 times.",
+      "fails_without": "Without the orphan logic, the first commit would have a parent and merge-base would find one. Without the bound, the loop would not terminate or would give a vague error."
+    },
+    {
+      "criterion": 5,
+      "method": "The producer runs the three gate commands from the repository root and quotes each command line with its exit status and result summary in the final report. The verifier reruns them.",
+      "command": "cargo test",
+      "observes": "Quote the lines `cargo test`, `cargo clippy --all-targets` and `cargo fmt --check`, each with its result: all tests pass, no clippy warnings, and fmt is clean.",
+      "fails_without": "A failing test, a clippy warning or a formatting difference would make the corresponding command exit non-zero."
+    },
+    {
+      "criterion": 6,
+      "method": "Inspect the files: lib.rs has `pub mod records_branch;` and the module docs cite §8.2 and D111. Search the other crates for callers.",
+      "command": "cargo build",
+      "observes": "The build succeeds. A Grep for `records_branch` outside crates/athena-git returns nothing. `git diff` shows Cargo.toml and Cargo.lock unchanged.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Review the diff of CHANGELOG.md and docs/design/records-history.md, and list the changed paths.",
+      "command": "git status",
+      "observes": "The changed files are only records_branch.rs, lib.rs, CHANGELOG.md and records-history.md. The CHANGELOG [Unreleased] section has an entry. records-history.md marks the writer built. Nothing in athena.toml, defaults.toml, workflows or records/ appears.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Whether commit signing must apply: the plan uses sign = git.signs_commits(). Isolated test repos do not sign.",
+    "Which identity the commit uses when user.name is unset; Git::isolated is assumed to set one, as other tests rely on it.",
+    "The default attempt count of 8 is a choice; the spec says only bounded."
+  ],
+  "producer_section_sha256": "2097319671a4753534194c501b3f7f5115dd901fd2e49ba3a2ecf2ab69b54e7b"
+}
