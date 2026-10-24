@@ -5,6 +5,8 @@
 //! `schema` field names its type and version, and [`AnyRecord`] parses any record with unknown fields
 //! denied. Every record has exactly one canonical location, derived from its own fields, so the gate can
 //! check that a file sits where its content says it belongs (M5).
+//!
+//! The records-branch types of `docs/design/records-history.md` (D111) are in [`crate::history`], not here.
 
 use crate::id::{JobId, RecordId};
 use crate::quantity::Quantity;
