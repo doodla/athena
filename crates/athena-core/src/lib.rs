@@ -61,6 +61,7 @@ pub mod ci_result;
 pub mod commits;
 pub mod fake;
 pub mod gh;
+pub mod host_rules;
 pub mod introspect;
 pub mod invocation;
 pub mod jev;

@@ -310,7 +310,10 @@ keeps running until the new one has passed alongside it.
    `legacy-exempt`, `import-manifest`) in `athena-data`; a writer that creates the records ref with
    compare-and-swap and retry (§8.2), writing the branch `athena/records` (own root). Test: two simultaneous
    writers both land; a rejected push retries. Also confirm the host rules of §3 are in force on
-   `athena/records` (no force-push, no deletion) and on main (branches up to date before merging).
+   `athena/records` (no force-push, no deletion) and on main (branches up to date before merging). That
+   confirmation is the read-only check in `host_rules.rs` (D111, part 3 of job 1). It reads the rulesets view
+   `rules/branches/{branch}` only, so classic branch protection is not visible to it: the §3 rules must be set
+   as rulesets to show as in force.
 2. **Importer.** Copy `records/` at `C0` to the new root with the manifest and the self-check of §4. Test:
    a missing, changed or extra file fails the import. Run once into a scratch repository first; main is
    unchanged.

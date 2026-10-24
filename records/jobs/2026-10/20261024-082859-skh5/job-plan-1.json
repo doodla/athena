@@ -1,0 +1,164 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261024-082859-skh5",
+  "round": 1,
+  "at": "2026-10-24T08:30:25.865161094Z",
+  "invocation_seq": 2,
+  "approach": "Add athena-core module host_rules.rs. It takes a gh::Runner, owner and repo. For each of athena/records and main it runs `gh api repos/{owner}/{repo}/rules/branches/{branch}`. That is a plain GET: no --method and no -f/-F/--input arguments. The reply is parsed as a JSON list of rule objects and mapped to three tri-state results (InForce, NotInForce, Unknown) per branch. A runner error or bad JSON makes every rule on that branch Unknown. The module renders a plain-text report that states it sees rulesets only. Register the module in lib.rs. Add a small GET-args helper in gh.rs. Update CHANGELOG and records-history.md §10 item 1 (job 1, part 3).",
+  "decisions": [
+    {
+      "choice": "The module calls Runner::gh directly with args [\"api\", path], built by a new pub helper in gh.rs (gh::get_args). It does not use GhClient::api.",
+      "reason": "GhClient::api_text always adds `--method <m>` and its retry and error-log loop is tied to HostOperation. Criterion 3 requires no method override, and gh api defaults to GET. The helper keeps the argument shape in one place, next to the other api calls.",
+      "rejected": [
+        {
+          "option": "Reuse GhClient::api with method GET",
+          "why": "It passes `--method GET`, which breaks the no-override assertion, and it needs a HostOperation variant in athena-data."
+        },
+        {
+          "option": "Call the classic /branches/{b}/protection endpoint",
+          "why": "It returns 403 here, and reading classic protection is out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "Three-state enum RuleState {InForce, NotInForce, Unknown}. Any error or parse failure gives Unknown for all three rules on that branch. A reply that is valid JSON but not an array is also Unknown.",
+      "reason": "A failed read must never be taken as 'not in force' or 'in force'.",
+      "rejected": [
+        {
+          "option": "bool per rule",
+          "why": "It cannot express unknown."
+        }
+      ]
+    },
+    {
+      "choice": "The same three-rule evaluation applies to both branches. Up-to-date required is in force only when a required_status_checks rule has parameters.strict_required_status_checks_policy == true. If several such rules exist, any strict one counts.",
+      "reason": "This is the stated mapping. The check stays symmetric and simple, and the report names all three rules per branch.",
+      "rejected": [
+        {
+          "option": "Check only the rules each branch needs (force-push and deletion on athena/records, up-to-date on main)",
+          "why": "The criteria want all three rules named per branch, so Sri sees the full picture."
+        }
+      ]
+    },
+    {
+      "choice": "The report and the module doc both state that only rulesets are seen and classic branch protection is not visible.",
+      "reason": "This answers the earlier finding, and a 'not in force' result could otherwise be misread as 'unprotected'.",
+      "rejected": []
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/host_rules.rs",
+      "action": "create",
+      "purpose": "Host-rules check (D111, records-history §3, part 3 of job 1): the RuleState and BranchRules types, check(runner, owner, repo), the JSON evaluation, the report renderer, and the tests.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "purpose": "Add `pub mod host_rules;` in alphabetical order, after `gh`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "action": "modify",
+      "purpose": "Add pub fn get_args(path) -> Vec<String> returning [\"api\", path], with a doc note that gh api defaults to GET.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an entry under [Unreleased] ### Added. It describes the read-only host-rules check, cites records-history §3 and §10, and states the rulesets-only limit.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/records-history.md",
+      "action": "modify",
+      "purpose": "In §10 item 1, note that the host-rules confirmation is done by the read-only check in host_rules.rs. It sees rulesets only, so classic branch protection is not visible and Sri must set the §3 rules as rulesets.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read the Runner trait and GhFailure in gh.rs. Add get_args(path) to gh.rs.",
+    "Create host_rules.rs. Give it a //! doc citing D111 and docs/design/records-history.md §3, calling it part 3 of job 1 and stating that only rulesets are seen. Define the Rule enum or constants, RuleState, BranchRules, and fn check(runner: &dyn Runner, owner, repo) -> Vec<BranchRules> over [\"athena/records\", \"main\"]. Define fn evaluate(reply: &str) -> [RuleState; 3] and fn render(&[BranchRules]) -> String.",
+    "Write the tests with a RecordingRunner (RefCell<Vec<Vec<String>>> plus a queue of Result<String>), covering criteria 1-5.",
+    "Add `pub mod host_rules;` to lib.rs.",
+    "Add the CHANGELOG entry citing §3 and §10, and the records-history §10 item 1 note.",
+    "Run `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Record each command, its exit status and its output tail in the evidence."
+  ],
+  "risks": [
+    {
+      "risk": "Sri reads 'not in force' as 'branch unprotected' when classic protection is on.",
+      "mitigation": "A rules/branches reply lists only the rules that apply to the branch, including those inherited from org-level rulesets. The report and docs say 'rulesets only'. Classic protection is never reported as in force."
+    },
+    {
+      "risk": "The API shape differs slightly, for example the parameters key is missing.",
+      "mitigation": "Parse leniently, and treat any reply that is not a JSON array as Unknown. Skip array items that lack a string `type`."
+    },
+    {
+      "risk": "The evidence for criterion 7 is weak again.",
+      "mitigation": "Run the fmt, clippy and test commands, and quote each with its exit status and output tail."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit tests with a fake Runner that returns canned rules/branches JSON: a list with non_fast_forward and deletion for athena/records, and one with required_status_checks (strict true) for main.",
+      "command": "cargo test -p athena-core host_rules",
+      "observes": "Check results give force-push forbidden and deletion forbidden InForce on athena/records, and up-to-date required InForce on main.",
+      "fails_without": "If the mapping from non_fast_forward, deletion and strict required_status_checks to in-force states were missing, the asserts on the fixture replies would fail."
+    },
+    {
+      "criterion": 2,
+      "method": "Tests for `[]`, strict false, strict absent, and a list with only non_fast_forward.",
+      "command": "cargo test -p athena-core host_rules",
+      "observes": "`[]` gives all three NotInForce. Strict false or absent gives up-to-date NotInForce. The partial list gives force-push InForce and deletion NotInForce.",
+      "fails_without": "If absent rules defaulted to in force, or the strict flag was ignored, these asserts would fail."
+    },
+    {
+      "criterion": 3,
+      "method": "A recording fake Runner stores every args vector.",
+      "command": "cargo test -p athena-core host_rules",
+      "observes": "Exactly two calls: [\"api\",\"repos/o/r/rules/branches/athena/records\"] and [\"api\",\"repos/o/r/rules/branches/main\"]. No arg is --method, -f, -F or --input, and none contains \"protection\".",
+      "fails_without": "If the code used --method, -f, --input or the /protection path, the recorded-args assertion would fail."
+    },
+    {
+      "criterion": 4,
+      "method": "A fake Runner returns Err(GhFailure with status 403), Err(GhFailure with status 503), and Ok(\"not json\"). One test also covers a failure on one branch only.",
+      "command": "cargo test -p athena-core host_rules",
+      "observes": "All three rules on the affected branch are Unknown. The other branch still gets its own result.",
+      "fails_without": "If errors or bad JSON were mapped to NotInForce (or InForce), the Unknown asserts would fail."
+    },
+    {
+      "criterion": 5,
+      "method": "A test renders the report and checks its text.",
+      "command": "cargo test -p athena-core host_rules",
+      "observes": "The report contains lines such as 'athena/records: force-push forbidden: in force', one line for each of the 3 rules on each of the 2 branches (including 'unknown' lines), and a sentence that only rulesets are seen and classic branch protection is not.",
+      "fails_without": "If the report omitted a rule or the rulesets-only note, the string asserts would fail."
+    },
+    {
+      "criterion": 6,
+      "method": "Read the //! doc in host_rules.rs, `pub mod host_rules;` in lib.rs, and the CHANGELOG [Unreleased] ### Added entry. The test run shows the module compiled in.",
+      "command": "cargo test -p athena-core host_rules",
+      "observes": "The doc cites D111 and docs/design/records-history.md §3 and says 'part 3 of job 1'. The CHANGELOG entry cites §3 and §10. lib.rs lists the module, and the host_rules tests run under athena-core.",
+      "fails_without": "If the module were not registered, the tests above would not be compiled or run, so this command would show no host_rules tests."
+    },
+    {
+      "criterion": 7,
+      "method": "The producer runs `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked` from the repo root, and quotes each command with its exit status and last output lines.",
+      "command": "cargo clippy --all-targets --locked -- -D warnings",
+      "observes": "All three exit 0 and the evidence cites each command as run.",
+      "fails_without": "A lint, format or test regression anywhere in the workspace would give a non-zero exit."
+    }
+  ],
+  "open_questions": [
+    "How the owner and repo are supplied is left to the caller, because CLI wiring is out of scope. The function takes them as arguments.",
+    "Whether gh api returns the rules/branches reply as a plain list at the current API version is assumed from the brief. It was not checked against the live host."
+  ],
+  "producer_section_sha256": "aa557fa4ef86cf3dad6f7ee1302c3fb69c303fe845c45c086e8bbee8277cc53a"
+}

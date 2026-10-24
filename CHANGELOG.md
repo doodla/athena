@@ -7,6 +7,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- `host_rules` in `athena-core`: a read-only check of the host rules that `docs/design/records-history.md` §3
+  requires, as the confirmation named in §10 item 1 (D111, part 3 of job 1). It reads
+  `repos/{owner}/{repo}/rules/branches/{branch}` with a plain GET for `athena/records` and `main`, and reports
+  force-push forbidden, deletion forbidden and up-to-date required as in force, not in force, or unknown (a
+  failed call or unreadable reply). It sees rulesets only; classic branch protection is not visible through
+  that view. It changes no host setting and is not yet wired into a command.
+
 ### Changed
 
 - The change verifier prompt now says each recorded fmt, clippy or test check it cites goes in that criterion's
