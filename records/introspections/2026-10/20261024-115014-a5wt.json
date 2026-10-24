@@ -1,0 +1,34 @@
+{
+  "schema": "athena.introspection/1",
+  "id": "20261024-115014-a5wt",
+  "at": "2026-10-24T11:50:14.060211186Z",
+  "trigger": "failure",
+  "job": "20261024-114123-p0n4",
+  "intervention": null,
+  "class_of_work": "code",
+  "category": "failed",
+  "what_happened": "The job \"Write landing intent and landing records from athena land --pr\" (20261024-114123-p0n4) failed in planning, before any code was written. After round 3 of 3 the critic still said the plan needed revising. It confirmed that the types, hook points, failure policy, records paths and demonstrations all fit the request. It found one major gap: the plan's retry after a rejected push cannot work. RecordsWriter::append moves the local athena/records ref before the push. After a rejected push, local and remote have diverged. sync_from, as specified, errors on divergence, so the planned \"re-sync and rebuild\" cannot recover. An unpushed local intent, left by a failed push or a crash, could also make every later land --pr fail before the merge once anything else writes to the remote branch. Two minor findings: the \"merged but not verified\" state and the drain.rs caller of Athena::land_pr are not covered. One nit: stray local commits between base and head would block the merge with an unclear error. The event lists no unmet acceptance criteria and no failed checks. Nothing was delivered.",
+  "failure_class": "20261024-115027-s1ww",
+  "new_class": true,
+  "earlier_cases": [],
+  "decisions_matched": [],
+  "cause": "The planner designs error and recovery paths from the intended behavior of the pieces it names, not from what those pieces do in the failure state. Here it never traced the state after a rejected push, where the local ref has already moved. Nothing in the plan template asks, for each failure path, for the state it starts from and the existing function's behavior in that state. The critic finds this only by reading code, so it surfaces late. Round 3 gets no fallback. Major findings are not required to shrink, no partial plan is kept, and a retry starts without the earlier critic's findings. The same late-critic gap already failed three planning jobs, so this is a wider planning-stage weakness.",
+  "prevention_kind": "design-change",
+  "prevention": "Change the planning stage in two ways. (1) Require the plan to include a failure-path table. For each recovery or retry step it names the exact starting state (for example \"local ref ahead of remote after a rejected push\"), the existing function it calls, and that function's cited behavior in that state. The first critic round checks the table against the code. (2) Replace the hard fail after round 3 with a fallback. Keep the last plan and the open findings, and either let the operator resolve them or split the job. A retry then starts with the prior critic's findings. This would have caught the sync_from divergence gap in round 1 and kept the work.",
+  "proposed_request": "Make athena land --pr write landing intent and landing records to the athena/records branch, and make the push-failure recovery work. Outcome: when the push of a records commit is rejected, or a crash leaves an unpushed local records commit, the next land --pr recovers on its own. It must not fail with a divergence error, and it must not merge a pull request without its intent record. Requirements: (1) Before the merge, write the landing intent and push it. If the push is rejected, discard or rebase the unpushed local commit onto the fetched remote tip and retry a bounded number of times. Do not rely on sync_from as it stands, because it refuses divergence. Change it, or add a distinct recover path, and state which. (2) After the merge, write the landing record with the host commit. Define and record the state \"merged but not verified\", and say what a rerun does in that state. (3) Cover the second caller of Athena::land_pr in drain.rs so the drain behaves the same. (4) Give a clear error when stray local commits sit between the base and the head. Acceptance: tests show (a) a rejected push followed by a successful retry, (b) a leftover unpushed local intent followed by a remote write, after which the next land --pr still succeeds, (c) the merged-but-unverified state recorded and handled on rerun, (d) the drain path writing the same records. Each test must fail without the behavior it covers. Include a table in the plan listing each failure path, its starting state and the existing function behavior it depends on.",
+  "evidence": {
+    "model": "claude-sonnet-5-5",
+    "cost_usd": 0.067268,
+    "input_tokens": 2,
+    "output_tokens": 1612
+  },
+  "status": "recorded",
+  "failure": null,
+  "flags": [],
+  "dropped_ids": [
+    "20261018-114052-07tm",
+    "20261018-113436-cxg9",
+    "20261018-100226-1mfq"
+  ],
+  "from_jev": false
+}
