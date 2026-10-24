@@ -24,7 +24,7 @@ the same step.
   automatically.
 - Your mistakes (Sri, 2026-10-23; OP-21): log each one as it happens with `athena intervene "Mistake: <what
   went wrong and what it cost>" --why "<what Athena would have had to know or check to prevent it>"
-  --class <class> --category other`, so it becomes work for Athena.
+  --class <class> --category mistake`, so it becomes work for Athena.
 - Sandbox facts and open blockers: `operator/preflight.md`.
 - Your own decisions about operating: `operator/decisions.md`.
 - Everything else, including what to do next: ask Athena.

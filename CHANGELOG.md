@@ -9,6 +9,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The change verifier prompt now tells verifiers to cite the recorded fmt, clippy and test results under "Checks
+  Athena ran on this tree" instead of rerunning the full suite, and to run a check only if its record is missing or
+  failed. On 2026-10-18 verifiers rerunning the full suite (about 11 minutes) timed out.
 - A `mistake` intervention category (`athena intervene --category mistake`). `athena status` and `athena audit`
   (and their JSON) count mistakes per class of work and per cause, in a `mistakes` field apart from
   `interventions_by_category`, and list the prevention (a check, knowledge, or a design change) proposed for

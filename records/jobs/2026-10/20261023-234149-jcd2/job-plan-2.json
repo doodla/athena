@@ -1,0 +1,150 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261023-234149-jcd2",
+  "round": 2,
+  "at": "2026-10-23T23:44:56.824875871Z",
+  "invocation_seq": 5,
+  "approach": "Prompt-only change plus one changelog entry; no Rust. In crates/athena-context/prompts/verifier.md, add a short block on the recorded checks under the heading \"## Checks Athena ran on this tree\" (rendered at crates/athena-context/src/briefs.rs:461). The block says those results are recorded for this candidate: cite them in evidence, do not rerun them, and do not rerun the full `cargo test` suite. It says a criterion such as \"cargo test passes\" is met by citing the recorded check. It says a behavior criterion also needs at least one targeted command the verifier ran (e.g. `cargo test -p <crate> <filter>`), listed in commands, because verify.rs counts a behavior criterion unmet when no command is listed (verify.rs:336, 356). It says new behavior is exercised only with such targeted commands. It adds a new rule, since none exists today: a failed or missing recorded check is not a pass, and the verifier may then run that one check. Apply one sentence of the same rule to crates/athena-cap-change/prompts/verifier.md. Add a \"### Changed\" entry under [Unreleased] in CHANGELOG.md, before \"### Fixed\", naming the 2026-10-18 verifier timeouts (full suite about 11 minutes) as the reason, as the request states them. Run cargo test -p athena-context once; do not run the full suite.",
+  "decisions": [
+    {
+      "choice": "Change only the two verifier prompts and CHANGELOG.md, using prose rules.",
+      "reason": "The request is a narrow retry: verifiers should reuse recorded results. Prompt text is the lever the brief allows, and the verifier role reads its instructions from these files.",
+      "rejected": [
+        {
+          "option": "Change Rust (verify.rs or the verifier invocation) so recorded results are passed in structurally, or so a criterion auto-passes.",
+          "why": "Out of scope: no Rust source changes."
+        },
+        {
+          "option": "Add a watchdog, early stop or resumable retry for timeouts.",
+          "why": "Explicitly out of scope for this retry."
+        }
+      ]
+    },
+    {
+      "choice": "For a behavior criterion, cite the recorded check in evidence and also run and list at least one targeted command in commands. A content criterion may rest on the citation alone.",
+      "reason": "verify.rs:336 sets commands_verified for a behavior criterion only when commands is non-empty and every command was seen running; verify.rs:340-356 marks it unmet otherwise. A citation-only behavior criterion would be rejected by the code, so the prompt must require a run command. This settles the earlier open question 2: no Rust change is needed.",
+      "rejected": [
+        {
+          "option": "Cite recorded checks only, with no command run, for behavior criteria.",
+          "why": "verify.rs:336 rejects it: the criterion is marked unmet with 'it cites no command'."
+        },
+        {
+          "option": "List recorded checks in commands as if the verifier ran them.",
+          "why": "The verifier did not run them, and commands must be exactly as run; Athena would also see them as unseen."
+        }
+      ]
+    },
+    {
+      "choice": "Add the failed-or-missing rule as a new sentence rather than keeping an existing one.",
+      "reason": "crates/athena-context/prompts/verifier.md (14 lines) has no such rule; its only mention of checks is 'Athena already ran the checks.' The rule must be written, not kept.",
+      "rejected": [
+        {
+          "option": "Assume the rule exists and only keep it.",
+          "why": "It is absent from the file, so criterion 3 would go unshown."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-context/prompts/verifier.md",
+      "action": "modify",
+      "purpose": "Add the recorded-check rules: cite fmt, clippy and test results under 'Checks Athena ran on this tree'; do not rerun them or the full cargo test suite; cite them for criteria like 'cargo test passes'; behavior criteria also need a listed targeted command; new behavior uses targeted commands; a failed or missing recorded check is not a pass and the verifier may run that one check.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cap-change/prompts/verifier.md",
+      "action": "modify",
+      "purpose": "Add one sentence that the recorded fmt, clippy and test checks are cited, not rerun.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add a '### Changed' entry under [Unreleased], before '### Fixed', naming the 2026-10-18 verifier timeouts (full suite about 11 minutes) as the reason.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Re-read crates/athena-core/src/verify.rs lines 335-356 to confirm the behavior-criterion rule before writing the prompt text. If it differs from this plan, stop and report; do not change Rust.",
+    "Edit crates/athena-context/prompts/verifier.md: add the recorded-check block citing the heading 'Checks Athena ran on this tree' (briefs.rs:461), the cite-don't-rerun rule, the behavior-criterion command rule, the targeted-command rule, and the new failed-or-missing rule.",
+    "Edit crates/athena-cap-change/prompts/verifier.md: add one sentence that the recorded fmt, clippy and test checks are cited, not rerun.",
+    "Edit CHANGELOG.md: add a '### Changed' section under [Unreleased], before '### Fixed', naming the 2026-10-18 verifier timeouts (full suite about 11 minutes) as the reason.",
+    "Run cargo test -p athena-context once. Do not run the full suite; Athena runs fmt, clippy and the full test suite."
+  ],
+  "risks": [
+    {
+      "risk": "Verifiers read 'cite, do not rerun' as permission to skip checks that were never recorded.",
+      "mitigation": "The new sentence says a failed or missing recorded check is not a pass, and the verifier may then run that one check."
+    },
+    {
+      "risk": "A behavior criterion satisfied only by citation is rejected by Athena (verify.rs:336, 356).",
+      "mitigation": "The prompt requires a targeted command run and listed in commands for every behavior criterion; citation alone is allowed only for content criteria."
+    },
+    {
+      "risk": "The prompt edit changes a brief snapshot and breaks cargo test -p athena-context.",
+      "mitigation": "Run that command once; if it fails on snapshot text, stop and report rather than editing snapshot files, which are outside the deliverables."
+    },
+    {
+      "risk": "The producer reruns the full suite while testing, repeating the problem.",
+      "mitigation": "Run only cargo test -p athena-context; Athena runs fmt, clippy and the full test suite."
+    },
+    {
+      "risk": "The recorded-check wording does not match the rendered check names (e.g. 'test: `cargo test`').",
+      "mitigation": "Refer to the recorded checks generically under the heading, not by exact line format; the heading text at briefs.rs:461 is quoted exactly."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Content check: read the changed prompt and confirm it names the heading 'Checks Athena ran on this tree', says the recorded fmt, clippy and test results are recorded for the candidate and must be cited in evidence, and says the full cargo test suite is not to be rerun.",
+      "command": "Read crates/athena-context/prompts/verifier.md",
+      "observes": "One sentence or adjacent sentences covering all three points are present.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Content check: read the prompt and confirm (a) a criterion such as 'cargo test passes' is met by citing the recorded check, (b) a behavior criterion also needs a targeted command the verifier ran and listed in commands, and (c) new behavior is exercised only with targeted commands such as `cargo test -p <crate> <filter>`.",
+      "command": "Read crates/athena-context/prompts/verifier.md",
+      "observes": "All three statements are present.",
+      "fails_without": null
+    },
+    {
+      "criterion": 3,
+      "method": "Content check: read the prompt and confirm the new sentence says a failed or missing recorded check is not a pass and the verifier may then run that one check. This sentence is added by the producer; the base file has no such rule.",
+      "command": "Read crates/athena-context/prompts/verifier.md",
+      "observes": "The sentence is present and says both points.",
+      "fails_without": null
+    },
+    {
+      "criterion": 4,
+      "method": "Content check: inspect the changelog diff for a new '### Changed' entry under [Unreleased], placed before '### Fixed', that names 2026-10-18, the verifier timeouts and the ~11 minute full suite as the reason.",
+      "command": "git diff HEAD~1 -- CHANGELOG.md",
+      "observes": "The added lines name 2026-10-18, the verifier timeouts and the about 11 minute full suite, under [Unreleased].",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "Content check: list changed files against the base commit; confirm only the two verifier prompts and CHANGELOG.md changed and no Rust file or watchdog/retry code was added.",
+      "command": "git diff HEAD~1 --name-only",
+      "observes": "Output lists only crates/athena-context/prompts/verifier.md, crates/athena-cap-change/prompts/verifier.md and CHANGELOG.md.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Regression check: run the athena-context crate's tests and confirm exit status 0. This shows the prompt edit did not break the crate's build or tests. No named test is claimed to cover the prompt text.",
+      "command": "cargo test -p athena-context",
+      "observes": "Exit status 0 and all athena-context tests reported ok.",
+      "fails_without": "A prompt edit that breaks the crate's build or any of its tests makes this command fail. It would not show that the prompt wording itself is correct."
+    }
+  ],
+  "open_questions": [
+    "Whether any brief snapshot file embeds the verifier prompt text. If cargo test -p athena-context fails on snapshot text, the producer must stop and report, not edit snapshot files.",
+    "The 2026-10-18 timeouts and the ~11 minute figure were not found in CHANGELOG.md's first 60 lines or in the code. The entry cites them as the request states them.",
+    "That CHANGELOG.md has an [Unreleased] section with a '### Fixed' heading. If it does not, the producer stops and reports."
+  ],
+  "producer_section_sha256": "ee0cd054caba4e61793e5c253e33956460cab33ec8b8e02a9efc0fc00db85708"
+}
