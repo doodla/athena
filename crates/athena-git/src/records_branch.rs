@@ -19,8 +19,9 @@
 //! - [`Change::Delete`] and [`Change::Rename`] are always refused: they would modify or remove a record.
 //!
 //! A refused batch changes nothing: the whole batch is checked before any commit is made. Trees are built in
-//! a temporary index, so the user's index and work tree are never touched. The only caller is the importer
-//! in `athena-core` (`records_import`), which is not wired into the pipeline and has not been run against main.
+//! a temporary index, so the user's index and work tree are never touched. The importer in `athena-core`
+//! (`records_import`) uses [`RecordsWriter::append`]; landing (`athena-core` `gh`) uses
+//! [`RecordsWriter::append_to_remote`], which builds on the remote tip and publishes to the remote (§8.2).
 
 use crate::index::{IndexEdit, TempIndex};
 use crate::{Git, GitError, null_oid};
@@ -29,6 +30,9 @@ use std::time::Duration;
 
 /// The full name of the records branch.
 pub const RECORDS_REF: &str = "refs/heads/athena/records";
+
+/// The records branch's short name, as it is spelled on a remote.
+pub const RECORDS_BRANCH: &str = "athena/records";
 
 /// How many times a write is tried against a moving tip before it gives up.
 pub const DEFAULT_MAX_ATTEMPTS: usize = 8;
@@ -124,23 +128,7 @@ impl<'a> RecordsWriter<'a> {
             }
             before_swap(attempt);
 
-            let base = match &tip {
-                Some(tip) => tip.clone(),
-                None => self.git.empty_tree()?,
-            };
-            let index = TempIndex::from_tree(self.git, &base)?;
-            let edits: Vec<IndexEdit> = new_files
-                .into_iter()
-                .map(|(path, oid)| IndexEdit::Put {
-                    mode: "100644".into(),
-                    oid,
-                    path,
-                })
-                .collect();
-            index.apply(&edits)?;
-            let tree = index.write_tree()?;
-            let parents: Vec<&str> = tip.as_deref().into_iter().collect();
-            let commit = self.git.commit_tree(&tree, &parents, message, sign)?;
+            let commit = self.build_commit(tip.as_deref(), new_files, message, sign, &[])?;
 
             let expected = tip.as_deref().unwrap_or_else(|| null_oid());
             let swap = self
@@ -150,6 +138,133 @@ impl<'a> RecordsWriter<'a> {
                 return Ok(commit);
             }
             last = swap.stderr;
+            if attempt < self.max_attempts {
+                std::thread::sleep(Duration::from_millis(5 * attempt as u64));
+            }
+        }
+        Err(RecordsError::Contended {
+            attempts: self.max_attempts,
+            last,
+        })
+    }
+
+    /// Builds (but does not publish) a commit holding `base`'s tree plus `new_files`. Its parents are `base`
+    /// (when there is one) and then `extra_parents`, which only carry reachability (§6.1).
+    fn build_commit(
+        &self,
+        base: Option<&str>,
+        new_files: Vec<(String, String)>,
+        message: &str,
+        sign: bool,
+        extra_parents: &[&str],
+    ) -> Result<String, RecordsError> {
+        let base_tree = match base {
+            Some(tip) => tip.to_string(),
+            None => self.git.empty_tree()?,
+        };
+        let index = TempIndex::from_tree(self.git, &base_tree)?;
+        let edits: Vec<IndexEdit> = new_files
+            .into_iter()
+            .map(|(path, oid)| IndexEdit::Put {
+                mode: "100644".into(),
+                oid,
+                path,
+            })
+            .collect();
+        index.apply(&edits)?;
+        let tree = index.write_tree()?;
+        let mut parents: Vec<&str> = base.into_iter().collect();
+        parents.extend(extra_parents.iter().copied());
+        Ok(self.git.commit_tree(&tree, &parents, message, sign)?)
+    }
+
+    /// Resets the local records branch to what `remote` holds (§8.2, the recover path; D111). A local
+    /// branch that is ahead of the remote, or that has diverged from it, loses the commits the remote
+    /// does not have: the remote is the source of truth, so such a commit is a leftover of a write that
+    /// never reached it. Returns the remote tip, which is now also the local tip. When the remote has no
+    /// records branch the local branch is left alone and the local tip (possibly `None`) is returned.
+    pub fn sync_from(&self, remote: &str) -> Result<Option<String>, RecordsError> {
+        match self.git.fetch_remote_branch(remote, RECORDS_BRANCH)? {
+            Some(tip) => {
+                if self.tip()?.as_deref() != Some(tip.as_str()) {
+                    self.git.set_ref(RECORDS_REF, &tip)?;
+                }
+                Ok(Some(tip))
+            }
+            None => self.tip(),
+        }
+    }
+
+    /// Appends `changes` as one commit on the **remote** tip and publishes it to `remote` (§8.2; D111).
+    ///
+    /// The commit is built on the remote's records tip and pushed with an expected-tip guard, so it lands
+    /// only if the remote branch still holds that tip. The local branch is reset to the remote first
+    /// ([`sync_from`](Self::sync_from)) and moves to the new commit only after the push succeeded. When the
+    /// push is rejected because another writer moved the remote, the tip is fetched again, the commit is
+    /// rebuilt on it and the push retried, up to the attempt bound; then [`RecordsError::Contended`] is
+    /// returned. A push that fails while the remote tip has not moved is a plain error, not a retry.
+    ///
+    /// `extra_parents` become the second and later parents of the commit (§6.1: a landing record carries the
+    /// pull request's head so its commits stay reachable). When every change is a same-bytes `Put` at an
+    /// existing path, nothing is pushed and the remote tip is returned.
+    pub fn append_to_remote(
+        &self,
+        remote: &str,
+        message: &str,
+        changes: &[Change],
+        extra_parents: &[&str],
+    ) -> Result<String, RecordsError> {
+        self.append_to_remote_with_hook(remote, message, changes, extra_parents, |_| {})
+    }
+
+    /// As [`append_to_remote`](Self::append_to_remote), calling `before_push(attempt)` (from 1) after the
+    /// commit is built and before it is pushed. Tests use it to move the remote at that moment.
+    fn append_to_remote_with_hook(
+        &self,
+        remote: &str,
+        message: &str,
+        changes: &[Change],
+        extra_parents: &[&str],
+        mut before_push: impl FnMut(usize),
+    ) -> Result<String, RecordsError> {
+        let puts = self.validate(changes)?;
+        let sign = self.git.signs_commits()?;
+        self.sync_from(remote)?;
+        let mut last = String::new();
+        for attempt in 1..=self.max_attempts {
+            let remote_tip = self.git.fetch_remote_branch(remote, RECORDS_BRANCH)?;
+            // With no remote branch yet, a local one (a first write that never got out) is the base.
+            let base = match &remote_tip {
+                Some(tip) => Some(tip.clone()),
+                None => self.tip()?,
+            };
+            let new_files = self.plan(base.as_deref(), &puts)?;
+            if new_files.is_empty() {
+                return base.ok_or_else(|| refused("", "nothing to write"));
+            }
+            let commit =
+                self.build_commit(base.as_deref(), new_files, message, sign, extra_parents)?;
+            before_push(attempt);
+            let pushed = match &remote_tip {
+                Some(expected) => {
+                    self.git
+                        .push_if_remote_at(remote, RECORDS_BRANCH, &commit, expected)
+                }
+                None => self.git.push_branch(remote, RECORDS_BRANCH, &commit),
+            };
+            match pushed {
+                Ok(()) => {
+                    self.git.set_ref(RECORDS_REF, &commit)?;
+                    return Ok(commit);
+                }
+                Err(error) => {
+                    let now = self.git.fetch_remote_branch(remote, RECORDS_BRANCH)?;
+                    if now == remote_tip {
+                        return Err(error.into());
+                    }
+                    last = error.to_string();
+                }
+            }
             if attempt < self.max_attempts {
                 std::thread::sleep(Duration::from_millis(5 * attempt as u64));
             }
@@ -509,6 +624,194 @@ mod tests {
         assert_eq!(
             paths(&git, &tip),
             vec!["rival/1.json", "rival/2.json", "rival/3.json", "seed.json"]
+        );
+    }
+
+    /// A bare remote, and a repository (with one commit on main) whose `origin` is that remote.
+    fn bare_remote() -> (tempfile::TempDir, Git) {
+        let dir = tempfile::tempdir().unwrap();
+        let bare = Git::isolated(dir.path());
+        bare.run(["init", "-q", "--bare", "-b", "main"]).unwrap();
+        (dir, bare)
+    }
+
+    fn clone_of(bare: &Git) -> (tempfile::TempDir, Git) {
+        let (dir, git) = repo_with(&[("a.txt", "a")]);
+        let url = bare.dir().to_str().unwrap().to_string();
+        git.run(["remote", "add", "origin", &url]).unwrap();
+        (dir, git)
+    }
+
+    fn remote_tip(bare: &Git) -> Option<String> {
+        bare.rev_parse(RECORDS_REF).unwrap()
+    }
+
+    #[test]
+    fn a_remote_append_publishes_first_then_moves_the_local_branch_and_keeps_extra_parents() {
+        let (_b, bare) = bare_remote();
+        let (_d, git) = clone_of(&bare);
+        let writer = RecordsWriter::new(&git);
+        let first = writer
+            .append_to_remote("origin", "first", &[Change::put("one.json", "1")], &[])
+            .unwrap();
+        assert_eq!(remote_tip(&bare).as_deref(), Some(first.as_str()));
+        assert_eq!(writer.tip().unwrap().as_deref(), Some(first.as_str()));
+        assert!(git.parents(&first).unwrap().is_empty());
+
+        let work = git.head().unwrap().unwrap();
+        let second = writer
+            .append_to_remote(
+                "origin",
+                "second",
+                &[Change::put("two.json", "2")],
+                &[&work],
+            )
+            .unwrap();
+        assert_eq!(git.parents(&second).unwrap(), vec![first.clone(), work]);
+        assert_eq!(remote_tip(&bare).as_deref(), Some(second.as_str()));
+        assert_eq!(writer.tip().unwrap().as_deref(), Some(second.as_str()));
+        // First-parent order is unchanged by the extra parent.
+        assert_eq!(paths(&bare, &second), vec!["one.json", "two.json"]);
+        // The same bytes again is a no-op that pushes nothing.
+        let again = writer
+            .append_to_remote("origin", "again", &[Change::put("two.json", "2")], &[])
+            .unwrap();
+        assert_eq!(again, second);
+    }
+
+    #[test]
+    fn a_rejected_push_is_rebuilt_on_the_fetched_remote_tip_and_retried() {
+        let (_b, bare) = bare_remote();
+        let (_d, git) = clone_of(&bare);
+        let (_d2, rival) = clone_of(&bare);
+        let writer = RecordsWriter::new(&git);
+        let seed = writer
+            .append_to_remote("origin", "seed", &[Change::put("seed.json", "s")], &[])
+            .unwrap();
+        let attempts = Cell::new(0);
+        let rival_tip = Cell::new(None);
+        let local_during = Cell::new(None);
+        let tip = writer
+            .append_to_remote_with_hook(
+                "origin",
+                "mine",
+                &[Change::put("mine.json", "m")],
+                &[],
+                |n| {
+                    attempts.set(n);
+                    if n == 1 {
+                        // Another clone moves the remote after this commit was built and before it is pushed.
+                        rival_tip.set(Some(
+                            RecordsWriter::new(&rival)
+                                .append_to_remote(
+                                    "origin",
+                                    "rival",
+                                    &[Change::put("rival.json", "r")],
+                                    &[],
+                                )
+                                .unwrap(),
+                        ));
+                        local_during.set(writer.tip().unwrap());
+                    }
+                },
+            )
+            .unwrap();
+        let rival_tip = rival_tip.take().unwrap();
+        assert_eq!(attempts.get(), 2, "first push rejected, second accepted");
+        assert_eq!(
+            local_during.take().as_deref(),
+            Some(seed.as_str()),
+            "the local branch did not move while the push was pending or rejected"
+        );
+        assert_eq!(git.parents(&tip).unwrap(), vec![rival_tip]);
+        assert_eq!(remote_tip(&bare).as_deref(), Some(tip.as_str()));
+        assert_eq!(writer.tip().unwrap().as_deref(), Some(tip.as_str()));
+        assert_eq!(
+            paths(&bare, &tip),
+            vec!["mine.json", "rival.json", "seed.json"],
+            "the other writer's record is kept"
+        );
+    }
+
+    #[test]
+    fn a_remote_that_moves_on_every_attempt_ends_in_a_bounded_error_and_the_local_branch_stays() {
+        let (_b, bare) = bare_remote();
+        let (_d, git) = clone_of(&bare);
+        let (_d2, rival) = clone_of(&bare);
+        let writer = RecordsWriter::new(&git).with_max_attempts(3);
+        let seed = writer
+            .append_to_remote("origin", "seed", &[Change::put("seed.json", "s")], &[])
+            .unwrap();
+        let calls = Cell::new(0);
+        let err = writer
+            .append_to_remote_with_hook(
+                "origin",
+                "mine",
+                &[Change::put("mine.json", "m")],
+                &[],
+                |n| {
+                    calls.set(n);
+                    RecordsWriter::new(&rival)
+                        .append_to_remote(
+                            "origin",
+                            "rival",
+                            &[Change::put(format!("rival/{n}.json"), "r")],
+                            &[],
+                        )
+                        .unwrap();
+                },
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, RecordsError::Contended { attempts: 3, .. }),
+            "{err}"
+        );
+        assert_eq!(calls.get(), 3, "bounded: exactly three attempts");
+        assert_eq!(writer.tip().unwrap().as_deref(), Some(seed.as_str()));
+        let tip = remote_tip(&bare).unwrap();
+        assert!(!paths(&bare, &tip).contains(&"mine.json".to_string()));
+    }
+
+    #[test]
+    fn sync_from_resets_a_local_branch_that_is_ahead_or_diverged_and_the_next_write_succeeds() {
+        let (_b, bare) = bare_remote();
+        let (_d, git) = clone_of(&bare);
+        let writer = RecordsWriter::new(&git);
+        let base = writer
+            .append_to_remote("origin", "base", &[Change::put("base.json", "b")], &[])
+            .unwrap();
+
+        // Ahead: a local-only commit on top of the remote tip.
+        let leftover = writer
+            .append("leftover", &[Change::put("leftover.json", "l")])
+            .unwrap();
+        assert_eq!(git.parents(&leftover).unwrap(), vec![base.clone()]);
+        assert_eq!(
+            writer.sync_from("origin").unwrap().as_deref(),
+            Some(base.as_str())
+        );
+        assert_eq!(writer.tip().unwrap().as_deref(), Some(base.as_str()));
+
+        // Diverged: the remote moves on through another clone while this one holds its own local commit.
+        let local_only = writer
+            .append("local only", &[Change::put("local-only.json", "x")])
+            .unwrap();
+        let (_d2, rival) = clone_of(&bare);
+        let moved = RecordsWriter::new(&rival)
+            .append_to_remote("origin", "rival", &[Change::put("rival.json", "r")], &[])
+            .unwrap();
+        assert_ne!(local_only, moved);
+        assert_eq!(bare.rev_parse(&local_only).unwrap(), None);
+        let tip = writer
+            .append_to_remote("origin", "mine", &[Change::put("mine.json", "m")], &[])
+            .unwrap();
+        assert_eq!(git.parents(&tip).unwrap(), vec![moved]);
+        assert_eq!(remote_tip(&bare).as_deref(), Some(tip.as_str()));
+        assert_eq!(writer.tip().unwrap().as_deref(), Some(tip.as_str()));
+        assert_eq!(
+            paths(&bare, &tip),
+            vec!["base.json", "mine.json", "rival.json"],
+            "neither leftover commit reached the remote"
         );
     }
 

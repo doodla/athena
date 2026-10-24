@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261024-115923-02gf",
+  "round": 2,
+  "at": "2026-10-24T12:04:05.960074715Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The plan does not say where LandingCommit.verification comes from, and no existing record supplies it.",
+      "evidence": "LandingCommit.verification is `RecordId`. The `Verification` struct (records.rs:718) has fields job, candidate_commit, verified_fingerprint and so on, but no id. The plan defers this ('the producer must find it first and ask'). Criterion 1 requires commits with tree, job and verification, so the producer may have to stop mid-run. Fix: Decide now. Either (a) state the id source, for example a deterministic RecordId derived from the job's verification record path, and name the function that computes it; or (b) if history.rs or Verification must change, add that file to the deliverables and record the decision. Do not leave it as a step-1 discovery.",
+      "location": "Open questions 1 / Steps 1; crates/athena-data/src/history.rs:134, crates/athena-data/src/records.rs:718",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "expected_base has to be main's tip sha, but the plan takes it from the default branch name.",
+      "evidence": "The doc comment on `expected_base` says 'Main's tip when the intent was written', and `LandingIntent::validate` calls check_sha on it. The plan says 'Expected base comes from PrHost::default_branch passed into the sink'. That returns a branch name, so validation would refuse the intent. Fix: Resolve the default branch to the remote's tip sha (for example with the remote_base the plan already uses for the commit range) and pass that sha into the sink. In criterion 1, assert that expected_base equals the remote main tip.",
+      "location": "Open questions 3; crates/athena-data/src/history.rs:91-104",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The claim that the code 'does not compile otherwise' is wrong because LandPr.records is an Option.",
+      "evidence": "Decision 1 makes `records: Option<&dyn LandingRecords>`. Athena::land_pr could pass `records: None` and still compile, so the stated argument does not show the production path uses the constructor. Fix: Remove the compile claim. State that the wiring is shown by the constructor test plus a diff inspection showing Athena::land_pr passes Some(GitLandingRecords::for_remote(..)). Optionally, have Athena::land_pr return an error if the constructor fails rather than falling back to None.",
+      "location": "Demonstrations, Criterion 8",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "'Exit codes unchanged' is asserted, not observed.",
+      "evidence": "The demonstration says 'exit-code mapping unchanged' but names no test or assertion. land_pr returns Ok with warnings, so the exit code depends on how main.rs and drain.rs map that Ok. Fix: Assert that land_pr returns Ok (the same result shape as an open PR with no merge confirmed today), and note that main.rs is untouched in the diff.",
+      "location": "Demonstrations, Criterion 7",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "sync_from does not exist yet. Criterion 12 talks about how it 'changed', but the plan adds it new.",
+      "evidence": "There is no `sync_from` anywhere in crates/. RecordsWriter exposes only new, with_max_attempts, tip and append. Fix: In the design doc, describe sync_from as a new reset-to-remote step (the 'distinct recover path' option in criterion 12).",
+      "location": "Files: records_branch.rs, 'sync_from'",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan follows the accepted reading. It builds on the remote tip, pushes with a lease, moves the local ref only after the push succeeds, writes the intent before the merge and the landing after it, and reuses RecordsWriter and the history.rs types. Most demonstrations would fail without the behavior. Two gaps remain in the snapshot code. First, LandingCommit.verification is a RecordId, but the Verification record in records.rs has no id field. The plan leaves this as step 1 and an open question, so the landing record in criterion 1 may not be buildable inside one producer run. Second, LandingIntent.expected_base must be a commit sha (check_sha), but the plan takes it from PrHost::default_branch, which is a branch name. Two smaller points: the claim that the code would not compile if Athena::land_pr passed no sink is false because the field is an Option, and criterion 7's unchanged exit codes are asserted but never observed. Settle the verification id and the expected_base source in the plan, then accept."
+}

@@ -155,7 +155,7 @@ fn operations() -> Vec<Operation> {
             |c| c.checks("abc").map(|_| ()),
         ),
         ("merge", "repos/example/project", |c| {
-            c.merge(7, "abc", &text())
+            c.merge(7, "abc", &text()).map(|_| ())
         }),
         ("merged commit", "repos/example/project/pulls/7", |c| {
             c.merged_commit(&link()).map(|_| ())
@@ -486,6 +486,7 @@ fn land(runner: &Injecting) -> (Result<athena_core::gh::PrReport>, Vec<String>) 
         remote: &NoRemote(RefCell::new(None)),
         host: &client,
         content: &Fingerprints,
+        records: None,
     });
     (result, lines.0.into_inner())
 }

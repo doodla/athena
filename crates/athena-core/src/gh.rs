@@ -10,6 +10,7 @@
 //! it was merged, runs the merged-content check of [`crate::pr`]: the job is landed on a matching
 //! fingerprint, and `merged-unverified` otherwise. The merged commit is never found by reading trailers.
 
+use crate::land::pr_commits;
 use crate::pr::{
     Ancestry, Content, GitContent, Host, LinkState, PrLink, PushRequest, check_push, load_link,
     observe_merge, store_link,
@@ -17,8 +18,10 @@ use crate::pr::{
 use crate::state::StateDir;
 use crate::{Athena, Ui};
 use anyhow::{Context, Result, bail};
+use athena_data::history::{self, HistoryRecord, Landing, LandingCommit, LandingIntent};
 use athena_data::records::{HostError, HostOperation, MessageClass, Verdict, WorkPhase};
 use athena_data::{JobId, RecordId};
+use athena_git::records_branch::{Change, RecordsWriter};
 use athena_git::{CommitText, Git};
 use serde::Serialize;
 use serde_json::Value;
@@ -407,7 +410,8 @@ pub trait PrHost: Host {
     fn checks(&self, commit: &str) -> Result<Checks>;
     /// Asks the host to merge the pull request, guarded by the head commit it was opened with, by a merge
     /// method the repository allows (see [`MergeMethods::choose`]). `text` is the message a squash carries.
-    fn merge(&self, number: u64, head: &str, text: &CommitText) -> Result<()>;
+    /// Returns the method the host was asked to use, which the landing record names (§5.3).
+    fn merge(&self, number: u64, head: &str, text: &CommitText) -> Result<MergeMethod>;
     /// The workflow runs of a commit: whether each is still going, how it ended, and which try it is on.
     fn ci_runs(&self, commit: &str) -> Result<Vec<CiRunState>>;
     /// Asks the host to run the failed jobs of one completed workflow run again. The host refuses while the
@@ -796,7 +800,7 @@ impl PrHost for GhClient<'_> {
         Ok(classify_checks(&runs, &status))
     }
 
-    fn merge(&self, number: u64, head: &str, text: &CommitText) -> Result<()> {
+    fn merge(&self, number: u64, head: &str, text: &CommitText) -> Result<MergeMethod> {
         let repo = self.api(
             HostOperation::ReadRepo,
             "GET",
@@ -816,7 +820,7 @@ impl PrHost for GhClient<'_> {
             &self.repo_path(&format!("pulls/{number}/merge")),
             &fields,
         )?;
-        Ok(())
+        Ok(method)
     }
 
     fn ci_runs(&self, commit: &str) -> Result<Vec<CiRunState>> {
@@ -1272,6 +1276,10 @@ pub struct LandPr<'a> {
     pub remote: &'a dyn Remote,
     pub host: &'a dyn PrHost,
     pub content: &'a dyn Content,
+    /// Where the landing-intent and landing records are written (§5.2, §5.3 of
+    /// `docs/design/records-history.md`). `Athena::land_pr` always passes one, built by
+    /// [`GitLandingRecords::for_remote`]; `None` skips the records and is for tests of the rest of the flow.
+    pub records: Option<&'a dyn LandingRecords>,
 }
 
 impl std::fmt::Debug for LandPr<'_> {
@@ -1297,6 +1305,225 @@ pub struct PrReport {
     pub reruns: u32,
     /// The first failing test's name, read from the failed job's log, when the checks were red.
     pub failing_test: Option<String>,
+    /// Things the caller must be told that are not failures: a merge whose landing record was not written,
+    /// naming the landing-intent record that reconciliation will use (§8.1).
+    pub warnings: Vec<String>,
+}
+
+/// The records `land_pr` writes around the merge (§5.2, §5.3, §8 of `docs/design/records-history.md`).
+pub trait LandingRecords {
+    /// The commit the remote's default branch `branch` holds now: the intent's expected base, and the lower
+    /// bound of the pull request's commits.
+    fn base_tip(&self, branch: &str) -> Result<String>;
+    /// Writes the landing-intent record for the pull request, **before** the merge, and returns its id. The
+    /// commits in `expected_base..head` are checked first; one without a verification is an error and
+    /// nothing is written. The intent of an earlier run for the same pull request and head is reused.
+    fn intent(&self, pr_number: u64, head: &str, expected_base: &str) -> Result<RecordId>;
+    /// Writes the landing record, **after** the merge was confirmed, and returns its id. Its records commit
+    /// takes `head` as a second parent (§6.1).
+    fn landing(&self, landing: &LandingFacts) -> Result<RecordId>;
+}
+
+/// What is known about a merge once the host reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LandingFacts {
+    pub intent: RecordId,
+    pub expected_base: String,
+    pub pr_number: u64,
+    pub head: String,
+    pub host_commit: String,
+    pub merge_method: MergeMethod,
+}
+
+/// The verification record that covers a commit of `job`. A verification has no id of its own: there is
+/// exactly one per job, stored under the job's directory, so the job's id names it (§5.3). The bootstrap job
+/// has no such id, so a commit of it cannot be recorded and the error names the commit. If a verification
+/// ever gets an id of its own, this is the one place to change.
+pub fn verification_id(job: &JobId, commit: &str) -> Result<RecordId> {
+    match job {
+        JobId::Id(id) => Ok(id.clone()),
+        JobId::Bootstrap => bail!(
+            "commit {commit} belongs to the bootstrap job, which has no verification record to name in a \
+             landing record"
+        ),
+    }
+}
+
+/// Directory of landing-intent files on the records branch.
+const INTENT_DIR: &str = "landing-intents";
+/// Directory of landing files on the records branch.
+const LANDING_DIR: &str = "landings";
+
+fn history_method(method: MergeMethod) -> history::MergeMethod {
+    match method {
+        MergeMethod::Merge => history::MergeMethod::Merge,
+        MergeMethod::Squash => history::MergeMethod::Squash,
+        MergeMethod::Rebase => history::MergeMethod::Rebase,
+    }
+}
+
+/// [`LandingRecords`] over a git repository and one of its remotes: records go to the remote's
+/// `athena/records` branch through [`RecordsWriter::append_to_remote`] (§8.2), which builds on the remote
+/// tip and moves the local branch only after the push succeeded.
+#[derive(Debug)]
+pub struct GitLandingRecords<'a> {
+    git: &'a Git,
+    remote: String,
+}
+
+impl<'a> GitLandingRecords<'a> {
+    /// The real sink for `git` and the remote named `remote`. The remote must exist, so a landing cannot go
+    /// ahead with nowhere to put its records (§5.2).
+    pub fn for_remote(git: &'a Git, remote: &str) -> Result<Self> {
+        if remote.trim().is_empty() {
+            bail!("no remote is named, so landing records have nowhere to go");
+        }
+        git.run(["remote", "get-url", remote]).with_context(|| {
+            format!("remote {remote:?} is not configured, so landing records have nowhere to go")
+        })?;
+        Ok(GitLandingRecords {
+            git,
+            remote: remote.to_string(),
+        })
+    }
+
+    /// The history records under `dir` on the remote's records branch (the local branch is first reset to
+    /// it, see [`RecordsWriter::sync_from`]).
+    fn existing(&self, dir: &str) -> Result<Vec<HistoryRecord>> {
+        let Some(tip) = RecordsWriter::new(self.git).sync_from(&self.remote)? else {
+            return Ok(Vec::new());
+        };
+        let oids: Vec<String> = self
+            .git
+            .ls_tree_under(&tip, dir)?
+            .into_iter()
+            .map(|e| e.oid)
+            .collect();
+        self.git
+            .cat_blobs(&oids)?
+            .iter()
+            .map(|bytes| {
+                HistoryRecord::parse(&String::from_utf8_lossy(bytes))
+                    .context("an existing record on the records branch is not valid")
+            })
+            .collect()
+    }
+
+    /// The pull request's commits with the verification record that covers each (§5.3).
+    fn commits(&self, expected_base: &str, head: &str) -> Result<Vec<LandingCommit>> {
+        pr_commits(self.git, expected_base, head)?
+            .into_iter()
+            .map(|c| {
+                Ok(LandingCommit {
+                    verification: verification_id(&c.job, &c.sha)?,
+                    sha: c.sha,
+                    tree: c.tree,
+                    job: c.job,
+                })
+            })
+            .collect()
+    }
+
+    /// Validates `record`, then writes it as `<dir>/<id>.json` in one commit with `extra_parents`.
+    fn write(
+        &self,
+        dir: &str,
+        id: &RecordId,
+        record: &HistoryRecord,
+        message: &str,
+        extra_parents: &[&str],
+    ) -> Result<()> {
+        record.validate()?;
+        let bytes = serde_json::to_vec_pretty(record)?;
+        RecordsWriter::new(self.git).append_to_remote(
+            &self.remote,
+            message,
+            &[Change::put(format!("{dir}/{id}.json"), bytes)],
+            extra_parents,
+        )?;
+        Ok(())
+    }
+}
+
+impl LandingRecords for GitLandingRecords<'_> {
+    fn base_tip(&self, branch: &str) -> Result<String> {
+        self.git
+            .fetch_remote_branch(&self.remote, branch)?
+            .with_context(|| {
+                format!(
+                    "the remote {} has no branch {branch}, so the expected base cannot be recorded",
+                    self.remote
+                )
+            })
+    }
+
+    fn intent(&self, pr_number: u64, head: &str, expected_base: &str) -> Result<RecordId> {
+        let commits = self.commits(expected_base, head)?;
+        for record in self.existing(INTENT_DIR)? {
+            if let HistoryRecord::LandingIntent(found) = record
+                && found.pr_number == pr_number
+                && found.head_sha == head
+            {
+                return Ok(found.id);
+            }
+        }
+        let mut job_ids: Vec<JobId> = Vec::new();
+        for commit in &commits {
+            if !job_ids.contains(&commit.job) {
+                job_ids.push(commit.job.clone());
+            }
+        }
+        let now = crate::now();
+        let intent = LandingIntent {
+            id: RecordId::generate(now),
+            created_at: now,
+            pr_number,
+            head_sha: head.to_string(),
+            head_tree_sha: self.git.tree_of(head)?,
+            expected_base: expected_base.to_string(),
+            job_ids,
+        };
+        let id = intent.id.clone();
+        self.write(
+            INTENT_DIR,
+            &id,
+            &HistoryRecord::LandingIntent(intent),
+            &format!("Landing intent for pull request #{pr_number}"),
+            &[],
+        )?;
+        Ok(id)
+    }
+
+    fn landing(&self, facts: &LandingFacts) -> Result<RecordId> {
+        let commits = self.commits(&facts.expected_base, &facts.head)?;
+        for record in self.existing(LANDING_DIR)? {
+            if let HistoryRecord::Landing(found) = record
+                && found.intent == facts.intent
+            {
+                return Ok(found.id);
+            }
+        }
+        let now = crate::now();
+        let landing = Landing {
+            id: RecordId::generate(now),
+            created_at: now,
+            pr_number: facts.pr_number,
+            head_sha: facts.head.clone(),
+            host_commit: facts.host_commit.clone(),
+            merge_method: history_method(facts.merge_method),
+            commits,
+            intent: facts.intent.clone(),
+        };
+        let id = landing.id.clone();
+        self.write(
+            LANDING_DIR,
+            &id,
+            &HistoryRecord::Landing(landing),
+            &format!("Landing record for pull request #{}", facts.pr_number),
+            &[facts.head.as_str()],
+        )?;
+        Ok(id)
+    }
 }
 
 /// Runs the flow. With no stored link: guard and push the branch, open the pull request, store the link.
@@ -1311,6 +1538,7 @@ pub fn land_pr(job: &LandPr) -> Result<PrReport> {
     let mut merge_requested = false;
     let mut reruns = 0;
     let mut failing_test = None;
+    let mut warnings = Vec::new();
     observe_merge(job.host, job.content, &mut link, job.verified_fingerprint)?;
     if link.state == LinkState::Open {
         // The pull request's head is whatever its branch holds now, not the job's commit: a fix may have
@@ -1342,9 +1570,46 @@ pub fn land_pr(job: &LandPr) -> Result<PrReport> {
         // The merge gate: the setting is on and every check is green. Nothing else reaches the host's
         // merge endpoint.
         if job.merge_via_rest && seen == Checks::Green {
-            job.host.merge(link.pr_number, &link.head, job.squash)?;
+            // The landing-intent record is on the records branch of the remote before the host is asked to
+            // merge (§5.2). An error here, such as a commit nothing verified, stops the landing before
+            // anything is merged.
+            let intent = match job.records {
+                Some(records) => {
+                    let base = records.base_tip(&job.host.default_branch()?)?;
+                    let id = records.intent(link.pr_number, &link.head, &base)?;
+                    Some((records, base, id))
+                }
+                None => None,
+            };
+            let method = job.host.merge(link.pr_number, &link.head, job.squash)?;
             merge_requested = true;
             observe_merge(job.host, job.content, &mut link, job.verified_fingerprint)?;
+            if let Some((records, expected_base, intent)) = intent {
+                match (&link.state, &link.merged_commit) {
+                    (LinkState::Landed, Some(host_commit)) => {
+                        let facts = LandingFacts {
+                            intent: intent.clone(),
+                            expected_base,
+                            pr_number: link.pr_number,
+                            head: link.head.clone(),
+                            host_commit: host_commit.clone(),
+                            merge_method: method,
+                        };
+                        // The merge is done and stays done: a landing record that cannot be written is a
+                        // warning, and reconciliation (§8.1) writes it from the intent.
+                        if let Err(problem) = records.landing(&facts) {
+                            warnings.push(format!(
+                                "the pull request was merged but its landing record could not be written \
+                                 ({problem:#}); landing-intent record {intent} is on the records branch for reconciliation"
+                            ));
+                        }
+                    }
+                    _ => warnings.push(format!(
+                        "a merge was requested but not confirmed, so no landing record was written; \
+                         landing-intent record {intent} is on the records branch for reconciliation"
+                    )),
+                }
+            }
         }
     }
     store_link(job.state, job.job, &link)?;
@@ -1354,6 +1619,7 @@ pub fn land_pr(job: &LandPr) -> Result<PrReport> {
         merge_requested,
         reruns,
         failing_test,
+        warnings,
     })
 }
 
@@ -1382,6 +1648,7 @@ pub fn confirm_existing_merge(
         merge_requested: false,
         reruns: 0,
         failing_test: None,
+        warnings: Vec::new(),
     }))
 }
 
@@ -1624,6 +1891,9 @@ impl Athena {
             git: &self.git,
             name: remote_name,
         };
+        // The records sink is built here, on the production path, and its error stops the landing: a
+        // landing never goes ahead without somewhere to write its records (§5.2).
+        let sink = GitLandingRecords::for_remote(&self.git, remote_name)?;
         let landed = landed_commit(&self.git, &head, &id, &verification.verified_fingerprint);
         let landed_id = landed.as_ref().ok().cloned();
         let attempt = || -> Result<PrReport> {
@@ -1648,6 +1918,7 @@ impl Athena {
                     remote: &remote,
                     host: &client,
                     content: &content,
+                    records: Some(&sink),
                 }),
                 // The landed commit is not on this branch. If the job's pull request already exists, the
                 // host may have merged it, and that confirms the landing without the local commit.
@@ -2001,10 +2272,19 @@ mod tests {
         per_commit: RefCell<BTreeMap<String, Checks>>,
         /// The head each merge request carried as its guard.
         merge_heads: RefCell<Vec<String>>,
+        /// A merge request that the host refuses.
+        merge_refused: Cell<bool>,
+        /// Whether a merge makes the host report the merged commit (false: merged but not confirmed).
+        merge_confirms: Cell<bool>,
+        /// Run when a merge request arrives, before the host answers.
+        on_merge: RefCell<Option<Box<dyn Fn()>>>,
     }
     impl FakeHost {
         fn new(checks: Checks) -> Self {
             FakeHost {
+                merge_refused: Cell::new(false),
+                merge_confirms: Cell::new(true),
+                on_merge: RefCell::new(None),
                 per_commit: RefCell::new(BTreeMap::new()),
                 merge_heads: RefCell::new(vec![]),
                 script: RefCell::new(vec![]),
@@ -2088,11 +2368,19 @@ mod tests {
         fn failing_test(&self, _: u64) -> Result<Option<String>> {
             Ok(failing_test_name(&self.log.borrow()))
         }
-        fn merge(&self, _: u64, head: &str, _: &CommitText) -> Result<()> {
+        fn merge(&self, _: u64, head: &str, _: &CommitText) -> Result<MergeMethod> {
             self.merges.set(self.merges.get() + 1);
             self.merge_heads.borrow_mut().push(head.to_string());
-            *self.merged.borrow_mut() = Some(self.merge_makes.to_string());
-            Ok(())
+            if let Some(hook) = self.on_merge.borrow().as_ref() {
+                hook();
+            }
+            if self.merge_refused.get() {
+                bail!("the host refused the merge");
+            }
+            if self.merge_confirms.get() {
+                *self.merged.borrow_mut() = Some(self.merge_makes.to_string());
+            }
+            Ok(MergeMethod::Merge)
         }
     }
 
@@ -2164,6 +2452,7 @@ mod tests {
                 remote: &self.remote,
                 host,
                 content: &self.content,
+                records: None,
             })
         }
 
@@ -2431,6 +2720,7 @@ mod tests {
             remote: &rig.remote,
             host: &host,
             content: &rig.content,
+            records: None,
         })
         .unwrap();
         // The base is what the host reports, whatever the local branch is called.
@@ -2778,6 +3068,7 @@ mod tests {
                 remote: &remote,
                 host: &host,
                 content: &rig.content,
+                records: None,
             })
         };
         // Publish the landing commit; it is red, so it is not merged.
@@ -2850,6 +3141,7 @@ mod tests {
             remote: &rig.remote,
             host: &host,
             content: &rig.content,
+            records: None,
         });
         assert!(refused.is_err());
         assert!(rig.remote.pushes.borrow().is_empty());
@@ -3166,5 +3458,422 @@ mod tests {
         let json = athena_data::records::AnyRecord::HostError(errors[0].clone()).to_json();
         assert!(!json.contains("refused"), "{json}");
         assert!(json.contains("\"status_code\": 405"), "{json}");
+    }
+
+    /// `land_pr` with the real records sink, a real repository, a bare remote and a fake host
+    /// (`docs/design/records-history.md` §5.2, §5.3, §6.1, §8).
+    mod records_flow {
+        use super::*;
+        use athena_git::records_branch::RECORDS_REF;
+        use std::rc::Rc;
+
+        const JOB: &str = "20261024-115923-02gf";
+        /// The commit the fake host makes: a valid sha, as the landing record requires.
+        const HOST_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+
+        struct World {
+            _bare_dir: tempfile::TempDir,
+            bare: Git,
+            _work_dir: tempfile::TempDir,
+            git: Git,
+            state_dir: tempfile::TempDir,
+            /// The remote main's tip when the pull request was opened.
+            base: String,
+            head: String,
+            remote: FakeRemote,
+            content: FakeContent,
+            job: JobId,
+        }
+
+        impl World {
+            fn new() -> Self {
+                let bare_dir = tempfile::tempdir().unwrap();
+                let bare = Git::isolated(bare_dir.path());
+                // The fake host's default branch is `trunk`.
+                bare.run(["init", "-q", "--bare", "-b", "trunk"]).unwrap();
+                let work_dir = tempfile::tempdir().unwrap();
+                let git = Git::isolated(work_dir.path());
+                git.run(["init", "-q", "-b", "trunk"]).unwrap();
+                let url = bare_dir.path().to_str().unwrap().to_string();
+                git.run(["remote", "add", "origin", &url]).unwrap();
+                std::fs::write(work_dir.path().join("a.txt"), "a").unwrap();
+                git.run(["add", "-A"]).unwrap();
+                git.run(["commit", "-q", "-m", "init"]).unwrap();
+                git.run(["push", "-q", "origin", "trunk"]).unwrap();
+                let base = git.head().unwrap().unwrap();
+                git.run(["checkout", "-q", "-b", &format!("athena/{JOB}")])
+                    .unwrap();
+                let mut world = World {
+                    _bare_dir: bare_dir,
+                    bare,
+                    _work_dir: work_dir,
+                    git,
+                    state_dir: tempfile::tempdir().unwrap(),
+                    base,
+                    head: String::new(),
+                    remote: FakeRemote::default(),
+                    content: FakeContent(BTreeMap::from([(HOST_COMMIT, "verified")])),
+                    job: JobId::parse(JOB).unwrap(),
+                };
+                world.add_commit(
+                    "b.txt",
+                    &format!("Work\n\nAthena-Job: {JOB}\nAthena-Verified-Content: verified\n"),
+                );
+                world
+            }
+
+            /// A commit on the work branch, pushed, so the pull request's head moves to it.
+            fn add_commit(&mut self, file: &str, message: &str) -> String {
+                std::fs::write(self.git.dir().join(file), file).unwrap();
+                self.git.run(["add", "-A"]).unwrap();
+                self.git.run(["commit", "-q", "-m", message]).unwrap();
+                self.head = self.git.head().unwrap().unwrap();
+                self.git
+                    .run(["push", "-q", "-f", "origin", &format!("athena/{JOB}")])
+                    .unwrap();
+                *self.remote.head.borrow_mut() = Some(self.head.clone());
+                self.head.clone()
+            }
+
+            fn host(&self) -> FakeHost {
+                let mut host = FakeHost::new(Checks::Green);
+                host.merge_makes = HOST_COMMIT;
+                host
+            }
+
+            fn sink(&self) -> GitLandingRecords<'_> {
+                GitLandingRecords::for_remote(&self.git, "origin").unwrap()
+            }
+
+            fn run(
+                &self,
+                host: &FakeHost,
+                records: Option<&dyn LandingRecords>,
+            ) -> Result<PrReport> {
+                let state = StateDir::new(self.state_dir.path().to_path_buf());
+                let nap = |_: Duration| {};
+                land_pr(&LandPr {
+                    state: &state,
+                    job: &self.job,
+                    branch: &format!("athena/{JOB}"),
+                    commit: &self.head,
+                    verified_fingerprint: "verified",
+                    pr: PrDraft {
+                        title: "t",
+                        body: "b",
+                        head: "athena/x",
+                    },
+                    squash: &text(),
+                    host_name: HOST,
+                    repository: "example/project",
+                    merge_via_rest: true,
+                    poll: Poll {
+                        attempts: 1,
+                        delay: Duration::ZERO,
+                        sleep: &nap,
+                    },
+                    ancestry: &Anc(true),
+                    remote: &self.remote,
+                    host,
+                    content: &self.content,
+                    records,
+                })
+            }
+
+            fn remote_tip(&self) -> Option<String> {
+                self.bare.rev_parse(RECORDS_REF).unwrap()
+            }
+
+            /// The records on the remote branch, oldest commit first, with the commit that added each.
+            fn records(&self) -> Vec<(String, HistoryRecord)> {
+                let Some(tip) = self.remote_tip() else {
+                    return Vec::new();
+                };
+                let mut out = Vec::new();
+                for commit in self
+                    .bare
+                    .run(["rev-list", "--reverse", "--first-parent", &tip])
+                    .unwrap()
+                    .lines()
+                {
+                    for path in self.bare.added_paths(commit).unwrap() {
+                        // Other writers' files (the rival's, in one test) are not landing records.
+                        if !path.starts_with("landing") {
+                            continue;
+                        }
+                        let bytes = self.bare.show_file(commit, &path).unwrap().unwrap();
+                        let record = HistoryRecord::parse(&String::from_utf8(bytes).unwrap());
+                        out.push((commit.to_string(), record.unwrap()));
+                    }
+                }
+                out
+            }
+        }
+
+        fn intents(records: &[(String, HistoryRecord)]) -> Vec<(String, LandingIntent)> {
+            records
+                .iter()
+                .filter_map(|(c, r)| match r {
+                    HistoryRecord::LandingIntent(i) => Some((c.clone(), i.clone())),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        fn landings(records: &[(String, HistoryRecord)]) -> Vec<(String, Landing)> {
+            records
+                .iter()
+                .filter_map(|(c, r)| match r {
+                    HistoryRecord::Landing(l) => Some((c.clone(), l.clone())),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        #[test]
+        fn land_pr_writes_the_intent_then_the_landing_with_the_head_as_second_parent() {
+            let world = World::new();
+            let host = world.host();
+            let sink = world.sink();
+            let report = world.run(&host, Some(&sink)).unwrap();
+            assert_eq!(report.link.state, LinkState::Landed);
+            assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+
+            let records = world.records();
+            assert_eq!(records.len(), 2, "one intent, then one landing");
+            let (intent_commit, intent) = &intents(&records)[0];
+            let (landing_commit, landing) = &landings(&records)[0];
+            assert!(matches!(records[0].1, HistoryRecord::LandingIntent(_)));
+            assert!(matches!(records[1].1, HistoryRecord::Landing(_)));
+
+            let job = JobId::parse(JOB).unwrap();
+            assert_eq!(intent.pr_number, 42);
+            assert_eq!(intent.head_sha, world.head);
+            assert_eq!(
+                intent.head_tree_sha,
+                world.git.tree_of(&world.head).unwrap()
+            );
+            assert_eq!(intent.expected_base, world.base);
+            assert_eq!(intent.job_ids, vec![job.clone()]);
+            intent.validate().unwrap();
+
+            assert_eq!(landing.pr_number, 42);
+            assert_eq!(landing.head_sha, world.head);
+            assert_eq!(landing.host_commit, HOST_COMMIT);
+            assert_eq!(landing.merge_method, history::MergeMethod::Merge);
+            assert_eq!(landing.intent, intent.id);
+            assert_eq!(
+                landing.commits,
+                vec![LandingCommit {
+                    sha: world.head.clone(),
+                    tree: world.git.tree_of(&world.head).unwrap(),
+                    job,
+                    verification: RecordId::parse(JOB).unwrap(),
+                }]
+            );
+            landing.validate().unwrap();
+
+            // The intent commit is the branch's root; the landing commit's parents are the intent commit and
+            // the pull request's head, which keeps the head reachable (§6.1).
+            assert!(world.bare.parents(intent_commit).unwrap().is_empty());
+            assert_eq!(
+                world.bare.parents(landing_commit).unwrap(),
+                vec![intent_commit.clone(), world.head.clone()]
+            );
+            // The local branch holds what the remote holds.
+            assert_eq!(
+                world.git.rev_parse(RECORDS_REF).unwrap(),
+                world.remote_tip()
+            );
+            assert_eq!(world.remote_tip().as_deref(), Some(landing_commit.as_str()));
+        }
+
+        #[test]
+        fn the_intent_is_on_the_remote_before_the_merge_and_the_landing_after() {
+            let world = World::new();
+            let host = world.host();
+            let seen: Rc<RefCell<Vec<(usize, usize)>>> = Rc::new(RefCell::new(Vec::new()));
+            let bare = world.bare.clone();
+            let at_merge = Rc::clone(&seen);
+            *host.on_merge.borrow_mut() = Some(Box::new(move || {
+                let tip = bare.rev_parse(RECORDS_REF).unwrap().unwrap();
+                let count = |dir: &str| bare.ls_tree_under(&tip, dir).unwrap().len();
+                at_merge
+                    .borrow_mut()
+                    .push((count("landing-intents"), count("landings")));
+            }));
+            let sink = world.sink();
+            world.run(&host, Some(&sink)).unwrap();
+            assert_eq!(
+                *seen.borrow(),
+                vec![(1, 0)],
+                "at merge time: intent, no landing"
+            );
+            // After land_pr returns, the bare remote itself holds the intent and the landing.
+            let tip = world.bare.rev_parse(RECORDS_REF).unwrap().unwrap();
+            assert_eq!(
+                world
+                    .bare
+                    .ls_tree_under(&tip, "landing-intents")
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert_eq!(world.bare.ls_tree_under(&tip, "landings").unwrap().len(), 1);
+            let records = world.records();
+            assert_eq!((intents(&records).len(), landings(&records).len()), (1, 1));
+        }
+
+        #[test]
+        fn a_refused_merge_leaves_the_intent_on_both_branches_and_no_landing() {
+            let world = World::new();
+            let host = world.host();
+            host.merge_refused.set(true);
+            let sink = world.sink();
+            let err = world.run(&host, Some(&sink)).unwrap_err();
+            assert!(
+                err.to_string().contains("the host refused the merge"),
+                "{err:#}"
+            );
+            let records = world.records();
+            assert_eq!((intents(&records).len(), landings(&records).len()), (1, 0));
+            assert!(world.remote_tip().is_some());
+            assert_eq!(
+                world.git.rev_parse(RECORDS_REF).unwrap(),
+                world.remote_tip()
+            );
+        }
+
+        #[test]
+        fn a_merge_that_is_not_confirmed_writes_no_landing_warns_and_a_rerun_adds_nothing() {
+            let world = World::new();
+            let host = world.host();
+            host.merge_confirms.set(false);
+            let sink = world.sink();
+            let report = world.run(&host, Some(&sink)).unwrap();
+            let records = world.records();
+            assert_eq!((intents(&records).len(), landings(&records).len()), (1, 0));
+            let intent_id = intents(&records)[0].1.id.to_string();
+            assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
+            assert!(
+                report.warnings[0].contains(&intent_id),
+                "{:?}",
+                report.warnings
+            );
+            // The result is the one the CLI already maps: an open pull request with a merge requested.
+            assert_eq!(report.link.state, LinkState::Open);
+            assert!(report.merge_requested);
+
+            let tip = world.remote_tip();
+            let again = world.run(&host, Some(&sink)).unwrap();
+            assert_eq!(world.remote_tip(), tip, "a rerun makes no commit");
+            let records = world.records();
+            assert_eq!((intents(&records).len(), landings(&records).len()), (1, 0));
+            assert!(again.warnings[0].contains(&intent_id));
+        }
+
+        #[test]
+        fn a_leftover_local_records_branch_is_reset_to_the_remote_before_writing() {
+            let world = World::new();
+            let host = world.host();
+            host.merge_refused.set(true);
+            let sink = world.sink();
+            world.run(&host, Some(&sink)).unwrap_err();
+            let intent_tip = world.remote_tip().unwrap();
+
+            // Ahead: a record that only the local branch has. Diverged: the remote also moves, through
+            // another clone.
+            let writer = RecordsWriter::new(&world.git);
+            let leftover = writer
+                .append("leftover", &[Change::put("leftover.json", "{}")])
+                .unwrap();
+            let other_dir = tempfile::tempdir().unwrap();
+            let other = Git::isolated(other_dir.path());
+            other.run(["init", "-q"]).unwrap();
+            let url = world.bare.dir().to_str().unwrap().to_string();
+            other.run(["remote", "add", "origin", &url]).unwrap();
+            let rival = RecordsWriter::new(&other)
+                .append_to_remote("origin", "rival", &[Change::put("rival.json", "r")], &[])
+                .unwrap();
+            assert_eq!(world.git.parents(&leftover).unwrap(), vec![intent_tip]);
+
+            host.merge_refused.set(false);
+            let report = world.run(&host, Some(&sink)).unwrap();
+            assert_eq!(report.link.state, LinkState::Landed);
+            let tip = world.remote_tip().unwrap();
+            assert_eq!(
+                world.git.rev_parse(RECORDS_REF).unwrap().as_deref(),
+                Some(tip.as_str())
+            );
+            assert_eq!(
+                world.bare.rev_parse(&leftover).unwrap(),
+                None,
+                "the leftover never left"
+            );
+            assert!(world.bare.is_ancestor(&rival, &tip).unwrap());
+            let records = world.records();
+            assert_eq!(
+                (intents(&records).len(), landings(&records).len()),
+                (1, 1),
+                "the intent was reused"
+            );
+        }
+
+        #[test]
+        fn for_remote_builds_a_sink_that_writes_to_the_remote_records_branch() {
+            let world = World::new();
+            let sink = GitLandingRecords::for_remote(&world.git, "origin").unwrap();
+            assert_eq!(sink.base_tip("trunk").unwrap(), world.base);
+            assert!(sink.base_tip("nope").is_err());
+            assert_eq!(world.remote_tip(), None);
+            let intent = sink.intent(7, &world.head, &world.base).unwrap();
+            let facts = LandingFacts {
+                intent: intent.clone(),
+                expected_base: world.base.clone(),
+                pr_number: 7,
+                head: world.head.clone(),
+                host_commit: HOST_COMMIT.to_string(),
+                merge_method: MergeMethod::Squash,
+            };
+            let landing = sink.landing(&facts).unwrap();
+            assert_eq!(
+                sink.landing(&facts).unwrap(),
+                landing,
+                "a repeat finds the same landing"
+            );
+            let records = world.records();
+            assert_eq!(intents(&records)[0].1.id, intent);
+            assert_eq!(landings(&records)[0].1.id, landing);
+            assert_eq!(
+                landings(&records)[0].1.merge_method,
+                history::MergeMethod::Squash
+            );
+            let err = GitLandingRecords::for_remote(&world.git, "elsewhere").unwrap_err();
+            assert!(err.to_string().contains("elsewhere"), "{err:#}");
+        }
+
+        #[test]
+        fn a_commit_without_a_job_trailer_is_named_and_nothing_is_recorded_or_merged() {
+            let mut world = World::new();
+            let bad = world.add_commit("c.txt", "Hand edit with no trailers");
+            let host = world.host();
+            let sink = world.sink();
+            let err = world.run(&host, Some(&sink)).unwrap_err().to_string();
+            assert!(err.contains(&bad), "{err}");
+            assert!(
+                err.contains("lies between the remote base and the PR head"),
+                "{err}"
+            );
+            assert_eq!(world.remote_tip(), None);
+            assert_eq!(host.merges.get(), 0);
+        }
+
+        #[test]
+        fn a_bootstrap_commit_has_no_verification_and_is_named() {
+            let err = verification_id(&JobId::Bootstrap, "abc123").unwrap_err();
+            assert!(err.to_string().contains("abc123"), "{err}");
+            let id = RecordId::parse(JOB).unwrap();
+            assert_eq!(verification_id(&JobId::Id(id.clone()), "abc").unwrap(), id);
+        }
     }
 }
