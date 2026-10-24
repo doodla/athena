@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261024-140624-ewbs",
+  "round": 1,
+  "at": "2026-10-24T14:14:18.772231428Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "A job landed after a blocked outcome (outcome-landed.json) is not recognised, so a valid PR is refused.",
+      "evidence": "The gate counts as a landing either a fresh trio (candidate, verification, outcome.json in state Landed) or, after a blocked outcome, an added outcome-landed.json (`retried`). run.rs:2450 says `go` on a blocked job lands with outcome-landed.json, and chain.rs:43-46 treats both names as landed outcomes. Because the plan requires all three files added together, a PR whose job was blocked and then landed with `go` would be refused as a governed change with no closing records. Fix: Classify a commit as job_landing when it adds the fresh trio with a Landed outcome, or when it adds outcome-landed.json and the job's recorded outcome is blocked, matching invariant.rs. Add a test for a range whose last commit adds only outcome-landed.json while the parent holds a blocked outcome.",
+      "location": "Plan Approach step (1) and Risks 'Require all three records added in the same job dir'; crates/athena-gate/src/invariant.rs:541-563",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan writes a second closing-record classifier instead of matching the gate's closing_jobs rules.",
+      "evidence": "The gate already finds a commit's closing jobs from added files (path shape records/jobs/<month>/<id>/<name>, JobId::parse, job.is_request(), path == job.dir()/name). The plan writes a separate parser with its own path rules. Two classifiers can drift apart, and the request says to classify 'as athena-gate's invariant does'. Fix: Reuse the same path rules: check job.is_request() and that the path equals job.dir()/name. If athena-core may depend on athena-gate, call the gate's helper. If it may not, say why in the plan and copy the rules exactly, with a comment pointing to invariant.rs.",
+      "location": "Plan Steps 3 (classify_commit); crates/athena-gate/src/invariant.rs:225-249 (closing_jobs)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "No defined behavior for a squash commit that adds the closing records of several chained jobs.",
+      "evidence": "The gate allows one squash commit to add the closing records of several jobs in a chain. LandingCommit carries a single job, and the plan does not say what pr_commits does when one commit adds closing records for two jobs. Fix: State the behavior. Either refuse with a clear error that names the commit and both jobs (and test it), or attribute the commit to the last job of the chain, the one whose candidate holds the landed fingerprint, and record that choice in records-history.md §5.3.",
+      "location": "Plan Approach (1), one job per commit; invariant.rs:18-20 (D69 squash chains)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Stored landings without kind would make every later landing fail; that risk needs a firm answer, not an open question.",
+      "evidence": "Every landing parses all existing intent and landing records and stops with 'an existing record on the records branch is not valid'. If any stored landing lacks kind, every future `athena land --pr` fails under the stricter parser, which is the same failure this job is fixing. Fix: Have the producer state in the change description whether landings without kind can exist, for example because no landing was written since 29fdd4c, since all of them failed. If they can exist, name the one-time records-branch rewrite as a required follow-up rather than just an open question.",
+      "location": "Decision 4 and Open question 1; crates/athena-core/src/gh.rs:1393-1415 (existing/records_under)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The 'nothing recorded' half of criterion 2 has no named test command.",
+      "evidence": "The refusal test is in land.rs, but the 'nothing is recorded' check is a gh.rs test with no named test or command. Fix: Name the gh.rs test and give its cargo test filter so the verifier can run both checks.",
+      "location": "Demonstration for criterion 2",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan is the right root-cause fix and fits one producer run. It replaces trailer attribution in pr_commits (land.rs:122-158, which I read) with content classification, adds a strict LandingKind, and handles job and verification per kind in gh.rs commits() (gh.rs:1419-1431). One gap is major. The plan says a commit is a job landing only when the same commit adds candidate.json, verification.json and outcome.json. The gate's own closing-record rule, which the request points to, also accepts outcome-landed.json added after a blocked outcome (athena-gate/src/invariant.rs:9-10, 218-231, 549-563). That happens when `go` is run on a blocked job (run.rs:2450). Under the plan, that landing commit changes governed content but has no fresh trio, so pr_commits would refuse a valid PR. The plan also writes a second copy of a classifier the gate already has (closing_jobs) instead of matching or reusing it, and it says nothing about squash commits that land a chain of jobs. The other parts are sound: the per-kind validation design, the criterion 1-3 demonstrations (each would fail under the old trailer code), and the docs and CHANGELOG steps."
+}
