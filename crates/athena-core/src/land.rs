@@ -16,6 +16,7 @@
 use crate::verify::Verified;
 use crate::{Athena, Ui};
 use anyhow::{Context, Result, bail};
+use athena_data::JobId;
 use athena_git::Git;
 use athena_git::attrs::{classification_changes, fingerprint};
 use std::collections::BTreeSet;
@@ -103,6 +104,57 @@ pub fn resync_tip(
         return Ok(None);
     }
     Ok(Some(git.replay(merged, landed, head, sign)?))
+}
+
+/// One commit of a pull request, with the job its `Athena-Job` trailer names (§5.3 of
+/// `docs/design/records-history.md`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrCommit {
+    pub sha: String,
+    pub tree: String,
+    pub job: JobId,
+}
+
+/// The commits of a pull request, oldest first: every commit in `remote_base..head` (§5.3). Each must carry
+/// exactly one `Athena-Job` trailer, which names the job whose verification covers it. A commit without one
+/// is an error naming its sha, and nothing is recorded: a commit nothing verified must not be written into a
+/// landing record. An empty range is an error too.
+pub fn pr_commits(git: &Git, remote_base: &str, head: &str) -> Result<Vec<PrCommit>> {
+    let listing = git.run(["rev-list", "--reverse", &format!("{remote_base}..{head}")])?;
+    let mut commits = Vec::new();
+    for sha in listing.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let trailers = git.trailers(&git.message(sha)?)?;
+        let jobs: Vec<&str> = trailers
+            .iter()
+            .filter(|(key, _)| key == "Athena-Job")
+            .map(|(_, value)| value.as_str())
+            .collect();
+        let [job] = jobs.as_slice() else {
+            bail!(
+                "commit {sha} lies between the remote base and the PR head (base {remote_base}, head {head}) \
+                 and has {} Athena-Job trailers (it needs exactly one), so no verification covers it; \
+                 nothing was recorded",
+                jobs.len()
+            );
+        };
+        let job = JobId::parse(job).with_context(|| {
+            format!(
+                "commit {sha} lies between the remote base and the PR head (base {remote_base}, head {head}) \
+                 and its Athena-Job trailer {job:?} is not a job id"
+            )
+        })?;
+        commits.push(PrCommit {
+            sha: sha.to_string(),
+            tree: git.tree_of(sha)?,
+            job,
+        });
+    }
+    if commits.is_empty() {
+        bail!(
+            "the PR head {head} adds no commit to the remote base {remote_base}; nothing to record"
+        );
+    }
+    Ok(commits)
 }
 
 impl Athena {

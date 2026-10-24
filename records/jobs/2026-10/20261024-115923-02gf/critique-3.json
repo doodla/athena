@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261024-115923-02gf",
+  "round": 3,
+  "at": "2026-10-24T12:06:09.717922088Z",
+  "invocation_seq": 7,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "The plan does not say which of the two MergeMethod types PrHost::merge returns.",
+      "evidence": "gh.rs already defines its own `pub enum MergeMethod` (used at gh.rs:806-808 to choose the REST merge method), and history.rs defines a separate `MergeMethod`. The plan says \"PrHost::merge returns the MergeMethod used\" but does not say which of the two types, or how one maps to the other. Fix: Say that PrHost::merge returns the gh.rs MergeMethod, and add one explicit, tested conversion into athena_data::history::MergeMethod for the Landing record. Or name the history type with its full path so the two do not clash.",
+      "location": "Decision 6 / Step 3; crates/athena-core/src/gh.rs:503 and crates/athena-data/src/history.rs:115",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan says nothing about the default path, where Athena never calls host.merge.",
+      "evidence": "land_pr calls host.merge only when merge_via_rest is on and the checks are green. The setting defaults to false. When a person or auto-merge merges the PR, the first observe_merge (gh.rs:1314) sees it merged and the plan writes no intent and no landing. The plan never names this path, and the failure-path table does not cover it. Fix: State what happens when Athena did not request the merge (no records, left to reconcile in job 3 part 2). Add that row to the failure-path table so a reader does not think landings are always recorded.",
+      "location": "Approach / Decision 7; gh.rs:1336-1348; athena-data config.rs:703-707 (merge_via_rest defaults to false)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The criterion 7 rerun test could pass without ever reaching the intent-reuse code.",
+      "evidence": "The rerun's no-duplicate claim depends on the link staying Open, so that the rerun reaches the intent-writing path again. If the first run moves the link out of Open, the rerun skips the path and the 'no duplicates' assertion passes without testing intent reuse. Fix: In the test, assert that the rerun reaches the intent-write step, for example that the fake host's merge is called twice or the sink is called, before asserting that the record counts are equal.",
+      "location": "Demonstration for criterion 7",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The wiring of Athena::land_pr to the constructor is shown only by reading the diff.",
+      "evidence": "The accepted reading allows this, since it rules out a fake-runner rig for Athena::land_pr. Fix: None required. Optionally keep the call to for_remote in a small helper that Athena::land_pr calls and that the test also calls.",
+      "location": "Criterion 8 demonstration",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the code at the base commit (gh.rs, records_branch.rs, pr.rs, history.rs, config.rs) and found no blocker or major problem; the verdict is accept. The plan fits the accepted reading. The functions it names exist: RecordsWriter::append, LandPr, PrReport, PrHost::merge, default_branch and observe_merge. It changes things at the cause: it builds records commits on the remote tip, pushes them with a lease, and moves the local ref only after the push succeeds. The design choices that look odd at first are justified. The records sink sits behind a trait because the old tests use fake shas that would fail validation. expected_base is a sha because LandingIntent::validate checks it as one. Each demonstration checks real records on a real bare remote, and each would fail without the behavior. Remaining issues are minor: there are two MergeMethod types (gh.rs and history.rs) and the plan does not say which one merge returns or how they map; the plan says nothing about the default path where merge_via_rest is false and Athena never calls host.merge; and the criterion 7 rerun test should prove it actually reaches the intent-reuse code."
+}

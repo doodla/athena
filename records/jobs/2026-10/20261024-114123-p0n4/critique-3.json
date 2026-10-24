@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261024-114123-p0n4",
+  "round": 3,
+  "at": "2026-10-24T11:50:10.879748079Z",
+  "invocation_seq": 7,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The retry after a rejected push cannot work: sync_from refuses the very divergence it must recover from, and an unpushed local commit can block every later landing.",
+      "evidence": "append_with_hook moves RECORDS_REF to the new commit (update-ref with compare-and-swap) before any push is attempted. Decision 9 says sync_from 'returns a named error' when the local and remote refs have diverged. It also says that on a rejected push the ledger 'syncs once more, rebuilds the commit on the new tip'. After a rejected push, local holds commit C on the old tip and the remote holds another commit, so they have diverged by definition. sync_from then errors, and the retry never runs. The same state lasts across runs: if a push fails (network, crash, or a second rejection) and anyone later advances the remote branch, every later land --pr bails before the merge with the divergence error. Nothing in the plan repairs it. Fix: Do not leave an unpushed record commit on the local ref as permanent state. Option 1: build the commit, push that sha to refs/heads/athena/records with a lease on the expected remote tip, and only then CAS the local ref. Option 2: on a rejected push, reset the local ref to the fetched remote tip and re-apply the same record files (their paths are unique ids, so this is safe), then push again. Also define what sync_from does when local has unpushed record-only commits: rebase them as files onto the remote tip rather than refusing. Add a test where the push is rejected because the remote moved, and assert that the retry succeeds and the local and remote tips match afterwards.",
+      "location": "Plan decision 9 and decision 8; crates/athena-git/src/records_branch.rs:142-150",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The merged-but-unverified state and the drain.rs caller are not covered.",
+      "evidence": "The landing is written only when the second observe_merge reports Landed. observe_merge can also leave the link merged but not verified (see the confirm_existing_merge doc comment at gh.rs:1360-1363). In that case the host has made a commit on main, but no landing record is written and no warning is given. Athena::land_pr is also called from drain.rs:1263, which the plan does not mention, though it will now write records and print warnings there too. Fix: State the rule for the merged-but-unverified state: either write the landing, since the host did merge, or emit a PrReport warning saying it was skipped. Add drain.rs to the risk list, or check that the drain tests still pass with the real GitLedger against their remote setup.",
+      "location": "Plan decision 2 / Files gh.rs; crates/athena-core/src/gh.rs:1347 and crates/athena-cli/src/drain.rs:1263",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Stray local commits between the base and the head would block the merge with an unclear error.",
+      "evidence": "rev_list_reverse(\"<expected_base>..<head>\") also lists any local unpushed commits below the landed commit. Since every commit must carry a trailer and a verification, a stray local commit blocks the merge with an error that may not explain itself. Fix: Have the error for a commit without a trailer name that commit's sha and say it is between the remote base and the PR head.",
+      "location": "Plan decision 4",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the snapshot by reading files. The items it relies on all exist. history.rs has LandingIntent, Landing, LandingCommit and MergeMethod, and validate() returns BadPrNumber and BadSha(\"host_commit\") as the criterion 6 tests expect. RecordsWriter::append creates an orphan first commit and moves the branch with a compare-and-swap update-ref. Git::rev_list_reverse is at lib.rs:457 and is_ancestor at lib.rs:352. In gh.rs, land_pr calls host.merge at line 1345 between the checks gate and the second observe_merge, and GhClient::merge picks the merge method locally at line 806, so returning it costs nothing. The hook points, the failure policy, the records paths and the demonstrations all fit the request. Each test would fail without the behavior it covers. One design gap remains. append moves the local athena/records ref before the push. sync_from, as specified, returns an error when local and remote have diverged. After a rejected push they have always diverged, so the planned \"re-sync and rebuild\" retry cannot work as written. Worse, an unpushed local intent left by a failed push or a crash, followed by any later write to the remote branch, makes every future land --pr fail before the merge with a divergence error. Two smaller points: Athena::land_pr is also called from drain.rs, and the post-merge state \"merged but not verified\" is not addressed."
+}

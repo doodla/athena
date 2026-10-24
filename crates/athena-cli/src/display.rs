@@ -288,6 +288,9 @@ pub fn land_pr(report: &athena_core::gh::PrReport) -> String {
         }
     };
     out.push_str(&line);
+    for warning in &report.warnings {
+        out.push_str(&format!("warning       {warning}\n"));
+    }
     if report.reruns > 0 && report.checks != Some(Checks::Red) {
         let after = if report.checks == Some(Checks::Green) {
             "and then passed"
@@ -1296,6 +1299,7 @@ mod tests {
             merge_requested: false,
             reruns,
             failing_test: test.map(str::to_string),
+            warnings: Vec::new(),
         }
     }
 

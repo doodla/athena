@@ -9,6 +9,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `athena land --pr` now writes the records of `docs/design/records-history.md` §5.2, §5.3 and §6.1 (D111, job 3
+  part 1). `gh::land_pr` writes a landing-intent record (PR number, head sha and tree, the remote default
+  branch's tip as expected base, job ids) to `athena/records` on the remote **before** asking the host to merge,
+  and a landing record (host commit, merge method, each commit with tree, job and verification, intent id)
+  **after** the merge is confirmed. The landing's records commit takes the pull request's head as second
+  parent. Every commit between the remote base and the PR head must carry an `Athena-Job` trailer; one that
+  does not is an error naming its sha, and nothing is recorded. A merge the host did not confirm writes no
+  landing and adds a warning to the report that names the intent; reconciliation (§8.1, job 3 part 2) is
+  still to do. `GitLandingRecords::for_remote` builds the real sink and `Athena::land_pr` always uses it.
+  `RecordsWriter` gained `append_to_remote` (built on the remote tip, pushed with an expected-tip guard,
+  local branch moved only after the push, bounded retry) and `sync_from` (reset the local branch to the
+  remote). `PrHost::merge` now returns the merge method used, and `PrReport` has a `warnings` list.
 - `records_import` in `athena-core` (`crates/athena-core/src/records_import.rs`): the importer of
   `docs/design/records-history.md` §4 and §10 item 2 (D111, job 2). It copies every file under `records/` at a
   commit `C0` into one commit on `athena/records` with `import-manifest.json` (each path, its blob id and

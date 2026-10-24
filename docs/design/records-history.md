@@ -282,6 +282,53 @@ path, blob id or SHA-256, or on a count mismatch. A second import is refused. It
 scratch repositories only: it is not wired into the pipeline, the CLI or CI, and has not yet been run against
 main (that is the cutover, job 7).
 
+**Built (build job 3, part 1).** `athena land --pr` writes the landing-intent and landing records
+(`gh::land_pr`, `crates/athena-core/src/gh.rs`). They go through the same `RecordsWriter` and the
+`athena-data` history types (`LandingIntent`, `Landing`, `LandingCommit`, `MergeMethod`), validated before
+they are written, as `landing-intents/<id>.json` and `landings/<id>.json`.
+
+- **Order.** `land_pr` reads the remote default branch's tip and uses it as the intent's expected base and as
+  the lower bound of the pull request's commits. It writes the intent and pushes it to `origin`'s
+  `athena/records`, then calls the host's merge, then, once the merge is confirmed by the existing
+  merged-content check, writes the landing. The landing's records commit has two parents: the previous records
+  tip and the pull request's head (§6.1). The intent commit has one.
+- **How `sync_from` changed the write path (the distinct recover path).** `RecordsWriter::append` is
+  unchanged: it still swaps the local ref and is what the importer uses. The new `RecordsWriter::sync_from`
+  resets the local `athena/records` to the remote's tip, so a local branch that is ahead of the remote or has
+  diverged from it loses the commits the remote does not have; the remote is the source of truth. The new
+  `append_to_remote` calls it first, builds the commit on the remote tip, pushes with an expected-tip guard
+  (`push_if_remote_at`, which only succeeds if the remote branch still holds that tip), and moves the local
+  ref **only after** the push succeeded. A rejected push re-fetches the tip, rebuilds the commit on it and
+  retries, at most 8 attempts (`DEFAULT_MAX_ATTEMPTS`), then returns `RecordsError::Contended`. A push that
+  fails while the remote tip has not moved is returned as an error without retrying. With no remote branch yet,
+  a local branch is kept and its first push creates the remote branch.
+- **Verification id.** A verification record has no id of its own: there is one `athena.verification/1` per
+  job, stored under the job's directory. `LandingCommit.verification` therefore holds the job's own record id
+  (`gh::verification_id`). A commit of the `bootstrap` job has no such id and is refused with its sha. If a
+  verification ever gets an id, `verification_id` is the one place to change.
+- **Which commits.** Every commit in `remote_base..head` must carry exactly one `Athena-Job` trailer
+  (`land::pr_commits`). One that does not is an error that names its sha and says it lies between the remote
+  base and the PR head. This is checked before the intent is written, so a refused pull request leaves no
+  record. An intent that already exists for the same pull request number and head is reused, so a rerun does not
+  add a second one.
+- **Host rules.** The expected-tip guard is a property of the push, not of the host's branch rules; checking
+  the host's rules for `athena/records` stays with job 4.
+
+Failure paths. "Starting state" is what the repository and remote hold when the call starts.
+
+| Starting state | Function | Behavior |
+|---|---|---|
+| Remote records tip moved between building and pushing | `RecordsWriter::append_to_remote` | The push is rejected; the tip is fetched, the commit rebuilt on it and the push retried (bounded, 8). The other writer's files are kept. The local ref did not move during the rejected attempt. |
+| Remote moves on every attempt | `RecordsWriter::append_to_remote` | After the attempt bound, `Contended`; the local ref stays where it was; nothing of ours is on the remote. |
+| Local records branch ahead of the remote (leftover commit) | `RecordsWriter::sync_from`, called by `append_to_remote` | The local ref is reset to the remote tip; the leftover commit never reaches the remote; the write succeeds. |
+| Local records branch diverged from the remote | same | Same: reset to the remote tip, then the commit is built on it. |
+| No remote records branch, local branch exists | `append_to_remote` | The local branch is the base; the first push creates the remote branch. |
+| Commit in `remote_base..head` with no `Athena-Job` trailer, or a bootstrap job | `land::pr_commits`, `gh::verification_id` | Error naming the commit sha (and that it lies between the remote base and the PR head); no record written; no merge asked. |
+| Host refuses the merge | `gh::land_pr` | The intent stays on the local and remote records branch; no landing; the host's error is returned as before. A later run reuses the intent. |
+| Merge asked, host does not report the merged commit (or the merged content differs) | `gh::land_pr` | No landing record; `PrReport.warnings` names the intent; the exit code is the one the report already gives. Reconciliation (§8.1, job 3 part 2) repairs it. A rerun adds no second intent. |
+| Merge confirmed, landing record cannot be written | `gh::land_pr` | The merge stands; a warning names the intent and the reason; reconciliation repairs it. |
+| Remote has no `origin`, or no default branch | `GitLandingRecords::for_remote`, `LandingRecords::base_tip` | An error before anything is merged. `Athena::land_pr` returns it and never lands without a records sink. |
+
 ## 9. Keeping the check's cost independent of history size
 
 Today the history check validates about 4,000 records at the tip (reported), about 65 s locally (reported).

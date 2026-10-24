@@ -8,8 +8,9 @@
 //!   `.gitattributes` files only, and the content fingerprint built on that classification;
 //! - [`index`]: temporary indexes for building trees and commits without touching the user's index;
 //! - [`snapshot`]: the detached snapshots agents work in, each with its own throwaway repository;
-//! - [`records_branch`]: the append-only writer of the `athena/records` branch (§8.2, D111). Its one caller is
-//!   the importer in `athena-core` (`records_import`), which is not wired in.
+//! - [`records_branch`]: the append-only writer of the `athena/records` branch (§8.2, D111), locally and
+//!   against a remote. Its callers are the importer in `athena-core` (`records_import`, not wired in) and
+//!   landing (`gh`), which writes the landing-intent and landing records.
 //!
 //! This crate is a leaf: it depends on no other Athena crate.
 
@@ -386,6 +387,41 @@ impl Git {
         let guard = format!("{PUSH_GUARD_FLAG}refs/heads/{branch}:{expected}");
         let update = format!("{commit}:refs/heads/{branch}");
         self.run(["push", guard.as_str(), remote, update.as_str()])?;
+        Ok(())
+    }
+
+    /// The commit that `branch` holds on `remote`, or `None` when the remote has no such branch. When the
+    /// branch exists, its commit and history are fetched into the object store; no ref moves and
+    /// `FETCH_HEAD` is not written. Used by the records writer (§8.2 of `docs/design/records-history.md`).
+    pub fn fetch_remote_branch(&self, remote: &str, branch: &str) -> Result<Option<String>> {
+        let full = format!("refs/heads/{branch}");
+        let listing = self.run(["ls-remote", "--heads", remote, &full])?;
+        let tip = listing.lines().find_map(|line| {
+            let (sha, name) = line.split_once('\t')?;
+            (name.trim() == full).then(|| sha.trim().to_string())
+        });
+        let Some(tip) = tip else {
+            return Ok(None);
+        };
+        if !self.ensure_commit(remote, &tip)? {
+            return Err(GitError::Refused(format!(
+                "could not fetch commit {tip} of {full} from {remote}"
+            )));
+        }
+        Ok(Some(tip))
+    }
+
+    /// Points the full ref name `refname` at `commit`, whatever it held before.
+    pub fn set_ref(&self, refname: &str, commit: &str) -> Result<()> {
+        self.run(["update-ref", refname, commit])?;
+        Ok(())
+    }
+
+    /// A plain, non-forced push of `commit` as the new branch `branch` on `remote`. Git refuses it when the
+    /// branch exists and `commit` does not descend from it.
+    pub fn push_branch(&self, remote: &str, branch: &str, commit: &str) -> Result<()> {
+        let update = format!("{commit}:refs/heads/{branch}");
+        self.run(["push", "--quiet", remote, update.as_str()])?;
         Ok(())
     }
 
@@ -1129,6 +1165,52 @@ mod tests {
             Some(moved.as_str())
         );
         assert!(git.push_if_remote_at("origin", "", &mine, &moved).is_err());
+    }
+
+    #[test]
+    fn a_remote_branch_is_fetched_without_moving_any_local_ref_and_set_ref_moves_one() {
+        let (_b, _dir, bare, git) = with_bare_remote();
+        let tip = git.head().unwrap().unwrap();
+        // Another clone of the bare remote adds a branch the first clone has never seen.
+        let other_dir = tempfile::tempdir().unwrap();
+        let other = Git::isolated(other_dir.path());
+        other
+            .run(["clone", "-q", bare.dir().to_str().unwrap(), "."])
+            .unwrap();
+        other.run(["checkout", "-q", "-b", "side"]).unwrap();
+        write_files(other_dir.path(), &[("s.txt", "s")]);
+        let side = commit_all(&other, "side");
+        other.run(["push", "-q", "origin", "side"]).unwrap();
+
+        assert_eq!(git.rev_parse(&side).unwrap(), None);
+        let refs_before = git.run(["for-each-ref"]).unwrap();
+        assert_eq!(
+            git.fetch_remote_branch("origin", "side")
+                .unwrap()
+                .as_deref(),
+            Some(side.as_str())
+        );
+        assert_eq!(git.run(["for-each-ref"]).unwrap(), refs_before);
+        assert!(git.commit_exists(&side).unwrap());
+        assert_eq!(git.fetch_remote_branch("origin", "nope").unwrap(), None);
+
+        git.set_ref("refs/heads/copy", &side).unwrap();
+        assert_eq!(
+            git.rev_parse("copy").unwrap().as_deref(),
+            Some(side.as_str())
+        );
+        git.push_branch("origin", "fresh", &tip).unwrap();
+        assert_eq!(
+            bare.rev_parse("refs/heads/fresh").unwrap().as_deref(),
+            Some(tip.as_str())
+        );
+        // A fast-forward goes through; a plain push that moves the branch back is refused.
+        git.push_branch("origin", "fresh", &side).unwrap();
+        assert!(git.push_branch("origin", "fresh", &tip).is_err());
+        assert_eq!(
+            bare.rev_parse("refs/heads/fresh").unwrap().as_deref(),
+            Some(side.as_str())
+        );
     }
 
     #[test]
