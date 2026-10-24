@@ -12,6 +12,7 @@
 //! records judged as a set ([`jobs`]), and reconciliation of usage records ([`reconcile`]). [`redact`]
 //! scrubs agent free text before it is recorded.
 
+pub mod attribution;
 pub mod content;
 pub mod history;
 pub mod invariant;

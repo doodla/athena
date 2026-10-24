@@ -34,6 +34,100 @@ pub const RECORDS_REF: &str = "refs/heads/athena/records";
 /// The records branch's short name, as it is spelled on a remote.
 pub const RECORDS_BRANCH: &str = "athena/records";
 
+/// The remote-tracking ref that a plain `git fetch origin` leaves for the records branch.
+pub const RECORDS_TRACKING_REF: &str = "refs/remotes/origin/athena/records";
+
+/// Where a reader finds the records branch (§10 of `docs/design/records-history.md`, job 5; D111).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordsTip {
+    /// Neither the local branch nor the remote-tracking ref exists.
+    Missing,
+    /// The branch is at `tip`, read from the ref `from`. When both refs exist and one descends from the
+    /// other, the descendant is used.
+    At { tip: String, from: &'static str },
+    /// Both refs exist and neither descends from the other: the remote branch was rewritten or the local
+    /// one holds commits the remote never had.
+    Diverged { local: String, tracking: String },
+}
+
+/// Finds the records branch for a reader: the local `athena/records` first, then the remote-tracking ref
+/// (a CI job fetches into the local ref; a developer clone may have only the tracking one).
+pub fn resolve_tip(git: &Git) -> Result<RecordsTip, GitError> {
+    let local = git.rev_parse(RECORDS_REF)?;
+    let tracking = git.rev_parse(RECORDS_TRACKING_REF)?;
+    Ok(match (local, tracking) {
+        (None, None) => RecordsTip::Missing,
+        (Some(tip), None) => RecordsTip::At {
+            tip,
+            from: RECORDS_REF,
+        },
+        (None, Some(tip)) => RecordsTip::At {
+            tip,
+            from: RECORDS_TRACKING_REF,
+        },
+        (Some(local), Some(tracking)) => {
+            if git.is_ancestor(&tracking, &local)? {
+                RecordsTip::At {
+                    tip: local,
+                    from: RECORDS_REF,
+                }
+            } else if git.is_ancestor(&local, &tracking)? {
+                RecordsTip::At {
+                    tip: tracking,
+                    from: RECORDS_TRACKING_REF,
+                }
+            } else {
+                RecordsTip::Diverged { local, tracking }
+            }
+        }
+    })
+}
+
+/// A records commit that is not a fast-forward of its first parent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryProblem {
+    /// The offending records commit.
+    pub commit: String,
+    /// What it dropped or changed.
+    pub detail: String,
+}
+
+/// Audits the records branch's own history (§10 of `docs/design/records-history.md`, D111).
+///
+/// The branch is append-only (§8.2), so along the first-parent chain from `tip` every commit's tree must
+/// hold every file its first parent held, with the same bytes. A commit that drops or changes one is not
+/// a fast-forward of its predecessor: it is what a rewritten history looks like in a snapshot. Extra
+/// parents are allowed, because a landing record carries the pull request's head as one (§6.1).
+pub fn audit_history(git: &Git, tip: &str) -> Result<Vec<HistoryProblem>, GitError> {
+    let out = git.run(["rev-list", "--first-parent", "--reverse", tip])?;
+    let mut problems = Vec::new();
+    let mut previous: Option<BTreeMap<String, String>> = None;
+    for commit in out.lines() {
+        let files: BTreeMap<String, String> = git
+            .ls_tree(commit)?
+            .into_iter()
+            .map(|e| (e.path, e.oid))
+            .collect();
+        if let Some(before) = &previous {
+            for (path, oid) in before {
+                match files.get(path) {
+                    None => problems.push(HistoryProblem {
+                        commit: commit.to_string(),
+                        detail: format!("drops {path}, which its first parent held"),
+                    }),
+                    Some(now) if now != oid => problems.push(HistoryProblem {
+                        commit: commit.to_string(),
+                        detail: format!("changes {path}, which its first parent held"),
+                    }),
+                    Some(_) => {}
+                }
+            }
+        }
+        previous = Some(files);
+    }
+    Ok(problems)
+}
+
 /// How many times a write is tried against a moving tip before it gives up.
 pub const DEFAULT_MAX_ATTEMPTS: usize = 8;
 
@@ -812,6 +906,99 @@ mod tests {
             paths(&bare, &tip),
             vec!["base.json", "mine.json", "rival.json"],
             "neither leftover commit reached the remote"
+        );
+    }
+
+    #[test]
+    fn audit_passes_a_normal_history_with_extra_parents_and_reports_a_dropped_or_changed_file() {
+        let (_d, git) = repo_with(&[("a.txt", "a")]);
+        let writer = RecordsWriter::new(&git);
+        let one = writer
+            .append("one", &[Change::put("one.json", "1")])
+            .unwrap();
+        let work = git.head().unwrap().unwrap();
+        // A commit with an extra parent, built the way a landing record is.
+        let tree = git.tree_of(&one).unwrap();
+        let two = git
+            .commit_tree(&tree, &[&one, &work], "two", false)
+            .unwrap();
+        assert_eq!(audit_history(&git, &two).unwrap(), vec![]);
+
+        // Drops one.json.
+        let empty = git.empty_tree().unwrap();
+        let dropped = git.commit_tree(&empty, &[&two], "drop", false).unwrap();
+        let problems = audit_history(&git, &dropped).unwrap();
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert_eq!(problems[0].commit, dropped);
+        assert!(problems[0].detail.contains("one.json"), "{problems:?}");
+
+        // Changes one.json.
+        let changed_blob = git.hash_object_w(b"changed").unwrap();
+        let index = TempIndex::from_tree(&git, &two).unwrap();
+        index
+            .apply(&[IndexEdit::Put {
+                mode: "100644".into(),
+                oid: changed_blob,
+                path: "one.json".into(),
+            }])
+            .unwrap();
+        let changed_tree = index.write_tree().unwrap();
+        let changed = git
+            .commit_tree(&changed_tree, &[&two], "change", false)
+            .unwrap();
+        let problems = audit_history(&git, &changed).unwrap();
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].detail.contains("changes one.json"),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_tip_prefers_the_descendant_and_reports_divergence() {
+        let (_d, git) = repo_with(&[("a.txt", "a")]);
+        assert_eq!(resolve_tip(&git).unwrap(), RecordsTip::Missing);
+        let one = RecordsWriter::new(&git)
+            .append("one", &[Change::put("one.json", "1")])
+            .unwrap();
+        assert_eq!(
+            resolve_tip(&git).unwrap(),
+            RecordsTip::At {
+                tip: one.clone(),
+                from: RECORDS_REF
+            }
+        );
+        git.set_ref(RECORDS_TRACKING_REF, &one).unwrap();
+        let two = RecordsWriter::new(&git)
+            .append("two", &[Change::put("two.json", "2")])
+            .unwrap();
+        assert_eq!(
+            resolve_tip(&git).unwrap(),
+            RecordsTip::At {
+                tip: two.clone(),
+                from: RECORDS_REF
+            }
+        );
+        // The tracking ref is ahead of the local branch.
+        git.set_ref(RECORDS_REF, &one).unwrap();
+        git.set_ref(RECORDS_TRACKING_REF, &two).unwrap();
+        assert_eq!(
+            resolve_tip(&git).unwrap(),
+            RecordsTip::At {
+                tip: two.clone(),
+                from: RECORDS_TRACKING_REF
+            }
+        );
+        // An unrelated tracking ref: diverged.
+        let empty = git.empty_tree().unwrap();
+        let rival = git.commit_tree(&empty, &[], "rival", false).unwrap();
+        git.set_ref(RECORDS_TRACKING_REF, &rival).unwrap();
+        assert_eq!(
+            resolve_tip(&git).unwrap(),
+            RecordsTip::Diverged {
+                local: one,
+                tracking: rival
+            }
         );
     }
 

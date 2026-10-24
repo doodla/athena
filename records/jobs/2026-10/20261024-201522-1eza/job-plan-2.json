@@ -1,0 +1,230 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261024-201522-1eza",
+  "round": 2,
+  "at": "2026-10-24T20:19:28.193829309Z",
+  "invocation_seq": 4,
+  "approach": "Add athena_gate::attribution::check_attribution(git, main_tip, now: jiff::Timestamp). It reads only athena/records: landing-intents/ and landings/ via ls_tree_under plus cat_blobs, parsed with HistoryRecord::parse. It also audits the records branch's own history with a new helper in athena-git records_branch.rs. It walks rev-list --first-parent --parents from the earliest intent's expected_base (the base itself is judged). A commit is attributed if a landing names it as host_commit and the intent that landing cites matches (tree, first parent) via LandingIntent::matches. Otherwise it is pending if a matching intent exists and now is within 15 minutes of created_at; else it is a finding (stale intent or unattributed). Missing ref, no intent, or a base off main's line is a finding. The CLI adds check --attribution (conflicts with --history and --pr-head), prints text or JSON, exits 2 on a finding. CI gets a non-blocking attribution job that fetches athena/records first. The producer re-reads records-history.md sections 5.2, 6, 10 and D111 first and adjusts the non-fast-forward definition if the doc differs.",
+  "decisions": [
+    {
+      "choice": "Take the check time as a jiff::Timestamp argument; the CLI passes Timestamp::now().",
+      "reason": "Tests pin the 15-minute window without sleeping.",
+      "rejected": [
+        {
+          "option": "Read the clock inside the check",
+          "why": "Tests could not pin the window and would be flaky."
+        }
+      ]
+    },
+    {
+      "choice": "Judge head tree and expected base through the intent the landing cites, using LandingIntent::matches(tree, parent).",
+      "reason": "The Landing has no tree field; the intent holds head_tree_sha and expected_base. One definition is shared with reconcile.",
+      "rejected": [
+        {
+          "option": "Compare against landing commits[].tree",
+          "why": "Those are the PR's commits, not the announced head tree, and the expected base would go unchecked."
+        }
+      ]
+    },
+    {
+      "choice": "Read local refs/heads/athena/records first, then refs/remotes/origin/athena/records; report a finding if both exist and neither is an ancestor of the other.",
+      "reason": "CI fetch creates the local ref; a developer checkout may only have the remote-tracking one. Divergence signals a rewritten remote.",
+      "rejected": [
+        {
+          "option": "Remote-tracking ref only",
+          "why": "Contradicts the fetch into athena/records in CI."
+        }
+      ]
+    },
+    {
+      "choice": "Add records_branch::audit_history(git, tip): walk the first-parent chain; report a second root or a wrong root, and any commit whose tree drops or changes a file its first parent held. Extra parents are allowed.",
+      "reason": "A snapshot cannot show a past force-push but shows a rewritten history by these symptoms. Landing commits legitimately carry extra parents.",
+      "rejected": [
+        {
+          "option": "Require exactly one parent per commit",
+          "why": "Landing commits have a second parent (append_to_remote extra_parents)."
+        }
+      ]
+    },
+    {
+      "choice": "Use main tip HEAD as check --history does, and judge the base commit itself.",
+      "reason": "CI checks out the pushed sha. The request says walk from the base onward.",
+      "rejected": [
+        {
+          "option": "Skip the base like reconcile (start = base+1)",
+          "why": "The base is the first commit in scope."
+        }
+      ]
+    },
+    {
+      "choice": "No commit-trailer parsing and no host calls.",
+      "reason": "Criterion 6 requires records-only.",
+      "rejected": [
+        {
+          "option": "Reuse Change::trailers or reconcile's host fallback",
+          "why": "Both break the records-only rule."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-gate/src/attribution.rs",
+      "action": "create",
+      "purpose": "check_attribution, AttributionReport, Finding; doc comments citing records-history.md 5.2, 6, 10, D111; unit tests.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-gate/src/lib.rs",
+      "action": "modify",
+      "purpose": "pub mod attribution;",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-git/src/records_branch.rs",
+      "action": "modify",
+      "purpose": "Ref reader (local, else remote-tracking, divergence) and audit_history, with tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-gate/src/history.rs",
+      "action": "modify",
+      "purpose": "Only if needed: share a first-parent listing helper; otherwise untouched.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "purpose": "--attribution flag, conflicts, dispatch, exit 2 on finding, help text.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "purpose": "attribution_report renderer (text and JSON) naming each bad commit.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/binary.rs",
+      "action": "modify",
+      "purpose": "Tests for help listing, flag conflicts, no-records exit.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "action": "modify",
+      "purpose": "Governance deliverable: non-blocking attribution job beside history.",
+      "governance": true,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Entry for athena check --attribution in the file's existing format.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read records-history.md sections 5.2, 6, 10 and D111 and confirm the 15-minute rule and non-fast-forward wording.",
+    "In records_branch.rs add the ref reader and audit_history with unit tests.",
+    "Create attribution.rs: load intents and landings, parse with HistoryRecord::parse (parse failure is a finding), pick the earliest intent by (created_at, id), walk first-parent from its expected_base, apply attributed/pending/stale/unattributed rules.",
+    "Add unit tests: pass, unrecorded, pending at +14/+15/+16m, mismatching intent, pre-base ignored, no ref, no intent, non-ff records history.",
+    "Register the module in lib.rs.",
+    "Add the CLI flag, dispatch and display renderer.",
+    "Add binary tests.",
+    "Add the attribution job to ci.yml.",
+    "Add the CHANGELOG entry.",
+    "Run cargo fmt --all, cargo clippy --all-targets --locked -- -D warnings, cargo test --locked."
+  ],
+  "risks": [
+    {
+      "risk": "The ci.yml job cannot be run here; an error in its if or fetch step shows only in CI.",
+      "mitigation": "Copy the structure and SHA pins of the existing history job; mark continue-on-error."
+    },
+    {
+      "risk": "On the first run athena/records may not exist on origin, so the fetch fails.",
+      "mitigation": "Job is non-blocking; the command reports a missing ref as an explicit finding."
+    },
+    {
+      "risk": "A landing may cite a missing or mismatched intent, or two intents may match one commit.",
+      "mitigation": "Treat as a finding; unit test it."
+    },
+    {
+      "risk": "Intent created_at in the future relative to now.",
+      "mitigation": "Treat as pending; test the +15m boundary."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit test in attribution.rs: temp repo with base and squash commit; write intent (expected_base=base, head_tree=squash tree) and landing (host_commit=squash, intent=id) with RecordsWriter; run check just after the landing.",
+      "command": "cargo test -p athena-gate attribution",
+      "observes": "Report has no findings and the squash is counted attributed.",
+      "fails_without": "If the match logic is missing or compares tree/base wrongly, the squash is flagged and the test fails."
+    },
+    {
+      "criterion": 2,
+      "method": "Unit test: add a main commit with no intent and no landing; run the check.",
+      "command": "cargo test -p athena-gate attribution",
+      "observes": "Report fails with an Unattributed finding containing the commit's full sha; rendered text names it.",
+      "fails_without": "Without the unattributed rule the commit passes silently and the finding assertion fails."
+    },
+    {
+      "criterion": 3,
+      "method": "Unit test: commit with matching intent and no landing; run at created_at+14m, +15m and +16m.",
+      "command": "cargo test -p athena-gate attribution",
+      "observes": "At +14m and +15m no findings and the commit is pending; at +16m a finding names the commit and expired intent.",
+      "fails_without": "No pending window fails the +14m case; no expiry passes the +16m case and fails the test."
+    },
+    {
+      "criterion": 4,
+      "method": "Unit tests in attribution.rs and records_branch.rs: build a records history with a second-root commit and another dropping a prior file; also a normal branch with an extra-parent commit.",
+      "command": "cargo test -p athena-gate attribution",
+      "observes": "Report has a records-history finding naming the offending records commit; the normal branch has none.",
+      "fails_without": "Without the audit the rewritten history yields no finding and the test fails."
+    },
+    {
+      "criterion": 5,
+      "method": "Binary tests run the real binary: check --help; check --attribution --history; check --attribution --pr-head a b; --attribution in a repo without athena/records.",
+      "command": "cargo run -- check --help",
+      "observes": "Help lists --attribution; via cargo test -p athena-cli --test binary the combinations exit non-zero with a clap conflict message, and the no-records case exits 2 with a finding.",
+      "fails_without": "Without conflicts_with the combinations are accepted and the test fails; without the flag the help assertion fails."
+    },
+    {
+      "criterion": 6,
+      "method": "Inspect the diff for doc comments citing records-history.md 5.2, 6, 10 and D111, no trailer/log_grep/Change::trailers use in attribution.rs, and the pre-base test.",
+      "command": "git diff",
+      "observes": "Doc comments present, no trailer calls; the pre-base unrecorded commit test passes with no finding for it (cargo test -p athena-gate attribution).",
+      "fails_without": "If the walk started before the base, the pre-base test would report that commit and fail."
+    },
+    {
+      "criterion": 7,
+      "method": "Read the workflow diff.",
+      "command": "git diff",
+      "observes": "attribution job beside history: continue-on-error true; if push to main or schedule; checkout fetch-depth 0; step git fetch origin athena/records:athena/records before athena check --attribution; actions pinned by the same 40-hex SHAs; comment says not required.",
+      "fails_without": "Missing fetch or wrong if condition would be absent in the diff, so the review fails."
+    },
+    {
+      "criterion": 8,
+      "method": "Run the workspace gates; each must exit 0. The new tests, the clippy -D warnings gate and fmt would fail on any formatting, lint or test regression introduced by the change (e.g. a failing attribution test, an unused import, unformatted code).",
+      "command": "cargo clippy --all-targets --locked -- -D warnings",
+      "observes": "No warnings; then cargo fmt --all --check shows no diff and cargo test --locked passes across the workspace, including the new attribution and binary tests.",
+      "fails_without": "If the attribution logic were wrong or the code unformatted or lint-dirty, cargo test, fmt --check or clippy would exit non-zero."
+    }
+  ],
+  "open_questions": [
+    "records-history.md 5.2/6/10/D111 text was not read; the producer must confirm the non-fast-forward definition.",
+    "Whether an intent already fulfilled by another landing still makes an unlanded commit pending; the plan counts any matching intent.",
+    "CHANGELOG top-of-file format not read; the producer follows it.",
+    "Whether history.rs needs any change."
+  ],
+  "producer_section_sha256": "cbd3a05d5bbf4b40dc4ec75a53ca9dd197425cf9b6ac88eb63601273d85eed5f"
+}

@@ -295,3 +295,48 @@ fn check_reports_a_configuration_that_does_not_parse() {
     );
     assert!(stdout.contains("is not a full commit id"), "{stdout}");
 }
+
+#[test]
+fn check_help_lists_attribution_and_it_conflicts_with_the_other_modes() {
+    let fx = Fixture::new();
+    let help = athena()
+        .current_dir(fx.root())
+        .args(["check", "--help"])
+        .output()
+        .unwrap();
+    assert!(help.status.success());
+    assert!(
+        String::from_utf8_lossy(&help.stdout).contains("--attribution"),
+        "{}",
+        String::from_utf8_lossy(&help.stdout)
+    );
+    for args in [
+        vec!["check", "--attribution", "--history"],
+        vec!["check", "--attribution", "--pr-head", "a", "b"],
+    ] {
+        let out = athena()
+            .current_dir(fx.root())
+            .args(&args)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("cannot be used with"), "{args:?}: {stderr}");
+    }
+}
+
+#[test]
+fn check_attribution_without_a_records_branch_fails_explicitly() {
+    let fx = Fixture::new();
+    let state = tempfile::tempdir().unwrap();
+    let out = athena()
+        .current_dir(fx.root())
+        .env("ATHENA_STATE_DIR", state.path())
+        .args(["check", "--attribution"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(2), "{stdout}");
+    assert!(stdout.contains("records branch missing"), "{stdout}");
+    assert!(stdout.contains("attribution FAIL"), "{stdout}");
+}

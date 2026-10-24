@@ -27,6 +27,58 @@ pub fn pr_head_report(report: &athena_core::pr_check::PrReport) -> String {
     out
 }
 
+/// The result of `athena check --attribution`: one line per finding naming the commit, a notice per pending
+/// commit, then a summary (docs/design/records-history.md §5.2, §6, §10; D111).
+pub fn attribution_report(report: &athena_gate::attribution::AttributionReport) -> String {
+    let mut out = String::new();
+    for p in &report.pending {
+        let _ = writeln!(
+            out,
+            "  - notice: {} is pending reconciliation (landing-intent written {})",
+            p.commit, p.intent_at
+        );
+    }
+    for f in &report.findings {
+        match &f.commit {
+            Some(commit) => {
+                let _ = writeln!(out, "  - {} {commit}: {}", f.kind.label(), f.detail);
+            }
+            None => {
+                let _ = writeln!(out, "  - {}: {}", f.kind.label(), f.detail);
+            }
+        }
+    }
+    let verdict = if report.passed() { "pass" } else { "FAIL" };
+    let _ = writeln!(
+        out,
+        "attribution {verdict}: {} commit(s) judged, {} attributed, {} pending, {} finding(s)",
+        report.checked,
+        report.attributed.len(),
+        report.pending.len(),
+        report.findings.len()
+    );
+    out
+}
+
+/// The same report as JSON, for `athena check --attribution --json`.
+pub fn attribution_json(report: &athena_gate::attribution::AttributionReport) -> serde_json::Value {
+    serde_json::json!({
+        "base": report.base,
+        "checked": report.checked,
+        "passed": report.passed(),
+        "attributed": report.attributed,
+        "pending": report.pending.iter().map(|p| serde_json::json!({
+            "commit": p.commit,
+            "intent_at": p.intent_at.to_string(),
+        })).collect::<Vec<_>>(),
+        "findings": report.findings.iter().map(|f| serde_json::json!({
+            "kind": f.kind.label(),
+            "commit": f.commit,
+            "detail": f.detail,
+        })).collect::<Vec<_>>(),
+    })
+}
+
 fn pct(p: f64) -> String {
     format!("{:.0}%", p * 100.0)
 }
