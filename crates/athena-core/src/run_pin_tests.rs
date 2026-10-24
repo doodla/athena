@@ -720,6 +720,73 @@ fn a_plain_criterion_reported_met_with_evidence_is_not_failed() {
 }
 
 #[test]
+fn the_send_back_names_each_missing_criterion_and_says_to_copy_the_line() {
+    let text = crate::run::send_back_text(
+        "BRIEF",
+        &[
+            "the docs name the flag".to_string(),
+            "tests pass".to_string(),
+        ],
+    );
+    assert!(text.starts_with("BRIEF\n\n## Sent back"));
+    assert!(text.contains("\n- the docs name the flag\n"));
+    assert!(text.contains("\n- tests pass\n"));
+    assert!(text.contains("copying each line from the brief's criteria_check section"));
+    assert!(!text.contains("without its number"));
+}
+
+/// Runs a study whose first producer report keeps only the criteria at `keep` (indices into the two
+/// accepted criteria); later reports are complete. Returns the producer prompts, one per invocation.
+fn producer_prompts_when_first_report_keeps(keep: &'static [usize]) -> Vec<String> {
+    let (dir, _git) = repo(&config(true));
+    let state = tempfile::tempdir().unwrap();
+    let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen_prompts = prompts.clone();
+    let tweak: Tweak = Arc::new(move |spec, turn| {
+        if spec.role == Role::Producer {
+            let mut prompts = seen_prompts.lock().unwrap();
+            if prompts.is_empty() {
+                let all = turn.structured.as_ref().unwrap()["criteria_check"].clone();
+                let kept: Vec<_> = keep.iter().map(|&i| all[i].clone()).collect();
+                turn.structured.as_mut().unwrap()["criteria_check"] = json!(kept);
+            }
+            prompts.push(spec.user_prompt.clone());
+        }
+    });
+    let athena = athena_with(
+        &dir,
+        &state,
+        CountingPinner::new(FAKE_SHA),
+        Arc::default(),
+        tweak,
+    );
+    let proposal = athena.ask("study the demo", &Quiet).unwrap();
+    athena
+        .go(proposal.job.as_str(), AcceptedBy::User, &Quiet)
+        .unwrap();
+    prompts.lock().unwrap().clone()
+}
+
+#[test]
+fn a_first_report_with_a_met_entry_for_every_criterion_is_not_sent_back() {
+    let prompts = producer_prompts_when_first_report_keeps(&[0, 1]);
+    assert_eq!(prompts.len(), 1, "no send-back");
+    assert!(!prompts[0].contains("## Sent back"));
+}
+
+#[test]
+fn a_first_report_omitting_a_criterion_is_sent_back_once_naming_its_exact_text() {
+    let prompts = producer_prompts_when_first_report_keeps(&[0]);
+    assert_eq!(prompts.len(), 2, "the first attempt and one send-back");
+    let (_, sent_back) = prompts[1].split_once("## Sent back").unwrap();
+    assert!(
+        sent_back.contains("\n- the tests still pass\n"),
+        "{sent_back}"
+    );
+    assert!(!sent_back.contains("- README.md describes the demo"));
+}
+
+#[test]
 fn a_report_that_fails_the_self_check_is_kept_for_both_attempts_and_the_work_still_goes_on() {
     let (dir, git) = repo(&config(true));
     let state = tempfile::tempdir().unwrap();

@@ -24,6 +24,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- The producer brief gains a "criteria_check: copy the line" section listing every accepted criterion as a bare
+  line, with the instruction to report one entry per criterion, in order, with evidence, including criteria
+  already satisfied (D116). First reports retyped criteria from memory and drifted from the wording
+  `unmet_criteria` matches, so most producers were sent back once. The send-back text is now `send_back_text` in
+  `athena-core` and says to copy the line; the shared producer prompt line is shorter. The send-back rate before
+  the change could not be measured (records absent from the producer's copy), and no job has run since.
+
 - The change verifier prompt now says each recorded fmt, clippy or test check it cites goes in that criterion's
   commands list, exactly as shown under "Checks Athena ran on this tree", and that quoting it only in evidence
   text is not enough. Reason: job 20261024-033935-c4w4 quoted its checks in evidence text with an empty commands

@@ -167,7 +167,7 @@ impl CriterionStatusOutput {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CriterionCheckOutput {
-    /// The criterion's text exactly as the accepted reading gives it, without its number or kind tag.
+    /// The criterion's text: copy the line from the brief's criteria_check section.
     pub criterion: String,
     pub status: CriterionStatusOutput,
     /// What you read or ran to decide the status.
