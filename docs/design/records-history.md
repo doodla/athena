@@ -306,11 +306,28 @@ they are written, as `landing-intents/<id>.json` and `landings/<id>.json`.
   job, stored under the job's directory. `LandingCommit.verification` therefore holds the job's own record id
   (`gh::verification_id`). A commit of the `bootstrap` job has no such id and is refused with its sha. If a
   verification ever gets an id, `verification_id` is the one place to change.
-- **Which commits.** Every commit in `remote_base..head` must carry exactly one `Athena-Job` trailer
-  (`land::pr_commits`). One that does not is an error that names its sha and says it lies between the remote
-  base and the PR head. This is checked before the intent is written, so a refused pull request leaves no
-  record. An intent that already exists for the same pull request number and head is reused, so a rerun does not
-  add a second one.
+- **Which commits, and what kind each is.** `land::pr_commits` classifies every commit in `remote_base..head`
+  from its content; commit messages and trailers are never read. Each commit is judged against its first parent,
+  under the first parent's exclusion rules (the gate's own view of it), by the first rule that applies:
+  1. It adds the closing records of a job (`candidate.json`, `verification.json`, `outcome.json` or
+     `outcome-landed.json`), as `athena_gate::invariant::closing_jobs` finds them: `job_landing`, with that job
+     and its verification id. `closing_jobs` is the single source of truth for "this commit lands a job"; the
+     landing check and this classification use the same function. It leaves out a job whose recorded outcome is
+     not landed, so a commit that adds a candidate, a verification and a `blocked` outcome is `records_only`,
+     and the later commit that adds `outcome-landed.json` with the governed work is the `job_landing`. The
+     job's `verification.json` must be in the commit's tree, and a commit that adds the closing records of more
+     than one job is refused.
+  2. It adds `records/interventions/<month>/<id>.json`: `declared_intervention`; it claims no job.
+  3. Otherwise, if the governed fingerprint changed, nothing covers the change and the commit is refused.
+  4. Otherwise it touched only records and paths the rules exclude: `records_only`. An owner path counts only
+     where the first parent's rules exclude it, nested `.gitattributes` included; an owner-path commit without
+     the exclusion changes the fingerprint and is refused under rule 3.
+
+  A refusal is an error that names the commit's sha and says it lies between the remote base and the PR head.
+  This is checked before the intent is written, so a refused pull request leaves no record. An intent needs at
+  least one `job_landing` commit to name a job; a pull request with none gets a clear error and no intent. An
+  intent that already exists for the same pull request number and head is reused, so a rerun does not add a
+  second one.
 - **Host rules.** The expected-tip guard is a property of the push, not of the host's branch rules; checking
   the host's rules for `athena/records` stays with job 4.
 
@@ -323,7 +340,8 @@ Failure paths. "Starting state" is what the repository and remote hold when the 
 | Local records branch ahead of the remote (leftover commit) | `RecordsWriter::sync_from`, called by `append_to_remote` | The local ref is reset to the remote tip; the leftover commit never reaches the remote; the write succeeds. |
 | Local records branch diverged from the remote | same | Same: reset to the remote tip, then the commit is built on it. |
 | No remote records branch, local branch exists | `append_to_remote` | The local branch is the base; the first push creates the remote branch. |
-| Commit in `remote_base..head` with no `Athena-Job` trailer, or a bootstrap job | `land::pr_commits`, `gh::verification_id` | Error naming the commit sha (and that it lies between the remote base and the PR head); no record written; no merge asked. |
+| Commit in `remote_base..head` that changes governed content without closing records of a landed job or a declared intervention; a landing with no `verification.json`; an owner-path commit without the exclusion; or a bootstrap job | `land::pr_commits`, `gh::verification_id` | Error naming the commit sha (and that it lies between the remote base and the PR head); no record written; no merge asked. |
+| Pull request whose commits include no `job_landing` | `GitLandingRecords::intent` | Error that no commit lands a job; no intent written; no merge asked. |
 | Host refuses the merge | `gh::land_pr` | The intent stays on the local and remote records branch; no landing; the host's error is returned as before. A later run reuses the intent. |
 | Merge asked, host does not report the merged commit (or the merged content differs) | `gh::land_pr` | No landing record; `PrReport.warnings` names the intent; the exit code is the one the report already gives. Reconciliation (§8.1, job 3 part 2) repairs it. A rerun adds no second intent. |
 | Merge confirmed, landing record cannot be written | `gh::land_pr` | The merge stands; a warning names the intent and the reason; reconciliation repairs it. |

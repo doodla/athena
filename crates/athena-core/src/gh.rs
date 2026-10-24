@@ -19,9 +19,7 @@ use crate::reconcile::{CommitHost, MergedPr, ReconcileRecords, RecordsSnapshot};
 use crate::state::StateDir;
 use crate::{Athena, Ui};
 use anyhow::{Context, Result, bail};
-use athena_data::history::{
-    self, HistoryRecord, Landing, LandingCommit, LandingIntent, LandingKind,
-};
+use athena_data::history::{self, HistoryRecord, Landing, LandingCommit, LandingIntent};
 use athena_data::records::{HostError, HostOperation, MessageClass, Verdict, WorkPhase};
 use athena_data::{JobId, RecordId};
 use athena_git::records_branch::{Change, RecordsWriter};
@@ -1417,20 +1415,23 @@ impl<'a> GitLandingRecords<'a> {
             .collect()
     }
 
-    /// The pull request's commits with the verification record that covers each (§5.3).
+    /// The pull request's commits, each with its kind and, for a job landing, the job and the verification
+    /// record that covers it, all read from the commit's content (§5.3).
     fn commits(&self, expected_base: &str, head: &str) -> Result<Vec<LandingCommit>> {
-        pr_commits(self.git, expected_base, head)?
+        let commits: Vec<LandingCommit> = pr_commits(self.git, expected_base, head)?
             .into_iter()
-            .map(|c| {
-                Ok(LandingCommit {
-                    verification: Some(verification_id(&c.job, &c.sha)?),
-                    sha: c.sha,
-                    tree: c.tree,
-                    kind: LandingKind::JobLanding,
-                    job: Some(c.job),
-                })
+            .map(|c| LandingCommit {
+                sha: c.sha,
+                tree: c.tree,
+                kind: c.kind,
+                job: c.job,
+                verification: c.verification,
             })
-            .collect()
+            .collect();
+        for commit in &commits {
+            commit.validate()?;
+        }
+        Ok(commits)
     }
 
     /// Validates `record`, then writes it as `<dir>/<id>.json` in one commit with `extra_parents`.
@@ -1481,6 +1482,12 @@ impl LandingRecords for GitLandingRecords<'_> {
             if !job_ids.contains(job) {
                 job_ids.push(job.clone());
             }
+        }
+        if job_ids.is_empty() {
+            bail!(
+                "no commit between the remote base {expected_base} and the PR head {head} lands a job, so \
+                 a landing intent has no job to name; nothing was recorded"
+            );
         }
         let now = crate::now();
         let intent = LandingIntent {
@@ -2069,6 +2076,7 @@ impl Athena {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use athena_data::history::LandingKind;
 
     #[test]
     fn parse_merged_pr_keeps_only_the_pull_request_that_merged_the_commit() {
@@ -3639,19 +3647,26 @@ mod tests {
                     content: FakeContent(BTreeMap::from([(HOST_COMMIT, "verified")])),
                     job: JobId::parse(JOB).unwrap(),
                 };
-                world.add_commit(
-                    "b.txt",
-                    &format!("Work\n\nAthena-Job: {JOB}\nAthena-Verified-Content: verified\n"),
-                );
+                // The pull request's one commit lands the job: its work, with its candidate, verification
+                // and landed outcome.
+                let mut files = crate::land::fixtures::landed(&world.job);
+                files.push(crate::land::fixtures::plain("b.txt", "b.txt"));
+                world.add_files(&files, "Work");
                 world
             }
 
             /// A commit on the work branch, pushed, so the pull request's head moves to it.
             fn add_commit(&mut self, file: &str, message: &str) -> String {
-                std::fs::write(self.git.dir().join(file), file).unwrap();
-                self.git.run(["add", "-A"]).unwrap();
-                self.git.run(["commit", "-q", "-m", message]).unwrap();
-                self.head = self.git.head().unwrap().unwrap();
+                self.add_files(&[crate::land::fixtures::plain(file, file)], message)
+            }
+
+            /// A commit of `files` on the work branch, pushed, so the pull request's head moves to it.
+            fn add_files(
+                &mut self,
+                files: &[crate::land::fixtures::File],
+                message: &str,
+            ) -> String {
+                self.head = crate::land::fixtures::commit(&self.git, files, message);
                 self.git
                     .run(["push", "-q", "-f", "origin", &format!("athena/{JOB}")])
                     .unwrap();
@@ -3978,9 +3993,84 @@ mod tests {
         }
 
         #[test]
-        fn a_commit_without_a_job_trailer_is_named_and_nothing_is_recorded_or_merged() {
+        fn commits_carry_their_kind_job_and_verification_and_pass_validation() {
             let mut world = World::new();
-            let bad = world.add_commit("c.txt", "Hand edit with no trailers");
+            let note = crate::land::fixtures::plain(
+                "records/introspections/2026-10/20261024-120000-abcd.json",
+                "{}\n",
+            );
+            let records_only = world.add_files(&[note], "Records");
+            let intervention = RecordId::parse("20261024-121000-abcd").unwrap();
+            let path = format!(
+                "records/interventions/{}/{intervention}.json",
+                intervention.month()
+            );
+            let declared = world.add_files(
+                &[
+                    crate::land::fixtures::plain("c.txt", "by hand\n"),
+                    crate::land::fixtures::plain(&path, "{}\n"),
+                ],
+                "Hand work",
+            );
+            let commits = world.sink().commits(&world.base, &world.head).unwrap();
+            for commit in &commits {
+                commit.validate().unwrap();
+            }
+            assert_eq!(
+                commits
+                    .iter()
+                    .map(|c| (c.kind, c.job.is_some(), c.verification.is_some()))
+                    .collect::<Vec<_>>(),
+                [
+                    (LandingKind::JobLanding, true, true),
+                    (LandingKind::RecordsOnly, false, false),
+                    (LandingKind::DeclaredIntervention, false, false),
+                ]
+            );
+            assert_eq!(commits[0].job.as_ref(), Some(&world.job));
+            assert_eq!(commits[0].verification, Some(RecordId::parse(JOB).unwrap()));
+            assert_eq!(commits[1].sha, records_only);
+            assert_eq!(commits[2].sha, declared);
+            // The intent names only the jobs that landed.
+            let sink = world.sink();
+            sink.intent(42, &world.head, &world.base).unwrap();
+            let records = world.records();
+            assert_eq!(intents(&records)[0].1.job_ids, vec![world.job.clone()]);
+        }
+
+        #[test]
+        fn a_pull_request_that_lands_no_job_has_no_intent() {
+            let mut world = World::new();
+            // The only commit above the base is an intervention; nothing lands a job.
+            world
+                .git
+                .run(["reset", "-q", "--hard", &world.base])
+                .unwrap();
+            let intervention = RecordId::parse("20261024-121000-abcd").unwrap();
+            let path = format!(
+                "records/interventions/{}/{intervention}.json",
+                intervention.month()
+            );
+            world.add_files(
+                &[
+                    crate::land::fixtures::plain("c.txt", "by hand\n"),
+                    crate::land::fixtures::plain(&path, "{}\n"),
+                ],
+                "Hand work",
+            );
+            let err = world
+                .sink()
+                .intent(42, &world.head, &world.base)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("lands a job"), "{err}");
+            assert_eq!(world.remote_tip(), None);
+        }
+
+        #[test]
+        fn a_governed_commit_no_record_covers_is_named_and_nothing_is_recorded_or_merged() {
+            let mut world = World::new();
+            let bad = world.add_commit("c.txt", "Hand edit with no records");
             let host = world.host();
             let sink = world.sink();
             let err = world.run(&host, Some(&sink)).unwrap_err().to_string();

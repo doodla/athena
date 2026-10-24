@@ -13,10 +13,15 @@
 //! The caller adds the closing records to the tree, gates the commit, and fast-forwards; a refused
 //! fast-forward makes the job `blocked`.
 
+use crate::gh::verification_id;
 use crate::verify::Verified;
 use crate::{Athena, Ui};
 use anyhow::{Context, Result, bail};
-use athena_data::JobId;
+use athena_data::history::LandingKind;
+use athena_data::{JobId, RecordId};
+use athena_gate::invariant::{added_interventions, closing_jobs};
+use athena_gate::jobs::JobFiles;
+use athena_gate::{Change, Judged};
 use athena_git::Git;
 use athena_git::attrs::{classification_changes, fingerprint};
 use std::collections::BTreeSet;
@@ -106,47 +111,91 @@ pub fn resync_tip(
     Ok(Some(git.replay(merged, landed, head, sign)?))
 }
 
-/// One commit of a pull request, with the job its `Athena-Job` trailer names (§5.3 of
-/// `docs/design/records-history.md`).
+/// One commit of a pull request, classified by what it contains (§5.3 of
+/// `docs/design/records-history.md`). `job` and `verification` are set exactly for
+/// [`LandingKind::JobLanding`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrCommit {
     pub sha: String,
     pub tree: String,
-    pub job: JobId,
+    pub kind: LandingKind,
+    /// The job whose closing records the commit adds.
+    pub job: Option<JobId>,
+    /// The record that verifies that job's work.
+    pub verification: Option<RecordId>,
 }
 
-/// The commits of a pull request, oldest first: every commit in `remote_base..head` (§5.3). Each must carry
-/// exactly one `Athena-Job` trailer, which names the job whose verification covers it. A commit without one
-/// is an error naming its sha, and nothing is recorded: a commit nothing verified must not be written into a
-/// landing record. An empty range is an error too.
+/// The commits of a pull request, oldest first: every commit in `remote_base..head` (§5.3), each classified
+/// from its content alone. Messages are never read. A commit is judged against its first parent, under the
+/// first parent's exclusion rules (the gate's own view of it), by the first rule that applies:
+///
+/// 1. It adds the closing records of a job (`athena_gate::invariant::closing_jobs`, the single source of
+///    truth for "this commit lands a job"): [`LandingKind::JobLanding`], carrying that job and its
+///    verification record, which must be in the commit's tree. A job whose recorded outcome is not landed
+///    does not count, so the commit that adds a blocked outcome is records only, and the later commit that
+///    adds `outcome-landed.json` is the landing. Closing records of more than one job are an error.
+/// 2. It adds an intervention record (`records/interventions/<month>/<id>.json`):
+///    [`LandingKind::DeclaredIntervention`].
+/// 3. Otherwise, if the governed fingerprint changed, nothing covers the change: an error.
+/// 4. Otherwise it touched only records and paths the rules exclude: [`LandingKind::RecordsOnly`]. An owner
+///    path counts only where the rules exclude it, so one without the exclusion falls under rule 3.
+///
+/// An error names the commit's sha, the base and the head, and nothing is recorded: a commit nothing
+/// verified must not be written into a landing record. An empty range is an error too.
 pub fn pr_commits(git: &Git, remote_base: &str, head: &str) -> Result<Vec<PrCommit>> {
     let listing = git.run(["rev-list", "--reverse", &format!("{remote_base}..{head}")])?;
     let mut commits = Vec::new();
     for sha in listing.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        let trailers = git.trailers(&git.message(sha)?)?;
-        let jobs: Vec<&str> = trailers
-            .iter()
-            .filter(|(key, _)| key == "Athena-Job")
-            .map(|(_, value)| value.as_str())
-            .collect();
-        let [job] = jobs.as_slice() else {
-            bail!(
-                "commit {sha} lies between the remote base and the PR head (base {remote_base}, head {head}) \
-                 and has {} Athena-Job trailers (it needs exactly one), so no verification covers it; \
-                 nothing was recorded",
-                jobs.len()
-            );
-        };
-        let job = JobId::parse(job).with_context(|| {
+        let between = || {
             format!(
-                "commit {sha} lies between the remote base and the PR head (base {remote_base}, head {head}) \
-                 and its Athena-Job trailer {job:?} is not a job id"
+                "commit {sha} lies between the remote base and the PR head (base {remote_base}, head {head})"
             )
-        })?;
+        };
+        let change = Change::of_commit(git, sha)?;
+        let judged = Judged::new(git, &change)?;
+        let jobs = closing_jobs(git, &change, &judged)?;
+        let (kind, job, verification) = if let Some(job) = jobs.iter().next() {
+            if jobs.len() > 1 {
+                bail!(
+                    "{} and adds the closing records of {} jobs (it can land one); nothing was recorded",
+                    between(),
+                    jobs.len()
+                );
+            }
+            if JobFiles::load(git, &change.tree, job)?
+                .verification
+                .is_none()
+            {
+                bail!(
+                    "{} and adds the records of job {job} without its verification, so no verification \
+                     covers it; nothing was recorded",
+                    between()
+                );
+            }
+            (
+                LandingKind::JobLanding,
+                Some(job.clone()),
+                Some(verification_id(job, sha)?),
+            )
+        } else if !added_interventions(&judged).is_empty() {
+            (LandingKind::DeclaredIntervention, None, None)
+        } else if fingerprint(git, &change.tree, &judged.rules)?
+            != fingerprint(git, &judged.base, &judged.rules)?
+        {
+            bail!(
+                "{} and changes governed content without landing a verified job or declaring an \
+                 intervention, so no verification covers it; nothing was recorded",
+                between()
+            );
+        } else {
+            (LandingKind::RecordsOnly, None, None)
+        };
         commits.push(PrCommit {
             sha: sha.to_string(),
-            tree: git.tree_of(sha)?,
+            tree: change.tree,
+            kind,
             job,
+            verification,
         });
     }
     if commits.is_empty() {
@@ -210,11 +259,115 @@ fn first_governed_change(git: &Git, base: &str, head: &str) -> Result<Option<(St
     Ok(None)
 }
 
+/// Job records for tests that need a pull request holding a real job landing.
+#[cfg(test)]
+pub(crate) mod fixtures {
+    use athena_data::records::{
+        AnyRecord, Candidate, Outcome, OutcomeState, Totals, Verdict, Verification,
+    };
+    use athena_data::{JobId, Quantity, Unit};
+    use athena_git::Git;
+    use std::collections::BTreeMap;
+
+    /// A file to commit: its path and its text.
+    pub type File = (String, String);
+
+    fn file(record: AnyRecord) -> File {
+        (record.canonical_path(), record.to_json())
+    }
+
+    pub fn candidate(job: &JobId) -> File {
+        file(AnyRecord::Candidate(Box::new(Candidate {
+            job: job.clone(),
+            base_commit: "0".repeat(40),
+            base_fingerprint: None,
+            previous_job: None,
+            candidate_commit: Some("c".repeat(40)),
+            candidate_tree: None,
+            changes: vec![],
+            fingerprint: Some("f".repeat(64)),
+            violations: vec![],
+            producer_report: None,
+        })))
+    }
+
+    pub fn verification(job: &JobId) -> File {
+        file(AnyRecord::Verification(Box::new(Verification {
+            job: job.clone(),
+            candidate_commit: "c".repeat(40),
+            verified_fingerprint: "f".repeat(64),
+            tool_config_from_base: vec![],
+            checks: vec![],
+            check_cleanup: vec![],
+            verifier_invocation: None,
+            criteria: vec![],
+            findings: vec![],
+            request_reading_mismatch: None,
+            agent_verdict: Some(Verdict::Pass),
+            final_verdict: Verdict::Pass,
+            reasons: vec![],
+            inputs: vec![],
+            summary: None,
+        })))
+    }
+
+    /// `outcome.json`, or `outcome-<state>.json` when `after_blocked`.
+    pub fn outcome(job: &JobId, state: OutcomeState, after_blocked: bool) -> File {
+        let zero = || Quantity::reported(0.0, Unit::Usd, "sum");
+        file(AnyRecord::Outcome(Box::new(Outcome {
+            job: job.clone(),
+            state,
+            reason: "test".into(),
+            at: "2026-10-24T12:00:00Z".parse().unwrap(),
+            totals: Some(Totals {
+                cost_all: zero(),
+                cost_execution: zero(),
+                wall_time_execution: None,
+                tokens: BTreeMap::new(),
+                invocations: 0,
+            }),
+            branch: None,
+            base_commit: None,
+            candidate_commit: None,
+            after_blocked,
+            through_commit: None,
+        })))
+    }
+
+    /// The closing records of a job that landed in one commit.
+    pub fn landed(job: &JobId) -> Vec<File> {
+        vec![
+            candidate(job),
+            verification(job),
+            outcome(job, OutcomeState::Landed, false),
+        ]
+    }
+
+    /// Writes `files` under the work tree of `git`, stages everything and commits with `message`; returns
+    /// the new commit.
+    pub fn commit(git: &Git, files: &[File], message: &str) -> String {
+        for (path, text) in files {
+            let full = git.dir().join(path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(full, text).unwrap();
+        }
+        git.run(["add", "-A"]).unwrap();
+        git.run(["commit", "-q", "-m", message]).unwrap();
+        git.head().unwrap().unwrap()
+    }
+
+    /// A file with a fixed text, for governed or owner changes.
+    pub fn plain(path: &str, text: &str) -> File {
+        (path.to_string(), text.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::verify::{Judgment, verified};
-    use athena_data::records::Verdict;
+    use athena_data::records::{OutcomeState, Verdict};
+    use fixtures::plain;
 
     fn repo() -> (tempfile::TempDir, Git) {
         let dir = tempfile::tempdir().unwrap();
@@ -440,5 +593,209 @@ mod tests {
             plan(&git, &pass(&p, &c, &f), &head).unwrap(),
             Plan::Stale(_)
         ));
+    }
+
+    // ---- pr_commits: classification by content, with no trailers anywhere ----
+
+    const PR_JOB: &str = "20261024-115923-02gf";
+
+    /// A repository with `owner/` excluded by a nested rule and `lacking/` carrying a rules file that
+    /// excludes nothing there; returns the base commit the pull request is cut from.
+    fn pr_repo() -> (tempfile::TempDir, Git, String) {
+        let (dir, git) = repo();
+        fixtures::commit(
+            &git,
+            &[
+                plain("owner/.gitattributes", "* athena-exclude\n"),
+                plain("lacking/.gitattributes", "*.tmp athena-exclude\n"),
+            ],
+            "rules",
+        );
+        let base = git.head().unwrap().unwrap();
+        (dir, git, base)
+    }
+
+    fn kinds(commits: &[PrCommit]) -> Vec<LandingKind> {
+        commits.iter().map(|c| c.kind).collect()
+    }
+
+    /// The error `pr_commits` gives for `base..HEAD`; it must name `sha`.
+    fn refusal(git: &Git, base: &str, sha: &str) -> String {
+        let head = git.head().unwrap().unwrap();
+        let error = pr_commits(git, base, &head).unwrap_err().to_string();
+        assert!(error.contains(sha), "{error}");
+        error
+    }
+
+    #[test]
+    fn a_realistic_range_is_classified_from_content_alone() {
+        let (_dir, git, base) = pr_repo();
+        let job = JobId::parse(PR_JOB).unwrap();
+        let job_dir = job.dir();
+        let rid = |text: &str| athena_data::RecordId::parse(text).unwrap();
+        let mut shas = vec![
+            fixtures::commit(
+                &git,
+                &[plain(&format!("{job_dir}/reading-1.json"), "{}\n")],
+                "Reading",
+            ),
+            fixtures::commit(
+                &git,
+                &[plain(&format!("{job_dir}/job.json"), "{}\n")],
+                "Dispatch",
+            ),
+            fixtures::commit(
+                &git,
+                &[plain(
+                    "records/introspections/2026-10/20261024-120000-abcd.json",
+                    "{}\n",
+                )],
+                "Introspection",
+            ),
+            fixtures::commit(&git, &[plain("owner/notes.md", "mine\n")], "Owner path"),
+        ];
+        let intervention = rid("20261024-121000-abcd");
+        shas.push(fixtures::commit(
+            &git,
+            &[
+                plain("a.txt", "by hand\n"),
+                plain(
+                    &format!(
+                        "records/interventions/{}/{intervention}.json",
+                        intervention.month()
+                    ),
+                    "{}\n",
+                ),
+            ],
+            "Intervention",
+        ));
+        let mut landing = fixtures::landed(&job);
+        landing.push(plain("a.txt", "landed by a job\n"));
+        shas.push(fixtures::commit(&git, &landing, "Landing"));
+        let head = git.head().unwrap().unwrap();
+
+        // The landing's records really parse, so the classification below is not an accident.
+        let files = athena_gate::jobs::JobFiles::load(&git, &head, &job).unwrap();
+        assert!(
+            files.candidate.is_some() && files.verification.is_some() && files.outcome.is_some()
+        );
+
+        let commits = pr_commits(&git, &base, &head).unwrap();
+        assert_eq!(
+            commits.iter().map(|c| c.sha.clone()).collect::<Vec<_>>(),
+            shas
+        );
+        assert_eq!(
+            kinds(&commits),
+            [
+                LandingKind::RecordsOnly,
+                LandingKind::RecordsOnly,
+                LandingKind::RecordsOnly,
+                LandingKind::RecordsOnly,
+                LandingKind::DeclaredIntervention,
+                LandingKind::JobLanding,
+            ]
+        );
+        for c in &commits[..5] {
+            assert_eq!((&c.job, &c.verification), (&None, &None), "{}", c.sha);
+        }
+        let last = &commits[5];
+        assert_eq!(last.job.as_ref(), Some(&job));
+        assert_eq!(last.verification.as_ref(), Some(&rid(PR_JOB)));
+        assert_eq!(last.tree, git.tree_of(&last.sha).unwrap());
+    }
+
+    #[test]
+    fn a_blocked_outcome_is_records_only_and_the_later_landed_outcome_is_the_landing() {
+        let (_dir, git, base) = pr_repo();
+        let job = JobId::parse(PR_JOB).unwrap();
+        let blocked = fixtures::commit(
+            &git,
+            &[
+                fixtures::candidate(&job),
+                fixtures::verification(&job),
+                fixtures::outcome(&job, OutcomeState::Blocked, false),
+            ],
+            "Blocked",
+        );
+        let landed = fixtures::commit(
+            &git,
+            &[
+                fixtures::outcome(&job, OutcomeState::Landed, true),
+                plain("a.txt", "landed on retry\n"),
+            ],
+            "Retry",
+        );
+        let commits = pr_commits(&git, &base, &landed).unwrap();
+        assert_eq!(
+            kinds(&commits),
+            [LandingKind::RecordsOnly, LandingKind::JobLanding]
+        );
+        assert_eq!(commits[0].sha, blocked);
+        assert_eq!((&commits[0].job, &commits[0].verification), (&None, &None));
+        assert_eq!(commits[1].job.as_ref(), Some(&job));
+        assert!(commits[1].verification.is_some());
+    }
+
+    #[test]
+    fn governed_change_that_is_neither_an_intervention_nor_closing_records_is_refused() {
+        let (_dir, git, base) = pr_repo();
+        let bad = fixtures::commit(&git, &[plain("a.txt", "hand edit\n")], "Hand edit");
+        let error = refusal(&git, &base, &bad);
+        assert!(error.contains("changes governed content"), "{error}");
+    }
+
+    #[test]
+    fn a_landing_without_a_verification_is_refused() {
+        let (_dir, git, base) = pr_repo();
+        let job = JobId::parse(PR_JOB).unwrap();
+        let bad = fixtures::commit(
+            &git,
+            &[
+                fixtures::candidate(&job),
+                fixtures::outcome(&job, OutcomeState::Landed, false),
+                plain("a.txt", "landed, unverified\n"),
+            ],
+            "Landing",
+        );
+        let error = refusal(&git, &base, &bad);
+        assert!(error.contains("without its verification"), "{error}");
+    }
+
+    #[test]
+    fn a_landing_whose_outcome_is_blocked_is_refused_not_counted() {
+        let (_dir, git, base) = pr_repo();
+        let job = JobId::parse(PR_JOB).unwrap();
+        let bad = fixtures::commit(
+            &git,
+            &[
+                fixtures::candidate(&job),
+                fixtures::verification(&job),
+                fixtures::outcome(&job, OutcomeState::Blocked, false),
+                plain("a.txt", "work that never landed\n"),
+            ],
+            "Blocked with work",
+        );
+        let error = refusal(&git, &base, &bad);
+        assert!(error.contains("changes governed content"), "{error}");
+    }
+
+    #[test]
+    fn an_owner_path_without_the_exclusion_is_refused() {
+        let (_dir, git, base) = pr_repo();
+        fixtures::commit(&git, &[plain("owner/notes.md", "excluded\n")], "Excluded");
+        let bad = fixtures::commit(
+            &git,
+            &[plain("lacking/notes.md", "not excluded\n")],
+            "Not excluded",
+        );
+        refusal(&git, &base, &bad);
+    }
+
+    #[test]
+    fn an_empty_range_is_an_error() {
+        let (_dir, git, base) = pr_repo();
+        let error = pr_commits(&git, &base, &base).unwrap_err().to_string();
+        assert!(error.contains("nothing to record"), "{error}");
     }
 }

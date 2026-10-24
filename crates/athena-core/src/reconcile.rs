@@ -444,8 +444,6 @@ mod tests {
 
     use crate::gh::LandingRecords;
 
-    const JOB: &str = "20261024-114125-7z2t";
-
     enum Answer {
         Down,
         Nothing,
@@ -530,21 +528,19 @@ mod tests {
             self.tip()
         }
 
-        /// A pull request head one commit above `base`, with a job trailer, pushed as branch `pr<number>`.
+        /// A pull request head one commit above `base`, pushed as branch `pr<number>`. The commit lands the
+        /// job: it adds the job's work with its candidate, verification and landed outcome, which is what
+        /// makes it a job landing; its message says nothing about it.
         fn pr_head(&self, number: u64, base: &str) -> String {
             self.git.run(["checkout", "-q", "--detach", base]).unwrap();
             let file = format!("pr{number}.txt");
-            std::fs::write(self.git.dir().join(&file), &file).unwrap();
-            self.git.run(["add", "-A"]).unwrap();
-            self.git
-                .run([
-                    "commit",
-                    "-q",
-                    "-m",
-                    &format!("Pull request {number}\n\nAthena-Job: {JOB}"),
-                ])
-                .unwrap();
-            let head = self.git.head().unwrap().unwrap();
+            // One job per pull request: a job's records are added once, and an earlier pull request's
+            // squash is already on the base of a later one.
+            let job = athena_data::JobId::parse(&format!("20261024-1141{number:02}-7z2t")).unwrap();
+            let mut files = crate::land::fixtures::landed(&job);
+            files.push(crate::land::fixtures::plain(&file, &file));
+            let head =
+                crate::land::fixtures::commit(&self.git, &files, &format!("Pull request {number}"));
             self.git
                 .run([
                     "push",
