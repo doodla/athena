@@ -8,7 +8,7 @@ use crate::commits::{NewFile, Refusal, message};
 use crate::invocation::InvocationFacts;
 use crate::land::{Plan, plan};
 use crate::pin::{is_full_sha, mount};
-use crate::reading::{Proposal, same_scope};
+use crate::reading::{Proposal, TreeRetrySeed, same_scope, tree_retry_seed};
 use crate::scoring::{self, Happened, score, totals};
 use crate::store::{JobRecords, JobState, Records};
 use crate::verify::{MAP_PATH, VerdictInputs, Verified, judge, mark_pre_existing, verified};
@@ -18,8 +18,8 @@ use athena_agent::env::{EnvSpec, Side};
 use athena_agent::policy::Policy;
 use athena_context::briefs::{
     AcceptedReading, CandidateView, CheckResultView, CheckView, CriticInputs, DeliverableFact,
-    PlanRevision, PlannerInputs, ProducerInputs, VerifierInputs, VerifierPlan, critic_brief,
-    planner_brief, producer_brief, producer_prompt_with_plan, render_plan_section,
+    PlanRevision, PlannerInputs, ProducerInputs, RetrySeed, VerifierInputs, VerifierPlan,
+    critic_brief, planner_brief, producer_brief, producer_prompt_with_plan, render_plan_section,
     verifier_brief_with_plan,
 };
 use athena_context::outputs::{
@@ -198,6 +198,33 @@ impl Athena {
         }
     }
 
+    /// The seed for a producer retry that starts from a rejected candidate, or `None` when the retry starts
+    /// from the base. The request must be "try again on <job>" for a job that
+    /// [`qualifies_for_tree_retry`](crate::reading::qualifies_for_tree_retry); the rejected candidate must
+    /// still be in the repository; and the files agents see at `head` must be those the rejected job's base
+    /// had (only `records/` differs), so that starting from the old candidate cannot undo later work.
+    fn tree_seed(
+        &self,
+        records: &Records,
+        request: &str,
+        redactor: &Redactor,
+        head: &str,
+    ) -> Result<Option<TreeRetrySeed>> {
+        let Some(seed) = tree_retry_seed(records, request, redactor)? else {
+            return Ok(None);
+        };
+        if self.git.rev_parse(&seed.candidate_commit)?.is_none()
+            || self.git.rev_parse(&seed.base_commit)?.is_none()
+        {
+            return Ok(None);
+        }
+        let changed = self.git.diff_tree(&seed.base_commit, head)?;
+        if changed.iter().any(|c| !c.path.starts_with("records/")) {
+            return Ok(None);
+        }
+        Ok(Some(seed))
+    }
+
     fn dispatch(
         &self,
         head: &str,
@@ -261,6 +288,7 @@ impl Athena {
         // A study's repository is pinned by the core, here, before anything is committed or any agent runs.
         let request_text = job.request.as_ref().map(|r| r.text.as_str()).unwrap_or("");
         let pinned = self.pin_repo(capability, &jc, &id, head, request_text)?;
+        let retry_seed = self.tree_seed(records, request_text, &redactor, head)?;
 
         // The prediction commit: the accepted reading's job record and the producer brief, before any work.
         let producer_grant = capability.producer_grant(&jc);
@@ -284,6 +312,11 @@ impl Athena {
             checks: check_views.clone(),
             commands: athena_agent::policy::describe_commands(&producer_grant.commands),
             pin: pinned.as_ref().map(|(record, _)| record.clone()),
+            retry_from: retry_seed.as_ref().map(|s| RetrySeed {
+                job: s.job.as_str().to_string(),
+                unmet: s.unmet.clone(),
+                findings: s.findings.clone(),
+            }),
         });
         let dispatched_at = crate::now();
         let clock = Instant::now();
@@ -356,6 +389,7 @@ impl Athena {
             clock,
             ui,
             pin_dir: pinned.map(|(_, dir)| dir),
+            seed_commit: retry_seed.map(|s| s.candidate_commit),
         };
         // Job planning (docs/design/job-planning.md): one accepted round, before the producer. The round
         // seeds the closing with its invocations, plan and critique, so the producer's invocation is
@@ -1025,6 +1059,8 @@ struct RunContext<'a> {
     ui: &'a dyn Ui,
     /// The pinned tree's checkout, mounted read-only into both agents' working directories.
     pin_dir: Option<PathBuf>,
+    /// The rejected candidate commit the producer's working directory is seeded from, for a tree-seeded retry.
+    seed_commit: Option<String>,
 }
 
 impl RunContext<'_> {
@@ -1329,12 +1365,20 @@ impl Athena {
         ));
         closing.baseline = Some(baseline);
 
-        // The producer, in a detached snapshot of the base with a one-commit repository of its own.
+        // The producer, in a detached snapshot of the base with a one-commit repository of its own. A
+        // tree-seeded retry's work tree holds the rejected candidate's files on top of that base commit, so
+        // the change list below is still against the base.
         let work = job_dir.join("work");
         if work.exists() {
             crate::pin::remove_tree(&work)?;
         }
-        let snapshot = Snapshot::create(&self.git, &p, &p, &work, SnapshotRepo::Base)?;
+        let repo = match &ctx.seed_commit {
+            Some(tree_commit) => SnapshotRepo::BaseThenTree {
+                tree_commit: tree_commit.clone(),
+            },
+            None => SnapshotRepo::Base,
+        };
+        let snapshot = Snapshot::create(&self.git, &p, &p, &work, repo)?;
         if let Some(pin_dir) = &ctx.pin_dir {
             mount(pin_dir, snapshot.dir())?;
         }
@@ -1479,7 +1523,9 @@ impl Athena {
             violations: Vec::new(),
             producer_report: report,
         };
-        if changes.is_empty() {
+        // A seeded work tree already differs from the base, so an idle producer is told apart by the work
+        // tree being as seeded, not by an empty change list.
+        if changes.is_empty() || snapshot.unchanged_since_seed()? {
             closing.candidate = Some(candidate);
             let reason = if report_gaps.is_empty() {
                 "the producer made no change".to_string()

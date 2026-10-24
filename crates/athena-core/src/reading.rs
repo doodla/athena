@@ -993,6 +993,123 @@ pub fn retried_job(records: &Records, request: &str) -> Option<JobId> {
     records.resolve(reference).ok()
 }
 
+/// Whether a retry of a job may start its producer from the job's rejected candidate instead of the base.
+///
+/// True only when all of these hold, read from the job's records and never from prose:
+/// - the job was rejected (not failed, interrupted, blocked, landed or dropped);
+/// - it has a candidate with a commit and a tree and no admission violations;
+/// - its verification recorded at least one check, every check passed, and the verifier found no mismatch
+///   between the request and the reading;
+/// - at least one criterion is unmet, every unmet criterion is of kind content, and no behavior criterion is
+///   unmet or cites a command that was not seen running.
+///
+/// A rejection that names no unmet criterion has an unknown cause, so it does not qualify. The new
+/// candidate is verified in full either way.
+pub fn qualifies_for_tree_retry(
+    state: JobState,
+    candidate: Option<&athena_data::records::Candidate>,
+    verification: Option<&athena_data::records::Verification>,
+) -> bool {
+    if state != JobState::Closed(OutcomeState::Rejected) {
+        return false;
+    }
+    let (Some(candidate), Some(verification)) = (candidate, verification) else {
+        return false;
+    };
+    if candidate.candidate_commit.is_none()
+        || candidate.candidate_tree.is_none()
+        || !candidate.violations.is_empty()
+    {
+        return false;
+    }
+    if verification.checks.is_empty()
+        || !verification.checks.iter().all(|c| c.passed)
+        || verification.request_reading_mismatch.is_some()
+    {
+        return false;
+    }
+    let behavior_trouble = verification
+        .criteria
+        .iter()
+        .any(|c| c.kind == CriterionKind::Behavior && (!c.met || !c.commands_verified));
+    let mut unmet = verification.criteria.iter().filter(|c| !c.met).peekable();
+    !behavior_trouble && unmet.peek().is_some() && unmet.all(|c| c.kind == CriterionKind::Content)
+}
+
+/// What a producer retry seeded from a rejected candidate starts from and is told.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeRetrySeed {
+    /// The rejected job.
+    pub job: JobId,
+    /// The base commit the rejected job's candidate was made against.
+    pub base_commit: String,
+    /// The rejected candidate's commit, whose visible files seed the working directory.
+    pub candidate_commit: String,
+    /// The unmet criteria with the verifier's evidence, redacted.
+    pub unmet: Vec<String>,
+    /// The verification's findings, redacted.
+    pub findings: Vec<String>,
+}
+
+/// The seed for a request of the form "try again on <job>" when [`qualifies_for_tree_retry`] holds for that
+/// job; `None` for any other request or job. The caller must still check that the visible base has not
+/// changed since `base_commit` before it seeds from the candidate.
+pub fn tree_retry_seed(
+    records: &Records,
+    request: &str,
+    redactor: &Redactor,
+) -> Result<Option<TreeRetrySeed>> {
+    let Some(id) = retried_job(records, request) else {
+        return Ok(None);
+    };
+    let Some(job) = records.jobs.get(id.as_str()) else {
+        return Ok(None);
+    };
+    if !qualifies_for_tree_retry(
+        job.state(),
+        job.candidate.as_ref(),
+        job.verification.as_ref(),
+    ) {
+        return Ok(None);
+    }
+    let (Some(candidate), Some(verification)) = (&job.candidate, &job.verification) else {
+        return Ok(None);
+    };
+    let Some(candidate_commit) = candidate.candidate_commit.clone() else {
+        return Ok(None);
+    };
+    let mut texts: Vec<String> = verification
+        .criteria
+        .iter()
+        .filter(|c| !c.met)
+        .map(|c| format!("{}: {}", c.criterion, c.evidence))
+        .collect();
+    let unmet_count = texts.len();
+    texts.extend(verification.findings.iter().map(|f| {
+        let location = f
+            .location
+            .as_deref()
+            .map_or(String::new(), |l| format!(" ({l})"));
+        format!(
+            "{}{location}: {} {}",
+            format!("{:?}", f.severity).to_lowercase(),
+            f.summary,
+            f.evidence
+        )
+        .trim_end()
+        .to_string()
+    }));
+    redactor.redact_all(&mut texts)?;
+    let findings = texts.split_off(unmet_count);
+    Ok(Some(TreeRetrySeed {
+        job: id,
+        base_commit: candidate.base_commit.clone(),
+        candidate_commit,
+        unmet: texts,
+        findings,
+    }))
+}
+
 /// The reference after "try again on " at the start of `request`; `None` when it is not that form.
 fn retry_reference(request: &str) -> Result<Option<&str>> {
     let text = request.trim();
@@ -2287,5 +2404,172 @@ mod tests {
         assert_eq!(names, ["20261012-075824-1x28", "20261011-000000-abcd"]);
         assert!(job_ids_in("add 1x28 and 2026-10-12 and latest").is_empty());
         assert!(job_ids_in("x120261012-075824-1x28 or 20261012-075824-1x28z").is_empty());
+    }
+
+    fn criterion_result(
+        kind: CriterionKind,
+        met: bool,
+        commands_verified: bool,
+    ) -> athena_data::records::CriterionResult {
+        athena_data::records::CriterionResult {
+            criterion: "a criterion".into(),
+            kind,
+            met,
+            evidence: "UNMET-EVIDENCE the description lists no callers".into(),
+            commands: vec![],
+            commands_verified,
+        }
+    }
+
+    fn candidate_of(job: &JobRecords) -> athena_data::records::Candidate {
+        athena_data::records::Candidate {
+            job: job.id().clone(),
+            base_commit: "a".repeat(40),
+            base_fingerprint: None,
+            previous_job: None,
+            candidate_commit: Some("b".repeat(40)),
+            candidate_tree: Some("c".repeat(40)),
+            changes: vec![],
+            fingerprint: None,
+            violations: vec![],
+            producer_report: None,
+        }
+    }
+
+    /// A rejected job whose checks passed and whose only unmet criterion is of kind content.
+    fn content_only_rejection() -> JobRecords {
+        let mut job = job_with_checks(vec![check("fmt", true, ""), check("test", true, "")]);
+        job.candidate = Some(candidate_of(&job));
+        job.outcome = Some(outcome(&job, OutcomeState::Rejected, "rejected"));
+        let verification = job.verification.as_mut().unwrap();
+        verification.criteria = vec![
+            criterion_result(CriterionKind::Content, false, true),
+            criterion_result(CriterionKind::Behavior, true, true),
+        ];
+        verification.findings = vec![athena_data::records::Finding {
+            severity: athena_data::records::Severity::Major,
+            summary: "no callers listed".into(),
+            evidence: "the entry is silent".into(),
+            location: Some("CHANGELOG.md".into()),
+            source: athena_data::records::FindingSource::Verifier,
+        }];
+        job
+    }
+
+    fn qualifies(job: &JobRecords) -> bool {
+        qualifies_for_tree_retry(
+            job.state(),
+            job.candidate.as_ref(),
+            job.verification.as_ref(),
+        )
+    }
+
+    #[test]
+    fn only_a_rejection_with_every_check_passed_and_content_criteria_unmet_qualifies() {
+        assert!(qualifies(&content_only_rejection()));
+
+        type Change = fn(&mut JobRecords);
+        let cases: [(&str, Change); 11] = [
+            ("a check failed", |j| {
+                j.verification.as_mut().unwrap().checks[1].passed = false
+            }),
+            ("a behavior criterion is unmet", |j| {
+                j.verification.as_mut().unwrap().criteria[1].met = false
+            }),
+            ("a behavior criterion cites commands never seen", |j| {
+                j.verification.as_mut().unwrap().criteria[1].commands_verified = false
+            }),
+            ("no candidate tree", |j| {
+                j.candidate.as_mut().unwrap().candidate_tree = None
+            }),
+            ("no candidate commit", |j| {
+                j.candidate.as_mut().unwrap().candidate_commit = None
+            }),
+            ("no candidate record", |j| j.candidate = None),
+            ("admission violations", |j| {
+                j.candidate.as_mut().unwrap().violations =
+                    vec![athena_data::records::PolicyViolation {
+                        rule: "governance".into(),
+                        path: None,
+                        detail: "x".into(),
+                    }]
+            }),
+            ("the job failed", |j| {
+                j.outcome.as_mut().unwrap().state = OutcomeState::Failed
+            }),
+            ("the job was interrupted", |j| j.outcome = None),
+            ("no criterion is unmet", |j| {
+                j.verification.as_mut().unwrap().criteria[0].met = true
+            }),
+            ("no check was recorded", |j| {
+                j.verification.as_mut().unwrap().checks.clear()
+            }),
+        ];
+        for (name, change) in cases {
+            let mut job = content_only_rejection();
+            // An interrupted job is dispatched and has no outcome.
+            if name == "the job was interrupted" {
+                job.job = Some(athena_data::records::Job {
+                    id: job.id().clone(),
+                    ..dispatched_job_stub()
+                });
+            }
+            change(&mut job);
+            assert!(!qualifies(&job), "{name}: must restart from the base");
+        }
+
+        let mut mismatch = content_only_rejection();
+        mismatch
+            .verification
+            .as_mut()
+            .unwrap()
+            .request_reading_mismatch = Some("misread".into());
+        assert!(
+            !qualifies(&mismatch),
+            "a reading mismatch restarts from the base"
+        );
+    }
+
+    fn dispatched_job_stub() -> athena_data::records::Job {
+        serde_json::from_value(serde_json::json!({
+            "id": "20261012-084936-n1p0", "kind": "request", "title": "t", "class_of_work": null,
+            "capability": null, "accepted_reading": null, "accepted_by": null,
+            "owner": { "role": "producer", "capability": null, "model": null, "note": null },
+            "verifier_model": null, "caps": null, "base_commit": null, "config_sha256": null,
+            "defaults_sha256": null, "athena": null, "driver": null, "brief_sha256": null,
+            "dispatched_at": null, "request_path": null, "request_sha256": null, "cost": null,
+            "tokens": null, "note": null, "pin": null
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn the_seed_is_found_from_the_request_and_carries_redacted_findings() {
+        let redactor = Redactor::new(&athena_gate::builtin_config()).unwrap();
+        let job = content_only_rejection();
+        let id = job.id().as_str().to_string();
+        let records = records_with(job);
+        let seed = tree_retry_seed(&records, &format!("try again on {id}"), &redactor)
+            .unwrap()
+            .expect("a seed");
+        assert_eq!(seed.job.as_str(), id);
+        assert_eq!(seed.candidate_commit, "b".repeat(40));
+        assert_eq!(seed.base_commit, "a".repeat(40));
+        assert_eq!(seed.unmet.len(), 1);
+        assert!(seed.unmet[0].contains("UNMET-EVIDENCE"), "{:?}", seed.unmet);
+        assert_eq!(seed.findings.len(), 1);
+        assert!(seed.findings[0].contains("major (CHANGELOG.md): no callers listed"));
+        // Any other request, or a job that does not qualify, has no seed.
+        assert_eq!(
+            tree_retry_seed(&records, "add a greeting", &redactor).unwrap(),
+            None
+        );
+        let mut failed = content_only_rejection();
+        failed.verification.as_mut().unwrap().checks[0].passed = false;
+        let records = records_with(failed);
+        assert_eq!(
+            tree_retry_seed(&records, &format!("try again on {id}"), &redactor).unwrap(),
+            None
+        );
     }
 }

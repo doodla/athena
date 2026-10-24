@@ -619,14 +619,28 @@ fn retrying_a_retry_carries_the_original_request_redacted() {
     first_scenario.verdict = failing_verdict("FINDING-A-CANARY the greeting is missing");
     let mut second_scenario = Scenario::default();
     second_scenario.verdict = failing_verdict("FINDING-B-CANARY the greeting is still missing");
+    // The retry of a content-only rejection starts from the first attempt's files, so an identical edit
+    // would change nothing and fail as an empty candidate: this attempt writes something else.
+    second_scenario.edits = vec![(
+        "README.md".into(),
+        Some("# Demo\n\nHello again, reader.\n".into()),
+    )];
     let first_script = first_scenario.script();
     let second_script = second_scenario.script();
     let verifier_calls = Arc::new(Mutex::new(0usize));
+    let producer_calls = Arc::new(Mutex::new(0usize));
     let readers = Arc::new(Mutex::new(Vec::new()));
     let kept = readers.clone();
     let script: athena_agent::fake::Script = Box::new(move |spec| {
         if spec.role == Role::Reader {
             kept.lock().unwrap().push(spec.user_prompt.clone());
+        }
+        if spec.role == Role::Producer {
+            let mut calls = producer_calls.lock().unwrap();
+            *calls += 1;
+            if *calls > 1 {
+                return second_script(spec);
+            }
         }
         if spec.role == Role::Verifier {
             let mut calls = verifier_calls.lock().unwrap();

@@ -327,6 +327,352 @@ fn a_job_with_no_introspection_falls_back_to_try_again_on() {
     assert!(!brief.contains("Proposed next request"));
 }
 
+// ---------------------------------------------------------------------------------------------------------
+// Tree-seeded retries: a rejection with every check passed and only content criteria unmet restarts the
+// producer from the rejected candidate; any other rejection restarts from the base.
+
+/// What one producer run was given: its working directory's files (relative paths, `.git` left out), the
+/// content of `README.md` there, and its brief.
+#[derive(Clone, Debug)]
+struct Seen {
+    files: Vec<String>,
+    readme: String,
+    brief: String,
+}
+
+fn files_under(dir: &std::path::Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for entry in std::fs::read_dir(&d).unwrap().flatten() {
+            let path = entry.path();
+            if path.file_name().is_some_and(|n| n == ".git") {
+                continue;
+            }
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                out.push(path.strip_prefix(dir).unwrap().display().to_string());
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// The script, what each producer run was given, and every role that was called.
+type Phased = (
+    athena_agent::fake::Script,
+    Arc<Mutex<Vec<Seen>>>,
+    Arc<Mutex<Vec<Role>>>,
+);
+
+/// A script that plays `first` until the second reader call (the retry's reading) and `second` after it, and
+/// records what every producer run was given, plus every role it was called as.
+fn two_phases(first: Scenario, second: Scenario) -> Phased {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let roles = Arc::new(Mutex::new(Vec::new()));
+    let readers = Arc::new(Mutex::new(0usize));
+    let (first, second) = (first.script(), second.script());
+    let (kept, called) = (seen.clone(), roles.clone());
+    let script: athena_agent::fake::Script = Box::new(move |spec| {
+        called.lock().unwrap().push(spec.role);
+        if spec.role == Role::Reader {
+            *readers.lock().unwrap() += 1;
+        }
+        if spec.role == Role::Producer {
+            kept.lock().unwrap().push(Seen {
+                files: files_under(&spec.workdir),
+                readme: std::fs::read_to_string(spec.workdir.join("README.md")).unwrap_or_default(),
+                brief: spec.user_prompt.clone(),
+            });
+        }
+        if *readers.lock().unwrap() > 1 {
+            second(spec)
+        } else {
+            first(spec)
+        }
+    });
+    (script, seen, roles)
+}
+
+const HELLO: &str = "# Demo\n\nHello, reader.\n";
+const CONTENT_FINDING: &str = "CONTENT-FINDING-CANARY the description lists no callers";
+
+/// A verdict that leaves the given criteria (1-based) unmet and the other one met.
+fn verdict_unmet(unmet: &[usize]) -> Value {
+    let criteria: Vec<Value> = (1..=2)
+        .map(|n| {
+            let met = !unmet.contains(&n);
+            json!({
+                "criterion": format!("criterion {n}"),
+                "met": met,
+                "evidence": if met { "ran" } else { "UNMET-EVIDENCE-CANARY missing" },
+                "commands": if n == 2 { vec!["cargo test"] } else { Vec::<&str>::new() }
+            })
+        })
+        .collect();
+    json!({
+        "verdict": "fail",
+        "criteria": criteria,
+        "findings": [{
+            "severity": "major",
+            "summary": CONTENT_FINDING,
+            "evidence": "the change description is missing",
+            "location": "README.md"
+        }],
+        "request_reading_mismatch": null,
+        "summary": "Rejected."
+    })
+}
+
+/// The first attempt adds `greeting.txt` and edits `README.md`; its verdict is `verdict`.
+fn first_attempt(verdict: Value) -> Scenario {
+    Scenario {
+        edits: vec![
+            ("README.md".into(), Some(HELLO.into())),
+            ("greeting.txt".into(), Some("hi\n".into())),
+        ],
+        verdict,
+        ..Scenario::default()
+    }
+}
+
+/// The retry's producer edits `README.md` again; its verdict passes.
+fn second_attempt() -> Scenario {
+    Scenario {
+        edits: vec![(
+            "README.md".into(),
+            Some("# Demo\n\nHello, reader.\n\nChanged by the retry.\n".into()),
+        )],
+        ..Scenario::default()
+    }
+}
+
+/// Runs the first attempt to a rejection, then asks to try again on it. Returns the retry's job.
+fn reject_then_ask_again(athena: &Athena, text: &str) -> (String, String) {
+    let first = athena.ask(text, &Lines::default()).unwrap().job.to_string();
+    match athena
+        .go(&first, AcceptedBy::User, &Lines::default())
+        .unwrap()
+    {
+        GoResult::Finished(f) => assert_eq!(f.state, OutcomeState::Rejected, "{}", f.reason),
+        other => panic!("expected a finished job, got {other:?}"),
+    }
+    let again = athena
+        .ask(&format!("try again on {first}"), &Lines::default())
+        .unwrap()
+        .job
+        .to_string();
+    (first, again)
+}
+
+fn run_retry(athena: &Athena, job: &str) -> athena_core::run::Finished {
+    match athena.go(job, AcceptedBy::User, &Lines::default()).unwrap() {
+        GoResult::Finished(f) => *f,
+        other => panic!("expected a finished job, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_content_only_rejection_retries_from_the_rejected_tree() {
+    let fx = Fixture::new();
+    let (script, seen, roles) = two_phases(first_attempt(verdict_unmet(&[1])), second_attempt());
+    let athena = fx.athena(script);
+    let (first, again) = reject_then_ask_again(&athena, "add a greeting");
+    let verifiers_before = roles
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| **r == Role::Verifier)
+        .count();
+    let finished = run_retry(&athena, &again);
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 2);
+
+    // The first attempt started from the base; the retry from the rejected candidate.
+    assert!(!seen[0].files.contains(&"greeting.txt".to_string()));
+    assert_eq!(seen[0].readme, "# Demo\n");
+    assert!(
+        seen[1].files.contains(&"greeting.txt".to_string()),
+        "{:?}",
+        seen[1].files
+    );
+    assert_eq!(seen[1].readme, HELLO);
+    // The brief carries the findings and says where the work starts, and never that it starts from the base.
+    assert!(seen[1].brief.contains(CONTENT_FINDING), "{}", seen[1].brief);
+    assert!(seen[1].brief.contains("UNMET-EVIDENCE-CANARY"));
+    assert!(seen[1].brief.contains(&format!(
+        "starts from the rejected candidate of job {first}"
+    )));
+    assert!(!seen[1].brief.contains("starts from the base"));
+    assert!(!seen[0].brief.contains("rejected candidate"));
+
+    // The new candidate is verified in full and lands against the original base: the rejected work and the
+    // retry's own edit are both in the landed tree.
+    let verifiers_after = roles
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| **r == Role::Verifier)
+        .count();
+    assert!(verifiers_after > verifiers_before, "the verifier ran");
+    assert_eq!(finished.state, OutcomeState::Landed, "{}", finished.reason);
+    assert_eq!(fx.file("greeting.txt").as_deref(), Some("hi\n"));
+    assert!(
+        fx.file("README.md")
+            .unwrap()
+            .contains("Changed by the retry.")
+    );
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    let verification = records.jobs[&again].verification.as_ref().unwrap();
+    assert!(!verification.checks.is_empty());
+    assert!(verification.checks.iter().all(|c| c.passed));
+    let candidate = records.jobs[&again].candidate.as_ref().unwrap();
+    let paths: Vec<&str> = candidate.changes.iter().map(|c| c.path.as_str()).collect();
+    assert!(paths.contains(&"greeting.txt"), "{paths:?}");
+    assert!(paths.contains(&"README.md"), "{paths:?}");
+}
+
+#[test]
+fn a_seeded_retry_that_changes_nothing_fails_as_an_empty_candidate() {
+    let fx = Fixture::new();
+    let idle = Scenario {
+        edits: vec![],
+        ..second_attempt()
+    };
+    let (script, seen, roles) = two_phases(first_attempt(verdict_unmet(&[1])), idle);
+    let athena = fx.athena(script);
+    let (_, again) = reject_then_ask_again(&athena, "add a greeting");
+    let verifiers_before = roles
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| **r == Role::Verifier)
+        .count();
+    let finished = run_retry(&athena, &again);
+    assert!(
+        seen.lock().unwrap()[1]
+            .files
+            .contains(&"greeting.txt".to_string()),
+        "the retry was seeded"
+    );
+    assert_eq!(finished.state, OutcomeState::Failed, "{}", finished.reason);
+    assert!(
+        finished.reason.contains("the producer made no change"),
+        "{}",
+        finished.reason
+    );
+    let verifiers_after = roles
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| **r == Role::Verifier)
+        .count();
+    assert_eq!(
+        verifiers_after, verifiers_before,
+        "no candidate was verified"
+    );
+    assert_eq!(fx.file("greeting.txt"), None, "nothing landed");
+}
+
+#[test]
+fn an_unmet_behavior_criterion_retries_from_the_base() {
+    let fx = Fixture::new();
+    let (script, seen, _) = two_phases(first_attempt(verdict_unmet(&[2])), second_attempt());
+    let athena = fx.athena(script);
+    let (_, again) = reject_then_ask_again(&athena, "add a greeting");
+    run_retry(&athena, &again);
+    let seen = seen.lock().unwrap().clone();
+    assert!(!seen[1].files.contains(&"greeting.txt".to_string()));
+    assert_eq!(seen[1].readme, "# Demo\n");
+    assert!(!seen[1].brief.contains("rejected candidate"));
+    assert!(
+        seen[1]
+            .brief
+            .contains("A snapshot of the base commit's files")
+    );
+}
+
+#[test]
+fn a_failed_check_retries_from_the_base() {
+    // The test check fails when README.md is gone: the first attempt deletes it and adds a file.
+    let fx = Fixture::new();
+    let first = Scenario {
+        edits: vec![
+            ("README.md".into(), None),
+            ("greeting.txt".into(), Some("hi\n".into())),
+        ],
+        verdict: verdict_unmet(&[1]),
+        ..Scenario::default()
+    };
+    let (script, seen, _) = two_phases(first, second_attempt());
+    let athena = fx.athena(script);
+    let (_, again) = reject_then_ask_again(&athena, "add a greeting");
+    run_retry(&athena, &again);
+    let seen = seen.lock().unwrap().clone();
+    assert!(!seen[1].files.contains(&"greeting.txt".to_string()));
+    assert_eq!(seen[1].readme, "# Demo\n", "the base's README.md");
+    assert!(!seen[1].brief.contains("rejected candidate"));
+}
+
+#[test]
+fn a_changed_base_retries_from_the_base() {
+    let fx = Fixture::new();
+    let (script, seen, _) = two_phases(first_attempt(verdict_unmet(&[1])), second_attempt());
+    let athena = fx.athena(script);
+    let first = athena
+        .ask("add a greeting", &Lines::default())
+        .unwrap()
+        .job
+        .to_string();
+    run_retry(&athena, &first);
+    // Other work lands in the repository between the rejection and the retry.
+    write(fx.root(), &[("OTHER.md", "later work\n")]);
+    fx.git.run(["add", "-A"]).unwrap();
+    fx.git.run(["commit", "-q", "-m", "Other work"]).unwrap();
+    let again = athena
+        .ask(&format!("try again on {first}"), &Lines::default())
+        .unwrap()
+        .job
+        .to_string();
+    run_retry(&athena, &again);
+    let seen = seen.lock().unwrap().clone();
+    assert!(seen[1].files.contains(&"OTHER.md".to_string()));
+    assert!(
+        !seen[1].files.contains(&"greeting.txt".to_string()),
+        "the old candidate would have undone later work"
+    );
+    assert!(!seen[1].brief.contains("rejected candidate"));
+}
+
+#[test]
+fn a_failed_job_retries_from_the_base() {
+    // The producer changes nothing, so the first job fails as an empty candidate.
+    let fx = Fixture::new();
+    let idle = Scenario {
+        edits: vec![],
+        ..Scenario::default()
+    };
+    let (script, seen, _) = two_phases(idle, second_attempt());
+    let athena = fx.athena(script);
+    let first = athena
+        .ask("add a greeting", &Lines::default())
+        .unwrap()
+        .job
+        .to_string();
+    assert_eq!(run_retry(&athena, &first).state, OutcomeState::Failed);
+    let again = athena
+        .ask(&format!("try again on {first}"), &Lines::default())
+        .unwrap()
+        .job
+        .to_string();
+    run_retry(&athena, &again);
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen[1].readme, "# Demo\n");
+    assert!(!seen[1].brief.contains("rejected candidate"));
+}
+
 #[test]
 fn the_retry_command_takes_a_job_and_the_same_options_as_ask() {
     let run = |args: &[&str]| {

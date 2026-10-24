@@ -9,6 +9,48 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A retry starts the producer from the rejected candidate, not the base, when every check of the rejected job
+  passed and every unmet criterion is a content criterion; the producer is sent only the verifier's findings.
+  Any other rejection (a failed check, an unmet or unverified behavior criterion, no candidate tree, a failed
+  or interrupted job, a reading mismatch, admission violations) still starts from the base, and so does a
+  retry after other work landed (a path outside `records/` differs between the rejected job's base and the
+  retry's prediction commit), because the old candidate would undo that work. Root cause: the retry always
+  rebuilt the producer's snapshot from the base, redoing code that had passed every check.
+  The new candidate is still its change list against the original base, then admission, fingerprint, the full
+  checks and the verifier, so landing is unchanged. A seeded producer that changes nothing fails as "the
+  producer made no change". Earlier CHANGELOG or decision text that says a retry always starts from the base
+  is superseded by this entry and by D117 in `docs/decisions.md`. Callers and writers touched, with the test
+  that covers each:
+  - `qualifies_for_tree_retry` and `tree_retry_seed` (new, `crates/athena-core/src/reading.rs`):
+    `only_a_rejection_with_every_check_passed_and_content_criteria_unmet_qualifies` and
+    `the_seed_is_found_from_the_request_and_carries_redacted_findings`.
+  - `Athena::tree_seed` and `Athena::dispatch` (`run.rs`, the seed and the brief):
+    `a_content_only_rejection_retries_from_the_rejected_tree` and `a_changed_base_retries_from_the_base`.
+  - `Athena::produce_and_verify` (`run.rs`, the snapshot and the empty-candidate test):
+    `a_content_only_rejection_retries_from_the_rejected_tree` (full checks, verifier, landing) and
+    `a_seeded_retry_that_changes_nothing_fails_as_an_empty_candidate`; the base-start cases are
+    `a_failed_check_retries_from_the_base`, `an_unmet_behavior_criterion_retries_from_the_base` and
+    `a_failed_job_retries_from_the_base` (all in `crates/athena-cli/tests/retry.rs`).
+  - `Snapshot::create` with the new `SnapshotRepo::BaseThenTree`, and `Snapshot::unchanged_since_seed`
+    (`crates/athena-git/src/snapshot.rs`): `a_seeded_snapshot_diffs_against_the_base_and_notices_an_untouched_seed`
+    and `a_snapshot_without_a_seed_is_never_unchanged_since_seed`.
+  - `producer_brief` (a retry section and a working-directory paragraph) and `reader_brief` (the base-start
+    sentence is now conditional), in `crates/athena-context/src/briefs.rs`:
+    `a_seeded_producer_brief_carries_the_findings_and_says_the_work_starts_from_the_candidate`,
+    `an_unseeded_producer_brief_is_a_base_snapshot_without_a_retry_section` and
+    `reader_briefs_carry_the_earlier_reading_corrections_and_the_discard_notice`.
+  - Doc text only: the retry paragraph of `README.md` and the retry item of `crates/athena-cli/src/drain.rs`.
+  - Commands run: `cargo test --locked -p athena-git seed`, `cargo test --locked -p athena-context`,
+    `cargo test --locked -p athena-core --lib -- only_a_rejection the_seed_is_found`,
+    `cargo test --locked -p athena-cli --test retry`, `cargo fmt --all --check` and
+    `cargo clippy --all-targets --locked -- -D warnings` (all passed), and `cargo test --locked --no-fail-fast`
+    on the whole workspace. That run had two failures, both caused by this change and both fixed: the backtest
+    of `docs/decisions.md` (a bare "supersedes" phrase in the new decision) and
+    `retrying_a_retry_carries_the_original_request_redacted` in `crates/athena-cli/tests/lifecycle.rs`, whose
+    second attempt wrote the same file content as the seeded tree and so, correctly, failed as an empty
+    candidate; its second attempt now writes different content. After the fixes,
+    `cargo test --locked -p athena-cli --test backtest` and the lifecycle test named above passed; the whole
+    suite was not run a second time.
 - `LandingCommit` in `crates/athena-data/src/history.rs` has a required `kind` (`job_landing`,
   `declared_intervention`, `records_only`). `job` and `verification` are now optional and omitted when absent;
   `Landing::validate` requires both for `job_landing` and refuses them for the other two kinds. `GitLandingRecords`
