@@ -1,0 +1,164 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261024-033933-ta60",
+  "n": 1,
+  "at": "2026-10-24T04:21:34.737788194Z",
+  "invocation_seq": 1,
+  "base_commit": "42382eaf0e0a3e1cfd097536d627abd22c98a345",
+  "config_sha256": "723abb81b8cdcc25033d7d9653128a919911c4b5950c306183153235b21717e7",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Add athena/records branch writer with CAS and bounded retry",
+  "summary": "Add a new module in athena-git that appends opaque record files to the orphan branch athena/records. It uses a compare-and-swap ref update, fast-forward only, and retries a bounded number of times by refetching and replaying. It refuses any write that would modify, delete or rename an existing path. Nothing in the job pipeline calls it. The audience is the maintainer and the verifier, who check it by running the tests.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "Rust only, inside the athena-git crate."
+    },
+    {
+      "id": "tested",
+      "how": "Unit tests for each requested behavior; cargo test and clippy must pass."
+    },
+    {
+      "id": "buy-first",
+      "how": "Reuse the existing Git wrapper, TempIndex and commit_tree helpers and the git CLI's atomic update-ref; add no crate."
+    },
+    {
+      "id": "small",
+      "how": "One new module plus its export; no pipeline changes."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run the concurrency, retry, refusal and no-common-ancestor behaviors instead of checking that the code exists."
+    },
+    {
+      "id": "verified",
+      "how": "The verifier runs cargo test, clippy and fmt --check."
+    },
+    {
+      "id": "strangers",
+      "how": "Doc comments cite the design section and decision."
+    },
+    {
+      "id": "public",
+      "how": "Tests use synthetic identities and no personal data."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "The writer works on a local repository's ref, and optionally on a remote through the existing guarded push (push_if_remote_at). The local ref update uses `git update-ref <ref> <new> <old>`, which takes git's lock and acts as the compare-and-swap. The 'simultaneous writers' test uses two threads on one repository, or two clones pushing to a bare remote.",
+    "Whether to also implement the remote variant is the producer's call. Local plus a bare-remote test is the minimum that matches §8.2 'Local repositories use the same ref update'.",
+    "Records are opaque bytes: the writer does not validate schemas, because the athena-data record types are job 1 part 1 and are out of this change.",
+    "The retry count defaults to 5 (the design's example) and can be set as a parameter.",
+    "The first write creates a root commit with no parents, using an empty base tree. The commit uses a fixed Athena identity, like Git::isolated, with signing configurable through the existing `sign` flag.",
+    "The branch name is the constant `athena/records`.",
+    "The goal is the writer plus its tests, and the maintainer will build the later jobs (importer, landing) on it.",
+    "Existing-path refusal is checked against the latest fetched tip on each attempt, so a replay after rejection also refuses if the winner took the same path."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Run `cargo test -p athena-git`. A test starts two writers at once (threads) against one repository, with different record paths. Both land, each path is present on the final tip, every update was a fast-forward (each tip descends from the previous one), and no commit was lost.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-git`. A test makes the ref move between the writer's read and its update (a stale expected tip). The first update is rejected, the writer refetches and replays its new files on the new tip, and the write succeeds. The earlier commit and the new files are both in the final tree.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-git`. Tests show that a write that modifies an existing path, deletes one, or renames one (a delete plus an add of the same content) is refused with an error. In each case the branch tip after the call equals the tip before. A write with identical bytes at an existing path is also tested, and its result is documented.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-git`. A test shows that `athena/records` shares no history with main: `git merge-base main athena/records` finds nothing, and the first records commit has no parent. A second test shows the retry bound is enforced. When every attempt is rejected, the writer returns a clear error after the bounded count and does not loop.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo clippy --all-targets` and `cargo fmt --check`. Both are clean. `cargo test` passes for the workspace.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A writer API exists in athena-git (a new public module exported from lib.rs). It takes opaque bytes keyed by path, with doc comments that cite §8.2 and D111. It uses the existing Git wrapper, temp index and commit_tree helpers, with no new crate. A repository search finds no caller of it outside athena-git, so the pipeline is untouched.",
+      "kind": "content"
+    },
+    {
+      "text": "No governance file is changed (athena.toml, defaults.toml, workflows, lint tables). No file under records/ is touched.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-git/src/records_branch.rs",
+      "action": "create",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-git/src/lib.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "docs/design/records-history.md",
+      "action": "modify",
+      "p": 0.1
+    },
+    {
+      "path": "crates/athena-git/Cargo.toml",
+      "action": "modify",
+      "p": 0.08
+    }
+  ],
+  "out_of_scope": [
+    "New record types in athena-data",
+    "The importer, landing intent and reconcile, and the pre-merge status (jobs 2 to 4)",
+    "Wiring the writer into the job pipeline",
+    "Confirming host branch rules (no force-push, no deletion) on the real host",
+    "The history check that rejects commits that modify records"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.75,
+      "p_verification_passes": 0.58,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.4,
+        "p50": 0.95,
+        "p90": 2.2
+      },
+      "wall_time_s": {
+        "p10": 450.0,
+        "p50": 1200.0,
+        "p90": 2600.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7603603603603604,
+      "p_verification_passes": 0.6388888888888888,
+      "p_user_intervenes": 0.07540983606557378,
+      "cost_usd": {
+        "p10": 0.41986821579177824,
+        "p50": 1.0017654,
+        "p90": 2.156940892160377
+      },
+      "wall_time_s": {
+        "p10": 564.405824838328,
+        "p50": 1278.0202876614176,
+        "p90": 2525.4044922758667
+      }
+    }
+  },
+  "departures": "The concurrency and git plumbing tests make this slightly costlier than the median job. Concurrency tests can be flaky, which raises the chance that verification fails."
+}

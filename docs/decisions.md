@@ -979,7 +979,7 @@ amend earlier entries without rewriting them. All of these entries belong to the
   the findings. Option (b) runs tests the producer may have written, which is not independent evidence.
 - **Reversal cost:** Low.
 - **Provenance:** Stated: user-facing behavior is verified by exercising it (A7). Evidenced: tool calls,
-  with their commands, arrive in the stream (E16). Inferred from review 1 (m2).
+  with their commands, arrive in the stream (E16). Inferred from review 1 (m2). Amended by D63 and D115.
 
 ## D44 · Owner-maintained paths: the `athena-readonly` attribute
 
@@ -2703,3 +2703,30 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Reversal cost:** Low: delete the file and the test; nothing else reads them.
 - **Provenance:** read: BRIEF.md "Project Olympus" sections 1 to 6, `xtask/tests/policy.rs`; measured:
   `cargo test -p xtask --test spec`. `toml` and `serde` were already xtask dev-dependencies.
+
+## D115 · A passing check Athena recorded on the same tree counts as a command seen running
+
+- **Case:** Since commit 88562f1, verifiers cite Athena's recorded fmt, clippy and test results instead of
+  rerunning them. D43 still marked a behavior criterion unmet unless its cited commands were ones the verifier
+  was seen running, so job 20261024-033933-ta60 was rejected on "cargo test passes for the workspace" while
+  Athena's own test run on the same candidate had passed.
+- **Decision:** Amends D43. A cited command is seen if the verifier ran it, or Athena ran and recorded it on the
+  same candidate tree and it passed. `judge` in `crates/athena-core/src/verify.rs` takes two new inputs,
+  `candidate_tree` and `checks_tree`. A recorded check counts only when both are set and equal, the check
+  passed, and its exit code is 0. The check's command is split into simple commands and matched by whole text
+  as in D63, so `cargo test` is seen for a recorded `cargo test`, not for `cargo test --locked`. A failed
+  record, one made on another tree, and a placeholder with no exit code (a skipped check, or a nested run's
+  "not run" entry) do not count. `run.rs` passes the candidate commit as both trees, and no `checks_tree` for a
+  nested run. D43's finding text and the no-command rule are unchanged.
+- **Alternatives:** (a) Match by check name or by command prefix: would accept `cargo test` for a different
+  recorded command, which D63 rejected. (b) Treat every passed check as met regardless of citation: ignores
+  the criterion's text. (c) A boolean "recorded on the candidate" from the caller: `judge` would compare
+  nothing, and the other-tree case could not be tested in `verify.rs`. (d) A tree field on `CheckRun`: changes
+  the record schema.
+- **Tradeoff:** A verifier must cite the recorded command text exactly; a citation with different flags is
+  still unseen. The record is trusted as Athena's own, so a wrongly attributed tree would excuse a command
+  that never ran on the candidate; the missing-value case fails closed.
+- **Reversal cost:** Low: remove the two inputs and the extension of the seen list in `judge`.
+- **Provenance:** read: `judge`, its tests and the `run.rs` call; measured: `cargo test -p athena-core verify`
+  (passing, failed, other-tree, missing-tree, placeholder and unrecorded cases). Prompted by job
+  20261024-033933-ta60 and commit 88562f1.

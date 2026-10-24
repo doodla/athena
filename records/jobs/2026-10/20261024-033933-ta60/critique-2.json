@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261024-033933-ta60",
+  "round": 2,
+  "at": "2026-10-24T04:23:53.858137595Z",
+  "invocation_seq": 4,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "The thread test for criterion 1 would not reliably fail without CAS.",
+      "evidence": "The two threads are released by a Barrier, but the git processes they spawn may still run one after the other. A version with no CAS (plain update-ref) could then pass this test by luck. The deterministic proof of CAS-plus-replay is the hook-based test for criterion 2. Fix: Keep the thread test, but say plainly that the hook test is the deterministic proof of CAS. Optionally, also assert that the two writers' attempt counts add up to at least 3, so the run shows that one update really was rejected and replayed.",
+      "location": "Demonstrations, Criterion 1 ('Fails without the behavior')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The writer's Git isolates less than Git::isolated does.",
+      "evidence": "Git::isolated (lib.rs:165-182) also fixes the dates and sets GIT_CONFIG_GLOBAL=/dev/null, core.hooksPath and gc.auto=0. The plan only mentions name and email through env. If the user's config is not isolated, a background `gc --auto` or hooks could interfere with the concurrent test. Fix: State that the writer's Git sets its identity through with_env on a clone of the caller's Git, and that the tests use repositories built the way repo_with builds them, isolated. Optionally, disable gc.auto for the writer's commands.",
+      "location": "Decisions 3 / Step 2 (identity)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "No test covers the immediate-error path for an update-ref failure that is not a lost race.",
+      "evidence": "The mitigation re-reads the tip and returns the git error if it has not moved. This is sound, but no test covers it. Fix: Optionally, add a small test (for example, an invalid old value or a locked ref) that expects an immediate error, not a retry.",
+      "location": "Risks, 'update-ref failing for other reasons'",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the snapshot by reading crates/athena-git/src/lib.rs, crates/athena-git/src/index.rs and section 8.2 of docs/design/records-history.md. Every helper the plan uses exists with the signature it expects: Git::exit, rev_parse, ls_tree (recursive, full tree), hash_object_w, empty_tree, commit_tree (takes a list of parents and a sign flag, and passes --no-gpg-sign when sign is off), null_oid, GitError::Refused, TempIndex::from_tree, apply and write_tree, and testutil::repo_with. The design fits the request: one new module, a compare-and-swap through `git update-ref NEW OLD` with the all-zero oid as OLD for a new branch, a parentless root commit, bounded retry with a configurable count, and the existing-path check rerun on every attempt. Each demonstration runs the behavior it covers. The private before_update hook makes the stale-tip test and the retry-bound test deterministic, and checking that the tip is unchanged gives real proof of refusal. I found nothing that blocks the plan; my three findings concern how firm the tests are, not the design. No athena.toml field and no new crate is added, and the work fits one producer run."
+}

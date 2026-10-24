@@ -1927,6 +1927,9 @@ impl Athena {
             checks: &check_runs,
             output: verdict_output.as_ref(),
             commands_run: &redacted_commands,
+            candidate_tree: Some(c.as_str()),
+            // A nested run records "not run" placeholders, not results.
+            checks_tree: self.nested.is_none().then_some(c.as_str()),
             system_fault: system_fault.clone(),
             verifier_failure: verifier_failure.clone(),
             map_base: map_base.as_deref(),
