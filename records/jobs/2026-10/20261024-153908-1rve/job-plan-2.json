@@ -1,0 +1,179 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261024-153908-1rve",
+  "round": 2,
+  "at": "2026-10-24T15:41:55.261085925Z",
+  "invocation_seq": 3,
+  "approach": "Rewrite `pr_commits` to walk remote_base..head oldest first and classify each commit from its diff against its first parent, never reading messages. Order: (1) fingerprint(git, sha, parent) equals fingerprint(git, parent, parent) -> records_only; (2) an added records/interventions/<month>/<id>.json -> declared_intervention; (3) one job's candidate.json, verification.json and outcome(.json or -landed.json) all added under records/jobs/<month>/<job>/ -> job_landing with job and verification_id(job, sha); (4) otherwise bail naming the sha. Share path parsing with the gate via two pure pub helpers in invariant.rs. PrCommit becomes {sha, tree, kind, job, verification}; gh.rs commits() passes them through. Replace trailer tests, update docs and changelog.",
+  "decisions": [
+    {
+      "choice": "Classify from git.diff_tree(first_parent, sha) plus fingerprint; do not build gate Change/Judged objects.",
+      "reason": "pr_commits has only git and shas; added paths are all the content rules need. The gate still validates deeply when it gates the landing commit.",
+      "rejected": [
+        {
+          "option": "Call the gate's landing_job/check directly",
+          "why": "Needs Change and Judged and validates more than classification, widening coupling."
+        }
+      ]
+    },
+    {
+      "choice": "Expose closing_record_of_path and intervention_of_path from invariant.rs and reuse them in the gate and land.rs.",
+      "reason": "One definition of the path rules; pure refactor, no gate behavior change.",
+      "rejected": [
+        {
+          "option": "Duplicate path splitting in land.rs",
+          "why": "The two copies could drift."
+        },
+        {
+          "option": "Make closing_jobs pub",
+          "why": "It takes Change/Judged and loads files from a tree."
+        }
+      ]
+    },
+    {
+      "choice": "job_landing requires candidate, verification and an outcome all added for exactly one job; otherwise refuse.",
+      "reason": "Matches 'closing records' and the gate's landing case; partial sets must not be recorded as covered landings.",
+      "rejected": [
+        {
+          "option": "Accept any one closing file",
+          "why": "A partial set would be recorded as a landing."
+        }
+      ]
+    },
+    {
+      "choice": "Compare with the first parent; root or merge commits in the range are refused with their sha.",
+      "reason": "Range is expected to be linear.",
+      "rejected": [
+        {
+          "option": "Support merges or --first-parent",
+          "why": "Out of scope; gate merge rules differ."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/land.rs",
+      "action": "modify",
+      "purpose": "Rewrite PrCommit and pr_commits to classify by content; new realistic-range, refusal, empty-range tests; remove trailer-count tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "action": "modify",
+      "purpose": "commits() passes kind, job and verification through; reshape test World so the work commit is a real job landing; hand-edit refusal test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-gate/src/invariant.rs",
+      "action": "modify",
+      "purpose": "Add pub closing_record_of_path and intervention_of_path and use them in closing_jobs and intervention, with no behavior change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/records-history.md",
+      "action": "modify",
+      "purpose": "Section 5.3 and the failure table row describe content classification instead of the one-trailer rule.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased Changed entry; fix the earlier line saying pr_commits is unchanged.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In invariant.rs add pub closing_record_of_path and intervention_of_path; rewire closing_jobs and intervention; run cargo test -p athena-gate invariant.",
+    "In land.rs redefine PrCommit {sha, tree, kind, job, verification} and rewrite pr_commits per the check order; keep the empty-range error; refuse root/merge commits with the sha.",
+    "Write doc comments with the content rules; drop all Athena-Job text and unused imports.",
+    "Add land.rs tests: realistic range, refusal (including incomplete landing), empty range; remove trailer-count tests.",
+    "Update gh.rs commits() and the test World; assert kinds and validate; turn the trailer-missing test into a hand-edit refusal.",
+    "Update records-history.md and CHANGELOG.md.",
+    "Run cargo test -p athena-core land::, gh::, cargo test -p athena-gate invariant, cargo clippy -p athena-core --all-targets, cargo fmt --check."
+  ],
+  "risks": [
+    {
+      "risk": "Closing-record file names differ from what the brief assumes.",
+      "mitigation": "Helper reuses the gate's CLOSING list, so both agree by construction."
+    },
+    {
+      "risk": "The operator/ lease or reading commits are not fingerprint-neutral under default rules and get refused.",
+      "mitigation": "The test checks this; if false, report it instead of special-casing."
+    },
+    {
+      "risk": "gh tests built around trailer-only commits now get refused.",
+      "mitigation": "Run gh:: tests and reshape fixtures to content."
+    },
+    {
+      "risk": "Two fingerprint calls per commit are slow on long ranges.",
+      "mitigation": "Reuse the previous commit's fingerprint as the next parent's where simple."
+    },
+    {
+      "risk": "Editing invariant.rs could change gate behavior.",
+      "mitigation": "Helpers only move existing parsing; run cargo test -p athena-gate invariant."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit test in land.rs builds a repo: base, then plain-message commits: reading, dispatch, introspection record commits, a lease file under operator/, an intervention adding records/interventions/<month>/<id>.json, then a landing adding a governed file plus the job's candidate, verification and outcome records. Calls pr_commits.",
+      "command": "cargo test -p athena-core land::",
+      "observes": "Test passes; kinds in order are RecordsOnly x4, DeclaredIntervention, JobLanding with job equal to the job id and verification equal to verification_id(job, sha); no message has an Athena-Job trailer.",
+      "fails_without": "The old trailer logic errors on the first commit; a missing fingerprint, intervention or closing-records rule gives different kinds or an error."
+    },
+    {
+      "criterion": 2,
+      "method": "Unit test adds a plain-message commit changing a governed file with no intervention or closing records (plus a variant landing missing its verification record) and calls pr_commits.",
+      "command": "cargo test -p athena-core land::",
+      "observes": "Err whose text contains the offending commit's full sha.",
+      "fails_without": "If the fallback classified such a commit or the error omitted the sha, the contains(sha) assertion fails."
+    },
+    {
+      "criterion": 3,
+      "method": "Reshape the gh test World so its work commit is a real job landing; assert recorded Landing commits carry the kind from pr_commits and that LandingCommit::validate passes; the hand-edit test is refused with its sha, nothing recorded, zero merges.",
+      "command": "cargo test -p athena-core gh::",
+      "observes": "All gh tests pass with kind JobLanding plus job and verification on the written commits.",
+      "fails_without": "If gh.rs still hard-coded JobLanding or dropped job/verification, kind assertions or validation fail."
+    },
+    {
+      "criterion": 4,
+      "method": "Inspect the diff.",
+      "command": "git diff -- crates/athena-core/src/land.rs crates/athena-core/src/gh.rs",
+      "observes": "PrCommit has kind, job: Option<JobId>, verification: Option<RecordId>; pr_commits and PrCommit have no trailers( call and no Athena-Job text; doc comments state the content rules and refusal.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "The classification test plus an empty-range assertion pr_commits(git, head, head); code uses fingerprint(git, sha, parent) == fingerprint(git, parent, parent), the same function first_governed_change uses.",
+      "command": "cargo test -p athena-core land::",
+      "observes": "Empty range returns the 'adds no commit' error; an operator/-and-records/-only commit is RecordsOnly; a governed change is not.",
+      "fails_without": "A different rules argument or wrong parent would misclassify the operator/ lease commit and fail the criterion 1 test."
+    },
+    {
+      "criterion": 6,
+      "method": "Remove the trailer-count pr_commits tests and the gh 'lies between the remote base and the PR head' trailer test; view test names in the run output.",
+      "command": "cargo test -p athena-core land::",
+      "observes": "New test names run and none of the old ones; remaining Athena-Job strings in land.rs are only the unrelated resync_tip test messages.",
+      "fails_without": "Leftover trailer tests would still run and fail against content-based behavior."
+    },
+    {
+      "criterion": 7,
+      "method": "Run clippy, then cargo fmt --check, on the finished tree. A lint failure is the deliberate signal: unused imports (Context, JobId, trailers helpers) left after removing trailer code, or unformatted new code, make these commands fail.",
+      "command": "cargo clippy -p athena-core --all-targets",
+      "observes": "Clippy reports no warnings and cargo fmt --check prints no diff and exits 0.",
+      "fails_without": "Leftover unused trailer imports or helper code, or unformatted new tests, would produce clippy warnings or an fmt diff and fail the command."
+    }
+  ],
+  "open_questions": [
+    "Whether the default classification treats operator/ as non-governed; the lease-commit test will show it, and the producer must report rather than special-case.",
+    "Whether a job's verification id always equals verification_id(job, sha); relied on the existing function.",
+    "Whether a landing that adds only outcome-landed.json with candidate and verification should be accepted; plan accepts it as the gate does."
+  ],
+  "producer_section_sha256": "e9925a3831bfc9ff3304c8eed6f657369b3117f9271e67730333d6cca49bfdeb"
+}

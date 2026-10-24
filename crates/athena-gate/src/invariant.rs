@@ -222,7 +222,10 @@ pub fn landing_job(
 /// out. A squash ships the records of such a job, but its work never reached the branch, so it is no link
 /// of the chain: counting it would make its landed retry, which names it as `previous_job`, look like a
 /// fork. A job with no outcome record at all stays in, so that the landing check can refuse it.
-fn closing_jobs(git: &Git, change: &Change, judged: &Judged) -> Result<BTreeSet<JobId>> {
+///
+/// This is the single answer to "which jobs does this commit claim to land": the landing check uses it, and
+/// so does the classification of a pull request's commits (`athena_core::land::pr_commits`).
+pub fn closing_jobs(git: &Git, change: &Change, judged: &Judged) -> Result<BTreeSet<JobId>> {
     const CLOSING: [&str; 4] = [
         "candidate.json",
         "verification.json",
@@ -687,6 +690,28 @@ fn intervention(judged: &Judged, trailers: &[(String, String)]) -> std::result::
     Err(())
 }
 
+/// The interventions whose record `judged` adds, at `records/interventions/<month>/<id>.json`. This reads
+/// the content only; [`check`] additionally requires an `Athena-Intervention` trailer (case b).
+pub fn added_interventions(judged: &Judged) -> Vec<RecordId> {
+    let mut found = Vec::new();
+    for d in judged.diff.iter().filter(|d| d.status == 'A') {
+        let mut parts = d.path.split('/');
+        if let (Some("records"), Some("interventions"), Some(month), Some(file), None) = (
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+        ) && let Some(stem) = file.strip_suffix(".json")
+            && let Ok(id) = RecordId::parse(stem)
+            && id.month() == month
+        {
+            found.push(id);
+        }
+    }
+    found
+}
+
 /// `None` when a records-only commit names existing work; otherwise the problem.
 fn names_existing_work(
     git: &Git,
@@ -800,6 +825,23 @@ mod tests {
             "Fix by hand\n\nAthena-Intervention: 20261010-160000-abcd\n",
         );
         assert_eq!(judge(&git, "HEAD"), vec![]);
+    }
+
+    #[test]
+    fn added_interventions_lists_the_records_a_commit_adds_whatever_its_message_says() {
+        let (dir, git) = owner_repo();
+        let (path, text) = intervention_record("20261010-160000-abcd");
+        // A record under the wrong month is not an intervention record at its canonical path.
+        let wrong = "records/interventions/2026-01/20261010-160001-abcd.json";
+        write(dir.path(), &[(&path, &text), (wrong, "{}")]);
+        commit(&git, "no trailers at all\n");
+        let id = git.rev_parse("HEAD").unwrap().unwrap();
+        let change = Change::of_commit(&git, &id).unwrap();
+        let judged = Judged::new(&git, &change).unwrap();
+        assert_eq!(
+            added_interventions(&judged),
+            vec![RecordId::parse("20261010-160000-abcd").unwrap()]
+        );
     }
 
     #[test]

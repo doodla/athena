@@ -1,0 +1,193 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261024-154552-e65v",
+  "round": 1,
+  "at": "2026-10-24T15:48:45.870482739Z",
+  "invocation_seq": 3,
+  "approach": "Rewrite land::pr_commits to classify each commit of remote_base..head from its content. For each sha build gate Change::of_commit and Judged::new (rules = first parent). Order of tests: (1) closing_jobs (made pub in invariant.rs, otherwise unchanged) non-empty -> job_landing: exactly one job, JobFiles::load of the commit's tree must show a verification record and a landed outcome (outcome or later_outcome), verification id from gh::verification_id; anything else is refused with the sha. (2) the commit adds records/interventions/<month>/<id>.json (status A, id parses, month matches) -> declared_intervention. (3) fingerprint(commit; parent) == fingerprint(parent; parent) -> records_only (covers readings, dispatch, introspection, blocked-job records, operator/ lease commits excluded by the nested .gitattributes). (4) else error naming the sha. PrCommit becomes {sha, tree, kind: LandingKind, job: Option<JobId>, verification: Option<RecordId>}. GitLandingRecords::commits in gh.rs copies those fields. Trailer tests are replaced by content tests in land.rs; the gh records_flow fixture is changed so its first commit is a real job landing (records plus governed file), and the hand-edit test becomes a governed hand edit that is refused with its sha. Docs and changelog replace the trailer rule.",
+  "decisions": [
+    {
+      "choice": "Order: job_landing, then declared_intervention, then records_only by fingerprint, else refuse.",
+      "reason": "An intervention commit that adds only its record has an unchanged fingerprint, so it would read as records_only if the fingerprint test ran first; criterion 1 needs declared_intervention. A blocked job's records fail closing_jobs (not landed), so they fall through to records_only as criterion 2 needs.",
+      "rejected": [
+        {
+          "option": "Fingerprint test first",
+          "why": "Classifies a record-only intervention commit as records_only."
+        },
+        {
+          "option": "Intervention test first",
+          "why": "A commit that both lands a job and adds an intervention record would lose its job; landing first matches the gate, which tries landing before intervention."
+        }
+      ]
+    },
+    {
+      "choice": "Make invariant::closing_jobs pub and call it from pr_commits; do not copy its rule. The not_landed filter comes with it. pr_commits adds only a stricter check on top: landed outcome and verification record must be present.",
+      "reason": "Single source of truth, as the user answered. closing_jobs keeps a job with no outcome record so the landing check can refuse it, so pr_commits must itself require a landed outcome and a verification.",
+      "rejected": [
+        {
+          "option": "A new rule in land.rs",
+          "why": "Two rules would drift; the user asked for reuse."
+        }
+      ]
+    },
+    {
+      "choice": "Take verification id from gh::verification_id(job, sha).",
+      "reason": "One place defines that a verification is named by the job's id.",
+      "rejected": [
+        {
+          "option": "Duplicate the match in land.rs",
+          "why": "Duplicates the single source of truth."
+        }
+      ]
+    },
+    {
+      "choice": "A commit that closes more than one job (a squashed chain) or has no parent is refused with its sha.",
+      "reason": "PrCommit carries one job; guessing would write a false record. These do not occur in pull request ranges of single-job branches.",
+      "rejected": [
+        {
+          "option": "Pick the last job of the chain",
+          "why": "Needs the gate's chain_problem logic; out of scope and risks a wrong record."
+        }
+      ]
+    },
+    {
+      "choice": "Keep the error wording 'lies between the remote base and the PR head (base, head)' plus the sha, but describe the content reason.",
+      "reason": "Tests and operators look for the sha; the empty-range error stays unchanged.",
+      "rejected": []
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/land.rs",
+      "action": "modify",
+      "purpose": "New PrCommit and content-based pr_commits; replace trailer tests with content tests (fixture helper that writes records and a nested operator/.gitattributes).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "action": "modify",
+      "purpose": "GitLandingRecords::commits copies kind/job/verification from PrCommit; update records_flow World fixture and replace the trailer-less commit test; add a kind test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-gate/src/invariant.rs",
+      "action": "modify",
+      "purpose": "Make closing_jobs pub with a doc line saying land::pr_commits reuses it; no semantic change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/records-history.md",
+      "action": "modify",
+      "purpose": "Replace the 'Which commits' bullet and the failure-path row with the content rules.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Record the change under Unreleased and correct the 'pr_commits is unchanged' sentence.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In invariant.rs make closing_jobs pub and extend its doc comment; no other change.",
+    "In land.rs replace PrCommit with {sha, tree, kind: LandingKind, job: Option<JobId>, verification: Option<RecordId>}; import LandingKind, Change, Judged, closing_jobs, JobFiles, OutcomeState and gh::verification_id; drop unused imports.",
+    "Write pr_commits: rev-list --reverse range (keep empty-range bail); for each sha build Change::of_commit and Judged::new; refuse a root commit; apply job_landing, declared_intervention, records_only, refuse in that order, with doc comments that state each rule and the closing_jobs/not_landed reuse; every error names the sha, base and head.",
+    "Write the job_landing branch: exactly one closing job; JobFiles::load on the commit tree; require verification and a landed outcome (outcome or later_outcome); verification via verification_id; otherwise bail with the sha and the reason.",
+    "Write the intervention test: a diff entry with status 'A' and path records/interventions/<month>/<id>.json where RecordId::parse succeeds and id.month() matches.",
+    "In land.rs tests add helpers (write nested path, commit with message without trailers, record JSON builders for candidate, verification, outcome landed/blocked/outcome-landed) and the realistic-range, blocked-then-landed and refusal tests (including the missing-operator/.gitattributes companion); no pr_commits trailer test remains.",
+    "In gh.rs change GitLandingRecords::commits to copy kind, job and verification; adjust the World fixture to commit job records plus b.txt, replace the trailer-less commit test with a governed hand-edit refusal, and add a test asserting stored kinds validate.",
+    "Update records-history.md (5.3 bullet, failure table row) and CHANGELOG.md (Changed entry; fix the Added sentence).",
+    "Run cargo test -p athena-core land:: and gh::, cargo clippy -p athena-core --all-targets, cargo fmt --check; fix. The change description lists every landing-record writer (GitLandingRecords::intent, ::landing, run.rs retry_landing) with its test, and the reason for any narrow athena-gate run."
+  ],
+  "risks": [
+    {
+      "risk": "Gate and pr_commits disagree on what a landing is.",
+      "mitigation": "Reuse the gate's own functions (Change::of_commit, Judged::new, fingerprint, closing_jobs) and test against real git repos built with Git::isolated."
+    },
+    {
+      "risk": "Other gh tests use the old World commit (9 uses) and break.",
+      "mitigation": "Pre-existing fixtures are updated in the same change; run cargo test -p athena-core gh:: and fix each fixture until it passes."
+    },
+    {
+      "risk": "Hand-written record JSON in tests is invalid or off its canonical path, so JobFiles::load skips it and the tests pass or fail for the wrong reason.",
+      "mitigation": "Copy the record shape from the gate's landing_tests.rs helpers (candidate, verification, outcome) and the chain.rs outcome string; parse with AnyRecord::parse in the helper to check canonical paths."
+    },
+    {
+      "risk": "Making closing_jobs pub is mistaken for a gate change.",
+      "mitigation": "State in the change description that the invariant.rs change is a visibility change only, and run a narrow athena-gate invariant test only if the producer touches more than the visibility."
+    },
+    {
+      "risk": "retry_landing records are what make a blocked job landable; if their shape differs from the fixture, real PRs still refuse.",
+      "mitigation": "List run.rs retry_landing (writes outcome-landed.json, does not touch pr_commits) in the description as out of scope and unchanged."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "New unit test in land.rs tests; the doc comment names the nested operator/.gitattributes ('* athena-exclude') the fixture writes. Builds reading, dispatch, introspection, lease commit under operator/, an intervention commit adding records/interventions/<month>/<id>.json, then a landing adding candidate.json, verification.json, outcome.json (landed) plus a governed file; no commit message has a trailer.",
+      "command": "cargo test -p athena-core land::",
+      "observes": "pr_commits returns kinds [RecordsOnly x4, DeclaredIntervention, JobLanding]; the last has the job id and verification == the job's record id.",
+      "fails_without": "With the trailer rule, every commit lacking an Athena-Job trailer makes pr_commits error, so the test fails at the first reading commit; with a wrong order the intervention or lease commit gets the wrong kind and the assert_eq on the kinds fails."
+    },
+    {
+      "criterion": 2,
+      "method": "New unit test: commit 1 adds candidate, verification and outcome.json with state blocked (no governed change); commit 2 adds only outcome-landed.json (after_blocked true, state landed) plus a governed file.",
+      "command": "cargo test -p athena-core land::",
+      "observes": "kinds [RecordsOnly, JobLanding]; the second carries the job and its verification id.",
+      "fails_without": "If closing_jobs/not_landed were not reused, the blocked commit would be a job_landing (or refused) and the later outcome-landed commit would not be recognised; the test fails."
+    },
+    {
+      "criterion": 3,
+      "method": "Four unit tests: (a) a governed hand edit with no records; (b) a landing adding candidate.json and outcome.json (landed) but no verification.json; (c) a governed change with a candidate, verification and a non-landed outcome; (d) the same operator/ lease commit in a repo whose operator/.gitattributes is absent.",
+      "command": "cargo test -p athena-core land::",
+      "observes": "each pr_commits returns Err whose text contains that commit's full sha.",
+      "fails_without": "If governed content passed unchecked, or a landing without verification or with a blocked/failed outcome were accepted, pr_commits would return Ok and unwrap_err would panic; if the sha were missing from the message the contains assertion fails."
+    },
+    {
+      "criterion": 4,
+      "method": "Existing records_flow tests with the World fixture changed so its first commit adds the job's candidate, verification and landed outcome plus b.txt. Add one test where the PR also has a records-only commit, and assert the stored Landing.commits kinds and that every entry passes LandingCommit::validate. Replace the trailer-less test with a governed hand edit that is refused, naming the sha, with nothing recorded or merged.",
+      "command": "cargo test -p athena-core gh::",
+      "observes": "All gh:: tests pass; the stored landing commits carry job_landing with job and verification, and records_only with none.",
+      "fails_without": "With a hard-coded JobLanding the records_flow test for a records-only or intervention commit would carry the wrong kind; with the old fixture (governed file, no records) pr_commits would refuse and the landing tests would fail."
+    },
+    {
+      "criterion": 5,
+      "method": "Read land.rs: PrCommit {sha, tree, kind, job: Option, verification: Option}; pr_commits and its doc comments contain no 'trailer' or 'Athena-Job' text; docs state the fingerprint-equals-parent rule and closing_jobs/not_landed reuse; the empty-range bail! stays, covered by an existing-style test. Check with the test run above.",
+      "command": "cargo test -p athena-core land::",
+      "observes": "The empty-range test passes; no trailer or Athena-Job mention in pr_commits or PrCommit.",
+      "fails_without": "Not applicable (content criterion); the tests compile only against the new PrCommit shape."
+    },
+    {
+      "criterion": 6,
+      "method": "The old trailer tests are deleted: land.rs has none for pr_commits, and gh.rs's a_commit_without_a_job_trailer_is_named... is replaced. The run shows only the new test names. The change description lists every writer of landing records: GitLandingRecords::intent and ::landing (gh.rs, covered by records_flow tests and the new kind test) and run.rs retry_landing (which writes outcome records and does not call pr_commits; covered by existing run.rs tests, unchanged), and states why any athena-gate run was done (a narrow run of the closing_jobs-related invariant tests only because invariant.rs gained a pub).",
+      "command": "cargo test -p athena-core land::",
+      "observes": "Test listing has no trailer-count tests; the description has the list.",
+      "fails_without": "Not applicable (content criterion)."
+    },
+    {
+      "criterion": 7,
+      "method": "Review the diff of docs/design/records-history.md (section 5.3 'Which commits' bullet and the failure-path table row) and CHANGELOG.md (new Changed entry under Unreleased, plus fix the Added line saying pr_commits is unchanged).",
+      "command": "git diff",
+      "observes": "Both describe the three content rules and no longer say 'exactly one Athena-Job trailer'.",
+      "fails_without": "Not applicable (content criterion)."
+    },
+    {
+      "criterion": 8,
+      "method": "Run cargo clippy -p athena-core --all-targets, then cargo fmt --check.",
+      "command": "cargo clippy -p athena-core --all-targets",
+      "observes": "Both finish with no warnings and no diff.",
+      "fails_without": "Unused imports (JobId parse, Context) or an unformatted file would fail clippy or fmt."
+    }
+  ],
+  "open_questions": [
+    "Whether Judged::new (config_at on the parent) works for the small test repos without an athena.toml; if not the fixtures must add one, or the producer falls back to the built-in config.",
+    "Whether the gh World fixture needs athena.toml or .gitattributes for records/ to be classed as records; the producer should check attrs classification of records/jobs paths.",
+    "Merge commits and squashed job chains in a PR range are refused with the sha; the user may want a rule for them later."
+  ],
+  "producer_section_sha256": "25c25f0a1139f1d80245102cdc74d71cd4308889d2fae7bed451c1905fdeced3"
+}

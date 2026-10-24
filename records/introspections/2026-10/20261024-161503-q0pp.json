@@ -1,0 +1,30 @@
+{
+  "schema": "athena.introspection/1",
+  "id": "20261024-161503-q0pp",
+  "at": "2026-10-24T16:15:03.82103263Z",
+  "trigger": "rejection",
+  "job": "20261024-154552-e65v",
+  "intervention": null,
+  "class_of_work": "code",
+  "category": "rejected",
+  "what_happened": "The job changed `pr_commits` so it sorts PR commits by their content instead of by trailers. It was rejected. 3 of 8 acceptance criteria were unmet and there were 3 blocker or major findings. One check failed.\n\nThe unmet criteria are:\n- The realistic-range test in `land::` is missing the required fixture. It needs an `operator/` lease commit with a nested `operator/.gitattributes`, and the job used `owner-notes/` instead.\n- The refusal tests have the same fixture problem. The companion check that an `operator/` commit without the exclusion is refused is also missing.\n- The old trailer-count tests are not shown as removed, and the change description does not list every writer of landing records.\n\nThe blocker is that the change breaks 5 reconcile tests in athena-core.\n\nThe failed check is the `athena-cli` reconcile test run. Two tests failed: `land_reports_an_unattributed_main_commit_before_it_does_anything_else` and `status_reports_an_unattributed_main_commit_and_writes_nothing`. Content classification now refuses a governed-content commit that is neither a job landing nor a declared intervention, and these tests' fixtures contain such a commit.\n\nOne major finding is that the landing-record writer audit missed `reconcile.rs`. It writes landings through `GitLandingRecords`, so it now depends on the new classification.\n\nSo the classification may work. But a caller was missed, existing tests were broken, and the realistic-history test was not built as the criteria specified.",
+  "failure_class": "20261024-140616-afw6",
+  "new_class": false,
+  "earlier_cases": [],
+  "decisions_matched": [],
+  "cause": "The change to how commits are classified was made without a complete list of everything that depends on it, and without being run against a realistic branch history. Nothing makes the producer find every caller of the shared landing and classification path, such as `reconcile.rs` and the CLI reconcile tests. Nothing makes it run the dependent test suites before handover either. Two things are left to the verifier's final verdict, where rejection is the only outcome: whether the fixture matches the criterion's named shape, and whether the full workspace tests still pass. The producer was also able to substitute a similar fixture (`owner-notes/`) for the specified `operator/` one without anything flagging the difference. This is an inference, since the stored fields do not show what the producer ran.",
+  "prevention_kind": "code-check",
+  "prevention": "Before handover, run a check that runs every test in each crate that calls the changed history or classification functions. For this change that means `athena-core` reconcile and `athena-cli --test reconcile`, not only `land::`. The check should find the callers of the changed function automatically, and a failure should block handover. Add a fixture-conformance test to the landing and history check suite. It builds one shared realistic-history fixture with the operator/ lease commit, the nested `.gitattributes` exclusion, intervention commits and records-only commits. Both the land tests and the reconcile tests must use this fixture, so any later classification change is tested against the same realistic history.",
+  "proposed_request": "Finish the content-based commit classification in `pr_commits` (crates/athena-core/src/land.rs), replacing the trailer-based logic. It is currently rejected.\n\nOutcome: every commit between the remote base and the PR head is classified by what it changes. Intervention commits, a job's closing records and operator/ commits excluded by a nested `.gitattributes` are accepted. Any other commit that changes governed content is refused, and the error names its sha.\n\nRequirements:\n1. Find every caller of `pr_commits` and every writer of landing records, including `run.rs` `retry_landing` and `reconcile.rs` (which writes through `GitLandingRecords`). Update each one. In the change description, list each writer and name the test that covers it.\n2. Fix the 5 failing athena-core reconcile tests and the two failing athena-cli reconcile tests: `land_reports_an_unattributed_main_commit_before_it_does_anything_else` and `status_reports_an_unattributed_main_commit_and_writes_nothing`. Their fixtures need to follow the new rules, or the code needs to. Say which and why.\n3. Add one shared realistic-range test fixture in `land::`. It holds the reading, dispatch and introspection commits, an `operator/` lease commit with a nested `operator/.gitattributes` containing `* athena-exclude` (named in the test's doc comment), an intervention commit adding `records/interventions/<month>/<id>.json`, and then a job's candidate, verification and outcome. No commit may be wrongly refused.\n4. Add refusal tests. Each of these must make `pr_commits` return an error that contains the commit's sha: a governed-content commit that is neither an intervention nor a job's closing records; a landing with no verification record; a landing whose outcome is not landed; and an `operator/` commit without the exclusion.\n5. Remove the old trailer-count tests.\n6. Run `cargo test -p athena-core` and `cargo test -p athena-cli --test reconcile`, and run clippy and fmt. Cite the commands that actually ran as evidence.",
+  "evidence": {
+    "model": "claude-sonnet-5-5",
+    "cost_usd": 0.0665481,
+    "input_tokens": 2,
+    "output_tokens": 1868
+  },
+  "status": "recorded",
+  "failure": null,
+  "flags": [],
+  "dropped_ids": [],
+  "from_jev": false
+}

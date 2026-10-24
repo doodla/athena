@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261024-153908-1rve",
+  "round": 2,
+  "at": "2026-10-24T15:42:58.201113307Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "job_landing does not require the outcome to be landed.",
+      "evidence": "The request says a commit 'adds a job's closing records (its candidate, verification and landed outcome)'. The plan accepts 'outcome(.json or -landed.json)' with no check of its state. The gate's closing_jobs loads JobFiles and leaves out jobs where not_landed() is true (lines 246, 255-261). Under the plan, a commit that changes governed content and adds a rejected or failed outcome.json would be recorded as a covered job_landing, which is exactly the false landing Decision 3 says it guards against. Fix: Require the job's outcome in the commit's tree to be Landed. Load it the way the gate does (JobFiles::load plus not_landed, or expose a small pub helper next to closing_record_of_path). Add a refusal case to the criterion 2 test: a landing whose outcome.json is rejected must return an error naming its sha.",
+      "location": "Plan Approach rule (3) / Decision 3; crates/athena-gate/src/invariant.rs:218-261",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "In this snapshot the operator/ lease commit is governed, so the plan's own rules would refuse it, yet criterion 1 expects records_only. The plan leaves this unresolved.",
+      "evidence": "The repo's .gitattributes marks only /CLAUDE.md, /BRIEF.md and /LICENSE. classify() treats only records/ and attribute-marked paths as non-governed, and no code or file under operator/ exists in the snapshot. fingerprint(sha, parent) therefore changes for an operator/ commit, rule (4) refuses it, and the criterion 1 test either fails or passes only because its fixture marks operator/ in a way that does not match the real repo. Fix: Settle this in the plan. Say exactly which .gitattributes the criterion 1 fixture uses and why it matches the real repository: if the real main branch marks operator/ as athena-exclude or athena-readonly, cite where. If it does not, report to the user now that real PRs with lease commits would still be refused under the requested rules. That root cause is outside land.rs and needs either an attribute or a user decision. Do not leave it for the producer to find out.",
+      "location": "Plan Risks #2, Open question 1, Criterion 1 demonstration; .gitattributes; crates/athena-git/src/attrs.rs:45-59",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Rewiring the gate's intervention() onto a path helper is not a pure move.",
+      "evidence": "intervention() takes RecordIds from Athena-Intervention trailers and builds the expected path from each one. It does not parse added paths. Rebuilding it around intervention_of_path changes the order of its logic, which puts the out-of-scope 'gate behavior unchanged' constraint at risk. Fix: Add intervention_of_path for land.rs. Either leave the gate's intervention() as it is, or use the helper there only as an exact equality check against the trailer id. Run the existing invariant tests either way.",
+      "location": "Plan Decision 2 / Step 1; crates/athena-gate/src/invariant.rs:673-688",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The realistic test should also assert that the verification id is the job's own id and that each intermediate commit's sha matches.",
+      "evidence": "verification_id returns the job's id (gh.rs:1345-1353), so comparing against verification_id(job, sha) checks the function against itself. Fix: Assert verification == the job's RecordId directly, and assert the shas in order against the commits the test created.",
+      "location": "Criterion 1 demonstration",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan is in the right place. It rewrites pr_commits in land.rs (lines 109-158), passes kinds through gh.rs (line 1422 onward), reuses attrs::fingerprint and gh::verification_id, and drops the trailer logic instead of adding exceptions. Everything it names exists, and athena-core already depends on athena-gate. Two design gaps would leave criterion 1 unproven or break the request's rules. (1) The request says a job's closing records include its *landed* outcome. Rule 3 accepts any outcome.json, while the gate's closing_jobs leaves out jobs whose outcome is not landed. (2) This snapshot's .gitattributes does not exclude operator/, and no code treats operator/ specially. So by the fingerprint rule a lease commit under operator/ changes governed content and would be refused. The plan leaves this as an open question for later, but criterion 1 depends on the answer. A third, smaller point: the gate's intervention check works from trailers, not paths, so rewiring it onto a path helper is not the pure move the plan describes."
+}

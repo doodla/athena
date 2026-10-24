@@ -12,7 +12,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `LandingCommit` in `crates/athena-data/src/history.rs` has a required `kind` (`job_landing`,
   `declared_intervention`, `records_only`). `job` and `verification` are now optional and omitted when absent;
   `Landing::validate` requires both for `job_landing` and refuses them for the other two kinds. `GitLandingRecords`
-  sets `job_landing`; `pr_commits` is unchanged (part 2).
+  sets the kind of each commit from its content (see "Changed" below).
 - The reconcile step of `docs/design/records-history.md` §8.1 (D111, job 3 part 2), in
   `crates/athena-core/src/reconcile.rs`. `athena land` and `athena status` run it first. It walks main's
   first-parent commits after the later of the last landing record and the first landing intent's expected base,
@@ -33,8 +33,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   branch's tip as expected base, job ids) to `athena/records` on the remote **before** asking the host to merge,
   and a landing record (host commit, merge method, each commit with tree, job and verification, intent id)
   **after** the merge is confirmed. The landing's records commit takes the pull request's head as second
-  parent. Every commit between the remote base and the PR head must carry an `Athena-Job` trailer; one that
-  does not is an error naming its sha, and nothing is recorded. A merge the host did not confirm writes no
+  parent. Every commit between the remote base and the PR head is classified from its content (see "Changed"
+  below); one that no record covers is an error naming its sha, and nothing is recorded. A merge the host did not confirm writes no
   landing and adds a warning to the report that names the intent; reconciliation (§8.1, job 3 part 2)
   repairs it, see the entry above. `GitLandingRecords::for_remote` builds the real sink and `Athena::land_pr` always uses it.
   `RecordsWriter` gained `append_to_remote` (built on the remote tip, pushed with an expected-tip guard,
@@ -55,6 +55,48 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- `land::pr_commits` classifies each commit of a pull request (`remote_base..head`) from its content, not from
+  an `Athena-Job` trailer (`docs/design/records-history.md` §5.3). Each commit is judged against its first
+  parent under the first parent's exclusion rules, by the first rule that applies: it adds a job's closing
+  records, as `athena_gate::invariant::closing_jobs` finds them, so it is a `job_landing` carrying that job and
+  its verification id (the job's `verification.json` must be in the tree; the closing records of more than one
+  job are refused); else it adds `records/interventions/<month>/<id>.json`, so it is a `declared_intervention`;
+  else, if the governed fingerprint changed, it is refused; else it is `records_only`. The error names the
+  commit's sha. `PrCommit` now carries `kind`, `job` and `verification`; `LandingIntent` still needs at least one
+  job, so a pull request with no `job_landing` commit gets an error and no intent. Root cause: the old rule
+  trusted a line in the commit message that nothing checked, and a records-only commit (reading, dispatch,
+  introspection, owner path, or a blocked job's records) carries none, so a range holding one could never be
+  recorded. The gate already decides which commits land a job from the records they add, and
+  `closing_jobs` (now `pub`) is the single source of truth for that, so there is no second rule to drift.
+  `athena_gate::invariant::added_interventions` is the content-only twin of the gate's trailer check for
+  declared interventions; the gate's own check is unchanged.
+
+  Callers of `pr_commits` and writers of landing records, each with what covers it:
+  - `gh.rs` `GitLandingRecords::commits` (the only caller of `pr_commits`; `intent` and `landing` both use it):
+    now maps `PrCommit` to `LandingCommit` and validates each. Covered by `land::tests::*` (classification and
+    refusals), `gh::tests::records_flow::commits_carry_their_kind_job_and_verification_and_pass_validation`,
+    `records_flow::a_pull_request_that_lands_no_job_has_no_intent`,
+    `records_flow::a_governed_commit_no_record_covers_is_named_and_nothing_is_recorded_or_merged`, and
+    `records_flow::land_pr_writes_the_intent_then_the_landing_with_the_head_as_second_parent`.
+  - `reconcile.rs`, which writes landing records through `GitLandingRecords`: no production change; its test
+    fixture `World::pr_head` now builds a real job-landing commit, one job per pull request. Covered by
+    `reconcile::tests::*`.
+  - `crates/athena-cli/tests/reconcile.rs`: the fixture's pull request head was a commit with only a trailer; it
+    is now one shared helper, `pr_head`, that builds a real job-landing commit. Covered by the two tests in that
+    file.
+  - `run.rs` `retry_landing`: no change. It does not call `pr_commits` and writes no landing record; it retries
+    the local landing of a blocked job and adds `outcome-landed.json`. The commit shape it produces is the one
+    `land::tests::a_blocked_outcome_is_records_only_and_the_later_landed_outcome_is_the_landing` covers.
+  - `crates/athena-cli/src/drain.rs` `PrLander`: no change, for the same reason; it lands through
+    `Athena::land_pr`, which reaches `pr_commits` only through `GitLandingRecords::commits`.
+  - `athena-gate` `invariant.rs`: `closing_jobs` made `pub`, `added_interventions` added; covered by
+    `invariant::tests::added_interventions_lists_the_records_a_commit_adds_whatever_its_message_says` and the
+    existing gate landing tests.
+
+  Commands run: `cargo test -p athena-core land::`, `cargo test -p athena-core gh::`,
+  `cargo test -p athena-core reconcile::`, `cargo test -p athena-core`, `cargo test -p athena-cli --test
+  reconcile`, `cargo test -p athena-gate`, `cargo clippy --all-targets --locked -- -D warnings`,
+  `cargo fmt --all --check`, and `cargo test --locked`.
 - The producer brief gains a "criteria_check: copy the line" section listing every accepted criterion as a bare
   line, with the instruction to report one entry per criterion, in order, with evidence, including criteria
   already satisfied (D116). First reports retyped criteria from memory and drifted from the wording

@@ -6,9 +6,14 @@
 mod common;
 
 use athena_core::gh::{GitLandingRecords, LandingRecords};
+use athena_data::records::{
+    AnyRecord, Candidate, Outcome, OutcomeState, Totals, Verdict, Verification,
+};
+use athena_data::{JobId, Quantity, Unit};
 use athena_git::Git;
 use athena_git::records_branch::RECORDS_REF;
 use common::*;
+use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
@@ -18,6 +23,76 @@ struct World {
     bare: Git,
     bin: std::path::PathBuf,
     stray: String,
+}
+
+/// A detached commit one commit above `base` that lands a job: the job's work with its candidate,
+/// verification and landed outcome. Nothing in its message names the job; the records do.
+fn pr_head(fx: &Fixture, base: &str) -> String {
+    let job = JobId::parse("20261024-114125-7z2t").unwrap();
+    let zero = || Quantity::reported(0.0, Unit::Usd, "sum");
+    let records = [
+        AnyRecord::Candidate(Box::new(Candidate {
+            job: job.clone(),
+            base_commit: base.to_string(),
+            base_fingerprint: None,
+            previous_job: None,
+            candidate_commit: None,
+            candidate_tree: None,
+            changes: vec![],
+            fingerprint: None,
+            violations: vec![],
+            producer_report: None,
+        })),
+        AnyRecord::Verification(Box::new(Verification {
+            job: job.clone(),
+            candidate_commit: base.to_string(),
+            verified_fingerprint: "f".repeat(64),
+            tool_config_from_base: vec![],
+            checks: vec![],
+            check_cleanup: vec![],
+            verifier_invocation: None,
+            criteria: vec![],
+            findings: vec![],
+            request_reading_mismatch: None,
+            agent_verdict: Some(Verdict::Pass),
+            final_verdict: Verdict::Pass,
+            reasons: vec![],
+            inputs: vec![],
+            summary: None,
+        })),
+        AnyRecord::Outcome(Box::new(Outcome {
+            job: job.clone(),
+            state: OutcomeState::Landed,
+            reason: "test".into(),
+            at: "2026-10-24T12:00:00Z".parse().unwrap(),
+            totals: Some(Totals {
+                cost_all: zero(),
+                cost_execution: zero(),
+                wall_time_execution: None,
+                tokens: BTreeMap::new(),
+                invocations: 0,
+            }),
+            branch: None,
+            base_commit: None,
+            candidate_commit: None,
+            after_blocked: false,
+            through_commit: None,
+        })),
+    ];
+    let texts: Vec<(String, String)> = records
+        .iter()
+        .map(|r| (r.canonical_path(), r.to_json()))
+        .collect();
+    let mut files: Vec<(&str, &str)> = texts
+        .iter()
+        .map(|(p, t)| (p.as_str(), t.as_str()))
+        .collect();
+    files.push(("pr1.txt", "pr1\n"));
+    fx.git.run(["checkout", "-q", "--detach", base]).unwrap();
+    write(fx.root(), &files);
+    fx.git.run(["add", "-A"]).unwrap();
+    fx.git.run(["commit", "-q", "-m", "Pull request"]).unwrap();
+    fx.head()
 }
 
 /// A repository whose `origin` looks like a host repository (`.../github.com/example/project.git`), with a
@@ -36,18 +111,8 @@ fn world() -> World {
     git.run(["remote", "set-head", "origin", "main"]).unwrap();
     let base = fx.head();
 
-    // A pull request head one commit above the base, carrying a job trailer; its intent is on the records branch.
-    git.run(["checkout", "-q", "--detach", &base]).unwrap();
-    write(fx.root(), &[("pr1.txt", "pr1\n")]);
-    git.run(["add", "-A"]).unwrap();
-    git.run([
-        "commit",
-        "-q",
-        "-m",
-        "Pull request\n\nAthena-Job: 20261024-114125-7z2t",
-    ])
-    .unwrap();
-    let head = fx.head();
+    // A pull request head one commit above the base that lands a job; its intent is on the records branch.
+    let head = pr_head(&fx, &base);
     git.run(["push", "-q", "origin", &format!("{head}:refs/heads/pr1")])
         .unwrap();
     git.run(["checkout", "-q", "main"]).unwrap();
