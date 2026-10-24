@@ -396,17 +396,20 @@ fn the_pass_reads_only_within_the_budget() {
 fn plan_prints_order_groups_details_and_flagged_items_and_says_so_when_nothing_is_open() {
     let mut a = planned("a", Ladder::Implementation, &["src/a.rs"], &[]);
     a.open_questions = vec!["the touched path src/a.rs does not exist at the base commit".into()];
+    let mut urgent = planned("urgent", Ladder::Implementation, &["src/u.rs"], &[]);
+    urgent.priority = athena_core::plan::Priority::High;
     let stub = Stub {
-        items: vec!["a", "b", "vague"],
+        items: vec!["a", "b", "vague", "urgent"],
         plan: vec![
             a,
             planned("b", Ladder::DesignDecisions, &["docs/b.md"], &["a"]),
             vague("vague"),
+            urgent,
         ],
         ..Stub::default()
     };
     let report = drain::plan(&stub, 5.0, &Quiet).unwrap();
-    assert_eq!(report.plan.order, ["a", "b"]);
+    assert_eq!(report.plan.order, ["urgent", "a", "b"]);
     assert_eq!(
         stub.log(),
         ["read vague"],
@@ -414,9 +417,12 @@ fn plan_prints_order_groups_details_and_flagged_items_and_says_so_when_nothing_i
     );
     let text = display::plan(&report);
     for needle in [
-        "order       a → b",
-        "group 1     a",
-        "group 2     b",
+        "order       urgent → a → b",
+        "group 1     urgent",
+        "group 2     a",
+        "group 3     b",
+        "priority    high",
+        "priority    normal",
         "goal        goal of a",
         "rung        implementation",
         "acceptance  a works",

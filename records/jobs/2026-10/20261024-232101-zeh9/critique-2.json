@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261024-232101-zeh9",
+  "round": 2,
+  "at": "2026-10-24T23:25:19.329555609Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "Sorting by priority only inside a ready wave leaves a high-priority item that has any dependency behind every older normal item in earlier waves. That is probably the motivating case.",
+      "evidence": "Plan::build takes all items whose dependencies are done as one wave, then sorts that wave with `ready.sort_by_key(|(age, e)| (e.rung, *age))` (line 191). The plan adds priority only to that key and leaves the wave loop alone. Take h (high) that depends on n1, with n2..n30 also ready in wave 1. The order becomes n1, n2, …, n30, h, so h still waits behind about 30 older requests. The request's example, 'D111 job 7', reads like a step in a series with dependencies. The demonstration for criterion 2 only checks position(n1) < position(h), with n2 unrelated, so it passes even though h lands after n2. That hides the gap. Fix: Choose and record one of two options. (a) Make the order priority-aware across waves, for example a topological order that picks the highest-priority ready item at each step, while still building groups from waves as today. (b) Keep the per-wave sort, but state the limitation in decisions.md and in the module doc, and say whether it still fixes the D111 cutover case. In both cases, extend the criterion 2 test with an unrelated older normal n2 and assert where h lands relative to n2, so the chosen behavior is actually shown.",
+      "location": "Plan Decision 1; crates/athena-core/src/plan.rs:177-191 (Plan::build wave loop)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Two other places describe the order as 'higher rung first, … age as the tiebreak'. They would go stale.",
+      "evidence": "main.rs line 221 says: 'items in plan order (higher rung first, a dependent after what it needs, age as the tiebreak)'. The drain.rs module doc (lines 7-8) says the same. The plan only updates the module doc in plan.rs. Fix: Add priority to the main.rs help text and the drain.rs module doc, or list them as small changes outside the listed files.",
+      "location": "Plan Files list; crates/athena-cli/src/main.rs:219-221, crates/athena-cli/src/drain.rs:6-8",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "job_line builds both the recent and open lines, for every job, including ones with no request text. Every line would then gain 'priority normal', which is noise.",
+      "evidence": "status.rs builds `recent.push(job_line(...))` and `open.push(job_line(...))` (lines 624 and 630). job.request is an Option, so jobs without a request would always parse as Normal. Fix: Show the suffix only for non-normal priority, or only on request lines in the open list. Make sure the display test still shows each request's priority as criterion 4 requires, for example by asserting that normal is shown or that its absence is defined.",
+      "location": "Plan Step 5 / status.rs:512-521 job_line",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The Run command lists only clippy, though the Observes line also claims fmt passes.",
+      "evidence": "Run: `cargo clippy --all-targets --locked -- -D warnings`; Observes: 'no formatting diff'. Fix: Add `cargo fmt --all --check` to the Run line.",
+      "location": "Plan Demonstration, criterion 8",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read plan.rs, reading.rs, status.rs, display.rs, cli/tests/drain.rs and main.rs. The plan names real code: Plan::build sorts each ready wave by (rung, age) at plan.rs:191; reading::plan_entry has the request text; status::job_line has job.request; display::plan has an entry_lines closure; and the drain.rs test helper uses ..PlanEntry::bare. The main gap is in the design. Because priority sorts only within a dependency wave, a high-priority request with any dependency still runs after every older normal request in earlier waves. That is likely the D111 cutover case. The criterion 2 test is written so it would not catch this. Smaller points: the main.rs help text and the drain.rs module doc would describe the old order, every status line would gain 'priority normal', and the criterion 8 Run line omits the fmt command. Verdict: revise."
+}

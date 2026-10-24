@@ -431,6 +431,7 @@ pub fn plan(report: &crate::drain::PlanReport) -> String {
             "  rung        {}",
             e.rung.map_or("none", athena_data::roles::Ladder::as_str)
         );
+        let _ = writeln!(out, "  priority    {}", e.priority.as_str());
         let _ = writeln!(out, "  acceptance  {}", list(&e.acceptance));
         let _ = writeln!(out, "  questions   {}", list(&e.open_questions));
         let _ = writeln!(out, "  depends on  {}", list(&e.depends_on));
@@ -718,11 +719,19 @@ pub fn score_line(score: &Score) -> String {
     }
 }
 
-/// The plan state at the end of a job's line, empty for a job that was not planned.
+/// The priority and plan state at the end of a job's line. The priority shows only when it is not normal
+/// (absence means normal); the plan state is empty for a job that was not planned.
 fn plan_suffix(j: &athena_core::status::JobLine) -> String {
-    j.plan
+    let priority = if j.priority == athena_core::plan::Priority::Normal {
+        String::new()
+    } else {
+        format!(" · priority {}", j.priority.as_str())
+    };
+    let plan = j
+        .plan
         .as_ref()
-        .map_or(String::new(), |plan| format!(" · {plan}"))
+        .map_or(String::new(), |plan| format!(" · {plan}"));
+    format!("{priority}{plan}")
 }
 
 /// `athena status`.
@@ -1376,6 +1385,25 @@ mod tests {
             failing_test: test.map(str::to_string),
             warnings: Vec::new(),
         }
+    }
+
+    #[test]
+    fn status_lines_show_a_non_normal_priority_and_the_plan_item_always_shows_one() {
+        use athena_core::plan::Priority;
+        let line = |priority| athena_core::status::JobLine {
+            id: "j".into(),
+            state: "open".into(),
+            title: "t".into(),
+            class: None,
+            cost_usd: 0.0,
+            plan: Some("plan accepted r1".into()),
+            priority,
+        };
+        assert_eq!(
+            plan_suffix(&line(Priority::High)),
+            " · priority high · plan accepted r1"
+        );
+        assert_eq!(plan_suffix(&line(Priority::Normal)), " · plan accepted r1");
     }
 
     #[test]

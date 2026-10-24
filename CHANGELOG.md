@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Request priority. A line `Priority: high`, `Priority: normal` or `Priority: low` (any case) in a request's
+  words sets its priority; no such line means normal. `athena plan` and `athena drain` order by dependencies
+  first, then priority, then rung, then age, so a newer high-priority request runs before older normal ones
+  (D118). A high request's prerequisites are pulled forward with it. `athena plan` prints a `priority` line for
+  every item, and `athena status` marks a request that is not normal with `priority high` or `priority low`.
+  Requests with no priority line keep today's order.
 - Incremental attribution checking with checkpoint records (job 6 of `docs/design/records-history.md`, section
   9, D111). A passing `athena check --attribution` (on the main branch, with `CI` unset and no
   `--no-checkpoint`) and `athena land` after its landing record append a `checkpoint` record to the local

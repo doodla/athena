@@ -4,8 +4,9 @@
 //!
 //! - **Planning comes first.** The open requests are fleshed out and planned together
 //!   ([`athena_core::plan`]): goal, requirements-ladder rung, acceptance, open questions, dependencies and
-//!   touched paths. The loop works the items in plan order (higher rung first, a dependent after what it
-//!   needs, age as the tiebreak), not oldest first. An item whose plan lacks a goal, a rung or acceptance is
+//!   touched paths. The loop works the items in plan order (a dependent after what it
+//!   needs, then priority from a `Priority:` line in the request, then higher rung, then age as the tiebreak),
+//!   not oldest first. An item whose plan lacks a goal, a rung or acceptance is
 //!   refused and reported with a reason ([`Report::refused`]). The plan also groups items that could run in
 //!   parallel ([`Report::plan_groups`]); [`drain_concurrent`] runs the items of one group side by side, up to
 //!   `[parallel] max_concurrency` (default 1, which is [`drain`]'s one job at a time). The pass is

@@ -2834,3 +2834,38 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   the workspace, which had two failures caused by this change (the log's own backtest, and a lifecycle test whose
   retry wrote the same content as the seeded tree and so failed as an empty candidate). Both were fixed and only
   those two tests were rerun, and passed. The saving itself (time and cost of a seeded retry) is not measured.
+
+## D118 · A request carries a priority that the plan orders by before rung and age
+
+- **Case:** `athena plan` ordered requests only by dependencies, rung and age, so a drain worked the oldest first
+  however much a newer one mattered. On 2026-10-24 the records-history cutover (D111 job 7) sat behind about 30
+  older requests (the count is from the request, not measured here).
+- **Decision:** (1) `Priority` (high, normal, low; high sorts first) in `plan.rs`, a field of `PlanEntry`. (2)
+  `Priority::from_text` reads the first line that, trimmed, is `Priority:` and then exactly `high`, `normal` or
+  `low`, in any case; anything else, or no line, is normal. `reading::plan_entry` and `status::job_line` both use
+  it. (3) `Plan::build` gives each item an effective priority: its own, raised to the best priority of anything
+  that depends on it. Each turn of the loop takes only the ready items (every dependency done) with the best
+  effective priority, sorted by rung then age. Dependencies stay strictly first; a high item's prerequisites run
+  before unrelated older normal items. With no priority set every item is normal, the wave is the whole ready set,
+  and the order and groups are what they were. (4) `athena plan` prints a `priority` line for each item;
+  `athena status` adds `priority high` or `priority low` to a request line and shows nothing for normal.
+- **Callers and writers touched, with the covering test:** `Plan::build`:
+  `a_newer_high_priority_item_comes_before_older_normal_ones`,
+  `dependencies_win_over_priority_and_pull_their_prerequisites_forward`,
+  `without_priorities_the_order_is_rung_then_age` (`plan.rs`). `Priority::from_text`:
+  `priority_is_read_from_a_line_in_the_words`. `reading::plan_entry`:
+  `a_priority_line_in_the_request_sets_the_plan_priority`. `display::plan` and `display::status`:
+  `plan_prints_order_groups_details_and_flagged_items_and_says_so_when_nothing_is_open` (`tests/drain.rs`),
+  `status_lines_show_a_non_normal_priority_and_the_plan_item_always_shows_one` (`display.rs`).
+- **Alternatives:** (a) A field set by a command (for example `athena priority <job> high`): needs a new command
+  and a record schema, and the owner would have to run it after submitting; the words already travel with the
+  request. Left for later. (b) The words in the request (chosen): no schema, visible in the request, works with
+  `athena ask`. (c) Sort priority only inside a ready wave: a high item with any dependency would land behind
+  every older normal item in earlier waves, which is the cutover case. (d) Pick one highest-priority ready item
+  at a time: needs the grouping code rewritten. (e) Priority after rung: the cutover would still wait behind older
+  higher-rung work. (f) A numeric priority: more surface, no stated need.
+- **Tradeoff:** A typo such as `Priority: urgent` reads as normal, so a request can be silently unprioritised;
+  that is safer than reordering the queue on a guess. Mixed priorities make smaller parallel groups.
+- **Reversal cost:** Low. Remove the field and the filter in `Plan::build`.
+- **Provenance:** read: `plan.rs`, `reading.rs`, `status.rs`, `display.rs`, `drain.rs`; measured: the tests named
+  above under `cargo test`.

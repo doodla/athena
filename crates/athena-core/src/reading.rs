@@ -1511,6 +1511,7 @@ pub fn plan_entry(
     let text = job.request.as_ref().map_or("", |r| r.text.as_str());
     let first = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
     let mut entry = crate::plan::PlanEntry::bare(job.id().as_str(), &job.title());
+    entry.priority = crate::plan::Priority::from_text(text);
     entry.depends_on = job_ids_in(text)
         .into_iter()
         .map(|id| id.as_str().to_string())
@@ -2284,6 +2285,22 @@ mod tests {
         let plan = crate::plan::Plan::build(&[entry]);
         assert!(plan.order.is_empty(), "{plan:?}");
         assert_eq!(plan.refused[0].missing, ["ladder rung", "acceptance"]);
+    }
+
+    #[test]
+    fn a_priority_line_in_the_request_sets_the_plan_priority() {
+        use crate::plan::Priority;
+        let mut job = job_with_checks(vec![]);
+        job.request.as_mut().unwrap().text = "Fix the typo in README.md".into();
+        assert_eq!(
+            plan_entry(&job, None, &nothing_known()).priority,
+            Priority::Normal
+        );
+        job.request.as_mut().unwrap().text = "Fix the typo in README.md\nPriority: HIGH".into();
+        assert_eq!(
+            plan_entry(&job, None, &nothing_known()).priority,
+            Priority::High
+        );
     }
 
     #[test]
