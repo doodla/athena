@@ -146,57 +146,7 @@ pub fn pr_commits(git: &Git, remote_base: &str, head: &str) -> Result<Vec<PrComm
     let listing = git.run(["rev-list", "--reverse", &format!("{remote_base}..{head}")])?;
     let mut commits = Vec::new();
     for sha in listing.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        let between = || {
-            format!(
-                "commit {sha} lies between the remote base and the PR head (base {remote_base}, head {head})"
-            )
-        };
-        let change = Change::of_commit(git, sha)?;
-        let judged = Judged::new(git, &change)?;
-        let jobs = closing_jobs(git, &change, &judged)?;
-        let (kind, job, verification) = if let Some(job) = jobs.iter().next() {
-            if jobs.len() > 1 {
-                bail!(
-                    "{} and adds the closing records of {} jobs (it can land one); nothing was recorded",
-                    between(),
-                    jobs.len()
-                );
-            }
-            if JobFiles::load(git, &change.tree, job)?
-                .verification
-                .is_none()
-            {
-                bail!(
-                    "{} and adds the records of job {job} without its verification, so no verification \
-                     covers it; nothing was recorded",
-                    between()
-                );
-            }
-            (
-                LandingKind::JobLanding,
-                Some(job.clone()),
-                Some(verification_id(job, sha)?),
-            )
-        } else if !added_interventions(&judged).is_empty() {
-            (LandingKind::DeclaredIntervention, None, None)
-        } else if fingerprint(git, &change.tree, &judged.rules)?
-            != fingerprint(git, &judged.base, &judged.rules)?
-        {
-            bail!(
-                "{} and changes governed content without landing a verified job or declaring an \
-                 intervention, so no verification covers it; nothing was recorded",
-                between()
-            );
-        } else {
-            (LandingKind::RecordsOnly, None, None)
-        };
-        commits.push(PrCommit {
-            sha: sha.to_string(),
-            tree: change.tree,
-            kind,
-            job,
-            verification,
-        });
+        commits.push(classify_commit(git, remote_base, head, sha)?);
     }
     if commits.is_empty() {
         bail!(
@@ -204,6 +154,63 @@ pub fn pr_commits(git: &Git, remote_base: &str, head: &str) -> Result<Vec<PrComm
         );
     }
     Ok(commits)
+}
+
+/// Classifies the one commit `sha` of the range `remote_base..head` by the rules of [`pr_commits`], which
+/// calls this for each commit. It is public so a caller can judge every commit and report all the bad ones
+/// rather than only the first.
+pub fn classify_commit(git: &Git, remote_base: &str, head: &str, sha: &str) -> Result<PrCommit> {
+    let between = || {
+        format!(
+            "commit {sha} lies between the remote base and the PR head (base {remote_base}, head {head})"
+        )
+    };
+    let change = Change::of_commit(git, sha)?;
+    let judged = Judged::new(git, &change)?;
+    let jobs = closing_jobs(git, &change, &judged)?;
+    let (kind, job, verification) = if let Some(job) = jobs.iter().next() {
+        if jobs.len() > 1 {
+            bail!(
+                "{} and adds the closing records of {} jobs (it can land one); nothing was recorded",
+                between(),
+                jobs.len()
+            );
+        }
+        if JobFiles::load(git, &change.tree, job)?
+            .verification
+            .is_none()
+        {
+            bail!(
+                "{} and adds the records of job {job} without its verification, so no verification \
+                 covers it; nothing was recorded",
+                between()
+            );
+        }
+        (
+            LandingKind::JobLanding,
+            Some(job.clone()),
+            Some(verification_id(job, sha)?),
+        )
+    } else if !added_interventions(&judged).is_empty() {
+        (LandingKind::DeclaredIntervention, None, None)
+    } else if fingerprint(git, &change.tree, &judged.rules)?
+        != fingerprint(git, &judged.base, &judged.rules)?
+    {
+        bail!(
+            "{} and changes governed content without landing a verified job or declaring an \
+             intervention, so no verification covers it; nothing was recorded",
+            between()
+        );
+    } else {
+        (LandingKind::RecordsOnly, None, None)
+    };
+    Ok(PrCommit {
+        sha: sha.to_string(),
+        tree: change.tree,
+        kind,
+        job,
+        verification,
+    })
 }
 
 impl Athena {

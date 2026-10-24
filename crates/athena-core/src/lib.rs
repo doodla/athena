@@ -77,6 +77,7 @@ pub mod nested;
 pub mod pin;
 pub mod plan;
 pub mod pr;
+pub mod pr_check;
 pub mod proposals;
 pub mod reading;
 pub mod reconcile;

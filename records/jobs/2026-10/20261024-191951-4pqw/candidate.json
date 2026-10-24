@@ -1,0 +1,170 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261024-191951-4pqw",
+  "base_commit": "3feaed9edd7ac61379e9d27c25500acebe38fa2e",
+  "base_fingerprint": "sha256:3a6e1a4825154414c050737d339c77e8a1e9068f42725037c731daaed1bc5f65",
+  "previous_job": "20261024-170225-89rk",
+  "candidate_commit": "01bdc007a59051b28413b837bdb205b6155be31a",
+  "candidate_tree": "7829f175cf724a2650e5d031d2d2994f591c77cb",
+  "changes": [
+    {
+      "path": ".github/workflows/ci.yml",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 9692
+    },
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 129948
+    },
+    {
+      "path": "README.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 22964
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 45707
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 40872
+    },
+    {
+      "path": "crates/athena-core/src/land.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 31185
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 11566
+    },
+    {
+      "path": "crates/athena-core/src/pr_check.rs",
+      "status": "added",
+      "mode": "100644",
+      "bytes": 19872
+    },
+    {
+      "path": "crates/athena-gate/src/invariant.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 42626
+    },
+    {
+      "path": "docs/design/records-history.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 40048
+    }
+  ],
+  "fingerprint": "sha256:1d59a65a2d2ae828f055553f7bc3c75733fee9de8e8ad00b5f815d402dd77576",
+  "violations": [],
+  "producer_report": {
+    "summary": "I added `athena check --pr-head <base> <head>` and a non-required `pr-head` CI job. The command lists every commit in base..head and judges each one separately, so one bad commit no longer hides the others. To do that I moved the body of the `pr_commits` loop into a public `land::classify_commit`; the rules and messages are unchanged and `pr_commits` calls it. The new `athena_core::pr_check` module then applies these rules:\\n- A job landing needs a passing verification and a prediction that precedes the work. The prediction rule is the gate's `prediction_problem`, which I made `pub` (visibility only).\\n- A declared intervention after the last landing, or with no landing, fails with 'a squash of it is not a valid landing until the cutover'.\\n- The head's fingerprint, under the landing parent's rules, must equal the last landing's verified fingerprint.\\n- An empty range fails.\\n\\nThe CLI option is `--pr-head` on `Check`, taking two values and conflicting with `--history`. It supports `--json`, renders through `display::pr_head_report`, and exits 2 on failure and 0 on pass. The CI job runs only on pull requests, has `continue-on-error`, fetches full history, and passes the base and head shas through env vars. It carries a comment that it becomes required at the cutover (job 7). CHANGELOG, README and the design doc §10 job 4 entry are updated. Eight tests in `pr_check.rs` cover each case in the brief; clippy and fmt are clean, and the full test run exited 0 (I couldn't read its per-test output).",
+    "files": [
+      "crates/athena-core/src/pr_check.rs",
+      "crates/athena-core/src/land.rs",
+      "crates/athena-core/src/lib.rs",
+      "crates/athena-gate/src/invariant.rs",
+      "crates/athena-cli/src/main.rs",
+      "crates/athena-cli/src/display.rs",
+      ".github/workflows/ci.yml",
+      "CHANGELOG.md",
+      "README.md",
+      "docs/design/records-history.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test --locked -p athena-core pr_check",
+        "result": "pass",
+        "note": "8 tests; first run had one failing test (content-mismatch fixture), fixed, then the full run below passed"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "clean"
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "clean after cargo fmt --all"
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "full suite ran once, exited 0 (no error exit reported). Output was too large to inspect, and the saved file was outside the working directory, so I did not read the per-test summary."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Run `cargo test`: a test builds a PR range containing a commit that changes governed content with no verification or intervention, and the pr-head check fails and names that commit's sha.",
+        "status": "met",
+        "evidence": "pr_check::tests::an_unverified_commit_fails_and_is_named: a hand edit of a.txt; asserts the offence list is exactly that sha, with 'no verification covers it'. Passed."
+      },
+      {
+        "criterion": "Run `cargo test`: a test builds a head shaped like a real Athena PR (job landing with verification, prediction before outcome, optional records-only commits after) and the check passes.",
+        "status": "met",
+        "evidence": "pr_check::tests::a_head_shaped_like_an_athena_pull_request_passes: records-only, open job (reading 11:30, dispatch 12:00, producer from 12:30), intervention, landing with the real fingerprint, trailing records-only. Asserts passed() and the kinds. Passed."
+      },
+      {
+        "criterion": "Run `cargo test`: a test with a declared-intervention commit after the job landing fails, naming that commit and saying a squash of it is not a valid landing until the cutover.",
+        "status": "met",
+        "evidence": "pr_check::tests::a_declared_intervention_after_the_landing_fails: asserts the only offender is the late intervention sha (not the landing) and that the reason contains 'a squash of it is not a valid landing until the cutover'. Passed."
+      },
+      {
+        "criterion": "Run `cargo test`: a test shows a job landing whose prediction does not precede its outcome, and a head whose content differs from the last landing's verified content plus records-only commits, each fail naming the offending commit; every offending commit is listed, not only the first.",
+        "status": "met",
+        "evidence": "Tests a_landing_whose_prediction_follows_the_work_fails (names the landing sha); a_head_whose_content_differs_from_the_verified_content_fails (the verification claims a different fingerprint, so the landing sha is named); a_landing_whose_verification_failed_fails; every_offending_commit_is_listed_in_order (unverified commit, late-prediction landing and trailing intervention, all three shas in order). Passed."
+      },
+      {
+        "criterion": "`athena check --pr-head <base> <head>` exists in the CLI, uses `land::pr_commits` for classification, exits non-zero on failure and zero on pass, and the existing `check` and `check --history` behavior is unchanged.",
+        "status": "met",
+        "evidence": "main.rs: Check gains pr_head (num_args 2, conflicts_with history); its early-return branch calls pr_check::check_pr_head and returns 2 on failure and 0 on pass. Classification goes through land::classify_commit, which pr_commits now calls for each commit with identical logic and messages. The existing land.rs pr_commits tests passed in the full run. The history and working branches are untouched. Not run: the built binary end to end. Departure: it uses classify_commit (extracted from pr_commits) rather than calling pr_commits itself, so that every bad commit is reported."
+      },
+      {
+        "criterion": ".github/workflows/ci.yml gains a new job that runs only on pull_request, passes the PR base and head shas (with full history fetched) to the command, and is commented as not yet required (becomes required at the cutover, job 7). Existing jobs are unchanged.",
+        "status": "met",
+        "evidence": "New pr-head job appended: if github.event_name == 'pull_request', continue-on-error, fetch-depth 0, BASE_SHA and HEAD_SHA env passed to athena check --pr-head, comment 'NOT YET REQUIRED ... becomes a required check at the cutover (job 7 of the plan)'. The edit only adds lines after the history job."
+      },
+      {
+        "criterion": "Run `cargo clippy --all-targets` and `cargo fmt --check`: both clean; `cargo test` passes fully.",
+        "status": "met",
+        "evidence": "cargo clippy --all-targets --locked -- -D warnings and cargo fmt --all --check exited clean; cargo test --locked exited 0."
+      }
+    ],
+    "open_issues": [
+      "Departure from the plan: the test fixtures (reading, dispatch, invocation and verification builders) live in pr_check.rs's tests module, not in land.rs's fixtures, to keep land.rs smaller.",
+      "athena-gate/src/invariant.rs is changed (prediction_problem made pub), a file the brief's deliverable list omits. This is a visibility change only; if unwanted, copy the rule into pr_check.",
+      "A PR with no job landing passes if it holds only records-only commits, and fails on any intervention. The brief is silent on this case.",
+      "I could not read the full-suite output; it exited 0. Athena's own run is the authoritative result.",
+      "The CLI path is covered by compilation and clippy only, with no end-to-end test of the binary.",
+      "The CI job installs through setup.sh --ci. It has not run on a real pull request."
+    ],
+    "mistakes": [
+      "My first land.rs edit used mistyped old text and failed; I redid it with the correct text.",
+      "The first content-mismatch test used a rules-change commit that classification refused, so it did not exercise the rule. I rewrote it.",
+      "The first ci.yml and CHANGELOG edits had non-unique anchors and failed; I redid them with unique anchors."
+    ],
+    "learnings": [
+      "land.rs's test fixtures module is pub(crate) cfg(test), so other core modules' tests can reuse fixtures::commit, candidate and outcome.",
+      "A commit that changes the exclusion rules is itself classified as a governed change by classify_commit. So the content-mismatch rule cannot be reached through records-only commits, and the test uses a verification claiming a different fingerprint.",
+      "The closing records are excluded from the governed fingerprint, so a landing can be committed, fingerprinted, then amended with the real value, and the fingerprint is unchanged.",
+      "Bash is restricted to the listed commands, with no pipes, so cargo output can't be trimmed; large outputs are persisted outside the working directory and the Read tool can't open them."
+    ],
+    "desires": [
+      "A way to read a large persisted tool output inside the working directory, to confirm the per-test totals.",
+      "Permission to run `tail` or a pipe, to see the end of cargo output."
+    ]
+  }
+}

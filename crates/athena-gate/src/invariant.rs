@@ -645,7 +645,7 @@ fn job_problem(
 /// they do not. The reading must be in the tree, and neither its time nor its invocation number may
 /// come after the dispatch, a producer invocation, or a verifier invocation that the records list.
 /// Nothing here depends on the history being kept: a squash holds the same records.
-fn prediction_problem(files: &JobFiles, job: &JobId, n: u32) -> Option<String> {
+pub fn prediction_problem(files: &JobFiles, job: &JobId, n: u32) -> Option<String> {
     let dir = job.dir();
     let Some(reading) = files.readings.iter().find(|r| r.n == n && &r.job == job) else {
         return Some(format!("{dir}/reading-{n}.json is not in the landed tree"));

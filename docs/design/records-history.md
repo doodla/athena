@@ -395,6 +395,15 @@ keeps running until the new one has passed alongside it.
 4. **Pre-merge status.** The required status on the PR head (§5.1 step 1), and the stealth-mode local bare
    repository. Test: a head with an unverified commit fails the status; PR commits are reachable after the
    host ref is deleted (garbage collection run).
+   *Part 1 built:* `athena check --pr-head <base> <head>` (`crates/athena-core/src/pr_check.rs`). Each commit
+   in `base..head` is classified by `land::classify_commit` (the per-commit step of `pr_commits`); the check
+   passes only if each job landing has a passing verification and an accepted reading that precedes the work
+   (the gate's `prediction_problem` rule), and the head's fingerprint, under the landing parent's rules,
+   equals the last landing's verified fingerprint, so only records-only commits follow it. A declared
+   intervention after the last landing, or with no landing, fails: a squash of it is not a valid landing until
+   the cutover. All offending commits are named. A merge commit in the range is judged against its first
+   parent, as `pr_commits` does. The `pr-head` CI job runs it on pull requests and is not required until the
+   cutover (job 7). The local bare repository and the host status are still to build.
 5. **Attribution check, alongside the old one.** First-parent walk, squash rule, pending state, legacy rule
    (§4, §5, §6). It runs in CI as a second, non-blocking check beside the existing one, to compare verdicts
    on real history. Test: each of the seven named commits (six exempt entries and 02837e0) is judged as §4 says.
