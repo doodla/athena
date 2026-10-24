@@ -2,9 +2,11 @@
 //!
 //! The core computes the final verdict. It passes only if the agent says pass, every criterion is met, no
 //! finding is a blocker or major, and every check passed or was already failing on the base commit. Each `behavior` criterion must cite at least one
-//! command, and every cited command must be one the core saw the verifier run, either as a whole command or
+//! command, and every cited command must be one the core saw run, either as a whole command or
 //! as one whole simple command inside a chained or piped one; otherwise the criterion counts as unmet, with a
-//! finding that says so (D43, D63).
+//! finding that says so (D43, D63). A cited command is seen if the verifier ran it, or Athena ran and
+//! recorded it on the same candidate tree and it passed; a failed record, or one made on another tree, does
+//! not count (D115).
 //!
 //! [`Verified`] has private fields and is constructed only here, only for a pass, so `land()` cannot be
 //! called with anything unverified.
@@ -101,8 +103,15 @@ pub struct VerdictInputs<'a> {
     pub checks: &'a [CheckRun],
     /// The verifier's structured output, if it produced one.
     pub output: Option<&'a VerdictOutput>,
-    /// The commands the core saw the verifier run.
+    /// The commands the core saw the verifier run. A cited command is seen if it is here, or if Athena ran
+    /// and recorded it in `checks` on the same candidate tree and it passed; failed or other-tree records
+    /// do not count (D43, D115).
     pub commands_run: &'a [String],
+    /// The tree being judged. With `checks_tree`, decides whether `checks` count as seen commands.
+    pub candidate_tree: Option<&'a str>,
+    /// The tree Athena ran `checks` on, or `None` when it ran none. A recorded check counts as a seen
+    /// command only if this equals `candidate_tree` and the check passed with exit code 0 (D115).
+    pub checks_tree: Option<&'a str>,
     /// Set when the verifier changed its snapshot. The core discarded that verdict and reran verification;
     /// the fault is the system's, so it is recorded and never counted against the work.
     pub system_fault: Option<String>,
@@ -269,11 +278,22 @@ fn simple_commands(line: &str) -> Vec<String> {
 pub fn judge(inputs: &VerdictInputs<'_>) -> Judgment {
     let mut findings = Vec::new();
     let mut reasons = Vec::new();
-    let ran: Vec<String> = inputs
+    let mut ran: Vec<String> = inputs
         .commands_run
         .iter()
         .flat_map(|c| simple_commands(c))
         .collect();
+    // Athena's own passing record for this very tree counts as a command run (D115). Skipped checks and
+    // nested-run placeholders carry no exit code and never count.
+    if inputs.candidate_tree.is_some() && inputs.candidate_tree == inputs.checks_tree {
+        for check in inputs
+            .checks
+            .iter()
+            .filter(|c| c.passed && c.exit_code == Some(0))
+        {
+            ran.extend(simple_commands(&check.command.join(" ")));
+        }
+    }
 
     let blocking_checks = |c: &&CheckRun| !c.passed && !is_pre_existing(c, inputs.baseline);
     for check in inputs.checks.iter().filter(blocking_checks) {
@@ -527,6 +547,8 @@ mod tests {
             checks,
             output: Some(out),
             commands_run: ran,
+            candidate_tree: None,
+            checks_tree: None,
             system_fault: None,
             verifier_failure: None,
             map_base: None,
@@ -552,12 +574,109 @@ mod tests {
             checks,
             output: Some(&output(vec!["cargo test"], vec![])),
             commands_run: &ran,
+            candidate_tree: None,
+            checks_tree: None,
             system_fault: None,
             verifier_failure: None,
             map_base: None,
             map_candidate: None,
             baseline,
         })
+    }
+
+    /// The verifier ran nothing; `recorded` is Athena's check list, run on `checks_tree`, judged for `candidate_tree`.
+    fn judge_recorded(
+        recorded: &[CheckRun],
+        candidate_tree: Option<&str>,
+        checks_tree: Option<&str>,
+        cited: Vec<&str>,
+    ) -> Judgment {
+        judge(&VerdictInputs {
+            criteria: &criteria(),
+            checks: recorded,
+            output: Some(&output(cited, vec![])),
+            commands_run: &[],
+            candidate_tree,
+            checks_tree,
+            system_fault: None,
+            verifier_failure: None,
+            map_base: None,
+            map_candidate: None,
+            baseline: None,
+        })
+    }
+
+    fn d43_finding(j: &Judgment) -> Option<&Finding> {
+        j.findings.iter().find(|f| f.summary.contains("D43"))
+    }
+
+    #[test]
+    fn a_passing_check_recorded_on_the_same_tree_counts_as_run() {
+        let j = judge_recorded(&[check(true)], Some("abc"), Some("abc"), vec!["cargo test"]);
+        assert!(j.criteria[1].met);
+        assert!(j.criteria[1].commands_verified);
+        assert!(d43_finding(&j).is_none());
+    }
+
+    #[test]
+    fn a_failed_recorded_check_does_not_count_as_run() {
+        let j = judge_recorded(
+            &[check(false)],
+            Some("abc"),
+            Some("abc"),
+            vec!["cargo test"],
+        );
+        assert!(!j.criteria[1].met);
+        assert!(!j.criteria[1].commands_verified);
+        let finding = d43_finding(&j).expect("D43 finding");
+        assert!(
+            finding
+                .evidence
+                .contains("cited but not seen running: `cargo test`")
+        );
+    }
+
+    #[test]
+    fn a_passing_check_recorded_on_another_tree_does_not_count_as_run() {
+        for checks_tree in [Some("def"), None] {
+            let j = judge_recorded(&[check(true)], Some("abc"), checks_tree, vec!["cargo test"]);
+            assert!(!j.criteria[1].met, "{checks_tree:?}");
+            assert!(!j.criteria[1].commands_verified);
+            assert!(d43_finding(&j).is_some());
+        }
+        // No candidate tree known: nothing can match.
+        let j = judge_recorded(&[check(true)], None, None, vec!["cargo test"]);
+        assert!(!j.criteria[1].met);
+    }
+
+    #[test]
+    fn a_placeholder_record_without_an_exit_code_does_not_count_as_run() {
+        let mut placeholder = check(true);
+        placeholder.exit_code = None;
+        let j = judge_recorded(&[placeholder], Some("abc"), Some("abc"), vec!["cargo test"]);
+        assert!(!j.criteria[1].met);
+        assert!(d43_finding(&j).is_some());
+    }
+
+    #[test]
+    fn a_command_neither_run_nor_recorded_is_unseen_and_a_recorded_one_needs_the_same_text() {
+        let j = judge_recorded(&[], Some("abc"), Some("abc"), vec!["cargo test"]);
+        assert!(!j.criteria[1].met);
+        let j = judge_recorded(
+            &[check(true)],
+            Some("abc"),
+            Some("abc"),
+            vec!["cargo clippy"],
+        );
+        assert!(!j.criteria[1].met);
+        let j = judge_recorded(&[check(true)], Some("abc"), Some("abc"), vec![]);
+        assert!(!j.criteria[1].met);
+        assert!(
+            d43_finding(&j)
+                .unwrap()
+                .evidence
+                .contains("it cites no command")
+        );
     }
 
     #[test]
@@ -642,6 +761,8 @@ mod tests {
             checks: &[check(true)],
             output: Some(&output(vec!["cargo test"], vec![])),
             commands_run: &ran,
+            candidate_tree: None,
+            checks_tree: None,
             system_fault: None,
             verifier_failure: None,
             map_base: Some(base),
@@ -813,6 +934,8 @@ mod tests {
             checks: &[check(true)],
             output: Some(&output(vec!["cargo test"], vec![])),
             commands_run: &ran,
+            candidate_tree: None,
+            checks_tree: None,
             system_fault: fault.map(String::from),
             verifier_failure: None,
             map_base: None,

@@ -1,0 +1,183 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261024-045548-7qht",
+  "round": 1,
+  "at": "2026-10-24T04:58:30.265200914Z",
+  "invocation_seq": 3,
+  "approach": "Add two optional fields to `VerdictInputs`: `candidate_tree` (the tree being judged) and `checks_tree` (the tree Athena's recorded checks ran on). In `judge`, build a list of \"recorded-seen\" simple commands from `inputs.checks`. A check counts only if it passed, has `exit_code == Some(0)` (so skipped or nested \"not run\" placeholders drop out), and `checks_tree` is `Some` and equals `candidate_tree`. Each such check's `command` is joined with spaces and run through `simple_commands`. A cited simple command is seen if it is in the verifier's `ran` list or in that recorded list. The rest of D43 and D63 is unchanged, and so is the finding text. `run.rs` passes the candidate commit as `candidate_tree` and, only when checks were actually run (`nested.is_none()`), as `checks_tree`. Docs: amend the module doc and field docs, add decision D115, link it to D43 as amended, and add a changelog entry.",
+  "decisions": [
+    {
+      "choice": "Match a cited command to a recorded check by whole simple-command equality against the check's `command` joined with spaces, reusing D63's `simple_commands` normalisation.",
+      "reason": "This is the same rule as for commands the verifier ran, so no new matching rules exist. The verifier sees the recorded command text under 'Checks Athena ran on this tree' and can cite it exactly. `cargo test` is not accepted for a recorded `cargo test --locked`.",
+      "rejected": [
+        {
+          "option": "Match by recorded check name (test, clippy, fmt) or by prefix.",
+          "why": "A name or prefix match would accept `cargo test` for `cargo test --all` or an unrelated command, which D63 rejected."
+        },
+        {
+          "option": "Mark criteria met whenever the check passed, regardless of citation.",
+          "why": "That ignores the criterion's text, and D43 requires a cited command."
+        }
+      ]
+    },
+    {
+      "choice": "Same-tree is two explicit inputs, `candidate_tree` and `checks_tree`, both `Option<&str>`. Same tree means both are `Some` and equal.",
+      "reason": "The test for a record from a different tree can be written as a unit test in verify.rs. `run.rs` states the fact (checks ran on the candidate `c`) at the place it is true. A missing value fails closed.",
+      "rejected": [
+        {
+          "option": "A bool `recorded_on_candidate`.",
+          "why": "The different-tree case would be only a flag set by the caller, so `judge` would compare nothing."
+        },
+        {
+          "option": "Add a tree field to `CheckRun`.",
+          "why": "That changes the record schema in athena-data, which is beyond the focused change."
+        }
+      ]
+    },
+    {
+      "choice": "`judge` also requires `exit_code == Some(0)` and `passed` for a recorded check to count.",
+      "reason": "Skipped checks and the nested-run placeholder are built with `passed: true` and `exit_code: None`. They must not count as a run. `run.rs` also passes `checks_tree = None` when nested, so there are two guards.",
+      "rejected": [
+        {
+          "option": "Filter placeholders only in `run.rs`.",
+          "why": "`judge` would then trust its caller for a safety property, and the skipped-check case would be missed."
+        }
+      ]
+    },
+    {
+      "choice": "Record the change as a new decision, D115, that amends D43. D43's section gets a pointer line, and D63's 'Amends D43' pattern is followed.",
+      "reason": "The accepted reading says D43's history is not rewritten. The backtest compares 'Amends' phrases with decision-links.toml.",
+      "rejected": [
+        {
+          "option": "Edit D43's text in place.",
+          "why": "It loses history."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "action": "modify",
+      "purpose": "Add `candidate_tree` and `checks_tree` to `VerdictInputs`. In `judge`, add recorded passing same-tree commands to the seen set. Update the module doc and the docs of `commands_run` and the new fields. Add the tests for pass, failed, other-tree, no-tree and placeholder, and update the existing `VerdictInputs` constructors in tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "purpose": "Pass `candidate_tree` and `checks_tree` (None when nested) into `judge` at about line 1925.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append D115 amending D43, with Decision, Alternatives, Tradeoff, Reversal cost and Provenance (job 20261024-033933-ta60, commit 88562f1). Add a pointer line to D43's section.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decision-links.toml",
+      "action": "modify",
+      "purpose": "Add [[link]] line = <the 'Amends D43' line in D115>, older = D43, newer = D115, status = amended. If the D43 pointer adds lines, shift every later `line` value accordingly.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add a Changed entry under Unreleased describing the amended D43 rule (D115).",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In verify.rs, add `candidate_tree: Option<&'a str>` and `checks_tree: Option<&'a str>` to `VerdictInputs`, with docs. Update the module doc and the `commands_run` doc with the rule.",
+    "In `judge`, after computing `ran`, extend it with the simple commands of each recorded check that passed, has exit_code Some(0), and when `candidate_tree.is_some() && candidate_tree == checks_tree`. Join `command` with spaces and use `simple_commands`.",
+    "Update the existing test constructors with the two new fields set to None. Add tests: recorded passing same tree is met with no D43 finding; failed record is unmet with 'cited but not seen running'; other-tree and None-tree are unmet; a record with exit_code None is unmet; nothing run and nothing recorded is unmet; and a behavior criterion with no commands is still unmet.",
+    "In run.rs, at the `judge` call, pass `candidate_tree: Some(c.as_str())` and `checks_tree: (self.nested.is_none()).then_some(c.as_str())`. Adjust to the type of `c` as the compiler requires.",
+    "In docs/decisions.md, append D115 (Amends D43, with the rule, alternatives, tradeoff, reversal cost and provenance). Add the D43 pointer line.",
+    "Update docs/decision-links.toml: add the D43 to D115 'amended' link at the D115 'Amends D43' line, and shift any later lines moved by the D43 pointer.",
+    "Add the CHANGELOG.md entry under [Unreleased] Changed.",
+    "Run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings`, and `cargo test --locked`."
+  ],
+  "risks": [
+    {
+      "risk": "The decision-links backtest fails because inserting a pointer into D43 shifts the line numbers of all later links.",
+      "mitigation": "Put the D43 pointer in as few lines as possible (one line, or fold it into an existing line). Recompute every `line` in decision-links.toml afterwards, then run `cargo test --locked` to run the decision-link tests."
+    },
+    {
+      "risk": "A skipped or placeholder check (passed true, exit_code None) is counted as run.",
+      "mitigation": "`judge` requires `exit_code == Some(0)`; `run.rs` passes `checks_tree` None when nested. Unit tests cover a placeholder."
+    },
+    {
+      "risk": "A new required field breaks existing `VerdictInputs` constructors in tests and in run.rs.",
+      "mitigation": "Update all call sites (verify.rs tests at about lines 525, 550, 640, 815, and run.rs about 1925). The compiler lists any missed."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit test in verify.rs. The verifier ran nothing, one recorded `test` check with command `cargo test` passed (exit 0), and `candidate_tree` equals `checks_tree`. The behavior criterion cites `cargo test`.",
+      "command": "cargo test -p athena-core verify",
+      "observes": "The criterion is met, `commands_verified` is true, and no finding contains 'D43'.",
+      "fails_without": "Without the recorded-check path, `cargo test` is not in `ran`, so the criterion is unmet with the 'cited but not seen running' finding and the test fails."
+    },
+    {
+      "criterion": 2,
+      "method": "Unit test: same setup, but the recorded check is `check(false)` (failed, exit 101).",
+      "command": "cargo test -p athena-core verify",
+      "observes": "The criterion is unmet, `commands_verified` is false, and the finding evidence contains 'cited but not seen running: `cargo test`'.",
+      "fails_without": "If a failed record counted (the `passed` or `exit_code` guard missing), the criterion would be met and the test would fail."
+    },
+    {
+      "criterion": 3,
+      "method": "Unit test: a passing record, but `checks_tree` differs from `candidate_tree`. A second case sets `checks_tree` to None.",
+      "command": "cargo test -p athena-core verify",
+      "observes": "The criterion is unmet and the D43 finding is present in both cases.",
+      "fails_without": "If the tree comparison were absent, the record would count and the test would fail."
+    },
+    {
+      "criterion": 4,
+      "method": "Run the existing verify tests unchanged apart from the two new `VerdictInputs` fields added to each constructor. They include the D63 test `cited_commands_match_whole_simple_commands_inside_what_ran` and the no-commands behavior criterion test. Add one case where the verifier ran nothing, no check is recorded, and the criterion is unmet.",
+      "command": "cargo test -p athena-core verify",
+      "observes": "All pass. An unrun, unrecorded command is still unseen, and a behavior criterion with no commands is still unmet ('it cites no command').",
+      "fails_without": "If the amendment loosened the unseen test beyond recorded passing same-tree checks, these tests would fail."
+    },
+    {
+      "criterion": 5,
+      "method": "Athena's own recorded fmt, clippy and test checks on the candidate tree, shown under 'Checks Athena ran on this tree'. The verifier cites those records, per the verifier prompt.",
+      "command": "cargo test --locked",
+      "observes": "The recorded checks `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked` all show passed.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Read the module doc and the docs on `commands_run`, `checks`, `candidate_tree` and `checks_tree` in verify.rs. A grep also checks that the rule is stated.",
+      "command": "git diff -- crates/athena-core/src/verify.rs",
+      "observes": "The diff has the sentence: a cited command is seen if the verifier ran it, or Athena ran and recorded it on the same candidate tree and it passed; failed or other-tree records do not count.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Inspect the diff of docs/decisions.md and docs/decision-links.toml. Check that the new decision's 'Amends D43' line number equals the `line` value in the new [[link]], with older = D43, newer = D115, status = amended. Check that D43's section has the pointer line. Both checks come after the D43 edit shifts later lines, so the numbers of every existing link below D43 must also be updated. Run the backtest-related tests.",
+      "command": "cargo test --locked",
+      "observes": "The diff shows D115 with its rule, alternatives, tradeoff, and provenance citing job 20261024-033933-ta60 and commit 88562f1. Decision-link and backtest tests pass, which shows the line numbers are correct.",
+      "fails_without": null
+    },
+    {
+      "criterion": 8,
+      "method": "Read the `judge` call in run.rs. It passes `candidate_tree: Some(c)` and `checks_tree: Some(c)` only when `self.nested.is_none()`, otherwise None. Placeholders have `exit_code None`, so `judge` ignores them. The existing nested-run lifecycle tests in run.rs and run_pin_tests.rs still pass.",
+      "command": "git diff -- crates/athena-core/src/run.rs",
+      "observes": "The diff shows the new inputs wired as described. `cargo test -p athena-core` passes.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Recorded commands carry flags (`cargo test --locked`). A verifier that cites plain `cargo test` will still be unseen under whole-command equality. The plan accepts that, since the verifier sees the exact text in its brief. Should `cargo test` also count for a recorded `cargo test --locked`? The code does not settle this.",
+    "Whether 'tree' should be the candidate commit id or the git tree hash. The plan uses the candidate commit `c`, since the checks ran in a snapshot built from it. Compare how the tests build these values in run.rs before choosing.",
+    "The decision-link line numbers depend on exactly where the producer adds lines to D43's section. The producer should check them after the final edit. If the pointer is added inside D43, every later link line shifts."
+  ],
+  "producer_section_sha256": "2a51085748ab8fc756ccfe1ff68b6ee9f42760c56388aa23a19ca467a6fae723"
+}

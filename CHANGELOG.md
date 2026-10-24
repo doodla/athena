@@ -9,6 +9,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- A cited command now counts as seen running if the verifier ran it, or Athena ran and recorded it on the same
+  candidate tree and it passed (D115, amending D43). A failed record, a record for another tree, and a
+  placeholder with no exit code still leave the command unseen. Reason: job 20261024-033933-ta60 was rejected on
+  "cargo test passes for the workspace" while Athena's own test run on that candidate had passed. `judge` takes
+  `candidate_tree` and `checks_tree`; unit tests cover the passing, failed and other-tree cases.
 - The producer is no longer required to run the full suite (D113, amending D95 and D103). The producer prompt
   says to run targeted tests (`cargo test -p <crate> <filter>`) while working, that Athena runs fmt, clippy and
   the full suite on the candidate, and that the producer runs the full suite at most once. `produce_and_verify`
