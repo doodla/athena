@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261024-114125-7z2t",
+  "round": 2,
+  "at": "2026-10-24T13:10:31.133371584Z",
+  "invocation_seq": 6,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The lower bound contradicts accepted criterion 5 and the reading, and the criterion 5 demonstration cannot hold under it.",
+      "evidence": "Criterion 5: 'commits before the first landing-intent record on athena/records, and before the last landing record, are never reconciled.' Reading assumption: 'The walk starts after the later of the last landing record and the first landing-intent record.' Decision 2 sets the bound to 'the earlier of (a) the latest landing host_commit ... and (b) the earliest unfulfilled intent's expected_base'. That deliberately walks commits before the last landing. Demonstration 5 still says unmatched commits before the last landing get no finding. Both cannot be true once an earlier unfulfilled intent exists. Fix: Either keep the accepted bound (the later of the last landing and the first intent's base) and list 'earlier crash passed over by a later landing' as a known gap or open question for the user, or raise the bound change to the user as a change to criterion 5 before building. Make Demonstration 5 and the 'A crashed, B landed' test agree with whichever bound is chosen.",
+      "location": "Plan decision 2 vs acceptance criterion 5 and Demonstration 5",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "An abandoned intent pins the walk back to the first intent forever, so the walk is no longer bounded and host calls repeat on every land and status.",
+      "evidence": "GitLandingRecords::intent (gh.rs:1460-1495) writes an intent before every merge attempt. A PR that is closed, refused or re-headed leaves an intent with no landing that will never be fulfilled. Under decision 2 that intent's expected_base stays the anchor indefinitely. The risk section claims a 'Bounded walk', but every unmatched commit after that base (human commits, rebase-replayed commits) is re-reported and costs a host call on every athena land and athena status. Fix: If the earlier anchor is kept, count an intent only when its expected_base is still after the latest landing's position and its head/base relation still makes it a candidate. Otherwise drop it from the anchor. Add a test where an abandoned intent does not widen the walk.",
+      "location": "Plan decision 2 (earliest unfulfilled intent's base)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Commits named by a declared-intervention record are treated as missing a landing, so they get reported unattributed and queried on the host.",
+      "evidence": "§6 of records-history.md says every first-parent commit is named by 'a landing or declared-intervention record'. history.rs has DeclaredIntervention (line 182) and HistoryRecord::DeclaredIntervention (line 319). The plan only skips commits that already have a landing record. Fix: Skip commits named by a DeclaredIntervention record as well, and add a case to the criterion 4 or 5 test.",
+      "location": "Plan approach and decision 2 (which commits count as attributed)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A one-parent commit is always recorded as Squash, even when it is the PR head itself (fast-forward) or a rebase.",
+      "evidence": "In the local match, tree(commit)==head_tree_sha and parent==expected_base also hold when commit == intent.head_sha, i.e. a fast-forward. history::MergeMethod has Rebase (history.rs:121). Fix: When commit == intent.head_sha, record it as a fast-forward/rebase, not Squash, or state the rule and test it.",
+      "location": "Plan decision 5 (merge method)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The CLI test's unattributed commit sends the real GhCli to the host fallback, so the test depends on the network or on how gh fails.",
+      "evidence": "The plan says an unmatched commit goes to the host. The CLI binary uses GhCli and has no fake host. crates/athena-cli/tests/external_calls.rs already has a pattern for faked host endpoints. Fix: Point the CLI test at the faked host used in external_calls.rs, or at a guaranteed-unreachable host, and assert 'unattributed'. Do not rely on ambient network state.",
+      "location": "Demonstration 6 (CLI integration test for athena status)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The host fallback writes only when an intent exists for the PR the host names. That fits the scope, but the user should confirm it.",
+      "evidence": "Landing.intent is required (LandingFacts.intent, gh.rs:1330), so writing without an intent would forge provenance. §8.1 step 3 does not say this. Fix: Keep the rule, and say in the CHANGELOG or a doc comment that a PR merged without an intent stays unattributed.",
+      "location": "Plan decision 3 / open question 1",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan names real code that exists: the LandingRecords trait, LandingFacts, GitLandingRecords with its existing/commits/write/landing methods in gh.rs, Athena::land_pr, StatusView/status() in status.rs, LandingIntent in history.rs, and HostOperation in records.rs. It follows §8.1 of records-history.md: local match first, host only as a fallback, never guess. The traits keep the tests off the network, and the status and land wiring is tested on the real paths. The main problem is decision 2. It moves the walk's lower bound to the earliest unfulfilled intent's base. That contradicts accepted criterion 5 (\"before the last landing record ... never reconciled\") and the reading's assumption (\"later of\"), and the plan's own criterion 5 demonstration claims the opposite. The bound also degrades over time: an intent whose PR was never merged stays unfulfilled forever and pins the walk back to the first intent. A second gap: commits named by declared-intervention records are not excluded, so they would be reported unattributed and sent to the host on every run. A few smaller issues follow."
+}

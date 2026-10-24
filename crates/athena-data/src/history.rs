@@ -107,6 +107,12 @@ impl LandingIntent {
         }
         Ok(())
     }
+
+    /// Whether a main commit with tree `tree` and first parent `parent` is the merge this intent announced:
+    /// the tree is the head's tree and the parent is the expected base (§8.1 step 2). Both must hold.
+    pub fn matches(&self, tree: &str, parent: &str) -> bool {
+        self.head_tree_sha == tree && self.expected_base == parent
+    }
 }
 
 /// How the host combined the pull request into main (§5.3; D111).
@@ -479,6 +485,14 @@ mod tests {
             assert!(text.contains(&tag), "{text}");
             assert_eq!(HistoryRecord::parse(&text).unwrap(), record);
         }
+    }
+
+    #[test]
+    fn an_intent_matches_only_on_head_tree_and_expected_base_together() {
+        let i = intent();
+        assert!(i.matches(SHA_B, SHA_A));
+        assert!(!i.matches(SHA_A, SHA_A), "wrong tree");
+        assert!(!i.matches(SHA_B, SHA_B), "wrong parent");
     }
 
     #[test]

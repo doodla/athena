@@ -9,6 +9,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The reconcile step of `docs/design/records-history.md` §8.1 (D111, job 3 part 2), in
+  `crates/athena-core/src/reconcile.rs`. `athena land` and `athena status` run it first. It walks main's
+  first-parent commits after the later of the last landing record and the first landing intent's expected base,
+  and for each commit that no landing record or declared intervention names: (1) a landing intent whose head
+  tree equals the commit's tree and whose expected base is the commit's parent gives the landing record, with no
+  host call (the repair of a crash between the host's merge and the landing record); (2) else the host is asked
+  which pull request merged the commit, and the landing is written only if a landing intent records that pull
+  request and head; (3) else the commit is reported as unattributed and nothing is written. A host that is
+  unavailable, or names no pull request, gives unattributed; Athena never guesses. With no records branch, or
+  no landing intent on it, it does nothing and says so. It never fails the command: `athena status` shows the
+  findings (and in `--json`), `athena land` prints them before it goes on. Known gap: a crashed landing that a
+  later landing has already passed lies before the bound and is not repaired. A pull request merged with no
+  landing intent stays unattributed. A rebase that replays several commits leaves the other commits
+  unattributed. Declared interventions are read from `declared-interventions/` on the records branch, which
+  nothing writes yet.
 - `athena land --pr` now writes the records of `docs/design/records-history.md` §5.2, §5.3 and §6.1 (D111, job 3
   part 1). `gh::land_pr` writes a landing-intent record (PR number, head sha and tree, the remote default
   branch's tip as expected base, job ids) to `athena/records` on the remote **before** asking the host to merge,
@@ -16,8 +31,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   **after** the merge is confirmed. The landing's records commit takes the pull request's head as second
   parent. Every commit between the remote base and the PR head must carry an `Athena-Job` trailer; one that
   does not is an error naming its sha, and nothing is recorded. A merge the host did not confirm writes no
-  landing and adds a warning to the report that names the intent; reconciliation (§8.1, job 3 part 2) is
-  still to do. `GitLandingRecords::for_remote` builds the real sink and `Athena::land_pr` always uses it.
+  landing and adds a warning to the report that names the intent; reconciliation (§8.1, job 3 part 2)
+  repairs it, see the entry above. `GitLandingRecords::for_remote` builds the real sink and `Athena::land_pr` always uses it.
   `RecordsWriter` gained `append_to_remote` (built on the remote tip, pushed with an expected-tip guard,
   local branch moved only after the push, bounded retry) and `sync_from` (reset the local branch to the
   remote). `PrHost::merge` now returns the merge method used, and `PrReport` has a `warnings` list.
