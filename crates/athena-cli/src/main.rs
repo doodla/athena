@@ -326,11 +326,18 @@ Exit code: 0 only when the target was met; 2 for any other stop; 1 when Athena i
     /// be a verified job landing (prediction before outcome), a declared intervention before the last
     /// landing, or records only, and the head must hold the last landing's verified content. Exit 2 on a
     /// finding.
+    ///
+    /// With `--attribution`, the records-only check on main: every first-parent commit from the earliest
+    /// landing-intent's expected base onward must be named by a matching landing record (a commit with a
+    /// matching intent and no landing is pending for 15 minutes). It reads `athena/records` (fetch it first)
+    /// and never a commit message. Exit 2 on a finding.
     Check {
         #[arg(long)]
         history: bool,
         #[arg(long, num_args = 2, value_names = ["BASE", "HEAD"], conflicts_with = "history")]
         pr_head: Option<Vec<String>>,
+        #[arg(long, conflicts_with_all = ["history", "pr_head"])]
+        attribution: bool,
         #[arg(long)]
         json: bool,
     },
@@ -942,9 +949,27 @@ fn run(cli: Cli) -> Result<u8> {
         Command::Check {
             history,
             pr_head,
+            attribution,
             json,
         } => {
             let athena = open(false)?;
+            if attribution {
+                let tip = athena
+                    .git
+                    .head()?
+                    .ok_or_else(|| anyhow::anyhow!("the repository has no commits"))?;
+                let report = athena_gate::attribution::check_attribution(
+                    &athena.git,
+                    &tip,
+                    jiff::Timestamp::now(),
+                )?;
+                if json {
+                    print_json(&display::attribution_json(&report))?;
+                } else {
+                    print!("{}", display::attribution_report(&report));
+                }
+                return Ok(if report.passed() { 0 } else { 2 });
+            }
             if let Some(range) = pr_head {
                 let report =
                     athena_core::pr_check::check_pr_head(&athena.git, &range[0], &range[1])?;

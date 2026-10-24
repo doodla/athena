@@ -9,6 +9,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `athena check --attribution`, the records-only attribution check on main (job 5, part 1 of
+  `docs/design/records-history.md`, sections 5.2, 6 and 10, D111). It reads only `athena/records` (the local
+  branch, else `origin/athena/records`) and main's first-parent commits, never a commit message. Starting at
+  the commit the earliest landing-intent expects as its base (the anchor, not itself judged), each later
+  commit must be named as `host_commit` by a landing whose intent matches it (head tree equals the commit's
+  tree, expected base equals its parent). A commit with a matching intent and no landing passes as pending
+  for 15 minutes from the intent and then fails; any other commit fails as unattributed, and its sha is
+  printed. A missing records branch, no landing-intent, an unparseable record, diverged local and remote
+  records refs, and a records commit that drops or changes a file of its predecessor (not a fast-forward)
+  are findings too. Exit 2 on a finding. It conflicts with `--history` and `--pr-head`. A new `attribution`
+  job in `.github/workflows/ci.yml` runs it on pushes to main and on schedule after
+  `git fetch origin athena/records:athena/records`; it does not block merging. Code:
+  `athena_gate::attribution`, `athena_git::records_branch::{resolve_tip, audit_history}`.
 - `athena check --pr-head <base> <head>`, the pre-merge check on a pull request (job 4, part 1 of
   `docs/design/records-history.md`). It passes only when every commit between the base and the head is a
   verified job landing whose prediction (the accepted reading) was recorded before the work, a declared

@@ -172,6 +172,28 @@ jobs:
           path: target
           key: target-history-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
 
+  # The attribution check on main (docs/design/records-history.md §5.2, §6 and §10, D111). It reads only the
+  # records branch, so the branch is fetched explicitly: checkout does not bring it.
+  # NOT REQUIRED: it reports but does not block (continue-on-error, and it is not in branch protection).
+  attribution:
+    name: attribution of main (not required)
+    if: github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    continue-on-error: true
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          # The token is kept so the next step can fetch the records branch; it is read-only (contents: read).
+          persist-credentials: true
+          ref: ${{ github.sha }}
+      - name: Fetch the records branch
+        run: git fetch origin athena/records:athena/records
+      - name: Set up (pinned toolchain, gitleaks, athena)
+        run: ./setup.sh --ci
+      - name: athena check --attribution
+        run: '"$HOME/.local/bin/athena" check --attribution'
+
   # The pre-merge check on a pull request's head (docs/design/records-history.md §5.1 and §10, D111).
   # NOT YET REQUIRED: it reports but does not block merging (continue-on-error, and it is not in branch
   # protection). It becomes a required check at the cutover (job 7 of the plan).
