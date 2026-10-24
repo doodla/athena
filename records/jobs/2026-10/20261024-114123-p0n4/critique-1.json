@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261024-114123-p0n4",
+  "round": 1,
+  "at": "2026-10-24T11:46:33.600566354Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The validation test would pass even if validate() were never called.",
+      "evidence": "Under Decision 4, a commit whose job has no map entry fails the intent step by itself. A PR with no Athena-Job trailer therefore errors in GitLedger's own trailer and map lookup before the code ever reaches LandingIntent::validate. The test, which observes an error and a missing records branch, passes whether or not validate() runs. Landing::validate (history.rs:162-174) also checks things the ledger can produce wrongly, such as non-sha host_commit, and the plan has no test that reaches it. Fix: Pick an input that gets past the ledger's own checks and fails only validate(). For example, pr_number 0, which check_pr refuses at history.rs:70, or a host_commit that is not a 40-hex sha passed to record_landing. Assert the error is the HistoryError variant: BadPrNumber or BadSha(\"host_commit\"). Assert that nothing was written. Alternatively, put the build-validate-serialise step in one function and unit-test it with those inputs.",
+      "location": "Plan › Demonstrations › Criterion 6; Decision 4",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The fake host's merged commit must be a real 40-hex sha, or Landing::validate refuses it.",
+      "evidence": "Existing tests set `*host.merged.borrow_mut() = Some(\"merged1\".into())` (gh.rs:2370, 2504). Landing::validate calls check_sha(&self.host_commit, \"host_commit\") (history.rs:165). With \"merged1\", the landing write fails and only a warning is produced, so the criterion-1 test would fail for a reason unrelated to the behavior. Fix: In the new real-repo tests, set the fake's merged commit to a real commit sha built in the fixture, for example a merge or squash commit on the bare remote's main. Make sure the Content fake reports a match, so observe_merge reaches Landed.",
+      "location": "Plan › Demonstrations › Criterion 1 (host_commit \"merged1\"-style sha)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan does not say how record_landing gets the intent's id, expected_base and head.",
+      "evidence": "Decision 3 says the landing \"re-reads the intent's recorded expected_base and head\", but record_intent(pr, head, base_branch) has no stated return value. A &dyn LandingLedger behind a shared reference would need interior mutability to hold that state. Fix: Have record_intent return the LandingIntent it wrote, and pass it to record_landing(&intent, host_commit, method) from land_pr. This needs no hidden state and lets the test compare landing.intent with intent.id directly.",
+      "location": "Plan › Decision 1/3, LandingLedger trait signatures",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Which Landed observation triggers the landing write is unclear, and a landing whose write failed is never retried.",
+      "evidence": "land_pr calls observe_merge twice: at line 1314, before any merge by this run (a PR merged by the host or a person), and at line 1347, after job.host.merge. If the landing goes only after the second, a run whose landing write failed with a warning will find the link already Landed at 1314 on its next run, and will never write the landing. If it also goes after the first, there may be no intent and no merge method. Fix: State that the landing is written only after the merge this run requested (line 1347), and only when an intent was written in the same run. Note that the case of a write failing after the merge is left to reconcile (§8.1). Add a test assertion that a PR found already merged at the first observation writes no records.",
+      "location": "Plan › Files › gh.rs; gh.rs:1314 vs 1345-1347",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The bootstrap question can be settled now.",
+      "evidence": "JobId::parse maps \"bootstrap\" to JobId::Bootstrap (id.rs:139). LandingCommit.job is a JobId, but verification is a RecordId, which bootstrap cannot be. Since the error is raised before the merge, a bootstrap land --pr would be blocked. Fix: Say explicitly that a bootstrap job through --pr is refused at the intent step with a named error, and add that case to the refusal test, or else exempt it with a stated reason.",
+      "location": "Plan › Open questions (bootstrap job id)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the code. The things it names exist: LandPr and land_pr with the host.merge call at gh.rs:1345 and observe_merge at 1347, the PrHost::merge trait method, gh::MergeMethod, RecordsWriter::append, which builds parents from the tip, and the history.rs types and their validate() methods. The hook points are where the fault starts. The trait-based ledger is a fair way to observe call order against FakeHost. Changing PrHost::merge to return the method explains the external_calls.rs deliverable. The demonstrations for criteria 1 to 4 would fail without the behavior. The demonstration for criterion 6 would not: a PR with no Athena-Job trailer is refused by the ledger's own map lookup before validate() runs, so the test passes even without validation. That is a major finding. Smaller gaps: the fake's \"merged1\" host commit fails check_sha; the plan does not say how the intent passes from record_intent to record_landing; and it is unclear which observe_merge triggers the landing write and what happens to a landing whose write failed. The plan adds no athena.toml field, and it fits one producer run. Verdict: revise."
+}

@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261024-114123-p0n4",
+  "round": 2,
+  "at": "2026-10-24T11:48:20.337431915Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The local records branch is never synced with origin before the write and push, so a remote that has moved ahead blocks every land --pr.",
+      "evidence": "records_branch.rs builds each commit on the local tip only (append_with_hook reads self.tip() = rev_parse(RECORDS_REF), line 119). The plan adds a plain non-force push and says the intent write or push fails 'before host.merge'. Nothing fetches origin's athena/records first. So if the remote branch has commits the local one lacks (another clone, another machine), the push is rejected on every run. Every land --pr then bails before the merge, which is a lasting regression in landing. Fix: Before record_intent writes, fetch refs/heads/athena/records from the remote. Fast-forward the local ref (CAS update-ref) when the local ref is an ancestor, or refuse with a named error when the two have diverged. On a rejected push, fetch and rebuild once more. Add a test: the bare remote already holds a records commit the local repo lacks, and land_pr still writes the intent on top of it, pushes, and merges.",
+      "location": "Decision 8 / Decision 6 / Risks 'Remote records branch moved'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The intent commit is an orphan with zero parents in this fixture.",
+      "evidence": "records_branch.rs:102 and line 142 make the first write an orphan with no parents. The fixture starts with athena/records absent, as pr_already_merged_writes_no_records asserts. Fix: Either seed the records branch in the fixture, or assert that the intent commit has zero parents when the branch is new, and that the landing commit's first parent is the intent commit.",
+      "location": "Demonstration for criterion 2: 'The intent commit has one parent'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The same-bytes no-op path would silently drop extra parents.",
+      "evidence": "append_with_hook returns the current tip without committing when every put is same-bytes (lines 121-124). With extra_parents, the PR head would then never be linked. Fix: Refuse a no-op that has extra parents, or check that the existing tip already reaches each extra parent. Document this and add a unit test.",
+      "location": "Decision 8 append_with_parents",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Using the job id as the verification RecordId is an unchecked assumption.",
+      "evidence": "LandingCommit.verification is a RecordId (history.rs:135). Landing::validate checks only shas, so a wrong id would not be caught. The plan lists this as an open question. Fix: Cite the design text that names the verification record by its job id, or state the assumption in the doc comment and the §10 note so the history check (part 2) applies the same rule.",
+      "location": "Decision 4: verification id = job id",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "A helper that lists commits may already exist.",
+      "evidence": "Remote::commits_after is already used at gh.rs:1330. Fix: Check whether commits_after or an existing rev-list helper gives the shas oldest first before adding a new one.",
+      "location": "Steps 2 / Files lib.rs",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan matches the request and the accepted reading. The code it names exists: LandingIntent, Landing, LandingCommit and MergeMethod in athena-data history.rs; RecordsWriter::append with a CAS loop in records_branch.rs; land_pr at gh.rs:1305 with host.merge at 1345 and the second observe_merge at 1347; gh::MergeMethod chosen inside GhClient::merge at gh.rs:806. The hook points are right. The demonstrations would fail without the behavior, and the tests watch the call order and the remote push state. One design gap matters: the plan pushes without first bringing the local athena/records up to date with origin. When another clone has already pushed records, the non-force push is rejected, and every land --pr then fails before the merge with no way to recover. There are also two smaller problems. A test expectation is wrong about the parents of the orphan commit. And the writer's same-bytes no-op path skips extra parents without saying so."
+}

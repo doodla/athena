@@ -1,0 +1,283 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261024-114123-p0n4",
+  "round": 3,
+  "at": "2026-10-24T11:48:59.702171132Z",
+  "invocation_seq": 6,
+  "approach": "Add a LandingLedger trait (land.rs) with a git-backed GitLedger, held as Option<&dyn LandingLedger> on LandPr. Before writing, the ledger syncs the local records branch with origin (fetch, fast-forward, or a named divergence error). record_intent returns the LandingIntent it wrote; land_pr passes it to record_landing(&intent, host_commit, method). Both records go through one build-validate-serialise helper, then RecordsWriter (new append_with_parents and push). A rejected push triggers one fetch and rebuild. Intent failure blocks the merge. Landing failure is a warning on PrReport. The landing is written only after this run's merge request and only if this run wrote an intent. PrHost::merge returns the requested gh MergeMethod. Trailers, records/ and resync_onto_merge are untouched.",
+  "decisions": [
+    {
+      "choice": "LandingLedger trait with record_intent(pr, head, base_branch) -> Result<LandingIntent> and record_landing(&LandingIntent, host_commit, method) -> Result<()>; GitLedger implements it over Git.",
+      "reason": "The free function land_pr has no git handle and its tests use fakes. Returning the intent avoids hidden state; tests compare landing.intent with intent.id.",
+      "rejected": [
+        {
+          "option": "&Git directly on LandPr",
+          "why": "Every fake-based test would need a real repo, and call order against the fake host could not be observed."
+        },
+        {
+          "option": "Interior-mutable intent state in the ledger",
+          "why": "Hidden state."
+        },
+        {
+          "option": "Write records in Athena::land_pr around land_pr",
+          "why": "The intent must sit between the gate and host.merge, inside the free function."
+        }
+      ]
+    },
+    {
+      "choice": "Landing is written only after the observe_merge that follows job.host.merge in this run, and only when this run wrote an intent. A PR already merged at the first observation writes no records. A failed landing write is a warning, left to reconcile (§8.1).",
+      "reason": "Without this run's intent and requested method the landing would lack its intent id and merge method.",
+      "rejected": [
+        {
+          "option": "Also write the landing after the first observation",
+          "why": "No intent and no merge method are available there."
+        }
+      ]
+    },
+    {
+      "choice": "PrHost::merge returns the gh::MergeMethod it requested, mapped to athena_data MergeMethod.",
+      "reason": "The method is known at the host call; inference from commit shape is ambiguous for one-commit PRs.",
+      "rejected": [
+        {
+          "option": "Infer from parent count",
+          "why": "Ambiguous."
+        },
+        {
+          "option": "Extra API call",
+          "why": "New failure point after merge."
+        }
+      ]
+    },
+    {
+      "choice": "expected_base is the remote base branch tip from ls-remote when the intent is written. PR commits are rev_list_reverse(\"<expected_base>..<head>\") (existing Git::rev_list_reverse, lib.rs:457), so no new lib.rs helper is needed. Job ids come from Athena-Job trailers, deduplicated. The verification RecordId is the job's RecordId, via a job-to-verification map built in Athena::land_pr from records.jobs entries that have a verification. The assumption is stated in the doc comments and the §10 note so part 2 applies the same rule. Every commit is checked before the merge.",
+      "reason": "§5.3 puts main's tip at write time in the intent. Remote::commits_after (gh.rs:572) is a landed..head lookup on the Remote trait and returns pairs, so it is not the right tool. The job id names the verification because a verification has no id of its own. This is unchecked against the design text, so it is recorded as an open question.",
+      "rejected": [
+        {
+          "option": "Local default branch as base",
+          "why": "May be stale."
+        },
+        {
+          "option": "Skip commits without trailer or verification",
+          "why": "Landing requires both on every commit."
+        },
+        {
+          "option": "New commit-list helper in lib.rs",
+          "why": "rev_list_reverse already gives shas oldest first."
+        }
+      ]
+    },
+    {
+      "choice": "A bootstrap job (JobId::Bootstrap, not a valid RecordId) landed via --pr is refused at the intent step, before the merge, with a named error.",
+      "reason": "Verification must be a RecordId and bootstrap cannot be one. Failing before the merge is safe.",
+      "rejected": [
+        {
+          "option": "Exempt bootstrap",
+          "why": "The Landing type cannot represent it."
+        }
+      ]
+    },
+    {
+      "choice": "Failure policy: intent write or push failure bails before host.merge. Landing write or push failure becomes a warning in PrReport.warnings, printed by Athena::land_pr. Pages watch and resync_onto_merge still run.",
+      "reason": "Without the intent the check cannot recognise the incoming commit (§5.2). After the merge the host's state is the truth.",
+      "rejected": [
+        {
+          "option": "Fail land_pr when the landing write fails",
+          "why": "The merge is done; an error invites a retry on a closed PR."
+        }
+      ]
+    },
+    {
+      "choice": "Records paths are landing-intents/<id>.json and landings/<id>.json, one pretty-JSON file per record. A single helper build_and_serialise builds, validate()s, then serialises.",
+      "reason": "One file per record (§8.2). The paths do not clash with imported records/.",
+      "rejected": [
+        {
+          "option": "Reuse records/",
+          "why": "That is the imported legacy tree."
+        }
+      ]
+    },
+    {
+      "choice": "RecordsWriter::append_with_parents(message, changes, extra_parents) with append delegating. It refuses the same-bytes no-op when extra_parents is non-empty and the tip does not already reach every extra parent (is_ancestor). RecordsWriter::push(remote) is a non-force push.",
+      "reason": "§6.1 wants the PR head as an extra parent with first-parent order kept. The no-op path must not silently drop a link (finding 3). Existing CAS and append-only checks are reused.",
+      "rejected": [
+        {
+          "option": "Separate landing writer",
+          "why": "The request says to use RecordsWriter."
+        },
+        {
+          "option": "Force push",
+          "why": "Breaks append-only."
+        },
+        {
+          "option": "Let the no-op drop extra parents",
+          "why": "The PR head would never be reachable."
+        }
+      ]
+    },
+    {
+      "choice": "Sync before write (finding 1). GitLedger calls RecordsWriter::sync_from(remote) before each write. It fetches refs/heads/athena/records from origin. If the remote ref is absent it does nothing. If the local ref is absent or an ancestor of the remote ref, it fast-forwards the local ref by CAS update-ref. If the remote is an ancestor of local, it does nothing. If the two have diverged, it returns a named error. On a rejected push, the ledger syncs once more, rebuilds the commit on the new tip, and pushes again. A second rejection is an error.",
+      "reason": "Another clone or machine may have advanced the remote branch. Without a sync, every land --pr would bail before the merge.",
+      "rejected": [
+        {
+          "option": "Plain push with no fetch",
+          "why": "A moved remote blocks every landing."
+        },
+        {
+          "option": "Force push or auto-merge of diverged histories",
+          "why": "Breaks append-only."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "action": "modify",
+      "purpose": "Add ledger to LandPr and warnings to PrReport. Call record_intent before host.merge (bail on error) and record_landing after the second observe_merge reports Landed (warn on error). PrHost::merge returns MergeMethod. Build GitLedger in Athena::land_pr and print warnings. Add tests and ledger: None to existing literals.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/land.rs",
+      "action": "modify",
+      "purpose": "LandingLedger trait and GitLedger: sync with origin, build, validate and serialise records, write through RecordsWriter, push with one retry, and compute tree, base, commits, jobs and verification ids.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-git/src/records_branch.rs",
+      "action": "modify",
+      "purpose": "Add append_with_parents (with the no-op guard), push and sync_from, with tests. Update the module text.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-git/src/lib.rs",
+      "action": "modify",
+      "purpose": "Only if needed: a thin fetch-ref helper used by sync_from. rev_list_reverse is reused. A test for the helper.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/external_calls.rs",
+      "action": "modify",
+      "purpose": "Keep compiling: fake PrHost::merge returns the merge method and the LandPr literal gains ledger: None.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Record that land --pr writes landing-intent and landing records.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/records-history.md",
+      "action": "modify",
+      "purpose": "Short note under §10: job 3 part 1 is built, the record paths, the verification-id-equals-job-id rule, and that reconcile and the check are still to do.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/Cargo.toml",
+      "action": "modify",
+      "purpose": "Only if a test needs a dev-dependency; expected no change.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "records_branch.rs: add append_with_parents (with the no-op guard), push and sync_from. Add tests: second parent, extra-parent no-op refusal, push to a bare remote, fast-forward from a moved remote, divergence error.",
+    "lib.rs: add a fetch-ref helper only if none exists. Reuse rev_list_reverse and is_ancestor.",
+    "land.rs: define LandingLedger and GitLedger. One helper builds, validates and serialises each record. record_intent syncs, writes, pushes (retrying once after a re-sync) and returns the LandingIntent. Refuse bootstrap jobs and commits lacking a trailer or verification, each with a named error.",
+    "gh.rs: PrHost::merge returns MergeMethod. Add ledger and warnings to LandPr and PrReport. Hook the intent before host.merge and the landing after the second observe_merge, only when an intent was written this run. Update the literals.",
+    "gh.rs Athena::land_pr: build the verification map from records.jobs, create GitLedger with remote origin, print warnings.",
+    "external_calls.rs: keep it compiling.",
+    "Write the tests: success and fields, second parent and zero-parent intent commit, refused merge, call order and push, already-merged writes nothing, remote-ahead sync, validation variants, bootstrap refusal.",
+    "Update CHANGELOG.md and the §10 note. Run fmt, clippy and test."
+  ],
+  "risks": [
+    {
+      "risk": "Changing LandPr and PrHost::merge breaks constructors and fakes.",
+      "mitigation": "Existing tests pass ledger: None. Grep every LandPr literal and PrHost impl (gh.rs, external_calls.rs)."
+    },
+    {
+      "risk": "Pre-merge failures (no network, commit without trailer, bootstrap job, diverged records branch) now block landings that used to work.",
+      "mitigation": "Deliberate per §5.2. Errors name the cause. A remote that is merely ahead is fast-forwarded, not blocked."
+    },
+    {
+      "risk": "A landing whose write fails is never retried by a later run.",
+      "mitigation": "The warning says so. Reconcile (§8.1) is a later part."
+    },
+    {
+      "risk": "A race: the remote moves between sync and push.",
+      "mitigation": "One re-sync and rebuild on a rejected push. After that, an error before the merge or a warning after it."
+    },
+    {
+      "risk": "The PR head object is missing locally when the landing commit is built.",
+      "mitigation": "The intent already read the head tree, so the head is local. The landing is written only after this run's merge."
+    },
+    {
+      "risk": "The verification-id rule (verification id equals job id) may not match the design text.",
+      "mitigation": "State it in doc comments and the §10 note. Raise it as an open question for part 2."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "New gh.rs test with a temp git repo, a bare origin, a base commit, a PR commit with an Athena-Job trailer, and a real merge or squash commit on the bare remote's main. The FakeHost reports that 40-hex sha as the merged commit, and the Content fake reports a match so observe_merge reaches Landed. Run land_pr with a real GitLedger. Read athena/records with first-parent log, oldest first, and parse each file with HistoryRecord::parse.",
+      "command": "cargo test -p athena-core landing_writes_intent_then_landing_with_the_right_fields",
+      "observes": "Two records, intent first. The intent has PR number, head sha, head tree (from rev-parse), expected base and job ids. The landing has PR number, head sha, host commit, merge method, commits with sha, tree, job and verification, and intent equal to the intent id. A companion test, pr_already_merged_writes_no_records, shows a PR found merged at the first observation leaves athena/records absent.",
+      "fails_without": "If the ledger were never called, the order were reversed, or a field were missing, the records would be absent, misordered or mismatched."
+    },
+    {
+      "criterion": 2,
+      "method": "Same fixture. The branch starts absent, so assert the intent commit has zero parents. Assert the landing commit has exactly two parents: the intent commit first, the PR head second. Run is_ancestor for each PR commit against athena/records.",
+      "command": "cargo test -p athena-core landing_record_commit_takes_the_pr_head_as_second_parent",
+      "observes": "Intent commit: no parents. Landing commit: parents [intent commit, PR head]. All PR commits are reachable from athena/records. A records_branch.rs unit test covers append_with_parents directly, including refusal of the no-op with extra parents.",
+      "fails_without": "With only the tip as parent, parents().len() would be 1 and the second-parent assertion would fail."
+    },
+    {
+      "criterion": 3,
+      "method": "A RefusingHost whose merge returns Err. Run land_pr with the real ledger. Read the local and bare-remote records branches.",
+      "command": "cargo test -p athena-core refused_merge_leaves_an_intent_and_no_landing",
+      "observes": "land_pr returns the host's error with the same message. The records branch, local and remote, holds exactly one landing-intent and nothing under landings/.",
+      "fails_without": "If the intent were written after the merge, no intent would exist. If a landing were written regardless, a landings/ file would exist."
+    },
+    {
+      "criterion": 4,
+      "method": "A recording ledger wrapper around GitLedger and a recording FakeHost share one call log. The merge hook reads the bare remote's refs/heads/athena/records tip when merge runs. After the run, compare the remote and local tips. A second test, remote_ahead_is_synced_before_intent, has the bare remote already hold a records commit the local repo lacks. land_pr still writes the intent on top of it, pushes, and merges.",
+      "command": "cargo test -p athena-core landing_intent_is_pushed_before_the_merge_and_each_write_is_pushed",
+      "observes": "The log reads [intent_written, merge, landing_written]. At merge time the remote already holds the intent commit. At the end the remote tip equals the local tip with both records. A push test in records_branch.rs checks a bare remote after each append. In the remote-ahead test the remote history keeps the foreign commit as an ancestor of the intent.",
+      "fails_without": "If the intent were pushed after host.merge, the remote would lack it at merge time. If a write were not pushed, the remote tip would lag. Without the sync, the push is rejected in the remote-ahead test."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the full suite, clippy and fmt. Existing tests only gain ledger: None and the new merge return value; no assertions are edited. external_calls.rs is updated to compile.",
+      "command": "cargo test --locked",
+      "observes": "All tests pass, including land.rs, resync_onto_merge and external_calls tests. cargo clippy --all-targets --locked -- -D warnings and cargo fmt --all --check are both clean.",
+      "fails_without": "If trailers, records/ or resync_onto_merge changed, the existing tests would fail."
+    },
+    {
+      "criterion": 6,
+      "method": "Unit-test build_and_serialise and the ledger with inputs that pass the ledger's own checks and fail only validate(). (a) record_intent with pr_number 0 gives HistoryError::BadPrNumber. (b) record_landing with a host_commit that is not 40-hex gives HistoryError::BadSha(\"host_commit\"). Assert the variant and that nothing was written (records ref absent or unchanged). A separate test shows a bootstrap job through --pr is refused at the intent step with the named error. Read the diff to confirm RecordsWriter is the only writer and the types are athena_data::history ones.",
+      "command": "cargo test -p athena-core landing_records_are_validated_before_they_are_written",
+      "observes": "The exact HistoryError variants, and no records ref or an unchanged tip after each failure.",
+      "fails_without": "If validate() were skipped, the pr_number 0 intent and the bad host_commit landing would be written and the tests would fail."
+    },
+    {
+      "criterion": 7,
+      "method": "Inspect the diff for doc comments on every new pub fn, trait, struct and helper in land.rs, gh.rs, records_branch.rs and athena-git lib.rs, each naming a section such as §5.2, §5.3, §6.1 or §10 job 3.",
+      "command": "git diff",
+      "observes": "Each new item has a /// comment citing docs/design/records-history.md.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Is the job's verification record named by its job id in the design? I assumed it is and did not read all of §8.2.",
+    "The paths landing-intents/ and landings/ are my choice. §8.2 may name different ones.",
+    "Does any existing Git helper already fetch a single ref? I found none by name (grep for fn fetch in athena-git). The producer should check the generic command runner before adding one."
+  ],
+  "producer_section_sha256": "4eb485d0ca3117ef4cf2e4f23b56561b342c738f5ac1a94912267f44ade28de4"
+}
