@@ -10,8 +10,8 @@
 //! It walks main's first-parent commits, oldest first, starting from the commit the **earliest
 //! landing-intent** expects as its base, up to the tip that is checked. That base is the anchor, as `C0` is
 //! in §6 ("after `C0`"): it is where the walk starts and is not itself judged, because it was made before
-//! any intent announced it. Commits up to and including it are out of scope here: the old history check
-//! judges them, and the legacy rule will later. For each commit `M` after the base, with first parent `P`:
+//! any intent announced it. Commits up to and including it are out of scope for this walk. For each
+//! commit `M` after the base, with first parent `P`:
 //!
 //! - **Attributed** when a landing record names `M` as its `host_commit` and the intent that landing cites
 //!   matches `M`: the intent's head tree equals `tree(M)` and its expected base equals `P`
@@ -27,6 +27,15 @@
 //! that is not a fast-forward of its predecessor is a finding, and so is a local `athena/records` and a
 //! remote-tracking ref that have diverged. A missing branch or a branch with no landing-intent is an
 //! explicit finding, never a silent pass.
+//!
+//! # The legacy rule
+//!
+//! [`crate::legacy::check_attribution_with_legacy`] adds the legacy rule (§4, §10 build job 5; D111). Given
+//! a cutover commit `C0`, supplied by the caller (nothing here chooses it), the commits up to and
+//! including `C0` are judged by the existing history check with its exempt list read from the
+//! `legacy-exempt.json` record on the records branch, and never by attribution. The walk above then
+//! starts after `C0` instead of after the earliest intent's base, and judges only the commits after it,
+//! by records alone. [`check_attribution`] without a `C0` is unchanged.
 
 use crate::Result;
 use athena_data::history::{HistoryRecord, Landing, LandingIntent};
@@ -64,6 +73,12 @@ pub enum FindingKind {
     LandingMismatch,
     /// A matching intent exists, no landing came, and the 15-minute window ran out (§5.2).
     PendingExpired,
+    /// The history check, run on the commits up to and including `C0`, found a violation (§4; D111).
+    LegacyHistory,
+    /// The records branch holds no `legacy-exempt.json`, or it is not a valid legacy-exempt record (§4).
+    LegacyExemptMissing,
+    /// `legacy-exempt.json` was changed after it was first written: it is append-only (§4, §10).
+    LegacyExemptChanged,
 }
 
 impl FindingKind {
@@ -79,6 +94,9 @@ impl FindingKind {
             FindingKind::Unattributed => "unattributed",
             FindingKind::LandingMismatch => "landing does not match",
             FindingKind::PendingExpired => "pending window expired",
+            FindingKind::LegacyHistory => "legacy history check",
+            FindingKind::LegacyExemptMissing => "legacy-exempt record missing",
+            FindingKind::LegacyExemptChanged => "legacy-exempt record changed",
         }
     }
 }
@@ -161,8 +179,20 @@ fn read_records(
 /// Runs the attribution check on main's first-parent line ending at `main_tip`, judging the pending window
 /// against `now` (§5.2, §6, §10; D111). Only records and the commit graph are read.
 pub fn check_attribution(git: &Git, main_tip: &str, now: Timestamp) -> Result<AttributionReport> {
-    let mut report = AttributionReport::default();
+    walk(git, main_tip, now, None, AttributionReport::default())
+}
 
+/// The records-only walk. With `cutover` `None` it starts after the earliest landing-intent's expected base
+/// (the part 1 rule). With `Some(c0)` it starts after `c0` on main's first-parent line, and a records branch
+/// with no landing-intent is not a finding: every commit after `c0` is then simply unattributed. `report`
+/// carries findings already made (the legacy rule's), and is extended.
+pub(crate) fn walk(
+    git: &Git,
+    main_tip: &str,
+    now: Timestamp,
+    cutover: Option<&str>,
+    mut report: AttributionReport,
+) -> Result<AttributionReport> {
     let records_tip = match records_branch::resolve_tip(git)? {
         RecordsTip::Missing => {
             report.find(
@@ -211,18 +241,23 @@ pub fn check_attribution(git: &Git, main_tip: &str, now: Timestamp) -> Result<At
         }
     }
 
-    let Some(first) = intents
-        .iter()
-        .min_by(|a, b| (a.created_at, a.id.as_str()).cmp(&(b.created_at, b.id.as_str())))
-    else {
-        report.find(
-            FindingKind::NoIntent,
-            None,
-            "the records branch holds no landing-intent, so there is no base to walk from",
-        );
-        return Ok(report);
+    let base = match cutover {
+        Some(c0) => c0.to_string(),
+        None => {
+            let Some(first) = intents
+                .iter()
+                .min_by(|a, b| (a.created_at, a.id.as_str()).cmp(&(b.created_at, b.id.as_str())))
+            else {
+                report.find(
+                    FindingKind::NoIntent,
+                    None,
+                    "the records branch holds no landing-intent, so there is no base to walk from",
+                );
+                return Ok(report);
+            };
+            first.expected_base.clone()
+        }
     };
-    let base = first.expected_base.clone();
     report.base = Some(base.clone());
 
     // Main's first-parent line, newest first, each with its first parent.
@@ -240,7 +275,11 @@ pub fn check_attribution(git: &Git, main_tip: &str, now: Timestamp) -> Result<At
         report.find(
             FindingKind::BaseNotOnMain,
             Some(&base),
-            format!("the earliest landing-intent expects base {base}, which is not on main's first-parent line"),
+            if cutover.is_some() {
+                format!("the cutover commit {base} is not on main's first-parent line")
+            } else {
+                format!("the earliest landing-intent expects base {base}, which is not on main's first-parent line")
+            },
         );
         return Ok(report);
     };
