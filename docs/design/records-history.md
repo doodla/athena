@@ -273,7 +273,14 @@ Local repositories use the same ref update with a lock file git already provides
 attempts (the "5" above was an example); after that it returns `RecordsError::Contended`. The writer is
 append-only: a changed, deleted or renamed path is refused and the tip stays. Writing the same bytes at an
 existing path is a no-op that makes no commit and returns the current tip, so a replayed write is idempotent.
-Nothing calls the writer yet, and the record types, the importer and the host rules of §3 are still to do.
+The importer (build job 2, §10 item 2) is now its only caller; the host rules of §3 are still to do.
+
+**Built (build job 2, §10 item 2).** The importer is `crates/athena-core/src/records_import.rs`
+(`import_records`, `verify_import`). It copies every file under `records/` at `C0` to the records branch in
+one commit with `import-manifest.json`, then re-reads the commit and fails on any missing, extra or changed
+path, blob id or SHA-256, or on a count mismatch. A second import is refused. It exists and is tested on
+scratch repositories only: it is not wired into the pipeline, the CLI or CI, and has not yet been run against
+main (that is the cutover, job 7).
 
 ## 9. Keeping the check's cost independent of history size
 

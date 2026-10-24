@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `records_import` in `athena-core` (`crates/athena-core/src/records_import.rs`): the importer of
+  `docs/design/records-history.md` §4 and §10 item 2 (D111, job 2). It copies every file under `records/` at a
+  commit `C0` into one commit on `athena/records` with `import-manifest.json` (each path, its blob id and
+  SHA-256), then re-reads the commit and fails on a missing, changed or extra file or a count mismatch. A
+  second import is refused. It exists and is tested on scratch repositories; it is not wired into the
+  pipeline, the CLI or CI, and has not yet been run against main.
 - `host_rules` in `athena-core`: a read-only check of the host rules that `docs/design/records-history.md` §3
   requires, as the confirmation named in §10 item 1 (D111, part 3 of job 1). It reads
   `repos/{owner}/{repo}/rules/branches/{branch}` with a plain GET for `athena/records` and `main`, and reports

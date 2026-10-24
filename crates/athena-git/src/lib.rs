@@ -8,7 +8,8 @@
 //!   `.gitattributes` files only, and the content fingerprint built on that classification;
 //! - [`index`]: temporary indexes for building trees and commits without touching the user's index;
 //! - [`snapshot`]: the detached snapshots agents work in, each with its own throwaway repository;
-//! - [`records_branch`]: the append-only writer of the `athena/records` branch (§8.2, D111).
+//! - [`records_branch`]: the append-only writer of the `athena/records` branch (§8.2, D111). Its one caller is
+//!   the importer in `athena-core` (`records_import`), which is not wired in.
 //!
 //! This crate is a leaf: it depends on no other Athena crate.
 

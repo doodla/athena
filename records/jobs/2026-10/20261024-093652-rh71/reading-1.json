@@ -1,0 +1,175 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261024-093652-rh71",
+  "n": 1,
+  "at": "2026-10-24T09:38:09.448764129Z",
+  "invocation_seq": 1,
+  "base_commit": "269551f5cf351385d4408e8836ead14b1c4d3b3a",
+  "config_sha256": "723abb81b8cdcc25033d7d9653128a919911c4b5950c306183153235b21717e7",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Add records importer with manifest and self-check",
+  "summary": "Add a new athena-core module, which already depends on both athena-git and athena-data. It copies records/ at C0 to the athena/records branch in one commit with import-manifest.json, then re-reads the commit and fails on any path, blob, hash or count mismatch. It refuses a second import. The audience is the maintainer and the later cutover job (job 7). Nothing calls it from the pipeline or runs it against main.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "Importer and tests are Rust."
+    },
+    {
+      "id": "buy-first",
+      "how": "Reuses RecordsWriter, ImportManifest and the existing sha2 crate; builds no new tooling."
+    },
+    {
+      "id": "tested",
+      "how": "Scratch-repository tests; cargo test and clippy must pass."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check the failing and passing import outcomes, not that types exist."
+    },
+    {
+      "id": "small",
+      "how": "One module plus the lib.rs registration and a doc note."
+    },
+    {
+      "id": "verified",
+      "how": "Behavior criteria name the cargo commands the verifier can run."
+    },
+    {
+      "id": "no-empty-success",
+      "how": "An empty records/ is an error, and the self-check compares counts."
+    },
+    {
+      "id": "strangers",
+      "how": "Module docs explain the import and the self-check for an outside reader."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "The importer lives in athena-core, because athena-git and athena-data do not depend on each other and athena-core depends on both. I read the Cargo.toml files to establish this.",
+    "The entry point takes a Git handle and a C0 commit id. It returns the new commit id or a typed error. It uses RecordsWriter::append with one Change::put per file plus import-manifest.json, in a single commit.",
+    "import-manifest.json sits at the root of the records branch. The paths in the manifest are the source paths as they appear at C0, under records/. The imported files go at those same paths, as the request says.",
+    "Importing twice is refused by checking that the branch already has a tip before writing. The writer's same-bytes no-op is not enough, because it would silently pass.",
+    "Binary files are copied as bytes. The scratch repository tests use the existing athena-git testutil helper. The id and timestamp for the manifest come from RecordId::generate and the current time.",
+    "An empty records/ at C0 is an error, because ImportManifest::validate rejects an empty paths list and an empty import must not count as success."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Run `cargo test -p athena-core records_import`. A test on a scratch repository with several nested files under records/ imports them. The importer's self-check passes. The new commit on athena/records has every records/ file at the same path with the same blob id. It also holds import-manifest.json.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-core records_import`. The manifest parses as HistoryRecord::ImportManifest and validates. It lists each source path with its blob id at C0 and the SHA-256 of its contents. The entry count equals the file count at C0.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-core records_import`. The self-check fails with a distinct error for each of three cases: a file missing from the imported commit, a file whose bytes changed, and an extra file not in C0. A count mismatch is also covered. A passing import is not what proves these.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-core records_import`. A second import into a repository that already has the records branch is refused, and the branch tip is unchanged.",
+      "kind": "behavior"
+    },
+    {
+      "text": "No existing caller, CLI command, job pipeline step or workflow invokes the importer, and nothing is run against this repository's main. The diff touches no athena.toml, defaults.toml or .github/workflows file. The importer module docs say the importer is not wired in.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo test --workspace`, `cargo clippy --workspace --all-targets` and `cargo fmt --check`. All pass, and the importer reuses RecordsWriter and ImportManifest rather than reimplementing them.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The design doc's job-2 status text and the CHANGELOG say the importer exists and is not yet run against main, and a reader can see where the code lives.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/records_import.rs",
+      "action": "create",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "docs/design/records-history.md",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-core/Cargo.toml",
+      "action": "modify",
+      "p": 0.25
+    },
+    {
+      "path": "Cargo.lock",
+      "action": "modify",
+      "p": 0.15
+    },
+    {
+      "path": "crates/athena-git/src/lib.rs",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "crates/athena-git/src/records_branch.rs",
+      "action": "modify",
+      "p": 0.1
+    }
+  ],
+  "out_of_scope": [
+    "Running the importer against this repository's main or on the real records/ directory",
+    "Wiring the importer into the job pipeline, the CLI or CI",
+    "Cutover (job 7), host rules, and the other record writers"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.72,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.4,
+        "p50": 0.95,
+        "p90": 2.2
+      },
+      "wall_time_s": {
+        "p10": 420.0,
+        "p50": 1250.0,
+        "p90": 2700.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7589519650655022,
+      "p_verification_passes": 0.6378378378378379,
+      "p_user_intervenes": 0.07340425531914894,
+      "cost_usd": {
+        "p10": 0.4209698304682829,
+        "p50": 1.0025543393358087,
+        "p90": 2.1488576164010182
+      },
+      "wall_time_s": {
+        "p10": 566.8517764085597,
+        "p50": 1300.233769026,
+        "p90": 2576.9991160105205
+      }
+    }
+  },
+  "departures": "The cost and wall-time percentiles are slightly above the reference. The change needs a new module with several failure-path tests on a scratch git repository, and the design leaves the module's home crate open."
+}

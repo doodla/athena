@@ -11,6 +11,8 @@
 //! - [`store`]: records at a commit, and state derived from them;
 //! - [`commits`]: records and landing commits built with plumbing, gated in process, fast-forwarded;
 //! - [`reading`], [`run`], [`manage`]: the commands;
+//! - [`records_import`]: the importer that copies `records/` at a commit onto the `athena/records` branch and
+//!   checks the copy; not wired into any command;
 //! - [`admission`], [`toolconfig`], [`checks`], [`verify`], [`land`]: the verification protocol;
 //! - [`scoring`]: forecasts resolved and scored;
 //! - [`status`]: the state of the work, from the repository alone;
@@ -74,6 +76,7 @@ pub mod plan;
 pub mod pr;
 pub mod proposals;
 pub mod reading;
+pub mod records_import;
 pub mod review;
 pub mod routing;
 pub mod run;
