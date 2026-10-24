@@ -15,6 +15,7 @@ use crate::pr::{
     Ancestry, Content, GitContent, Host, LinkState, PrLink, PushRequest, check_push, load_link,
     observe_merge, store_link,
 };
+use crate::reconcile::{CommitHost, MergedPr, ReconcileRecords, RecordsSnapshot};
 use crate::state::StateDir;
 use crate::{Athena, Ui};
 use anyhow::{Context, Result, bail};
@@ -1393,9 +1394,14 @@ impl<'a> GitLandingRecords<'a> {
         let Some(tip) = RecordsWriter::new(self.git).sync_from(&self.remote)? else {
             return Ok(Vec::new());
         };
+        self.records_under(&tip, dir)
+    }
+
+    /// The history records under `dir` at the records commit `tip`.
+    fn records_under(&self, tip: &str, dir: &str) -> Result<Vec<HistoryRecord>> {
         let oids: Vec<String> = self
             .git
-            .ls_tree_under(&tip, dir)?
+            .ls_tree_under(tip, dir)?
             .into_iter()
             .map(|e| e.oid)
             .collect();
@@ -1523,6 +1529,83 @@ impl LandingRecords for GitLandingRecords<'_> {
             &[facts.head.as_str()],
         )?;
         Ok(id)
+    }
+}
+
+/// Directory of declared-intervention files on the records branch (§5.3). Nothing writes it yet; a missing
+/// directory reads as empty.
+const DECLARED_DIR: &str = "declared-interventions";
+
+impl ReconcileRecords for GitLandingRecords<'_> {
+    fn snapshot(&self) -> Result<Option<RecordsSnapshot>> {
+        let Some(tip) = RecordsWriter::new(self.git).sync_from(&self.remote)? else {
+            return Ok(None);
+        };
+        let mut snapshot = RecordsSnapshot::default();
+        for record in self.records_under(&tip, INTENT_DIR)? {
+            if let HistoryRecord::LandingIntent(intent) = record {
+                snapshot.intents.push(intent);
+            }
+        }
+        for record in self.records_under(&tip, LANDING_DIR)? {
+            if let HistoryRecord::Landing(landing) = record {
+                snapshot.landings.push(landing);
+            }
+        }
+        for record in self.records_under(&tip, DECLARED_DIR)? {
+            if let HistoryRecord::DeclaredIntervention(declared) = record {
+                snapshot.declared.push(declared);
+            }
+        }
+        Ok(Some(snapshot))
+    }
+
+    fn write_landing(&self, facts: &LandingFacts) -> Result<RecordId> {
+        // The head and the base must be present to list the pull request's commits.
+        for commit in [&facts.head, &facts.expected_base] {
+            if !self.git.ensure_commit(&self.remote, commit)? {
+                bail!(
+                    "commit {commit} is not available from remote {}",
+                    self.remote
+                );
+            }
+        }
+        self.landing(facts)
+    }
+}
+
+/// Parses the host's reply to "which pull requests contain this commit" into the one that merged `commit`: a
+/// pull request with `merged_at` set whose `merge_commit_sha` is `commit`. None when there is none; several
+/// is an error, because choosing one would be a guess.
+pub fn parse_merged_pr(reply: &Value, commit: &str) -> Result<Option<MergedPr>> {
+    let mut found: Vec<MergedPr> = reply
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|pr| !pr["merged_at"].is_null() && pr["merge_commit_sha"].as_str() == Some(commit))
+        .filter_map(|pr| {
+            Some(MergedPr {
+                number: pr["number"].as_u64()?,
+                head_sha: pr["head"]["sha"].as_str()?.to_string(),
+            })
+        })
+        .collect();
+    match found.len() {
+        0 => Ok(None),
+        1 => Ok(found.pop()),
+        n => bail!("the host names {n} merged pull requests for commit {commit}; it is ambiguous"),
+    }
+}
+
+impl CommitHost for GhClient<'_> {
+    fn merged_pr(&self, commit: &str) -> Result<Option<MergedPr>> {
+        let reply = self.api(
+            HostOperation::ReadPr,
+            "GET",
+            &self.repo_path(&format!("commits/{commit}/pulls")),
+            &[],
+        )?;
+        parse_merged_pr(&reply, commit)
     }
 }
 
@@ -1847,6 +1930,11 @@ impl Athena {
         ui: &dyn Ui,
     ) -> Result<PrReport> {
         self.refuse_if_stopped()?;
+        // Reconcile first (§8.1): a landing record missing from an earlier crash is written, or the commit is
+        // reported unattributed. It never fails the landing.
+        for line in self.reconcile(runner, ui).lines() {
+            ui.line(&line);
+        }
         let head = self.head()?;
         let records = crate::store::Records::load(&self.git, &head)?;
         let id = records.resolve(job_ref)?;
@@ -1978,6 +2066,39 @@ impl Athena {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_merged_pr_keeps_only_the_pull_request_that_merged_the_commit() {
+        let commit = "a".repeat(40);
+        let pr = |number: u64, merged: bool, sha: &str| {
+            serde_json::json!({
+                "number": number,
+                "merged_at": if merged { Value::from("2026-10-24T00:00:00Z") } else { Value::Null },
+                "merge_commit_sha": sha,
+                "head": {"sha": "b".repeat(40)},
+            })
+        };
+        // None: an empty reply, an unmerged pull request, or one merged as another commit.
+        assert_eq!(
+            parse_merged_pr(&serde_json::json!([]), &commit).unwrap(),
+            None
+        );
+        let reply = serde_json::json!([pr(1, false, &commit), pr(2, true, &"c".repeat(40))]);
+        assert_eq!(parse_merged_pr(&reply, &commit).unwrap(), None);
+        // One.
+        let reply = serde_json::json!([pr(1, false, &commit), pr(3, true, &commit)]);
+        assert_eq!(
+            parse_merged_pr(&reply, &commit).unwrap(),
+            Some(MergedPr {
+                number: 3,
+                head_sha: "b".repeat(40)
+            })
+        );
+        // Two: a guess would be needed, so it is an error.
+        let reply = serde_json::json!([pr(3, true, &commit), pr(4, true, &commit)]);
+        let error = parse_merged_pr(&reply, &commit).unwrap_err();
+        assert!(format!("{error:#}").contains("ambiguous"), "{error:#}");
+    }
     use serde_json::json;
     use std::cell::{Cell, RefCell};
     use std::collections::BTreeMap;

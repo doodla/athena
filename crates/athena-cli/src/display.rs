@@ -686,6 +686,11 @@ pub fn status(v: &StatusView) -> String {
         }
     );
     let _ = writeln!(out, "bootstrap   {}", v.bootstrap.note);
+    if let Some(report) = v.reconcile.as_ref().filter(|r| !r.is_quiet()) {
+        for line in report.lines() {
+            let _ = writeln!(out, "{line}");
+        }
+    }
     if v.jobs_by_state.is_empty() {
         let _ = writeln!(out, "jobs        none yet");
     } else {

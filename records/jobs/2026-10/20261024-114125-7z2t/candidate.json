@@ -1,0 +1,177 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261024-114125-7z2t",
+  "base_commit": "6075da669f23291a2e6b182ba9d83a64da2095fe",
+  "base_fingerprint": "sha256:a95ce3db7a8046bfe59d89edddb3dda334f18d7c296779870cb8c7cd33a32ceb",
+  "previous_job": "20261024-115923-02gf",
+  "candidate_commit": "d355fec01c585145be7b29d138771e2eabe3e254",
+  "candidate_tree": "6bca0f3d84ceddd5b9839f85e236bf714cb94c39",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 120568
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 45094
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 39457
+    },
+    {
+      "path": "crates/athena-cli/tests/reconcile.rs",
+      "status": "added",
+      "mode": "100644",
+      "bytes": 4867
+    },
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 159142
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 11548
+    },
+    {
+      "path": "crates/athena-core/src/reconcile.rs",
+      "status": "added",
+      "mode": "100644",
+      "bytes": 32205
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 38789
+    },
+    {
+      "path": "crates/athena-data/src/history.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 21842
+    }
+  ],
+  "fingerprint": "sha256:0c9b461aa07d11ecd8968164f63e801a9ba7a11436303abc880969e6058285a8",
+  "violations": [],
+  "producer_report": {
+    "summary": "I added the reconcile step. `athena land` and `athena status` now run it first. It repairs missing landing records from a matching landing intent, or from the host's answer, and otherwise reports the commit as unattributed and writes nothing.\n\n- **Where it lives:** the logic is in `crates/athena-core/src/reconcile.rs`. The host answer comes from a new `GhClient::merged_pr` in `gh.rs`, reached through a `CommitHost` trait.\n- **The walk:** it covers main's first-parent commits after the later of the last landing and the first intent's expected base.\n- **Skips:** a commit already named by a landing or a declared intervention is skipped.\n- **Matching:** an intent matches on head tree and parent. Ambiguity is never guessed. The match rule is `LandingIntent::matches` in `history.rs`.\n- **Host fallback:** the host fallback writes a landing only when an intent for that PR with the same head exists.\n- **Failures:** a missing records branch, no intent, or any failure becomes a skipped reason or a finding. It never fails the command.\n- **Output:** `athena status` shows the findings, including in `--json`. `athena land` prints them to stderr before anything else. `CHANGELOG.md` has the entry.\n\nI ran `cargo test --locked` once and it exited without an error, but its output was too large for me to read the per-test summary. The targeted reconcile tests (6 in core, 2 CLI) passed, and clippy and fmt are clean.",
+    "files": [
+      "crates/athena-core/src/reconcile.rs",
+      "crates/athena-core/src/lib.rs",
+      "crates/athena-core/src/gh.rs",
+      "crates/athena-core/src/status.rs",
+      "crates/athena-cli/src/main.rs",
+      "crates/athena-cli/src/display.rs",
+      "crates/athena-data/src/history.rs",
+      "crates/athena-cli/tests/reconcile.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test --locked -p athena-core reconcile",
+        "result": "pass",
+        "note": "6 reconcile tests plus an unrelated name match passed"
+      },
+      {
+        "command": "cargo test --locked -p athena-cli --test reconcile",
+        "result": "pass",
+        "note": "2 CLI tests passed"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "clean after one fix to a test assertion"
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "clean"
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "Ran once. The command exited without an error code. The output was too large to read here and my tools could not open the saved file, so I did not see the per-test summary."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Crash repair: a test has a main first-parent commit whose tree and parent match a landing-intent and that has no landing record. Reconcile writes the landing record from the intent alone, with the host making no call. Check with `cargo test`.",
+        "status": "met",
+        "evidence": "reconcile::tests::crash_between_merge_and_landing_is_repaired_from_the_intent_alone passed. It squashes a PR head onto its expected base without a landing record. It asserts one Repaired finding with source Intent, a landing with that host_commit and the intent id, and 0 host calls even though the fake host would error. A second run writes nothing new."
+      },
+      {
+        "criterion": "Host unavailable: a commit with no matching intent and an erroring host gives an 'unattributed' finding and writes no landing record. Check with `cargo test`.",
+        "status": "met",
+        "evidence": "reconcile::tests::unavailable_host_gives_unattributed_and_writes_nothing passed. It asserts an Unattributed finding whose reason contains 'host unavailable', a line containing 'unattributed', no landings, and an unchanged records tip."
+      },
+      {
+        "criterion": "No guessing: a commit with no intent and no merged PR is reported unattributed and nothing is written. It is never attributed to a nearby intent or PR. Check with `cargo test`.",
+        "status": "met",
+        "evidence": "reconcile::tests::no_intent_and_no_pull_request_is_reported_never_guessed passed. Two nearby intents exist. It covers a host answer of none, a PR that has no intent, and a nearby PR with the wrong head. All three are unattributed, with no landing and an unchanged records tip."
+      },
+      {
+        "criterion": "Host fallback: with no matching intent and the host naming the merged PR, the landing record is written for that PR. Commits that already have a landing record are skipped. Check with `cargo test`.",
+        "status": "met",
+        "evidence": "reconcile::tests::host_names_the_merged_pull_request_when_no_intent_matches passed. The intent's base differs from the commit's parent and the host names PR 7. A Repaired finding with source Host is written, with the right intent and host_commit. The host is called once. A landed commit and a declared-intervention commit are not asked about. The landed commit is also skipped by the bound, because it comes before the last landing."
+      },
+      {
+        "criterion": "Bound: commits before the first landing-intent record on athena/records, and before the last landing record, are never reconciled. When the records branch is absent or holds no intent, reconcile does nothing and reports that. A test covers both cases. Check with `cargo test`.",
+        "status": "met",
+        "evidence": "reconcile::tests::bound_skips_older_commits_and_absent_or_empty_records passed. Part A examines only the one commit after the last landing. The host is asked only about it. Older commits, including an unrepaired crashed landing (the known gap), are not examined. Part B has no records branch and Part C has a branch with no intent. Both give a skipped reason, no findings, no host calls and no writes."
+      },
+      {
+        "criterion": "`athena land` and `athena status` run reconcile first, and an unattributed commit appears in their output. A test shows this. `cargo test`, `cargo clippy` and `cargo fmt --check` are clean.",
+        "status": "met",
+        "evidence": "crates/athena-cli/tests/reconcile.rs runs the athena binary with a fake gh first on PATH that refuses every call. `status` shows 'unattributed' and the sha on stdout, and `status --json` shows outcome unattributed. `land no-such-job --pr` fails, and its stderr shows the unattributed line first. Both leave no landing written. Both tests passed. Clippy and fmt --check were clean. The full `cargo test --locked` exited without an error code, but I could not read its summary."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry citing docs/design/records-history.md §8.1, D111, and job 3 part 2.",
+        "status": "met",
+        "evidence": "The first entry under Unreleased cites `docs/design/records-history.md` §8.1 (D111, job 3 part 2). It states the known gap, that a PR merged without an intent stays unattributed, and that declared interventions are read from declared-interventions/. The earlier 'still to do' sentence now points to it."
+      },
+      {
+        "criterion": "The change reuses the existing host and git helpers and record types, adds no dependency, and changes no governance file.",
+        "status": "met",
+        "evidence": "The code uses GhClient::api with HostOperation::ReadPr, GitLandingRecords and its landing(), LandingFacts, Git helpers, and the HistoryRecord, LandingIntent, Landing and DeclaredIntervention types. No Cargo.toml, Cargo.lock, athena.toml, defaults.toml or workflow was edited. The build and tests ran with --locked."
+      }
+    ],
+    "open_issues": [
+      "Departure from the plan: land.rs was not touched, because the reconcile call is in Athena::land_pr in gh.rs. It is listed as a deliverable but was not needed.",
+      "Departure from the plan: the display unit test was dropped because building a StatusView by hand is large. The CLI binary tests cover the rendering instead.",
+      "Departure from the plan: the CLI test is a new file, crates/athena-cli/tests/reconcile.rs. It uses a fake gh script on PATH with an origin path containing github.com/example/project.git.",
+      "Known gap, as planned: an earlier crashed landing that a later landing has passed is not repaired. The user should decide whether criterion 5 should change to cover it.",
+      "Declared interventions are read from `declared-interventions/` on the records branch. That directory name is my guess, and nothing writes it yet. Confirm the name or correct it.",
+      "A PR merged with no landing intent stays unattributed, because a landing must name its intent. Please confirm this reading of §8.1 step 3.",
+      "Rebase merges that replay several commits leave the extra commits unattributed.",
+      "`athena status` can now call the host and push to the records branch, so a mostly read-only command has writes. Please confirm this is wanted.",
+      "If origin/HEAD is not set locally, reconcile asks the host for the default branch."
+    ],
+    "mistakes": [
+      "The first changelog edit failed because the match text was not unique. I redid it with the Unreleased heading as context, and the file is correct.",
+      "A clippy lint in my own test code (cloned_ref_to_slice_refs) was fixed after the first clippy run.",
+      "I could not read the full `cargo test --locked` output, so I did not see the per-test summary."
+    ],
+    "learnings": [
+      "Terminal prints Ui lines to stderr, so `athena land` shows reconcile lines on stderr and `athena status` shows them on stdout in the view.",
+      "parse_remote accepts any URL containing `github.com`, so a test origin at `<tmp>/github.com/example/project.git` is accepted. A fake `gh` first on PATH then stands in for the host.",
+      "With the walk bounded after the last landing, a commit named by a landing never falls inside the walk. The landed-skip is therefore only a safeguard, and declared-intervention skipping is the case that matters.",
+      "The first intent by created_at always has the earliest expected base, because bases only move forward. An abandoned intent therefore cannot widen the walk.",
+      "Nothing yet writes declared interventions to the records branch, and the design gives no directory name for them."
+    ],
+    "desires": [
+      "A way to read a long test output file inside the working directory, to see the per-test summary of the full run.",
+      "The directory name for declared-intervention files on the records branch."
+    ]
+  }
+}

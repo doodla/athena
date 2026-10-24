@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261024-114125-7z2t",
+  "round": 1,
+  "at": "2026-10-24T13:08:58.23749335Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The AC6 demonstrations do not show that status and land actually call reconcile.",
+      "evidence": "Test 1 calls `Athena::reconcile` directly and renders the result with `display::status`. The wiring under test is in crates/athena-cli/src/main.rs (`Command::Status` calls reconcile and sets `view.reconcile`), and this test never runs that code. If main.rs did not call reconcile, Test 1 would still pass, so the plan's 'fails without the behavior' claim is wrong for status. For land, the plan says the test may use 'the same start-of-land helper it calls'. A helper test passes even if `Athena::land_pr` (gh.rs:1842) never calls the helper. Fix: Make the status demonstration run the real status path. Option 1: move the status assembly into a core function, e.g. `Athena::status_with_reconcile(host: &dyn CommitHost, ...)`, that main.rs only calls, and test that function with a fake host. Option 2: add a CLI integration test in crates/athena-cli/tests that runs `athena status` on a temp repo and asserts the Reconcile section appears. For land, require that the test call `Athena::land_pr` with a fake `Runner` and a collecting `Ui`. If the rest of land is too heavy to set up, it is enough to show the reconcile line is emitted before land fails at a later check. Drop the 'or helper' option.",
+      "location": "Demonstrations, Criterion 6 (status and land wiring)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The production path asks the host for the default branch even when the repair is local.",
+      "evidence": "`Athena::reconcile` finds the default branch with `GhClient::default_branch` first, which is a host call. It does this on every land and status, including when the repair is purely local. §8.1 step 2 says 'Nothing is asked of the host' on the local path. AC1 is shown only on the pure `reconcile()` with a fake host, so this production-path host call goes unseen. Fix: Resolve the branch locally first (`git symbolic-ref refs/remotes/origin/HEAD`, or the branch already fetched) and use the host only as a fallback. Alternatively, state plainly that this call is outside the 'no host call' rule.",
+      "location": "Decision 6 / Step 6 (finding main's branch)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Anchoring on the latest landing can silently skip an earlier crashed landing.",
+      "evidence": "Suppose two PRs merge in quick succession: A crashes before its landing record is written, and B's landing record is written. The anchor then moves past A's commit, so A is never reconciled. The request says 'since the last landing record', so this follows the request, but it is a silent gap. Fix: Either anchor on the earliest unfulfilled intent's base when it is earlier than the latest landing, or state the gap under Risks or Open questions and add a test that records the chosen behavior.",
+      "location": "Decision 2 (anchor = latest landing host_commit)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "land.rs needs no change.",
+      "evidence": "The plan expects no change to land.rs. `pr_commits` is already used through `GitLandingRecords::commits` in gh.rs (line 1414). Fix: Leave land.rs untouched and say so in the final report.",
+      "location": "Files: crates/athena-core/src/land.rs",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan is well grounded. The types and functions it names exist in gh.rs: `GitLandingRecords`, the `existing` helper, `landing`, which dedups by intent, `LandingFacts`, `HostOperation::ReadPr` and `Athena::land_pr`. The match rule, the host fallback, the bound and the unattributed handling follow docs/design/records-history.md §8.1. The reconcile demonstrations for AC1 to AC5 use a call-counting fake host and check record counts on the records branch, so each would fail without its behavior. The main gap is AC6. Neither the status test nor the land test as written would fail if main.rs or `Athena::land_pr` did not call reconcile, because the status test calls reconcile directly and the land test may target only a helper. A smaller issue: the production path asks the host for the default branch even when the repair is purely local. Revise the AC6 demonstrations to run the real status and land paths, then accept."
+}

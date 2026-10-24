@@ -1,0 +1,302 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261024-114125-7z2t",
+  "round": 3,
+  "at": "2026-10-24T13:11:02.187082649Z",
+  "invocation_seq": 7,
+  "approach": "Add athena-core/src/reconcile.rs with a pure `reconcile(git, main_tip, records, host)` over two small traits (ReconcileRecords, CommitHost) so tests need no network. The walk follows the ACCEPTED bound: main's first-parent commits strictly after the later of (a) the latest landing record's host_commit and (b) the first landing-intent's expected_base on main. Per commit: skip if a landing or a declared-intervention record names it; else match an intent on head tree + expected base (write from intent alone, no host call); else ask the host which merged PR made it, and write only if an intent for that PR with the same head exists; else report 'unattributed' and write nothing. Athena::reconcile never fails the command. land_pr calls it first. Status goes through a new core fn Athena::status_with_reconcile(runner, ui) that main.rs only calls.",
+  "decisions": [
+    {
+      "choice": "Keep the accepted lower bound (criterion 5): start after the later of the last landing's host_commit and the first intent's expected_base. An earlier crashed landing passed over by a later landing is a KNOWN GAP, recorded in a doc comment, CHANGELOG, and open questions for the user.",
+      "reason": "Answers findings 1 and 2: matches criterion 5 and the reading exactly; an abandoned intent can never widen the walk, so the walk stays bounded and host calls do not repeat. Demonstration 5 and the tests agree with this bound.",
+      "rejected": [
+        {
+          "option": "Anchor at the earliest unfulfilled intent's base",
+          "why": "Contradicts accepted criterion 5; abandoned intents (closed/refused PRs) would pin the walk forever and cost host calls every run."
+        },
+        {
+          "option": "Count only unfulfilled intents still after the last landing",
+          "why": "Those are already inside the accepted bound, so it adds nothing; widening beyond the last landing needs the user to change criterion 5."
+        },
+        {
+          "option": "Walk all of main",
+          "why": "Flags every pre-cutover commit."
+        }
+      ]
+    },
+    {
+      "choice": "Core logic behind traits ReconcileRecords and CommitHost; GitLandingRecords and GhClient implement them. Reuse LandingFacts, GitLandingRecords::landing, HistoryRecord.",
+      "reason": "A real temp git repo plus a fake host with a call counter shows no-host-call, error and no-answer cases.",
+      "rejected": [
+        {
+          "option": "Extend existing LandingRecords/PrHost traits",
+          "why": "Breaks existing fakes in gh.rs and athena-cli/tests."
+        },
+        {
+          "option": "Call gh directly",
+          "why": "Untestable; bypasses retry and host logging."
+        }
+      ]
+    },
+    {
+      "choice": "Skip commits already named by a Landing record OR a DeclaredIntervention record (history.rs HistoryRecord::DeclaredIntervention).",
+      "reason": "Answers finding 3: §6 says each first-parent commit is named by either; reporting interventions as unattributed would be false and cost host calls. Test case added in the criterion 4 test.",
+      "rejected": [
+        {
+          "option": "Skip only landings",
+          "why": "Misreports declared interventions."
+        }
+      ]
+    },
+    {
+      "choice": "Host fallback writes a landing only when the host's merged PR number matches an existing intent with the same PR number and head_sha; otherwise unattributed with a reason. Documented in a doc comment and CHANGELOG: a PR merged without an intent stays unattributed.",
+      "reason": "Answers finding 6: Landing.intent is required; inventing one forges provenance.",
+      "rejected": [
+        {
+          "option": "Placeholder intent id",
+          "why": "Forges provenance."
+        },
+        {
+          "option": "Write a new intent",
+          "why": "Out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "CommitHost::merged_pr(commit) -> Result<Option<MergedPr>> on GhClient via GET repos/{r}/commits/{sha}/pulls, keeping merged_at set and merge_commit_sha == commit; zero => None, several => error 'ambiguous'. Logged as HostOperation::ReadPr; pure parse_merged_pr unit-tested.",
+      "reason": "Reuses retry and logging; no change to non-deliverable records.rs.",
+      "rejected": [
+        {
+          "option": "New HostOperation variant",
+          "why": "Touches a non-deliverable file."
+        },
+        {
+          "option": "Pick newest PR",
+          "why": "Guessing."
+        }
+      ]
+    },
+    {
+      "choice": "Merge method inferred locally: two parents => Merge; one parent and commit == intent.head_sha => Rebase (fast-forward/replay of the head itself); one parent otherwise => Squash. Tested for all three.",
+      "reason": "Answers finding 4: no host call needed and fast-forward is not mislabeled Squash. Rule stated in a doc comment.",
+      "rejected": [
+        {
+          "option": "Always Squash for one parent",
+          "why": "Wrong for fast-forward/rebase."
+        },
+        {
+          "option": "Ask the host",
+          "why": "Violates the no-host local repair path."
+        }
+      ]
+    },
+    {
+      "choice": "Resolve main's branch locally first via `git symbolic-ref --short refs/remotes/origin/HEAD`; fall back to GhClient::default_branch only if that fails. Then fetch origin/<branch>. Any failure becomes a skipped reason, never an error.",
+      "reason": "The local repair path makes no host call in production when origin/HEAD is set.",
+      "rejected": [
+        {
+          "option": "Always ask the host for the default branch",
+          "why": "Host call on every land/status."
+        }
+      ]
+    },
+    {
+      "choice": "Status: Athena::status_with_reconcile returns StatusView with reconcile: Option<ReconcileReport>; main.rs Command::Status (no-job branch) only calls it; display::status renders it. Existing Athena::status() unchanged (reconcile None).",
+      "reason": "Real status assembly is testable in core with a fake Runner; a CLI test confirms main.rs calls it.",
+      "rejected": [
+        {
+          "option": "Reconcile inside Athena::status()",
+          "why": "No runner/ui; existing tests would touch network."
+        },
+        {
+          "option": "Test only a helper",
+          "why": "Passes even if land/status never call it."
+        }
+      ]
+    },
+    {
+      "choice": "CLI integration test avoids ambient network: follow the faked-host pattern in crates/athena-cli/tests/external_calls.rs (fake gh on PATH that fails/returns no PRs) and assert 'unattributed' in `athena status` output.",
+      "reason": "Answers finding 5: deterministic regardless of network state.",
+      "rejected": [
+        {
+          "option": "Use real GhCli against the ambient network",
+          "why": "Flaky."
+        }
+      ]
+    },
+    {
+      "choice": "history.rs gets LandingIntent::matches(tree, parent); land.rs stays untouched.",
+      "reason": "One place for the head-tree + expected-base rule; pr_commits is already reached via GitLandingRecords::commits in gh.rs.",
+      "rejected": [
+        {
+          "option": "Inline comparisons in reconcile.rs",
+          "why": "Duplicates the rule."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/reconcile.rs",
+      "action": "create",
+      "purpose": "Traits, report types, reconcile(), Athena::reconcile, Athena::status_with_reconcile, tests for AC1-AC6.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "purpose": "Register pub mod reconcile.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "action": "modify",
+      "purpose": "Implement ReconcileRecords for GitLandingRecords and CommitHost for GhClient (parse_merged_pr + tests); call reconcile first in Athena::land_pr and print findings; land test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "Add reconcile: Option<ReconcileReport> to StatusView, None in status().",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "purpose": "Command::Status calls Athena::status_with_reconcile.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "purpose": "Render the Reconcile section in display::status; test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/history.rs",
+      "action": "modify",
+      "purpose": "Add LandingIntent::matches and test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Entry citing records-history §8.1, D111, job 3 part 2; known gap and intent-less PR note.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read the top of CHANGELOG.md for entry format; read Git helpers in crates/athena-git/src/lib.rs, the external_calls.rs fake-gh pattern, Athena::land_pr and the Athena struct.",
+    "history.rs: add LandingIntent::matches and its test.",
+    "gh.rs: add helpers on GitLandingRecords to read intents, landings and declared interventions (None when records branch absent); implement ReconcileRecords with write_landing delegating to the existing landing path.",
+    "gh.rs: add parse_merged_pr and impl CommitHost for GhClient under HostOperation::ReadPr, with unit tests for none, one, two, unmerged.",
+    "reconcile.rs: report types (Serialize, Debug, Clone, PartialEq) and reconcile(): first-parent list with parents, accepted-bound anchor, skip cases, per-commit skip/match/host fallback, merge-method rule, never write on unattributed.",
+    "reconcile.rs: Athena::reconcile (local branch resolution, host only as fallback, fetch, errors into skipped) and Athena::status_with_reconcile.",
+    "lib.rs register module; status.rs add field.",
+    "gh.rs Athena::land_pr: call reconcile first and ui.line findings and skipped reason.",
+    "main.rs and display.rs: wire Status and render the Reconcile section only when findings or a skipped reason exist.",
+    "Write tests: core fixtures (temp repo, bare origin, counting FakeCommitHost), land_pr test, CLI integration test with fake gh.",
+    "Add CHANGELOG entry; run cargo fmt --all, clippy, cargo test --locked."
+  ],
+  "risks": [
+    {
+      "risk": "Reconcile makes land/status fail or hang when network or origin is missing.",
+      "mitigation": "Every error becomes a skipped reason or WriteFailed finding; exit codes do not depend on it; test a missing origin."
+    },
+    {
+      "risk": "Many host calls over a long unattributed range.",
+      "mitigation": "Bounded walk (accepted bound, abandoned intents cannot widen it); one host call per unmatched commit; call count asserted."
+    },
+    {
+      "risk": "Concurrent runs write the same landing twice.",
+      "mitigation": "GitLandingRecords::landing dedups by intent; landed commits are skipped; re-run test asserts no new landing."
+    },
+    {
+      "risk": "Force-moved main makes the anchor invalid.",
+      "mitigation": "First intent base not on main's first-parent line => skipped with reason; test it."
+    },
+    {
+      "risk": "StatusView field change breaks existing tests.",
+      "mitigation": "One Option field set None in its single constructor; run full suite."
+    },
+    {
+      "risk": "PR head object missing locally when writing from an intent.",
+      "mitigation": "Reported as WriteFailed with reason; intent stays for next run."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Temp repo with bare origin; main commit whose tree and first parent equal an intent's head_tree_sha and expected_base; no landing; run reconcile with a counting fake host.",
+      "command": "cargo test --locked reconcile::tests::crash_between_merge_and_landing_is_repaired_from_the_intent_alone",
+      "observes": "One Repaired finding (source Intent); records branch has a landing with host_commit = that commit and the intent id; host call count 0.",
+      "fails_without": "Without intent matching, the commit goes to the host (count > 0) and no landing is written."
+    },
+    {
+      "criterion": 2,
+      "method": "Commit with no matching intent; fake host returns Err.",
+      "command": "cargo test --locked reconcile::tests::unavailable_host_gives_unattributed_and_writes_nothing",
+      "observes": "One Unattributed finding mentioning host unavailable; landing count and records tip unchanged.",
+      "fails_without": "A swallowed error or a written record would drop the finding or raise the landing count."
+    },
+    {
+      "criterion": 3,
+      "method": "Commit with no match, plus nearby intents with different tree and base; host returns Ok(None); variant where host names a PR with no intent.",
+      "command": "cargo test --locked reconcile::tests::no_intent_and_no_pull_request_is_reported_never_guessed",
+      "observes": "Unattributed in both cases; no landing written; nearby intents remain unfulfilled.",
+      "fails_without": "A nearest-intent or nearest-PR guess would write a landing."
+    },
+    {
+      "criterion": 4,
+      "method": "Intent for PR 7 whose base differs from the commit parent; host names PR 7 with the same head; a second commit already has a landing; a third is named by a declared-intervention record.",
+      "command": "cargo test --locked reconcile::tests::host_names_the_merged_pull_request_when_no_intent_matches",
+      "observes": "Landing for PR 7 written (Repaired, source Host); host called once; the landed and intervention commits are skipped with no extra landing or host call.",
+      "fails_without": "Without the fallback the commit stays unattributed and no landing exists."
+    },
+    {
+      "criterion": 5,
+      "method": "A: unmatched commits before the first intent's base and before the last landing, one after; an abandoned intent with an early base does not widen the walk; the known-gap case (earlier crashed landing, later landing) is asserted as NOT reconciled. B: no records branch. C: branch with no intent.",
+      "command": "cargo test --locked reconcile::tests::bound_skips_older_commits_and_absent_or_empty_records",
+      "observes": "A: only the later commit gets a finding, host never called for older ones. B/C: skipped reason set, no findings, no writes, no host calls.",
+      "fails_without": "Old commits would be reported or sent to the host."
+    },
+    {
+      "criterion": 6,
+      "method": "Core test calls Athena::status_with_reconcile with a fake Runner on a temp repo with an unattributed commit; CLI integration test runs the athena binary `status` with a fake gh on PATH (external_calls.rs pattern); display test renders the section; land_pr test with fake Runner and collecting Ui. Then clippy and fmt.",
+      "command": "cargo test --locked",
+      "observes": "Commit sha and 'unattributed' appear in status output (core and CLI) and in land's collected ui lines before a later land check fails. Also run `cargo clippy --all-targets --locked -- -D warnings` and `cargo fmt --all --check`: both clean.",
+      "fails_without": "If main.rs did not call status_with_reconcile, or land_pr did not call reconcile, those tests would miss the line."
+    },
+    {
+      "criterion": 7,
+      "method": "Inspect the diff.",
+      "command": "git diff CHANGELOG.md",
+      "observes": "New entry citing docs/design/records-history.md §8.1, D111 and job 3 part 2, noting the known gap and that a PR merged without an intent stays unattributed.",
+      "fails_without": null
+    },
+    {
+      "criterion": 8,
+      "method": "Inspect the diff; `cargo build --locked` succeeds with the unchanged lockfile.",
+      "command": "git diff --stat",
+      "observes": "No Cargo.toml, Cargo.lock, athena.toml, defaults.toml or workflow change; code uses Git, GhClient, GitLandingRecords, LandingFacts and HistoryRecord types.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Known gap: an earlier crashed landing passed over by a later landing is not repaired under the accepted bound. Does the user want criterion 5 changed later to cover it?",
+    "Host fallback needs an existing intent for the named PR; a PR merged with no intent is unattributed. Is that the intended reading of §8.1 step 3?",
+    "Rebase merges replay several commits but a landing names one host_commit; the others show as unattributed. Acceptable?",
+    "athena status may now call the host and push to the records branch; confirm a read-mostly command doing this is wanted.",
+    "I did not read lib.rs's Athena struct or Ui/Terminal in full; producer should confirm access to git and the origin remote name.",
+    "land.rs is listed as a deliverable but is expected to stay untouched."
+  ],
+  "producer_section_sha256": "0cef69ade7a03d266367dd95fe194d627bfdd0d3589bba18d52409124db2ef43"
+}

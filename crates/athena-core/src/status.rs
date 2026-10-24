@@ -130,6 +130,10 @@ pub struct StatusView {
     pub audit: Option<AuditView>,
     pub invalid_records: Vec<String>,
     pub next: Vec<String>,
+    /// The reconciliation that ran before this view was built (`Athena::status_with_reconcile`); absent from
+    /// [`Athena::status`], which asks nothing of the remote.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reconcile: Option<crate::reconcile::ReconcileReport>,
 }
 
 /// An intervention that still calls for follow-up, as `athena status` lists it under open work.
@@ -771,6 +775,7 @@ impl Athena {
             audit: audit_view(&records),
             invalid_records: records.invalid.clone(),
             next,
+            reconcile: None,
         })
     }
 

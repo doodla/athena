@@ -864,7 +864,7 @@ fn run(cli: Cli) -> Result<u8> {
                     }
                 }
                 None => {
-                    let view = athena.status()?;
+                    let view = athena.status_with_reconcile(&athena_core::gh::GhCli, &Terminal)?;
                     if json {
                         print_json(&view)?
                     } else {
