@@ -25,6 +25,18 @@ pub struct HistoryReport {
 
 /// Checks every commit reachable from `tip`.
 pub fn check_history(git: &Git, tip: &str) -> Result<HistoryReport> {
+    check_history_with_exempt(git, tip, None)
+}
+
+/// As [`check_history`], with the exempt list taken from `exempt` when it is `Some`, instead of from the
+/// tip's `[history] exempt`. This is the one difference the legacy rule needs (`docs/design/records-history.md`
+/// §4, D111): it reads the list from a legacy-exempt record on the records branch. Everything else, the
+/// tip's other configuration included, is judged exactly as [`check_history`] does.
+pub fn check_history_with_exempt(
+    git: &Git,
+    tip: &str,
+    exempt: Option<Vec<String>>,
+) -> Result<HistoryReport> {
     let tip = git
         .rev_parse(tip)?
         .ok_or_else(|| crate::GateError::Config(format!("{tip} is not a commit")))?;
@@ -49,7 +61,7 @@ pub fn check_history(git: &Git, tip: &str) -> Result<HistoryReport> {
 
     let mut state = HistoryState {
         tip: tip.clone(),
-        exempt: tip_config.history.exempt.clone(),
+        exempt: exempt.unwrap_or_else(|| tip_config.history.exempt.clone()),
         ..HistoryState::default()
     };
     for commit in git.rev_list_reverse(&tip)? {

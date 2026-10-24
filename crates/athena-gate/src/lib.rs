@@ -17,6 +17,7 @@ pub mod content;
 pub mod history;
 pub mod invariant;
 pub mod jobs;
+pub mod legacy;
 pub mod reconcile;
 pub mod records;
 pub mod redact;

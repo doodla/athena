@@ -9,6 +9,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The legacy rule of the attribution check (job 5, part 2 of `docs/design/records-history.md`, sections 4
+  and 10, D111): `athena_gate::legacy::check_attribution_with_legacy`. For main's commits up to and
+  including a cutover commit `C0`, the existing history check judges them, with its exempt list read from
+  `legacy-exempt.json` on `athena/records` instead of `athena.toml`'s `[history] exempt`
+  (`check_history_with_exempt`; `check_history` is unchanged). Commits after `C0` keep the records-only rule.
+  `C0` is a caller-supplied parameter; nothing chooses it, and no command or CI job calls the rule yet.
+  `legacy_exempt_record` builds the record from `athena.toml`'s seven exempt entries and the reasons in its
+  comments, and `legacy_exempt_change` the change that would write it; nothing is written to the branch. A
+  records history in which `legacy-exempt.json` changed is a finding, and the records writer refuses an
+  added entry.
 - `athena check --attribution`, the records-only attribution check on main (job 5, part 1 of
   `docs/design/records-history.md`, sections 5.2, 6 and 10, D111). It reads only `athena/records` (the local
   branch, else `origin/athena/records`) and main's first-parent commits, never a commit message. Starting at

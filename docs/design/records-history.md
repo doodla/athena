@@ -407,6 +407,14 @@ keeps running until the new one has passed alongside it.
 5. **Attribution check, alongside the old one.** First-parent walk, squash rule, pending state, legacy rule
    (§4, §5, §6). It runs in CI as a second, non-blocking check beside the existing one, to compare verdicts
    on real history. Test: each of the seven named commits (six exempt entries and 02837e0) is judged as §4 says.
+   *Part 2 built:* the legacy rule, `crates/athena-gate/src/legacy.rs`. `check_attribution_with_legacy` takes
+   `C0` as an argument (nothing chooses it yet): commits up to and including `C0` go to the existing history
+   check, with its exempt list read from `legacy-exempt.json` on the records tip
+   (`check_history_with_exempt`); later commits keep the records-only walk of part 1. `legacy_exempt_record`
+   builds that record from `athena.toml`'s seven entries and the reasons in its comments, and
+   `legacy_exempt_change` the change that would write it; the record is not yet written to the branch, and
+   `[history] exempt` stays until job 8. A change to `legacy-exempt.json` after its first write is refused by
+   the writer and is a finding if it is found in the records history.
 6. **Incremental check and replay.** Checkpoint record, new-since-checkpoint judging, weekly full replay and
    the measurement of §9. Test: the incremental count equals new records; a tampered checkpoint fails replay.
 7. **Cutover.** `C0` is chosen after job 6 passes. Make the new check the required one and the old one retire

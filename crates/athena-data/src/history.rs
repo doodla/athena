@@ -328,6 +328,11 @@ pub struct LegacyExempt {
 }
 
 impl LegacyExempt {
+    /// The exempt commit ids, in entry order.
+    pub fn shas(&self) -> Vec<String> {
+        self.entries.iter().map(|e| e.sha.clone()).collect()
+    }
+
     /// Checks the fields against §4.
     pub fn validate(&self) -> Result<(), HistoryError> {
         if self.entries.is_empty() {
@@ -521,6 +526,16 @@ mod tests {
                 reason: "predates the rule".into(),
             }],
         }
+    }
+
+    #[test]
+    fn legacy_exempt_lists_its_shas_in_order() {
+        let mut l = legacy();
+        l.entries.push(LegacyExemptEntry {
+            sha: SHA_B.into(),
+            reason: "another".into(),
+        });
+        assert_eq!(l.shas(), vec![SHA_A.to_string(), SHA_B.to_string()]);
     }
 
     fn manifest() -> ImportManifest {

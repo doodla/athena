@@ -1,0 +1,207 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261024-211312-eab5",
+  "round": 2,
+  "at": "2026-10-24T21:16:06.276133812Z",
+  "invocation_seq": 3,
+  "approach": "Parameterise the one history check's exempt source: add check_history_with_exempt(git, tip, Option<Vec<String>>); check_history calls it with None. New module legacy.rs holds a builder (athena.toml's [history] exempt list plus a const reason table copied from the athena.toml comments, giving a validated LegacyExempt record and a Change for legacy-exempt.json, writing nothing), a reader of legacy-exempt.json at the records tip, check_legacy(git, c0) (runs check_history_with_exempt on C0 with the list from the records tip), and check_attribution_with_legacy(git, main_tip, now, c0) (legacy check, then the part 1 walk starting after C0 via an inner fn with an optional cutover; check_attribution passes None). Append-only is enforced by the existing RecordsWriter::append and audit_history; tests prove it for legacy-exempt.json, and a legacy-specific finding covers a records history where that file changed. C0 is only an argument; no CLI or CI wiring.",
+  "decisions": [
+    {
+      "choice": "Add check_history_with_exempt with an optional override that only replaces HistoryState.exempt; check_history delegates with None.",
+      "reason": "HistoryState.exempt is the single place the walk reads the exempt list, so only the list differs (criterion 6).",
+      "rejected": [
+        {
+          "option": "Copy check_history into legacy.rs",
+          "why": "Duplicates frozen logic; would drift."
+        },
+        {
+          "option": "Rewrite athena.toml in a synthetic tip config",
+          "why": "The tip config also feeds the secrets and personal-data allow-lists, which must stay from the tip."
+        }
+      ]
+    },
+    {
+      "choice": "Refactor check_attribution into an inner fn with an optional cutover; with a cutover the walk starts after C0 on main's first-parent line. Public signature unchanged.",
+      "reason": "Post-C0 commits keep the part 1 rule; commits up to C0 are never judged by attribution.",
+      "rejected": [
+        {
+          "option": "Run the old walk from base and filter findings by position",
+          "why": "Pre-C0 commits would still be judged and counted."
+        }
+      ]
+    },
+    {
+      "choice": "Report legacy violations as AttributionReport findings of new FindingKinds (LegacyHistory, LegacyExemptMissing, LegacyExemptChanged), carrying the original Violation text; check_legacy also returns the raw HistoryReport.",
+      "reason": "One report type; tests can compare violations with check_history's.",
+      "rejected": [
+        {
+          "option": "A separate report type only",
+          "why": "Callers would have to merge two reports."
+        }
+      ]
+    },
+    {
+      "choice": "Keep reasons in a const table keyed by sha prefix, copied from the athena.toml comments; the builder errors on an entry with no reason.",
+      "reason": "Comments can't be parsed reliably; an unknown entry fails loudly rather than getting an empty reason.",
+      "rejected": [
+        {
+          "option": "Parse athena.toml comments at run time",
+          "why": "Fragile, coupled to comment layout."
+        }
+      ]
+    },
+    {
+      "choice": "Leave records_branch.rs and invariant.rs behaviour unchanged unless a gap appears; add tests only.",
+      "reason": "RecordsWriter already refuses different bytes at an existing path and audit_history flags changed paths.",
+      "rejected": [
+        {
+          "option": "Special legacy-exempt guard in the writer",
+          "why": "The general rule already covers it."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-gate/src/legacy.rs",
+      "action": "create",
+      "purpose": "Legacy rule: reason table, record builder, records-tip reader, check_legacy, check_attribution_with_legacy, tests.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-gate/src/history.rs",
+      "action": "modify",
+      "purpose": "Add check_history_with_exempt; check_history delegates with None.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-gate/src/attribution.rs",
+      "action": "modify",
+      "purpose": "Inner walk with optional cutover; new finding kinds; module doc updated.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-gate/src/lib.rs",
+      "action": "modify",
+      "purpose": "Declare pub mod legacy.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/history.rs",
+      "action": "modify",
+      "purpose": "Small LegacyExempt helper (shas()) and test; no format change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Record the legacy rule and builder.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/records-history.md",
+      "action": "modify",
+      "purpose": "Section 10 job 5: legacy rule built, C0 caller-supplied, record built but not written.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read testutil helpers and exemption tests in history.rs; add check_history_with_exempt and make check_history call it with None.",
+    "In attribution.rs add finding kinds and labels, factor the walk into an inner fn with an optional cutover, keep check_attribution as the None wrapper, and rewrite the module doc.",
+    "In athena-data history.rs add LegacyExempt::shas() and a test.",
+    "Create legacy.rs: reason table, legacy_exempt_record, read_legacy_exempt, check_legacy, check_attribution_with_legacy, with docs citing section 4 and D111 and saying C0 is caller-supplied.",
+    "Add pub mod legacy to lib.rs.",
+    "Write tests: seven names x present/absent, append-only refusal with unchanged bytes, changed-history finding, post-C0 and at-C0, builder with seven entries and no ref written.",
+    "Update CHANGELOG.md and docs/design/records-history.md.",
+    "Run cargo fmt --all, cargo clippy --all-targets --locked -- -D warnings, cargo test --locked."
+  ],
+  "risks": [
+    {
+      "risk": "check_history at C0 also runs secrets and RecordSet::load with C0's athena.toml, so config problems surface as legacy violations.",
+      "mitigation": "This is today's logic unchanged by design; tests use constructed repos with a valid built-in config."
+    },
+    {
+      "risk": "The seven reasons drift from the athena.toml comments.",
+      "mitigation": "The builder test asserts the exact seven shas and non-empty reasons; unknown entries error."
+    },
+    {
+      "risk": "Refactoring check_attribution breaks part 1 tests.",
+      "mitigation": "Inner fn takes cutover: Option<&str>; None keeps the old path; existing tests are not edited."
+    },
+    {
+      "risk": "Test repos can't use the real shas.",
+      "mitigation": "Entries name the real sha of a constructed hand-change commit; the table keys on the seven names for reasons only."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit tests over the seven names: a small repo where a hand-change commit stands for each name. With the entry present in a legacy-exempt record, check_legacy with C0 at or after it reports no violation for the commit. With the entry absent, the violations equal check_history_with_exempt(git, c0, Some(vec![])) and check_history on an empty-exempt config.",
+      "command": "cargo test -p athena-gate legacy",
+      "observes": "Seven present-entry tests pass with no violation; seven absent-entry tests show the same violation as today's check_history.",
+      "fails_without": "Without the override or the records read, present-entry tests report the governed-content violation, and the absent-entry equality fails."
+    },
+    {
+      "criterion": 2,
+      "method": "Real-repo test: RecordsWriter::append the builder's record, then append a record with one more entry at legacy-exempt.json. Assert RecordsError::Refused, the tip unchanged and the blob bytes equal to the original. A second test with a forced changed history yields a LegacyExemptChanged finding.",
+      "command": "cargo test",
+      "observes": "The refusal error is returned, the tip and bytes are unchanged, and the changed-history case gives a finding.",
+      "fails_without": "If append accepted changed bytes, the second append would succeed and the unchanged-bytes assertion would fail."
+    },
+    {
+      "criterion": 3,
+      "method": "Tests with c0 as an argument. (a) History base..C0..X with X unattributed: an Unattributed finding for X, none for pre-C0 commits, and checked counts only post-C0 commits. (b) C0 itself is a hand change: a legacy finding with the entry absent, excused with it present, and no Unattributed finding for it.",
+      "command": "cargo test -p athena-gate attribution",
+      "observes": "Post-C0 unattributed commit gives FindingKind::Unattributed; pre-C0 commits give no attribution findings; the C0 commit follows the legacy verdict.",
+      "fails_without": "If the walk started from the earliest intent's base, pre-C0 commits would be judged by attribution; if C0 were excluded from the legacy range, the C0 hand change would go unjudged."
+    },
+    {
+      "criterion": 4,
+      "method": "Call the builder with builtin_config().history.exempt. Assert exactly seven expected shas, non-empty reasons, validate() Ok, and that resolve_tip on refs/heads/athena/records is still Missing in a fresh repo.",
+      "command": "cargo test -p athena-gate legacy_exempt_record",
+      "observes": "len == 7, non-empty reasons, validate Ok, no ref created.",
+      "fails_without": "An empty or short list, a missing reason (builder errors) or a branch write would fail the assertions."
+    },
+    {
+      "criterion": 5,
+      "method": "Run clippy, then cargo fmt --check, on the finished change. Clippy is also run with -D warnings, as Athena's check does.",
+      "command": "cargo clippy --all-targets",
+      "observes": "Clippy emits no warnings and fmt --check reports no diff. Both exit 0.",
+      "fails_without": "An unused function, unused finding kind or unformatted code in legacy.rs, attribution.rs or history.rs would make clippy -D warnings or fmt --check exit non-zero."
+    },
+    {
+      "criterion": 6,
+      "method": "Inspect the diff: check_history reduced to a call to check_history_with_exempt(..., None), only the exempt initialiser changed, no walk copy in legacy.rs. Then run the existing history tests unchanged with cargo test -p athena-gate history.",
+      "command": "git diff crates/athena-gate/src/history.rs",
+      "observes": "Existing history tests pass without edits; the diff touches no test bodies.",
+      "fails_without": "A copied walk would show as duplicated code in legacy.rs, and a behaviour change would fail existing history tests."
+    },
+    {
+      "criterion": 7,
+      "method": "Check that the diff lists no athena.toml, defaults.toml or workflow file. Grep legacy.rs and attribution.rs for any const or fn that picks a C0. Read the module docs for the caller-supplied C0 statement and the section 4 and D111 citations.",
+      "command": "git diff --stat",
+      "observes": "Only the deliverable files appear; no C0 chooser; docs cite section 4 and D111 and state C0 is a parameter.",
+      "fails_without": "A governance edit would show in the diff stat; a hard-coded C0 would show in grep."
+    },
+    {
+      "criterion": 8,
+      "method": "Read the head of attribution.rs in the diff.",
+      "command": "git diff crates/athena-gate/src/attribution.rs",
+      "observes": "The sentence saying the legacy rule will come later is replaced by a description of check_attribution_with_legacy, its inclusive C0 parameter, and the records-only walk for later commits.",
+      "fails_without": "With the doc unchanged, the diff would show no edit to the module doc and the old 'will come later' text would remain."
+    }
+  ],
+  "open_questions": [
+    "records_branch.rs and invariant.rs are listed as deliverables but appear to need no change; left untouched unless the producer finds a gap.",
+    "49c6ac1 has no individual comment in athena.toml; its reason comes from the section header. Acceptable?",
+    "With a C0 given, should an empty set of landing-intents still be a NoIntent finding? The plan skips it."
+  ],
+  "producer_section_sha256": "ab8f80c49972ece7d40e905e89c40679140bb2ff52ef835efcb4dd035b778969"
+}
