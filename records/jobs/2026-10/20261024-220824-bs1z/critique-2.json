@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261024-220824-bs1z",
+  "round": 2,
+  "at": "2026-10-24T22:11:33.520556623Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "Incremental mode judging only the records in the delta gives false LandingMismatch findings when a landing in the delta cites an intent written before the checkpoint",
+      "evidence": "walk reads intents and landings from the records tip and reports LandingMismatch when 'the intent it cites (...) is missing or does not match' (line ~308). Intents are written before the merge and landings after it. A passing check can run while a PR has an intent but is not merged yet; there is no pending main commit, so a checkpoint is written with records_sha after that intent. On the next incremental run the landing is in the delta but its intent is not. Decision 3 widens the records read only when a new commit has 'no named landing in the delta', so this case is not covered and a valid landing becomes a finding. Risk 1's mitigation does not cover it either. Fix: Resolve each cited intent against all intents at the tip (or widen when a cited intent is missing from the delta), and count only delta records in records_judged. Add a test: write the intent, write a checkpoint, then merge and land, and the incremental run passes.",
+      "location": "Plan decision 3; crates/athena-gate/src/attribution.rs:231-242 and ~308",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Binary tests that expect a checkpoint write will fail on GitHub Actions, where CI=true is set",
+      "evidence": "The plan treats any non-empty CI env var as read-only. GitHub Actions sets CI=true for the cargo test step, so check_attribution_writes_checkpoint would see no write in CI even though it passes locally. Fix: In binary tests that expect a write, call env_remove(\"CI\") on the Command. Set CI explicitly only in the read-only test.",
+      "location": "Plan decision 4; demonstrations for criteria 5 and 7 (binary tests)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The writer pushes to origin from a local check",
+      "evidence": "Decision 5 has append_to_remote(\"origin\") run whenever origin exists, so a plain local `athena check --attribution` pushes to the remote. The request says only to write with the records writer. A push failure or a race needs defined handling, or the passing check could exit non-zero. Fix: State what happens when the push fails (report it, keep the check's verdict) and test that path, or document why a remote append is required.",
+      "location": "Plan decision 5",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan matches the request and the reading. I confirmed that Checkpoint (history.rs:286), audit_history (records_branch.rs:101), append_to_remote and the gate's walk exist, that the CLI calls check_attribution directly, and that ci.yml already sets contents: read and has a schedule trigger. The demonstrations are behavioral and would fail without the feature. One design flaw is serious: incremental mode reads only the records added since the checkpoint, and it widens that read only when a new commit has no landing in the delta. A landing whose intent was written before the checkpoint would then be reported as LandingMismatch, a false failure on a common landing timeline. Read cited intents from the full tip, or widen when one is missing, and add a test for that order. There are two smaller issues: tests that expect a checkpoint write need CI removed from their environment, and the plan does not say what happens when the push to origin fails."
+}

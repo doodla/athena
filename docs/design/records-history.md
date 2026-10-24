@@ -372,6 +372,33 @@ Measuring: record, per run, seconds and the number of records and commits judged
    with the 4,000 old records. Estimate: seconds, to be replaced by the measurement.
 4. The full replay is expected to remain at roughly the baseline, because it re-reads all records.
 
+**Built (job 6).** The rules as implemented:
+
+- The newest checkpoint is the one added by the newest first-parent records commit that added any file under
+  `checkpoints/`. Record ids and `created_at` are writer-supplied and play no part.
+- An incremental run walks main's commits after the checkpoint's `main_sha` and audits and counts the records
+  added after its `records_sha` (`audit_history_since`; checkpoint files are not counted, so a run that only
+  wrote a checkpoint does not make the next run write another). Intents and landings are looked up across the
+  whole records tip, so a landing in the delta can cite an intent from before the checkpoint.
+- It falls back to a full replay, with the reason printed, when there is no checkpoint, the checkpoint's
+  `verifier_version` is not the running `CHECK_VERSION`, or it names a main commit not on main's first-parent
+  line or a records commit not on the records branch.
+- `--full-replay` ignores checkpoints for judging. It adds a finding when the newest checkpoint names a commit
+  the replay fails or one not on main, and the run exits 2.
+- A checkpoint is written only after a pass with no pending commit, from the local `athena/records` ref, and is
+  appended locally only: the check never pushes. If the append fails, the report says so and the verdict and
+  exit code are unchanged. A checkpoint written locally reaches CI when the records branch is pushed by the
+  existing flow; until then CI's incremental run finds none and runs a full replay, saying so.
+- No write happens when `CI` is set and not empty, with `--no-checkpoint`, or when HEAD is not on `main`. CI's
+  workflow token is `contents: read`, so the rule is enforced by the token and by the code.
+- Accepted bound: an incremental run trusts the newest checkpoint; a forged checkpoint is caught by the weekly
+  full replay, which compares against it.
+
+Measured on the synthetic fixture (200 landings, each a commit plus an intent and a landing record; debug build,
+one run, test `attribution::tests::timing_on_synthetic_200_landings`): full replay 1.731 s (200 commits, 400
+records); incremental run after one more landing 0.145 s (1 commit, 2 records). These are fixture figures. The
+timing on this repository (steps 1 to 3 above, against its real history) is taken after landing, outside job 6.
+
 ## 10. Build plan
 
 Each job is sized for one producer run (one seam and its tests). Order keeps main attributed at all times: the
@@ -417,6 +444,9 @@ keeps running until the new one has passed alongside it.
    the writer and is a finding if it is found in the records history.
 6. **Incremental check and replay.** Checkpoint record, new-since-checkpoint judging, weekly full replay and
    the measurement of §9. Test: the incremental count equals new records; a tampered checkpoint fails replay.
+   *Built:* `athena_gate::attribution::run_check` (modes `Incremental` and `FullReplay`; `CHECK_VERSION`),
+   `athena check --attribution [--full-replay] [--no-checkpoint]`, and a checkpoint after `athena land`
+   (`checkpoint_after_landing` in `crates/athena-cli/src/main.rs`). See §9 for the rules and the measurement.
 7. **Cutover.** `C0` is chosen after job 6 passes. Make the new check the required one and the old one retire
    for post-cutover commits; stop writing trailers; `records/` on main frozen. Also move the readers of §13:
    keep a worktree of `athena/records` at a fixed path in Athena's state directory, point the two reader seams

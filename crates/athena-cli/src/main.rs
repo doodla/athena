@@ -330,7 +330,11 @@ Exit code: 0 only when the target was met; 2 for any other stop; 1 when Athena i
     /// With `--attribution`, the records-only check on main: every first-parent commit from the earliest
     /// landing-intent's expected base onward must be named by a matching landing record (a commit with a
     /// matching intent and no landing is pending for 15 minutes). It reads `athena/records` (fetch it first)
-    /// and never a commit message. Exit 2 on a finding.
+    /// and never a commit message. Exit 2 on a finding. It judges only the commits and records added since
+    /// the newest checkpoint on `athena/records` (a full replay when there is none or its check version
+    /// differs), and on a pass on the main branch writes a new checkpoint to the local records branch. It
+    /// writes nothing when CI is set in the environment, with `--no-checkpoint`, or off the main branch.
+    /// It prints the seconds taken and the commits and records judged.
     Check {
         #[arg(long)]
         history: bool,
@@ -338,6 +342,13 @@ Exit code: 0 only when the target was met; 2 for any other stop; 1 when Athena i
         pr_head: Option<Vec<String>>,
         #[arg(long, conflicts_with_all = ["history", "pr_head"])]
         attribution: bool,
+        /// With `--attribution`: ignore checkpoints, judge everything from the start, and fail if the newest
+        /// checkpoint names a commit the replay fails.
+        #[arg(long, requires = "attribution")]
+        full_replay: bool,
+        /// With `--attribution`: never write a checkpoint.
+        #[arg(long, requires = "attribution")]
+        no_checkpoint: bool,
         #[arg(long)]
         json: bool,
     },
@@ -447,6 +458,133 @@ fn proposal_json(p: &Proposal) -> serde_json::Value {
         "reader_error": p.reader_error,
         "spent_usd": p.spent_usd,
     })
+}
+
+/// Whether the environment says this is CI (`CI` set and not empty). CI's token is read-only, and the code
+/// agrees: a CI run never writes a checkpoint.
+fn ci_is_set() -> bool {
+    std::env::var_os("CI").is_some_and(|v| !v.is_empty())
+}
+
+/// Why `check --attribution` must not write a checkpoint, or `None` when it may.
+fn no_write_reason(no_checkpoint: bool, ci: bool, branch: Option<&str>) -> Option<&'static str> {
+    if ci {
+        Some("CI is read-only")
+    } else if no_checkpoint {
+        Some("--no-checkpoint")
+    } else if branch != Some("main") {
+        Some("HEAD is not on the main branch")
+    } else {
+        None
+    }
+}
+
+/// The text of a run: the report, then the mode, the checkpoint and the seconds and counts.
+fn run_text(run: &athena_gate::attribution::RunReport, no_write: Option<&str>) -> String {
+    use std::fmt::Write as _;
+    let mut out = display::attribution_report(&run.report);
+    let _ = writeln!(out, "mode: {}", mode_text(run));
+    out.push_str(&checkpoint_line(run, no_write));
+    let _ = writeln!(
+        out,
+        "took {:.3} s; judged {} commit(s) and {} record(s)",
+        run.seconds,
+        run.commits_judged(),
+        run.records_judged()
+    );
+    out
+}
+
+fn mode_text(run: &athena_gate::attribution::RunReport) -> String {
+    match (&run.started_from, &run.fallback_reason) {
+        (Some(cp), _) => format!(
+            "incremental, from the checkpoint at main commit {} (check version {})",
+            cp.main_sha, cp.verifier_version
+        ),
+        (None, Some(why)) => format!("full replay, because {why}"),
+        (None, None) => run.mode.label().to_string(),
+    }
+}
+
+fn checkpoint_line(run: &athena_gate::attribution::RunReport, no_write: Option<&str>) -> String {
+    match (&run.checkpoint_written, &run.checkpoint_error, no_write) {
+        (Some(cp), _, _) => format!(
+            "checkpoint: written {} (main {}, records {}, check version {})\n",
+            cp.id, cp.main_sha, cp.records_sha, cp.verifier_version
+        ),
+        (None, Some(error), _) => format!("checkpoint not written: {error}\n"),
+        (None, None, Some(why)) => format!("checkpoint: not written ({why})\n"),
+        (None, None, None) => {
+            "checkpoint: not written (the run did not pass cleanly or judged nothing new)\n"
+                .to_string()
+        }
+    }
+}
+
+/// The run as JSON: the attribution report's keys plus the mode, seconds and counts.
+fn run_json(
+    run: &athena_gate::attribution::RunReport,
+    no_write: Option<&str>,
+) -> serde_json::Value {
+    let mut value = display::attribution_json(&run.report);
+    if let Some(map) = value.as_object_mut() {
+        map.insert("mode".into(), run.mode.label().into());
+        map.insert("requested_mode".into(), run.requested.label().into());
+        map.insert("fallback_reason".into(), run.fallback_reason.clone().into());
+        map.insert("seconds".into(), run.seconds.into());
+        map.insert("commits_judged".into(), run.commits_judged().into());
+        map.insert("records_judged".into(), run.records_judged().into());
+        map.insert(
+            "checkpoint_written".into(),
+            run.checkpoint_written
+                .as_ref()
+                .map(|cp| cp.id.to_string())
+                .into(),
+        );
+        map.insert(
+            "checkpoint_error".into(),
+            run.checkpoint_error.clone().into(),
+        );
+        map.insert("read_only_reason".into(), no_write.into());
+    }
+    value
+}
+
+/// After a landing record: runs the attribution check incrementally on `landed` (the merged commit) with
+/// checkpoint writing on. A pass writes a checkpoint to the local records branch; the verdict never changes
+/// the landing's own outcome.
+fn checkpoint_after_landing(
+    git: &athena_git::Git,
+    landed: &str,
+    now: jiff::Timestamp,
+) -> Result<athena_gate::attribution::RunReport> {
+    use athena_gate::attribution::{Mode, Options, run_check};
+    Ok(run_check(
+        git,
+        landed,
+        now,
+        &Options::new(Mode::Incremental, true),
+    )?)
+}
+
+/// One note for `athena land` about the checkpoint after a landing.
+fn checkpoint_note(run: &athena_gate::attribution::RunReport) -> String {
+    match (&run.checkpoint_written, &run.checkpoint_error) {
+        (Some(cp), _) => format!(
+            "checkpoint written: main {}, records {}, check version {} ({:.3} s, {} commit(s), {} record(s) judged)\n",
+            cp.main_sha,
+            cp.records_sha,
+            cp.verifier_version,
+            run.seconds,
+            run.commits_judged(),
+            run.records_judged()
+        ),
+        (None, Some(error)) => format!("checkpoint not written: {error}\n"),
+        (None, None) => format!(
+            "checkpoint not written: the attribution check found {} problem(s) or a pending commit\n",
+            run.report.findings.len()
+        ),
+    }
 }
 
 fn finished_code(state: OutcomeState) -> u8 {
@@ -793,6 +931,18 @@ fn run(cli: Cli) -> Result<u8> {
             } else {
                 print!("{}", display::land_pr(&report));
             }
+            // After a landing record, the attribution check; a pass writes a checkpoint. The note goes to
+            // stderr so `--json` output stays whole, and nothing here changes the exit code.
+            if report.link.state == athena_core::pr::LinkState::Landed
+                && !ci_is_set()
+                && let Some(merged) = &report.link.merged_commit
+                && athena.git.commit_exists(merged)?
+            {
+                match checkpoint_after_landing(&athena.git, merged, jiff::Timestamp::now()) {
+                    Ok(run) => eprint!("{}", checkpoint_note(&run)),
+                    Err(error) => eprintln!("checkpoint not written: {error}"),
+                }
+            }
             Ok(land_pr_code(&report))
         }
         Command::Drain {
@@ -950,25 +1100,35 @@ fn run(cli: Cli) -> Result<u8> {
             history,
             pr_head,
             attribution,
+            full_replay,
+            no_checkpoint,
             json,
         } => {
             let athena = open(false)?;
             if attribution {
+                use athena_gate::attribution::{Mode, Options, run_check};
                 let tip = athena
                     .git
                     .head()?
                     .ok_or_else(|| anyhow::anyhow!("the repository has no commits"))?;
-                let report = athena_gate::attribution::check_attribution(
-                    &athena.git,
-                    &tip,
-                    jiff::Timestamp::now(),
-                )?;
-                if json {
-                    print_json(&display::attribution_json(&report))?;
+                let no_write = no_write_reason(
+                    no_checkpoint,
+                    ci_is_set(),
+                    athena.git.current_branch()?.as_deref(),
+                );
+                let mode = if full_replay {
+                    Mode::FullReplay
                 } else {
-                    print!("{}", display::attribution_report(&report));
+                    Mode::Incremental
+                };
+                let options = Options::new(mode, no_write.is_none());
+                let run = run_check(&athena.git, &tip, jiff::Timestamp::now(), &options)?;
+                if json {
+                    print_json(&run_json(&run, no_write))?;
+                } else {
+                    print!("{}", run_text(&run, no_write));
                 }
-                return Ok(if report.passed() { 0 } else { 2 });
+                return Ok(if run.report.passed() { 0 } else { 2 });
             }
             if let Some(range) = pr_head {
                 let report =
@@ -1063,5 +1223,124 @@ fn run(cli: Cli) -> Result<u8> {
         Command::Hook {
             hook: HookCommand::PreToolUse { policy },
         } => Ok(hooks::pre_tool_use(&policy) as u8),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use athena_data::JobId;
+    use athena_data::RecordId;
+    use athena_data::history::{
+        HistoryRecord, Landing, LandingCommit, LandingIntent, LandingKind, MergeMethod,
+    };
+    use athena_git::Git;
+    use athena_git::records_branch::{Change, RECORDS_REF, RecordsWriter};
+
+    fn put(git: &Git, dir: &str, id: &RecordId, record: HistoryRecord) {
+        RecordsWriter::new(git)
+            .append(
+                "record",
+                &[Change::put(
+                    format!("{dir}/{id}.json"),
+                    serde_json::to_string(&record).unwrap(),
+                )],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn no_write_reasons_cover_ci_the_flag_and_other_branches() {
+        assert_eq!(
+            no_write_reason(false, true, Some("main")),
+            Some("CI is read-only")
+        );
+        assert_eq!(
+            no_write_reason(true, false, Some("main")),
+            Some("--no-checkpoint")
+        );
+        assert!(no_write_reason(false, false, Some("topic")).is_some());
+        assert!(no_write_reason(false, false, None).is_some());
+        assert_eq!(no_write_reason(false, false, Some("main")), None);
+    }
+
+    #[test]
+    fn checkpoint_after_landing_writes_a_checkpoint_naming_the_landed_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = Git::isolated(dir.path());
+        git.run(["init", "-q", "-b", "main"]).unwrap();
+        std::fs::write(dir.path().join("a.txt"), "a\n").unwrap();
+        git.run(["add", "-A"]).unwrap();
+        git.run(["commit", "-q", "-m", "init"]).unwrap();
+        let base = git.head().unwrap().unwrap();
+        std::fs::write(dir.path().join("b.txt"), "b\n").unwrap();
+        git.run(["add", "-A"]).unwrap();
+        git.run(["commit", "-q", "-m", "squash"]).unwrap();
+        let landed = git.head().unwrap().unwrap();
+
+        let now: jiff::Timestamp = "2026-10-24T10:00:00Z".parse().unwrap();
+        let intent_id = RecordId::from_parts(now, 1);
+        let intent = LandingIntent {
+            id: intent_id.clone(),
+            created_at: now,
+            pr_number: 1,
+            head_sha: "1".repeat(40),
+            head_tree_sha: git.tree_of(&landed).unwrap(),
+            expected_base: base,
+            job_ids: vec![JobId::parse("20261024-100000-aaaa").unwrap()],
+        };
+        put(
+            &git,
+            "landing-intents",
+            &intent_id,
+            HistoryRecord::LandingIntent(intent),
+        );
+        let landing_id = RecordId::from_parts(now, 2);
+        let landing = Landing {
+            id: landing_id.clone(),
+            created_at: now,
+            pr_number: 1,
+            head_sha: "1".repeat(40),
+            host_commit: landed.clone(),
+            merge_method: MergeMethod::Squash,
+            commits: vec![LandingCommit {
+                sha: "1".repeat(40),
+                tree: "2".repeat(40),
+                kind: LandingKind::RecordsOnly,
+                job: None,
+                verification: None,
+            }],
+            intent: intent_id,
+        };
+        put(
+            &git,
+            "landings",
+            &landing_id,
+            HistoryRecord::Landing(landing),
+        );
+        let before = git.rev_parse(RECORDS_REF).unwrap().unwrap();
+
+        let run = checkpoint_after_landing(&git, &landed, now).unwrap();
+        assert!(run.report.passed(), "{:?}", run.report.findings);
+        let cp = run
+            .checkpoint_written
+            .clone()
+            .expect("a checkpoint is written");
+        assert_eq!(cp.main_sha, landed);
+        assert_eq!(cp.records_sha, before);
+        assert_eq!(cp.verifier_version, athena_gate::attribution::CHECK_VERSION);
+        assert_ne!(git.rev_parse(RECORDS_REF).unwrap().unwrap(), before);
+        assert!(checkpoint_note(&run).starts_with("checkpoint written"));
+
+        // A landing the records do not name writes nothing and says so.
+        std::fs::write(dir.path().join("c.txt"), "c\n").unwrap();
+        git.run(["add", "-A"]).unwrap();
+        git.run(["commit", "-q", "-m", "hand-made"]).unwrap();
+        let rogue = git.head().unwrap().unwrap();
+        let tip = git.rev_parse(RECORDS_REF).unwrap().unwrap();
+        let run = checkpoint_after_landing(&git, &rogue, now).unwrap();
+        assert!(!run.report.passed() && run.checkpoint_written.is_none());
+        assert!(checkpoint_note(&run).starts_with("checkpoint not written"));
+        assert_eq!(git.rev_parse(RECORDS_REF).unwrap().unwrap(), tip);
     }
 }
