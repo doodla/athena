@@ -7,7 +7,9 @@
 //! for sensitive content, `[secrets]` and `[personal_data]`, and the `[history] exempt` list come from the
 //! tip, where allow-listing an old false positive or excusing old history is legitimate. Finally it validates and reconciles every record at the tip.
 
+use crate::attribution::{self, CutoverState};
 use crate::invariant::HistoryState;
+use crate::legacy;
 use crate::records::RecordSet;
 use crate::{
     Change, GateError, Judged, Result, Rule, Violation, builtin_config, config_at, content,
@@ -21,11 +23,86 @@ pub struct HistoryReport {
     pub commits: usize,
     pub records: usize,
     pub violations: Vec<Violation>,
+    /// Things a person should see that do not fail the check, such as a cutover still waiting for its import.
+    pub notes: Vec<String>,
 }
 
 /// Checks every commit reachable from `tip`.
+///
+/// This is the records-history cutover's one switch (`docs/design/records-history.md` §4 and §10, D111). With
+/// no `[history] cutover_job` at the tip, or before the records branch shows the cutover (the job's landing
+/// record **and** an import manifest naming its `C0`), it is [`check_history_with_exempt`] with the tip's own
+/// exempt list, exactly as before the cutover. Once the records branch shows the cutover, the commits up to and
+/// including `C0` are judged by the old rules (with the exempt list from the `legacy-exempt` record) and the
+/// commits after `C0` only by the attribution check against records; commit trailers are no longer read for them.
+/// The gitleaks scan still covers every commit reachable from the tip.
 pub fn check_history(git: &Git, tip: &str) -> Result<HistoryReport> {
-    check_history_with_exempt(git, tip, None)
+    let Some(resolved) = git.rev_parse(tip)? else {
+        return check_history_with_exempt(git, tip, None);
+    };
+    // A tip whose configuration does not parse is reported by the old check, which judges it.
+    let Ok(tip_config) = config_at(git, Some(&resolved)) else {
+        return check_history_with_exempt(git, tip, None);
+    };
+    let Some(job) = tip_config.history.cutover_job.clone() else {
+        return check_history_with_exempt(git, tip, None);
+    };
+    match attribution::cutover_state(git, &job)? {
+        CutoverState::Shown { c0 } if git.is_ancestor(&c0, &resolved)? => {
+            check_after_cutover(git, &resolved, &c0, &tip_config)
+        }
+        CutoverState::Pending { c0 } => {
+            let mut report = check_history_with_exempt(git, tip, None)?;
+            report.notes.push(format!(
+                "the cutover is pending: job {job} is landed at {c0}, but the records branch has no import \
+                 manifest for it yet, so every commit is still judged by the old rules; `athena status` \
+                 imports records at {c0}"
+            ));
+            Ok(report)
+        }
+        _ => check_history_with_exempt(git, tip, None),
+    }
+}
+
+/// The history check once the cutover is shown: the old rules up to and including `c0`, attribution after.
+fn check_after_cutover(
+    git: &Git,
+    tip: &str,
+    c0: &str,
+    tip_config: &athena_data::config::Config,
+) -> Result<HistoryReport> {
+    let mut report = HistoryReport::default();
+    report
+        .violations
+        .extend(secrets::check_history(git, tip_config, tip)?);
+    let judged = legacy::check_attribution_with_legacy(git, tip, jiff::Timestamp::now(), c0)?;
+    for finding in judged.findings {
+        report.violations.push(
+            Violation::new(
+                Rule::JobRecords,
+                format!("{}: {}", finding.kind.label(), finding.detail),
+                "land the change through athena land --pr so a landing record names it, or run \
+                 `athena status` to finish the cutover import",
+            )
+            .in_commit(finding.commit.as_deref()),
+        );
+    }
+    for pending in judged.pending {
+        report.notes.push(format!(
+            "commit {} is pending: its landing-intent is on the records branch and its landing record is due",
+            pending.commit
+        ));
+    }
+    report.commits = git.rev_list_reverse(tip)?.len();
+    let records = RecordSet::load(git, tip)?;
+    report.records = records.files.len();
+    for error in records.errors() {
+        report
+            .violations
+            .push(Violation::new(Rule::ValidRecords, error.to_string(), ""));
+    }
+    report.violations.extend(reconcile::check_records(&records));
+    Ok(report)
 }
 
 /// As [`check_history`], with the exempt list taken from `exempt` when it is `Some`, instead of from the
@@ -516,5 +593,328 @@ mod exemption_tests {
             assert_eq!(found.is_empty(), allowed, "{entry}: {found:?}");
             git.run(["reset", "-q", "--hard", "HEAD~1"]).unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod cutover_tests {
+    use super::*;
+    use crate::testutil::*;
+    use athena_data::history::{
+        HistoryRecord, ImportManifest, ImportedPath, Landing, LandingCommit, LandingIntent,
+        LandingKind, LegacyExempt, LegacyExemptEntry, MergeMethod,
+    };
+    use athena_data::{JobId, RecordId};
+    use athena_git::records_branch::{Change as RecordsChange, RecordsWriter};
+
+    const CUTOVER_JOB: &str = "20261025-001232-vesh";
+    const T0: &str = "2026-10-25T10:00:00Z";
+
+    fn ts() -> jiff::Timestamp {
+        T0.parse().unwrap()
+    }
+
+    fn rid(bits: u32) -> RecordId {
+        RecordId::from_parts(ts(), bits)
+    }
+
+    /// The built-in configuration (which names the cutover job) with `exempt` as its exempt list, and the
+    /// `cutover_job` line kept only when `cutover` is true.
+    fn config(exempt: &[&str], cutover: bool) -> String {
+        let list = exempt
+            .iter()
+            .map(|e| format!("\"{e}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        crate::BUILTIN_CONFIG
+            .lines()
+            .filter(|l| cutover || !l.starts_with("cutover_job = "))
+            .map(|l| {
+                if l.starts_with("exempt = ") {
+                    format!("exempt = [{list}]")
+                } else {
+                    l.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n"
+    }
+
+    fn put(git: &Git, path: &str, record: &HistoryRecord) {
+        RecordsWriter::new(git)
+            .append(
+                "record",
+                &[RecordsChange::put(
+                    path,
+                    serde_json::to_string(record).unwrap(),
+                )],
+            )
+            .unwrap();
+    }
+
+    /// Writes an intent and a landing for the commit `host`, whose parent is `parent`, naming `job`.
+    fn record_landing(git: &Git, n: u32, host: &str, parent: &str, job: &str) {
+        let intent = LandingIntent {
+            id: rid(2 * n),
+            created_at: ts(),
+            pr_number: 1,
+            head_sha: "1".repeat(40),
+            head_tree_sha: git.tree_of(host).unwrap(),
+            expected_base: parent.to_string(),
+            job_ids: vec![JobId::parse(job).unwrap()],
+        };
+        put(
+            git,
+            &format!("landing-intents/{}.json", intent.id),
+            &HistoryRecord::LandingIntent(intent.clone()),
+        );
+        let landing = Landing {
+            id: rid(2 * n + 1),
+            created_at: ts(),
+            pr_number: 1,
+            head_sha: "1".repeat(40),
+            host_commit: host.to_string(),
+            merge_method: MergeMethod::Squash,
+            commits: vec![LandingCommit {
+                sha: "1".repeat(40),
+                tree: "2".repeat(40),
+                kind: LandingKind::RecordsOnly,
+                job: None,
+                verification: None,
+            }],
+            intent: intent.id,
+        };
+        put(
+            git,
+            &format!("landings/{}.json", landing.id),
+            &HistoryRecord::Landing(landing),
+        );
+    }
+
+    fn put_manifest(git: &Git, c0: &str) {
+        let manifest = ImportManifest {
+            id: rid(90),
+            created_at: ts(),
+            c0: c0.to_string(),
+            paths: vec![ImportedPath {
+                path: "records/x.json".into(),
+                blob_id: "3".repeat(40),
+                sha256: "4".repeat(64),
+            }],
+        };
+        put(
+            git,
+            "import-manifest.json",
+            &HistoryRecord::ImportManifest(manifest),
+        );
+    }
+
+    fn put_exempt(git: &Git, shas: &[&str]) {
+        let record = LegacyExempt {
+            id: rid(91),
+            created_at: ts(),
+            entries: shas
+                .iter()
+                .map(|sha| LegacyExemptEntry {
+                    sha: sha.to_string(),
+                    reason: "predates the cutover".into(),
+                })
+                .collect(),
+        };
+        put(
+            git,
+            "legacy-exempt.json",
+            &HistoryRecord::LegacyExempt(record),
+        );
+    }
+
+    struct World {
+        _dir: tempfile::TempDir,
+        git: Git,
+        /// A hand edit before `C0`, with no trailer.
+        hand: String,
+        c0: String,
+        /// A commit after `C0`, with no trailer.
+        post: String,
+    }
+
+    /// root, a trailerless hand edit, `C0` (a bootstrap commit), a trailerless commit after `C0`. No records
+    /// branch yet.
+    fn world(cutover_in_config: bool) -> World {
+        let builtin = crate::builtin_config();
+        let (dir, git) = repo(&[
+            (
+                "athena.toml",
+                &config(&[&builtin.history.exempt[0]], cutover_in_config),
+            ),
+            ("README.md", "hello\n"),
+        ]);
+        write(dir.path(), &[("README.md", "edited by hand\n")]);
+        let hand = commit(&git, "hand edit\n");
+        write(dir.path(), &[("src/lib.rs", "pub fn f() {}\n")]);
+        let c0 = commit(&git, "cutover\n\nAthena-Job: bootstrap\n");
+        write(dir.path(), &[("src/lib.rs", "pub fn f() { 1; }\n")]);
+        let post = commit(&git, "later work without a trailer\n");
+        World {
+            _dir: dir,
+            git,
+            hand,
+            c0,
+            post,
+        }
+    }
+
+    /// The cutover landing, its import and the legacy-exempt record, excusing `exempt`.
+    fn record_cutover(world: &World, exempt: &[&str]) {
+        let parent = world.git.parents(&world.c0).unwrap()[0].clone();
+        record_landing(&world.git, 1, &world.c0, &parent, CUTOVER_JOB);
+        put_manifest(&world.git, &world.c0);
+        put_exempt(&world.git, exempt);
+    }
+
+    fn flagged(report: &HistoryReport, commit: &str) -> Vec<String> {
+        report
+            .violations
+            .iter()
+            .filter(|v| v.commit.as_deref() == Some(&commit[..12]))
+            .map(|v| v.detail.clone())
+            .collect()
+    }
+
+    #[test]
+    fn a_commit_before_c0_is_judged_by_the_old_rules_and_one_after_only_by_records() {
+        let w = world(true);
+        record_cutover(&w, &[&w.hand]);
+        record_landing(&w.git, 2, &w.post, &w.c0, "20261025-120000-aaaa");
+
+        // Today's rules would fail the trailerless commit after C0.
+        let old = check_history_with_exempt(&w.git, "HEAD", None).unwrap();
+        assert!(
+            !flagged(&old, &w.post).is_empty(),
+            "the old rules flag the later commit: {:?}",
+            old.violations
+        );
+
+        // With the cutover shown, it passes: a landing record names it and it has no trailer. The hand edit
+        // before C0 is excused by the legacy-exempt record.
+        let report = check_history(&w.git, "HEAD").unwrap();
+        assert_eq!(report.violations, vec![], "{:?}", report.violations);
+        assert_eq!(report.commits, 4);
+        assert!(report.notes.is_empty(), "{:?}", report.notes);
+    }
+
+    #[test]
+    fn a_commit_before_c0_that_the_legacy_exempt_record_does_not_name_is_flagged_by_the_old_rules()
+    {
+        let w = world(true);
+        record_cutover(&w, &["1".repeat(40).as_str()]);
+        record_landing(&w.git, 2, &w.post, &w.c0, "20261025-120000-aaaa");
+        let report = check_history(&w.git, "HEAD").unwrap();
+        let found = flagged(&report, &w.hand);
+        assert!(
+            found.iter().any(|d| d.contains("legacy history check")),
+            "{:?}",
+            report.violations
+        );
+        assert!(flagged(&report, &w.post).is_empty());
+        assert!(flagged(&report, &w.c0).is_empty());
+    }
+
+    #[test]
+    fn a_commit_after_c0_that_no_landing_names_is_flagged_by_attribution() {
+        let w = world(true);
+        record_cutover(&w, &[&w.hand]);
+        let report = check_history(&w.git, "HEAD").unwrap();
+        let found = flagged(&report, &w.post);
+        assert!(
+            found.iter().any(|d| d.contains("unattributed")),
+            "{:?}",
+            report.violations
+        );
+        assert!(flagged(&report, &w.hand).is_empty());
+    }
+
+    /// The old check's verdict, to compare the fallbacks with.
+    fn same_as_today(git: &Git) -> HistoryReport {
+        let routed = check_history(git, "HEAD").unwrap();
+        let today = check_history_with_exempt(git, "HEAD", None).unwrap();
+        assert_eq!(routed.violations, today.violations);
+        assert_eq!(
+            (routed.commits, routed.records),
+            (today.commits, today.records)
+        );
+        assert!(
+            !today.violations.is_empty(),
+            "the fixture breaks the old rules"
+        );
+        routed
+    }
+
+    #[test]
+    fn with_no_cutover_job_the_check_is_unchanged_even_when_records_show_a_landing() {
+        let w = world(false);
+        record_cutover(&w, &[&w.hand]);
+        let report = same_as_today(&w.git);
+        assert!(report.notes.is_empty());
+    }
+
+    #[test]
+    fn before_the_landing_record_exists_the_check_is_unchanged() {
+        // No records branch at all.
+        let w = world(true);
+        let report = same_as_today(&w.git);
+        assert!(report.notes.is_empty());
+
+        // A records branch with a landing for some other job only.
+        let parent = w.git.parents(&w.c0).unwrap()[0].clone();
+        record_landing(&w.git, 3, &w.c0, &parent, "20261025-130000-bbbb");
+        let report = same_as_today(&w.git);
+        assert!(report.notes.is_empty());
+    }
+
+    #[test]
+    fn a_landing_without_its_import_keeps_the_old_rules_and_says_the_cutover_is_pending() {
+        let w = world(true);
+        let parent = w.git.parents(&w.c0).unwrap()[0].clone();
+        record_landing(&w.git, 1, &w.c0, &parent, CUTOVER_JOB);
+        let report = same_as_today(&w.git);
+        assert_eq!(report.notes.len(), 1, "{:?}", report.notes);
+        assert!(report.notes[0].contains("pending"), "{:?}", report.notes);
+        assert!(report.notes[0].contains(&w.c0), "{:?}", report.notes);
+
+        // A manifest naming another commit does not show the cutover either.
+        put_manifest(&w.git, &w.post);
+        let report = same_as_today(&w.git);
+        assert_eq!(report.notes.len(), 1);
+    }
+
+    #[test]
+    fn cutover_state_reads_the_landing_and_the_manifest() {
+        let w = world(true);
+        assert_eq!(
+            attribution::cutover_state(&w.git, CUTOVER_JOB).unwrap(),
+            CutoverState::NotLanded
+        );
+        let parent = w.git.parents(&w.c0).unwrap()[0].clone();
+        record_landing(&w.git, 1, &w.c0, &parent, CUTOVER_JOB);
+        assert_eq!(
+            attribution::cutover_commit(&w.git, CUTOVER_JOB).unwrap(),
+            Some(w.c0.clone())
+        );
+        assert_eq!(
+            attribution::cutover_commit(&w.git, "20261025-130000-bbbb").unwrap(),
+            None,
+            "a landing of another job is not the cutover"
+        );
+        assert_eq!(
+            attribution::cutover_state(&w.git, CUTOVER_JOB).unwrap(),
+            CutoverState::Pending { c0: w.c0.clone() }
+        );
+        put_manifest(&w.git, &w.c0);
+        assert_eq!(
+            attribution::cutover_state(&w.git, CUTOVER_JOB).unwrap(),
+            CutoverState::Shown { c0: w.c0.clone() }
+        );
     }
 }

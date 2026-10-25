@@ -34,9 +34,11 @@
 //!
 //! # Status
 //!
-//! The importer is **not wired in**: no command, job pipeline step, CI workflow or other caller runs it, and
-//! it has not been run against this repository's `main`. It is tested on scratch repositories only. Running
-//! it for real is the cutover (job 7 of the plan).
+//! [`import_records`] is the strict importer for an empty records branch and is tested on scratch repositories
+//! only. The cutover (job 7 of the plan) runs [`import_at_cutover`] instead, from `crate::gh`, when the job
+//! named by `[history] cutover_job` lands, and again from the reconcile step of `athena land` and
+//! `athena status` if that run did not finish. It appends to the existing records tip, because the landing
+//! record that fixes `C0` is already on the branch, and checks the result with [`verify_cutover_import`].
 
 use athena_data::history::{HistoryRecord, ImportManifest, ImportedPath};
 use athena_data::{RecordId, sha256_hex};
@@ -129,9 +131,25 @@ fn import_with(
         return Err(ImportError::AlreadyImported { tip });
     }
 
-    let files = source_files(git, &c0)?;
+    let (mut changes, count) = import_changes(git, &c0)?;
+    tamper(&mut changes);
+
+    let message = import_message(&c0, count);
+    let commit = writer.append(&message, &changes)?;
+    verify_import(git, &c0, &commit)?;
+    Ok(commit)
+}
+
+fn import_message(c0: &str, count: usize) -> String {
+    format!("Import records/ from {c0}: {count} files and {MANIFEST_PATH}")
+}
+
+/// The changes of an import of `records/` at `c0`: every file at its own path, then the manifest. Also the
+/// number of files. An empty `records/` is an error.
+fn import_changes(git: &Git, c0: &str) -> Result<(Vec<Change>, usize), ImportError> {
+    let files = source_files(git, c0)?;
     if files.is_empty() {
-        return Err(ImportError::EmptyRecords { c0 });
+        return Err(ImportError::EmptyRecords { c0: c0.to_string() });
     }
     let mut changes = Vec::with_capacity(files.len() + 1);
     let mut paths = Vec::with_capacity(files.len());
@@ -147,7 +165,7 @@ fn import_with(
     let manifest = ImportManifest {
         id: RecordId::generate(crate::now()),
         created_at: crate::now(),
-        c0: c0.clone(),
+        c0: c0.to_string(),
         paths,
     };
     manifest
@@ -156,14 +174,37 @@ fn import_with(
     let json = serde_json::to_vec_pretty(&HistoryRecord::ImportManifest(manifest))
         .map_err(|e| ImportError::ManifestInvalid(e.to_string()))?;
     changes.push(Change::put(MANIFEST_PATH, json));
-    tamper(&mut changes);
+    Ok((changes, files.len()))
+}
 
-    let message = format!(
-        "Import records/ from {c0}: {} files and {MANIFEST_PATH}",
-        files.len()
-    );
-    let commit = writer.append(&message, &changes)?;
-    verify_import(git, &c0, &commit)?;
+/// The cutover import (job 7 of the plan, D111): copies `records/` at `c0` onto the tip of the **remote**
+/// records branch `remote`, together with [`MANIFEST_PATH`] and `extra` (the legacy-exempt record), in one
+/// commit pushed with an expected-tip guard, then checks the new commit with [`verify_cutover_import`] and
+/// returns its id.
+///
+/// Unlike [`import_records`], the branch already has a tip: the cutover job's landing record is on it, because
+/// `c0` is that landing's host commit and so is not known before it. The import therefore appends to the tip
+/// instead of creating the branch. It is refused ([`ImportError::AlreadyImported`]) when the tip already holds
+/// a manifest, so nothing is written twice. `c0` must be a commit in this repository.
+pub fn import_at_cutover(
+    git: &Git,
+    remote: &str,
+    c0: &str,
+    extra: &[Change],
+) -> Result<String, ImportError> {
+    let c0 = git
+        .rev_parse(c0)?
+        .ok_or_else(|| ImportError::NotACommit { c0: c0.to_string() })?;
+    let writer = RecordsWriter::new(git);
+    if let Some(tip) = writer.sync_from(remote)?
+        && git.show_file(&tip, MANIFEST_PATH)?.is_some()
+    {
+        return Err(ImportError::AlreadyImported { tip });
+    }
+    let (mut changes, count) = import_changes(git, &c0)?;
+    changes.extend(extra.iter().cloned());
+    let commit = writer.append_to_remote(remote, &import_message(&c0, count), &changes, &[])?;
+    verify_cutover_import(git, &c0, &commit)?;
     Ok(commit)
 }
 
@@ -189,6 +230,17 @@ fn source_files(git: &Git, c0: &str) -> Result<BTreeMap<String, String>, ImportE
 /// Re-reads `commit` and fails if it is not a faithful import of `records/` at `c0`. See the module docs for
 /// the list of checks, in the order they run.
 pub fn verify_import(git: &Git, c0: &str, commit: &str) -> Result<(), ImportError> {
+    verify_with(git, c0, commit, true)
+}
+
+/// As [`verify_import`] for a commit made by [`import_at_cutover`]: the commit sits on a branch that already
+/// holds other records (landings, intents, the legacy-exempt record), so only the files under `records/` and
+/// the manifest are compared with `C0`. Everything else about the check is the same.
+pub fn verify_cutover_import(git: &Git, c0: &str, commit: &str) -> Result<(), ImportError> {
+    verify_with(git, c0, commit, false)
+}
+
+fn verify_with(git: &Git, c0: &str, commit: &str, strict: bool) -> Result<(), ImportError> {
     let source = source_files(git, c0)?;
 
     let manifest_bytes = git
@@ -216,7 +268,7 @@ pub fn verify_import(git: &Git, c0: &str, commit: &str) -> Result<(), ImportErro
     let imported: BTreeMap<String, String> = git
         .ls_tree(commit)?
         .into_iter()
-        .filter(|e| e.path != MANIFEST_PATH)
+        .filter(|e| e.path != MANIFEST_PATH && (strict || e.path.starts_with(SOURCE_DIR)))
         .map(|e| (e.path, e.oid))
         .collect();
     let by_path: BTreeMap<&str, &ImportedPath> = manifest

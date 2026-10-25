@@ -27,12 +27,18 @@
 //! parent otherwise is a squash. A rebase that replays several commits leaves a landing that names one host
 //! commit, so the other replayed commits are reported unattributed.
 //!
+//! After the landing records are repaired, the same step runs the records-history cutover catch-up
+//! ([`crate::gh::cutover_catch_up`]): when `[history] cutover_job` names a job whose landing record is on the
+//! records branch but whose import is not, it imports `records/` at that landing's host commit and writes the
+//! legacy-exempt record. It is idempotent, so a second run writes nothing.
+//!
 //! Reconciliation never fails the command that runs it: every problem becomes a finding or a skipped reason.
 
 use crate::Athena;
 use crate::Ui;
 use crate::gh::{
-    GhClient, GitLandingRecords, LandingFacts, MergeMethod, PrHost, Runner, parse_remote,
+    GhClient, GitLandingRecords, LandingFacts, MergeMethod, PrHost, Runner, cutover_catch_up,
+    parse_remote,
 };
 use crate::status::StatusView;
 use anyhow::{Context, Result, anyhow};
@@ -144,6 +150,10 @@ pub struct ReconcileReport {
     /// Why nothing was reconciled, when that is so: no records branch, no landing intent, no remote.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skipped: Option<String>,
+    /// What the cutover catch-up did or could not do (see [`crate::gh::cutover_catch_up`]); empty when it had
+    /// nothing to do.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub cutover: Vec<String>,
 }
 
 impl ReconcileReport {
@@ -156,16 +166,17 @@ impl ReconcileReport {
 
     /// Whether there is anything to tell a person.
     pub fn is_quiet(&self) -> bool {
-        self.findings.is_empty() && self.skipped.is_none()
+        self.findings.is_empty() && self.skipped.is_none() && self.cutover.is_empty()
     }
 
-    /// The lines for a person: the skipped reason, then each finding.
+    /// The lines for a person: the skipped reason, then each finding, then the cutover catch-up.
     pub fn lines(&self) -> Vec<String> {
         let mut lines = Vec::new();
         if let Some(reason) = &self.skipped {
             lines.push(format!("reconcile: nothing to do ({reason})"));
         }
         lines.extend(self.findings.iter().map(Finding::line));
+        lines.extend(self.cutover.iter().cloned());
         lines
     }
 
@@ -415,7 +426,7 @@ impl Athena {
                 "the remote has no branch {branch}"
             )));
         };
-        match &client {
+        let reconciled = match &client {
             Some(client) => reconcile(&self.git, &tip, &sink, client),
             None => reconcile(
                 &self.git,
@@ -423,7 +434,14 @@ impl Athena {
                 &sink,
                 &NoHost("the remote is not a supported host".into()),
             ),
-        }
+        };
+        // The cutover catch-up runs after the landing records are repaired, so a landing written just now
+        // can start the import, and runs even when the repair stopped. It reads `[history] cutover_job` from
+        // the default branch's tip.
+        let cutover = cutover_catch_up(&sink, &tip);
+        let mut report = reconciled?;
+        report.cutover = cutover;
+        Ok(report)
     }
 
     /// [`Athena::status`] with a reconciliation first, whose report is in the view.
@@ -844,5 +862,183 @@ mod tests {
         );
         assert_eq!(host.calls(), 0);
         assert_eq!(empty_world.records_tip(), before);
+    }
+
+    // ---- The cutover catch-up (records-history cutover, D111) ----
+
+    const CUTOVER_JOB: &str = "20261024-114107-7z2t";
+
+    /// A world in which main's tip is a squash whose `athena.toml` names `CUTOVER_JOB` as the cutover job,
+    /// with the intent and the landing record for it on the records branch, and no import. Returns the world
+    /// and `C0`, the squash.
+    fn landed_cutover_world() -> (World, String) {
+        let world = World::new();
+        let base = world.tip();
+        let config = athena_gate::BUILTIN_CONFIG
+            .lines()
+            .map(|l| {
+                if l.starts_with("cutover_job = ") {
+                    format!("cutover_job = \"{CUTOVER_JOB}\"")
+                } else {
+                    l.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        world
+            .git
+            .run(["checkout", "-q", "--detach", &base])
+            .unwrap();
+        let job = athena_data::JobId::parse(CUTOVER_JOB).unwrap();
+        let mut files = crate::land::fixtures::landed(&job);
+        files.push(crate::land::fixtures::plain("pr7.txt", "pr7.txt"));
+        files.push(crate::land::fixtures::plain("athena.toml", &config));
+        let head = crate::land::fixtures::commit(&world.git, &files, "Pull request 7");
+        world
+            .git
+            .run(["push", "-q", "origin", &format!("{head}:refs/heads/pr7")])
+            .unwrap();
+        world.git.run(["checkout", "-q", "main"]).unwrap();
+        let intent = world.sink().intent(7, &head, &base).unwrap();
+        let c0 = world.squash(&head, &base);
+        world
+            .sink()
+            .landing(&LandingFacts {
+                intent,
+                expected_base: base,
+                pr_number: 7,
+                head,
+                host_commit: c0.clone(),
+                merge_method: MergeMethod::Squash,
+            })
+            .unwrap();
+        // The reconcile step finds the default branch through origin/HEAD.
+        world
+            .git
+            .run(["remote", "set-head", "origin", "main"])
+            .unwrap();
+        (world, c0)
+    }
+
+    fn athena_for(world: &World) -> Athena {
+        let state = tempfile::tempdir().unwrap().keep();
+        Athena {
+            git: world.git.clone(),
+            state: crate::state::StateDir::new(state),
+            driver: std::sync::Arc::new(athena_agent::fake::FakeAgentDriver::new(Box::new(|_| {
+                athena_agent::fake::FakeTurn::output(serde_json::json!({}))
+            }))),
+            capabilities: Vec::new(),
+            build: athena_data::records::Build {
+                version: "0.1.0".into(),
+                source_commit: "0".repeat(40),
+                dirty: false,
+            },
+            athena_bin: "/bin/false".into(),
+            nested: None,
+            pinner: Box::new(crate::fake::CountingPinner::new(&"0".repeat(40))),
+            jev: None,
+        }
+    }
+
+    fn commits_on_records(world: &World) -> usize {
+        let tip = world.records_tip().unwrap();
+        world
+            .bare
+            .run(["rev-list", "--count", "--first-parent", &tip])
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
+    }
+
+    #[test]
+    fn catch_up_imports_at_c0_and_writes_the_legacy_exempt_record_then_writes_nothing() {
+        let (world, c0) = landed_cutover_world();
+        let athena = athena_for(&world);
+        let landed_tip = world.records_tip().unwrap();
+        assert_eq!(commits_on_records(&world), 2, "the intent and the landing");
+        assert!(
+            world
+                .bare
+                .show_file(&landed_tip, "import-manifest.json")
+                .unwrap()
+                .is_none()
+        );
+
+        let first = athena.reconcile(&crate::gh::GhCli, &crate::Quiet);
+        assert_eq!(first.cutover.len(), 1, "{first:?}");
+        assert!(first.cutover[0].contains("imported records/ at C0"));
+        assert!(first.cutover[0].contains("legacy-exempt record"));
+        assert!(first.lines().iter().any(|l| l.starts_with("cutover:")));
+        let tip = world.records_tip().unwrap();
+        assert_ne!(tip, landed_tip, "the import is a real write");
+        assert_eq!(commits_on_records(&world), 3);
+        assert_eq!(world.bare.parents(&tip).unwrap(), vec![landed_tip]);
+        crate::records_import::verify_cutover_import(&world.git, &c0, &tip).unwrap();
+        let exempt = world
+            .bare
+            .show_file(&tip, "legacy-exempt.json")
+            .unwrap()
+            .expect("the legacy-exempt record");
+        match athena_data::history::HistoryRecord::parse(&String::from_utf8(exempt).unwrap())
+            .unwrap()
+        {
+            athena_data::history::HistoryRecord::LegacyExempt(record) => {
+                assert_eq!(record.entries.len(), 7);
+                assert!(record.entries.iter().all(|e| !e.reason.is_empty()));
+            }
+            other => panic!("{other:?}"),
+        }
+
+        // A second reconcile writes nothing.
+        let second = athena.reconcile(&crate::gh::GhCli, &crate::Quiet);
+        assert!(second.cutover.is_empty(), "{second:?}");
+        assert_eq!(world.records_tip().unwrap(), tip);
+        assert_eq!(commits_on_records(&world), 3);
+    }
+
+    #[test]
+    fn catch_up_writes_only_the_legacy_exempt_record_when_the_import_is_already_there() {
+        let (world, c0) = landed_cutover_world();
+        crate::records_import::import_at_cutover(&world.git, "origin", &c0, &[]).unwrap();
+        let imported_tip = world.records_tip().unwrap();
+        let report = athena_for(&world).reconcile(&crate::gh::GhCli, &crate::Quiet);
+        assert_eq!(report.cutover.len(), 1, "{report:?}");
+        assert!(report.cutover[0].contains("wrote the legacy-exempt record"));
+        assert!(!report.cutover[0].contains("imported"), "{report:?}");
+        let tip = world.records_tip().unwrap();
+        assert_eq!(world.bare.parents(&tip).unwrap(), vec![imported_tip]);
+        assert_eq!(
+            world.bare.added_paths(&tip).unwrap(),
+            vec!["legacy-exempt.json".to_string()]
+        );
+    }
+
+    #[test]
+    fn catch_up_does_nothing_when_the_default_branch_names_no_cutover_job() {
+        let world = World::new();
+        let base = world.tip();
+        let (head, _) = world.intent(3, &base);
+        let squash = world.squash(&head, &base);
+        world
+            .git
+            .run(["remote", "set-head", "origin", "main"])
+            .unwrap();
+        let _ = squash;
+        let report = athena_for(&world).reconcile(&crate::gh::GhCli, &crate::Quiet);
+        // The reconcile step repaired the missing landing record, and the catch-up wrote nothing more.
+        assert_eq!(report.findings.len(), 1, "{report:?}");
+        assert!(report.cutover.is_empty(), "{report:?}");
+        let tip = world.records_tip().unwrap();
+        assert_eq!(world.bare.added_paths(&tip).unwrap().len(), 1);
+        assert!(
+            world
+                .bare
+                .show_file(&tip, "import-manifest.json")
+                .unwrap()
+                .is_none()
+        );
     }
 }

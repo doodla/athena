@@ -60,6 +60,89 @@ pub const CHECKPOINT_DIR: &str = "checkpoints";
 /// version differs ignores that checkpoint and runs a full replay. Change it whenever the judging rules do.
 pub const CHECK_VERSION: &str = "attribution-check/1";
 
+/// Where the importer writes its manifest, at the root of the records branch (`records_import` in
+/// `athena-core`). The gate cannot depend on that crate, so the name is repeated here.
+pub const IMPORT_MANIFEST_PATH: &str = "import-manifest.json";
+
+/// How far the records-history cutover has got, as the records branch shows it (D111).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CutoverState {
+    /// No records branch (or a diverged one), or no landing record for the cutover job: the cutover has not
+    /// happened and every commit is judged by the old rules.
+    NotLanded,
+    /// The cutover job's landing record names `c0`, but the records branch holds no import manifest naming
+    /// `c0` yet. The import is still due, so the old rules still apply.
+    Pending { c0: String },
+    /// The landing record names `c0` and the import manifest naming `c0` is on the records branch.
+    Shown { c0: String },
+}
+
+/// The host commit of the landing record that lands `job` at the records tip, which is `C0` when `job` is the
+/// cutover job. A landing lands `job` when one of its commits names the job, or the intent it cites does. With
+/// several such landings the earliest decides. `None` when there is no records branch or no such landing.
+pub fn cutover_commit(git: &Git, job: &str) -> Result<Option<String>> {
+    let RecordsTip::At { tip, .. } = records_branch::resolve_tip(git)? else {
+        return Ok(None);
+    };
+    cutover_commit_at(git, &tip, job)
+}
+
+/// As [`cutover_commit`], reading the records commit `tip` instead of resolving the branch.
+pub fn cutover_commit_at(git: &Git, tip: &str, job: &str) -> Result<Option<String>> {
+    let mut scratch = AttributionReport::default();
+    let intents: Vec<LandingIntent> = read_records(git, tip, INTENT_DIR, &mut scratch)?
+        .into_iter()
+        .filter_map(|r| match r {
+            HistoryRecord::LandingIntent(i) => Some(i),
+            _ => None,
+        })
+        .collect();
+    let mut found: Vec<Landing> = read_records(git, tip, LANDING_DIR, &mut scratch)?
+        .into_iter()
+        .filter_map(|r| match r {
+            HistoryRecord::Landing(l) => Some(l),
+            _ => None,
+        })
+        .filter(|landing| {
+            landing
+                .commits
+                .iter()
+                .any(|c| c.job.as_ref().is_some_and(|j| j.as_str() == job))
+                || intents
+                    .iter()
+                    .any(|i| i.id == landing.intent && i.job_ids.iter().any(|j| j.as_str() == job))
+        })
+        .collect();
+    found.sort_by(|a, b| (a.created_at, a.id.as_str()).cmp(&(b.created_at, b.id.as_str())));
+    Ok(found.into_iter().next().map(|l| l.host_commit))
+}
+
+/// Whether the records branch holds an import manifest at its root naming `c0`.
+pub fn manifest_names(git: &Git, tip: &str, c0: &str) -> Result<bool> {
+    let Some(bytes) = git.show_file(tip, IMPORT_MANIFEST_PATH)? else {
+        return Ok(false);
+    };
+    Ok(matches!(
+        HistoryRecord::parse(&String::from_utf8_lossy(&bytes)),
+        Ok(HistoryRecord::ImportManifest(m)) if m.c0 == c0
+    ))
+}
+
+/// The cutover state for `job` (the configured `[history] cutover_job`) on the records branch.
+pub fn cutover_state(git: &Git, job: &str) -> Result<CutoverState> {
+    let RecordsTip::At { tip, .. } = records_branch::resolve_tip(git)? else {
+        return Ok(CutoverState::NotLanded);
+    };
+    let Some(c0) = cutover_commit_at(git, &tip, job)? else {
+        return Ok(CutoverState::NotLanded);
+    };
+    Ok(if manifest_names(git, &tip, &c0)? {
+        CutoverState::Shown { c0 }
+    } else {
+        CutoverState::Pending { c0 }
+    })
+}
+
 /// What kind of problem a finding is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FindingKind {

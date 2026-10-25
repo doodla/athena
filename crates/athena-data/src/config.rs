@@ -292,6 +292,11 @@ pub struct ToolPin {
 pub struct History {
     #[serde(default)]
     pub exempt: Vec<String>,
+    /// The id of the job whose landing is the records-history cutover (`docs/design/records-history.md`
+    /// §4 and §10, D111). `C0` is the host commit of that job's landing record on `athena/records`. Unset
+    /// means no cutover: the history check judges every commit by the old rules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cutover_job: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -785,6 +790,22 @@ pub(crate) mod tests {
                 .iter()
                 .any(|c| c.name == "fmt" && c.kind == CheckKind::Command)
         );
+    }
+
+    #[test]
+    fn cutover_job_is_optional_and_the_repo_config_names_the_cutover_job() {
+        let config = Config::parse(REPO_CONFIG).unwrap();
+        assert_eq!(
+            config.history.cutover_job.as_deref(),
+            Some("20261025-001232-vesh")
+        );
+        let without = REPO_CONFIG
+            .lines()
+            .filter(|l| !l.starts_with("cutover_job = "))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(without.len() < REPO_CONFIG.len(), "the line was removed");
+        assert_eq!(Config::parse(&without).unwrap().history.cutover_job, None);
     }
 
     #[test]

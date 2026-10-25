@@ -9,6 +9,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The records-history cutover (job 7, part 1, of `docs/design/records-history.md`, sections 4 and 10, D111,
+  D119). `athena.toml` `[history]` gains an optional `cutover_job`; `C0` is the host commit of that job's landing
+  record on `athena/records`. When `athena land --pr` lands that job, after the landing record it imports
+  `records/` at `C0` (one commit with `import-manifest.json`, checked by a self-check) and writes the
+  legacy-exempt record from `[history] exempt`. The reconcile step that `athena land` and `athena status` run
+  first repeats this when the landing is on the branch but the import is not, and writes nothing the second time.
+  `athena check --history` judges commits up to and including `C0` by the old rules and later commits only by the
+  attribution check, once the branch shows the import; before that it behaves as it did and prints a note that the
+  cutover is pending. The required CI job keeps its name, "the full history", and fetches `athena/records` before
+  the check (not on pull requests). Commit-message trailers are still written.
 - Request priority. A line `Priority: high`, `Priority: normal` or `Priority: low` (any case) in a request's
   words sets its priority; no such line means normal. `athena plan` and `athena drain` order by dependencies
   first, then priority, then rung, then age, so a newer high-priority request runs before older normal ones
