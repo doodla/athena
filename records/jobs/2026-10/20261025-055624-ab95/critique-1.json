@@ -1,0 +1,62 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261025-055624-ab95",
+  "round": 1,
+  "at": "2026-10-25T05:59:54.422658361Z",
+  "invocation_seq": 3,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "If the new pre-setup xtask build or fingerprint step fails, the whole job fails instead of falling back to a full run.",
+      "evidence": "Cargo.toml sets rust-version = \"1.97\" and rust-toolchain.toml pins 1.97.0. The plan builds xtask with the runner's `cargo +stable` before setup. If the runner's stable is older, or the build fails for any other reason, the required job fails. Nothing falls back to the full run. Fix: Make the fingerprint and gate steps degrade to a miss: add continue-on-error to the fingerprint step, and have the gate treat an empty fingerprint as skip=false. Add an assertion for this to the workflow test.",
+      "location": "Plan Risks 1 / Open question 1; ci.yml lookup steps",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan does not say how the workflow test will parse ci.yml; xtask has no YAML parser.",
+      "evidence": "xtask's dev-dependencies are athena-context, regex, serde and toml. The existing policy.rs tests only treat ci.yml as a path (lines 250 and 321). Fix: Name the method. Either split the checks job into steps by reading the text and assert on each step's `if:` and `key:` lines, or add a maintained YAML crate as a dev-dependency and record that choice under buy-first.",
+      "location": "Demonstrations for criteria 2-5 (policy.rs workflow-structure test)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan says two different things about where the pre-setup xtask build writes its output.",
+      "evidence": "Risks says `cargo +stable run --locked -q -p xtask`; the open questions say the plan also uses a separate CARGO_TARGET_DIR. If the build writes into ./target, its artifacts land in the target-checks cache that main saves. Fix: Fix one choice: build into a separate directory (e.g. $RUNNER_TEMP/xtask-target) so it stays out of the shared target cache.",
+      "location": "Risks 1 vs Open questions 1",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The workflow-file risk is moot: ci.yml, rust-toolchain.toml and Cargo.lock are already governed paths.",
+      "evidence": ".gitattributes marks only /CLAUDE.md, /BRIEF.md and /LICENSE as owner paths. Fix: Replace the conditional mitigation with the fact, in the plan and in decisions.md. Also state the trade: tests that read records/ (walltime.rs, spec.rs) are not rerun after a records-only change.",
+      "location": "Risks 3",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The criterion 6 demonstration does not show the fingerprint is reused rather than reimplemented.",
+      "evidence": "The temp-repo test would also pass against a faithful copy of the algorithm. 'main.rs calls athena_git::attrs::fingerprint' is not a runnable check. Fix: Add a test that compares the `xtask fingerprint` output with athena_git::attrs::fingerprint on the same temp repo. Or say plainly that criterion 6 is shown by reading the code plus `cargo tree -p xtask`.",
+      "location": "Demonstration for criterion 6",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The `--outcome` flag carries no information in the workflow.",
+      "evidence": "The mark step runs under implicit success(), so whenever it runs, the outcome it receives is 'success'. Fix: Pass `${{ steps.checks.outcome }}` explicitly, or drop the flag.",
+      "location": "Decision 2",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The cache key carries the 'sha256:' prefix.",
+      "evidence": "fingerprint() returns `sha256:<hex>` (attrs.rs:157), so the key is `ci-pass-sha256:<hex>`. Fix: Optionally strip the prefix. Colons are allowed, so this is cosmetic.",
+      "location": "Cache key format",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the snapshot to check the plan. The plan matches the request and the accepted reading, and the parts it relies on exist as described. `athena_git::attrs::fingerprint(git, treeish, rules_commit)` is at crates/athena-git/src/attrs.rs:139 and `Git::at` is at lib.rs:141. Records/ and owner paths are left out of the fingerprint as the request wants. ci.yml and rust-toolchain.toml are governed paths, so a change to either changes the fingerprint (.gitattributes marks only CLAUDE.md, BRIEF.md and LICENSE). The xtask row in docs/architecture.md says 'data', the stale comment is at policy.rs:33, and the graph test is at policy.rs:424. The current job runs `cargo run -p xtask -- ci`, so skipping it skips fmt, clippy and tests as asked. The core design holds up: the marker must name the same fingerprint, the marker is written only after the checks pass, the pass entry is saved on every branch, and the shared caches stay default-branch-only. The demonstrations would fail without the behavior: real temp-repo tests of the binary, decision tests for check and mark, and a structure test of the workflow. I found no blocker or major problem. The gaps are robustness and precision. A failure of the new pre-setup step has no fallback to a full run. The plan does not say how the test will parse the workflow YAML. Where the pre-setup build writes its output is stated two different ways. One risk entry is moot. The criterion 6 demonstration does not show that the fingerprint is reused rather than reimplemented."
+}

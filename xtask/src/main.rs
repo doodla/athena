@@ -4,6 +4,8 @@
 //!   Every step is idempotent. `./setup.sh` installs rustup if needed and then runs this.
 //! - `cargo run -p xtask -- ci`: the checks CI runs (fmt, clippy, tests), runnable locally.
 //! - `cargo run -p xtask -- walltime`: wall time per verified result from the job records.
+//! - `cargo run -p xtask -- fingerprint` and `ci-cache`: let the CI job reuse its own earlier pass for
+//!   unchanged governed content (see `ci_cache`).
 //!
 //! Setup reads every pin from `athena.toml`, reads credentials only to report whether they work, and never
 //! stores them.
@@ -14,6 +16,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
+mod ci_cache;
 mod site;
 mod walltime;
 
@@ -28,10 +31,13 @@ fn main() -> ExitCode {
         Some("ci") => ci(),
         Some("site") => site_command(&args[1..]),
         Some("walltime") => walltime::command(&args[1..], &repo_root()),
+        Some("fingerprint") => ci_cache::fingerprint_command(),
+        Some("ci-cache") => ci_cache::command(&args[1..]),
         _ => {
             eprintln!(
-                "usage: cargo run -p xtask -- setup [--ci] [--force] [--allow-dirty]\n       cargo run -p xtask -- ci\n       {SITE_USAGE}\n       {}",
-                walltime::USAGE
+                "usage: cargo run -p xtask -- setup [--ci] [--force] [--allow-dirty]\n       cargo run -p xtask -- ci\n       {SITE_USAGE}\n       {}\n       {}",
+                walltime::USAGE,
+                ci_cache::USAGE
             );
             return ExitCode::from(2);
         }

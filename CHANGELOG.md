@@ -9,6 +9,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The 'fmt, clippy, tests' CI job reuses its own earlier pass for unchanged governed content (D121).
+  `cargo run -p xtask -- fingerprint` prints athena-git's governed-content fingerprint of `HEAD` (it ignores
+  `records/` and owner paths), and `xtask ci-cache check|mark|report` hold the decisions. `ci.yml` looks up
+  `ci-pass-<fingerprint>` with `actions/cache` before setup; a marker naming the fingerprint skips setup and the
+  checks and reports the fingerprint and matched key in the log and step summary; otherwise the full job runs and
+  the marker is saved only after the checks pass, on pull-request branches too (GitHub keeps those entries on
+  their branch; the shared toolchain, registry and target caches are still saved only from the default branch).
+  `xtask` now depends on `athena-git` (`docs/architecture.md` updated). Landing median before: 15.4 minutes over 33
+  jobs, 2026-10-23 to 25; the figure after is not yet measured.
 - A shared test fixture for the records-history cutover (D111, D120): `athena_core::test_support`, compiled
   only for tests and the `test-support` feature of `athena-core`. `CutoverFixture::build` makes a scratch
   repository with a bare remote and this history, all through Athena's own writers: a bootstrap commit; one job

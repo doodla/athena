@@ -2963,3 +2963,47 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Reversal cost:** Low. Delete the module, the feature, the dev-dependency and the test file.
 - **Provenance:** read: `gh.rs`, `pr.rs`, `run.rs`, `attribution.rs`, `legacy.rs`, `history.rs`; measured:
   `cargo test -p athena-cli --test cutover_fixture`.
+
+## D121 · The 'fmt, clippy, tests' job reuses its own earlier pass for unchanged governed content
+
+- **Case:** Landing waits on the 'fmt, clippy, tests' job. Measured landing median before this change: 15.4
+  minutes over 33 jobs, 2026-10-23 to 2026-10-25 (from the job records). The job reruns
+  setup, clippy and the whole suite even when the governed content is byte-identical to a tree that already
+  passed (a records-only push, an owner-path edit, a rerun).
+- **Decision:** `cargo run -p xtask -- fingerprint` prints `athena_git::attrs::fingerprint(git, HEAD, HEAD)`: the
+  governed-content fingerprint athena-gate and `land` already use, which ignores `records/` and owner paths. In
+  `ci.yml`, right after checkout and before any setup, the job builds xtask with the runner's own stable cargo
+  (into a separate target directory), computes the fingerprint and restores `ci-pass/` from `actions/cache` under
+  `ci-pass-<fingerprint>`. `xtask ci-cache check` answers skip only if the restored `ci-pass/passed` marker exists
+  and names that fingerprint, so a hit on an empty or foreign entry does not skip. On a skip, a report step writes
+  the fingerprint and matched key to the log and step summary, and the restores, setup, checks and shared saves
+  are skipped. Otherwise the full job runs; after the checks step succeeds, `xtask ci-cache mark --outcome
+  <outcome of the checks step>` writes the marker (only for `success`) and `actions/cache/save` stores it under
+  the fingerprint key. A failed or cancelled run writes nothing, so absence means 'not passed'. The save runs on
+  pull-request branches too: GitHub scopes a cache to the branch that saved it, so a pull request's entries serve
+  only later runs on that branch, and the toolchain, registry and target caches stay saved only from the default
+  branch. Tests: `xtask/tests/fingerprint.rs` (fingerprint unchanged by `records/` and owner-path changes,
+  changed by a governed change; `ci_cache_*` for miss, foreign marker, failed run, pass then hit, report) and
+  `the_checks_job_looks_up_its_earlier_pass_before_setup_and_skips_on_a_hit` and
+  `the_pass_is_marked_and_saved_only_after_the_checks_and_the_shared_caches_stay_default_branch_only` in
+  `xtask/tests/policy.rs` (step order and conditions of `ci.yml`). The xtask to athena-git edge is added to
+  `docs/architecture.md`; athena-git stays a leaf.
+- **Alternatives:** (a) Skip on the `cache-hit` output alone: a hit does not prove the entry is a pass, and the
+  logic cannot be tested outside Actions. (b) Store a pass or fail status in the entry: a failed run should leave
+  nothing, and absence cannot be misread. (c) Save the pass entry only from the default branch: pull-request runs,
+  which are the landing case, would never reuse it. (d) Copy the fingerprint algorithm into xtask, or call the
+  `athena` binary: the copy drifts from the gate's rules, and the binary is not installed before setup, which is
+  what a skip avoids. (e) Hash the whole tree or `git diff` against the base: records-only and owner-path changes
+  would force a full run. (f) A merge queue or a path filter on the workflow: a path filter cannot tell governed
+  from owner paths, and a required job that does not run blocks merging.
+- **Tradeoff:** A miss now pays for a cold xtask build before setup (not measured here). A cached pass is trusted
+  as long as its fingerprint matches: it covers the governed files, including `ci.yml` and `rust-toolchain.toml`,
+  but not the runner image or a newly published dependency version outside `Cargo.lock`, and a flaky test that
+  passed once is reused. Entries are immutable per key, and a rerun after a pass hits the entry instead of saving.
+- **Reversal cost:** Low. Remove the new steps and conditions from `ci.yml`, the `fingerprint` and `ci-cache`
+  commands and the xtask to athena-git edge.
+- **Provenance:** measured: the 15.4 minute median over 33 jobs (2026-10-23 to 25) from the job records; the
+  tests above under `cargo test -p xtask`; read: `attrs.rs`, `ci.yml`, GitHub's cache scoping rules. Not measured:
+  the landing median after this change, the cold xtask build time on a runner, and a real run of the workflow;
+  the after-figure is deferred to a later measurement. This is part A1 of a larger speed-up; the early push of
+  the candidate is a separate job.

@@ -30,8 +30,8 @@ fn git(args: &[&str], stdin: Option<&str>) -> String {
         .stdout(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    // `xtask` may not depend on `athena-git` (architecture policy), so this mirrors
-    // `athena_git::output_with_stdin`: write stdin on its own thread while stdout is drained, or both
+    // This mirrors `athena_git::output_with_stdin` (a local copy keeps this helper free of the crate's
+    // error type): write stdin on its own thread while stdout is drained, or both
     // sides block once the output passes the pipe buffer.
     let mut pipe = child.stdin.take().unwrap();
     let input = stdin.unwrap_or("").as_bytes();
@@ -485,6 +485,118 @@ fn every_test_named_in_the_enforcement_map_exists() {
         missing.is_empty(),
         "tests named in docs/enforcement.md that do not exist: {missing:?}"
     );
+}
+
+// --------------------------------------------------------------------------------------------------------
+// The 'fmt, clippy, tests' job reuses its own earlier pass (docs/decisions.md D121)
+
+/// The steps of the job named `fmt, clippy, tests`, each as its text (name line included).
+fn checks_job_steps() -> Vec<String> {
+    let text = std::fs::read_to_string(root().join(".github/workflows/ci.yml")).unwrap();
+    let start = text
+        .find("    name: fmt, clippy, tests\n")
+        .expect("job name");
+    let rest = &text[start..];
+    let end = rest.find("\n  history:").expect("the next job");
+    let mut steps: Vec<String> = Vec::new();
+    for line in rest[..end].lines().skip(1) {
+        if line.starts_with("      - ") {
+            steps.push(String::new());
+        }
+        if let Some(step) = steps.last_mut()
+            && !line.trim_start().starts_with('#')
+        {
+            step.push_str(line);
+            step.push('\n');
+        }
+    }
+    steps
+}
+
+fn step_index(steps: &[String], name_part: &str) -> usize {
+    steps
+        .iter()
+        .position(|s| {
+            s.lines().any(|l| {
+                l.trim_start_matches([' ', '-'])
+                    .starts_with(&format!("name: {name_part}"))
+            })
+        })
+        .unwrap_or_else(|| panic!("no step named {name_part}"))
+}
+
+const SKIPPED_ON_A_HIT: &str = "steps.gate.outputs.skip != 'true'";
+const DEFAULT_BRANCH_ONLY: &str =
+    "github.ref == format('refs/heads/{0}', github.event.repository.default_branch)";
+
+#[test]
+fn the_checks_job_looks_up_its_earlier_pass_before_setup_and_skips_on_a_hit() {
+    let steps = checks_job_steps();
+    let lookup = step_index(&steps, "Look up an earlier pass");
+    let setup = step_index(&steps, "Set up");
+    let checks = step_index(&steps, "cargo fmt --check");
+    let gate = step_index(&steps, "Decide whether");
+    let fingerprint = step_index(&steps, "Fingerprint the governed content");
+    assert!(fingerprint < lookup && lookup < gate && gate < setup && setup < checks);
+    assert!(
+        steps[fingerprint].contains("fingerprint"),
+        "xtask's fingerprint is used"
+    );
+    assert!(steps[lookup].contains("actions/cache/restore@"));
+    assert!(steps[lookup].contains("steps.fingerprint.outputs.key"));
+    assert!(steps[fingerprint].contains("key=ci-pass-"));
+
+    // Everything after the gate except the hit report carries the skip condition.
+    let report = step_index(&steps, "Report the reused pass");
+    assert!(steps[report].contains("if: steps.gate.outputs.skip == 'true'"));
+    assert!(steps[report].contains("steps.ci-pass.outputs.cache-matched-key"));
+    assert!(steps[report].contains("steps.fingerprint.outputs.fingerprint"));
+    assert!(steps[report].contains("$GITHUB_STEP_SUMMARY"));
+    for (i, step) in steps.iter().enumerate().skip(gate + 1) {
+        if i != report {
+            assert!(
+                step.contains(SKIPPED_ON_A_HIT),
+                "step {i} is not skipped on a hit:\n{step}"
+            );
+        }
+    }
+    // The existing shared caches are restored after the lookup, not before it.
+    assert!(step_index(&steps, "Restore the toolchain cache") > gate);
+}
+
+#[test]
+fn the_pass_is_marked_and_saved_only_after_the_checks_and_the_shared_caches_stay_default_branch_only()
+ {
+    let steps = checks_job_steps();
+    let checks = step_index(&steps, "cargo fmt --check");
+    let mark = step_index(&steps, "Mark the pass");
+    let save = step_index(&steps, "Save the pass under the fingerprint");
+    assert!(checks < mark && mark < save);
+    assert!(steps[checks].contains("id: checks"));
+    assert!(steps[mark].contains("steps.checks.outcome"));
+    assert!(steps[mark].contains("ci-cache mark"));
+    // The pass save has no default-branch condition (a pull request saves its own entry) and no status
+    // override such as `always()` or `failure()`, so it never runs after a failed step.
+    assert!(steps[save].contains("actions/cache/save@"));
+    assert!(!steps[save].contains(DEFAULT_BRANCH_ONLY));
+    assert!(!steps[save].contains("pull_request"));
+    for status in ["always()", "failure()", "cancelled()"] {
+        assert!(!steps[save].contains(status) && !steps[mark].contains(status));
+    }
+    assert!(steps[save].contains("steps.fingerprint.outputs.key"));
+    // The three shared caches are still saved only from the default branch.
+    for name in [
+        "Save the toolchain cache",
+        "Save the registry cache",
+        "Save the target cache",
+    ] {
+        let shared = &steps[step_index(&steps, name)];
+        assert!(shared.contains(DEFAULT_BRANCH_ONLY), "{name}");
+        assert!(
+            shared.contains("github.event_name != 'pull_request'"),
+            "{name}"
+        );
+    }
 }
 
 #[test]
