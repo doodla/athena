@@ -1,0 +1,174 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261010-221301-sakk",
+  "n": 1,
+  "at": "2026-10-10T22:13:35.926008457Z",
+  "invocation_seq": 1,
+  "base_commit": "6b84666083a05fc115831bb348809225e07bd24d",
+  "config_sha256": "67db129587a26d4dcf0f2c3f54e46cfa967037cd9d4481a75f8ae4d2462c26fb",
+  "defaults_sha256": "34395568ed0684d5b19642d761d9d16e023f3263e4313e645b083d31b302e9bc",
+  "defaults_version": 1,
+  "title": "Make the history gate accept squash- and rebase-merged landings",
+  "summary": "`athena check --history` and the governed-content invariant assume a landing commit keeps its parent chain on main. They need the prediction commit to be an ancestor, a \"no earlier landing\" check, and a first-parent job.json. A squash or rebase merge rewrites or collapses those commits, so the check wrongly refuses them. I read the request as making the gate verify landings by content and records, not by commit ancestry, while still refusing unverified governed changes. Merge commits keep working.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "New gate tests for squash, rebase, and refused cases; cargo test and clippy must be clean."
+    },
+    {
+      "id": "verified",
+      "how": "Behavior criteria are checked by running cargo test, clippy and fmt --check."
+    },
+    {
+      "id": "designed",
+      "how": "The design doc §7.3/§7.4 is updated with the alternatives considered."
+    },
+    {
+      "id": "small",
+      "how": "The change is confined to the gate's landing and prediction checks, plus docs."
+    },
+    {
+      "id": "lazy-requests",
+      "how": "The missing detail (trailers kept on squash, how rebase rewrites ids) is recovered from the code and stated as assumptions."
+    },
+    {
+      "id": "rust",
+      "how": "All changes and tests are in Rust."
+    },
+    {
+      "id": "mechanism",
+      "how": "The new rule is enforced by the gate and its history check, not by prose."
+    }
+  ],
+  "assumptions": [
+    "A squash commit keeps the Athena-Job, Athena-Prediction and Athena-Verified-Content trailers in its message. Platforms usually build the squash message from the PR's commit messages, and the user can edit it.",
+    "The squashed or rebased commit's governed-content fingerprint equals the verified one, because the tree is the same as the PR tip's.",
+    "Rebase-merge rewrites commit ids, so Athena-Prediction may name a commit that no longer exists. The prediction check must resolve it through the records, for example the reading file already present in the parent's tree, not through git ancestry.",
+    "A squash of several Athena commits (landing plus record-only commits) into one is in scope only if the result still carries exactly one valid landing's trailers.",
+    "The weaker ancestry proof must not weaken the refusal of hand-made governed changes. Unverified squashed content stays refused."
+  ],
+  "question": "Should a squash commit be required to keep the Athena-* trailers, or should Athena also recognise a squash by the PR's records, with no trailers? I assumed trailers are kept.",
+  "acceptance_criteria": [
+    {
+      "text": "A new gate test builds a history in which a verified landing is squash-merged onto main (one commit, parent chain rewritten, trailers kept). `cargo test -p athena-gate` shows `check_history` reporting no violations for it.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A new gate test rebase-merges a verified landing, so its commit id differs and the Athena-Prediction commit is not an ancestor by id. `cargo test -p athena-gate` shows the history check passing.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A new test shows a squash commit that changes governed content without valid landing trailers or records is still refused with Rule::Invariant, and a second landing of the same job after a squash is still refused. `cargo test -p athena-gate` passes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Existing merge-commit tests (clean merge passes, merge with extra governed content refused) still pass. `cargo test`, `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` are all clean.",
+      "kind": "behavior"
+    },
+    {
+      "text": "docs/design/athena-v0.md §7.3/§7.4 describes how the invariant treats merge, squash and rebase strategies and what a landing commit must carry. It names the alternatives considered and cites the code.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has an entry, and README.md or the docs say that any of the three PR merge strategies is supported.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-gate/src/invariant.rs",
+      "action": "modify",
+      "p": 0.93
+    },
+    {
+      "path": "crates/athena-gate/src/history.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-gate/src/jobs.rs",
+      "action": "modify",
+      "p": 0.35
+    },
+    {
+      "path": "crates/athena-gate/src/lib.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-git/src/lib.rs",
+      "action": "modify",
+      "p": 0.25
+    },
+    {
+      "path": "docs/design/athena-v0.md",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "README.md",
+      "action": "modify",
+      "p": 0.35
+    },
+    {
+      "path": "crates/athena-core/src/land.rs",
+      "action": "modify",
+      "p": 0.1
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "action": "modify",
+      "p": 0.08
+    }
+  ],
+  "out_of_scope": [
+    "Changing how Athena itself lands commits locally (it fast-forwards)",
+    "Configuring GitHub repository merge settings or branch protection",
+    "Rewriting or exempting existing history",
+    "Changes to athena.toml, defaults.toml, or other governance files",
+    "Support for non-GitHub forges' squash message formats beyond keeping trailers"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.6,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.2,
+      "cost_usd": {
+        "p10": 0.4,
+        "p50": 1.2,
+        "p90": 3.5
+      },
+      "wall_time_s": {
+        "p10": 300.0,
+        "p50": 900.0,
+        "p90": 2400.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.725,
+      "p_verification_passes": 0.7142857142857143,
+      "p_user_intervenes": 0.1142857142857143,
+      "cost_usd": {
+        "p10": 0.15,
+        "p50": 0.6,
+        "p90": 2.5
+      },
+      "wall_time_s": {
+        "p10": 120.0,
+        "p50": 420.0,
+        "p90": 1500.0
+      }
+    }
+  },
+  "departures": "The reference forecast comes from smaller jobs. This one changes security-sensitive gate logic across several functions that rely on ancestry (is_ancestor on the prediction, earlier_landing, first-parent job.json), and the design is ambiguous. I raise cost and time and lower the chance the reading and the verification pass."
+}

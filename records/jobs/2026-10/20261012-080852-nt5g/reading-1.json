@@ -1,0 +1,156 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261012-080852-nt5g",
+  "n": 1,
+  "at": "2026-10-12T08:09:40.772652108Z",
+  "invocation_seq": 1,
+  "base_commit": "2a73e1645f469658c25002fab61e62c9c1c9d811",
+  "config_sha256": "a6116c38d15e6d5ad59834942e5123ea0be41f8ce5bd5f141a08f4790fdf09de",
+  "defaults_sha256": "34395568ed0684d5b19642d761d9d16e023f3263e4313e645b083d31b302e9bc",
+  "defaults_version": 1,
+  "title": "Match cited verifier commands against simple commands inside ran ones",
+  "summary": "D43 compares each cited command to the verifier's ran commands by exact whole-string match. A verifier that chains or pipes commands cites a piece, which then counts as unseen, so I read the real cause as the matcher. The change relaxes matching to whole simple commands inside what was run, adds tests, and records a decision that amends D43.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "Unit tests for the new matching rule in verify.rs; cargo test and clippy must pass."
+    },
+    {
+      "id": "rust",
+      "how": "The fix and its tests are Rust; the only non-Rust edits are existing docs and a prompt."
+    },
+    {
+      "id": "strangers",
+      "how": "The new decision entry explains the cause with job ids and no commit hashes."
+    },
+    {
+      "id": "evidence",
+      "how": "The decision cites the failing jobs' findings as its evidence and labels the inference about the cause."
+    },
+    {
+      "id": "small",
+      "how": "One focused change to the matcher plus its decision record."
+    },
+    {
+      "id": "verified",
+      "how": "Behavior criteria cite cargo commands the verifier is allowed to run."
+    },
+    {
+      "id": "lazy-requests",
+      "how": "The cause was recovered from verify.rs, policy.rs, stream.rs, and the verifier prompt instead of asking."
+    }
+  ],
+  "assumptions": [
+    "The real cause is in D43's exact whole-string match in verify.rs::judge: the verifier prompt says to list commands 'exactly as you ran them', but a verifier that chains or pipes commands (policy.rs allows `&&` and pipes) cites a piece, so the cited string is not in the ran list. Both cited commands in 86ja end in `2>&1`, which policy.rs allows, so the policy is not denying them. I could not read the job records (absent by design), so this is inferred from the code, not from the verifier's actual command log.",
+    "The fix is to relax matching to whole simple commands within compounds, not to loosen D43 for unrun commands; the rule that an unrun command makes the criterion unmet stays.",
+    "531f85b is taken to be the commit that added D62 and the producer-brief 'What the verifier sees' section, which targeted the producer side and not the matcher."
+  ],
+  "question": "Do you have the command list the verifier actually ran in job 20261012-075010-86ja? I inferred that it ran the tests inside a compound or piped command and cited a piece of it. If it ran something else, for example a different flag order, the matcher fix may be wrong.",
+  "acceptance_criteria": [
+    {
+      "text": "`judge` in crates/athena-core/src/verify.rs counts a cited command as seen when it equals a command the verifier ran, or equals one whole simple command inside a compound the verifier ran (split on `&&`, `;`, `||`, `|`), after trimming and collapsing whitespace. Split on shell separators as policy.rs does, and never match inside quotes. A trailing output filter such as `| tail -n 30` on a ran command does not hide the cited command before it.",
+      "kind": "content"
+    },
+    {
+      "text": "Matching stays strict where it matters: a cited command with different arguments, a different test filter, or a different package is still unseen. A command the verifier never ran is still reported as 'cited but not seen running' and the criterion is still unmet.",
+      "kind": "content"
+    },
+    {
+      "text": "docs/decisions.md gains a new decision that amends D43. It states the measured cause (exact whole-string matching failed verifiers that ran the cited command inside a compound or piped command, as in jobs 20261012-075010-86ja and 20261012-073105-mj6d), says why 531f85b (producer brief guidance) did not address it, and gives alternatives, tradeoff, and reversal cost. It cites no commit hash made during verification.",
+      "kind": "content"
+    },
+    {
+      "text": "crates/athena-context/prompts/verifier.md and the D43 text in the v0 design either stay consistent with the new rule or are updated to say that cited commands are matched as whole simple commands inside what was run. CHANGELOG.md has an entry under the correct existing heading.",
+      "kind": "content"
+    },
+    {
+      "text": "New unit tests in crates/athena-core/src/verify.rs cover: a cited command run alone; run after `cargo build &&`; run with `2>&1 | tail`; extra whitespace; a cited command with a different filter or package (unmet); a never-run command (unmet). Run `cargo test --locked -p athena-core verify` and expect all to pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The whole workspace stays green: `cargo test --locked`, `cargo clippy --locked --all-targets -- -D warnings`, and `cargo fmt --check` all pass.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-context/prompts/verifier.md",
+      "action": "modify",
+      "p": 0.45
+    },
+    {
+      "path": "docs/design/athena-v0.md",
+      "action": "modify",
+      "p": 0.25
+    },
+    {
+      "path": "crates/athena-agent/src/policy.rs",
+      "action": "modify",
+      "p": 0.15
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "p": 0.12
+    }
+  ],
+  "out_of_scope": [
+    "Loosening D43 so that unrun commands count as evidence.",
+    "Changing how the stream records Bash commands (stream.rs) or the permission policy, unless the tests show a gap.",
+    "Re-running or fixing jobs 20261012-075010-86ja and 20261012-073105-mj6d.",
+    "Further changes to the producer brief (D62)."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.6,
+      "p_verification_passes": 0.52,
+      "p_user_intervenes": 0.35,
+      "cost_usd": {
+        "p10": 0.3,
+        "p50": 0.7,
+        "p90": 1.6
+      },
+      "wall_time_s": {
+        "p10": 280.0,
+        "p50": 480.0,
+        "p90": 780.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.64,
+      "p_verification_passes": 0.5714285714285714,
+      "p_user_intervenes": 0.2714285714285714,
+      "cost_usd": {
+        "p10": 0.2648881151532067,
+        "p50": 0.5678508942197766,
+        "p90": 1.595744710360505
+      },
+      "wall_time_s": {
+        "p10": 215.8490521751995,
+        "p50": 431.22514524857036,
+        "p90": 653.2541733397287
+      }
+    }
+  },
+  "departures": "Slightly higher cost and lower pass odds than the reference. The cause is inferred from code without the verifier's command logs. It touches the verdict logic, which has to be tested carefully, and a decisions.md entry plus a prompt edit raise the surface a verifier can fault."
+}

@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261024-115052-bzw6",
+  "round": 2,
+  "at": "2026-10-24T11:56:08.931184546Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/src/display.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/src/display.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "No landing is written when a rerun's merge confirmation comes through the early observe_merge or confirm_existing_merge paths",
+      "evidence": "`land_pr` calls `observe_merge` at line 1314, before the Open branch. On a rerun where the host now confirms, the link becomes Landed there, and the code after `host.merge` (line 1345) never runs. `Athena::land_pr` also returns `confirm_existing_merge`'s report at line 1654 without going through `gh::land_pr`. The plan places the landing write only 'after a verified merge' that follows `host.merge`. The criterion 7 demonstration expects 'after confirmation exactly one landing is written', which neither path would do. Fix: Write the landing whenever the link ends Landed, an intent for (PR, head) is on the remote, and no landing for that intent exists. That covers the line 1314 path and either `confirm_existing_merge`, or a rule that it writes nothing. Say which. Make the criterion 7 test reach confirmation through the path a real rerun takes.",
+      "location": "Decision 4/5, Step 4; crates/athena-core/src/gh.rs:1314 and 1364-1386, 1654",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "A rerun after an unconfirmed merge can call PrHost::merge again",
+      "evidence": "After `merge` returns Ok but `merged_commit` reports None, `apply_outcome` leaves `LinkState::Open`, and `store_link` saves it. On the rerun the link is Open, so `wait_for_checks` and `host.merge` run again. Decision 5 rejects returning an error because 'a rerun would try to merge again', but the warning design has the same effect. The criterion 7 test checks only the records tree, not whether merge is called again. Fix: Record on the link, or check through the intent, that this run already asked for the merge. On a rerun, observe only and do not call `merge` again. Assert in the criterion 7 test that the fake host's merge count stays at 1.",
+      "location": "Decision 5; crates/athena-core/src/gh.rs:1336-1348",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The criterion 8 demonstration does not show the drain caller writing the same records",
+      "evidence": "The criterion asks for a test, or an existing drain test run with the real ledger, that shows the same records written. The plan's test checks only that warnings appear in the NotLanded text. PrLander calls `athena.land_pr` (drain.rs:1263), so the records claim rests on argument, not on an observed run. Fix: Either run a drain test against a fake-host `Athena` that checks `athena/records`, or state plainly that criterion 8 rests on the shared `Athena::land_pr` call plus the mapping test, and ask the verifier to accept that.",
+      "location": "Demonstrations, criterion 8",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "No test shows the merge is refused when the intent push fails",
+      "evidence": "Criterion 6 says 'the merge never happens without its intent on the remote'. The tests cover the success path only. No test makes `append_published` return Contended or a push error and then asserts that `host.merge` was not called. Fix: Add a case where the intent publish fails (`with_max_attempts(1)` plus a moved remote, or an unreachable remote). Assert that `land_pr` errors and the fake host's merge count is 0.",
+      "location": "Demonstrations, criterion 6; Decision 2",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Merge-method inference can't tell squash from rebase",
+      "evidence": "When the method is unknown, a single-parent merged commit is labelled Squash, which may be a rebase merge. The plan accepts this as a risk. Fix: Note the fallback in the design doc's failure table so readers know the label is inferred.",
+      "location": "Decision 7",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The core design fits the request and the user's decisions: build on the remote tip, push with a lease, move the local ref only after the push, and retry a bounded number of times. The functions it names exist: `Git::push_if_remote_at` (athena-git lib.rs:373), `RecordsWriter::append_with_hook` (records_branch.rs:109), `LandPr` and `PrReport` (gh.rs:1254, 1290) and `observe_merge` (pr.rs:281). `sync_from` really is absent. I read gh.rs and pr.rs, and they show a gap in the merged-but-unconfirmed and rerun logic. In `gh::land_pr`, a link stays Open when the host has not yet confirmed the merge. On a rerun the confirmation can arrive in two places the plan does not cover: the first `observe_merge` at gh.rs:1314, before any merge call, and `confirm_existing_merge`, which `Athena::land_pr` calls at gh.rs:1654. The plan only writes the landing \"after a verified merge\" that follows `host.merge`, yet decision 4 and the criterion 7 demonstration both rely on a later run writing that landing. A rerun with the link still Open would also call `host.merge` again, and the plan rejected the error option precisely because a rerun would merge again. The criterion 8 demonstration also tests only a report-to-message mapping, not the records written. Athena's own display.rs finding is minor and well justified; I do not repeat it."
+}

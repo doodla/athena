@@ -1,0 +1,109 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261023-181729-2sf0",
+  "base_commit": "07ae878b93784c4189a00d3fd6fb15226cb9da47",
+  "base_fingerprint": "sha256:2f23016341ab7a3b41641c7e455166848687b97557f37cdd80c707fd67fcb440",
+  "previous_job": "20261018-145008-k7fq",
+  "candidate_commit": "a3cee580c3faefb63233676a74c0b9c49d433b66",
+  "candidate_tree": "f2243a2a9d8e60c2bd27363c6837bdf8a5e94dfc",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 110301
+    },
+    {
+      "path": "README.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 21832
+    },
+    {
+      "path": "crates/athena-cli/tests/external_calls.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 17213
+    },
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 123621
+    }
+  ],
+  "fingerprint": "sha256:0310edc191a8b718d6c9aac14b5e60f91ef10a8eff36332c78947f7d404cabb3",
+  "violations": [],
+  "producer_report": {
+    "summary": "`athena land --pr` now judges and guards the pull request's current head and refuses any head that is not the job's landing commit. Root cause was in `gh::land_pr`. It judged the job's own commit and force-replaced a different remote head with it, so PR #149 kept showing the old commit's failure. The change reads the PR branch's head from the remote. It deletes `Remote::replace` and `replace_head`, so nothing can overwrite a newer head. If the head equals the job's commit, land waits for that head's checks and merges guarded by it. Otherwise it takes one look at the head's checks and returns an error without merging. The error names the head, its check state, each extra commit (12-character sha and subject, from the new `Remote::commits_after`), and the D111 reason. The reason says a squash of a landing plus any later commit is invalid until the records-history build, and that a declared intervention changes nothing. The error is a plain `Err`, so the existing error path prints it and exits nonzero. The full test suite, fmt and clippy all pass. No `reading_inputs_digest` failure showed up in this run.",
+    "files": [
+      "crates/athena-core/src/gh.rs",
+      "crates/athena-cli/tests/external_calls.rs",
+      "README.md",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "Run as `cargo test --locked --no-fail-fast -q`: every target passed, no failures. The one earlier failure, in my own new test, was fixed first."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A test (run with cargo test) shows that with a PR whose head differs from the job's commit and is green while the job's commit is red, land does not report the old commit's failure and judges the head's checks; and when the head equals the landing commit, land merges.",
+        "status": "met",
+        "evidence": "`cargo test -p athena-core --lib land_pr_judges` and `land_pr_merges_when_the_head_is_the_landing_commit`. The first has cand1 red and fix1 green. It asserts the checks log holds only fix1, the error says the head's checks are green, and no re-run of the old red is requested. The second asserts a merge is requested and the job lands."
+      },
+      {
+        "criterion": "A test (cargo test) shows the merge request is guarded with the PR's current head sha, and that no push or update replaces a newer head with the job's older commit.",
+        "status": "met",
+        "evidence": "`land_pr_guards_the_merge_with_the_current_head_and_pushes_nothing_over_a_newer_one`. It records the head passed to merge, which equals the remote head. With a newer head there is no merge and the only push is the first publish. The remote head stays fix1 and the stored link head is fix1. The `replace` method no longer exists on `Remote`, so no implementer can replace a head."
+      },
+      {
+        "criterion": "A test (cargo test) shows land refuses when the PR head is anything other than the job's landing commit, including when the extra commit is a declared intervention, and the message names each extra commit and why it is refused (squash with later commit invalid until D111 records-history build).",
+        "status": "met",
+        "evidence": "`land_pr_refuses_any_other_head_naming_each_extra_commit_and_why` covers the fake remote. `land_pr_refuses_a_real_branch_with_a_declared_intervention_after_the_landing` covers a real git repository and bare remote, where the landing commit is followed by a fix and a declared-intervention commit. Both assert each extra commit's short sha and subject, 'records-history build (D111)', 'declared intervention too', no merge, and the remote branch unchanged. With no commits listed the message says 'Refused head: fix1'. `git_remote_lists_the_commits_after_the_landing_commit` tests the listing itself."
+      },
+      {
+        "criterion": "README.md or CHANGELOG.md document the new land behavior and the D111 interim refusal, so a maintainer can find why land refused.",
+        "status": "met",
+        "evidence": "README.md has a new paragraph after 'Merge strategy' headed 'Which commit `land --pr` judges'. CHANGELOG.md has an entry under Unreleased/Fixed naming PR #149, job 20261018-145008-k7fq, squash 02837e0 and D111."
+      },
+      {
+        "criterion": "cargo clippy and cargo fmt --check are clean; cargo test passes for the changed crates (the pre-existing reading_inputs_digest failure is noted if it persists).",
+        "status": "met",
+        "evidence": "fmt --check and clippy -D warnings print no findings, and the full workspace test run has zero failures. The reading_inputs_digest failure did not appear."
+      }
+    ],
+    "open_issues": [
+      "`check_replace`, `ReplaceRequest` and `Git::push_if_remote_at` are now unused outside their own tests. They are pub, so no lint fires. I left them for a follow-up cleanup to keep this change focused.",
+      "I did not touch crates/athena-core/src/land.rs, crates/athena-gate/src/landing_tests.rs or crates/athena-cli/src/main.rs, though the brief lists them as deliverables. The PR flow lives in gh.rs, and a plain Err already prints and exits nonzero. This departs from the plan only in not editing those three files.",
+      "A pull request opened earlier with a bare candidate head, which the old code would fix up, is now refused. This matches the request.",
+      "If the head's commits cannot be fetched or listed, the refusal falls back to naming the head alone. It still refuses and never pushes.",
+      "I could not read the full-output file from the first `cargo test` run because it is outside the working directory. I reran with quiet output instead."
+    ],
+    "mistakes": [
+      "My first version of land_pr_judges asserted zero re-runs overall. That counted a re-run from the setup step, so it failed once. I changed it to compare against the count before the call.",
+      "The first draft asserted that the message does not contain 'red'. It matches 'declared', so I narrowed it to 'are red'."
+    ],
+    "learnings": [
+      "Remote::replace was reached only from replace_head in gh.rs. The only Remote implementers were GitRemote, the gh.rs test FakeRemote and the NoRemote in crates/athena-cli/tests/external_calls.rs.",
+      "Git::ensure_commit returns Result<bool> and fetches a commit missing locally, which commits_after relies on.",
+      "The original FakeRemote.push did not move its head, so the tests had to be changed so a push updates the remote head the flow now reads."
+    ],
+    "desires": [
+      "A way to run a single cargo test and read the full output without it being truncated."
+    ]
+  }
+}

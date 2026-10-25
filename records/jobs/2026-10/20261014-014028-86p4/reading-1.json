@@ -1,0 +1,232 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261014-014028-86p4",
+  "n": 1,
+  "at": "2026-10-14T01:40:54.754810943Z",
+  "invocation_seq": 1,
+  "base_commit": "d4839dc6b6dad1c3e505506a38774492233102f0",
+  "config_sha256": "3a5a7c10c8f8142be7e5f5cbd5f0238f710d6a133b92a5731607ebe61c2e2789",
+  "defaults_sha256": "7ca3db44e78a075634195d4e9722ade9188c5268e963b636ac7b9c38d2bee2c6",
+  "defaults_version": 1,
+  "title": "Add host-error record, landing watcher, decision-state; backtest D87",
+  "summary": "Implement decision-sets §8 step 4 minus the brief component: GhCli writes athena.host-error/1 (status_code, operation, closed message_class), a landing-time watcher with exact matching writes append-only athena.decision-state/1, and athena.default-expectations/1 is added. Transient 5xx calls are recorded and retried a bounded number of times; the 405 on merge puts D87 under review on first occurrence, and athena backtest reports it.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "All new code is Rust in existing crates."
+    },
+    {
+      "id": "tested",
+      "how": "Tests for the 405 record, the 500 retry then success, retry exhaustion, the watcher firing on first 405, no-fire on soft or unrelated errors, and the backtest report; clippy clean."
+    },
+    {
+      "id": "designed",
+      "how": "Follows the reviewed design in decision-sets.md; the doc status line is updated to mark step 4 built."
+    },
+    {
+      "id": "small",
+      "how": "Brief component and set selection are left out to keep the change focused."
+    },
+    {
+      "id": "root-cause",
+      "how": "Retry and recording are done in the host client, not in the land command only."
+    },
+    {
+      "id": "mechanism",
+      "how": "Firing is enforced by code-evaluated exact matching and tests, not prose."
+    },
+    {
+      "id": "verified",
+      "how": "Behavior is checked by cargo test, including backtest run against a fixture."
+    },
+    {
+      "id": "public",
+      "how": "Host-error records omit raw stderr; no personal data."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "The brief component (hashing decision-state fold into the reading) is held back because the request says to hold it back if it needs step 3 set selection; step 3 is not built, so it is deferred.",
+    "athena.default-expectations/1 is still called for by design §2 and §6 step 1, so only its record type, writer and reader are added, with no migration of the 12 defaults.",
+    "Bounded retry applies to 5xx host statuses (and a status-less failure is not retried); the bound is a small constant (3 attempts) with no backoff sleep in tests, set via an injectable delay.",
+    "Transient means HTTP 500, 502, 503, 504; 405 and 422 on merge are hard falsifiers; other statuses are non-transient and reach the user.",
+    "Status is parsed from gh stderr text of the form 'HTTP NNN', pinned by a test; if absent, status_code is absent.",
+    "D87 gets its typed header with the hard host-error signal in code (the decision view in decisions.rs/backtest.rs), not by editing docs/decisions.md.",
+    "Record kinds are added to athena-data records.rs and a records directory, following existing conventions; schema docs in docs/records.md are updated.",
+    "A CHANGELOG.md entry is added per D89."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "athena-data defines athena.host-error/1 with status_code (optional integer), operation (closed list including merge, create-pr, read-repo), job, phase, at, and a closed message_class; the raw stderr text is not a stored field.",
+      "kind": "content"
+    },
+    {
+      "text": "athena-data defines append-only athena.decision-state/1 (decision id, state, firing record ids, date) with a fold to current state, and athena.default-expectations/1 (default_id, assumptions, signals, defaults version, proposal).",
+      "kind": "content"
+    },
+    {
+      "text": "The gh client extracts the HTTP status from a refused call, writes a host-error record, and retries a 5xx a bounded number of times before returning the error; non-5xx errors are not retried.",
+      "kind": "content"
+    },
+    {
+      "text": "The land path invokes the watcher after a host error and at landing; the watcher loads D87's hard signal (operation merge, status 405 or 422, one job), validates values against the vocabulary, and does not evaluate records from a firing's own introspection.",
+      "kind": "content"
+    },
+    {
+      "text": "No brief component and no set selection are added; BRIEF.md, defaults.toml, athena.toml and records/ are unchanged.",
+      "kind": "content"
+    },
+    {
+      "text": "docs/design/decision-sets.md §8 step 4 and docs/records.md describe what was built and what was held back; CHANGELOG.md has an entry.",
+      "kind": "content"
+    },
+    {
+      "text": "Run cargo test: a test where the fake gh returns HTTP 500 twice then success lands with 2 host-error records and no user-facing error; a test with persistent 500 stops after the bound and surfaces the error.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run cargo test: a test where merge returns HTTP 405 writes one host-error record and one decision-state record putting D87 under review on the first occurrence; a 404 or a 500 does not.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run cargo test: athena backtest over a temp records fixture containing the 405 host-error record reports D87 under review, with the record id cited; without the record it does not.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run cargo clippy --all-targets and cargo fmt --check: both clean.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/land.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-core/src/pr.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/watcher.rs",
+      "action": "create",
+      "p": 0.65
+    },
+    {
+      "path": "crates/athena-cli/src/backtest.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-cli/src/decisions.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-data/src/paths.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-data/src/lib.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "docs/design/decision-sets.md",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "docs/records.md",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/store.rs",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "crates/athena-cli/src/wiring.rs",
+      "action": "modify",
+      "p": 0.2
+    }
+  ],
+  "out_of_scope": [
+    "Brief component for decision-state and set selection (step 3)",
+    "Jev / evaluate calls",
+    "Migrating defaults or typed headers for D01-D90",
+    "Editing docs/decisions.md, defaults.toml, athena.toml or BRIEF.md",
+    "Backtesting other signals (step 5 beyond D87 and the 405)",
+    "Clearing under-review state"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.6,
+      "p_verification_passes": 0.5,
+      "p_user_intervenes": 0.2,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.4,
+        "p90": 2.8
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 1200.0,
+        "p90": 2100.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7636363636363636,
+      "p_verification_passes": 0.6666666666666666,
+      "p_user_intervenes": 0.13,
+      "cost_usd": {
+        "p10": 0.35090093464691713,
+        "p50": 0.7918369974898621,
+        "p90": 1.7440690045941418
+      },
+      "wall_time_s": {
+        "p10": 437.08236294023294,
+        "p50": 721.3644432459997,
+        "p90": 981.8746120635526
+      }
+    }
+  },
+  "departures": "Larger than the reference: touches the data crate, gh client with retry, a new watcher, landing wiring and the backtest, so cost and time are well above the median job and verification is less likely to pass first time."
+}

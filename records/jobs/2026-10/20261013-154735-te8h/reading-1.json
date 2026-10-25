@@ -1,0 +1,168 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261013-154735-te8h",
+  "n": 1,
+  "at": "2026-10-13T15:48:08.449568071Z",
+  "invocation_seq": 1,
+  "base_commit": "792c97c302fcb392941b997b4198f03e8af1ed83",
+  "config_sha256": "46d9162d4972d6789bcfd5c744f3acb2c4c3baebcc12904ac29481610d0b8059",
+  "defaults_sha256": "34395568ed0684d5b19642d761d9d16e023f3263e4313e645b083d31b302e9bc",
+  "defaults_version": 1,
+  "title": "Make land --pr push the landed commit; atomic lease on replace",
+  "summary": "The repo has none of the earlier attempt, so this redoes job 1ds0 in full with the fixes. 'athena land --pr' pushes the job's locally landed commit (trailers and records) instead of the bare candidate. A rerun on an open PR replaces athena/<job> with one atomic `git push --force-with-lease=refs/heads/<branch>:<expected>`, and reuses the PR. An unknown remote head or an ancestry error is reported, never forced.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "All changes are Rust; the docs are markdown."
+    },
+    {
+      "id": "tested",
+      "how": "New unit tests with a real git remote and fake host; cargo test and clippy must pass."
+    },
+    {
+      "id": "designed",
+      "how": "The approach and its alternatives are recorded in the existing native-pr-landing design doc."
+    },
+    {
+      "id": "small",
+      "how": "One focused change to the PR landing path."
+    },
+    {
+      "id": "mechanism",
+      "how": "The no-force rule is enforced by the lease and the guard in code, not by prose."
+    },
+    {
+      "id": "verified",
+      "how": "Behavior is checked through cargo test against a real local bare remote."
+    }
+  ],
+  "assumptions": [
+    "The workspace is at the state before the failed attempt: gh.rs still pushes work_commit (candidate plus a records commit), so the whole feature is rebuilt, not just patched.",
+    "The commit to push is the job's locally landed commit, found from the job's landing record. If the job is not landed locally, the command reports that and does not push.",
+    "Replacement applies only to the job's own branch athena/<job> (or its stealth name), and only when a PR link is already stored.",
+    "The lease value is the remote head Athena just observed. If the remote head is not in the local object store, or is_ancestor errors, the command reports the error and does not push.",
+    "Remote trait gains a lease-based replace method; the plain push stays non-forcing.",
+    "The old work_commit helper becomes unused and is removed, with its tests replaced."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "athena-git has a push method that runs a single `git push --force-with-lease=refs/heads/<branch>:<expected> <remote> <commit>:refs/heads/<branch>`. It does no ls-remote check before the push and never uses a bare `+` or `--force`.",
+      "kind": "content"
+    },
+    {
+      "text": "In gh.rs, `athena land --pr` pushes the job's locally landed commit, which carries the Athena-Job trailer and the records, not the bare candidate. The choice and the reasons are recorded in docs/design/native-pr-landing.md.",
+      "kind": "content"
+    },
+    {
+      "text": "On a rerun with an open PR link whose stored head differs from the commit to push, land_pr replaces the branch head using the lease, reuses the stored PR number without opening a second PR, and updates the stored link head.",
+      "kind": "content"
+    },
+    {
+      "text": "When the remote head is unknown to the local object store, or the ancestry check returns an error, land_pr returns that error and makes no push of any kind. The `unwrap_or(false)` fallback is not used on the replace path.",
+      "kind": "content"
+    },
+    {
+      "text": "The replace path is refused for any branch other than the job's own work branch.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo test`. New tests cover: pushing the landed commit; replacing a bare-candidate head with the landed commit using a lease; a lease failure, where the remote moved after observation, is reported and leaves the remote unchanged; an ancestry error causes no push; an unknown remote head causes no push; the PR is reused. All pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo clippy --all-targets` and `cargo fmt --check`. Both are clean.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has an entry for the change.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-git/src/lib.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/pr.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "docs/design/native-pr-landing.md",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "p": 0.1
+    },
+    {
+      "path": "README.md",
+      "action": "modify",
+      "p": 0.1
+    }
+  ],
+  "out_of_scope": [
+    "Changing athena check --history or CI workflows.",
+    "Repairing PR #39 by hand.",
+    "Force-pushing any branch other than athena/<job>.",
+    "Changing records/ or governance files."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.15,
+      "cost_usd": {
+        "p10": 0.4,
+        "p50": 0.95,
+        "p90": 2.0
+      },
+      "wall_time_s": {
+        "p10": 420.0,
+        "p50": 780.0,
+        "p90": 1250.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.726984126984127,
+      "p_verification_passes": 0.6808510638297872,
+      "p_user_intervenes": 0.12340425531914893,
+      "cost_usd": {
+        "p10": 0.3498641633732138,
+        "p50": 0.7957258,
+        "p90": 1.7731641088695762
+      },
+      "wall_time_s": {
+        "p10": 414.9428787032933,
+        "p50": 715.3166808556637,
+        "p90": 937.7963763455874
+      }
+    }
+  },
+  "departures": "The repository lacks the earlier attempt's changes, so the whole feature is rebuilt. That makes it larger than a patch, and I put cost and time somewhat above the reference."
+}

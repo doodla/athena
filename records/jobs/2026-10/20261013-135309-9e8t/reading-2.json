@@ -1,0 +1,205 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261013-135309-9e8t",
+  "n": 2,
+  "at": "2026-10-13T13:54:24.793927371Z",
+  "invocation_seq": 2,
+  "base_commit": "aabe26a1c72d139c2d28f73dda6fe192b0f07122",
+  "config_sha256": "46d9162d4972d6789bcfd5c744f3acb2c4c3baebcc12904ac29481610d0b8059",
+  "defaults_sha256": "34395568ed0684d5b19642d761d9d16e023f3263e4313e645b083d31b302e9bc",
+  "defaults_version": 1,
+  "title": "Add athena land --pr for owned mode with a REST-only gh client",
+  "summary": "Build the command slice D86 deferred: `athena land --pr <job>` pushes the job's branch through `check_push`, opens a PR, waits for green checks, and then lands only when it observes the merge, with `check_merged` as the final check. The host client shells out to `gh api` REST paths only. Per the user's reply, Athena merges via REST only when a setting, off by default, opts in; otherwise it stops at an open, green PR.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "All new code is Rust; the gh CLI is only an external program invoked, no scripts."
+    },
+    {
+      "id": "buy-first",
+      "how": "Shell out to the maintained gh CLI rather than adding an HTTP crate; the call is recorded in a decision."
+    },
+    {
+      "id": "tested",
+      "how": "Fake runner/host tests cover each outcome; cargo test and clippy are clean."
+    },
+    {
+      "id": "small",
+      "how": "One slice: the owned-mode command only, not stealth mode or auto-merge."
+    },
+    {
+      "id": "mechanism",
+      "how": "A test asserts every recorded gh api call is REST and never graphql; merge only runs when the setting is on."
+    },
+    {
+      "id": "strangers",
+      "how": "Docs and the decision entry are written for an outside reader."
+    }
+  ],
+  "assumptions": [
+    "The opt-in is a boolean setting in athena.toml's config struct (athena-data config), default false, named something like land.merge; its name is the producer's call and is documented.",
+    "Without opt-in, the command opens the PR, waits for checks, reports 'open, green; merge it yourself', and exits; a later `athena land --pr <job>` run (or the same command re-run) looks up the stored link, observes the merge via REST, and runs check_merged.",
+    "The REST calls are: GET git ref and compare for the remote head, POST pulls, GET commits/{sha}/check-runs and status, PUT pulls/{n}/merge (opt-in only), and GET pulls/{n} for merged state and merge_commit_sha.",
+    "The push itself uses git (not gh), after check_push; the branch is the job's work branch, with no force.",
+    "Check waiting uses an injected clock/poll interval and a timeout, so tests do not sleep.",
+    "Athena's own governance files (athena.toml) do not change; the new setting lives in code defaults."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new host-client module in crates/athena-core implements `Host` and new traits (open PR, read check status, merge) by running `gh api` with REST paths only. No source contains `graphql` outside the test that asserts its absence, and no `gh pr` subcommand is used.",
+      "kind": "content"
+    },
+    {
+      "text": "The CLI has `athena land --pr <job>` with an optional `--json`, wired in crates/athena-cli and documented in `--help`.",
+      "kind": "content"
+    },
+    {
+      "text": "The push goes through `check_push` first and has no force option. The link is saved with `store_link`, outcomes go through `apply_outcome`, and the link survives `clean_job` until the merge is observed.",
+      "kind": "content"
+    },
+    {
+      "text": "A setting, default off, decides whether Athena merges. When off, Athena never calls the merge endpoint; it stops at an open PR with green checks and reports that. When on, it merges via the REST merge endpoint.",
+      "kind": "content"
+    },
+    {
+      "text": "Landing is recorded only after the merge is observed by PR number and `check_merged` returns Verified; a merge of other content gives merged-unverified.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo test`. Fake-runner tests pass for: green checks with merge off (no merge call, PR left open), merge on (merged then landed), failed checks (no merge), check timeout, non-fast-forward push refused, merged-unverified, and every recorded gh api call is REST (no graphql).",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo clippy --workspace --all-targets` and `cargo fmt --check`; both are clean. `cargo test` for the whole workspace passes, including the existing pr.rs tests.",
+      "kind": "behavior"
+    },
+    {
+      "text": "docs/decisions.md has a new entry recording the buy-first call (gh versus an HTTP crate), the REST-only choice, and the merge opt-in. docs/design/native-pr-landing.md says the command is built, and CHANGELOG.md has an entry.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "action": "create",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-core/src/pr.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/land.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-cli/src/lib.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-cli/src/wiring.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/fake.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "docs/design/native-pr-landing.md",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "README.md",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "docs/enforcement.md",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "crates/athena-core/Cargo.toml",
+      "action": "modify",
+      "p": 0.1
+    }
+  ],
+  "out_of_scope": [
+    "Stealth mode landing",
+    "GraphQL or GitHub auto-merge",
+    "An HTTP client crate",
+    "Force pushes or pushing branches other than the job's work branch",
+    "Changes to athena.toml, CI workflows, or other governance files",
+    "Hosts other than GitHub"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.65,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.2,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.4,
+        "p90": 3.0
+      },
+      "wall_time_s": {
+        "p10": 500.0,
+        "p50": 1000.0,
+        "p90": 1700.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7107142857142856,
+      "p_verification_passes": 0.7073170731707317,
+      "p_user_intervenes": 0.09268292682926829,
+      "cost_usd": {
+        "p10": 0.37715424231358935,
+        "p50": 0.7862853000000001,
+        "p90": 1.812627378800031
+      },
+      "wall_time_s": {
+        "p10": 413.11243621085333,
+        "p50": 635.525427854,
+        "p90": 860.5390259524021
+      }
+    }
+  },
+  "departures": "Larger than the reference: a new client module, CLI wiring, a config setting, many fake-based tests, and three docs, so cost and time are higher and verification is less likely to pass."
+}

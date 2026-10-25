@@ -1,0 +1,180 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261017-044405-4zcq",
+  "n": 1,
+  "at": "2026-10-17T07:20:24.57437815Z",
+  "invocation_seq": 1,
+  "base_commit": "13157ef4b571f3e84e331ec1724a3a98c8b69165",
+  "config_sha256": "de9345d83aafd84eab75106282444ab0f5c0d14b5aebd304ae9e772f14b919ad",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Keep work on stage timeout, record as timed out, resume on retry",
+  "summary": "When a producer (or verifier) stage hits its deadline, keep the worktree changes and write a progress note instead of discarding them. Record the job as timed out, not failed, and let a retry resume from the kept work. Planning should also split a multi-part request into one item per part. The audience is the Athena operator, who loses 20–30 minutes of work on each timeout.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "All changes are Rust."
+    },
+    {
+      "id": "tested",
+      "how": "Tests added for each new behavior; cargo test and clippy must pass."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check the work being kept and the retry resuming, not that types exist."
+    },
+    {
+      "id": "root-cause",
+      "how": "The fix covers every stage that can time out, producer and verifier, not only the producer."
+    },
+    {
+      "id": "small",
+      "how": "Kept to one change in the timeout, retry and plan paths."
+    },
+    {
+      "id": "outcome-check",
+      "how": "The check is that a timed-out job loses no work, not that a note is written."
+    },
+    {
+      "id": "verified",
+      "how": "The verifier exercises the behavior through cargo test."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "I read only a few spots (the deadline kill in claude.rs, the Killed outcome in records.rs, plan.rs for planning), so the deliverable list is partly guesswork. The producer must find where jobs are retried and where the worktree is discarded.",
+    "The 'timed out' status is a new state or outcome distinct from failed, and retries are the existing retry path extended to resume.",
+    "Progress note is a file written into the kept work or job record, and the retry prompt includes it.",
+    "Retries after a timeout should not count as a thrash failure under the thrash-stop default."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A test uses the fake agent to hit a producer deadline after editing files. Afterwards the edits are still in the job's worktree and a progress note exists, and the job is recorded as timed out, not failed. Run: cargo test.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test retries a timed-out job and shows the new producer starts from the kept work and is given the progress note, and does not start from a clean checkout. Run: cargo test.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test of the verifier-stage deadline (the jsdj case) shows it is also recorded as timed out, and that the retry does not redo an already-passed producer stage. Run: cargo test.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A planning test shows a request with several separate parts yields one plan item per part, and a single-part request still yields one item. Run: cargo test.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Status and report output can tell a timed-out job from a failed one, and the deadline reason (e.g. 'deadline of 1800s reached') is kept in the record. Run: cargo test.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Existing records that use the killed or failed outcome still deserialize. Any new outcome or status is documented, and CHANGELOG.md mentions the change.",
+      "kind": "content"
+    },
+    {
+      "text": "cargo test, cargo clippy and cargo fmt --check all pass with no new warnings.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-agent/src/claude.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-core/src/invocation.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-core/src/plan.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-agent/src/fake.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.5
+    }
+  ],
+  "out_of_scope": [
+    "Changing the deadline lengths in athena.toml",
+    "Automatic raising of timeouts or budgets",
+    "Changes to the study capability's behavior beyond what shared code needs",
+    "Rewriting old failed records for qw38, vc5k and jsdj"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.45,
+      "p_user_intervenes": 0.12,
+      "cost_usd": {
+        "p10": 0.8,
+        "p50": 1.9,
+        "p90": 4.5
+      },
+      "wall_time_s": {
+        "p10": 900.0,
+        "p50": 1900.0,
+        "p90": 3600.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.8158536585365854,
+      "p_verification_passes": 0.6433566433566433,
+      "p_user_intervenes": 0.07552447552447553,
+      "cost_usd": {
+        "p10": 0.36349617618741475,
+        "p50": 0.9202356,
+        "p90": 2.1649502801537954
+      },
+      "wall_time_s": {
+        "p10": 563.5492303973072,
+        "p50": 1014.5528360089999,
+        "p90": 2227.4545693431783
+      }
+    }
+  },
+  "departures": "Higher cost, longer time and lower pass chance than the reference. The request has several parts (timeout preservation, a new status, resume on retry, planning split) that cross several crates."
+}

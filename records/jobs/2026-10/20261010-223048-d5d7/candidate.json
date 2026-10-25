@@ -1,0 +1,122 @@
+{
+  "schema": "athena.candidate/1",
+  "job": "20261010-223048-d5d7",
+  "base_commit": "f7c020b2086d86d9a864eb496f75cb850602d480",
+  "candidate_commit": "450b9c1a386ec742da190c7ed6989835cc9ebba1",
+  "candidate_tree": "453c596041d0f59f75830876b7ff6e24c46e1000",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 4055
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 46097
+    },
+    {
+      "path": "crates/athena-core/src/land.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 9620
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 59317
+    },
+    {
+      "path": "crates/athena-gate/src/history.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 10244
+    },
+    {
+      "path": "crates/athena-gate/src/invariant.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 32718
+    },
+    {
+      "path": "crates/athena-gate/src/landing_tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 18219
+    },
+    {
+      "path": "docs/decisions.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 80061
+    },
+    {
+      "path": "docs/enforcement.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 15960
+    }
+  ],
+  "fingerprint": "sha256:ac854eabdb86b2e5fc5ec88af32b94f05612170caa43cd488bc024765a31bba9",
+  "violations": [],
+  "producer_report": {
+    "summary": "I added a landing-time history check and a narrow named acceptance for commit 64ecdc9. I could not run `cargo run --locked -- check --history` here, because the working copy has no history, so criterion 3 is unverified.\n\n**Root cause.** This is an inference from the code, because the real history is not available to me.\n- Commit 64ecdc9 carries `Athena-Job: 20261010-132713-ezm8` but adds the closing records of `20261010-131714-adcd`.\n- The rule that refuses that mismatch is at invariant.rs `landing()` (\"Trailers are only hints that must agree\"). A build without it would accept the commit.\n- The in-process gate in `build_commit` judges only the new commit, with the running binary's code.\n- Nothing ran the full-history check on the result, so the gate and the history check disagreed and the landing was recorded as verified.\n\n**Changes.**\n- **`invariant.rs`:** `LEGACY_MISMATCHED_LANDING` accepts exactly one published commit, as a landing of the job whose records it adds. It requires three things together: the id prefix `64ecdc9`, the trailer ezm8, and the records' job adcd. The comment explains why.\n  - `[history] exempt` cannot hold this commit: the exemption is read from the parent's config.\n  - I only know the 7-character prefix, not the full id.\n  - So `athena.toml` is unchanged.\n- **`history.rs`:** new `check_landing(git, commit)` runs every rule of `check --history` except the whole-history gitleaks scan. The scan stays in CI (M3) and is skipped to keep landings fast.\n- **`land.rs`, `run.rs`:** `Athena::require_clean_landing_history` runs after `build_commit` in `land_or_block` and in `retry_landing`. A violation makes the job `failed` with the findings; a retried landing errors and stays blocked.\n  - Nested runs skip it. Their scratch repo has one synthetic unlabeled commit, and `a_nested_run_works_in_a_scratch_copy_with_fake_agents` failed without the skip.\n- **Docs:** enforcement.md row M30, decisions.md D63, and CHANGELOG.md entries (Fixed and Changed).\n\n**Tests added.**\n- **Mismatch, gate and history:** `a_landing_whose_trailer_names_another_job_than_its_records_is_refused` checks that the invariant and the landing-time check both refuse the mismatch.\n- **History check, gate level:** `the_landing_time_history_check_refuses_a_history_that_fails_and_allows_one_that_passes`.\n- **History check, landing helper:** `a_landing_on_a_history_that_fails_the_check_is_refused`.\n- **History check, end to end:** `a_verified_job_does_not_land_while_the_history_check_fails`. A hand commit made with hooks off, then a verified job: the job ends `failed` and nothing lands.\n- **Legacy acceptance:** `only_the_one_published_mismatched_landing_is_accepted`.\n\n**Checks.**\n- **fmt and clippy:** `cargo fmt --all --check` and `cargo clippy --all-targets --locked -- -D warnings` are clean.\n- **tests:** `cargo test --locked` passed before I edited the docs and the module comment. After those edits I re-ran only `cargo test --locked -p xtask`, which covers the enforcement-map test, and it passed.",
+    "files": [
+      "crates/athena-gate/src/invariant.rs",
+      "crates/athena-gate/src/history.rs",
+      "crates/athena-gate/src/landing_tests.rs",
+      "crates/athena-core/src/land.rs",
+      "crates/athena-core/src/run.rs",
+      "crates/athena-cli/tests/lifecycle.rs",
+      "docs/enforcement.md",
+      "docs/decisions.md",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "clean after a `cargo fmt --all`"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "run after the last code edit"
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "full run before the docs and a module-comment edit; afterwards only `cargo test --locked -p xtask` was re-run (enforcement-map test passes)"
+      },
+      {
+        "command": "cargo run --locked -- check --history",
+        "result": "not-run",
+        "note": "the working copy has no history, so criterion 3 is not verified here; the commit handling is covered by a unit test on the helper only"
+      }
+    ],
+    "open_issues": [
+      "Criterion 3 is not verified: I could not run `athena check --history` on the real history. The named acceptance of 64ecdc9 assumes that, apart from the trailer mismatch, nothing else flags the commit. If the check still fails there, the first thing to look at is whether the commit's closing records (adcd) form a valid landing.",
+      "The landing-time check runs the running binary's gate, not the candidate's own gate code. A gate change is judged by the old gate and caught on the next landing, not on its own. D63 and M30 say this. A full fix would build the candidate's athena in a clone and run `check --history` there.",
+      "The match on 64ecdc9 uses only the 7-character prefix, because I never had the full id. Replacing it with the full 40-character id is a small follow-up.",
+      "The cost of the landing-time walk per landing is an estimate, not measured.",
+      "athena.toml is unchanged, so the deliverable that listed it is unused."
+    ],
+    "mistakes": [
+      "My first version ran the history check in nested runs too, which broke `a_nested_run_works_in_a_scratch_copy_with_fake_agents`; I fixed it by skipping the check when `self.nested` is set."
+    ],
+    "learnings": [
+      "`[history] exempt` is read from the judged commit's parent config, so an entry added later never exempts an older commit; D60 closed that on purpose.",
+      "The in-process gate runs the running binary's code, judges only the new commit, and `Scope::Commit` includes gitleaks. `jobs::check` also calls `invariant::landing_job` for any landed outcome.",
+      "Checks in athena.toml run in a one-commit snapshot, so a check entry that runs the history check would pass trivially.",
+      "Nested runs land in a one-commit synthetic scratch repo (`nested::prepare`), which has no valid history.",
+      "Bash in this environment rejects pipes and tail/grep; use the Read and Grep tools."
+    ],
+    "desires": [
+      "The real history, or at least the 64ecdc9 commit and the adcd and ezm8 records, to confirm the root cause and that the commit passes once accepted.",
+      "Permission to run `cargo run --locked -- check --history` against a copy of the real history."
+    ]
+  }
+}

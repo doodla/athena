@@ -1,0 +1,118 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261013-060728-kgp3",
+  "base_commit": "9cc244b5a9703f4e666aecba6b69eeef64c97791",
+  "base_fingerprint": "sha256:f97d99b561ab9ccb4e037203a42d2db3074be1d28d3dec3708f1ac25adf8e0a0",
+  "previous_job": "20261013-054813-6nrv",
+  "candidate_commit": "136315da49d24437f9e36f20bca1619a2ea6c78b",
+  "candidate_tree": "0b44cc99add55a456e2139cdd69e4d1b95f23214",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 16593
+    },
+    {
+      "path": "README.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 8561
+    },
+    {
+      "path": "athena.toml",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 8911
+    },
+    {
+      "path": "crates/athena-agent/src/env.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 12343
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 18166
+    },
+    {
+      "path": "docs/decisions.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 117586
+    },
+    {
+      "path": "docs/design/athena-v0.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 149236
+    },
+    {
+      "path": "docs/enforcement.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 18686
+    },
+    {
+      "path": "xtask/src/main.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 21702
+    }
+  ],
+  "fingerprint": "sha256:17042acfa5cde82965eba203921f4bb15158c411078c2eb648847041a3ffc089",
+  "violations": [],
+  "producer_report": {
+    "summary": "Jobs now build through a pinned sccache, and each job keeps its own CARGO_TARGET_DIR. I could not fetch or verify the sccache checksums, so the four `[tools.sccache]` sha256 values are all-zero placeholders, and `xtask setup` will refuse to install sccache until real ones replace them. Once the real values are in, a job that builds without the installed binary would fail.\nChanges:\n- **athena.toml**: `[capabilities.change.env]` keeps `CARGO_TARGET_DIR = {job_dir}/target/{side}`. It adds `RUSTC_WRAPPER = {athena_home}/tools/sccache/0.10.0/sccache`, `SCCACHE_DIR = {state_root}/sccache` (outside every job directory) and `CARGO_INCREMENTAL = \"0\"`. It also gains `[tools.sccache]` with version 0.10.0, shaped like the gitleaks pin.\n- **config.rs**: `Tools` gains an `sccache: ToolPin` field. Two new tests check the pins and the change environment.\n- **env.rs**: the environment templates gain `{athena_home}` and `{state_root}`, filled from `paths`. `check_build_dirs` is unchanged. Two new tests check that target directories stay per job while the cache directory and wrapper are shared, and that a target directory under the cache is still refused.\n- **xtask/src/main.rs**: the gitleaks installer is now a generic `install_tool` (download, `verify_checksum`, unpack, idempotent). `install_sccache` and a `sccache_url` mapping for the four platforms use it. Setup has a new step \"4. sccache\", and later steps are renumbered 5–8. Four new tests cover the URL mapping, pinned platforms, checksum mismatch and the SHA-256 helper.\n- **setup.sh**: unchanged. It already hands off to `xtask setup`, so the install happens there.\n- **Docs**:\n  - docs/decisions.md: new D79 amends D46. It has the alternatives (shared target dirs, seeded target copy), the buy-first call, the CARGO_INCREMENTAL=0 rationale, and says the speedup is an estimate. D46 gets an \"Amended by\" line.\n  - athena-v0.md: §10.4 now describes the shared compiler cache. The risk-table row and the N1 row are updated, and the \"left out\" row for a compiler cache is removed.\n  - Also: enforcement.md M26 row, README step list, CHANGELOG entry.\n- Cargo.toml and Cargo.lock needed no change.",
+    "files": [
+      "athena.toml",
+      "xtask/src/main.rs",
+      "crates/athena-data/src/config.rs",
+      "crates/athena-agent/src/env.rs",
+      "docs/decisions.md",
+      "docs/design/athena-v0.md",
+      "docs/enforcement.md",
+      "CHANGELOG.md",
+      "README.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "Run before the last CHANGELOG edit; the CHANGELOG edit adds prose only, and the final run by Athena covers it."
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      }
+    ],
+    "open_issues": [
+      "The four sccache sha256 values in athena.toml are all-zero placeholders. The 0.10.0 release version is also from memory. Before relying on the pin, replace them with the values from the upstream .sha256 files, and confirm the version exists. Until then `xtask setup` refuses to install sccache.",
+      "Until sccache is installed at the pinned path, change-capability jobs fail at build, because RUSTC_WRAPPER points at a missing binary. Run `xtask setup` before the first job.",
+      "The RUSTC_WRAPPER path in athena.toml repeats the sccache version. It must be edited together with `[tools.sccache].version`. The new config test checks that they agree.",
+      "The `[capabilities.study.env]` section is not changed, so studies still build cold.",
+      "Cache size and eviction are not tuned, and the speedup is not measured."
+    ],
+    "mistakes": [
+      "I first ran `tail` in Bash, which the producer policy denied. The hook blocked it, so there was no effect.",
+      "I tried to grep a tool-results file outside the working directory, which was denied. I reran the tests in quiet mode instead."
+    ],
+    "learnings": [
+      "Env templates were only {job_dir} and {side}; tool paths come from paths::athena_home() and state_root().",
+      "Docs hold decision records D01–D78, so the next free number was D79.",
+      "The policy test scans every tracked file for the forbidden-word list."
+    ],
+    "desires": [
+      "Network access or the upstream sccache .sha256 files to fill in real checksums.",
+      "A way to substitute the tools path from the pin, so the version is not repeated in the wrapper path."
+    ]
+  }
+}

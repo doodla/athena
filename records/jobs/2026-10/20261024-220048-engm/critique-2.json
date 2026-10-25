@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261024-220048-engm",
+  "round": 2,
+  "at": "2026-10-24T22:06:29.621151285Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "Incremental mode still reads all records and audits the full records history, so its cost and work are not limited to what is new.",
+      "evidence": "Incremental runs still read every intent and landing via ls_tree_under/cat_blobs and still run records_branch::audit_history over the whole records history (the open question keeps it a full audit). docs/design/records-history.md §9 (lines 357-358, 371-372) says cost must depend on new commits and 'incremental time must not scale with the 4,000 old records'. Under this plan, records_judged is only a counter of new records. Fix: In incremental mode, audit records history only from checkpoint.records_sha to the tip. Parse only the records added since records_sha (diff-tree), and look up the older intents those new landings cite by id or path instead of loading every record. Add a fixture assertion that the incremental run parses only new records plus the intents they cite.",
+      "location": "Plan decision 2, open question 2; crates/athena-gate/src/attribution.rs:220 (audit_history), :152 read_records",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "CI=true implies read-only, so binary write tests would fail when cargo test runs in CI.",
+      "evidence": "The CI workflow runs cargo test with CI set. Binary tests that expect a passing check or land to write a checkpoint would see no write. Fix: Have every binary test that expects a write call env_remove(\"CI\"), and set CI explicitly only in the read-only case.",
+      "location": "Decision 4 / Criterion 4 demonstration (c), binary.rs tests",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan does not say how the newest checkpoint is chosen.",
+      "evidence": "Checkpoint.created_at is self-reported (history.rs:290), so a forged later timestamp could win. Fix: Choose the newest checkpoint by records-branch commit order, not by created_at, and document this.",
+      "location": "Plan step 3 'pick newest'",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The plan conflates an incremental fallback with a replay disagreement.",
+      "evidence": "When the checkpoint's records_sha is not an ancestor, the plan both falls back to full replay and adds a CheckpointDisagrees finding. Fix: In incremental runs, report a non-ancestor records_sha as a replay_reason, and keep CheckpointDisagrees for full-replay mismatches only, or document why both apply.",
+      "location": "Risks: tampered records_sha mitigation",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan's references against the snapshot. The Checkpoint record exists with main_sha, records_sha and verifier_version (history.rs:286). check_attribution and walk exist (attribution.rs:181, :189). The CI attribution job exists with contents: read (ci.yml:18-19, 178-195). The demonstrations for the tamper, version-change and write/no-write criteria would each fail without the behavior. The main problem is the design of incremental mode: it still loads every record and audits the whole records history on every run. Its records_judged count would therefore be cosmetic, and incremental cost would still grow with total history, which contradicts §9 of the design doc and the point of the measurement. Smaller issues: the CI environment variable would break the write tests when they run in CI, and the plan does not say how the newest checkpoint is chosen. Revise."
+}

@@ -1,0 +1,139 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261013-215435-em5g",
+  "n": 1,
+  "at": "2026-10-13T21:55:00.768243598Z",
+  "invocation_seq": 1,
+  "base_commit": "e3c412a57a1307556c7dd899314f8318352c517a",
+  "config_sha256": "3a5a7c10c8f8142be7e5f5cbd5f0238f710d6a133b92a5731607ebe61c2e2789",
+  "defaults_sha256": "7ca3db44e78a075634195d4e9722ade9188c5268e963b636ac7b9c38d2bee2c6",
+  "defaults_version": 1,
+  "title": "Fix stdin/stdout pipe deadlock in git helpers and gitleaks runner",
+  "summary": "Writing child stdin before draining stdout deadlocks once output exceeds the pipe buffer. I add a shared helper in athena-git that writes stdin on a separate thread while collecting output, use it in Git::exit and the gitleaks runner, and fix the xtask policy.rs git() the same way. A regression test pipes over 1 MB through a child that echoes it.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "root-cause",
+      "how": "One shared helper fixes the pattern at every call site rather than only the failing test."
+    },
+    {
+      "id": "tested",
+      "how": "Adds a >1 MB echo regression test; cargo test and clippy must pass."
+    },
+    {
+      "id": "small",
+      "how": "One focused change limited to the three call sites and the helper."
+    },
+    {
+      "id": "buy-first",
+      "how": "Uses std threads; no new crate."
+    }
+  ],
+  "assumptions": [
+    "The shared helper lives in athena-git (athena-gate already depends on it); xtask may not depend on athena-git because of the architecture dependency-graph policy test, so it may get a small local fix.",
+    "No new crate is needed; std::thread::scope suffices.",
+    "Broken-pipe errors on stdin write are tolerated when the child exits, as the child's status is the real signal."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Git::exit, the gitleaks runner's run, and the xtask policy.rs git() helper no longer write all stdin before reading stdout; stdin is written on a separate thread (or equivalent concurrent drain).",
+      "kind": "content"
+    },
+    {
+      "text": "The athena-git and athena-gate call sites share one helper; xtask uses it or a documented local equivalent if using it would alter the crate dependency graph.",
+      "kind": "content"
+    },
+    {
+      "text": "A write error from a child that exits early (broken pipe) is handled without panic or hang.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo test` from the repo root: a new test piping more than 1 MB through an echoing child (e.g. cat) passes, and xtask policy tests complete rather than hang.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`cargo clippy --all-targets` is clean and `cargo fmt --check` passes.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-git/src/lib.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-gate/src/secrets.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "xtask/tests/policy.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "xtask/Cargo.toml",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "Cargo.lock",
+      "action": "modify",
+      "p": 0.1
+    },
+    {
+      "path": "docs/architecture.md",
+      "action": "modify",
+      "p": 0.1
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.3
+    }
+  ],
+  "out_of_scope": [
+    "Other process-spawning code that does not pipe stdin",
+    "CI workflow changes",
+    "Reducing the number of tracked files"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.78,
+      "p_verification_passes": 0.68,
+      "p_user_intervenes": 0.13,
+      "cost_usd": {
+        "p10": 0.3,
+        "p50": 0.75,
+        "p90": 1.7
+      },
+      "wall_time_s": {
+        "p10": 320.0,
+        "p50": 620.0,
+        "p90": 1000.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7507246376811594,
+      "p_verification_passes": 0.6792452830188679,
+      "p_user_intervenes": 0.1471698113207547,
+      "cost_usd": {
+        "p10": 0.3261871218406757,
+        "p50": 0.7957258,
+        "p90": 1.8027015126010353
+      },
+      "wall_time_s": {
+        "p10": 424.13879256183634,
+        "p50": 723.6551202605393,
+        "p90": 969.9161016396472
+      }
+    }
+  },
+  "departures": "Slightly higher acceptance because the request is very specific; slightly higher cost for three call sites plus a new test."
+}

@@ -1,0 +1,184 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261012-223236-amhd",
+  "base_commit": "680dff408cfe6779de8e06b335c352582ff0d932",
+  "base_fingerprint": "sha256:c352932eef6225a785ba84e91a53b95e25bb3f03cb3ccd2fa292c2a7531b23c1",
+  "previous_job": "20261012-220558-fd7f",
+  "candidate_commit": "0c3f8f78b52b40c68c53f6f14f07f5c34797fda0",
+  "candidate_tree": "d48b7bb51284eb3af89c573236d019a814273f14",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 14039
+    },
+    {
+      "path": "athena.toml",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 7227
+    },
+    {
+      "path": "crates/athena-cap-study/prompts/producer.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 1019
+    },
+    {
+      "path": "crates/athena-cap-study/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 6727
+    },
+    {
+      "path": "crates/athena-cli/src/wiring.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 6276
+    },
+    {
+      "path": "crates/athena-cli/tests/common/mod.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 10957
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 57682
+    },
+    {
+      "path": "crates/athena-core/src/capability.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 4615
+    },
+    {
+      "path": "crates/athena-core/src/fake.rs",
+      "status": "added",
+      "mode": "100644",
+      "bytes": 1684
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 4924
+    },
+    {
+      "path": "crates/athena-core/src/pin.rs",
+      "status": "added",
+      "mode": "100644",
+      "bytes": 12232
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 61750
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "status": "added",
+      "mode": "100644",
+      "bytes": 10309
+    },
+    {
+      "path": "crates/athena-core/src/state.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 4474
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 14661
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 44141
+    },
+    {
+      "path": "docs/decisions.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 109815
+    }
+  ],
+  "fingerprint": "sha256:443e1c00e8120f8c135b80d0c59f4875a44347cb4ea4921b3cb0de185bb23332",
+  "violations": [],
+  "producer_report": {
+    "summary": "The core now pins a study job's repository itself. `run.rs` calls a new `Pinner` once, before the prediction commit, and only for a capability whose `pins_repo()` is true (study). `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked` all pass.\n\n- **Pinning:** `pin.rs` is recreated with the `Pinner` trait and a `GitPinner` that shells out to git. It runs `ls-remote`, a depth-1 fetch of that commit, then `read-tree` and `checkout-index`. A branch, an annotated tag or a full commit id resolves to a 40-hex commit. A missing ref is an error, as are refs or URLs starting with `-`. The commit is always the checked-out commit, so an annotated tag gives its commit rather than the tag object.\n- **Config:** `repo_url` and `repo_ref` are new optional keys in `[capabilities.study]` (`CapabilityConfig`). No Rust source names a repository. `athena.toml` carries them only as a commented example that uses firstmate with an `example.com` URL.\n- **Missing config or bad pin:** if the study section lacks either key, `go` stops with a clear error before anything is committed. The same happens for a URL carrying credentials or a pinner answer that is not 40-hex.\n- **Job record:** a new optional `pin` field (`PinnedRepo` with url, ref and sha) is written in the prediction commit. It is skipped on serialization when absent, so existing records are unchanged.\n- **Mount:** the tree is copied to `pinned-source/` in both the producer's and the verifier's working directory. Every file and directory loses its write bits, and the mount is added to the snapshot's `info/exclude` so it never shows in a change list. Cleanup restores write access before removal, in `clean_job` and the work/verify removals in `run.rs`. Read-only is enforced by permissions plus agent policy, not an OS mount; D75 says so.\n- **Tests:**\n  - `run_pin_tests.rs`, run by `cargo test -p athena-core`: with a counting fake pinner and a scripted fake driver on a test capability with id \"study\", it asserts exactly one pinner call, the fake SHA in the committed and final job records, and the read-only mount seen by both agents. A second test checks that a study with no configured repo makes no call and commits nothing.\n  - `the_change_capability_never_pins` in `lifecycle.rs`, run by `cargo test`, uses the real Change capability: zero calls and no pin in the job record.\n  - Three real-pinner tests in `pin.rs` use local `file://` repos, with no network: branch, tag and commit resolution, a missing ref, and the read-only mount.\n  - Removing the `pin_repo` call in `run.rs` fails the first test on its call-count assertion.\n- **Docs and prompt:** D75 in `docs/decisions.md` has the alternatives, tradeoff and reversal cost. `CHANGELOG.md` has an entry. The study producer prompt now points at `pinned-source/`, kept short because the producer prompt budget test was 34 tokens over with my first, longer wording.",
+    "files": [
+      "crates/athena-core/src/pin.rs",
+      "crates/athena-core/src/fake.rs",
+      "crates/athena-core/src/run_pin_tests.rs",
+      "crates/athena-core/src/run.rs",
+      "crates/athena-core/src/lib.rs",
+      "crates/athena-core/src/state.rs",
+      "crates/athena-core/src/capability.rs",
+      "crates/athena-cap-study/src/lib.rs",
+      "crates/athena-cap-study/prompts/producer.md",
+      "crates/athena-data/src/config.rs",
+      "crates/athena-data/src/records.rs",
+      "crates/athena-cli/src/wiring.rs",
+      "crates/athena-cli/tests/common/mod.rs",
+      "crates/athena-cli/tests/lifecycle.rs",
+      "docs/decisions.md",
+      "CHANGELOG.md",
+      "athena.toml"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "run before the final prompt, docs and CHANGELOG edits; those do not affect clippy"
+      },
+      {
+        "command": "cargo test --locked --no-fail-fast",
+        "result": "pass",
+        "note": "all crates, including the policy boundary scan, the prompt budget test and the lifecycle tests"
+      },
+      {
+        "command": "cargo test --locked -p athena-core",
+        "result": "pass",
+        "note": "33 tests, including the dispatch and real-pinner tests"
+      }
+    ],
+    "open_issues": [
+      "athena.toml ships the study repo_url and repo_ref only as a commented example, so a real study job fails with a clear error until the user sets them. I did not invent a real firstmate URL.",
+      "Read-only is enforced by file permissions only. A process running as root or the owner can still chmod or write the mount, and the real pinner and the tag-peeling path are exercised only against local file:// repos.",
+      "Nested runs, which use fake agents, are wired with the real GitPinner, so a study started inside a nested run would try the network.",
+      "The verifier's snapshot also gets the mount, but nothing yet tells the verifier prompt about pinned-source/. I changed only the producer prompt, to stay within its token budget.",
+      "Older parsers of athena.job/1 that deny unknown fields would reject a job record that carries a pin."
+    ],
+    "mistakes": [
+      "My first draft of the git checkout used `checkout -- .` with --work-tree from outside the work tree. I changed it to read-tree plus checkout-index with a prefix before running anything.",
+      "The first real-pinner test failed because ls-remote for an annotated tag returned the tag object id rather than the commit. I fixed it by resolving FETCH_HEAD^{commit} after the fetch.",
+      "The first dispatch test read the job record at the reading commit, not the dispatch commit, and got no job.json. I fixed it by finding the commit that added job.json.",
+      "My first producer prompt wording pushed the producer role set over its token budget (1134 against 1100). I shortened it."
+    ],
+    "learnings": [
+      "Capability crates depend on athena-core, so a dispatch test for the real Study capability cannot live in athena-core; the core test uses a local test capability with id \"study\" and pins_repo true.",
+      "Finished.prediction_commit is the commit that added the reading, not the dispatch commit; the job record is in the commit found by introducing_commit(\"HEAD\", job.json).",
+      "The producer prompt role set has a tight token budget (1100) in crates/athena-cli/tests/budgets.rs; adding about 100 bytes to the study producer prompt fails it.",
+      "Athena's Bash hook only allows cargo, chmod, git, ls, mv and rm for the producer; tail, cat and grep are denied.",
+      "The brief names crates/athena-core/Cargo.toml and Cargo.lock as deliverables, but no change was needed: tempfile and anyhow were already dependencies of athena-core.",
+      "The brief lists fake.rs and invocation.rs as existing files to modify, but fake.rs did not exist and invocation.rs needed no change; I created fake.rs."
+    ],
+    "desires": [
+      "A way to run the budget and policy tests on their own before finishing, to learn the producer-prompt token headroom without a full test run.",
+      "A read-only file-search tool for the build output directory, to see exact test failure text without rerunning."
+    ]
+  }
+}

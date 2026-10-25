@@ -1,0 +1,124 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261017-152733-efyd",
+  "base_commit": "3970d5d18ab80bac26d68a639bdc95bfaeffbefa",
+  "base_fingerprint": "sha256:5b0bb8edc06622a66fb62918d3bb2f4f86d88fafa76f3857e7cf20ad58663689",
+  "previous_job": "20261016-152050-4kgd",
+  "candidate_commit": "630ceff2be9f050ec8bfe09114421b30dcb2fa61",
+  "candidate_tree": "d99d950bf2281e98b8eadd3cb79175c9e159e6d5",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 97039
+    },
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 103396
+    },
+    {
+      "path": "crates/athena-core/src/routing.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 31770
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 84801
+    },
+    {
+      "path": "docs/design/ci-routing.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 29442
+    }
+  ],
+  "fingerprint": "sha256:ef0ee02a9d3376f1b1824e3d79d5dff938106f0763e6701ca9dce5ba58b838fc",
+  "violations": [],
+  "producer_report": {
+    "summary": "The checks step now pushes the candidate commit and reuses CI's result for it. The cause was the `NoCi` stub plus the missing push; I replaced both. After the candidate commit is made, `run_pushed` in routing.rs pushes it to `athena/<job>`. The push goes through the new `gh::push_work_branch`, which reads the remote head, calls `check_push`, then uses the existing `GitRemote::push`. `run_pushed` then waits for the `ci` run on that exact SHA through `GhClient`, up to the named constant `CI_WAIT` (60 reads, 20 seconds apart, about 20 minutes). That bound is a conservative guess and not measured, and the doc comment says so. It hands the result to `run_routed`. A green run replaces the local checks and the records name the CI run address. A red run fails and nothing runs locally. A missing or other-SHA run, or a push that cannot be made (no `origin`, no credentials, refused by the guard), runs the three checks locally once. The run output says whether the checks came from CI or ran locally. `build` jobs and capabilities without all three checks push nothing, and nested runs still skip checks. The design doc (section 10, items 4 and 5) and CHANGELOG are updated, and the verifier's reuse is still listed as not done. I added no `athena.toml` field. `cargo test --locked`, clippy and fmt all pass. The `GhClient`/`GhCli` wiring in run.rs has not been run against a real remote; the tests use fake push and CI sources. One real concern is listed under open_issues: `athena land --pr` may refuse to push once the candidate is on the work branch.\"",
+    "files": [
+      "crates/athena-core/src/run.rs",
+      "crates/athena-core/src/routing.rs",
+      "crates/athena-core/src/gh.rs",
+      "docs/design/ci-routing.md",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "Ran as `cargo test --locked --quiet` after the final edit; every suite ok, none failed (a few ignored by the repo)."
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "Clean. Run before the doc, changelog and fmt edits, which touch no Rust."
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "Clean after `cargo fmt --all`."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Run `cargo test --locked`: it passes, with new tests showing the checks step receives a CI source backed by the platform and not `NoCi`. They also show the candidate commit is pushed before CI is read, the same SHA is used for both, and the wait uses the configured bound rather than one poll.",
+        "status": "met",
+        "evidence": "The suite passes. In routing.rs, `pushed_a_green_run_for_the_sha_replaces_the_local_checks` asserts the log is [push SHA, read SHA], so the push comes first and both use one SHA. `pushed_waits_for_the_configured_bound_and_then_runs_locally_once` asserts reads equal BOUND.polls (4). `the_ci_wait_bound_is_more_than_one_poll` checks CI_WAIT. run.rs passes `GhClient` through `Platform` and no longer uses NoCi. I did not run the `GhClient` and `GhCli` wiring in run.rs against a real remote."
+      },
+      {
+        "criterion": "Run `cargo test`: tests with fake push and CI sources show a green CI run for the candidate SHA means no local check runs and the check records say they came from CI with the run address. A run for another SHA, a missing run after the bounded wait, and a push failure each run the three checks locally exactly once. A red run fails and does not run locally.",
+        "status": "met",
+        "evidence": "The routing.rs tests `pushed_a_green_run_for_the_sha_replaces_the_local_checks`, `pushed_a_run_for_another_sha_runs_locally_once`, `pushed_waits_for_the_configured_bound_and_then_runs_locally_once`, `pushed_a_failed_push_reads_no_ci_and_runs_locally_once` and `pushed_a_red_run_fails_and_does_not_run_locally` each assert the local-run list and the CI-origin notes. The run address `runs/5` is checked in the green test."
+      },
+      {
+        "criterion": "Run `cargo clippy --all-targets --locked -- -D warnings` and `cargo fmt --all --check`: both are clean.",
+        "status": "met",
+        "evidence": "Both commands ran clean; the clippy run is the one noted above."
+      },
+      {
+        "criterion": "The push goes through the existing guarded push path (`check_push`, the work branch only). No new push mechanism is added, and nothing is pushed to the default branch.",
+        "status": "met",
+        "evidence": "`gh::push_work_branch` reads `remote_head`, calls `check_push` with allowed_branch and branch both `work_branch(job)`, then calls the existing `Remote::push` (`GitRemote`). The gh.rs tests show the push goes to `athena/<job>` and a non-fast-forward remote head is refused with nothing pushed."
+      },
+      {
+        "criterion": "The wait bound is a named, documented value (a constant or a config field) with a stated basis, and the run output says whether the checks came from CI or ran locally. If `athena.toml` gets a field, it is named and the schema/load tests are updated.",
+        "status": "met",
+        "evidence": "`routing::CI_WAIT` is a constant of 60 reads at 20 s with a doc comment giving its basis. `run_pushed` reports 'checks came from CI: ...' or 'checks ran locally', and the tests assert both lines. No athena.toml field was added."
+      },
+      {
+        "criterion": "docs/design/ci-routing.md section 10 items 4 and 5 are updated: the push and wait are no longer listed as 'not done'. The verifier's reuse is still listed as not done, and no speedup is claimed without a measurement.",
+        "status": "met",
+        "evidence": "Items 4 and 5 were edited. The push and wait are described as done, the verifier's input (step 4) and a measured bound are still listed as not done, and the text says no speedup is claimed or measured."
+      },
+      {
+        "criterion": "The `fmt`, `clippy` and `test` checks are not changed in definition. The verifier's input and prompts are not changed.",
+        "status": "met",
+        "evidence": "Nothing in athena.toml, the verifier code or the prompts was edited. The changed files are gh.rs, routing.rs, run.rs, the design doc and CHANGELOG.md."
+      }
+    ],
+    "open_issues": [
+      "Possible conflict with `athena land --pr`: the candidate now sits on `origin/athena/<job>`. Landing builds its own commit and, for a job with no stored PR link, runs `check_push` with the remote head set to the candidate. If the landed commit does not descend from the candidate, the guard refuses with NotFastForward. I did not change landing (out of scope), and I could not test this against a real remote. Suggested fix: let landing replace the work branch's head when the remote head is the job's own earlier candidate, or push the candidate under a separate CI-only ref.",
+      "The 20-minute CI_WAIT is not measured. If CI never triggers on the pushed branch, each job waits the full bound before running locally. Revise it once the section 9 baseline exists.",
+      "The push and CI read in run.rs use `GhCli` with the `origin` remote. I did not run them against a real remote; unit tests use fake push and CI sources."
+    ],
+    "mistakes": [
+      "I did not touch ci_result.rs or athena.toml, though both are listed as deliverables. The reading needed no change in them: the wait is a constant, so no config field was added."
+    ],
+    "learnings": [
+      "The candidate commit is built in `self.git` by `commit_tree` in run.rs, so it can be pushed from there.",
+      "`resolve` treats a CI source error as Missing straight away, so a failing `gh` call falls back to local without waiting out the bound.",
+      "The crate denies missing Debug impls under clippy, so `Platform` needed a manual Debug.",
+      "`JobId::parse(\"bootstrap\")` is the idiom for job ids in tests."
+    ],
+    "desires": [
+      "Read access to the saved test output. The harness stored it outside the working directory, and the read hook blocked it, so I reran with --quiet."
+    ]
+  }
+}

@@ -1,0 +1,7 @@
+Update on one environment fact: the Vercel AI Gateway now authenticates, so Jev is available after all.
+
+- Jev (`typesafe-ai/jev`) is a decision model, not a language model: chat completions return 400 `ModelTypeMismatchError`. It answers through the OpenAI-compatible Decisions API: `POST https://ai-gateway.vercel.sh/v1/decisions` with JSON `{model, input, questions: [...]}`, where each question has `type` (`predicate` | `choice` | `score`), optional unique `name`, `instructions`, and `choices` [{value, description?}] (1–255) for choice or `levels` [{label, description?}] (2–10) for score. Answers come back in question order: predicate → `probability`; choice → `choice`, `confidence`, `probabilities`; score → `score` (probability-weighted level index), `confidence`, `probabilities`; a declined question → `{type: "refusal"}`. The response carries `usage` (input/output tokens) and `provider_metadata.gateway.cost` (USD string). Limits: 32K tokens for the input plus the longest question; text only; about $0.042 per million input tokens, output free. Docs: https://vercel.com/docs/ai-gateway/sdks-and-apis/openai-decisions
+- Auth: `Authorization: Bearer $AI_GATEWAY_API_KEY` (read from the environment, never stored) works.
+- The gateway's `POST /v1/chat/completions` also works for language models (e.g. `anthropic/claude-haiku-5.5`).
+
+Whether any of this belongs in v0 stays your call; the "leave Jev out unless you argue otherwise" default still stands. Just don't design around the gateway being unavailable.

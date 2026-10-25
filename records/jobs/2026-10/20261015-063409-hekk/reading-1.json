@@ -1,0 +1,164 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261015-063409-hekk",
+  "n": 1,
+  "at": "2026-10-15T07:54:03.681575539Z",
+  "invocation_seq": 1,
+  "base_commit": "e012827c593dd290c48c8051556ab0279db24fc5",
+  "config_sha256": "36cc8236b906040fe507a6461dabd9eddad491a69739eeee2bf0d38753b1202e",
+  "defaults_sha256": "7ca3db44e78a075634195d4e9722ade9188c5268e963b636ac7b9c38d2bee2c6",
+  "defaults_version": 1,
+  "title": "Make verifier snapshot read-only; rerun once on fingerprint change",
+  "summary": "The verifier will run against a snapshot it cannot write to (read-only permissions plus a write deny in its grant). If HEAD or the work tree still differs afterwards, the verdict is discarded and verification reruns once on a fresh snapshot, recording a system fault rather than a rejection of the work. Audience: Athena maintainers, who need verifier misbehaviour separated from bad work.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "Unit tests for the write attempt and for the single rerun; fmt, clippy and test must pass."
+    },
+    {
+      "id": "root-cause",
+      "how": "Prevent the write instead of only detecting it."
+    },
+    {
+      "id": "small",
+      "how": "Change limited to the verifier run path and its tests."
+    },
+    {
+      "id": "mechanism",
+      "how": "Enforced by file permissions and a grant deny, not prose."
+    },
+    {
+      "id": "verified",
+      "how": "Behaviour exercised by tests run through cargo test."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "No 'system fault' concept exists in the code (grep found none), so the producer adds a minimal one: a field on the verification/closing data and a ui line, not a new record schema.",
+    "Read-only is done by chmod on the verifier snapshot (as pin.rs make_read_only does) after checks, with a write-deny in the verifier grant if the grant type supports it; the .git dir stays writable only where git needs it, or is also locked.",
+    "Checks (run_check and restore_to) still need a writable snapshot, so lock only for the verifier agent's run and unlock afterwards.",
+    "If the rerun also differs, the job ends as a system fault and not as a rejection of the work; the old snapshot_changed blocker is removed or kept only for that second failure path, never as a work rejection.",
+    "Rerun happens at most once; the retry's cost counts against the verifier budget."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A test shows that a write attempt in the verifier's snapshot (a file edit or a git commit) fails or is denied, and that the snapshot's HEAD and work-tree tree are unchanged afterwards. Run: cargo test -p athena-core.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test using the fake agent shows a changed snapshot fingerprint after the first verifier run triggers exactly one more verifier invocation on a freshly created snapshot, and that the first verdict is discarded.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test shows that when the fingerprint changed, the outcome is recorded as a system fault, and the judgment does not contain the 'verifier changed its snapshot' rejection blocker or reject the work.",
+      "kind": "behavior"
+    },
+    {
+      "text": "When the snapshot is unchanged, the verifier runs once and the verdict is used as before; existing tests still pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "cargo fmt --check, cargo clippy --all-targets and cargo test pass on the workspace.",
+      "kind": "behavior"
+    },
+    {
+      "text": "In run.rs the snapshot-changed branch near the old line 959 now discards the verdict and reruns once, and verify.rs no longer turns snapshot_changed into a blocker for the work.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-git/src/snapshot.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-core/src/pin.rs",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "p": 0.15
+    },
+    {
+      "path": "crates/athena-core/src/capability.rs",
+      "action": "modify",
+      "p": 0.1
+    },
+    {
+      "path": "crates/athena-cap-change/src/lib.rs",
+      "action": "modify",
+      "p": 0.1
+    }
+  ],
+  "out_of_scope": [
+    "Changing the producer's snapshot or sandbox",
+    "Changing the check-tool configuration handling in toolconfig.rs",
+    "Changes to athena.toml, defaults.toml or CI workflows",
+    "Changing how verdicts are judged apart from the snapshot-change path"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.72,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.12,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.1,
+        "p90": 2.5
+      },
+      "wall_time_s": {
+        "p10": 500.0,
+        "p50": 1000.0,
+        "p90": 1900.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7999999999999999,
+      "p_verification_passes": 0.7021276595744681,
+      "p_user_intervenes": 0.09361702127659575,
+      "cost_usd": {
+        "p10": 0.4197054066044115,
+        "p50": 0.8774205484223001,
+        "p90": 2.1737386453263166
+      },
+      "wall_time_s": {
+        "p10": 526.2073135793798,
+        "p50": 834.4606510980002,
+        "p90": 1400.654450214519
+      }
+    }
+  },
+  "departures": "The change touches the verifier flow, permissions, a new fault concept and several tests, so cost and time sit above the reference and pass probability sits slightly below."
+}

@@ -1,0 +1,137 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261017-121143-sg0j",
+  "base_commit": "2efe0b276ace9067d3068ad6c3fd1c54e191fc72",
+  "base_fingerprint": "sha256:e9a2026f7c74954c7f76d1e36dd70de034a89afba5755fa9e76a4fb62bb45e55",
+  "previous_job": "20261010-154004-60r4",
+  "candidate_commit": "c903e44420c8d40e65b7fbf01544ce6b4181ced2",
+  "candidate_tree": "834b0b3b8465a9b13f32ed25c60647bee8a95c63",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 94774
+    },
+    {
+      "path": "crates/athena-core/src/scoring.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 6541
+    },
+    {
+      "path": "crates/athena-gate/src/jobs.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 17128
+    },
+    {
+      "path": "crates/athena-gate/src/landing_tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 43007
+    },
+    {
+      "path": "crates/athena-score/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 34463
+    },
+    {
+      "path": "docs/decisions.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 184711
+    },
+    {
+      "path": "docs/records.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 20580
+    }
+  ],
+  "fingerprint": "sha256:55b9eddceffe0440b3ac5d8b854932ef02a831fe6f8571b185a17999949c9d31",
+  "violations": [],
+  "producer_report": {
+    "summary": "Scoring rules are now versioned. In athena-score, `RulesVersion` has V1 (the old behaviour: a cost known only as a bound is never provisional) and V2 (the current version: such a cost is provisional). `RULES` now equals the V2 string, and `RULES_V1` is the old string. `score_job` and `score_records` take the version and write `Score.rules` from it. `rescore` keeps the rules of the score it re-scores. The gate's job-record check in jobs.rs maps the recorded string to a version with `RulesVersion::from_recorded`, recomputes under it, and still refuses an unknown string. Root cause: one global RULES string was compared against, and used to recompute, scores written under older rules. I did not run `athena check --history`, so I did not confirm the failing path against the real records. Docs: CHANGELOG entry, the `athena.score/1` row in records.md, and decision D108. No record, athena.toml, defaults.toml or workflow file was touched. Other deliverables I did not edit: athena-core/src/lib.rs, history.rs, and athena-cli/tests/lifecycle.rs.",
+    "files": [
+      "crates/athena-score/src/lib.rs",
+      "crates/athena-gate/src/jobs.rs",
+      "crates/athena-gate/src/landing_tests.rs",
+      "crates/athena-core/src/scoring.rs",
+      "docs/records.md",
+      "docs/decisions.md",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "Ran `cargo fmt --all` to apply formatting; I did not run the `--check` form separately."
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "Every test binary reported ok."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Run `cargo test`. A new test recomputes a score that records the v1 rules string, using a killed or bound-only cost invocation, under v1. It matches the recorded score with the cost quantity not provisional, and the gate's job-record check accepts it.",
+        "status": "met",
+        "evidence": "The gate test `a_score_written_under_v1_is_accepted_with_its_bound_cost_not_provisional` in landing_tests.rs lands a job whose producer cost is a bound. It computes the score under V1 and asserts the rules string is v1 and the cost is not provisional. It then asserts no violation from `jobs::check` and none from `invariant::check`. The scorer test `v1_scores_a_bound_only_cost_as_not_provisional_and_records_v1` covers the same in athena-score."
+      },
+      {
+        "criterion": "Run `cargo test`. A test confirms a score written under the current rules still marks a bound-only cost provisional, and that the gate rejects a score whose rules string is not a known version.",
+        "status": "met",
+        "evidence": "The tests `a_score_written_under_the_current_rules_marks_a_bound_cost_provisional` (cost provisional, accepted), `a_score_under_an_unknown_rules_version_is_refused` (\"cannot recompute\") and `a_score_labelled_v1_but_computed_under_v2_is_refused` (\"does not follow\") all pass."
+      },
+      {
+        "criterion": "Run `cargo test`, `cargo clippy --all-targets` and `cargo fmt --check`. All pass.",
+        "status": "met",
+        "evidence": "`cargo test --locked` and `cargo clippy --all-targets --locked -- -D warnings` passed. I ran `cargo fmt --all` rather than the `--check` form."
+      },
+      {
+        "criterion": "The scorer defines each rule version explicitly: v1 keeps the pre-#129 behavior with no provisional cost for a bound, and the current version holds the bound-only rule. Each is selected by the rules string recorded in a score, and Score.rules is written from the version used.",
+        "status": "met",
+        "evidence": "crates/athena-score/src/lib.rs defines `RULES_V1`, `RULES_V2`, `RulesVersion::{V1,V2,CURRENT}`, `from_recorded` and `as_str`. `score_job` writes `rules.as_str()` into `Score.rules`. The provisional flag is `resolution.cost_provisional && rules.marks_bound_cost_provisional()`."
+      },
+      {
+        "criterion": "The gate's job-record check in crates/athena-gate/src/jobs.rs recomputes a score under the version it records and no longer demands equality with the latest RULES. An unknown version is still refused.",
+        "status": "met",
+        "evidence": "`jobs::check` uses `let Some(rules) = RulesVersion::from_recorded(&score.rules) else { violation }` and passes `rules` to `expected_score`. The unknown-version test passes."
+      },
+      {
+        "criterion": "No file under records/ is modified, and the diff touches no athena.toml, defaults.toml or workflow file. The change adds no gate that fails on future rule changes.",
+        "status": "met",
+        "evidence": "Files changed: the scoring and gate Rust files, CHANGELOG.md, docs/records.md and docs/decisions.md. No new check was added."
+      },
+      {
+        "criterion": "The change is documented in CHANGELOG.md and in the scoring or records docs: what a rules version is, and that older scores verify under their own version.",
+        "status": "met",
+        "evidence": "The CHANGELOG.md Unreleased/Changed entry, the `athena.score/1` row in docs/records.md, and decisions D108 explain this."
+      }
+    ],
+    "open_issues": [
+      "I could not read the 8 real score files or run `athena check --history`, because records/ is absent from my copy. It is inferred that they carry the exact V1 string and recompute under V1. The verifier or CI should confirm this.",
+      "The expected deliverables crates/athena-core/src/lib.rs, crates/athena-gate/src/history.rs and crates/athena-cli/tests/lifecycle.rs needed no edits, so they are unchanged."
+    ],
+    "mistakes": [
+      "My first draft of the gate tests used a bound cost with lower bound 0.0, which broke the invariant's cost reconcile. I fixed it by using a lower bound of 0.1 and by asserting that the invariant check passes."
+    ],
+    "learnings": [
+      "Before this change, the base commit's scorer already contained the bound-only provisional rule while still labelling scores `v1`. The old score files carry the same `v1` string, so V1 had to be redefined as the pre-provisional behaviour and the provisional rule moved to a new `v2` string.",
+      "Only athena-core's scoring.rs and the gate called `score_records` and `expected_score`. `RULES` is also used by a test in history.rs, which still works unchanged.",
+      "A gate landing test must keep the outcome totals consistent with the invocation costs. A bound cost with lower bound 0.1 keeps the reconcile sum at 0.3."
+    ],
+    "desires": [
+      "Read access to the 8 failing score files, to confirm they carry the `v1` rules string and that recomputing them under V1 matches.",
+      "A way to run `athena check --history` against the real records."
+    ]
+  }
+}

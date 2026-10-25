@@ -1,0 +1,115 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261015-215711-ayqz",
+  "base_commit": "374c29a9823b1399fbc4ca3915a041c5100db16f",
+  "base_fingerprint": "sha256:614e058f04b92a55eb62d5c977a12a3af1569f74ef85a6a8bf5448c12cbeb5df",
+  "previous_job": "20261015-205805-kdqd",
+  "candidate_commit": "4ecf19d80881dd63448843cf8bc1a4dc1df9a3e5",
+  "candidate_tree": "531ebed071b57e4afc411a854069bbc946e26d0c",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 76804
+    },
+    {
+      "path": "crates/athena-core/src/fake.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 2166
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 77638
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 28339
+    },
+    {
+      "path": "docs/decisions.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 168839
+    }
+  ],
+  "fingerprint": "sha256:75e4d81ea0d8191937befe67e317ae02c6e857056a4facc3be1d1f89528f48ef",
+  "violations": [],
+  "producer_report": {
+    "summary": "A study job now pins the sha in its study's pin.json, not the branch tip. Cause: `pin_repo` resolved only athena.toml's repo_ref (\"main\"), so job 20261015-201650-cyvb mounted fc8972cd while the study pin said 6407052f. `pin_repo` now takes the committed head and the request text. A new `study_pin` helper reads `studies/*/pin.json` at that head. It picks the study whose repository_url equals the configured repo_url. With one such study, the pinner is asked for its full sha, and the pin must resolve to that same sha. With several, the request must name exactly one study_id; if it names none or more than one, the job stops before pinning. A pin.json sha that is not a full 40-hex id, or a pin that resolves to a different sha, stops the job before dispatch with a message naming the study. It never falls back to repo_ref. With no study for the repository, repo_ref applies as before. The test fake `CountingPinner` gained `echoing_full_shas()` so a full-sha ref resolves to itself, as the real pinner does. I added tests, the CHANGELOG entry, and decision D102. No file under studies/, athena.toml or defaults.toml was changed.",
+    "files": [
+      "crates/athena-core/src/run.rs",
+      "crates/athena-core/src/run_pin_tests.rs",
+      "crates/athena-core/src/fake.rs",
+      "CHANGELOG.md",
+      "docs/decisions.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "Ran as `cargo test --locked -q` and as the plain command; all test binaries ok, including the new pin tests in athena-core."
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A new test in crates/athena-core (run_pin_tests.rs) dispatches a study job whose head holds studies/<id>/pin.json with a repository_url matching the configured repo_url and a sha differing from what repo_ref (\"main\") resolves to. It asserts the pinner is asked for that sha, and the job record's pin sha equals it. Run: cargo test -p athena-core.",
+        "status": "met",
+        "evidence": "`an_existing_studys_pin_overrides_the_configured_ref` commits a pin.json with sha 6407052f… (the test config's repo_ref \"stable\" resolves to FAKE_SHA, which differs). It asserts the pinner requests are [(URL, STUDY_SHA)] and the recorded job pin sha equals STUDY_SHA. It passed in the full `cargo test --locked` run, which includes athena-core."
+      },
+      {
+        "criterion": "Tests cover the fallbacks: with no existing study for the repository the configured repo_ref is used as before; with several studies for one repository, the one whose id the request names is chosen, and if none is named the behavior is documented and never silently picks a different commit. Run: cargo test.",
+        "status": "met",
+        "evidence": "`a_study_of_another_repository_leaves_the_configured_ref_in_force` asserts the configured ref is requested. `with_several_studies_of_one_repository_the_request_names_the_one_to_pin` asserts the named study's sha is pinned, and that naming none or both stops the job with zero pin calls. The rule is documented on `pin_repo` and in D102."
+      },
+      {
+        "criterion": "A pin.json whose sha is not a full 40-hex id, or whose pin does not resolve to that same sha, stops the job before dispatch with a message naming the study, rather than falling back to main. Run: cargo test.",
+        "status": "met",
+        "evidence": "`a_pin_that_is_not_a_full_sha_or_does_not_resolve_to_itself_stops_the_job_naming_the_study` covers sha \"main\" and \"6407052f\". Both give an error containing \"study demo\" and \"40-hex\" with zero pin calls. A non-echoing pinner that resolves elsewhere gives an error naming the study and the sha, and HEAD is unchanged."
+      },
+      {
+        "criterion": "cargo test --locked, cargo clippy --all-targets --locked -- -D warnings and cargo fmt --all --check all pass.",
+        "status": "met",
+        "evidence": "All three commands ran with no failures."
+      },
+      {
+        "criterion": "The doc comment on pin_repo and a CHANGELOG entry state the rule (an existing study's pin.json overrides repo_ref; athena.toml's repo_ref is used only for a new study) and name the cause: job 20261015-201650-cyvb mounted fc8972cd while the study pin said 6407052f.",
+        "status": "met",
+        "evidence": "Both are in run.rs (the pin_repo doc comment) and in the CHANGELOG.md Unreleased Fixed entry; each names job 20261015-201650-cyvb, fc8972cd and 6407052f."
+      },
+      {
+        "criterion": "No file under studies/, athena.toml or defaults.toml is changed; re-pinning or re-citing the study is a separate user decision.",
+        "status": "met",
+        "evidence": "Only run.rs, run_pin_tests.rs, fake.rs, CHANGELOG.md and decisions.md were edited."
+      }
+    ],
+    "open_issues": [
+      "The study match requires the study's repository_url to equal the configured repo_url exactly, so a URL written with a different suffix (for example without .git) is treated as another repository. Normalizing URLs was left out.",
+      "A pin.json that is not valid JSON stops every study job on the repository, since its repository cannot be read."
+    ],
+    "mistakes": [
+      "The first test build failed: a borrowed value was moved in `with_several_studies_of_one_repository_the_request_names_the_one_to_pin`. I fixed it with a clone."
+    ],
+    "learnings": [
+      "athena-core's `dispatch` has the head commit and the job's request text in scope, so the pin lookup needs no new state.",
+      "`Git::ls_tree_under` and `show_file` read committed content at a rev, so the lookup sees only committed studies.",
+      "The Grep tool is denied outside the working directory, so the cargo output spill file under ~/.claude could not be read. `cargo test --locked -q` keeps the output small enough to read directly."
+    ],
+    "desires": []
+  }
+}

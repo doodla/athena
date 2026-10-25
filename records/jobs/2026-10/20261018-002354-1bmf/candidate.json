@@ -1,0 +1,154 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261018-002354-1bmf",
+  "base_commit": "151f0e43433eeec6ccf4cb128e095010b043a381",
+  "base_fingerprint": "sha256:560435f54cbb0b7c153ccfe84305b81a9066e8ab1a7cdce97b4887b4c9b081b6",
+  "previous_job": "20261017-184923-myb9",
+  "candidate_commit": "58e6b67eec38c91f8d8f71d6c0ff71532bb95e91",
+  "candidate_tree": "2a76cdf5437609f966eb0fd343b515f4a1e0af4d",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 104894
+    },
+    {
+      "path": "crates/athena-cli/tests/common/mod.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 19289
+    },
+    {
+      "path": "crates/athena-cli/tests/job_plan.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 31787
+    },
+    {
+      "path": "crates/athena-core/src/admission.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 26527
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 89059
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 105709
+    },
+    {
+      "path": "crates/athena-score/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 34922
+    },
+    {
+      "path": "docs/design/job-planning.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 20431
+    }
+  ],
+  "fingerprint": "sha256:02d6b45771053791967a7db406109013edc65275769ea2480361d2674c86568e",
+  "violations": [],
+  "producer_report": {
+    "summary": "Job planning now runs up to max_rounds (default 3) of planner, Athena's own checks, then critic. A revise sends a revision brief quoting the previous plan and every finding. Reject, a misread reading, or a revise in the last round fails the job with \"planning stopped before any code was written:\" plus the findings. The stopped job scores verification_passes as unknown, not false (F11). A retry carries the stopping critique's findings (F11). Athena's checks live in admission::plan_findings. A major finding writes an Athena critique with no critic invocation and goes back to the planner. A critic that accepts while holding a major or blocker finding is treated as revise. The full cargo test --locked, clippy and fmt pass.",
+    "files": [
+      "crates/athena-core/src/run.rs",
+      "crates/athena-core/src/admission.rs",
+      "crates/athena-core/src/reading.rs",
+      "crates/athena-score/src/lib.rs",
+      "crates/athena-cli/tests/job_plan.rs",
+      "crates/athena-cli/tests/common/mod.rs",
+      "CHANGELOG.md",
+      "docs/design/job-planning.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "Run as `cargo test --locked -q --no-fail-fast` over the whole workspace, after fixing one failure of my own (external_calls_guard rejected a shell-download program name in a test string; reworded). All targets pass, including job_plan (15 tests) and external_calls_guard. The xtask boundary test is part of this run."
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "Needed one fix: boxed PlanRevision in the RoundEnd enum for large_enum_variant."
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Run cargo test: a test where the planner revises then accepts shows the second planner prompt contains the first finding's text, and the job lands.",
+        "status": "met",
+        "evidence": "job_plan.rs: after_a_revise_the_second_planner_prompt_quotes_the_first_finding_and_the_job_lands. It asserts the second planner brief contains the finding and the quoted previous plan, the role order, and OutcomeState::Landed. It passes."
+      },
+      {
+        "criterion": "Run cargo test: a test where every round says revise asserts no producer or verifier invocation, outcome failed with reason starting 'planning stopped before any code was written:' plus the findings, three plans and three critiques committed, totals counting all six planning invocations, verification_passed unknown (not false), and check_history() clean.",
+        "status": "met",
+        "evidence": "job_plan.rs: when_every_round_says_revise_the_job_fails_in_planning_with_nothing_built_and_an_unknown_verification. It checks the reason prefix and finding, no Producer or Verifier calls, job-plan-1..3 and critique-1..3 present, totals.invocations == 7 (reader plus six), the verification_passes score event outcome == None, and check_history() clean. It passes."
+      },
+      {
+        "criterion": "Run cargo test: a plan editing an unlisted athena.toml, or citing a command outside the verifier's grant (per athena_agent::policy::evaluate), yields an Athena critique with a major finding and zero critic invocations.",
+        "status": "met",
+        "evidence": "job_plan.rs: a_plan_that_edits_an_unlisted_governance_file_gets_an_athena_critique_and_no_critic_call and a_plan_citing_a_command_outside_the_verifiers_grant_gets_an_athena_critique_and_no_critic_call. Both assert critique-1 has invocation_seq None, a major finding with source Athena, and no critic call for that round. Both pass."
+      },
+      {
+        "criterion": "Run cargo test: a retry of a job stopped in planning carries the last critique's findings into the new reading's brief via earlier_attempt.",
+        "status": "met",
+        "evidence": "job_plan.rs: a_retry_of_a_job_stopped_in_planning_carries_the_last_critiques_findings. The retried reader brief contains the round-3 finding and the stop reason, and not the round-1 finding. The change is in reading.rs carry(). It passes."
+      },
+      {
+        "criterion": "Athena checks cover: exactly one demonstration per criterion; behavior demos have fails_without and an allowed command; modify paths exist and create paths do not; governance paths use admission::is_governance and governance_change_is_listed (major otherwise); other unlisted paths are minor findings.",
+        "status": "met",
+        "evidence": "admission::plan_findings implements each check. Tests: athena_checks_a_demonstration_for_every_criterion_and_a_fails_without_for_behavior_ones, athena_checks_that_files_to_modify_exist_and_files_to_create_do_not, and a_file_outside_the_deliverables_is_a_minor_finding_that_does_not_send_the_plan_back. All pass."
+      },
+      {
+        "criterion": "Rounds are bounded by max_rounds (default 3); reject, a misread reading, or revise in the last round stops the job; the revision brief quotes the previous plan and every finding.",
+        "status": "met",
+        "evidence": "plan_round loops 1..=cfg.max_rounds (the config default is 3, already present). end_round stops on reject, a misread, and revise in the last round; a_reject_a_misread_reading_or_a_revise_in_the_last_round_stops_the_job covers the three cases, including max_rounds = 2. The revision brief uses the existing planner_brief revision section with PlanRevision{previous plan, all findings}; the first test asserts it."
+      },
+      {
+        "criterion": "Run cargo clippy --all-targets -- -D warnings, cargo fmt --check, and the xtask boundary test (cargo test -p xtask); all pass.",
+        "status": "met",
+        "evidence": "Clippy and fmt pass as run. The xtask tests are part of the passing workspace `cargo test --locked`; I did not run `cargo test -p xtask` by itself."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry describing the revise/stop paths and Athena's plan checks; athena.toml is unchanged.",
+        "status": "met",
+        "evidence": "A new first entry under [Unreleased] / Added describes both. athena.toml was not edited: it is not in the changed-file list."
+      }
+    ],
+    "open_issues": [
+      "Scoring: a job with planner or critic invocations and no producer or verifier invocation scores verification_passes as unknown. That includes a job that was killed during planning, and a budget stop between an accepted plan and the producer. Recovery of a job killed during planning is out of scope, and I judged this acceptable.",
+      "A job that stops before the first planner call, on the budget check, has no planning invocation. It still scores as a failed verification.",
+      "athena-score/src/lib.rs is outside the listed deliverables. It was needed to make verification_passes unknown (F11) in the Score record. plan.rs, briefs.rs, outputs.rs, fake.rs and config.rs needed no change.",
+      "If the planner is called and the critic then cannot run, or the budget stops the job in round N, that round's plan is stored only in the budget case. A critic that cannot run or errors leaves that round's plan record out; its planner invocation is still committed.",
+      "I did not run `cargo test -p xtask` as its own command; it passed inside the workspace run."
+    ],
+    "mistakes": [
+      "My first test used a shell-download program name as the out-of-grant command, which tripped external_calls_guard. I reworded it to `python3 check_greeting.py`, which is also outside the grant.",
+      "The first clippy run failed with large_enum_variant on RoundEnd. I boxed the PlanRevision."
+    ],
+    "learnings": [
+      "JobPlanConfig already had max_rounds (default 3), so athena-data/src/config.rs needed no change.",
+      "The Happened.verification_passed field is written in run.rs but not read by scoring. The scored verification_passes event comes from athena_score::score_records, which treated any dispatched job with no verification as false. The unknown result therefore needed a change in athena-score.",
+      "crates/athena-core/tests/external_calls_guard.rs scans tracked files, tests included, for names of programs that make network calls, so test strings must avoid them.",
+      "Policy::root must exist for evaluate(); plan_findings uses the job's state directory as the root.",
+      "fake::deterministic_turn needed no change: the new test Scenario fields script planner and critic turns by call index."
+    ],
+    "desires": [
+      "A way to read truncated test output, or to filter it, without shell pipes."
+    ]
+  }
+}

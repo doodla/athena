@@ -1,0 +1,75 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261014-030342-j237",
+  "base_commit": "b82100c4445ddefecd5b003cd100d47e553539b5",
+  "base_fingerprint": "sha256:e6a8edc81e8d9f54714808bb58efad6dfffbc6e142bb584d84abc8f192bac661",
+  "previous_job": "20261014-024334-p71y",
+  "candidate_commit": "a133501f570761b9e7c2749c055c8e4a13250231",
+  "candidate_tree": "3abbbbe91fd5fe34fe4a213401900d32ca9fc9d0",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 37156
+    },
+    {
+      "path": "crates/athena-cli/src/backtest.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 46929
+    },
+    {
+      "path": "crates/athena-cli/tests/backtest.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 28872
+    },
+    {
+      "path": "docs/design/defaults-loop.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 48309
+    }
+  ],
+  "fingerprint": "sha256:1669828bab791741d96a34a0ecab35a2c568f3100eb571bb0be1456cdf2f17d5",
+  "violations": [],
+  "producer_report": {
+    "summary": "The backtest now builds the introspection record from whichever D87 signal fired, and reports a finding when a decision is under review with no record. Root cause: `introspection_for` only read a fired run's intervention events. D87 under review through ar1x's derived host-error record has no events, so no record was built. `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked -q` all pass.\n\nIn `crates/athena-cli/src/backtest.rs`:\n- **Sources:** `introspection_for` now takes the headers, records and starts. A new helper, `introspection_sources`, collects the cited interventions. Those are the run's intervention events, plus the source intervention of each derived host-error record. Each citation is checked with `validate_citations`, and any that fails is skipped. The record is built from the earliest by (time, id).\n- **Skipped sources:** sources with no job are skipped. Observed host-error records are not sources, because they have no intervention row and the `Introspection` struct can't carry them.\n- **Filter:** the D87 filter in `run_on_from` no longer has `!r.events.is_empty()`.\n- **Finding:** when a decision is under review and no record was built, `run_on_from` pushes a condition-`d` finding for each such decision, naming it.\n\nThe tests are in `crates/athena-cli/tests/backtest.rs`, not in the `backtest.rs` tests module. I added two:\n- **ar1x fixture:** it reuses the existing `real_interventions` fixture, which copies the real ar1x text and time. It checks that D87 is under review, the introspection's intervention is ar1x, its job is `20261013-192156-9h2j`, its class of work is `code`, and there are no findings.\n- **Missing record:** a fixture with an observed host-error record only gives a finding that names D87.\n\nI changed one existing test, the observed-host-error one. It used to assert a clean pass. It now expects exactly one finding, condition `d`, naming D87. This is the intended new behaviour, because an observed record has no intervention to build from.\n\nI also updated the module doc comment, `CHANGELOG.md` and `docs/design/defaults-loop.md` §3.2.",
+    "files": [
+      "crates/athena-cli/src/backtest.rs",
+      "crates/athena-cli/tests/backtest.rs",
+      "CHANGELOG.md",
+      "docs/design/defaults-loop.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test --locked -q",
+        "result": "pass",
+        "note": "All suites passed, including the two new backtest tests and the changed one. The first run's output was persisted to a path I could not read, so I reran with -q."
+      }
+    ],
+    "open_issues": [
+      "Observed host-error records can't source an introspection, because the Introspection struct needs an intervention id. A decision that fires only on an observed record is now reported as a condition-`d` finding. Supporting such records needs a schema change.",
+      "I did not run the backtest on the real records. The brief says that happens after landing."
+    ],
+    "mistakes": [
+      "My first full `cargo test` run printed too much and was saved to a path outside the working directory, which a hook then denied reading. I did not route around the denial and reran with -q."
+    ],
+    "learnings": [
+      "The backtest fixtures that copy ar1x live in crates/athena-cli/tests/backtest.rs and write temporary records/ files; the in-module tests in backtest.rs hold none.",
+      "`earlier_cases` is always empty by construction, because the chosen source is the earliest of the run's citations. This was also true before the change. I kept the expression."
+    ],
+    "desires": []
+  }
+}

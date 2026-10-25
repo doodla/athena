@@ -1,0 +1,224 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261024-232101-zeh9",
+  "round": 3,
+  "at": "2026-10-24T23:25:54.579603658Z",
+  "invocation_seq": 5,
+  "approach": "Add a Priority enum (High, Normal, Low; derived Ord, High first) to plan.rs with Priority::from_text reading a case-insensitive 'Priority: <level>' line, and a priority field on PlanEntry (Normal in bare). Plan::build computes an effective priority per pending item (own priority, raised to the best priority of anything that transitively depends on it), and each loop turn takes as its wave only the ready items with the best effective priority, sorted by (rung, age). A high item with dependencies therefore pulls its prerequisites forward and runs right after them, ahead of unrelated older normal items; with no priorities set every item is Normal, the wave is the whole ready set, and the order is exactly today's. reading::plan_entry sets priority from the request text. JobLine gains priority, set in status::job_line from the same parser. display::plan prints a priority line per item; status lines get a ' priority <level>' suffix when the level is not normal (absence means normal). Update help/doc text in main.rs and drain.rs, add tests, a CHANGELOG entry and a decisions.md entry.",
+  "decisions": [
+    {
+      "choice": "Make the order priority-aware across waves: effective priority inherited from dependents, and a wave holds only the ready items with the best effective priority.",
+      "reason": "Answers finding 1: a high item with a dependency (likely the D111 cutover shape) must not wait behind ~30 older ready normals. Dependencies stay strictly first because only ready items are ever taken. With all-normal input the wave is the full ready set, so today's order and grouping are unchanged.",
+      "rejected": [
+        {
+          "option": "Sort priority only inside a ready wave",
+          "why": "A high item with any dependency lands after every older normal item in earlier waves; the motivating case stays unfixed."
+        },
+        {
+          "option": "Keep per-wave sort and document the limitation",
+          "why": "Leaves the cutover case unsolved when it has dependencies."
+        },
+        {
+          "option": "Pure one-at-a-time topological pick of the highest-priority ready item",
+          "why": "Needs rewriting the group logic, which is out of scope; the wave-restriction keeps grouping code untouched."
+        },
+        {
+          "option": "Sort priority after rung",
+          "why": "The cutover request would still sit behind older higher-rung work."
+        }
+      ]
+    },
+    {
+      "choice": "Read priority from a 'Priority: <level>' line via one shared parser Priority::from_text used by plan_entry and status_job_line; closed set high/normal/low, unknown or missing is Normal, first valid line wins.",
+      "reason": "No new command or stored field; one parser keeps plan and status consistent; a typo cannot reorder the queue.",
+      "rejected": [
+        {
+          "option": "Command-set stored field",
+          "why": "Needs a new command and record schema; out of scope. Recorded in decisions.md."
+        },
+        {
+          "option": "Numeric priority",
+          "why": "More surface, no stated need."
+        },
+        {
+          "option": "Separate parser in display.rs",
+          "why": "Parsers can drift."
+        }
+      ]
+    },
+    {
+      "choice": "Status lines show a priority suffix only when the level is not normal; plan shows a priority line for every item.",
+      "reason": "Answers finding 3: job_line also builds lines for jobs with no request text, and 'priority normal' on every line is noise. Absence means normal, stated in the help text and tested.",
+      "rejected": [
+        {
+          "option": "Always show priority on every status line",
+          "why": "Noise on jobs without a request."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/plan.rs",
+      "action": "modify",
+      "purpose": "Priority enum and parser, PlanEntry.priority, effective-priority wave selection in build, module doc, tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "plan_entry sets priority from request text; test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "JobLine priority filled in job_line.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "purpose": "Priority line in plan items; suffix on non-normal status lines; test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Plan display test covers priority lines and high item first.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "purpose": "Plan help text (around line 221) names priority before rung and age (small change outside the listed files).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Module doc (lines 6-8) names priority in the order description.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Entry for request priority.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Decision entry with alternatives and cutover motivation.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read the tails of CHANGELOG.md and docs/decisions.md for format and next decision number.",
+    "In plan.rs add Priority (High, Normal, Low; derives incl. Ord, Serialize kebab-case; as_str; from_text) and PlanEntry.priority (Normal in bare).",
+    "In Plan::build compute effective priority per pending item by fixpoint (min of own and dependents' effective), then in each loop turn restrict ready to the best effective priority before the (rung, age) sort; leave the grouping code untouched. Update the module doc.",
+    "Add plan.rs tests: high newest first; dependency beats priority and h lands before unrelated n2/n3; no-priority order unchanged; low last; parser cases.",
+    "In reading.rs plan_entry set priority from the text; add test.",
+    "In status.rs add priority to JobLine, set in job_line.",
+    "In display.rs add the priority line in entry_lines and the non-normal suffix on status lines; add test.",
+    "Extend the drain.rs plan display test.",
+    "Update the help text in main.rs and the module doc in drain.rs.",
+    "Add CHANGELOG and decisions.md entries (include the across-wave choice and the cutover motivation).",
+    "Run cargo fmt --all, cargo clippy --all-targets --locked -- -D warnings, cargo test --locked."
+  ],
+  "risks": [
+    {
+      "risk": "Existing exact-output tests break.",
+      "mitigation": "Add priority as a separate line in plan and a suffix only when non-normal in status; run full cargo test."
+    },
+    {
+      "risk": "Derived Ord puts wrong end first.",
+      "mitigation": "Variant order High, Normal, Low; a test asserts High < Normal < Low."
+    },
+    {
+      "risk": "Prose mentioning priority reorders the queue.",
+      "mitigation": "Only a line starting with 'Priority:' and an exact level counts; tested."
+    },
+    {
+      "risk": "Inherited priority and best-priority waves reduce parallel grouping when priorities differ, or loop on cycles.",
+      "mitigation": "All-normal input behaves exactly as before; effective priority is a fixpoint over known pending ids, and the existing empty-ready cycle check is unchanged; cycle test stays."
+    },
+    {
+      "risk": "PlanEntry literals break on new field.",
+      "mitigation": "Use ..PlanEntry::bare; compile errors reveal exceptions."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit test in plan.rs: n1,n2,n3 normal (older) plus newer high h, same rung, no dependencies; assert Plan::build order.",
+      "command": "cargo test -p athena-core plan",
+      "observes": "order == [h, n1, n2, n3].",
+      "fails_without": "Without the priority key the newer high entry is last and the order assertion fails."
+    },
+    {
+      "criterion": 2,
+      "method": "Unit test: h high depends_on n1 (older normal), plus unrelated older normal n2 and n3; assert order is exactly [n1, h, n2, n3] (n1 before h, and h before n2 because the prerequisite inherits the priority). A second case: low-priority item with a high dependent is pulled before normals.",
+      "command": "cargo test -p athena-core plan",
+      "observes": "n1 precedes h always, and h precedes the unrelated older normals.",
+      "fails_without": "If priority overrode dependencies h would precede n1; if priority applied only within a wave, h would land after n2 and n3 and the exact-order assertion fails."
+    },
+    {
+      "criterion": 3,
+      "method": "New plan.rs test with no priorities, varied rungs and ages, asserting rung-then-age order and groups equal to the existing behavior; existing plan and drain tests run unchanged.",
+      "command": "cargo test",
+      "observes": "Order is rung then age; all tests pass.",
+      "fails_without": "If the default order changed, the no-priority test and the existing tests fail."
+    },
+    {
+      "criterion": 4,
+      "method": "drain.rs plan display test with a high and a normal entry asserts a 'priority' line for each item; display.rs test builds JobLines with high and normal priority and asserts the high line contains 'priority high' and the normal line has no priority suffix (absence means normal).",
+      "command": "cargo test -p athena-cli",
+      "observes": "Plan output has a priority line per item; status request lines show non-normal priority.",
+      "fails_without": "Without the display change the priority needles are absent and assertions fail."
+    },
+    {
+      "criterion": 5,
+      "method": "Tests for Priority::from_text ('Priority: high', 'priority: HIGH', indented, absent, 'Priority: urgent', prose mentioning priority) and reading::plan_entry on a request with the line vs without.",
+      "command": "cargo test -p athena-core",
+      "observes": "High for the line in any case; Normal otherwise.",
+      "fails_without": "Without the parser every request reads as normal and the high assertions fail."
+    },
+    {
+      "criterion": 6,
+      "method": "Read the module doc diff.",
+      "command": "git diff crates/athena-core/src/plan.rs",
+      "observes": "The Order bullet names priority, then rung, then age, with dependencies first, and explains the inherited priority and the best-priority wave.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Review the diff.",
+      "command": "git diff CHANGELOG.md docs/decisions.md",
+      "observes": "A CHANGELOG entry for request priority; a decisions.md entry with words-in-request versus command-field alternatives, the wave-only alternative, and the 2026-10-24 cutover motivation.",
+      "fails_without": null
+    },
+    {
+      "criterion": 8,
+      "method": "Run clippy with warnings denied and the format check over all code including new tests and field.",
+      "command": "cargo clippy --all-targets --locked -- -D warnings",
+      "observes": "No warnings; then `cargo fmt --all --check` also exits 0 with no diff.",
+      "fails_without": "An unused item, an unformatted line or a missed Priority field in a struct literal would make clippy or fmt exit non-zero."
+    }
+  ],
+  "open_questions": [
+    "Whether JobLine is constructed elsewhere (compile errors will show).",
+    "Exact heading format and next D-number in CHANGELOG.md and decisions.md.",
+    "Whether the owner wants 'priority normal' shown on every status request line; the plan shows non-normal only to avoid noise."
+  ],
+  "producer_section_sha256": "12801fcfa91c58ecf5d414262f970b60ff15b5d4db93a9f547a946dc7d710c8c"
+}

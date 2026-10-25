@@ -1,0 +1,151 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261024-153908-1rve",
+  "n": 1,
+  "at": "2026-10-24T15:40:02.774889058Z",
+  "invocation_seq": 1,
+  "base_commit": "190871411a6f1e981d9097b0433d9ff933b8982b",
+  "config_sha256": "723abb81b8cdcc25033d7d9653128a919911c4b5950c306183153235b21717e7",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Classify PR commits by content in pr_commits, not Athena-Job trailers",
+  "summary": "Rewrite `pr_commits` in land.rs to classify each commit in `remote_base..head` by its content. The goal is that `athena land --pr` stops refusing real pull requests. The audience is Sri and the verifier, who run the athena-core land and gh tests. The caller in gh.rs passes each commit's kind through instead of hard-coding JobLanding.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "New classification and refusal tests; clippy and fmt checks."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check the kinds produced for a realistic range and the sha in the refusal error."
+    },
+    {
+      "id": "root-cause",
+      "how": "Trailer reliance is removed entirely instead of adding exceptions."
+    },
+    {
+      "id": "small",
+      "how": "The change is confined to land.rs and its caller in gh.rs."
+    },
+    {
+      "id": "verified",
+      "how": "The behavior criteria name the cargo test commands the verifier can run."
+    },
+    {
+      "id": "rust",
+      "how": "Only Rust code and tests change."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "LandingCommit.kind and validation already exist in athena-data (b6f22c2), so athena-data does not change.",
+    "A job's closing records are recognised by paths added under records/jobs/<month>/<job>/ for the candidate, verification and outcome. I did not confirm the exact file names, so the producer must read how they are written.",
+    "The verification id comes from the existing `verification_id(job, commit)` in gh.rs.",
+    "A commit is compared against its first parent. Merge commits are not expected in a PR range.",
+    "Ordering of the checks: unchanged fingerprint first, then intervention record added, then job closing records, otherwise refuse."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Run `cargo test -p athena-core land::`. A test builds a range shaped like this repo's real PRs: reading, dispatch and introspection commits (records only), a lease commit under operator/, an intervention commit adding records/interventions/<month>/<id>.json, then a job's landing commit adding its candidate, verification and outcome records. No commit carries an Athena-Job trailer. The test passes and asserts kinds in order: records_only for the first four, declared_intervention, then job_landing with that job and the verification id.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-core land::`. A refusal test adds a commit that changes governed content without being an intervention or a job's closing records. `pr_commits` returns an error that contains that commit's sha.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-core gh::`. The gh tests still pass, and the commits built for a Landing record carry the kind from `pr_commits` and pass `LandingCommit::validate`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`pr_commits` and `PrCommit` no longer read trailers or mention Athena-Job. `PrCommit` carries the kind, plus an optional job and verification. The doc comments describe the content rules.",
+      "kind": "content"
+    },
+    {
+      "text": "A commit is records_only when its fingerprint equals its parent's, using the same `fingerprint(git, commit, base)` function the gate invariant uses. An empty range is still an error.",
+      "kind": "content"
+    },
+    {
+      "text": "The old trailer-count tests for `pr_commits` are removed or replaced, not left alongside the new behavior.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo clippy -p athena-core --all-targets` and `cargo fmt --check`. Both are clean.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/land.rs",
+      "action": "modify",
+      "p": 0.99
+    },
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-gate/src/invariant.rs",
+      "action": "modify",
+      "p": 0.1
+    },
+    {
+      "path": "docs/design/records-history.md",
+      "action": "modify",
+      "p": 0.25
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.3
+    }
+  ],
+  "out_of_scope": [
+    "Changing the Landing record schema or LandingKind.",
+    "Running the full workspace test suite.",
+    "Changing the gate invariant's behavior."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.72,
+      "p_verification_passes": 0.58,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.4,
+        "p50": 0.95,
+        "p90": 2.2
+      },
+      "wall_time_s": {
+        "p10": 500.0,
+        "p50": 1300.0,
+        "p90": 2700.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7564853556485356,
+      "p_verification_passes": 0.6421052631578947,
+      "p_user_intervenes": 0.07076923076923078,
+      "cost_usd": {
+        "p10": 0.42419508332788347,
+        "p50": 1.0187113830942995,
+        "p90": 2.16723360531538
+      },
+      "wall_time_s": {
+        "p10": 563.035897881544,
+        "p50": 1346.9469679499548,
+        "p90": 2639.277986353483
+      }
+    }
+  },
+  "departures": "The previous attempt at this fix hit the 1800s deadline, so cost and time are raised a little and the pass probability lowered. Building a realistic git range test is slow."
+}

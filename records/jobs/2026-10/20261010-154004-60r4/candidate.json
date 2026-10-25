@@ -1,0 +1,134 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261010-154004-60r4",
+  "base_commit": "e0222881c88954cddea60c6b609628eb951bad95",
+  "base_fingerprint": "sha256:2e0979667ea723ca0739a0ad6764ab27bbb08fd82a7232260074542326e92e65",
+  "previous_job": "20261017-091546-05yx",
+  "candidate_commit": "34074cf376eebaf37e62d3b0e388fab5acafe258",
+  "candidate_tree": "21e5a19e87b457931420f31a829341615f8cdd3a",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 94242
+    },
+    {
+      "path": "crates/athena-agent/src/claude.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 28912
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 78079
+    },
+    {
+      "path": "crates/athena-core/src/scoring.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 6496
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 102896
+    },
+    {
+      "path": "crates/athena-score/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 31090
+    },
+    {
+      "path": "docs/records.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 20328
+    }
+  ],
+  "fingerprint": "sha256:9f7c09edc6018f4e48d824a836470465471d283ee86f7daa6f45546d2c4c0ae4",
+  "violations": [],
+  "producer_report": {
+    "summary": "Root cause 1: `athena stop` ends the child's process group itself, so the driver could see a child end with no result before its own loop noticed the kill switch, and recorded `error`. The driver now checks the switch after the loop and records `killed` with the detail \"the kill switch was turned on\". Root cause 2: a cost known only as a bound (a killed producer's cost is $0 to the cap) was scored as a firm figure. `QuantityScore` has a new `provisional` field, which defaults to false and is omitted when false. The scorer sets it when any execution invocation's cost has no single value. Aggregates skip provisional quantities, and the reference history skips a provisional cost_usd. I updated docs/records.md and CHANGELOG.md (cites m8). Not exercised by the end-to-end test: the driver fix itself. The lifecycle test uses the fake agent, so it checks the record, the provisional score and the gate, and the stand-in-driver test covers the attribution.",
+    "files": [
+      "crates/athena-agent/src/claude.rs",
+      "crates/athena-score/src/lib.rs",
+      "crates/athena-data/src/records.rs",
+      "crates/athena-core/src/scoring.rs",
+      "crates/athena-cli/tests/lifecycle.rs",
+      "docs/records.md",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "every test result line was ok, no failures; re-run with -q to see the result lines"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "after running cargo fmt --all once"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A new driver test in crates/athena-agent/src/claude.rs shows a child ending with no result while the kill switch is on yields InvocationOutcome::Killed with a detail naming the kill switch, not Error. Run: cargo test -p athena-agent.",
+        "status": "met",
+        "evidence": "The test a_child_ending_without_a_result_while_the_kill_switch_is_on_is_killed_not_an_error uses a new stand-in mode that writes the stop file and exits 143 with no result. It asserts Killed and a detail containing 'kill switch'. It also asserts the same early exit without the switch is Error."
+      },
+      {
+        "criterion": "A new scoring test in crates/athena-score builds a job whose execution cost is only a bound and shows the cost_usd quantity score is provisional; a job with exact costs is not provisional. Run: cargo test -p athena-score.",
+        "status": "met",
+        "evidence": "The test a_cost_known_only_as_a_bound_scores_provisional_and_a_firm_cost_does_not scores a job from a bound-only cost and from firm costs. The bound-only cost_usd is provisional, wall_time_s is not, and the firm one is not provisional. It scores through score_job with Resolution.cost_provisional taken from cost_is_only_a_bound, the helper score_records uses; score_records itself is covered only by the lifecycle test."
+      },
+      {
+        "criterion": "An end-to-end test in crates/athena-cli/tests/lifecycle.rs shows a producer stopped by the kill switch closes with a killed invocation record and a provisional cost score, and the commit gate accepts the recomputed score. Run: cargo test -p athena-cli.",
+        "status": "met",
+        "evidence": "The test a_producer_stopped_by_the_kill_switch_closes_killed_with_a_provisional_cost_score reads the committed invocation (killed, detail names the kill switch, cost has no value) and score.json (cost_usd provisional). It then asserts check_history has no violations."
+      },
+      {
+        "criterion": "Whole workspace passes cargo test and cargo clippy --all-targets with no warnings; cargo fmt --check is clean.",
+        "status": "met",
+        "evidence": "I ran cargo test --locked -q, cargo clippy --all-targets --locked -- -D warnings and cargo fmt --all --check. All passed."
+      },
+      {
+        "criterion": "A bound-only cost is no longer scored as a firm figure, and a provisional cost_usd score does not count in aggregates as a resolved value.",
+        "status": "met",
+        "evidence": "The test a_provisional_quantity_does_not_count_in_aggregates checks the aggregate counts. athena-core/src/scoring.rs history() also skips provisional cost_usd."
+      },
+      {
+        "criterion": "Older score.json records without the new field still deserialize (serde default); existing history tests still pass.",
+        "status": "met",
+        "evidence": "The test a_quantity_score_written_before_the_provisional_field_still_reads in athena-data/src/records.rs parses an old-shape quantity score and round-trips the new field. The full suite passes."
+      },
+      {
+        "criterion": "docs/records.md describes the provisional quantity field and kill-switch attribution, and CHANGELOG.md has an entry citing m8 of docs/design/reviews/athena-v0-acceptance-1.md.",
+        "status": "met",
+        "evidence": "docs/records.md has two new paragraphs after the killed-invocation paragraph. CHANGELOG.md has an Unreleased/Changed entry citing m8 of the review file."
+      }
+    ],
+    "open_issues": [
+      "A provisional cost_usd score keeps its WIS values in score.json; only aggregates and the reference history skip it. athena-cli display.rs still prints 'cost WIS' for it without a provisional marker.",
+      "The brief's deliverable list named athena-core/src/lib.rs, which I did not need to edit. I edited athena-data/src/records.rs and athena-core/src/scoring.rs instead."
+    ],
+    "mistakes": [
+      "I first wrote a nonexistent method call, max_error(), in the new driver test and fixed it to Error before any build."
+    ],
+    "learnings": [
+      "The brief listed athena-core/src/lib.rs, but QuantityScore lives in athena-data/src/records.rs. The history consumer is athena-core/src/scoring.rs.",
+      "athena-score has no serde_json dependency, so the serde-default test went into athena-data.",
+      "A killed invocation's cost is estimated with value None and bounds 0 to the cap; `Quantity::value().is_none()` identifies a bound-only cost."
+    ],
+    "desires": []
+  }
+}

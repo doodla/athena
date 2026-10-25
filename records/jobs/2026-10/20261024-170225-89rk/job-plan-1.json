@@ -1,0 +1,258 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261024-170225-89rk",
+  "round": 1,
+  "at": "2026-10-24T18:14:11.439358516Z",
+  "invocation_seq": 2,
+  "approach": "Add one pure function, `qualifies_for_tree_retry`, in reading.rs. Its inputs are the retried job's state, candidate record and verification record. It is true only when the job is rejected, has a candidate commit and tree and no admission violations, and its verification recorded at least one check, all passed. Every unmet criterion must be of kind content, and at least one must be unmet. No behavior criterion may be unmet or unverified, and there must be no reading mismatch. A wrapper, `tree_retry_seed`, resolves \"try again on <job>\" with the existing `retried_job`. It returns the seed commit and the redacted findings only when the rule holds and the visible base is unchanged since the rejected job's base, which is the same check that keeps the candidate tree valid to start from. `dispatch` passes the seed into the producer brief (a new `retry_from` field) and into `produce_and_verify`. That function builds the producer snapshot with a new `SnapshotRepo::BaseThenTree { tree_commit }`. This variant commits the base as \"base\", then replaces the work tree with the rejected candidate's visible files without committing them. `change_list()` therefore still diffs against the original base. The empty-candidate test must change: with a seeded tree, `changes` is non-empty even if the producer did nothing, so a new `Snapshot::unchanged_since_seed()` makes that case fail as \"the producer made no change\". Everything after the change list (admission, fingerprint, checks, verifier) is untouched. All other retries take the old path. Wording in the reader brief, producer brief, README and drain doc comment is corrected, and the CHANGELOG and decision are written.",
+  "decisions": [
+    {
+      "choice": "Seed the producer snapshot with a new SnapshotRepo variant that commits the base and leaves the candidate's files uncommitted in the work tree.",
+      "reason": "`Snapshot::change_list` diffs the work tree against the snapshot's `base` commit. Keeping base as the original base means the new candidate's change list is against the original base and landing, admission and fingerprint code are unchanged. The existing `BaseAndCandidate` variant commits the candidate too, so it would yield an empty change list.",
+      "rejected": [
+        {
+          "option": "Seed from the candidate commit with `SnapshotRepo::Base` (base commit = candidate)",
+          "why": "The change list would be relative to the rejected candidate, so landing would miss the rejected work."
+        },
+        {
+          "option": "Create a Base snapshot, then copy the candidate's files over it in run.rs",
+          "why": "It needs the private `clear_work_tree` and repeats snapshot logic outside the git crate; a variant keeps it in one tested place."
+        }
+      ]
+    },
+    {
+      "choice": "A single doc-commented pure function `qualifies_for_tree_retry(state, candidate, verification) -> bool` over records, requiring a rejected state, candidate commit and tree, no violations, at least one recorded check with all passed, at least one unmet criterion, and every unmet criterion of kind Content.",
+      "reason": "The rule is general and testable with a table of records, with no prose parsing. An empty check list does not count as all passed, which is the conservative reading. A rejection with no unmet criteria (for example a blocker finding) has an unknown cause, so it restarts from the base.",
+      "rejected": [
+        {
+          "option": "Always start retries from the base",
+          "why": "Status quo; repeats about 40 minutes and 3 dollars of passing work."
+        },
+        {
+          "option": "Always start retries from the rejected candidate",
+          "why": "A failed check or unmet behavior criterion may come from the code itself, so the retry should start clean; failed or interrupted jobs have no candidate to inherit."
+        },
+        {
+          "option": "Ask a model whether the rejection is content-only",
+          "why": "The records already hold the verdict; a model call adds cost and nondeterminism."
+        }
+      ]
+    },
+    {
+      "choice": "Seed only when the visible base is unchanged: `diff_tree(rejected base_commit, new prediction commit)` has no path outside records/. Otherwise start from the base.",
+      "reason": "Every job's prediction commit differs from the rejected job's base by records/ at least, and the user may have landed other work since. Materializing the old candidate tree over a newer base would silently revert that work.",
+      "rejected": [
+        {
+          "option": "Require base_commit equality",
+          "why": "It is never equal, because each job commits its own records."
+        },
+        {
+          "option": "Replay the candidate's change list onto the new base",
+          "why": "It can conflict, and is more design than one run needs; a later change can add it."
+        }
+      ]
+    },
+    {
+      "choice": "Detect a do-nothing seeded producer by comparing the final work tree's tree with the seed's tree (`unchanged_since_seed`), and fail it with the existing empty-candidate path.",
+      "reason": "Without it, the inherited rejected changes would make the change list non-empty and an idle retry would be verified as if it were work.",
+      "rejected": [
+        {
+          "option": "Leave the check as `changes.is_empty()`",
+          "why": "It would pass an idle retry for inheriting the rejected tree."
+        }
+      ]
+    },
+    {
+      "choice": "The producer brief gets a `retry_from` section (job id, unmet criteria with evidence, and the verification's findings, all redacted) and a Working directory paragraph that says the work starts from that candidate. Without a seed the existing paragraph is unchanged.",
+      "reason": "Criterion 2 needs findings in the brief and no claim of a base start. The reader brief sentence is made conditional so no text says every retry starts from the base.",
+      "rejected": [
+        {
+          "option": "Send findings through the send-back loop",
+          "why": "The send-back loop is out of scope and starts only after a first report."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-git/src/snapshot.rs",
+      "action": "modify",
+      "purpose": "Add `SnapshotRepo::BaseThenTree { tree_commit }`, which commits the base and leaves the commit's visible files uncommitted in the work tree. Add `Snapshot::unchanged_since_seed`, which compares the current work tree's tree with the tree recorded at seeding. Unit tests. This file is not in the expected deliverables but is needed so the change list stays against the base.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Add `qualifies_for_tree_retry` (record inputs, doc comment) and `tree_retry_seed`, which uses `retried_job`, the rule, and redacted findings and unmet criteria taken from the verification record. Table tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "purpose": "In `dispatch`, compute the seed (also requiring no non-records path differs between the rejected base and the new prediction commit) and pass it to `producer_brief` and `produce_and_verify`. Build the producer snapshot with `BaseThenTree` when seeded. Fail as 'the producer made no change' when the seeded tree is untouched.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Add `RetrySeed` and `ProducerInputs.retry_from`. The producer brief gets a section with the findings and a Working directory paragraph that says the work starts from the rejected candidate. The reader-brief sentence becomes conditional. Update the existing test asserting 'starts from the base' and add tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "action": "modify",
+      "purpose": "Core-level tests for criteria 4 and 5: full verification of a seeded retry with a change list against the base, and an idle seeded producer failing as an empty candidate.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/retry.rs",
+      "action": "modify",
+      "purpose": "End-to-end tests for criteria 1 and 3: the producer's working directory listing for a content-only rejection, a failed-check rejection and a changed base.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Correct the retry doc comment (around line 74) so it does not imply a base start for every retry. Doc only.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "README.md",
+      "action": "modify",
+      "purpose": "Replace 'the retry starts from the base' (around line 51) with the conditional rule.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "[Unreleased] entry: what changed, each caller and writer with its test, the commands run, and that earlier text saying retries always start from the base is superseded.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "New decision recording the rule, the alternatives (always from base, always from candidate), the unchanged-base condition, the empty-seed check and the supersession.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read `Git::diff_tree`, `TempIndex` and the `Scenario` verdict handling in tests/common/mod.rs, to settle the open questions.",
+    "snapshot.rs: add `BaseThenTree { tree_commit }` to `SnapshotRepo`. In `create`: init and commit 'base' as now, then `clear_work_tree`, `materialize(tree_commit)` and record `seed_tree = work_tree_tree()` without committing. Add `unchanged_since_seed()`. Unit tests: change list against the base contains the seed's differences, and `unchanged_since_seed` is true then false after an edit.",
+    "reading.rs: add `qualifies_for_tree_retry` with the doc comment. Add `tree_retry_seed(records, request, base_commit, redactor)`, returning a `TreeRetrySeed { job, candidate_commit, unmet, findings }`. The visible-base check calls `git.diff_tree` from run.rs, or is passed in as a bool. Add table tests for every case in criterion 3.",
+    "briefs.rs: add `RetrySeed` and `ProducerInputs.retry_from`. Render the findings section and the conditional Working directory paragraph. Make the reader-brief sentence conditional. Update the existing tests and add new ones.",
+    "run.rs: in `dispatch`, after the redactor and request text, call `tree_retry_seed` and check that no non-records path differs between the rejected job's base and the new prediction commit. Pass `retry_from` to `producer_brief` and the seed to `produce_and_verify`. In `produce_and_verify`, use `SnapshotRepo::BaseThenTree` when seeded and treat `!snapshot.unchanged_since_seed()?` as the no-change test. Leave the baseline snapshot as `Base`.",
+    "Add the tests in run_pin_tests.rs and tests/retry.rs (criteria 1, 3, 4, 5). Reuse Scenario and Model; add a producer-listing capture.",
+    "Fix drain.rs doc comment and README.md wording; grep docs for any remaining 'starts from the base' claim.",
+    "Write the CHANGELOG [Unreleased] entry and the docs/decisions.md decision. They name the alternatives, list each touched caller and writer with its covering test, record the commands run, and state that earlier text saying every retry starts from the base is superseded.",
+    "Run cargo fmt --all --check, cargo clippy --all-targets --locked -- -D warnings and cargo test --locked, and record the results in the CHANGELOG and decision."
+  ],
+  "risks": [
+    {
+      "risk": "Seeding from a tree whose visible base has since changed would revert later landed work.",
+      "mitigation": "Seed only when the visible paths (all outside records/) are identical between the rejected base and the new prediction commit; a test covers the fallback to base."
+    },
+    {
+      "risk": "An idle seeded producer is verified as a candidate because the inherited changes make the change list non-empty.",
+      "mitigation": "`unchanged_since_seed` gates the empty-candidate failure; criterion 5 test."
+    },
+    {
+      "risk": "The brief's start-from-candidate claim drifts from what the snapshot holds.",
+      "mitigation": "The CLI test asserts the producer's directory listing, and the brief text is derived from the same seed value that selects the snapshot variant."
+    },
+    {
+      "risk": "A mis-set rule skips a retry that would have needed a clean start (for example a content criterion that depends on code that is wrong).",
+      "mitigation": "Strict rule: all checks recorded and passed, no behavior criterion unmet or unverified, no violations, no reading mismatch. Everything else restarts from the base, and the new candidate is fully verified either way."
+    },
+    {
+      "risk": "Existing tests assert the old wording ('starts from the base').",
+      "mitigation": "The reader-brief sentence keeps the phrase 'starts from the base' in its conditional form, and the test at briefs.rs ~1842 is updated alongside."
+    },
+    {
+      "risk": "The change touches the athena-git crate beyond the expected deliverables list.",
+      "mitigation": "The variant is additive; existing variants are unchanged and the new unit tests are in the same file."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "End-to-end test in crates/athena-cli/tests/retry.rs. Reject a job whose scripted producer adds a file and whose scripted verdict leaves one content criterion unmet, with all checks passing. Run `athena.retry` then `go` on the retry. The scripted producer records the file listing of its working directory from the invocation spec. The test asserts the listing holds the rejected candidate's added file.",
+      "command": "cargo test --locked -p athena-core -p athena-cli a_content_only_rejection_retries_from_the_rejected_tree",
+      "observes": "The producer's working directory contains the rejected candidate's file, which the base lacks.",
+      "fails_without": "With the old `SnapshotRepo::Base` seeding the listing lacks the rejected file and the assertion fails."
+    },
+    {
+      "criterion": 2,
+      "method": "Unit tests in briefs.rs: `producer_brief` with `retry_from` set contains the job id, each finding and unmet criterion, and text saying the work starts from the rejected candidate, and does not contain 'starts from the base' or 'snapshot of the base commit'. Without it the brief is unchanged. The reader-brief test is updated for the conditional wording.",
+      "command": "cargo test --locked -p athena-context",
+      "observes": "The brief text with and without the seed.",
+      "fails_without": "Without the new section the findings and start-from-candidate statement are absent, and the old Working directory text claims a base snapshot."
+    },
+    {
+      "criterion": 3,
+      "method": "Table tests of `qualifies_for_tree_retry` in reading.rs: failed check, unmet behavior criterion, behavior criterion with unverified commands, no candidate tree, admission violations, failed state, interrupted (Dispatched) state, no unmet criteria, no checks recorded. Each returns false and a content-only case returns true. A CLI test in retry.rs shows a rejected job with a failed check retries with a base-only listing, and a test shows a changed visible base falls back to base.",
+      "command": "cargo test --locked",
+      "observes": "The function returns false for every non-qualifying record set, and the producer listings of those retries lack the rejected file.",
+      "fails_without": "A rule that ignored check results or criterion kind would return true on those rows and the tests would fail."
+    },
+    {
+      "criterion": 4,
+      "method": "Test in crates/athena-core (run_pin_tests.rs or a new run test) for a seeded retry: the scripted verifier is invoked, the check list is recorded in verification.checks (fmt, clippy, test as configured in the fixture), the verifier snapshot is the new candidate, and `candidate.base_commit` is the retry's prediction commit with `changes` listing the rejected file as an add against the base. Landing the retry produces the file in the repository. Snapshot unit test in athena-git: the BaseThenTree `change_list()` is against the base commit.",
+      "command": "cargo test --locked -p athena-core",
+      "observes": "Verifier role invoked, all checks recorded, change entries against the original base, and landing works.",
+      "fails_without": "If seeding skipped verification or diffed against the candidate, the verifier would not run or the change list would be empty/wrong."
+    },
+    {
+      "criterion": 5,
+      "method": "Test with a scripted producer that edits nothing in a seeded retry. The job ends failed with reason 'the producer made no change', no verifier invocation. A unit test in snapshot.rs checks `unchanged_since_seed` is true for an untouched seeded work tree and false after an edit.",
+      "command": "cargo test --locked -p athena-core",
+      "observes": "Outcome failed with the empty-candidate reason; the verifier is never called.",
+      "fails_without": "With only `changes.is_empty()` the inherited tree yields a non-empty change list and the job would be verified and could pass."
+    },
+    {
+      "criterion": 6,
+      "method": "Run the three checks.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All exit 0.",
+      "fails_without": "A formatting, lint or test failure anywhere in the change."
+    },
+    {
+      "criterion": 7,
+      "method": "Read reading.rs: `qualifies_for_tree_retry` is a single `pub fn` with a doc comment, taking `JobState`, `Option<&Candidate>`, `Option<&Verification>`. Search for callers.",
+      "command": "git diff",
+      "observes": "The function signature takes records only and is the sole home of the rule; no string matching on findings.",
+      "fails_without": null
+    },
+    {
+      "criterion": 8,
+      "method": "Read the CHANGELOG [Unreleased] entry and the docs/decisions.md decision. They list each touched caller or writer with its covering test: `dispatch`, `produce_and_verify`, `Snapshot::create`, `producer_brief`, `reader_brief`, and `tree_retry_seed`. They record the commands run, name the alternatives (always from base, always from candidate), and state that earlier CHANGELOG or decision text saying retries always start from the base is superseded.",
+      "command": "git diff -- CHANGELOG.md docs/decisions.md",
+      "observes": "Entry text with callers, tests, commands and the supersession sentence.",
+      "fails_without": null
+    },
+    {
+      "criterion": 9,
+      "method": "Search for the old claim across README.md, docs and the Rust sources, and read the changed README lines (the paragraph near line 51), the reader brief in briefs.rs and the drain.rs retry doc comment.",
+      "command": "git diff -- README.md crates/athena-context/src/briefs.rs crates/athena-cli/src/drain.rs",
+      "observes": "No remaining text says every retry starts from the base; each says a retry starts from the base unless the rejection qualifies.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "pin.rs is an expected deliverable but I found no need to change it; the producer snapshot code only uses `pin::remove_tree` and `mount`, which stay as they are. I plan to leave it untouched unless the producer finds a reason.",
+    "Whether `Git::diff_tree` accepts commit ids rather than only tree ids. Snapshot.change_list passes trees. If commits are not accepted, peel with `<commit>^{tree}` first.",
+    "Whether a rejection with no unmet criteria (for example a blocker finding or a reading mismatch) should restart from the base. The plan treats it as not qualifying because the cause is unknown.",
+    "How the fixture Scenario's scripted verdict expresses an unmet content criterion with all checks passing; the producer must read `Scenario::verdict` in tests/common/mod.rs and, if needed, add a small helper there (a test support file).",
+    "Whether the rejected job's introspection-seeded request ever carries a different text than 'try again on <job>'. In the tests read, the retry's request is always that text, so `retried_job` finds the job."
+  ],
+  "producer_section_sha256": "a28bf5d8cd142ef78f452f4fa66d665602f70208581abf500a41d92e99485f57"
+}

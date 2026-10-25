@@ -1,0 +1,165 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261024-232101-zeh9",
+  "base_commit": "6d300c84e1fed7e75059575aada5f1a1af440e83",
+  "base_fingerprint": "sha256:c08d9cd3e04cf7169c8597aa512377ef5c2ff5ee0c431015172414315c82f840",
+  "previous_job": "20261024-220824-bs1z",
+  "candidate_commit": "3db40cbb2aaaa73a3ff8a238fde28199acb7d993",
+  "candidate_tree": "6c29ac1080755cbef005bf2ca487ac116523559c",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 134876
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 48670
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 81200
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 53557
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 110271
+    },
+    {
+      "path": "crates/athena-core/src/plan.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 26808
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 100950
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 39034
+    },
+    {
+      "path": "docs/decisions.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 216816
+    }
+  ],
+  "fingerprint": "sha256:687a1df45d7128663fcb3a69a8c67f582e955b49b68019b1e2d1856b73c5ec48",
+  "violations": [],
+  "producer_report": {
+    "summary": "A request can now carry a priority, and `athena plan` and `athena drain` order by it. A line `Priority: high|normal|low` (any case) in the request's words sets it. Anything else, or no line, reads as normal. The order is dependencies first, then priority, then rung, then age. Without priority lines every request is normal, so the order and the parallel groups are the same as before.\\n\\nA high request's prerequisites inherit its priority, so they run before unrelated older normal requests. This is what the records-history cutover (D111 job 7) needs if it has dependencies. `athena plan` prints a `priority` line for every item. `athena status` adds ` · priority high` or ` · priority low` to a request line and shows nothing for normal.\\n\\nThe parser is shared. `Priority::from_text` is in plan.rs and is used by both `reading::plan_entry` and `status::job_line`. Beyond the brief's list I also updated the help text in main.rs and the module doc in drain.rs. I added a CHANGELOG entry and decision D118, which records the alternatives and the cutover motivation.\"",
+    "files": [
+      "crates/athena-core/src/plan.rs",
+      "crates/athena-core/src/reading.rs",
+      "crates/athena-core/src/status.rs",
+      "crates/athena-cli/src/display.rs",
+      "crates/athena-cli/src/main.rs",
+      "crates/athena-cli/src/drain.rs",
+      "crates/athena-cli/tests/drain.rs",
+      "CHANGELOG.md",
+      "docs/decisions.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test --locked -p athena-core plan",
+        "result": "pass",
+        "note": "21 passed, including the new priority tests"
+      },
+      {
+        "command": "cargo test --locked -p athena-cli plan",
+        "result": "pass",
+        "note": "tests/drain.rs (11) and tests/job_plan.rs (19) passed, plus the new display test"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "after cargo fmt --all"
+      },
+      {
+        "command": "cargo test --locked (full)",
+        "result": "not-run",
+        "note": "Athena runs the full suite"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A plan.rs unit test builds a newer high-priority entry and several older normal ones, and shows the high one ordered first. Run `cargo test -p athena-core plan`.",
+        "status": "met",
+        "evidence": "plan::tests::a_newer_high_priority_item_comes_before_older_normal_ones asserts the order [h, n1, n2, n3]; it passed."
+      },
+      {
+        "criterion": "A test shows a high-priority entry that depends on an older normal one still comes after it, so dependencies win over priority. Run `cargo test -p athena-core plan`.",
+        "status": "met",
+        "evidence": "plan::tests::dependencies_win_over_priority_and_pull_their_prerequisites_forward asserts the order [n1, h, n2, n3], and base, h, n for a low item with a high dependent; it passed."
+      },
+      {
+        "criterion": "A test shows that entries with no priority keep the existing order (rung, then age). The existing plan tests pass unchanged. Run `cargo test`.",
+        "status": "met",
+        "evidence": "plan::tests::without_priorities_the_order_is_rung_then_age passed. The existing plan tests pass unmodified. In tests/drain.rs only plan_prints_order_groups_details_and_flagged_items_and_says_so_when_nothing_is_open changed, and that is the deliverable the brief lists. The full suite was not run."
+      },
+      {
+        "criterion": "A display test shows `athena plan` output has a priority line per item, and the `athena status` request lines show priority. Run `cargo test -p athena-cli`.",
+        "status": "met",
+        "evidence": "tests/drain.rs plan_prints_order_groups_... asserts 'priority    high' and 'priority    normal' in display::plan output, with the order urgent → a → b. display::tests::status_lines_show_a_non_normal_priority... asserts ' · priority high · plan accepted r1' and no suffix for normal. Both passed under cargo test -p athena-cli plan; the full cargo test -p athena-cli was not run."
+      },
+      {
+        "criterion": "A test shows a request whose text has a line 'Priority: high' (case-insensitive) is read as high priority, and a request without such a line as normal.",
+        "status": "met",
+        "evidence": "plan::tests::priority_is_read_from_a_line_in_the_words and reading::tests::a_priority_line_in_the_request_sets_the_plan_priority passed."
+      },
+      {
+        "criterion": "The plan.rs module doc names the new ordering key: priority, then rung, then age, with dependencies first.",
+        "status": "met",
+        "evidence": "The Order bullet in the plan.rs module doc now reads 'Dependencies first, then priority, then rung, then age'."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry for request priority. docs/decisions.md records the choice, with alternatives considered (words-in-request versus a command-set field) and the cutover motivation.",
+        "status": "met",
+        "evidence": "CHANGELOG.md has a 'Request priority' entry under Unreleased/Added. docs/decisions.md D118 lists alternatives (a) command field and (b) words in request, and cites the 2026-10-24 records-history cutover."
+      },
+      {
+        "criterion": "`cargo clippy --all-targets` is clean and `cargo fmt --check` passes.",
+        "status": "met",
+        "evidence": "cargo clippy --all-targets --locked -- -D warnings and cargo fmt --all --check both exited clean."
+      }
+    ],
+    "open_issues": [
+      "Departure from the plan: the plan listed the main.rs help text and the drain.rs module doc as edits. I made both, and they sit outside the brief's listed files.",
+      "The full cargo test was not run, so the whole suite is unchecked. Only the athena-core plan filter and the athena-cli plan filter were run (the latter also ran tests/job_plan.rs).",
+      "The decisions.md entry says the provenance is measured by the named tests; I ran them under filters, not the full suite.",
+      "The status priority suffix appears only for high and low, as in the plan (absence means normal). If the owner wants 'priority normal' on every status line, that is a one-line change in plan_suffix."
+    ],
+    "mistakes": [
+      "My first display test built a plan item by hand instead of calling display::plan. I removed it and covered the plan item in tests/drain.rs instead."
+    ],
+    "learnings": [
+      "Status request lines are built in display::status through plan_suffix, which appends the plan state, so the priority suffix goes there.",
+      "The latest decision in docs/decisions.md was D117, so the new entry is D118.",
+      "The Bash hook rejects tail and similar tools; use Read and Grep."
+    ],
+    "desires": []
+  }
+}

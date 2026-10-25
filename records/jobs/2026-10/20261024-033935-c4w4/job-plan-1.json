@@ -1,0 +1,160 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261024-033935-c4w4",
+  "round": 1,
+  "at": "2026-10-24T07:15:25.422175486Z",
+  "invocation_seq": 3,
+  "approach": "Create athena-core/src/host_rules.rs. A function `check_host_rules(runner: &dyn gh::Runner, owner, repo) -> HostRulesReport` makes two reads through Runner::gh with args exactly `[\"api\", \"repos/{o}/{r}/rules/branches/athena/records\"]` and the same for `main` (gh api defaults to GET with no fields, so there is no --method and no -f). It parses each reply as a JSON array of rule objects and maps three rules to a tri-state `RuleState` (InForce, NotInForce, Unknown(reason)). Non_fast_forward gives force-push forbidden, deletion gives deletion forbidden (both on athena/records), and required_status_checks with parameters.strict_required_status_checks_policy == true gives up-to-date required (on main). A runner error or non-array/unparseable JSON makes that branch's rules Unknown. The report renders plain lines such as \"athena/records: force-push forbidden: in force\". Register the module in lib.rs, add the changelog entry and a design note, and write fixture and recording-fake tests.",
+  "decisions": [
+    {
+      "choice": "Use the rulesets view repos/{o}/{r}/rules/branches/{branch} through the raw Runner with args [\"api\", path].",
+      "reason": "This view lists every rule that applies to a branch, whether it comes from a ruleset or not, and the call is a plain GET. The existing GhClient::api always adds `--method`, which criterion 3 forbids, and it needs a HostOperation for logging.",
+      "rejected": [
+        {
+          "option": "Classic branches/{b}/protection endpoint",
+          "why": "The brief excludes it, and it misses rulesets."
+        },
+        {
+          "option": "Route through GhClient::api_text with --method GET",
+          "why": "It adds a method override, which criterion 3 forbids."
+        }
+      ]
+    },
+    {
+      "choice": "A tri-state RuleState with Unknown(String) rather than a bool.",
+      "reason": "A failed or unparseable read must not look like 'not in force' or 'in force' (criterion 4).",
+      "rejected": [
+        {
+          "option": "Result<bool> per rule",
+          "why": "It loses the report-everything shape, and one failed branch would hide the other branch's results."
+        }
+      ]
+    },
+    {
+      "choice": "Do not retry, and keep the check as a library function with no CLI wiring.",
+      "reason": "Out of scope, and the smallest change.",
+      "rejected": [
+        {
+          "option": "Add a CLI subcommand",
+          "why": "The brief puts wiring out of scope."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/host_rules.rs",
+      "action": "create",
+      "purpose": "The read-only D111 host-rule check, its report type and its tests.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "purpose": "Add `pub mod host_rules;` between gh and introspect.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "action": "modify",
+      "purpose": "Doc-only note on the Runner trait pointing to host_rules for the plain-GET calls. This is optional, and skipped if it adds nothing.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Under [Unreleased] ### Added, record the check (D111, records-history job 1 part 3).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/records-history.md",
+      "action": "modify",
+      "purpose": "In §10 job 1, note that the host-rule confirmation is done by the read-only check in athena-core host_rules, which Sri runs before the cutover.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read Runner, GhFailure and the FakeRunner test patterns in gh.rs.",
+    "Create host_rules.rs with module docs citing D111, docs/design/records-history.md §3 and 'part 3 of job 1'. Define the RuleState enum, the HostRulesReport struct and its render method, and `check_host_rules(runner, owner, repo)`.",
+    "Implement fetch_rules(runner, path) -> Result<Vec<Value>, String>, and map the rule types to states.",
+    "Write the tests for criteria 1 to 5 with a local recording fake Runner.",
+    "Add `pub mod host_rules;` to lib.rs.",
+    "Add the doc-only note in gh.rs, the CHANGELOG entry and the design note.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings`, then `cargo test -p athena-core host_rules`, then the full suite at most once."
+  ],
+  "risks": [
+    {
+      "risk": "The rules/branches view needs only read access to the repository, but a token with too few permissions would give an error.",
+      "mitigation": "The tests cover a 403 and a 5xx and expect Unknown. The report text says the token may lack read access."
+    },
+    {
+      "risk": "The fixture shape may differ from the real GitHub reply.",
+      "mitigation": "Parse leniently: read `type` and `parameters` from each object and ignore unknown fields. The fixtures follow the documented shape."
+    },
+    {
+      "risk": "The `gh api` default method could change if fields were added later.",
+      "mitigation": "Use a plain `[\"api\", path]` call, and assert on exact args in the test."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit tests feed fixture JSON lists to a fake Runner and assert the reported states.",
+      "command": "cargo test -p athena-core host_rules",
+      "observes": "athena/records with non_fast_forward and deletion rules reports both InForce. main with a required_status_checks rule whose strict policy is true reports up-to-date InForce.",
+      "fails_without": "If the parser ignored non_fast_forward, deletion or strict required_status_checks, the in-force assertions would fail."
+    },
+    {
+      "criterion": 2,
+      "method": "Fixture tests for `[]`, for strict false, for strict absent, and for a list holding only non_fast_forward.",
+      "command": "cargo test -p athena-core host_rules",
+      "observes": "`[]` gives all three NotInForce. Strict false or absent gives up-to-date NotInForce. The partial list gives force-push InForce and deletion NotInForce.",
+      "fails_without": "A parser that treats any required_status_checks rule as strict, or that defaults to in force, would fail these tests."
+    },
+    {
+      "criterion": 3,
+      "method": "A recording fake Runner captures every args vector.",
+      "command": "cargo test -p athena-core host_rules",
+      "observes": "Exactly two calls, equal to [\"api\",\"repos/o/r/rules/branches/athena/records\"] and [\"api\",\"repos/o/r/rules/branches/main\"]. No arg is --method, -f, -F, --input or protection.",
+      "fails_without": "If the check used a --method override, -f/-F fields, or the /protection endpoint, the exact-args assertion would fail."
+    },
+    {
+      "criterion": 4,
+      "method": "Fake Runner returns a GhFailure with status 403, one with status 503, and a reply of `not json`. A plain object reply is also tested.",
+      "command": "cargo test -p athena-core host_rules",
+      "observes": "The affected rules are Unknown with a reason. The other branch's rules are still reported when its call succeeds.",
+      "fails_without": "If an error were mapped to NotInForce or InForce, the Unknown assertions would fail."
+    },
+    {
+      "criterion": 5,
+      "method": "Test the report's Display or render output.",
+      "command": "cargo test -p athena-core host_rules",
+      "observes": "The text contains \"athena/records: force-push forbidden: in force\", \"athena/records: deletion forbidden: not in force\" and \"main: up to date before merging required: unknown (...)\", for example, one line per rule.",
+      "fails_without": "If the rendering omitted a rule name or its state, the string assertions would fail."
+    },
+    {
+      "criterion": 6,
+      "method": "The module compiles only if it is registered in lib.rs. The doc comments are reviewed by reading `git diff`.",
+      "command": "cargo build",
+      "observes": "`pub mod host_rules;` appears in lib.rs in alphabetical position, and the module docs cite D111, docs/design/records-history.md §3 and 'part 3 of job 1'.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Run the three workspace checks: `cargo fmt --all --check`, the clippy command above, and `cargo test --locked`.",
+      "command": "cargo clippy --all-targets --locked -- -D warnings",
+      "observes": "All three exit 0.",
+      "fails_without": "A lint, a format error or a failing test would fail the matching command."
+    }
+  ],
+  "open_questions": [
+    "gh.rs needs no functional change, since GhFailure and Runner are already public. Is a doc-only edit acceptable for that listed deliverable?",
+    "Rules inherited from an organisation ruleset also appear in the rules/branches view. That is intended, but I have not seen a real reply."
+  ],
+  "producer_section_sha256": "460cb531ab0ccd2416e2c385821c6f3293dc9e741768be9ae3f9694d72225478"
+}

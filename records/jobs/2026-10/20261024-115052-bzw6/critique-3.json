@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261024-115052-bzw6",
+  "round": 3,
+  "at": "2026-10-24T11:58:18.727632316Z",
+  "invocation_seq": 7,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/src/display.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/src/display.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "No test exercises the Athena::land_pr wiring that drain.rs uses, so criterion 8 is not shown, and the plan's reason for skipping it is wrong.",
+      "evidence": "The plan says a drain test against a fake host \"is not available\" because `Athena::land_pr` builds a real `GhClient`. But `Athena::land_pr(&self, job_ref, runner: &dyn Runner, poll, ui)` takes the runner as a parameter, and the client is built with `GhClient::new(runner, ...)` (gh.rs:1618-1622). A fake runner can be passed in, which is how external_calls.rs fakes gh. Every records test in the plan (criteria 1-7) calls the free `gh::land_pr` with a test-built `GitLandingRecords`. So if Step 6 wired `records: None` into `Athena::land_pr`, or built the intent inputs wrongly, every planned test would still pass. Nothing calls `Athena::land_pr` in tests today; grep finds only drain.rs:1263 and main.rs:771. Fix: Add a test that calls `Athena::land_pr`, the path PrLander uses, with a fake `Runner` that answers the gh calls. Point `origin` at a bare repo that `parse_remote` accepts, for example a github-style URL mapped to the bare path with `url.<bare>.insteadOf`. Then assert that the intent and the landing are on the remote records branch. If that rig is too heavy, move the wiring into a function that takes `&Git` plus the host and test that function. Either way, the test must fail when `Athena::land_pr` passes `records: None`. Fix the plan's claim that a fake host is not possible.",
+      "location": "Demonstrations, Criterion 8; Steps 6; crates/athena-core/src/gh.rs:1575-1640",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A stale merge-requested marker can block merge retries, and no command clears it.",
+      "evidence": "The marker is cleared only when the merge returns Err or the head changes. A host that returns Ok but never merges (for example when the merge is only queued) leaves the job stuck: every rerun observes and warns, and the merge is never retried. Fix: In the unconfirmed warning, name the marker path and say how to clear it (delete the file, or push a new head). Add a row for this to the failure-path table.",
+      "location": "Decision 5 / Risks (merge-requested marker)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan does not say what exit code a report with warnings gives.",
+      "evidence": "`land_pr_code` in main.rs:443 maps a `PrReport` to an exit code. The plan adds warnings for the merged-but-unconfirmed case but does not say whether that case should exit non-zero. The display.rs scope point is already disclosed and was raised by Athena. Fix: State the exit code for a report with warnings, and leave main.rs unchanged unless a change is needed.",
+      "location": "Files: crates/athena-cli/src/display.rs; crates/athena-cli/src/main.rs:443",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan's code references against the snapshot. They hold: `push_if_remote_at` (athena-git lib.rs:373), `RecordsWriter::append`/`append_with_hook` and `RecordsError::Contended`, the `observe_merge` call before the Open branch (gh.rs:1314), `confirm_existing_merge` (gh.rs:1364), the `PrReport` literals (gh.rs and the display.rs:1285 test helper), and `state.job_dir`. In pr.rs, `observe_merge` sets the link to MergedUnverified when the merged content does not match, so writing the landing only for Landed links fits criterion 7. The design fixes the cause: the commit is built on the remote tip, pushed with a lease, and the local ref moves only after the push succeeds. Most demonstrations would fail without the behavior they cover. The gap is criterion 8. The plan wrongly says `Athena::land_pr` cannot run against a fake host, but it takes `runner: &dyn Runner`. Because every records test calls the free `gh::land_pr`, the production wiring in `Athena::land_pr`, which PrLander calls, is never exercised: passing `records: None` there would leave every test green. That is a major finding, and the planner can fix it, so the verdict is revise."
+}

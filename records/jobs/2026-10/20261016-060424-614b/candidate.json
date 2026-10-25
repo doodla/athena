@@ -1,0 +1,183 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261016-060424-614b",
+  "base_commit": "2a23e5a3547387e15f9ce5aada91a1f11de5ab7d",
+  "base_fingerprint": "sha256:ef5be71354e7520f3ddbb819ae12d37c154c27d9b7dc784073b45b0797713b88",
+  "previous_job": "20261016-051445-3ezv",
+  "candidate_commit": "528670614df869063858fdbe9dcf3a2bd6aa2a2a",
+  "candidate_tree": "6ddb005b205d7f3f7af6c5c0b15c258fdb6e6ee4",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 82671
+    },
+    {
+      "path": "README.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 20494
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 37157
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 65625
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 37145
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 71177
+    },
+    {
+      "path": "crates/athena-core/src/plan.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 18547
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 78234
+    },
+    {
+      "path": "docs/architecture.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 7147
+    },
+    {
+      "path": "docs/decisions.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 179507
+    }
+  ],
+  "fingerprint": "sha256:2df6709ab055b7f703572141524c8377e39658dfd289c30cd404bb38b6a9010b",
+  "violations": [],
+  "producer_report": {
+    "summary": "Planning no longer fills fields by default. Root cause: plan-entry construction copied an unread request's first line into acceptance and defaulted the rung to Implementation, so the refusal gate almost never fired. Acceptance now comes only from explicit bullets or a reading's criteria (a declined reading has none). The rung is the proposal's rung, else inferred from evidence in the request or reading, else flagged missing. Open questions are filled by lookup: a touched path absent at the base commit (a file a reading creates is excepted), and a referenced job id not in the records. A flagged item names its missing fields and a reason, and is not in Plan::order. Drain's planning pass now reads each unread request whose own words leave the plan incomplete, within the budget and job limit, then plans it again from the reading. A specifiable request then runs with no second reading, and a vague one is refused with a reason and never run. That removes the deadlock where unread items were refused and stayed queued. A new `athena plan [--budget USD] [--json]` command runs the same pass and prints the plan without working anything (default read budget $2, 0 reads nothing). The pass is deterministic Rust and calls no model. plan::trace and GapLog are still not wired to records, which the docs say. I touched display.rs (refusal reason, plan output) and main.rs (plan command, drain help) beyond plan.rs, reading.rs and drain.rs. D105 in docs/decisions.md is revised, and README, architecture and CHANGELOG are updated. I did not verify the pass against a real model: tests use the fake agent and stubs.",
+    "files": [
+      "crates/athena-core/src/plan.rs",
+      "crates/athena-core/src/reading.rs",
+      "crates/athena-cli/src/drain.rs",
+      "crates/athena-cli/src/display.rs",
+      "crates/athena-cli/src/main.rs",
+      "crates/athena-cli/tests/drain.rs",
+      "docs/decisions.md",
+      "CHANGELOG.md",
+      "README.md",
+      "docs/architecture.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "No output."
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "Finished with no warnings."
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "Ran again with -q for readable output: every suite ok. That includes athena-core unit tests (210 passed, 1 ignored) and the drain integration tests (48 passed)."
+      },
+      {
+        "command": "cargo run --locked -q --bin athena -- plan",
+        "result": "pass",
+        "note": "`cargo run -- plan` without --bin fails because the workspace has two binaries (athena, xtask), so I used --bin athena. In the nested scratch repo it printed: 'plan        nothing is open: no queued request is waiting to be planned'."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Run `cargo test`: a new test shows a request with no bullets and no path-like words (e.g. 'make it better') is flagged underspecified after reading, the flag names the missing field, and the item is not in Plan::order.",
+        "status": "met",
+        "evidence": "Passing `cargo test --locked`: reading.rs `a_vague_request_after_reading_is_flagged_and_names_what_is_missing` (declined reading, missing = ladder rung, acceptance, empty Plan::order). plan.rs `a_vague_entry_is_flagged_with_its_missing_fields_and_left_out_of_the_order`. drain test `real_steps_read_an_unread_vague_request_and_refuse_it_while_the_specified_one_runs` (real read through the fake agent, then refused)."
+      },
+      {
+        "criterion": "Run `cargo test`: a new test shows a request's first line is no longer copied into acceptance; only explicit acceptance bullets or a reading's criteria fill it.",
+        "status": "met",
+        "evidence": "`cargo test --locked`: reading.rs `the_first_line_is_not_copied_into_acceptance` checks acceptance is empty for a bare request, filled by a '* ' bullet, and filled by the reading's criteria once read."
+      },
+      {
+        "criterion": "Run `cargo test`: a new test shows a non-proposal job's rung is inferred from its request or reading, or flagged missing; it is never silently Implementation, and an item with no determinable rung is refused.",
+        "status": "met",
+        "evidence": "`cargo test --locked`: reading.rs `a_rung_is_inferred_from_evidence_or_flagged_never_defaulted_to_implementation`. 'make it better' gives rung None. Wording about a decision or the brief gives the higher rungs. A fix-the-typo request, or a reading for the change capability, gives Implementation. A request with bullets but no rung evidence has missing == [ladder rung] and an empty Plan::order."
+      },
+      {
+        "criterion": "Run `cargo test`: tests assert open_questions are filled for a read and an unread request, including a touched path that does not exist and an unresolved referenced job.",
+        "status": "met",
+        "evidence": "`cargo test --locked`: reading.rs `open_questions_name_a_missing_path_and_an_unresolved_job_for_read_and_unread_requests` covers unread and read cases, with a Create deliverable excepted. drain test `the_plan_of_a_read_job_names_a_missing_path_and_an_unresolved_referenced_job` covers RealSteps against a git fixture."
+      },
+      {
+        "criterion": "Run `cargo test`: a test shows two open items naming the same path get a dependency or different groups, and items with disjoint touches share a group.",
+        "status": "met",
+        "evidence": "`cargo test --locked`: plan.rs `two_items_naming_the_same_path_are_in_different_groups_and_disjoint_ones_share_one`."
+      },
+      {
+        "criterion": "Run `cargo test`: a drain test with RealSteps over a records fixture with one specified and one unread vague queued item shows the unread item is read by the pass (not refused merely for being unread), the vague one lands in Report::refused with a reason and is not run as a job, and the specified one runs. A further test shows an unread but specifiable request is read and then runs, so the queue does not fill with unread refused items.",
+        "status": "met",
+        "evidence": "`cargo test --locked`: tests/drain.rs `real_steps_read_an_unread_vague_request_and_refuse_it_while_the_specified_one_runs` (the vague job has exactly one reading, is in Report::refused with a reason naming acceptance, has no dispatched job, and only the specified item has a job line and lands). `real_steps_read_an_unread_but_specifiable_request_once_and_then_run_it` (one reader invocation, no refusal, landed). The stub versions are `an_unread_vague_request_is_read_by_the_pass_then_refused_with_a_reason_and_the_specified_one_runs` and `an_unread_but_specifiable_request_is_read_once_and_then_runs`."
+      },
+      {
+        "criterion": "Run `cargo run -- plan` (or the equivalent new command): it prints order, parallel groups, and each item's goal, rung, acceptance, open questions, dependencies, touches, plus flagged items with reasons; with nothing open it says so explicitly. The verifier's evidence cites the commands that ran and their output.",
+        "status": "met",
+        "evidence": "`cargo run --locked -q --bin athena -- plan` printed 'plan        nothing is open: no queued request is waiting to be planned' (needs --bin athena; see open_issues). The populated output is asserted by `plan_prints_order_groups_details_and_flagged_items_and_says_so_when_nothing_is_open` in `cargo test --locked`. It checks 'order       a → b', the groups, goal, rung, acceptance, questions, depends on, touches, and the 'flagged     vague · make it better lacks ladder rung, acceptance' line. I did not run the command with open items outside the tests."
+      },
+      {
+        "criterion": "Files touched outside plan.rs, reading.rs and drain.rs (display.rs, main.rs, etc.) are named in the docs or decision entry; the docs/decisions.md tradeoff about the gate rarely firing is updated, including how unread requests are handled.",
+        "status": "met",
+        "evidence": "D105 in docs/decisions.md has a Revision, 'Tradeoff of the revision' and 'Files touched' bullets. They name display.rs, main.rs and the docs, and explain the pass reading underspecified unread requests. CHANGELOG.md also names display.rs and main.rs."
+      },
+      {
+        "criterion": "`cargo clippy` is clean and `cargo fmt --check` passes; no secrets or personal data are added.",
+        "status": "met",
+        "evidence": "`cargo clippy --all-targets --locked -- -D warnings` and `cargo fmt --all --check` both ran clean. No credentials or personal data were added."
+      },
+      {
+        "criterion": "Docs state plainly that the planning pass is deterministic code (not a model call) and whether plan::trace/GapLog audit is wired to records or still follow-up.",
+        "status": "met",
+        "evidence": "README, architecture.md, the CHANGELOG entry, the D105 revision and the drain/plan help in main.rs all say the pass is deterministic code and not a model call. README, architecture.md, CHANGELOG and D105 say plan::trace and GapLog are still not wired to the records (follow-up)."
+      }
+    ],
+    "open_issues": [
+      "`cargo run -- plan` as written in the criterion errors on the two-binary workspace; `cargo run --bin athena -- plan` is the working form. I did not edit the manifest, since that is outside the deliverables.",
+      "A refused item that was read leaves the queue and the refusal is only in the drain report. It is not written to a record, so `athena plan` after a drain no longer lists it as an open request. It stays visible as a read or declined job.",
+      "If the real reader invents plausible criteria for a vague request, the gate cannot catch it, because it checks only that fields are present. The decision entry records this.",
+      "Rung inference is a keyword and path heuristic, so an unusual wording is flagged and needs a bullet or a correction.",
+      "plan::trace and GapLog are still not wired to records (follow-up, as the docs say)."
+    ],
+    "mistakes": [
+      "I tried `cat` and `tail` in Bash early on; the policy denied both and nothing ran.",
+      "My first RealSteps test asserted two Reader invocations, but the declining wrapper answers outside the scenario's counter. I fixed the assertion to count only the specified request and check the vague one through its record's reading count."
+    ],
+    "learnings": [
+      "The workspace has two binaries (athena, xtask), so `cargo run -- plan` fails; use `cargo run --bin athena -- plan`. In this environment the run happens in a nested scratch copy with fake agents.",
+      "Existing drain stub tests carried plan entries with no acceptance for unread items. Under the new pass those items are read first, so the log of the 'refused' test changed.",
+      "steward::queued_work lists only jobs in state Queued. A request read by the pass leaves the queue (becomes proposed or declined), so a refused item is no longer queued afterwards.",
+      "Role::Reader invocations are counted through Scenario.invocations only for requests the scenario script handles. A custom wrapper that answers some requests itself bypasses that count."
+    ],
+    "desires": [
+      "Allow reading cargo test output files in the tool-results directory; the full output was too large to view, so I reran quietly.",
+      "A default-run entry in the workspace manifest, so `cargo run -- plan` works without --bin athena."
+    ]
+  }
+}

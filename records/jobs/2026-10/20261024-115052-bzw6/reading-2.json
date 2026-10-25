@@ -1,0 +1,190 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261024-115052-bzw6",
+  "n": 2,
+  "at": "2026-10-24T11:51:32.035339321Z",
+  "invocation_seq": 2,
+  "base_commit": "54d985fcbdaa45cc1949b5529792d4e4656d267e",
+  "config_sha256": "723abb81b8cdcc25033d7d9653128a919911c4b5950c306183153235b21717e7",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Write landing intent and landing records in land --pr, with push",
+  "summary": "Retry job 3 part 1: land_pr writes a LandingIntent to athena/records and pushes it before the host merges, then a Landing record (second parent = PR head) after. Push-failure recovery follows the user's decisions: the remote is the source of truth, the commit is built on the remote tip, pushed with a lease, and the local ref moves only after the push succeeds. The drain.rs caller and the unconfirmed-merge warning are covered.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "Tests for each new path; cargo test and clippy clean."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check records, order, parents and recovery happening via fake-host tests."
+    },
+    {
+      "id": "designed",
+      "how": "Design doc updated with the recovery decision and failure-path table."
+    },
+    {
+      "id": "strangers",
+      "how": "Doc comments and CHANGELOG written for outside readers."
+    },
+    {
+      "id": "root-cause",
+      "how": "Recovery fixes the ref-moves-before-push cause, not one instance."
+    },
+    {
+      "id": "verified",
+      "how": "Criteria use commands the verifier can run."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Audience: maintainers who run athena land --pr and the verifier judging it; goal is job 3 part 1 of the records-history plan plus working push-failure recovery.",
+    "Per the user's decisions, the remote is the source of truth: records commit is built on the remote tip, pushed with a lease, local ref moved only after success.",
+    "Merged-but-unconfirmed: no landing record, warning naming the intent; reconcile (job 3 part 2) repairs it and is out of scope.",
+    "Deliverable paths are inferred from the earlier attempt plus drain.rs; I did not re-read the repository."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Fake-host test of a successful land_pr reads the records branch and finds a landing-intent record then a landing record, in that order. Intent: PR number, head sha, head tree, expected base, job ids. Landing: PR number, head sha, host commit, merge method, commits with tree/job/verification, intent id. Run: cargo test -p athena-core.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test shows the records commit carrying the landing record has the PR head sha as its second parent. Run: cargo test.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test with a fake host that refuses the merge shows the records branch (and remote) holds the intent and no landing record, and land_pr returns its existing error. Run: cargo test.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A call-order test with a bare remote shows the intent is pushed to the remote before PrHost::merge is called, and the landing record is pushed after the merge.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Rejected-push test: the remote records branch moves between build and push; the commit is rebuilt on the fetched remote tip and retried (bounded attempts), succeeds, and local and remote tips match. The commit is built on the remote tip, pushed with a lease on that tip, and the local ref moves only after the push succeeds. Fails without the recovery code. Run: cargo test.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Leftover-local-intent test: a local records ref ahead of or diverged from the remote is reset to the remote before writing; after a leftover unpushed local intent plus a remote write, the next land_pr succeeds with no divergence error, and the merge never happens without its intent on the remote.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Merged-but-unconfirmed test: when the host merged but the merge cannot be confirmed, no landing record is written and a PrReport warning names the intent; a rerun in that state is tested and creates no duplicate records.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The drain.rs caller of Athena::land_pr behaves the same: a test (or an existing drain test shown passing with the real ledger) shows the same records written.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A commit between the remote base and the PR head with no landing trailer or verification gives an error naming its sha and saying it lies between the remote base and the PR head. Tested.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Existing land and land_pr tests (trailers, records under records/, resync_onto_merge rebuild) pass unchanged; cargo test, cargo clippy --all-targets and cargo fmt --check are clean.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Records use the athena-data history.rs types (LandingIntent, Landing, LandingCommit, MergeMethod), are validated before writing, and are written through the athena-git RecordsWriter, not a new writer.",
+      "kind": "content"
+    },
+    {
+      "text": "docs/design/records-history.md states how sync_from changed (or which distinct recover path was added) and includes a failure-path table: starting state, function called, its cited behavior in that state. New functions carry doc comments citing the design section; CHANGELOG.md has an entry.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-git/src/records_branch.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/land.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-git/src/lib.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/Cargo.toml",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "docs/design/records-history.md",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-cli/tests/external_calls.rs",
+      "action": "modify",
+      "p": 0.3
+    }
+  ],
+  "out_of_scope": [
+    "Job 3 part 2: the reconcile command that repairs merged-but-unconfirmed landings",
+    "Changing the existing land trailers, records under records/, or the work-branch rebuild",
+    "Planning-stage changes to Athena itself (failure-path table in the planner, fallback after round 3)"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.75,
+      "p_verification_passes": 0.5,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.8,
+        "p50": 1.8,
+        "p90": 3.8
+      },
+      "wall_time_s": {
+        "p10": 900.0,
+        "p50": 2200.0,
+        "p90": 4500.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7610389610389611,
+      "p_verification_passes": 0.6397849462365591,
+      "p_user_intervenes": 0.07263157894736842,
+      "cost_usd": {
+        "p10": 0.42178970930058807,
+        "p50": 1.0100573896336884,
+        "p90": 2.1442284866965067
+      },
+      "wall_time_s": {
+        "p10": 563.891712057496,
+        "p50": 1300.233769026,
+        "p90": 2599.214070558362
+      }
+    }
+  },
+  "departures": "Larger than reference: recovery logic, drain caller, and many tests; a prior attempt failed in planning."
+}

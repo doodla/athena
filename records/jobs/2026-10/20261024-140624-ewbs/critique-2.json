@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261024-140624-ewbs",
+  "round": 2,
+  "at": "2026-10-24T14:15:37.636246365Z",
+  "invocation_seq": 5,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "A PR with no job_landing commit gives an intent with empty job_ids, which fails validation with an unclear error.",
+      "evidence": "LandingIntent::validate returns HistoryError::NoEntries(\"job_ids\") when job_ids is empty. The plan builds job_ids from job_landing entries only, so a PR made only of records-only and intervention commits now fails at intent validation. Under the old trailer rule this path was never reached. Fix: Decide what such a PR should do. Either refuse it in gh.rs before any write, with a clear message ('this PR lands no job'), and add that case to a_refused_commit_records_nothing, or state in the change description why this cannot happen.",
+      "location": "Plan step 5 / crates/athena-core/src/gh.rs:1476-1490, crates/athena-data/src/history.rs:105",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The rule for recognising an intervention is not stated as precisely as the job-landing rule.",
+      "evidence": "Intervention records live at records/interventions/<month>/<id>.json (records.rs:2164). The gate's intervention() in invariant.rs:674 recognises interventions by trailer, so there is no content-based rule to copy. The plan says only 'an added intervention record'. Fix: State the rule. An intervention commit is one that adds ('A') a path records/interventions/<month>/<id>.json, where the file parses as an Intervention record and its canonical path equals the added path. Add a test where a file with an intervention-shaped path but invalid content is not classified as declared_intervention.",
+      "location": "Approach and step 3: declared intervention detection",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "closing_jobs' rule that skips jobs whose outcome is not landed is not tested.",
+      "evidence": "closing_jobs (invariant.rs:246) drops jobs whose recorded outcome is not landed (rejected, blocked or failed). A squash can carry such a job's records alongside a landed retry. The planned tests cover blocked-then-landed and candidate-only, but not a commit that adds a rejected job's trio together with a landed job's trio. Fix: Add a test: one commit adds a rejected job's closing records and a landed job's closing records. It should be classified as job_landing for the landed job, not refused as a two-job commit.",
+      "location": "Decision 2 / Demonstrations for criterion 1",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "A public entry point to the gate's landing logic already exists.",
+      "evidence": "athena_gate::invariant::landing_job is pub (invariant.rs:207), but it needs a Change, a Judged and the commit's trailers, so it does not fit a trailer-free classifier as it stands. Copying the rules with a pointer comment is defensible. Fix: In the pointer comment, note that landing_job exists and why it was not used, so a later change can bring the two together.",
+      "location": "Decision 2",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the snapshot using Read and Grep. It fixes the fault where it starts: pr_commits in land.rs (lines 122-158) requires exactly one Athena-Job trailer on every commit, and the plan replaces that with classification by content. The other code it names exists: the private closing_jobs in athena-gate invariant.rs (lines 225-252), attrs::fingerprint, LandingCommit in history.rs (line 133, deny_unknown_fields), the gh.rs commits() mapping and verification_id (lines 1343, 1419), and the intent job_ids collection (line 1476). The checking order (job landing, then intervention, then records-only, then refusal) is right for the PR shape in the request. Each demonstration would fail without the new behavior, and criterion 2 also checks that nothing is recorded. No athena.toml field is added, and the work fits one producer run. Three minor gaps remain. (1) A PR with no job-landing commit now produces an empty job_ids list, which LandingIntent::validate rejects with a generic NoEntries error. (2) The rule for recognising an intervention is not written down as precisely as the job-landing rule. (3) closing_jobs' check that the job's outcome is landed, which the plan copies, should be tested. None of these blocks the plan."
+}

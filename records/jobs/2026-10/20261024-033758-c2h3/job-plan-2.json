@@ -1,0 +1,160 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261024-033758-c2h3",
+  "round": 2,
+  "at": "2026-10-24T03:40:46.142922337Z",
+  "invocation_seq": 4,
+  "approach": "Create crates/athena-data/src/history.rs with six record structs (LandingIntent, Landing, DeclaredIntervention, Checkpoint, LegacyExempt, ImportManifest), a separate internally tagged HistoryRecord enum (tag \"schema\", deny_unknown_fields) with parse and validate, and tests. Do not touch AnyRecord. Export the module in lib.rs, add a doc pointer in records.rs, and add a CHANGELOG entry. Cargo.toml changes only if a need appears.",
+  "decisions": [
+    {
+      "choice": "Schema tags athena.landing-intent/1, athena.landing/1, athena.declared-intervention/1, athena.checkpoint/1, athena.legacy-exempt/1, athena.import-manifest/1; Rust type DeclaredIntervention.",
+      "reason": "records.rs already has athena.intervention/1 and InterventionCategory; reuse would collide. Design §5.3 calls it 'intervention (declared)'.",
+      "rejected": [
+        {
+          "option": "Reuse athena.intervention/1",
+          "why": "Collides with the existing record and its tests."
+        }
+      ]
+    },
+    {
+      "choice": "Separate HistoryRecord enum in history.rs, not new AnyRecord variants.",
+      "reason": "AnyRecord drives records/ routing and the history check, which must not change.",
+      "rejected": [
+        {
+          "option": "Add variants to AnyRecord",
+          "why": "Touches existing exhaustive matches and risks changing history-check behaviour."
+        }
+      ]
+    },
+    {
+      "choice": "Local sha (40 lowercase hex) and SHA-256 (64 lowercase hex) validators; no new dependency.",
+      "reason": "One-line checks; buy-first does not justify a crate.",
+      "rejected": [
+        {
+          "option": "hex or regex crate",
+          "why": "Unneeded dependency."
+        }
+      ]
+    },
+    {
+      "choice": "Fields as in criterion 4; merge method is an enum (squash, merge, rebase) in snake_case; reuse JobId, RecordId and jiff Timestamp.",
+      "reason": "Matches §4, §5.3, §9 and the records.rs conventions.",
+      "rejected": [
+        {
+          "option": "Free string merge method",
+          "why": "Less validation."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-data/src/history.rs",
+      "action": "create",
+      "purpose": "Six record types, HistoryRecord enum, validators and tests.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-data/src/lib.rs",
+      "action": "modify",
+      "purpose": "Add pub mod history and a crate doc bullet.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "purpose": "Doc-only pointer to history.rs; no behaviour change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Entry naming the six record types.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/Cargo.toml",
+      "action": "modify",
+      "purpose": "Listed deliverable; expected unchanged unless a dependency is needed.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read the top of CHANGELOG.md and the id module (JobId, RecordId) for conventions.",
+    "Create history.rs: sha and sha256 validators, six structs with deny_unknown_fields and doc comments citing the design and D111, the HistoryRecord enum with schema tags and schema(), parse and validate.",
+    "Implement per-struct validate(): non-empty trimmed strings, 40-hex shas, non-empty lists, PR number > 0.",
+    "Add tests: round trip, schema tag in text, rejection of empty field, unknown field, bad sha, wrong tag, and an athena.intervention/1 body.",
+    "Add pub mod history to lib.rs and a doc pointer in records.rs.",
+    "Add the CHANGELOG entry.",
+    "Run cargo fmt, clippy --workspace --all-targets and cargo test --workspace."
+  ],
+  "risks": [
+    {
+      "risk": "Name or schema clash with the existing intervention record.",
+      "mitigation": "Use athena.declared-intervention/1 and a separate enum; a test asserts an athena.intervention/1 body is rejected."
+    },
+    {
+      "risk": "Accidental change to the history check or records routing.",
+      "mitigation": "Leave AnyRecord alone; grep confirms no other crate uses history."
+    },
+    {
+      "risk": "Sha validation too loose or strict.",
+      "mitigation": "Tests assert exactly 40 lowercase hex and reject uppercase."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Six unit tests: build a valid value, serialize to pretty JSON, assert the text has the schema tag, parse with HistoryRecord::parse, assert equality.",
+      "command": "cargo test -p athena-data history",
+      "observes": "All six round-trip tests pass.",
+      "fails_without": "Without the schema tag or serde derives, the text lacks the tag or the parsed value differs or fails to parse."
+    },
+    {
+      "criterion": 2,
+      "method": "Rejection tests per type: empty required field, unknown JSON field, sha uppercase/short/non-hex, wrong schema tag, and an athena.intervention/1 body; valid examples return Ok.",
+      "command": "cargo test -p athena-data history",
+      "observes": "Err for each malformed case, Ok for each valid example.",
+      "fails_without": "Without validate(), empty fields and bad shas are accepted; without deny_unknown_fields, the unknown field parses."
+    },
+    {
+      "criterion": 3,
+      "method": "Run cargo test --workspace, cargo clippy --workspace --all-targets and cargo fmt --check; use git diff to confirm existing test code is unchanged.",
+      "command": "cargo test --workspace",
+      "observes": "All three pass, and the existing records and history-check tests run and pass unmodified.",
+      "fails_without": "If the change broke the existing records or history-check behaviour (for example by adding AnyRecord variants or editing shared helpers), those existing tests would fail. A lint, format or compile error in the new code would fail clippy, fmt or the test build."
+    },
+    {
+      "criterion": 4,
+      "method": "Read the diff of history.rs.",
+      "command": "git diff",
+      "observes": "Every pub item has a doc comment citing docs/design/records-history.md (§5.3, §4 or §8) and D111, and the field sets match the design list.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "Inspect the changed-file list and check history.rs for git or branch code.",
+      "command": "git diff --stat",
+      "observes": "Only the deliverable files change; there is no writer or host-check code; nothing under athena-core, athena-cli, athena-gate or records/ changed.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Read the CHANGELOG diff.",
+      "command": "git diff CHANGELOG.md",
+      "observes": "A new entry names landing-intent, landing, intervention, checkpoint, legacy-exempt and import-manifest in athena-data.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Exact CHANGELOG heading format was not read; follow the file's top entries.",
+    "Merge method enum versus free string: the design only says 'the merge method'; the plan uses an enum.",
+    "Cargo.toml is listed but no change is expected."
+  ],
+  "producer_section_sha256": "c682bd75f73b8ef4f00ed49a59a899c8ab30cb6e55bf053b237fe83dc3af03d3"
+}

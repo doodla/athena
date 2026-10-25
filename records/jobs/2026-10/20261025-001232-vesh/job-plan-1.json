@@ -1,0 +1,265 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261025-001232-vesh",
+  "round": 1,
+  "at": "2026-10-25T00:16:28.114662136Z",
+  "invocation_seq": 3,
+  "approach": "Three parts. (1) Config: [history] gains optional cutover_job; athena.toml sets it to 20261025-001232-vesh. (2) Cutover action in athena-core. records_import.rs gets a cutover variant of the importer that appends to a records branch that already holds the landing record, publishes via append_to_remote, and self-checks with a verifier that ignores non-records/ paths. gh.rs adds a cutover routine: C0 is the host_commit of the landing record whose commits name the job. It imports (only if import-manifest.json is absent at the records tip), then writes legacy-exempt.json (only if absent) from legacy_exempt_record/legacy_exempt_change. Both steps are idempotent, keyed on file presence at the remote records tip. The routine is called (a) after the landing record is written in free land_pr, through a new default-no-op LandingRecords hook, so existing fakes and LandPr literals are untouched, and (b) as a catch-up at the end of Athena::try_reconcile, which land and status already run first. (3) Gate: attribution.rs gets cutover_commit(git, job) reading the landing at the records tip; history.rs check_history becomes a router. With no cutover_job, no records branch, no landing for the job, or C0 not an ancestor of the tip, it runs today's check_history_with_exempt(None) unchanged. Otherwise it runs legacy::check_attribution_with_legacy (old rules up to C0 with the exempt list from the record; records-only walk after C0), converts findings to violations (new Rule::Attribution), and runs gitleaks over the tip. check_history_with_exempt stays non-routing so the legacy check at C0 cannot recurse. manage.rs is untouched because it calls check_history. ci.yml's history job keeps its name and adds a 'git fetch origin athena/records:athena/records' step before the check.",
+  "decisions": [
+    {
+      "choice": "Route inside history::check_history (not in Athena::check_history in manage.rs).",
+      "reason": "manage.rs is not a listed file and the CLI and CI both go through check_history. Routing there means no CLI change, and every call with no cutover_job takes the identical old path.",
+      "rejected": [
+        {
+          "option": "Edit manage.rs/main.rs to call a new function",
+          "why": "Touches unlisted files and widens the change."
+        },
+        {
+          "option": "Make check_history_with_exempt route",
+          "why": "The legacy check calls it at C0, whose athena.toml has cutover_job, so it would recurse."
+        }
+      ]
+    },
+    {
+      "choice": "Cutover-only importer entry point that appends onto the existing records tip, leaving import_records strict.",
+      "reason": "The landing record is written before the import, so the branch already has a tip and import_records would return AlreadyImported. The old importer tests and their strict self-check keep passing; the new path adds a non-strict verifier that ignores paths outside records/ and the manifest.",
+      "rejected": [
+        {
+          "option": "Import before the landing record",
+          "why": "C0 is the host commit of the landing record, which does not exist until the landing is written, so C0 is unknown."
+        },
+        {
+          "option": "Relax import_records itself",
+          "why": "Changes existing tested refusals (AlreadyImported, Extra)."
+        }
+      ]
+    },
+    {
+      "choice": "Idempotence by file presence at the freshly synced remote records tip: import-manifest.json for the import, legacy-exempt.json for the exempt record, each checked and written separately.",
+      "reason": "Matches the reading's assumption. It also repairs a crash between the two writes, and a second reconcile writes nothing.",
+      "rejected": [
+        {
+          "option": "A local marker file or state flag",
+          "why": "Not shared across machines and can disagree with the branch."
+        }
+      ]
+    },
+    {
+      "choice": "Hook through a default-no-op method on the LandingRecords trait, with cutover_job held in GitLandingRecords (builder method), not a new LandPr field.",
+      "reason": "LandPr is built by struct literal in many tests; a new field would break them. Fakes of LandingRecords need no change.",
+      "rejected": [
+        {
+          "option": "Add cutover_job to LandPr",
+          "why": "Churns many existing tests."
+        },
+        {
+          "option": "Run the cutover in Athena::land_pr after land_pr returns",
+          "why": "Would need the landing record's host commit re-derived; the hook has the facts in hand, and reconcile catches any miss anyway."
+        }
+      ]
+    },
+    {
+      "choice": "A cutover failure is a warning in land and a reported skipped line in reconcile, never a failure.",
+      "reason": "The merge and landing record are done and stay done (same stance as the landing-record warning); the catch-up retries on the next land or status.",
+      "rejected": [
+        {
+          "option": "Fail the landing",
+          "why": "The merge has already happened and cannot be undone."
+        }
+      ]
+    },
+    {
+      "choice": "Cutover is active only when the landing record names the job and C0 is an ancestor of the tip. A missing legacy-exempt record after that is a visible finding (LegacyExemptMissing, already in legacy.rs), not a silent pass.",
+      "reason": "Meets 'before the records branch shows C0, exactly as today' while never silently weakening the check once C0 shows.",
+      "rejected": [
+        {
+          "option": "Fall back to old rules when legacy-exempt.json is missing",
+          "why": "It would hide a half-finished cutover."
+        }
+      ]
+    },
+    {
+      "choice": "Trailers keep being written; no change to trailer writing.",
+      "reason": "Request defers ending them to a later job.",
+      "rejected": []
+    }
+  ],
+  "files": [
+    {
+      "path": "athena.toml",
+      "action": "modify",
+      "purpose": "Add cutover_job = \"20261025-001232-vesh\" to [history], with a comment saying what it does. The exempt list is unchanged.",
+      "governance": true,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "purpose": "Add optional cutover_job: Option<String> to History (serde default, skipped when None). Tests: parse present, absent, and the repo's athena.toml.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/records_import.rs",
+      "action": "modify",
+      "purpose": "Add the cutover importer (appends onto the existing records tip, publishes with append_to_remote) and verify_cutover_import (non-strict: ignores paths outside records/ and the manifest). import_records and verify_import stay strict. Update the module's Status text.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "action": "modify",
+      "purpose": "Add the cutover routine on GitLandingRecords: find the landing for the job, take C0 from its host_commit, then run the import if the manifest is absent and write legacy-exempt.json if absent. Add the with_cutover builder and a default-no-op LandingRecords hook called after the landing record is written (failure becomes a warning). Athena::land_pr passes config.history.cutover_job to the sink. Tests for land and idempotence.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reconcile.rs",
+      "action": "modify",
+      "purpose": "At the end of Athena::try_reconcile, run the cutover catch-up when cutover_job is set. Report what it wrote, or why it was skipped, in ReconcileReport. This is the shared reconcile step of land and status; the catch-up test lives here. (Not in the brief's file list but required: this is the reconcile step the request names; the producer should flag it.)",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-gate/src/attribution.rs",
+      "action": "modify",
+      "purpose": "Add pub fn cutover_commit(git, job) -> Result<Option<String>>: the host_commit of the landing at the records tip whose commits name the job; None when the branch, the landing or the tip is missing.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-gate/src/history.rs",
+      "action": "modify",
+      "purpose": "check_history routes by cutover_job: old path unchanged when no C0; otherwise check_attribution_with_legacy plus gitleaks over the tip, with findings converted to violations. Tests for criteria 3 and 4.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-gate/src/lib.rs",
+      "action": "modify",
+      "purpose": "Add Rule::Attribution with its name() text, for converted attribution findings. Minimal; the producer greps for exhaustive matches on Rule.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "action": "modify",
+      "purpose": "In the history job (name 'the full history' unchanged) add a step 'git fetch origin athena/records:athena/records' before 'athena check --history', with the token kept (persist-credentials) as the attribution job does.",
+      "governance": true,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Record the cutover design: C0 definition, import at C0, legacy-exempt record, catch-up reconcile, behavior before C0, trailers still written.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an entry for the cutover.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Add cutover_job to History in config.rs, with tests; set it in athena.toml (check no test compares athena.toml against a fixed shape).",
+    "In records_import.rs, factor import_with so a cutover variant can append onto the existing tip via RecordsWriter::append_to_remote; add verify_cutover_import. Keep the existing tests and refusals; add tests with a landing already on the branch.",
+    "In attribution.rs add cutover_commit; in lib.rs add Rule::Attribution.",
+    "In history.rs rename the body of check_history to stay as check_history_with_exempt(None). Add the cutover router, check_history_at(git, tip, now) for tests, the findings-to-violations conversion and the gitleaks run on the tip, deduping equal violations. Write the tests (criteria 3 and 4), reusing the scratch-repo helpers in legacy.rs tests.",
+    "In gh.rs add the cutover routine (idempotent by presence of import-manifest.json and legacy-exempt.json at the synced remote tip; legacy record built with legacy_exempt_record from config_at(C0).history.exempt), the LandingRecords hook, with_cutover, and the Athena::land_pr wiring. Add the land test using the existing fake host and a bare remote.",
+    "In reconcile.rs call the catch-up at the end of try_reconcile and carry the outcome in ReconcileReport (extend its line output); add the catch-up test with an idempotence check on the remote tip.",
+    "Edit ci.yml to add the fetch step in the history job.",
+    "Write the decisions.md entry and the CHANGELOG.md entry.",
+    "Run cargo fmt --all, cargo clippy --all-targets --locked -- -D warnings and cargo test --locked; fix anything left."
+  ],
+  "risks": [
+    {
+      "risk": "CI's history job would fail in the window where the landing record shows C0 but legacy-exempt.json is not yet written (LegacyExemptMissing).",
+      "mitigation": "The import and the exempt record are written back to back in the landing hook, and the reconcile catch-up repairs a crash on the next land or status. The finding is deliberate, not a silent pass."
+    },
+    {
+      "risk": "The importer's refusal and self-check semantics change if the strict path is edited by mistake.",
+      "mitigation": "Leave import_records and verify_import untouched and add separate cutover functions; the existing importer tests run unedited."
+    },
+    {
+      "risk": "After the cutover, commits after C0 skip the old content checks (personal data, size, secrets by config), so coverage narrows.",
+      "mitigation": "This is what the request says (after C0 only by records). Gitleaks still runs over the whole tip, and the decisions entry names the narrowing."
+    },
+    {
+      "risk": "Adding Rule::Attribution breaks exhaustive matches elsewhere.",
+      "mitigation": "Grep for matches on Rule; clippy and the build catch the rest."
+    },
+    {
+      "risk": "reconcile.rs and lib.rs are outside the brief's file list.",
+      "mitigation": "Both edits are minimal and required (the reconcile step the request names; the violation type). Flagged as an open question so the reviewer can accept or redirect."
+    },
+    {
+      "risk": "A history test needs a records branch with valid intent, landing and legacy-exempt records, which is fiddly to build.",
+      "mitigation": "Reuse the helpers and record builders in legacy.rs tests and the attribution tests."
+    },
+    {
+      "risk": "Pushes to the remote records branch race with other writers.",
+      "mitigation": "append_to_remote already retries against a moving tip with an expected-tip guard; the idempotence checks re-read the synced tip each time."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "A scratch-repository test in gh.rs. It builds a repo with a bare remote and a fake PrHost whose job id equals the configured cutover_job, then drives the land path (free land_pr with GitLandingRecords::for_remote(..).with_cutover(job)) through a merge. It then reads the remote records branch: the landing record's host_commit equals the resolved C0; an import commit exists with import-manifest.json whose C0 is that commit and for which verify_cutover_import passes; legacy-exempt.json parses with 7 entries (six plus 02837e0), each with a non-empty reason.",
+      "command": "cargo test cutover",
+      "observes": "The test asserts the landing file, import-manifest.json, the imported records/ files and the 7-entry legacy-exempt record on the remote athena/records, and C0 == the landing's host_commit.",
+      "fails_without": "Without the landed hook, the records branch holds only the intent and landing: no manifest and no legacy-exempt.json, so the assertions fail."
+    },
+    {
+      "criterion": 2,
+      "method": "A catch-up test in reconcile.rs or gh.rs. Set up a remote whose records branch holds the intent and a landing for the cutover job but no import. Run Athena::reconcile (the same step land and status call at their start) and assert the import commit (with manifest) and legacy-exempt.json now exist, with the commit count increased by exactly two. Run reconcile again and assert the remote records tip is unchanged.",
+      "command": "cargo test catch_up",
+      "observes": "Records tip moves on the first reconcile, with a manifest and 7 exempt entries present (a real write, not an empty no-op); the second reconcile leaves the tip identical.",
+      "fails_without": "Without the catch-up in try_reconcile, the first reconcile leaves the tip unchanged and the manifest assertion fails; without the presence checks, the second run adds a commit or errors."
+    },
+    {
+      "criterion": 3,
+      "method": "A history.rs test on a scratch repo. Main has a pre-C0 commit that breaks the old rules (for example a governed-content change with no landing) and is excused only if legacy-exempt.json names it. It also has a post-C0 commit with no trailer and no prediction, matched by an intent and landing on athena/records. The test sets cutover_job in athena.toml at C0 and calls check_history. Variants: the pre-C0 commit unexempted yields a violation naming it (old rules); the post-C0 commit with its landing yields none; the post-C0 commit with no landing yields an Attribution violation.",
+      "command": "cargo test history::tests::cutover",
+      "observes": "Violations list is empty for the records-only post-C0 commit and non-empty exactly for the pre-C0 old-rule breach and for the unattributed post-C0 commit.",
+      "fails_without": "Without the router, the post-C0 trailerless commit is judged by the old trailer and invariant rules and fails; without the attribution hand-off, an unattributed post-C0 commit passes."
+    },
+    {
+      "criterion": 4,
+      "method": "No new code path runs when cutover_job is None, or Some but with no records branch or no landing for it. Add small tests that set cutover_job with no records branch, and with a records branch holding no landing for the job, and assert the report equals check_history_with_exempt(None). Run the existing suite unedited.",
+      "command": "cargo test",
+      "observes": "Every pre-existing history, legacy, attribution and lifecycle test passes with unmodified expectations; the new fallback tests show identical reports.",
+      "fails_without": "If the router engaged without a resolved C0, the existing history tests that have no records branch would produce attribution findings (a missing branch is a finding) and fail."
+    },
+    {
+      "criterion": 5,
+      "method": "Inspect the files, plus a config test parsing athena.toml. The new test in config.rs parses the repo's athena.toml (and a toml with and without cutover_job) and asserts cutover_job == Some(\"20261025-001232-vesh\") (and None when absent). Review ci.yml: job id history keeps name 'the full history', with a 'git fetch origin athena/records:athena/records' step before 'athena check --history'.",
+      "command": "cargo test cutover_job",
+      "observes": "The parsed value is Some(this job's id) from athena.toml, None when absent; the diff shows the fetch step precedes the check step and the name line is unchanged.",
+      "fails_without": "Without the field, deny_unknown_fields rejects athena.toml with cutover_job set, so the parse test and every config-reading test fail."
+    },
+    {
+      "criterion": 6,
+      "method": "Review the diff: docs/decisions.md has a new decision entry covering C0, import at C0, the legacy-exempt record, catch-up reconcile, behavior before C0, and trailers still written; CHANGELOG.md has an entry.",
+      "command": "git diff -- docs/decisions.md CHANGELOG.md",
+      "observes": "Both files show added entries naming each topic, written for an outside reader.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Run the lint, format and test gates over the whole workspace.",
+      "command": "cargo clippy --all-targets --locked -- -D warnings",
+      "observes": "No warnings. Then cargo fmt --all --check reports no diff and cargo test --locked passes.",
+      "fails_without": "Unformatted code, an unused import or a non-exhaustive match on the new Rule::Attribution would fail clippy, fmt or the build."
+    }
+  ],
+  "open_questions": [
+    "reconcile.rs and gate lib.rs are not in the brief's file list but the design needs them (the reconcile step named in the request; a Rule for attribution violations). Accept, or should the findings reuse an existing Rule and the catch-up live in gh.rs, with reconcile.rs calling only a one-line entry point?",
+    "Whether the 'job's own id' (20261025-001232-vesh) is the id the landing record will name in its commits' job field. The plan assumes so, as the request says.",
+    "Which athena.toml exempt list the legacy-exempt record is built from: the list at C0 (planned) or the current tip's. They are identical today (seven entries).",
+    "I did not read the existing legacy.rs and attribution test helpers in detail, so I could not confirm how much of them the new history test can reuse."
+  ],
+  "producer_section_sha256": "b5432d760ac3aa0109db64b591157ad6e7da6ceaa21cc4dc5245ad4a5a558d08"
+}

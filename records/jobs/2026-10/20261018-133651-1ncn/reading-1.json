@@ -1,0 +1,179 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261018-133651-1ncn",
+  "n": 1,
+  "at": "2026-10-18T13:37:20.355520331Z",
+  "invocation_seq": 1,
+  "base_commit": "5e843a20be302530dbbcf732181e5c902f251c49",
+  "config_sha256": "ba462c7ffba3475385f095363becb853b0eda55fed87c41e3f78d800cf1f63fc",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Treat verifier timeout as unjudged and retry only unjudged criteria",
+  "summary": "Retry reading follows the introspection's proposed request: a verifier that hits its deadline must not reject the job with every criterion unmet. Athena keeps per-criterion verdicts saved so far, records \"verifier timed out, not judged\", and re-runs the verifier on only the unjudged criteria with a fresh deadline, up to a fixed number of attempts. The audience is Sri and later job runs; a fake-verifier test demonstrates it.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "New tests for the timeout path; cargo test and clippy must be clean."
+    },
+    {
+      "id": "root-cause",
+      "how": "Fixes the timeout-as-rejection cause, not just the one job."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criterion checks the fake verifier's partial-timeout behavior by running tests."
+    },
+    {
+      "id": "no-empty-success",
+      "how": "A timeout with no judged criteria is never recorded as success or as a full rejection."
+    },
+    {
+      "id": "thrash-stop",
+      "how": "Retries are capped; after the cap the outcome stays 'unjudged' and is reported."
+    },
+    {
+      "id": "strangers",
+      "how": "CHANGELOG and docs/decisions.md entries written for an outside reader."
+    },
+    {
+      "id": "rust",
+      "how": "All changes in Rust."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "The typed request 'try again on 20261018-120736-90w3' is read through the introspection's proposed next request: fix the root cause (verifier timeout recorded as plain rejection) first, since a plain retry of the spec job would hit the same deadline.",
+    "Re-running job 20261018-120736-90w3 itself is an operational step Athena or Sri performs after this lands; it cannot be verified inside this change, so the change is judged by the fake-verifier test.",
+    "The attempt limit is a constant in code, not a new athena.toml key, to avoid a governance-file change.",
+    "Per-criterion verdicts are saved as the verifier reaches them; the repo checks (test, clippy, fmt) are run once and their results shared across verifier attempts. Exact seams are in crates/athena-core/src/run.rs (verifier loop near line 1800) and verify.rs."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Run `cargo test`: a test with a fake verifier that times out part-way shows the criteria it judged before the deadline are kept, the retry verifier is asked only about the remaining criteria with a fresh deadline, and the final outcome combines both sets of verdicts.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`: a test where the fake verifier times out on every attempt shows the job ends with an outcome distinct from rejection (verifier timed out, not judged) after the capped number of attempts, with no criterion recorded as failed that was not judged.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`: a test shows the repo checks (test, clippy, fmt) run once per verification and are not re-run on a verifier retry.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`: existing tests, including a verifier that genuinely fails a criterion, still reject the job, so a real failure is distinguishable from a timeout.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check`: both clean.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The recorded job outcome and the status display name the timeout case in words a reader can tell apart from a rejection (for example 'verifier timed out, not judged').",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has an entry, and docs/decisions.md records the choice (distinct outcome, per-criterion saves, capped retry on unjudged criteria only) with alternatives such as scaling the deadline.",
+      "kind": "content"
+    },
+    {
+      "text": "No change to athena.toml, defaults.toml, or workflows, and no docs/spec.toml is created in this change.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-agent/src/fake.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-cli/tests/verifier_timeout.rs",
+      "action": "create",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-cli/tests/common/mod.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.85
+    }
+  ],
+  "out_of_scope": [
+    "Building docs/spec.toml or xtask/tests/spec.rs (the spec layer), which is the job to re-run afterwards",
+    "Changing athena.toml budgets or adding config keys",
+    "Changing reader, planner, or producer prompts",
+    "Scaling the verifier deadline by criterion count (an alternative, recorded in decisions only)"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.6,
+      "p_verification_passes": 0.5,
+      "p_user_intervenes": 0.12,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.4,
+        "p90": 3.2
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 1500.0,
+        "p90": 3000.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7645933014354067,
+      "p_verification_passes": 0.6432748538011696,
+      "p_user_intervenes": 0.07931034482758621,
+      "cost_usd": {
+        "p10": 0.4139777373327592,
+        "p50": 0.9807187000000002,
+        "p90": 2.1292113497491143
+      },
+      "wall_time_s": {
+        "p10": 563.035897881544,
+        "p50": 1193.7754386054562,
+        "p90": 2339.6693592528227
+      }
+    }
+  },
+  "departures": "Higher cost and time than reference: the change touches the core run loop and needs a fake-timeout test harness; lower acceptance because the typed request ('try again') could also mean re-running the spec job directly."
+}

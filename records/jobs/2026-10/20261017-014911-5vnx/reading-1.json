@@ -1,0 +1,170 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261017-014911-5vnx",
+  "n": 1,
+  "at": "2026-10-17T01:49:42.379307813Z",
+  "invocation_seq": 1,
+  "base_commit": "9c52d97c42a2c0ccd042c90429d4554707335d8a",
+  "config_sha256": "74dead5c36e8aab9dc0fb23e541b63ee930bd688f9590cee2fc22291ad6a3ea6",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Drain: accept unchanged-scope rereadings; ignore irrelevant config chang",
+  "summary": "When athena.toml changes after a job was read, drain currently rereads each proposed item, gets a reading \"needing accepting\", records \"no outcome\", then wrongly retries a still-proposed job and stops on \"repeated failure\". Fix so that a config change not touching reading inputs (e.g. max_concurrency) doesn't invalidate readings, and a reread whose scope is unchanged is accepted and run by drain; the retry must only follow a rejected or failed job. Audience: the operator running unattended drains.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "Fix and tests are Rust."
+    },
+    {
+      "id": "tested",
+      "how": "Regression tests; cargo test and clippy must pass."
+    },
+    {
+      "id": "root-cause",
+      "how": "Fix both the over-broad invalidation and the drain's retry of a proposed job, not only the instance."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run the drain scenario and check landing."
+    },
+    {
+      "id": "small",
+      "how": "One focused change in core run/capability and drain."
+    },
+    {
+      "id": "verified",
+      "how": "Verifier runs cargo test, clippy and fmt --check."
+    },
+    {
+      "id": "mechanism",
+      "how": "Enforced by tests rather than prose."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Scope equality means same capability, class_of_work and the same deliverable paths (action) in the new reading versus the one it replaces; probabilities and wording may differ.",
+    "Config relevance is decided by comparing a projection of the parsed config (excluding fields such as max_concurrency) rather than the raw file hash; defaults.toml changes still invalidate.",
+    "Acceptance by drain uses the existing AcceptedBy::Flag, as drain already passes it.",
+    "No change to athena.toml or defaults.toml is needed; the config change in the report was the trigger, not the fix."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A test in crates/athena-cli/tests/drain.rs changes only max_concurrency in athena.toml after items are proposed/read; the drain lands them with no reread and no 'needs accepting' or 'no outcome' line. Run: cargo test -p athena-cli --test drain.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test changes a reading-relevant config value (e.g. a budget cap or capability definition), so drain rereads; when the new reading has the same capability and deliverables as the old, drain accepts it and runs the job to a landed outcome in the same drain. Run: cargo test.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test where the reread scope differs (different capability or deliverables) does not run silently: the drain leaves the item with a clear reason that the reading needs accepting, and does not stop with 'repeated failure'. Run: cargo test.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Drain never calls retry on a job that is still proposed: when a run ends with no outcome, the drain's next attempt is a run/accept of that job, not 'only a rejected or failed job can be tried again'. A regression test reproduces the 01:48 sequence (max_concurrency 1 to 2) and asserts the stop reason is not 'repeated failure'. Run: cargo test -p athena-cli.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Reading validity compares only the configuration inputs that bear on a reading; the existing test that a relevant configuration or defaults.toml change forces a reread still passes. Run: cargo test -p athena-core.",
+      "kind": "behavior"
+    },
+    {
+      "text": "cargo test passes, cargo clippy --all-targets is clean, and cargo fmt --check passes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Doc comments on GoResult::Reread and the reading-validity rule (D38) say what counts as a relevant config change and that a same-scope reread is accepted by drain; CHANGELOG notes the fix.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/capability.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "p": 0.2
+    }
+  ],
+  "out_of_scope": [
+    "Changing the retry rule that only rejected or failed jobs can be tried again",
+    "Changing interactive `athena go` acceptance behavior for readings whose scope changed",
+    "Editing athena.toml or defaults.toml",
+    "Changing drain budget or concurrency semantics"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.75,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.4,
+        "p50": 0.95,
+        "p90": 2.3
+      },
+      "wall_time_s": {
+        "p10": 450.0,
+        "p50": 1000.0,
+        "p90": 2100.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.8352941176470589,
+      "p_verification_passes": 0.6544117647058824,
+      "p_user_intervenes": 0.07941176470588236,
+      "cost_usd": {
+        "p10": 0.40779786057009587,
+        "p50": 0.917859983636829,
+        "p90": 2.170281785349226
+      },
+      "wall_time_s": {
+        "p10": 557.4813195929656,
+        "p50": 996.9442709725414,
+        "p90": 2067.8965761416894
+      }
+    }
+  },
+  "departures": "Slightly higher cost and lower pass probability than reference: the change spans core and CLI and needs a drain regression scenario with config changes."
+}

@@ -1,0 +1,179 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261024-033933-ta60",
+  "round": 2,
+  "at": "2026-10-24T04:23:08.995543015Z",
+  "invocation_seq": 3,
+  "approach": "Add crates/athena-git/src/records_branch.rs with a RecordsWriter over the existing Git. Each attempt reads the tip of refs/heads/athena/records (or none), checks the edits against that tip's tree and refuses any that touch an existing path, builds the new tree with TempIndex::from_tree (on the tip, or on empty_tree() for the first write), and calls commit_tree with the tip as the only parent (none for the first commit). It then runs `git update-ref <ref> <new> <old>`, with the all-zero oid as old when the branch is new. A non-zero exit means another writer won: re-read the tip and replay the same edits. After max_attempts rejections (default 5) it returns a clear error. Local repository only. Nothing in the pipeline calls it.",
+  "decisions": [
+    {
+      "choice": "API takes &[RecordEdit] with variants Put{path, bytes} and Delete{path}. Any Put on an existing path (even identical bytes), any Delete, and any file/directory clash is refused with GitError::Refused before any ref update. Checked against the freshly read tip on every attempt.",
+      "reason": "Criterion 3 needs deletes and renames expressible so refusal can be tested. Refusing identical bytes keeps 'a path is written once'; a test documents it.",
+      "rejected": [
+        {
+          "option": "Additions only, no Delete variant",
+          "why": "Refusal of delete and rename could not be tested through the public API."
+        },
+        {
+          "option": "Identical-bytes Put as idempotent no-op",
+          "why": "Adds a second outcome the later history check must reason about; can be added later."
+        }
+      ]
+    },
+    {
+      "choice": "CAS via `git update-ref -m msg refs/heads/athena/records NEW OLD`, run through Git::exit so non-zero is 'rejected'. Local only.",
+      "reason": "Git's ref lock makes check-and-set atomic (§8.2). The only parent is OLD, so every accepted update is a fast-forward. Smallest design.",
+      "rejected": [
+        {
+          "option": "Also implement push_if_remote_at remote variant",
+          "why": "Optional in brief; needs bare-remote fixture and fetch logic; no caller yet."
+        },
+        {
+          "option": "Plain update-ref without old value, or manual lock file",
+          "why": "Not a CAS; would lose a commit."
+        }
+      ]
+    },
+    {
+      "choice": "Fixed env identity (Athena records / records@noreply.invalid), `sign` flag passed to commit_tree, constants RECORDS_BRANCH and DEFAULT_MAX_ATTEMPTS=5, path validation (relative, no empty/./../.git components, no NUL, newline, tab, backslash).",
+      "reason": "Deterministic author; safe input to update-index --index-info.",
+      "rejected": [
+        {
+          "option": "Use repository's configured identity",
+          "why": "Depends on user config; fails where unset."
+        }
+      ]
+    },
+    {
+      "choice": "Private write_with(edits, message, before_update hook) holds the loop; public write() passes a no-op.",
+      "reason": "Deterministic stale-tip and retry-bound tests without sleeps.",
+      "rejected": [
+        {
+          "option": "Sleep or thread-timing races",
+          "why": "Flaky."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-git/src/records_branch.rs",
+      "action": "create",
+      "purpose": "RecordsWriter, RecordEdit, outcome type, constants, path validation, CAS retry loop, and unit tests for criteria 1 to 4.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-git/src/lib.rs",
+      "action": "modify",
+      "purpose": "Add `pub mod records_branch;` only.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Record the writer under the unreleased section, in existing style.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/records-history.md",
+      "action": "modify",
+      "purpose": "In §8.2 note the local writer is implemented (module, default 5 attempts, append-only refusal incl. identical bytes, remote push not yet done).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-git/Cargo.toml",
+      "action": "modify",
+      "purpose": "Extend the description string only; no dependency changes.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read crates/athena-git/src/lib.rs testutil (repo_with, write_files, commit_all) and the CHANGELOG unreleased section to match style.",
+    "Create records_branch.rs: constants, RecordEdit, RecordsWriter {git, max_attempts, sign} with new(&Git), with_max_attempts, with_sign; path validation.",
+    "Implement the attempt: rev_parse the ref; ls_tree the tip; refuse Delete, existing Put paths, duplicates and file/dir clashes; hash_object_w each blob; TempIndex::from_tree(tip or empty_tree) then apply Puts (mode 100644); write_tree; commit_tree with parents [tip] or []; update-ref via exit with old = tip or null_oid().",
+    "Loop up to max_attempts calling before_update(attempt) between read and update; retry on rejection; after the bound return GitError::Refused naming the ref and count. Return new commit and attempt count on success. Reject max_attempts of 0.",
+    "Write the tests: concurrent writers, stale-tip replay, the five refusals, no common ancestor with main and parentless root, retry bound.",
+    "Add `pub mod records_branch;` to lib.rs; update Cargo.toml description, CHANGELOG.md and §8.2 of the design doc.",
+    "Run cargo fmt, clippy -D warnings and cargo test --locked; Grep to confirm no use of the module outside athena-git."
+  ],
+  "risks": [
+    {
+      "risk": "Concurrent writers could lose repeatedly and exhaust 5 attempts under load.",
+      "mitigation": "With two writers the loser needs at most 2 attempts; the test uses a Barrier and max 5; the bound is configurable."
+    },
+    {
+      "risk": "update-ref failing for reasons other than a lost race (bad ref, permissions) is read as a rejection and retried.",
+      "mitigation": "After a rejection re-read the ref; if the tip has not moved, return the git error at once."
+    },
+    {
+      "risk": "Tests in a repo without identity or with gpgsign=true.",
+      "mitigation": "The writer sets its own identity via env and passes --no-gpg-sign unless sign is set; test repos come from repo_with."
+    },
+    {
+      "risk": "Branch name athena/records clashes with a ref named athena.",
+      "mitigation": "Unlikely; a failing update-ref surfaces as an error."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit test: two threads with their own Git values on one temp repo, released by a Barrier, each writing a different path via RecordsWriter::write (max 5). Join, inspect branch.",
+      "command": "cargo test -p athena-git records_branch",
+      "observes": "Both writes Ok; both paths in ls_tree of final tip; 3 commits (root + 2); each commit's parent is the previous one; both writers' commits in the chain.",
+      "fails_without": "Without CAS one commit is dropped (path missing or commit absent); without retry the loser returns an error."
+    },
+    {
+      "criterion": 2,
+      "method": "Unit test using the before_update hook: on attempt 1 the hook advances the ref with another write after the writer read the tip.",
+      "command": "cargo test -p athena-git records_branch",
+      "observes": "First update rejected, outcome reports 2 attempts, final tree holds the hook's file and the writer's file, final commit's parent is the hook's commit.",
+      "fails_without": "Without refetch and replay the call errors or overwrites the hook's commit, so the earlier file is missing."
+    },
+    {
+      "criterion": 3,
+      "method": "Unit tests: seed a path, save tip; write (a) different bytes at it, (b) Delete, (c) Delete plus Put of same bytes at new path (rename), (d) identical bytes, (e) file/dir clash. Assert Err(Refused) and unchanged tip.",
+      "command": "cargo test -p athena-git records_branch",
+      "observes": "Each case errors and rev_parse of the branch equals the saved tip. Case (d) is refused; test comment and module docs state identical bytes count as an existing path.",
+      "fails_without": "Without the existing-path check, modify, delete and rename succeed and move the tip, failing the tip-equality assertions."
+    },
+    {
+      "criterion": 4,
+      "method": "Test 1: repo_with a main commit, write one record, run `git merge-base` via Git::exit and check parents of the first records commit. Test 2: max_attempts 3, hook moves the ref every attempt and counts calls.",
+      "command": "cargo test -p athena-git records_branch",
+      "observes": "Test 1: merge-base exits 1 with empty output; first commit has no parents. Test 2: error naming the attempt count after exactly 3 hook calls; no loop; tip is the hook's last commit without the writer's files.",
+      "fails_without": "A writer branching from HEAD shares history so merge-base prints a commit; an unbounded loop hangs or exceeds 3 hook calls."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the format, lint and full test commands as three separate whole commands. The new tests are part of the workspace run, so the test run executes the behaviors of criteria 1 to 4; the lint run covers the new module under -D warnings.",
+      "command": "cargo fmt --all --check; cargo clippy --all-targets --locked -- -D warnings; cargo test --locked",
+      "observes": "Each exits 0 with no warnings, and the test run lists the records_branch tests as passed.",
+      "fails_without": "Unformatted code fails fmt --check; any warning in the new module (e.g. unused code, needless clones) fails clippy -D warnings; a broken or missing records_branch test, or a regression elsewhere in the workspace from the lib.rs export, fails cargo test."
+    },
+    {
+      "criterion": 6,
+      "method": "Inspect the diff and search for callers.",
+      "command": "git diff --stat",
+      "observes": "lib.rs gains only `pub mod records_branch;`; module docs cite §8.2 and D111; only Git, TempIndex and commit_tree are used; Cargo.toml adds no dependency; a Grep for records_branch and RecordsWriter finds hits only under crates/athena-git.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Check the changed paths.",
+      "command": "git status",
+      "observes": "Changed files are limited to records_branch.rs, lib.rs, CHANGELOG.md, docs/design/records-history.md and crates/athena-git/Cargo.toml (description only). No athena.toml, defaults.toml, workflow, lint table or records/ file appears.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Should a later change add the remote variant (fetch then push_if_remote_at with expected tip)? Left out here.",
+    "Is refusing identical bytes the intended rule, or should it be an idempotent no-op? This plan refuses and documents it.",
+    "Cargo.toml needs no dependency change; only its description is edited because the brief lists it. Drop if unwanted."
+  ],
+  "producer_section_sha256": "6ba196471e9f509850002a26f39697cfdadc1c8f6b748de761c26e5d5c3087c2"
+}

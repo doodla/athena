@@ -1,0 +1,189 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261018-095726-r3bn",
+  "round": 1,
+  "at": "2026-10-18T11:31:10.062068284Z",
+  "invocation_seq": 2,
+  "approach": "Stop rewriting the local branch after a merge, so a running job's base (a commit on the local branch) stays an ancestor of HEAD and `plan` still lands it. Delete the call to `resync_onto_merge` and the function and `resync_tip`. Make the squash-merge conflict disappear on the other side: when `land_pr` publishes a job, cut the pull request head from the local landed commit by replaying it onto the host's current default-branch tip (`Git::replay` from the merge-base). Commits that an earlier squash already carries replay to empty and are skipped, so the pull request holds only the new work and a squash merge lands one commit per job. Remember the local source commit in `PrLink` so reruns do not re-cut or re-push. Check the cut head's fingerprint equals the verified fingerprint before pushing. A job stale against a moved base keeps today's `plan` handling (Stale, no auto merge). Update the design docs, D103, and the changelog.",
+  "decisions": [
+    {
+      "choice": "Keep dispatching from the local branch HEAD, but never rewrite that branch on merge. Cut each pull request head onto the remote default tip at publish time.",
+      "reason": "Dispatch (`go_job` / `dispatch` in run.rs) records `base_commit = head` and `plan` in land.rs requires the base to be an ancestor of HEAD. The only thing that breaks that on a merge is `resync_onto_merge` in gh.rs (it resets the branch onto a rebuilt chain). Removing the rewrite makes the dispatch source independent of any merge, and moves the squash-conflict fix to the pull request's head, where it belongs. The replay primitive already exists.",
+      "rejected": [
+        {
+          "option": "Dispatch from a pinned ref such as origin/main or a new refs/athena/base ref",
+          "why": "Job records (Dispatch, Reading, closing records) are committed to the local branch and read from HEAD by `Records::load`; a second base would split the record history and need a new place to land records. Larger and riskier than needed."
+        },
+        {
+          "option": "Keep resync but run it only when no job is running",
+          "why": "That is the wait the request wants removed, and it needs a view of running jobs across processes."
+        },
+        {
+          "option": "Pull the squash commit in with a merge commit",
+          "why": "Adds merge commits to the local history and fails the 'no extra rebuild or merge commits' criterion."
+        },
+        {
+          "option": "Re-cut the pull request head on every `land --pr` rerun",
+          "why": "`Git::replay` makes new commit timestamps, so each rerun would produce a new head and a replace push. Storing the source commit in `PrLink` avoids that."
+        }
+      ]
+    },
+    {
+      "choice": "Add `source: Option<String>` (serde default) to `PrLink` and compare it, not `head`, with the local landed commit in `land_pr`; add a defaulted `Remote::cut_head(base_branch, commit)` that is overridden by `GitRemote`.",
+      "reason": "A defaulted method returning the commit unchanged keeps all existing fakes and tests compiling and behaving as before. Old links without `source` fall back to `head`, so the existing 'rerun replaces a bare candidate head' behavior stays.",
+      "rejected": [
+        {
+          "option": "Do the replay in `Athena::land_pr` before calling `gh::land_pr`",
+          "why": "The default branch name is read from the host inside `publish`, and the replace path needs the same cut. Doing it inside the flow keeps both paths in one place and testable with fakes."
+        }
+      ]
+    },
+    {
+      "choice": "If the cut head's fingerprint differs from the verified one, or the replay conflicts, push nothing and report it. A job whose base the replay cannot reach is handled as stale, never merged by Athena.",
+      "reason": "Preserves P5 and the merged-unverified protection, and honors the out-of-scope on automatic merge or re-verification. If the head already descends from the remote tip (a real merge commit or no squash), push it as before.",
+      "rejected": [
+        {
+          "option": "Resolve conflicts automatically",
+          "why": "Out of scope and would land content no verifier saw."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "action": "modify",
+      "purpose": "Remove the `resync_onto_merge` call in `Athena::land_pr`. Add `Remote::cut_head` (default returns the commit; `GitRemote` replays onto the remote default tip). Use it in `publish` and `replace_head`, with a fingerprint check before the push. Store `source` in the link. Add the two-job test. Adjust tests that expected a resync. This is where the code lives, though it was not in the deliverables list.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/land.rs",
+      "action": "modify",
+      "purpose": "Delete `resync_tip` and `Athena::resync_onto_merge` and their tests; add the merge-while-running test for criterion 1; update the header text.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/pr.rs",
+      "action": "modify",
+      "purpose": "Add `source: Option<String>` (serde default) to `PrLink`, and document it.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "purpose": "Likely comment-only: note that the dispatch base is the local HEAD and is never rewritten by a merge. Producer should not change logic here; if nothing needs a change, leave the file alone.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/watcher.rs",
+      "action": "modify",
+      "purpose": "Only if the producer finds a reference to the resync; I found none (line 345 only reads HEAD). Expected: no change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/native-pr-landing.md",
+      "action": "modify",
+      "purpose": "Rewrite §5.2a: the base rule (local branch is never rebuilt; the pull request head is cut onto the remote tip), alternatives rejected, stale handling, and that one merge lands one job.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/parallel-jobs.md",
+      "action": "modify",
+      "purpose": "Update the lines that describe the rebuild (about 117-123, 345-364, 406-409, 533) and §8 question 8 to the new rule; say the next job starts while the earlier pull request is in CI.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Add D103: the base rule, alternatives rejected, stale handling; mark D88's resync part superseded.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Under [Unreleased], record the change.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read gh.rs tests around lines 1886-2650 (FakeRemote, Racy, `a_rerun_replaces_a_bare_candidate_head...`) to see how fakes and links are built.",
+    "In pr.rs add `source: Option<String>` with `#[serde(default)]` to `PrLink`; fix constructors.",
+    "In gh.rs add `Remote::cut_head(&self, base_branch: &str, commit: &str) -> Result<String>` with a default returning the commit. Implement it in `GitRemote`: read the remote tip of the base branch with ls-remote, `git.ensure_commit` it, return the commit unchanged if the tip is its ancestor, else `git.replay(tip, merge-base, commit, signs_commits)`.",
+    "In `publish` and `replace_head`, call `cut_head` with the host default branch, check `job.content.fingerprint_of(head)` equals `verified_fingerprint` (bail if not), push the cut head, and store `source = job.commit`. In `land_pr` compare `link.source.unwrap_or(link.head)` with `job.commit`.",
+    "Remove the `resync_onto_merge` call in `Athena::land_pr`. Delete `resync_tip` and `resync_onto_merge` and their tests from land.rs; update the module header.",
+    "Add the criterion 1 test in land.rs and the criterion 2 test in gh.rs (real git, bare remote under tempdir); verify that they fail when the cut or the no-rewrite is undone.",
+    "Update native-pr-landing.md §5.2a, parallel-jobs.md, decisions.md (D103; mark D88's resync superseded), and CHANGELOG.md.",
+    "Run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`; grep that `resync_onto_merge` is gone from crates/ and that docs name no stale line numbers."
+  ],
+  "risks": [
+    {
+      "risk": "A cut head carries different content than the verified landed commit (main moved governed content).",
+      "mitigation": "Fingerprint check of the cut head against the verified fingerprint before any push; a mismatch or a replay conflict pushes nothing and reports it. The existing merged-content check (merged-unverified) stays."
+    },
+    {
+      "risk": "A rerun re-cuts and pushes a new head each time, because replay commits get new timestamps.",
+      "mitigation": "Store the cut head and its source in `PrLink`; reruns reuse them, so no re-cut and no replace push unless the source commit changes."
+    },
+    {
+      "risk": "Existing gh.rs tests with fakes break through the new trait method or link field.",
+      "mitigation": "Defaulted trait method and a serde default keep old links and fakes working; keep the existing 'rerun replaces a bare candidate head' test passing."
+    },
+    {
+      "risk": "The local branch diverging from main surprises the maintainer.",
+      "mitigation": "Docs state it; `plan` still uses ancestry of the job's own base, which is unaffected."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "A new test in land.rs (real git repo via `Git::isolated`): job B is verified at base P; job A lands locally on top of P; a squash merge of A is simulated on a side ref `trunk` (single-parent commit with A's tree, not a descendant of A). It then runs the merge-time path (what land_pr does after Landed, now nothing) and asserts the local HEAD and B's base and worktree files are unchanged, P is an ancestor of HEAD, and `plan` for B returns `Plan::Tree` whose fingerprint equals the verified one.",
+      "command": "cargo test --locked second_job_survives_a_squash_merge",
+      "observes": "HEAD id equal before and after the merge; `plan(...)` is `Plan::Tree`; B's candidate lands as one commit with no Stale outcome.",
+      "fails_without": "With the resync still in place (or the branch otherwise rewritten), the second job's base is no longer an ancestor of HEAD, so `plan` returns Stale and the test's `Plan::Tree` assertion and unchanged-HEAD assertion fail."
+    },
+    {
+      "criterion": 2,
+      "method": "A new test in gh.rs with a bare remote and `GitRemote`: the local branch holds P, A's landed commit, a records commit, and B's landed commit (both dispatched back to back, before any merge). Cut A's head with `cut_head`; simulate its squash merge by committing A's cut tree on the remote default branch with parent P; cut B's head with `cut_head`. Assert each cut head has exactly one parent chain onto the then-current remote tip, `git rev-list --merges` is empty, the count of new commits is only that job's own (B's does not contain A), the cut tree's fingerprint equals the verified one, and the local branch tip is unchanged.",
+      "command": "cargo test --locked two_jobs_cut_before_the_first_merges_land_one_commit_each",
+      "observes": "No merge commits; the new-commit count equals the job's own commits; local HEAD unchanged; fingerprints equal.",
+      "fails_without": "Without the replay onto the remote tip, job B's pull request head would carry A's local commit, so `rev-list --count trunk..head` is more than the job's own commits and the squash is not clean; without the skip of already-merged commits the count is wrong. The assertions on commit count and merge-commit absence fail."
+    },
+    {
+      "criterion": 3,
+      "method": "Run the three Athena checks.",
+      "command": "cargo test --locked && cargo clippy --all-targets --locked -- -D warnings && cargo fmt --all --check",
+      "observes": "All exit 0. Old resync tests in land.rs and gh.rs are removed or rewritten for the new rule.",
+      "fails_without": null
+    },
+    {
+      "criterion": 4,
+      "method": "Read the diff: `git diff` shows `resync_onto_merge` and `resync_tip` removed from land.rs and the call removed from gh.rs (a grep of `resync_onto_merge` over crates/ finds nothing); `git diff` of docs/design/native-pr-landing.md §5.2a, docs/design/parallel-jobs.md (§3, §7, §8), and docs/decisions.md D103 shows the base rule, the rejected alternatives, and how a stale job is handled (plan's Stale reasons, no auto merge, new job to re-verify).",
+      "command": "cargo build",
+      "observes": "No code path in dispatch (`go_job`, `dispatch`, `retry_landing`) calls or needs the resync; the docs contain the sections.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "Read the diff of the docs and CHANGELOG.md [Unreleased].",
+      "command": "git diff",
+      "observes": "The docs say in plain words that the next job can start while the earlier pull request is in CI, and that each squash merge lands one job as one commit. CHANGELOG.md has an entry.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "The deliverables list names run.rs and watcher.rs, but I found no resync dependency there (dispatch takes `head` from `self.head()`); the real call site and trait are in gh.rs. I assume gh.rs may be edited.",
+    "Replay from the merge-base grows with the number of merged jobs, because the local branch is never rebased. Each replayed already-merged commit costs one merge-tree. I estimate it is cheap for hundreds of jobs but did not measure it. The producer may note this in the docs.",
+    "The local branch now stays beside origin/main for good; a user who pulls main into it gets a merge commit by hand. Is that acceptable? I assumed yes, and the docs should say it.",
+    "`GitRemote::cut_head` must pass the signing setting (`signs_commits`) to `replay`. Check that `GitRemote` can reach it from `Git`."
+  ],
+  "producer_section_sha256": "82d0642831cecbd654b8adeb58873930825d3160386881815b7d731a48e1635c"
+}

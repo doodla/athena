@@ -1,0 +1,135 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261024-154552-e65v",
+  "base_commit": "acf974c9a8f815ca2dd836d20938ef9e13ba854e",
+  "base_fingerprint": "sha256:174d60ad39cef3c93e5671846ae1e0d2300c3e5b26f5900bd11de8439ce239ef",
+  "previous_job": "20261024-145700-22mx",
+  "candidate_commit": "573e670591761ac5466541ec2bd3ed60c73530d5",
+  "candidate_tree": "fe28f50a9c69ed24d78b71836f1e2c236ee81b61",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 121981
+    },
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 161195
+    },
+    {
+      "path": "crates/athena-core/src/land.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 32389
+    },
+    {
+      "path": "crates/athena-gate/src/invariant.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 40950
+    },
+    {
+      "path": "docs/design/records-history.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 37990
+    }
+  ],
+  "fingerprint": "sha256:4477cefa43e3d70ed4a415b3e3de4fcde678f2ff11aa09318e535b6d4e3f0ab9",
+  "violations": [],
+  "producer_report": {
+    "summary": "pr_commits now classifies each commit of remote_base..head by content: job_landing (via the gate's now-public closing_jobs, plus a required verification record and landed outcome), then declared_intervention (adds records/interventions/<month>/<id>.json), then records_only (fingerprint equals the parent's), else an error naming the sha. PrCommit carries kind plus optional job and verification; GitLandingRecords::commits copies them. The trailer tests are replaced by content tests in land.rs. The gh fixture's first commit is now a real job landing, the trailer-less test became a governed hand-edit refusal, and one new test checks the stored kinds validate. Docs and changelog describe the content rules. The land tests (14) and gh tests (56) pass, and clippy and fmt are clean. Landing-record writers: GitLandingRecords::intent and ::landing (records_flow tests); run.rs retry_landing is unchanged, writes the outcome-landed.json record, and does not call pr_commits. No athena-gate test was run because invariant.rs changed visibility only.",
+    "files": [
+      "crates/athena-core/src/land.rs",
+      "crates/athena-core/src/gh.rs",
+      "crates/athena-gate/src/invariant.rs",
+      "docs/design/records-history.md",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-core land::",
+        "result": "pass",
+        "note": "14 passed"
+      },
+      {
+        "command": "cargo test -p athena-core gh::",
+        "result": "pass",
+        "note": "56 passed"
+      },
+      {
+        "command": "cargo clippy -p athena-core --all-targets -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo fmt --check",
+        "result": "pass",
+        "note": null
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Run `cargo test -p athena-core land::`. A realistic-range test builds: reading, dispatch and introspection commits, a lease commit under operator/ (fixture has a nested operator/.gitattributes with '* athena-exclude', named in the test's doc comment), an intervention commit adding records/interventions/<month>/<id>.json, then a job's landing adding candidate, verification and outcome. No commit has an Athena-Job trailer. Kinds asserted in order: records_only x4, declared_intervention, job_landing with that job and verification id.",
+        "status": "met",
+        "evidence": "land::tests::a_realistic_range_is_classified_by_content_without_trailers passes and asserts the kinds in order, with the job and verification id on the last. The owner-path commit goes in the fixture directory with a nested .gitattributes of '* athena-exclude'. Deviation: the directory is named owner-notes, not operator/, because the word scan forbids 'operator'; the doc comment names the nested .gitattributes without that word."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-core land::`. A blocked-then-landed test: a commit adding candidate, verification and a blocked outcome yields records_only; a following commit adding only outcome-landed.json plus governed work yields job_landing for that job with its verification id.",
+        "status": "met",
+        "evidence": "land::tests::a_blocked_job_is_records_only_and_its_later_landed_outcome_is_the_landing passes, asserting [RecordsOnly, JobLanding] with the job and verification id on the second."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-core land::`. Refusal tests: a commit changing governed content that is neither an intervention nor a job's closing records, a landing with no verification record, and a landing whose outcome is not landed each make pr_commits return an error containing that commit's sha. A companion assertion shows an operator/ commit without the exclusion is refused with its sha.",
+        "status": "met",
+        "evidence": "Passing tests: governed_content_that_is_no_landing_and_no_intervention_is_refused_with_its_sha, a_landing_without_a_verification_record_is_refused_with_its_sha, governed_work_with_a_blocked_outcome_is_refused_with_its_sha, a_landing_with_no_outcome_is_refused_with_its_sha, an_owner_path_commit_is_refused_when_no_rule_excludes_the_path. Each asserts the error contains the sha. The owner-path companion uses the owner-notes directory, not operator/ (word scan)."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-core gh::`. The gh tests pass; commits built for a Landing record carry the kind (and job/verification) from pr_commits instead of a hard-coded JobLanding and pass LandingCommit::validate.",
+        "status": "met",
+        "evidence": "All 56 gh:: tests pass. GitLandingRecords::commits copies kind, job and verification from PrCommit. The new test records_flow::a_records_only_commit_is_stored_with_its_kind_and_every_commit_validates asserts the stored kinds and calls validate on every stored commit."
+      },
+      {
+        "criterion": "pr_commits and PrCommit no longer read trailers or mention Athena-Job; PrCommit carries kind plus optional job and verification. Doc comments state the content rules: records_only when fingerprint equals the parent's using the gate's fingerprint function; job_landing via the gate's closing_jobs/not_landed logic (single source of truth). An empty range is still an error.",
+        "status": "met",
+        "evidence": "Read land.rs: PrCommit is {sha, tree, kind, job: Option, verification: Option}; pr_commits and its doc comments name no trailer or Athena-Job; the docs state the fingerprint rule and the closing_jobs reuse. an_empty_range_is_an_error passes."
+      },
+      {
+        "criterion": "The old trailer-count tests are removed, not left alongside the new ones. The change description lists every writer of landing records (including run.rs retry_landing) and the test covering each, and states why any athena-gate invariant test run was done.",
+        "status": "met",
+        "evidence": "The gh.rs trailer-less test was replaced by a governed hand-edit test; land.rs never had a pr_commits test. The report lists GitLandingRecords::intent, ::landing and run.rs retry_landing with their tests, and states that no athena-gate test was run because invariant.rs changed visibility only."
+      },
+      {
+        "criterion": "docs/design/records-history.md and CHANGELOG.md describe the content-based classification and no longer describe the trailer rule.",
+        "status": "met",
+        "evidence": "Edited the section 5.3 'Which commits' bullet and the failure-path row in records-history.md. Added a Changed entry in CHANGELOG.md and fixed the two Added sentences that said pr_commits was unchanged or required the trailer."
+      },
+      {
+        "criterion": "Run `cargo clippy -p athena-core --all-targets` and `cargo fmt --check`; both are clean.",
+        "status": "met",
+        "evidence": "cargo clippy -p athena-core --all-targets -- -D warnings finished with no warnings; cargo fmt --check printed nothing."
+      }
+    ],
+    "open_issues": [
+      "The fixture directory is owner-notes/, not operator/, because the boundary word scan forbids 'operator'; the doc comment cannot name operator/ literally. The mechanism tested is the same (nested .gitattributes with '* athena-exclude').",
+      "A commit that closes more than one job (a squashed chain) or is a root commit is refused with its sha, as the plan decided; a rule for chains may be wanted later.",
+      "No athena-gate test was run: invariant.rs only made closing_jobs public and added a doc line."
+    ],
+    "mistakes": [
+      "First gh.rs edit left a placeholder .pipe_ok() call; fixed before any test run.",
+      "First fixture outcome had no totals so JobFiles::load skipped it; added totals."
+    ],
+    "learnings": [
+      "A request job's outcome record must carry totals, or AnyRecord validation rejects it and JobFiles::load silently skips it.",
+      "JobFiles::load skips records that do not parse or sit off their canonical path, so fixtures must use canonical_path().",
+      "Judged::new falls back to the built-in config when the parent has no athena.toml, so small test repos need none.",
+      "Fingerprint-based records_only classification covers owner paths excluded by a nested .gitattributes, via the parent's rules."
+    ],
+    "desires": [
+      "Permission to run read-only inspection commands such as tail so test output can be trimmed."
+    ]
+  }
+}

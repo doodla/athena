@@ -1,0 +1,169 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261016-071202-q0xy",
+  "n": 1,
+  "at": "2026-10-16T14:28:58.088197233Z",
+  "invocation_seq": 1,
+  "base_commit": "dd284bf37a696bbe2f288759b75f6bf5d4bb6cfb",
+  "config_sha256": "5570e4f9425ce1beb6f41799c80193739787f2fc95ee3ce8cdead671d06c980b",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Run independent plan-group items in parallel in the drain loop",
+  "summary": "Reading: the drain loop (crates/athena-cli/src/drain.rs) plans items into parallel groups (`plan_groups`) but runs one job at a time; build the first parallel slice so items of one plan group run concurrently, bounded by a worker limit, following docs/design/parallel-jobs.md (child-process model, per-job locks and budgets, kill switch). Audience: the Athena user running a drain, who wants shorter wall time without weakened gates.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "Implementation and tests are Rust."
+    },
+    {
+      "id": "tested",
+      "how": "New tests for concurrency, bound, isolation, kill switch; cargo test and clippy clean."
+    },
+    {
+      "id": "verified",
+      "how": "Behavior criteria name cargo commands the verifier can run."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check items actually overlapping, not that types exist."
+    },
+    {
+      "id": "small",
+      "how": "One focused slice: drain-group concurrency only."
+    },
+    {
+      "id": "mechanism",
+      "how": "Kill switch and bound enforced in code and tested."
+    },
+    {
+      "id": "strangers",
+      "how": "Docs and comments written for outside readers."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "'The plan's groups' means Report::plan_groups / Plan::groups in drain.rs and plan.rs, whose docs call concurrent group running 'follow-up work'.",
+    "The first build is the drain-loop slice, not the full multi-job `athena go a b c`/`--all` launcher with --pr phase from the design's section 10 item 4.",
+    "Concurrency is built to the design's recommendation (processes or isolation without Send/Sync changes to AgentDriver/Ui) unless the drain's Steps abstraction allows a simpler safe approach; worker default 2, ceiling 4 as the design states.",
+    "README, CHANGELOG and decisions.md entries belong to a later docs job per the design, so they are not expected to change.",
+    "Default worker bound keeps current behavior safe; exact default is the producer's call within the design's 2/4."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new test in crates/athena-cli/tests/drain.rs drives the drain with a fake Steps whose jobs block on a barrier; with a bound of 2 and two independent items in one plan group, both are in flight at once (the test fails if run serially). Run `cargo test -p athena-cli`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test shows the worker bound is respected: with a bound of 1 (or more items than workers) no more than the bound run at once, and items in later groups start only after the earlier group's items finish. Run `cargo test -p athena-cli`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test shows one item's failure or refusal does not abort siblings in its group, and that turning the kill switch (Stop) on mid-run starts no further item. Run `cargo test`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "With the bound at 1 or the default, the existing drain tests still pass unchanged: serial order, report and exit codes for single-job `athena go` are unchanged. Run `cargo test`, `cargo clippy --all-targets` (clean) and `cargo fmt --check`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Items that name no touched path or share a path stay serialized as plan.rs groups them; landing is still through the repository lock so nothing lands unverified; any new setting (worker bound, default and ceiling) is documented where it is defined.",
+      "kind": "content"
+    },
+    {
+      "text": "The drain's module docs and the Report no longer say the loop runs one job at a time; the design doc's status or build plan notes what this slice built and what remains (multi-job `athena go`, --pr phase). Any change to athena.toml is named here and justified.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-core/src/plan.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "athena.toml",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-core/src/config.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "docs/design/parallel-jobs.md",
+      "action": "modify",
+      "p": 0.25
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.2
+    }
+  ],
+  "out_of_scope": [
+    "Threads-in-one-process spike",
+    "Daemon or async runtime",
+    "Automatic merging or re-verification of stale jobs",
+    "Per-job work-branch pull requests (question 8)",
+    "Run-level spend cap",
+    "docs/decisions.md and README edits"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.65,
+      "p_verification_passes": 0.5,
+      "p_user_intervenes": 0.15,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.4,
+        "p90": 3.2
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 1400.0,
+        "p90": 2800.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.8258992805755395,
+      "p_verification_passes": 0.6721311475409836,
+      "p_user_intervenes": 0.08032786885245902,
+      "cost_usd": {
+        "p10": 0.4205288381828849,
+        "p50": 0.8774205484223001,
+        "p90": 2.165711121122935
+      },
+      "wall_time_s": {
+        "p10": 544.215646591689,
+        "p50": 946.1332570769999,
+        "p90": 1882.6036088512978
+      }
+    }
+  },
+  "departures": "Concurrency across the drain, locks and kill switch is larger and riskier than a typical change, and the request is ambiguous between the drain slice and the full launcher, so costs are higher and pass odds lower than the reference."
+}

@@ -1,0 +1,168 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261013-062226-zmb3",
+  "n": 1,
+  "at": "2026-10-13T06:22:55.177421752Z",
+  "invocation_seq": 1,
+  "base_commit": "0e4385961e5a7e2f683bfd4fd6268d34ab31da21",
+  "config_sha256": "46d9162d4972d6789bcfd5c744f3acb2c4c3baebcc12904ac29481610d0b8059",
+  "defaults_sha256": "34395568ed0684d5b19642d761d9d16e023f3263e4313e645b083d31b302e9bc",
+  "defaults_version": 1,
+  "title": "Add sccache-backed warm builds without placeholder checksums",
+  "summary": "Retry of the failed sccache change: jobs keep their own CARGO_TARGET_DIR (isolation) but compile through a shared content-addressed sccache. The pinned sccache is installed by setup in a way that needs no hand-copied digests, so setup and builds cannot be broken by fake values.",
+  "class_of_work": "build",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "buy-first",
+      "how": "Use the maintained sccache crate rather than building a cache; record the call."
+    },
+    {
+      "id": "evidence",
+      "how": "No claim of provenance for values that were not measured; cite the cold-build timing from the request."
+    },
+    {
+      "id": "tested",
+      "how": "Config tests enforce wrapper/version match and cargo test and clippy pass."
+    },
+    {
+      "id": "mechanism",
+      "how": "Tests enforce the sccache wiring and reject placeholder digests rather than relying on comments."
+    },
+    {
+      "id": "small",
+      "how": "One focused change to build wiring and its decision record."
+    },
+    {
+      "id": "strangers",
+      "how": "Decision and changelog written for an outside reader."
+    }
+  ],
+  "assumptions": [
+    "The producer cannot download release assets to learn real sha256 values, so it must not write any digest it did not measure; an all-zero or invented digest is forbidden.",
+    "sccache is installed by setup with `cargo install sccache --locked --version <pin> --root <athena_home>/tools/sccache/<pin>`, whose crate downloads are checksum-verified by crates.io/Cargo.lock-style verification, instead of a release tarball with a sha256 table. If the owner prefers release tarballs, they must supply real digests.",
+    "RUSTC_WRAPPER in the change and study capability environments points at the installed binary, and setup installs it before any job can run, so the wrapper never names a missing program.",
+    "The shared cache directory (SCCACHE_DIR) lives under athena_home, outside any job directory, and is keyed by content, so job isolation of target dirs (D46) is kept.",
+    "A new decision (D79) supersedes the part of D46 that left out sccache, and records the cold-build evidence (~165s test check)."
+  ],
+  "question": "Should sccache be installed with `cargo install --locked` (no digest needed, slower first setup), or from release tarballs for which you will supply the real sha256 values?",
+  "acceptance_criteria": [
+    {
+      "text": "athena.toml contains no all-zero or placeholder digest, and no claim in athena.toml, CHANGELOG.md or docs/decisions.md says a value was copied from upstream unless it was.",
+      "kind": "content"
+    },
+    {
+      "text": "CARGO_TARGET_DIR stays per job and per side in [capabilities.change.env] and [capabilities.study.env]; RUSTC_WRAPPER and SCCACHE_DIR are added there, with SCCACHE_DIR outside the job directory.",
+      "kind": "content"
+    },
+    {
+      "text": "setup.sh (or the setup code in xtask) installs the pinned sccache version before it builds Athena, and fails clearly if the install fails; the version is defined once and the wrapper path is derived from or tested against it.",
+      "kind": "content"
+    },
+    {
+      "text": "docs/decisions.md records a new decision with alternatives and the tradeoff, and marks D46's sccache exclusion as superseded; CHANGELOG.md has an entry.",
+      "kind": "content"
+    },
+    {
+      "text": "A config test asserts the change and study environments set RUSTC_WRAPPER to the pinned sccache path and keep CARGO_TARGET_DIR per job; run `cargo test --locked` and it passes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "If any digest table is kept, a test rejects all-zero digests; `cargo test --locked` passes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`cargo clippy --all-targets --locked -- -D warnings` and `cargo fmt --all --check` pass.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "athena.toml",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "setup.sh",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "xtask/src/main.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "README.md",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "docs/design/athena-v0.md",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "xtask/tests/policy.rs",
+      "action": "modify",
+      "p": 0.15
+    }
+  ],
+  "out_of_scope": [
+    "Sharing CARGO_TARGET_DIR across jobs or sides.",
+    "Changing check commands, gitleaks pin, or CI workflows.",
+    "Remote or networked sccache storage.",
+    "Changing records/ or owner files."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.55,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.2,
+      "cost_usd": {
+        "p10": 0.4,
+        "p50": 0.95,
+        "p90": 2.2
+      },
+      "wall_time_s": {
+        "p10": 400.0,
+        "p50": 800.0,
+        "p90": 1400.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.6811881188118811,
+      "p_verification_passes": 0.6714285714285714,
+      "p_user_intervenes": 0.1542857142857143,
+      "cost_usd": {
+        "p10": 0.23622049302795387,
+        "p50": 0.6868257514882651,
+        "p90": 1.7440690045941418
+      },
+      "wall_time_s": {
+        "p10": 265.53301795376996,
+        "p50": 540.2023964629017,
+        "p90": 838.4279520189846
+      }
+    }
+  },
+  "departures": "Cost and time raised: the prior attempt failed, the change touches setup and config, and a new tool install may lengthen cold checks. Pass rate lowered because the real tool cannot be exercised by the verifier's allowed commands."
+}

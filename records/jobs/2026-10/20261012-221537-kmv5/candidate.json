@@ -1,0 +1,183 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261012-221537-kmv5",
+  "base_commit": "7f354b815e654c4049c1b0d745250bf0edbc6007",
+  "base_fingerprint": "sha256:c352932eef6225a785ba84e91a53b95e25bb3f03cb3ccd2fa292c2a7531b23c1",
+  "previous_job": "20261012-220558-fd7f",
+  "candidate_commit": "a6f643c0210c68879b1e5b894c9e5878c24cd2be",
+  "candidate_tree": "f0b5da4244bb455395707d2cfb3cc42437ad502a",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 14043
+    },
+    {
+      "path": "athena.toml",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 7250
+    },
+    {
+      "path": "crates/athena-agent/src/policy.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 36674
+    },
+    {
+      "path": "crates/athena-cap-change/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 6112
+    },
+    {
+      "path": "crates/athena-cap-study/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 7394
+    },
+    {
+      "path": "crates/athena-cli/src/wiring.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 6276
+    },
+    {
+      "path": "crates/athena-cli/tests/common/mod.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 10852
+    },
+    {
+      "path": "crates/athena-cli/tests/live.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 8109
+    },
+    {
+      "path": "crates/athena-core/src/capability.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 4935
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 4857
+    },
+    {
+      "path": "crates/athena-core/src/pin.rs",
+      "status": "added",
+      "mode": "100644",
+      "bytes": 10440
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 43674
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 60792
+    },
+    {
+      "path": "crates/athena-core/src/state.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 4473
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 15467
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 44557
+    },
+    {
+      "path": "crates/athena-git/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 35335
+    },
+    {
+      "path": "docs/decisions.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 109051
+    }
+  ],
+  "fingerprint": "sha256:08dc1a7551b4a80a8f6b45b43dc32f9fce75c7e9358cb57b1305c02a7d78fa43",
+  "violations": [],
+  "producer_report": {
+    "summary": "When a study job is dispatched, Athena's core now resolves the study instance's configured repo URL and ref to a full commit SHA, records it in the job record, and mounts that tree read-only at `pinned/` in the agents' working directory. The change capability never reaches the pinner. fmt, clippy and the full test suite pass (my last test run was before the docs edits, and I did not rerun it after them). The firstmate `main` instance lives only in `[capabilities.study.instance]` in athena.toml, which also covers the config part of criterion 1. The \"no hard-coded URL\" half is by construction, not scanned. The URL appears only in athena.toml, a doc comment and the changelog.\n\nWhat changed:\n- **Config and record:** `CapabilityConfig` has an optional `instance` (`repo_url`, `ref`). The Job record has an optional `instance` field holding `url`, `ref` and `sha`.\n- **Git seam in `athena-git`:** `resolve_ref` runs `git ls-remote`. It requires an exact branch or tag name, resolves annotated tags to their commit, and refuses option-like input. `export_tree` fetches one commit into a scratch repo, checks it out, and clears the write bits. `make_read_only`, `remove_tree` and `exclude_in_snapshot` support it.\n- **`athena-core`:**\n  - `pin.rs` adds a `Pinner` trait, a real `GitPinner`, `pin_instance` and `mount`. `Capability::instance()` defaults to `None`.\n  - `Athena` has a new `pinner` field.\n  - `dispatch` pins before the prediction commit and stores the pin in the Job record. The pin is mounted in the producer snapshot, and in the verifier snapshot after the checks. A mount failure becomes a recorded failure.\n  - Cleanup uses `remove_tree` so read-only trees can be deleted.\n- **Enforcement:** `ToolGrant` and the agent hook policy gain `read_only` paths. The study grants list `pinned`. The hook refuses Write/Edit, `rm`, `mv`, `chmod` and redirection there, so `chmod u+w` cannot undo the mode bits. This goes beyond the file mode bits you asked for; I added it because the study producer's `chmod` grant is `*`.\n- **Docs:** CHANGELOG.md has an entry, and D75 in `docs/decisions.md` records the git-versus-crate (buy-first) choice.\n\nTests added:\n- `a_study_job_pins_the_configured_url_and_ref_once_and_records_the_sha` and `the_repository_study_config_is_what_gets_pinned` (fake pinner, athena-core).\n- `the_change_capability_never_calls_the_pinner` (fake pinner, athena-core).\n- `export_matches_the_pinned_commit_and_leaves_no_write_bits` and `resolve_ref_finds_the_full_commit_id_of_a_branch_and_a_tag` (local temporary repo, athena-git).\n- `the_git_pinner_pins_a_local_repository_read_only` (athena-core).\n- `read_only_paths_refuse_writes_and_allow_reads` (agent hook).\n- Config, study-capability and record round-trip tests.",
+    "files": [
+      "athena.toml",
+      "crates/athena-data/src/config.rs",
+      "crates/athena-data/src/records.rs",
+      "crates/athena-core/src/lib.rs",
+      "crates/athena-core/src/pin.rs",
+      "crates/athena-core/src/run.rs",
+      "crates/athena-core/src/capability.rs",
+      "crates/athena-core/src/state.rs",
+      "crates/athena-core/src/reading.rs",
+      "crates/athena-git/src/lib.rs",
+      "crates/athena-cap-study/src/lib.rs",
+      "crates/athena-cap-change/src/lib.rs",
+      "crates/athena-agent/src/policy.rs",
+      "crates/athena-cli/src/wiring.rs",
+      "crates/athena-cli/tests/common/mod.rs",
+      "crates/athena-cli/tests/live.rs",
+      "CHANGELOG.md",
+      "docs/decisions.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "rerun after the docs edits"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "run before the docs edits"
+      },
+      {
+        "command": "cargo test --locked --quiet --workspace --no-fail-fast",
+        "result": "pass",
+        "note": "run before the docs edits; the live tests are ignored, as before"
+      }
+    ],
+    "open_issues": [
+      "The deliverable list was incomplete. I also had to edit athena-agent/src/policy.rs, athena-cap-change/src/lib.rs, athena-core/src/reading.rs, athena-core/src/state.rs, athena-cli/tests/common/mod.rs and athena-cli/tests/live.rs, because the new `read_only` and `pinner` fields and the cleanup change touch them. docs/decisions.md replaces the nonexistent docs/design.md.",
+      "No end-to-end test dispatches a study job through `Athena::go` with a fake pinner. The call is covered by a unit test of `pin_instance` and by the `dispatch` wiring, which has no direct test.",
+      "Nothing tells the study producer prompt that the tree is at `pinned/`; the prompt files were not in scope.",
+      "The nested-run path and the CLI test fixture use `GitPinner`, so a study job there would try the network.",
+      "`ls-remote` and `fetch` run with an isolated git config, so a private repository would need credentials Athena does not provide.",
+      "The pin test `the_git_pinner_pins_a_local_repository_read_only` uses `std::os::unix`, so it is Unix-only. The code has a non-Unix fallback, but the tests are not gated."
+    ],
+    "mistakes": [
+      "I started reading very large files whole, which cost budget. I should have used targeted reads from the start."
+    ],
+    "learnings": [
+      "`docs/design.md` does not exist (`docs/design/` is a directory), and decisions live in `docs/decisions.md`, so I put the decision there as D75.",
+      "`Snapshot::change_list` and `work_tree_tree` run `git add -A` in the snapshot repo, so a mounted tree must be hidden through `.git/info/exclude` or it shows up as a producer change.",
+      "A tree with cleared write bits on directories cannot be deleted with `remove_dir_all`, so the cleanup paths (`state.clean_job`, the producer and verifier snapshot removals) had to switch to `remove_tree`.",
+      "The producer's `chmod` grant is `*`, so mode bits alone do not make the tree read-only. The hook needed a read-only path rule.",
+      "Bash here allows only the listed commands, so `grep` and `tail` are not available."
+    ],
+    "desires": [
+      "A way to read the persisted tool-output file when output is large, since Grep and Read are confined to the working directory.",
+      "A listing of which files pin the crate dependency graph, so adding a trait field could show all construction sites up front."
+    ]
+  }
+}

@@ -1,0 +1,192 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261017-083729-1bjt",
+  "n": 1,
+  "at": "2026-10-17T09:17:32.830963833Z",
+  "invocation_seq": 1,
+  "base_commit": "3015183715d367d4453b77407c8909cef0b95530",
+  "config_sha256": "de9345d83aafd84eab75106282444ab0f5c0d14b5aebd304ae9e772f14b919ad",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Detect stalled producers, end them early, and keep progress records",
+  "summary": "The producer stage gets progress visibility. Periodic progress events (tool-call count and files changed) go to the job's records. A producer with no progress for a configured interval is killed early with a stall reason, and its partial workspace diff is kept. The audience is the maintainer diagnosing stuck jobs. A fake stalling producer test covers it.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "All code and the fake-producer test are Rust."
+    },
+    {
+      "id": "tested",
+      "how": "Add unit and integration tests; cargo test passes and clippy is clean."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check that a stalled fake producer is actually killed early with the reason and the diff is kept."
+    },
+    {
+      "id": "mechanism",
+      "how": "Stall detection is enforced in the driver loop, not described in prose."
+    },
+    {
+      "id": "public",
+      "how": "Progress events and the kept diff go through the existing redactor."
+    },
+    {
+      "id": "small",
+      "how": "One focused change; deadline-overrun recording is untouched."
+    },
+    {
+      "id": "verified",
+      "how": "The verifier runs cargo test on the stall test."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "The driver loop in crates/athena-agent/src/claude.rs (1s recv_timeout, deadline check, kill_group) is where stall detection belongs. The UsageSink in crates/athena-core/src/invocation.rs is where progress is recorded.",
+    "Progress means a new tool call or a change in the workspace's changed-file set. A long-thinking producer is flagged only if it has issued no tool call and changed no file for the whole interval.",
+    "The stall interval is a new setting in athena.toml [agents], read through athena-data config, with a default well under the 1800s deadline.",
+    "A stalled kill is recorded as outcome Killed with a detail beginning 'stalled: no progress for Ns'. No new outcome enum value is added unless the record schema already needs one.",
+    "The partial workspace diff is saved to the job's records or state before the workspace is discarded, redacted like other agent text.",
+    "How deadline overruns are recorded is a separate queued item. This change leaves the existing deadline path and its wording unchanged."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Run `cargo test` (workspace). A new test drives a fake producer that emits no progress with a short stall interval and a long deadline. It asserts the invocation ends as Killed well before the deadline, with a detail naming a stall and the interval, not 'deadline of'.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`. A test with a fake producer that makes tool calls and edits files asserts that progress events are recorded in the job's records, each with a tool-call count and a files-changed count, and that this producer is not flagged as stalled.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`. After the stalled kill, the partial workspace diff of the fake producer's edits is still present in the job's records or state, and a test reads it back.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A reader of the job's records can tell a stall kill from a deadline kill by the recorded reason alone. The deadline path and its message are unchanged.",
+      "kind": "content"
+    },
+    {
+      "text": "The stall interval is a documented setting in athena.toml [agents] with a default, loaded via config. athena.toml is named here as a changed governance file.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo clippy --all-targets` and `cargo fmt --check`. Both are clean.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md and the relevant doc (docs/architecture.md or docs/decisions.md) describe the progress events, the stall rule, and the diff retention.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-agent/src/claude.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-agent/src/lib.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-agent/src/fake.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-core/src/invocation.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-cli/src/wiring.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "athena.toml",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "docs/architecture.md",
+      "action": "modify",
+      "p": 0.3
+    }
+  ],
+  "out_of_scope": [
+    "How deadline overruns are recorded (a separate queued item).",
+    "Changing the overall deadline or budget caps.",
+    "Stall detection for roles other than the producer, unless it falls out for free.",
+    "Retrying or resuming a stalled producer."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.75,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.4,
+        "p50": 1.0,
+        "p90": 2.4
+      },
+      "wall_time_s": {
+        "p10": 500.0,
+        "p50": 1100.0,
+        "p90": 2400.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.810909090909091,
+      "p_verification_passes": 0.636986301369863,
+      "p_user_intervenes": 0.07397260273972603,
+      "cost_usd": {
+        "p10": 0.356879461258123,
+        "p50": 0.921409551191,
+        "p90": 2.1618054454494464
+      },
+      "wall_time_s": {
+        "p10": 563.891712057496,
+        "p50": 1015.5634272609999,
+        "p90": 2321.645325114738
+      }
+    }
+  },
+  "departures": "The change touches the driver loop, the config, the records and a new test, so it is larger than the typical job. I raised cost and time slightly and lowered the pass probability."
+}

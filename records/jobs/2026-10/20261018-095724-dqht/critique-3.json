@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261018-095724-dqht",
+  "round": 3,
+  "at": "2026-10-18T10:02:24.464109155Z",
+  "invocation_seq": 6,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The first Red often comes while the failed workflow run is still in progress, so the rerun is refused or finds nothing to rerun and the landing never retries.",
+      "evidence": "classify_checks returns Red as soon as any check run has a failed conclusion, even while other check runs are still pending, and wait_for_checks stops at the first non-Pending look. So the first wait often ends while the failed job's workflow run is still in progress, for example when the other jobs in the run are still running or still being cancelled by fail-fast. GitHub refuses rerun-failed-jobs on a run that has not completed, and a parser that selects runs with conclusion=failure finds none yet. Under Decision 4 either outcome gives Red with rerun=false and no retry. That is the unattended landing the request asks for, failing in a common case, and none of the FakeHost scripts covers it. Fix: Before asking for a rerun, wait (inside the same bound) until the failed workflow runs for the head commit have completed. Options: rerun_failed reports a 'not yet completed' result, or the first wait keeps polling after a Red look until no check is pending. Then rerun the runs whose conclusion is failure. Add a FakeHost test where the first Red look comes while checks are still pending and the run is not complete yet. It must show that the rerun still happens exactly once after the run completes, and that the total number of reads stays within 2 x attempts.",
+      "location": "Plan approach and Decision 4 (first wait ends on Red, then rerun_failed); gh.rs:990-1009 classify_checks, gh.rs:1244-1257 wait_for_checks",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The expected read count in the [Red, Red, Pending, Red] demonstration is garbled.",
+      "evidence": "The text says \"reads == 4 in total after first Red... asserted exactly\". The exact expected count is unclear, so a verifier cannot tell whether the stale rule was exercised. Fix: State the exact expected read counts for both the first wait and the second wait. For example: first wait 1 read, second wait 3 reads (Red stale, Pending, Red final), 1 rerun, 1 lookup.",
+      "location": "Demonstrations, criterion 2, the [Red, Red, Pending, Red] case",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A fixed allowance of three looks is a weak staleness signal when run_attempt is already in the reply.",
+      "evidence": "Three looks at 20 s is about 60 s of stale tolerance. Decision 3 rejects comparing run_attempt, yet the PagesRun code (gh.rs:808-809, 958) already reads run_attempt from the same actions/runs reply that rerun_failed fetches. That would be a precise staleness signal at no extra cost. Fix: Consider having rerun_failed record the run ids and attempts it reran, and treat Red as stale until those runs show a higher run_attempt. Keep the look allowance only as a fallback. If you keep the allowance alone, write the 60 s figure into the docs.",
+      "location": "Decision 3 / Risk 'Stale allowance too short'",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read gh.rs: land_pr, wait_for_checks, classify_checks, GhClient::api and the Pages rerun code. The plan puts the retry in the right place, inside land_pr's check wait. The new host calls reuse the existing retry and error-log path, and HostOperation::ReadChecks is used the same way rerun_pages already uses it. The bound and the merge gate are stated, and the demonstrations mostly fail without the behavior. One design gap is major. classify_checks reports Red as soon as one check fails, even while others are still pending, so the first wait usually ends before the failed workflow run has completed. GitHub refuses rerun-failed-jobs on a run that has not completed, and Decision 4 then turns that into Red with no rerun, which defeats the unattended landing in a common case. The plan should wait, within the bound, for the failed runs to complete before asking for the rerun, and test that case. The other findings are minor clarifications."
+}

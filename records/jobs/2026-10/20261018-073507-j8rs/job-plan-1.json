@@ -1,0 +1,226 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261018-073507-j8rs",
+  "round": 1,
+  "at": "2026-10-18T07:37:39.475697875Z",
+  "invocation_seq": 2,
+  "approach": "Add a new job record, `athena.baseline/1` at `<job>/baseline.json`. In `produce_and_verify`, before the first producer invocation, Athena makes a base-only snapshot, runs the capability's configured checks in it with the existing `run_check`, and keeps the results in a new `Closing.baseline` field. `close_dispatched` writes the file with the other records. The record holds the job, the base commit, the seq of the first producer invocation, the `CheckRun` list (name, command, exit_code, passed, tests_ran, redacted output tail capped at 4 KiB, note) and an optional top-level note. A check that fails, times out or cannot start is recorded as failed with a note. If the whole baseline cannot run, the record holds no checks and a note saying so. Nothing in the baseline path returns an error to the job. verify.rs, routing.rs and the verdict code are not touched.",
+  "decisions": [
+    {
+      "choice": "A new record kind `athena.baseline/1` (struct `Baseline`) reusing `CheckRun`, kept in `Closing` and written in `close_dispatched`.",
+      "reason": "The brief asks for a record next to the others. `CheckRun` already has the needed fields and is redacted and capped. The new kind follows how JobPlan and Critique were added. Part 2 can read `JobRecords.baseline` without touching `Verification`.",
+      "rejected": [
+        {
+          "option": "Add a `baseline` field to `Verification`.",
+          "why": "The baseline exists before the producer runs, and a job that fails early has no Verification. The field would also change a record the gate and verify code read, which edges toward the verdict path."
+        },
+        {
+          "option": "Add the field to the job record or the candidate record.",
+          "why": "Both are written or changed elsewhere, and the candidate is the thing the baseline must not be taken from."
+        }
+      ]
+    },
+    {
+      "choice": "Take the baseline in a fresh `SnapshotRepo::Base` snapshot at `<job_dir>/baseline`, with the capability env and `check_timeout_s`, and remove it afterwards. Mount the pin dir when one exists.",
+      "reason": "This is the same base commit as the producer's snapshot, but a separate directory. Checks that write build output cannot reach the producer's tree. The snapshot is built from the base commit, not the candidate.",
+      "rejected": [
+        {
+          "option": "Run the checks inside the producer's `work` snapshot.",
+          "why": "Build artifacts would pollute the producer's tree and could show up as changes."
+        }
+      ]
+    },
+    {
+      "choice": "Record `before_invocation` (the seq the first producer invocation will get) and `base_commit` in the record, and run the baseline before the producer loop starts.",
+      "reason": "Records are committed together at close, so file order cannot show ordering. The seq field shows it, and the test compares it with the producer invocation record. `base_commit` is checked against `job.base`.",
+      "rejected": [
+        {
+          "option": "Apply `skip_when_only` or the routing of `routing::route`.",
+          "why": "No change list exists yet, and the brief says routing must not change. The baseline runs each spec in `capability.checks(jc)` directly."
+        }
+      ]
+    },
+    {
+      "choice": "Put the loop in a new `checks::baseline_runs(specs, ctx) -> Vec<CheckRun>` that turns a `run_check` Err into a failed CheckRun with a note. Wrap the call in run.rs so that any error, including snapshot or env failure, gives an empty-checks record with a note.",
+      "reason": "The brief requires that a baseline never stops the job. Keeping the conversion in checks.rs lets unit tests cover timeout and cannot-start without a full job.",
+      "rejected": [
+        {
+          "option": "Use `?` and let a baseline error fail the job.",
+          "why": "This breaks the brief."
+        }
+      ]
+    },
+    {
+      "choice": "In a nested run, write a baseline record with no checks and a note that a nested run skips checks, as the existing verification step does.",
+      "reason": "It is consistent with how nested runs treat checks, and no process is spawned.",
+      "rejected": [
+        {
+          "option": "Run the baseline anyway.",
+          "why": "Nested runs deliberately skip checks, and the outer job runs its own."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "purpose": "Add `BASELINE_SCHEMA`, `Baseline { job, base_commit, before_invocation, checks: Vec<CheckRun>, note }` with `validate()`, and the `AnyRecord::Baseline` variant. Wire it into `parse`, `canonical_path` (`<job>/baseline.json`) and `schema`. Add unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/checks.rs",
+      "action": "modify",
+      "purpose": "Add `baseline_runs(specs, ctx)`, which runs each spec with `run_check` and records an Err as a failed run with a note. Add unit tests for pass, fail, timeout and cannot-start.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "purpose": "Add `Closing.baseline`. Add a helper `take_baseline` that builds the base snapshot, env and CheckContext, and never errors. Call it in `produce_and_verify` before the producer loop. Write `AnyRecord::Baseline` in `close_dispatched`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/store.rs",
+      "action": "modify",
+      "purpose": "Add `JobRecords.baseline`, handle `AnyRecord::Baseline` in `add` and `job_of`, so the record is read back as part of the job. This file is not in the expected deliverables; it is needed because `job_of` ignores unknown kinds.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "purpose": "Only if its docs or re-exports enumerate record or check items: mention the baseline. Otherwise leave it unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-gate/src/records.rs",
+      "action": "modify",
+      "purpose": "Expected to need no code change, because it delegates to `check_record_file`. Change it only if a build error or a test of the records check shows otherwise.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/common/mod.rs",
+      "action": "modify",
+      "purpose": "Add a helper to build a config with given change checks, and a helper to read a job's record from the closing commit.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "purpose": "Add the lifecycle tests for criteria 1, 2, 3 and 5.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an entry: the baseline of checks on the base commit is recorded only, and part 2 will use it at verification.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/athena-v0.md",
+      "action": "modify",
+      "purpose": "Describe `athena.baseline/1` in the section on records and checks, in one or two sentences, with the same wording.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/records.md",
+      "action": "modify",
+      "purpose": "Add the `baseline.json` line to the per-job layout table, so the documented layout matches the validated kinds. This file is not in the expected deliverables.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In records.rs add `BASELINE_SCHEMA` and `Baseline`, with `validate()` rejecting an empty base_commit and duplicate check names. Add the `AnyRecord::Baseline` variant and wire it into `parse`, `canonical_path` and `schema`. Add unit tests (round trip, canonical path, misplaced, invalid).",
+    "In store.rs add `baseline: Option<Baseline>` to JobRecords and handle the variant in `add` and `job_of`. Fix any exhaustive match the compiler reports across the workspace.",
+    "In checks.rs add `baseline_runs` and its unit tests.",
+    "In run.rs add `Closing.baseline`. Write `take_baseline(ctx, seq)`: if nested, return a note-only record. Otherwise create `<job_dir>/baseline` with `Snapshot::create(.., SnapshotRepo::Base)`, mount the pin dir if any, build the env as in `produce_and_verify` with `Side::Verify` and the snapshot dir, and call `baseline_runs` with the budget's `check_timeout_s`. Remove the snapshot afterwards. Map any error to an empty-checks record with a note.",
+    "Call `take_baseline` in `produce_and_verify` after `seq` is computed and before the producer loop, and store the result in `closing.baseline`. Print one UI line summarising it.",
+    "In `close_dispatched` push `NewFile::record(&AnyRecord::Baseline(..))` when present.",
+    "Add test helpers to common/mod.rs, then the lifecycle tests. Use `grep -q Hello README.md` for the check that fails on the base and passes after the producer's edit, and `/nonexistent/athena-baseline-check` for the check that cannot start.",
+    "Update CHANGELOG.md, docs/design/athena-v0.md and docs/records.md with the recorded-only wording.",
+    "Run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Confirm `git diff` shows nothing in verify.rs or routing.rs."
+  ],
+  "risks": [
+    {
+      "risk": "A baseline error or hang could stop the job.",
+      "mitigation": "The wrapper in run.rs maps every Err to a note and an empty-checks record. Each check has `check_timeout_s`. Unit tests cover the spawn failure and the timeout."
+    },
+    {
+      "risk": "Checks run on the base leave build output that leaks into the producer's snapshot or the closing commit.",
+      "mitigation": "Use a separate `<job_dir>/baseline` snapshot that is removed after the run, so the producer's `work` directory is never used."
+    },
+    {
+      "risk": "Existing tests or the gate break because a new file appears in every job directory.",
+      "mitigation": "Only add a record kind. Do not touch the `Verification` struct, verify.rs or routing.rs. Run the full existing suite unedited. Check `git diff --stat`."
+    },
+    {
+      "risk": "The baseline output tail could hold secrets.",
+      "mitigation": "Tests are written to run only the commands in the brief's list. The record keeps the output tail redacted with the same `Redactor` as other check output, and capped at TAIL_BYTES."
+    },
+    {
+      "risk": "Tests that count invocations or files per job may start to fail.",
+      "mitigation": "Run the new unit and lifecycle tests, then the whole suite. Fix tests that count files or records per job, if any exist, by adding the baseline file only where needed."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "New lifecycle test with `Fixture::with_config`. Two change checks are configured: `sh -c 'exit 1'` (name `bad`) and `sh -c 'exit 0'` (name `good`). A scenario drives the job through `athena.go`. The test then reads `baseline.json` from the closing commit with the helper that `job_plan.rs` uses (`read_record`).",
+      "command": "cargo test --locked -p athena-cli --test lifecycle baseline_records_failing_and_passing_checks",
+      "observes": "The baseline lists `bad` with passed=false and exit_code=Some(1), and `good` with passed=true and exit_code=Some(0).",
+      "fails_without": "Without the recording, baseline.json is absent and the test's read of it panics. If failing checks were recorded as passed, the assert passed=false and exit_code=Some(1) fails."
+    },
+    {
+      "criterion": 2,
+      "method": "Lifecycle test with a check that fails on the base and passes after the producer's README edit (`grep -q Hello README.md`). It asserts baseline.base_commit == the job's base commit (the candidate's base_commit and `fx.head()` before the run). It asserts baseline.before_invocation == the seq of the producer's invocation record. It asserts the baseline entry has passed=false while the same check in verification.json has passed=true.",
+      "command": "cargo test --locked -p athena-cli --test lifecycle baseline_is_taken_from_the_base_before_the_producer",
+      "observes": "The baseline carries the base SHA and the seq of the first producer invocation. The baseline value differs from the candidate's value for the same check.",
+      "fails_without": "If the baseline were taken from the candidate, or after the producer, the base-commit assert or the before_invocation assert fails. The check `grep -q Hello README.md` would also show passed=true instead of false."
+    },
+    {
+      "criterion": 3,
+      "method": "The lifecycle test has one check that fails on the base but passes after the producer's edit, and one whose command does not exist (`/nonexistent/athena-baseline-check`). It asserts that the producer was invoked, that the baseline notes `could not start` for the second check, and that the job's verdict is decided by the candidate checks as before. The unit tests in checks.rs cover `baseline_runs` for a timeout using a short Duration and `sleep`, a spawn failure, and an Err from `run_check` turned into a failed run with a note.",
+      "command": "cargo test --locked -p athena-cli --test lifecycle baseline_failure_does_not_stop_the_job && cargo test --locked -p athena-core checks::tests::baseline",
+      "observes": "The job continues. The baseline notes the failure or the timeout. The final outcome follows the existing verification.",
+      "fails_without": "If a baseline error propagated, the job would end before the producer and the producer-invoked assert fails. If a check that fails on the base changed the verdict, the job would not land."
+    },
+    {
+      "criterion": 4,
+      "method": "Run the full test, clippy and fmt commands. Inspect `git diff --stat` and `git diff` for crates/athena-core/src/verify.rs and routing.rs.",
+      "command": "cargo test --locked && cargo clippy --all-targets --locked -- -D warnings && cargo fmt --all --check && git diff --stat",
+      "observes": "All existing tests pass unedited. The only diffs are the listed deliverables, with none in verify.rs or routing.rs.",
+      "fails_without": "If the baseline changed what verification or routing sees, an existing lifecycle or verify test would fail. A diff touching verify.rs or routing.rs would be visible."
+    },
+    {
+      "criterion": 5,
+      "method": "Unit tests in records.rs: a `Baseline` round-trips through `AnyRecord::parse` and `check_record_file` at `<job>/baseline.json`. A misplaced path is refused, and an invalid record (a duplicate check name or an empty base_commit) is refused. A lifecycle test loads `RecordSet::load` on the closing commit and asserts no record errors. The same test uses a failing check that prints a secret-looking canary and more than 4 KiB, and asserts the stored tail is redacted and no longer than TAIL_BYTES plus the ellipsis.",
+      "command": "cargo test --locked -p athena-data baseline && cargo test --locked -p athena-cli --test lifecycle baseline",
+      "observes": "baseline.json is accepted by the records check. Each configured check appears by name with passed, exit_code and a redacted, capped tail.",
+      "fails_without": "If the kind were not registered in `AnyRecord`, `canonical_path` and `schema`, `check_record_file` returns a Parse error for baseline.json and the records check reports it as invalid. If the tail were not redacted and capped, the canary test fails."
+    },
+    {
+      "criterion": 6,
+      "method": "Read the diff of the CHANGELOG entry and the design and record docs. The check is the wording, not a test.",
+      "command": "git diff CHANGELOG.md docs/design/athena-v0.md docs/records.md",
+      "observes": "One or two sentences state that the baseline is recorded only and that part 2 will use it at verification. docs/records.md lists baseline.json with its schema.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Whether crates/athena-gate/src/records.rs and crates/athena-core/src/lib.rs need any change. Both look generic, and the plan treats the changes as optional.",
+    "Whether any existing test or the gate's landing checks enumerate the allowed record names or counts per job (for example in landing_tests.rs). I did not read them all. The producer should run the full test suite to find out.",
+    "The baseline adds the time of one extra run of the checks, including a cargo build, before the producer starts. The cost is accepted by the brief. The check timeout still bounds each check."
+  ],
+  "producer_section_sha256": "e45473e37e2ed365888f738c9ead3bc97a3fc26f0910a7a047e8d3ee2dc43dc4"
+}

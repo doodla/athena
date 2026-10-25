@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261018-113512-gvcs",
+  "round": 3,
+  "at": "2026-10-18T11:40:50.770355636Z",
+  "invocation_seq": 6,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "With the cut on a trait method that defaults to Ok(None), tests through FakeRemote never run GitRemote::cut_head. So the cut, the B-PR-diff assertion and the cut/fingerprint-refusal tests either fail or pass on logic written in the test double.",
+      "evidence": "The plan puts the cut logic only in GitRemote::cut_head, which uses self.git, and gives the trait a default of Ok(None). The tests call land_pr_with with a FakeRemote. If FakeRemote keeps the default, nothing is cut: criterion 2's assertion that B's diff against main holds only B's change fails, and the moved-tip and fingerprint-mismatch tests have nothing to test. If FakeRemote overrides cut_head, the tests show the double's replay call, not the production one. Restoring a broken GitRemote::cut_head would then fail no test. Fix: Put the cut in a free function such as cut_onto(git: &Git, tip, head, sign) -> Result<Option<String>> holding the ancestor check and the replay. GitRemote::cut_head calls it, and FakeRemote over the real repos delegates to the same function. Or drive the tests through GitRemote with a local bare repo as its remote; it needs no network. State which one, and make the moved-tip test assert on what the production function produces.",
+      "location": "Plan decision 5 and step 7 / Demonstrations for criteria 2 and 3; gh.rs:559-602 (Remote, GitRemote)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The replay range (`from`) is not specified.",
+      "evidence": "Git::replay(onto, from, to, sign) replays the first-parent commits in from..to. The plan never says what `from` is. If it is merge-base(job.commit, tip), each earlier job's single landed commit is carried by a three-way merge onto a tip that already holds its squash, comes out empty, and is skipped. Records commits are carried too. A wrong `from` either carries too much or drops the job's own commits. Fix: State `from` (for example the merge-base of the head and the fetched remote tip) and say that records commits in the range are carried. Cover a job whose head holds records commits in the cut test.",
+      "location": "Plan step 2 (GitRemote::cut_head calls replay); athena-git/src/lib.rs:701",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The open question about non-fast-forward replacement is already answered by the code. The plan should state it, and the producer must not tighten check_replace.",
+      "evidence": "check_replace calls git.is_ancestor(remote, local_head) and only propagates an error; it discards the bool. replace then goes through push_if_remote_at, which succeeds only if the remote branch still holds the expected head. So a cut head that is not a descendant of the old PR head passes the guard today. Fix: Record that replacement is protected by the expected-head check, not by ancestry, and that check_replace stays as it is. Drop the open question.",
+      "location": "Plan decision 6 / Risks (replace_head non-fast-forward); pr.rs:170-192",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The new rule that the cut tree must match the verified fingerprint means a cut onto a tip moved by commits other than Athena's squashes is always refused. The docs should say this is how a stale job is handled.",
+      "evidence": "Today the only checks are the trailer check in landed_commit (gh.rs:1199) and the merged-content check in observe_merge. If someone else moves main, the cut tree's governed content differs from what was verified, so the new check refuses before pushing. That is defensible, but the reading says a stale job is 'handled by cutting onto the remote tip'. Fix: In native-pr-landing.md and decisions.md, state that a cut succeeds only when the tip moved by content the job already verified (earlier squashes), and that any other move is refused and the job must be re-verified. Make the fingerprint-mismatch test use an outside commit on main.",
+      "location": "Plan decision 6 and the docs for criterion 6",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Several values attempt() uses (config, content, title/body, verification, the head and branch) are computed before the client is built. The plan does not say they move into land_pr_with.",
+      "evidence": "In gh.rs around lines 1560-1600, attempt() uses config.landing.merge_via_rest, content, title, body, verification and branch, all computed earlier in land_pr. The HostErrorLog the wrapper builds needs the job id, which is also read inside. Fix: Say that land_pr_with does all setup from the lock onward, and that the wrapper only resolves the job id it needs for the HostErrorLog, or let land_pr_with build the log itself.",
+      "location": "Plan step 5 (land_pr_with parameter list)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "Read: gh.rs (Remote/GitRemote, land_pr at 1287, replace_head, publish, Athena::land_pr with the resync call at 1630), pr.rs (PrLink, check_push, check_replace), athena-git replay, and the grep results for resync_onto_merge and resync_tip. The plan fixes the fault where it starts: it removes the post-merge resync_onto_merge call, and land.rs is the only other place that refers to the resync. It also covers the side effect of removing it, PR diffs that grow with each landed job, by cutting the pushed head with the existing Git::replay, and it adds a sidecar so reruns do not push again. The named functions exist: resync_onto_merge, resync_tip, replay, is_ancestor, signs_commits, PrHost: Host and replace_head. The work fits one producer run. One gap is major. The cut lives only in GitRemote::cut_head, whose trait default is Ok(None), but every test goes through a FakeRemote. The criterion 2 diff assertion and the cut tests will therefore either fail or test the double's own logic instead of the production cut. The cut logic should be shared, or the tests should use GitRemote over a local bare repo. The smaller findings: say what replay range the cut uses, record that check_replace already allows non-fast-forward replacement under the expected-head check, and document that a tip moved by outside commits is refused by the new fingerprint check."
+}

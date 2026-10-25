@@ -1,0 +1,111 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261017-014911-5vnx",
+  "base_commit": "9a4b10fcb60ae2c4e0e685cde1e2b9d5b4eb3feb",
+  "base_fingerprint": "sha256:3a19e90ef6ca42cb6590019759f9fe8d06c5ea53e0664b80bb0fa26d7ec29ee8",
+  "previous_job": "20261016-174508-k0w6",
+  "candidate_commit": "a18c6cbd6ee247d61f18d1d33837132e26607573",
+  "candidate_tree": "2e2347bbd42b4ac5e024c04629a8ad7f76f53f6b",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 90248
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 79158
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 105701
+    },
+    {
+      "path": "crates/athena-core/src/capability.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 5258
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 85996
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 81959
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 24529
+    }
+  ],
+  "fingerprint": "sha256:33575b9fa45088bd9d9f7257ec750f3729b79f32e36d691b8fc51ea227dc312b",
+  "violations": [],
+  "producer_report": {
+    "summary": "Drain no longer rereads on config changes that don't bear on a reading (reading validity compares a projection of the parsed config, so max_concurrency is ignored; defaults.toml and other relevant changes still force a reread). A reread whose capability, class of work and deliverable paths match the old reading is accepted by drain (AcceptedBy::Flag) and run. A reread whose scope differs is left proposed with a \"needs accepting ... scope differs\" reason and is not a failure. Drain never retries a still-proposed job; a no-outcome run is run again. Doc comments on GoResult::Reread and D38 and the CHANGELOG are updated. Full cargo test --locked passes.",
+    "files": [
+      "CHANGELOG.md",
+      "crates/athena-cli/src/drain.rs",
+      "crates/athena-cli/tests/drain.rs",
+      "crates/athena-core/src/capability.rs",
+      "crates/athena-core/src/reading.rs",
+      "crates/athena-core/src/run.rs",
+      "crates/athena-data/src/config.rs"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "every suite ok, 0 failed"
+      },
+      {
+        "command": "cargo test --locked -p athena-cli --test drain -- config_change max_concurrency scope no_outcome",
+        "result": "pass",
+        "note": "4 passed"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A test in crates/athena-cli/tests/drain.rs changes only max_concurrency in athena.toml after items are proposed/read; the drain lands them with no reread and no 'needs accepting' or 'no outcome' line. Run: cargo test -p athena-cli --test drain.",
+        "status": "met",
+        "evidence": "a_change_to_max_concurrency_alone_does_not_invalidate_a_reading passes. It asserts landed==1, outcome passed, one reader call, no 'reading again' progress line, no 'needs accepting' or 'no outcome' in the drain text, and stop != RepeatedFailure."
+      },
+      {
+        "criterion": "A test changes a reading-relevant config value (e.g. a budget cap or capability definition), so drain rereads; when the new reading has the same capability and deliverables as the old, drain accepts it and runs the job to a landed outcome in the same drain. Run: cargo test.",
+        "status": "met",
+        "evidence": "a_relevant_config_change_rereads_and_drain_accepts_a_reading_of_the_same_scope passes. It changes the job USD cap, then asserts two reader calls, a 'reading again' line, landed==1, outcome passed, and accepted_reading==Some(2)."
+      },
+      {
+        "criterion": "A test where the reread scope differs (different capability or deliverables) does not run silently: the drain leaves the item with a clear reason that the reading needs accepting, and does not stop with 'repeated failure'. Run: cargo test.",
+        "status": "met",
+        "evidence": "a_reread_whose_scope_changed_is_left_for_a_person_and_is_not_a_failure passes. It asserts landed==0, stop != RepeatedFailure, a single attempt with outcome 'needs accepting', a reason containing 'needs accepting' and 'scope differs', the job still queued, and its state still Proposed."
+      },
+      {
+        "criterion": "Drain never calls retry on a job that is still proposed: when a run ends with no outcome, the drain's next attempt is a run/accept of that job, not 'only a rejected or failed job can be tried again'. A regression test reproduces the 01:48 sequence (max_concurrency 1 to 2) and asserts the stop reason is not 'repeated failure'. Run: cargo test -p athena-cli.",
+        "status": "met",
+        "evidence": "a_run_with_no_outcome_is_run_again_and_never_retried passes. Its log is read a, run a, run a, land a, with no retry or reread, and the stop is not RepeatedFailure. The 01:48 max_concurrency regression test above also asserts the stop is not RepeatedFailure. The full cargo test --locked passes, which includes all of athena-cli."
+      }
+    ],
+    "open_issues": [
+      "I did not rerun cargo clippy or cargo fmt --check in this pass; they were not rerun after the previous pass."
+    ],
+    "mistakes": [
+      "My first report did not map the existing tests to the criteria in criteria_check."
+    ],
+    "learnings": [
+      "Grep and Read are denied outside the working directory, so the persisted tool-output file can't be searched. Use cargo test --quiet to get short output."
+    ],
+    "desires": []
+  }
+}

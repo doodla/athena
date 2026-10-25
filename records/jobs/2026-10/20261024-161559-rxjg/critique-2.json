@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261024-161559-rxjg",
+  "round": 2,
+  "at": "2026-10-24T16:20:24.011133907Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "drain.rs exists and reaches pr_commits through Athena::land_pr; the plan says it is absent.",
+      "evidence": "The Glob on crates/athena-core/src/drain* found nothing, but crates/athena-cli/src/drain.rs exists. Its PrLander::land at line 1263 calls athena.land_pr(...). Athena::land_pr builds GitLandingRecords::for_remote at gh.rs:1987, and that calls pr_commits through commits() at gh.rs:1422. Criterion 7 requires listing drain.rs if it is relevant, with a covering test. Fix: Fix Decision 6, Step 7 and the criterion 7 demonstration: drain.rs lives at crates/athena-cli/src/drain.rs and depends on pr_commits indirectly (PrLander → Athena::land_pr → GitLandingRecords::commits → pr_commits). Audit it: it needs no code change because it only reads PrReport. In the change description, name the test that covers that path (the gh.rs land_pr tests that use GitLandingRecords). Remove the open question about drain.rs. Also mention that tests/external_calls.rs reaches land_pr with records: None and so never calls pr_commits.",
+      "location": "Plan Decision 6, Step 7, Open question 1, Criterion 7 demonstration ('drain.rs (absent)')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "closing_jobs deliberately returns several jobs for a squashed chain, and the plan refuses that case without saying so in the docs.",
+      "evidence": "invariant.rs:205-206 says landing_job returns 'one job, or every job of a chain'. The landing() doc at lines 263-276 describes squashes that fold several jobs into one commit (D69). Fix: In the pr_commits doc comment and in records-history.md, say that a commit closing several jobs (a squashed chain) is refused because LandingCommit carries one job. Name the error as a known limit rather than leaving it implicit.",
+      "location": "Plan Decision 2 ('more than one job ... is an error')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The doc comment should state that the exclusion is judged by the parent's rules.",
+      "evidence": "The plan uses the parent's fingerprint rules, so a .gitattributes file added in the same commit as the owner-path file does not make that commit records_only. The criterion 1 fixture commits the .gitattributes in the base, so the tests never show this behavior. Fix: State the parent-rules choice in the pr_commits doc comment. Optionally add one assertion showing that a same-commit .gitattributes plus owner file is refused, naming the sha.",
+      "location": "Plan rule (3) and Open question 2 (parent rules for owner-path)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The fmt command differs slightly from the criterion.",
+      "evidence": "The criterion says `cargo fmt --check`; the plan runs `cargo fmt --all --check`. Fix: Run the command exactly as the criterion states it, or cite both.",
+      "location": "Criterion 9 demonstration",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan's core design holds up against the code I read. closing_jobs exists, is private, and already leaves out blocked jobs (crates/athena-gate/src/invariant.rs:218-252). Change::of_commit and Judged::new are public (athena-gate/src/lib.rs:191, 265). verification_id is public (gh.rs:1345). The current pr_commits reads Athena-Job trailers (land.rs:109-155), and its only caller is GitLandingRecords::commits (gh.rs:1421-1434), which hard-codes JobLanding. So making closing_jobs public, classifying each commit by content, and copying kind, job and verification into LandingCommit fixes the fault where it starts, and blocked-then-landed should work with no new logic. One claim in the plan is wrong. It says drain.rs does not exist, but crates/athena-cli/src/drain.rs exists. Its PrLander::land (line 1263) calls Athena::land_pr, which builds GitLandingRecords on the production path (gh.rs:1987). drain.rs is therefore an indirect dependent that criterion 7 asks to list. As written, the change description would state something false and leave that path unaccounted for. The rest is minor."
+}

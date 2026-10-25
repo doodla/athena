@@ -1,0 +1,104 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261013-152648-1ds0",
+  "base_commit": "6081e82a67a1a0638f39acb48cd8ccf51881e903",
+  "base_fingerprint": "sha256:b16eb0a705e9537cd67e4b3faf05b2eabb907aa2ae4ea527745918e0f840cc3c",
+  "previous_job": "20261013-150709-b67z",
+  "candidate_commit": "8f7f97c3384cfa9b5952cfa6c11c8e212f579eeb",
+  "candidate_tree": "8c5b299ebbcf496f739e06af19180cb2a1ae8be4",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 22998
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 62545
+    },
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 43157
+    },
+    {
+      "path": "crates/athena-core/src/pr.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 18212
+    },
+    {
+      "path": "crates/athena-git/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 29720
+    },
+    {
+      "path": "docs/decisions.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 129235
+    },
+    {
+      "path": "docs/design/native-pr-landing.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 36256
+    }
+  ],
+  "fingerprint": "sha256:3532bca3232df699a29b33862938124190a1819c36fcf4c80f54d0f52635c1df",
+  "violations": [],
+  "producer_report": {
+    "summary": "`athena land --pr` now pushes the job's own landing commit (found by its Athena-Job and Athena-Verified-Content trailers) to `athena/<job>`. That commit already has the trailers and the records, so every commit on the branch passes `athena check --history`. The earlier code pushed the bare candidate plus a records-only commit, which caused the two violations on PR #39. Both the old commit-building code and its tests are removed.\\n\\nRerunning on a job whose PR is still open now also checks the branch head, again by looking for the landing commit:\\n- If the remote head already equals the landing commit, nothing is pushed.\\n- If the landing commit descends from the remote head, a plain push advances it.\\n- Otherwise (for example PR #39's bare candidate) the head is replaced by a forced push. A new guard, `check_replace`, allows this only on `athena/<job>`. `Git::push_replace` re-reads the remote head just before pushing and refuses if it moved.\\n\\nThe stored PR number is kept and its stored head is updated. `open_pr` is not called again. A PR that is merged or no longer open is left alone. Merging is still off by default.\\n\\nI added unit tests in `gh.rs`, `pr.rs` and `athena-git`. A lifecycle test uses a real repo and a bare remote. It sets up an open PR whose branch holds the bare candidate and shows that `check_history` reports violations on it. After the rerun the branch head is the landed commit, PR #39 is reused with no new PR, and `check_history` is clean. A second rerun changes nothing.\\n\\nThe design doc, `docs/decisions.md` (new D87) and `CHANGELOG.md` record the chosen approach, the rejected alternatives and the reason. Those alternatives are a bare candidate with rewritten trailers, a synthetic records commit, and closing the PR to open a new one.\\n\\nThe force is not a native compare-and-swap push, because the flag's name contains a word the boundary scan forbids. The check and the push are two git calls, so a push by someone else in that gap is not excluded by git itself. D87 states this.\"",
+    "files": [
+      "crates/athena-core/src/gh.rs",
+      "crates/athena-core/src/pr.rs",
+      "crates/athena-git/src/lib.rs",
+      "crates/athena-cli/tests/lifecycle.rs",
+      "docs/design/native-pr-landing.md",
+      "docs/decisions.md",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "run before the last one-line test fix; the final edit only changed a test string"
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "all suites pass, including the new gh.rs, athena-git, pr.rs and lifecycle tests"
+      }
+    ],
+    "open_issues": [
+      "The force is plain `+commit:ref`, not a native compare-and-swap push. `Git::push_replace` re-reads the remote head right before pushing and refuses if it moved, but a push by someone else in that gap is not excluded by git. A true compare-and-swap push needs a flag whose name the boundary scan forbids. D87 records the gap.",
+      "The user still has to rerun `athena land --pr` on job 20261013-150709-b67z to repair PR #39. The job's landing commit must be reachable from local HEAD.",
+      "Older CHANGELOG entries still say the pushed branch is the candidate plus a records commit, and that the push is never forced. I left them as history. The new Fixed entry and D87 supersede them.",
+      "The brief listed run.rs as a deliverable, but I did not need to change it."
+    ],
+    "mistakes": [
+      "A first unit test used the job id 'never', which JobId rejects. I fixed it to a well-formed id.",
+      "Python and heredocs are denied, so I made the edits with the Edit tool. That is slower, but it caused no errors."
+    ],
+    "learnings": [
+      "The outcome record cannot hold the landing commit's own hash, because the commit contains the record. The landed commit is therefore found by trailers: newest commit on local HEAD with Athena-Job: <id> and Athena-Verified-Content. Only landing commits carry Athena-Verified-Content.",
+      "git remote get-url expands url.<base>.insteadOf. A test cannot point a github.com origin at a bare repo that way, so the lifecycle test builds LandPr with GitRemote naming the bare repo's path directly.",
+      "Job ids must match YYYYMMDD-HHMMSS-xxxx, even in tests.",
+      "run.rs needed no change because Finished.landed_commit already exists."
+    ],
+    "desires": [
+      "A way to read a saved tool-output file, or to run a test with the output filtered, without the pipes the sandbox rules forbid.",
+      "Permission to name a git compare-and-swap push flag in source. The boundary scan rejects the word it contains."
+    ]
+  }
+}

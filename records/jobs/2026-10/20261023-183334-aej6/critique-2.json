@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261023-183334-aej6",
+  "round": 2,
+  "at": "2026-10-23T20:53:49.473574528Z",
+  "invocation_seq": 4,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "`athena audit` is per job and runs a model. It returns early when `athena.audit(&job)` yields None, so a repository-wide mistake report appended there may never print.",
+      "evidence": "main.rs:712-714: `let Some(audited) = athena.audit(&job)? else { return Ok(0); };`. The JSON output is only `{audit, invocation}`. Read in the snapshot. Fix: Build the MistakeReport before the early return, or emit it on the None path too, and state which surfaces carry it. Tests for criterion 2 should cover the audit text and the `--json` key with the stub model.",
+      "location": "Plan decision 5 / crates/athena-cli/src/main.rs:710-723",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "'Newest recorded introspection' could pick a Failed introspection, which has no failure_class. It also ignores reviewer class labels that correct the class.",
+      "evidence": "introspect.rs:1258-1277 builds records with status Failed and failure_class None by default. status.rs:646 shows class labels (`records.class_labels`) exist via `labeled::unreviewed`. Fix: Use the newest introspection with status ok and a failure_class. Prefer the reviewed class label when one exists. Otherwise count the mistake under 'not yet introspected'. Add one test case with a failed introspection.",
+      "location": "Plan step 3 (cause = failure class of the newest recorded introspection)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "These are listed as modify, but they may need no edit. reading.rs:721-723 matches specific variants rather than all of them.",
+      "evidence": "Grep shows reading.rs only names AnsweredQuestion and CorrectedOutput. The plan already marks both files as conditional. Fix: Leave them unedited if `cargo check` and the error message need nothing, and say so in the change description.",
+      "location": "Files: manage.rs, reading.rs",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan matches the request and the accepted reading. The code it names exists. `InterventionCategory`, with `ALL` of 8 and `as_str`, is at crates/athena-data/src/records.rs:140-171. `Intervention` has `class_of_work` and `category` (records.rs:827). `event_of_intervention` is at introspect.rs:1211, and it is where the category string is set (`i.category.as_str()`, line 1229), so mapping prefix-marked records to \"mistake\" there is the right place. Introspection records already carry `failure_class`, `cause`, `prevention_kind`, `prevention` and `proposed_request`, so deriving the cause from the introspection's failure class needs no schema change. The single `is_mistake()` predicate counts the eleven back-filled records without rewriting them, which is the root-cause fix. The demonstrations would fail without the behavior: a missing `mistakes` key, a missing prompt instruction, two cause entries instead of one, or a zero count for prefix-marked records. Remaining issues are minor: how the repository-wide report attaches to the per-job `athena audit` command, and which introspection supplies the cause."
+}

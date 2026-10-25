@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261024-201522-1eza",
+  "round": 2,
+  "at": "2026-10-24T20:20:38.334392797Z",
+  "invocation_seq": 5,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "The new records-history audit may duplicate an existing check that the design document mentions.",
+      "evidence": "docs/design/records-history.md line 60 says append-only is enforced by forbidding force-pushes \"plus the existing check on the records history\". The plan does not look for that existing check before writing a new audit. Fix: Before adding audit_history, search athena-core and athena-gate for an existing check on the records branch's history (for example in the auditor, the importer, or check --history). Reuse it or extend it, so there are not two definitions of a rewritten records history.",
+      "location": "Decision 4 / Step 2 (records_branch::audit_history)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan applies the pending window to any commit, but section 5.2 grants it only to main's tip.",
+      "evidence": "Section 5.2 says \"A main tip with no landing record but a matching landing-intent record is pending reconciliation.\" The plan makes any commit with a matching intent pending, not only the tip. Fix: Say whether pending applies only to the tip or to any commit. If it applies to any commit, record the reason in a doc comment. Add a test for a commit below the tip that matches an intent less than 15 minutes old.",
+      "location": "Approach: pending rule; Open question 2",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "If athena/records is missing, the fetch step fails and the check never runs, so the planned missing-ref finding is never reported in CI.",
+      "evidence": "The plan expects `git fetch origin athena/records:athena/records` to fail when the branch is missing. A failed step stops the job before `athena check --attribution` runs, so the command never reports the explicit missing-ref finding the plan relies on. Fix: Either accept that a fetch failure ends the job and say so in the job's comment, or make the fetch tolerant so that the check runs and reports the missing ref itself.",
+      "location": "Criterion 7 / CI risk",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan matches the request and the accepted reading. I checked the names it relies on, and they exist. LandingIntent has head_tree_sha, expected_base, created_at and matches(tree, parent) (athena-data/src/history.rs:97-129). Landing has host_commit and intent (history.rs:221-237). Git::ls_tree_under and cat_blobs exist (athena-git/src/lib.rs:785, 823). RecordsWriter takes extra_parents (records_branch.rs:78, 159). athena-gate already depends on athena-data, athena-git and jiff. The CLI already has `history` and `pr_head` with conflicts_with (main.rs:331-333). ci.yml has a history job and a non-blocking job with continue-on-error to copy. Section 5.2 of the design confirms the 15-minute pending rule. Each demonstration exercises the behavior and would fail without it. The non-fast-forward audit (second root, or a commit that drops or changes a file its parent held) is a reasonable reading for a snapshot check. My findings are minor: possible duplication with an existing records-history check, the pending window applying to every commit rather than only the tip as §5.2 says, and the behavior on a fetch failure in CI."
+}

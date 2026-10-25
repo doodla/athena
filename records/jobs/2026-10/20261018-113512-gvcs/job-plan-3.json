@@ -1,0 +1,251 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261018-113512-gvcs",
+  "round": 3,
+  "at": "2026-10-18T11:39:36.076191186Z",
+  "invocation_seq": 5,
+  "approach": "Delete the resync_onto_merge call after a squash merge in Athena::land_pr, and delete resync_onto_merge and resync_tip. The local branch is never rewritten, so running jobs' bases stay ancestors of HEAD and land.rs::plan still lands them. Dispatch reads local HEAD and needs no change. Because the local branch no longer follows the host's squash commit, a later job's pushed head would carry already-landed jobs and its PR diff would grow, so the pushed PR head (never the local branch) is cut whenever the remote default tip is not an ancestor of it. The cut is done through a new Remote::cut_head, which uses Git::replay. replay drops commits that become empty on the tip, so the published head holds only the job's own commits and sits on the latest squash. The fingerprint check runs on the cut tree before any push. The cut source is kept in a sidecar next to the PrLink file, so PrLink keeps its shape. The rerun check at gh.rs:1297 compares that source (falling back to link.head) with job.commit, so reruns do not push again. Athena::land_pr becomes a thin wrapper over a crate-private &self method land_pr_with.",
+  "decisions": [
+    {
+      "choice": "Remove the post-merge resync; do not work around it at dispatch.",
+      "reason": "It is the root cause. Moving HEAD off the ancestry that running jobs' bases rely on makes plan report them stale.",
+      "rejected": [
+        {
+          "option": "Dispatch from a separate stable ref and keep the resync",
+          "why": "Leaves the fault and adds a second base concept."
+        },
+        {
+          "option": "Keep the resync and let plan accept replayed bases",
+          "why": "Needs an old-to-new id map and weakens the ancestor check."
+        }
+      ]
+    },
+    {
+      "choice": "Cut the pushed PR head onto the remote default tip whenever that tip is not an ancestor of the head (not only on conflict). The local branch is never touched.",
+      "reason": "Without the resync, job.commit from landed_commit still carries earlier landed commits. Its merge-base with main would never advance, so each PR diff would grow with every job landed. replay skips commits that become empty, so the head holds only the job's own commits on top of the latest squash. One merge lands one job and the PR diff stays small. Only the pushed head is rewritten, so running jobs' bases are safe.",
+      "rejected": [
+        {
+          "option": "Cut only on conflict",
+          "why": "The normal path would then show a growing PR diff and an ever-older merge-base."
+        },
+        {
+          "option": "Merge the remote tip into the head",
+          "why": "Makes merge commits, which the criteria forbid."
+        },
+        {
+          "option": "Resync the local branch",
+          "why": "That is the fault."
+        }
+      ]
+    },
+    {
+      "choice": "Keep the cut source in a sidecar written and read by pr.rs; PrLink is unchanged. The rerun check at gh.rs:1297 (link.state == Open && link.head != job.commit) becomes: compare the sidecar source, falling back to link.head, with job.commit.",
+      "reason": "A cut head never equals job.commit, so without the sidecar every rerun would call replace_head and push again. A sidecar leaves the PrLink literals in the CLI crate untouched, and the CLI files are not deliverables.",
+      "rejected": [
+        {
+          "option": "Add PrLink.source",
+          "why": "Forces edits to PrLink literals in files outside the deliverables."
+        },
+        {
+          "option": "Re-cut on every rerun and compare ids",
+          "why": "Signed commits are not deterministic, and it pushes needlessly."
+        }
+      ]
+    },
+    {
+      "choice": "land_pr_with is a &self method on Athena, taking (job_ref, remote: &dyn Remote, host: &dyn PrHost, host_name, repository, log: &HostErrorLog, poll, ui). It covers everything from the lock through attempt(), watch_landing(&log, ui) and the post-merge tail (the former resync site). The wrapper builds GhClient, HostErrorLog and GitRemote, calls land_pr_with, then runs the Pages watch with its own client (PagesHost) and the 12-attempt poll.",
+      "reason": "The resync site uses self (state lock, HEAD), so the inner function must be a method. Keeping the post-merge tail inside it means a test fails if the call is restored. PrHost: Host covers every call in attempt (land_pr and confirm_existing_merge). Keeping watch_pages in the wrapper makes tests fast and deterministic with no injectable sleeping poll.",
+      "rejected": [
+        {
+          "option": "A free function without self",
+          "why": "The resync call site needs self."
+        },
+        {
+          "option": "Pages watch inside the inner function with an injectable poll",
+          "why": "Adds a PagesHost fake and polling to every test for no benefit."
+        }
+      ]
+    },
+    {
+      "choice": "Remote::cut_head is a trait method with default Ok(None); GitRemote overrides it using self.git.signs_commits() directly.",
+      "reason": "Other Remote impls and test doubles keep compiling.",
+      "rejected": [
+        {
+          "option": "A required method",
+          "why": "Forces edits to unrelated doubles."
+        }
+      ]
+    },
+    {
+      "choice": "The fingerprint check stays before every push, including a cut head. A cut whose tree fingerprint differs from the verified one is refused, and nothing is pushed.",
+      "reason": "The verified content is what lands.",
+      "rejected": []
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "action": "modify",
+      "purpose": "Remove the resync call; add land_pr_with and make Athena::land_pr a wrapper; add Remote::cut_head with its GitRemote impl; cut in publish and replace_head when the remote tip is not an ancestor of the head; fix the rerun check at line 1297 to use the sidecar source; add the tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/land.rs",
+      "action": "modify",
+      "purpose": "Delete resync_onto_merge, resync_tip and their tests; fix the module text; add a test that plan still lands a job whose base is an ancestor of a HEAD holding an earlier job.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/pr.rs",
+      "action": "modify",
+      "purpose": "Sidecar save/load for the cut source, leaving PrLink unchanged; add a test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-git/src/lib.rs",
+      "action": "modify",
+      "purpose": "Add a merge_base or is_ancestor helper only if one is missing; update the docs on replay and reset_keep.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "purpose": "Only if a comment or code there refers to the resync; probably unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/watcher.rs",
+      "action": "modify",
+      "purpose": "Only if it refers to the resync; probably unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/parallel-jobs.md",
+      "action": "modify",
+      "purpose": "Replace the resync passages with the new base rule and the cut.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/native-pr-landing.md",
+      "action": "modify",
+      "purpose": "Rewrite §5.2a as the no-resync rule, the rejected alternatives and the cut.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "New decision superseding D88, with the rejected alternatives.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add the entry.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Grep crates/ for resync_onto_merge, resync_tip, and any wording in run.rs and watcher.rs that depends on the resync. Check athena-git for existing merge_base, is_ancestor, replay and merge_tree helpers.",
+    "In athena-git, add any missing ancestor/merge-base helper. In gh.rs, add Remote::cut_head (default Ok(None)). GitRemote implements it: fetch or ensure the tip locally, return None if the tip is an ancestor of the head, otherwise call replay onto the tip with self.git.signs_commits()?.",
+    "In pr.rs, add sidecar save/load for the cut source, next to the PrLink file. PrLink is unchanged.",
+    "In publish and replace_head, read the default-branch tip and call cut_head. Check the cut tree's fingerprint against the verified one before the push and refuse on mismatch. Record the source in the sidecar. At gh.rs:1297 compare the sidecar source (falling back to link.head) with job.commit.",
+    "Split Athena::land_pr. The wrapper builds GhClient, HostErrorLog and GitRemote, calls land_pr_with (&self, &dyn Remote, &dyn PrHost, host_name, repository, &HostErrorLog, poll, ui), then runs watch_pages. land_pr_with keeps the lock, attempt(), watch_landing and the post-merge tail, but without the resync call.",
+    "In land.rs, delete resync_onto_merge, resync_tip and their tests; fix the module text; add the plan-still-lands test.",
+    "Write the gh.rs tests with a FakeRemote over a real bare repo and a fake PrHost that makes real squash commits: the stable base (criterion 1); two jobs back to back with the commit-shape, HEAD-unchanged and B-PR-diff assertions (criteria 2 and 3); a moved or conflicting tip with a cut, plus a rerun through the gh.rs:1297 path that does not push again; a fingerprint mismatch after a cut that is refused.",
+    "Update parallel-jobs.md, native-pr-landing.md and decisions.md, and add the CHANGELOG entry. Grep crates/ again for leftover references.",
+    "Run cargo fmt --all, cargo clippy --all-targets --locked -- -D warnings and cargo test --locked."
+  ],
+  "risks": [
+    {
+      "risk": "The PR diff of later jobs grows if the pushed head is not cut.",
+      "mitigation": "The cut triggers whenever the remote tip is not an ancestor of the head, not only on conflict. The criterion 2 test asserts B's diff against main holds only B's change."
+    },
+    {
+      "risk": "replay conflicts or does not skip emptied commits.",
+      "mitigation": "replay returns an error and nothing is pushed. Tests cover a conflict and an emptied A commit."
+    },
+    {
+      "risk": "The local branch now diverges from main after a squash, which may surprise a user who pulls.",
+      "mitigation": "The docs state it as the rule; the branch no longer changes under running jobs."
+    },
+    {
+      "risk": "The sidecar is missing or stale, so a rerun might push again.",
+      "mitigation": "A missing sidecar falls back to comparing link.head with job.commit, the old behavior. A test covers the rerun path."
+    },
+    {
+      "risk": "The inner function's host parameter is too narrow for confirm_existing_merge or the tests.",
+      "mitigation": "PrHost extends Host, so one &dyn PrHost covers both calls. If upcasting is a problem, pass it as a generic bound instead."
+    },
+    {
+      "risk": "A cut head is pushed while the earlier cut head's PR is still open, so replace_head must push a non-fast-forward.",
+      "mitigation": "Use the existing replace_head mechanism with its guard. The producer checks how it pushes and keeps the no-force rule in Remote."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit test in gh.rs calling land_pr_with with a FakeRemote over a local bare repo and a fake PrHost whose merge makes a real squash commit. Job B is dispatched before A's PR merges. After the merge, assert B's base commit, B's worktree and HEAD are unchanged, then assert land::plan(B) returns Plan::Tree and B's candidate lands.",
+      "command": "cargo test",
+      "observes": "The test passes. B's base is still an ancestor of HEAD and B lands cleanly.",
+      "fails_without": "With resync_onto_merge restored in land_pr_with, HEAD moves, B's base stops being an ancestor, and the unchanged-HEAD and Plan::Tree assertions fail."
+    },
+    {
+      "criterion": 2,
+      "method": "Test dispatches A and B back to back, then lands each through land_pr_with, inspecting the bare main with git log and diff. Asserts: exactly one new main commit per job; no commit with more than one parent; no rebuild commits; A's change appears once; the tree fingerprint matches the verified one. It also asserts B's pushed PR head has A's squash commit as an ancestor (the remote tip is an ancestor of the head) and that its diff against main contains only B's change. Records commits on the local branch are allowed.",
+      "command": "cargo test",
+      "observes": "All assertions hold: one commit per job, linear history, A applied once, fingerprint matches, and B's PR diff holds only B's change.",
+      "fails_without": "With the resync restored, B lands stale or as a rebuild commit and the commit-count assertions fail. If the cut is missing, B's PR diff includes A's change and the diff assertion fails."
+    },
+    {
+      "criterion": 3,
+      "method": "The criterion 2 test goes through land_pr_with, which keeps the former resync call site. It asserts HEAD is unchanged after each merge and that the commit count is exact. The verifier reads the test and runs it. Further tests: a moved remote tip where replay cuts the head; a rerun through the gh.rs:1297 path that does not push again (FakeRemote push count unchanged, sidecar source read); and a cut with a fingerprint mismatch that is refused with no push.",
+      "command": "cargo test",
+      "observes": "All of these pass. The HEAD-unchanged and commit-count assertions would break if the call were restored.",
+      "fails_without": "Restoring resync_onto_merge in land_pr_with moves HEAD and changes the commit shape, so the criterion 2 test fails."
+    },
+    {
+      "criterion": 4,
+      "method": "Run the three required checks. -D warnings turns any dead code left by the removal (resync_tip, unused helpers) into a failure.",
+      "command": "cargo test",
+      "observes": "cargo test passes. cargo clippy --all-targets --locked -- -D warnings and cargo fmt --all --check are clean.",
+      "fails_without": "Without the behavior the new tests in criteria 1-3 fail. Leftover unused code fails clippy, and unformatted code fails fmt."
+    },
+    {
+      "criterion": 5,
+      "method": "Build with the definitions deleted, then read the diff and the source to confirm nothing under crates/ names resync_onto_merge or resync_tip. The old resync_tip tests in land.rs are replaced by a plan-still-lands test.",
+      "command": "cargo build",
+      "observes": "The build succeeds. No reference to the deleted functions is left under crates/, and dispatch in run.rs does not depend on a resync having run.",
+      "fails_without": "If a production path still called the function the build would fail once it was deleted, or the verifier would find the reference when reading the source."
+    },
+    {
+      "criterion": 6,
+      "method": "Read the diff of the three docs: parallel-jobs.md (resync passages rewritten), native-pr-landing.md (§5.2a rewritten as the no-resync rule), and decisions.md (a new decision superseding D88).",
+      "command": "git diff",
+      "observes": "Each doc states the no-resync base rule, the rejected alternatives (stable ref, plan accepting replayed bases, always or never cutting, merge of the tip) and the cut of the pushed head onto the remote tip. They also say the next job starts while the earlier PR is in CI, that one merge lands one job, that the local branch diverges from main after a squash by design, and that the cut keeps PR diffs small.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Read the CHANGELOG.md diff.",
+      "command": "git diff",
+      "observes": "A new entry in the existing format describes the change: no resync, the cut of the pushed head, and the next job starting while a PR is in CI.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "The exact name and presence of the athena-git helpers (merge_base, is_ancestor, replay, merge_tree) must be confirmed by the producer, as I did not read athena-git.",
+    "Whether replace_head's push can move a branch to a head that is not a descendant of the old one under the existing Remote no-force guard.",
+    "Whether run.rs and watcher.rs mention the resync; planned as unchanged."
+  ],
+  "producer_section_sha256": "fdc12618185afb1fed545436506baed68b147c11608efd60b560e8d95e2cedab"
+}

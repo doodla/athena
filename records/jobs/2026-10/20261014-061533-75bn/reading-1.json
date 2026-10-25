@@ -1,0 +1,208 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261014-061533-75bn",
+  "n": 1,
+  "at": "2026-10-14T06:16:24.611799351Z",
+  "invocation_seq": 1,
+  "base_commit": "f1a471c5b51f43e69791f2f8f9e7f84461d9aea1",
+  "config_sha256": "3a5a7c10c8f8142be7e5f5cbd5f0238f710d6a133b92a5731607ebe61c2e2789",
+  "defaults_sha256": "7ca3db44e78a075634195d4e9722ade9188c5268e963b636ac7b9c38d2bee2c6",
+  "defaults_version": 1,
+  "title": "Add 'athena review' to record class labels; show unreviewed in status",
+  "summary": "Add `athena review <introspection-id>` that prints the introspection (what happened, class, cause, prevention, Jev's shadow answer) and, in the same call, commits an `athena.class-label/1` record with the person's verdict: class right, another existing class, or a new class (a new `athena.failure-class/1` record), plus an optional one-line note. `athena status` gains an unreviewed-introspection count. The introspection record is never touched.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "All new code is Rust in the existing crates."
+    },
+    {
+      "id": "tested",
+      "how": "New module and CLI behavior have passing tests using temporary-directory fixture records; clippy clean."
+    },
+    {
+      "id": "verified",
+      "how": "Behavior criteria are checked by running cargo test, clippy and fmt --check."
+    },
+    {
+      "id": "small",
+      "how": "One focused change: the review command, one optional record field, one status count."
+    },
+    {
+      "id": "strangers",
+      "how": "README, CHANGELOG and design docs updated for an outside reader."
+    },
+    {
+      "id": "root-cause",
+      "how": "The cause is that no command writes class-label records; the fix adds the writer instead of seeding fixtures."
+    },
+    {
+      "id": "lazy-requests",
+      "how": "The flag design, the note field and the unreviewed definition were recovered from labeled.rs, records.rs and status.rs, not asked."
+    },
+    {
+      "id": "buy-first",
+      "how": "Reuses existing record writing (`commit_records`), `RecordId` and the records parser. No new crates."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "One-step means flags, not prompts: `athena review <id> --right`, `--class <class-id>`, or `--new-class <name> --description <line>`, with optional `--note <line>` and `--json`. The record is shown, then the verdict is committed in the same call. Exactly one verdict flag is required.",
+    "`ClassLabel` has no note field, so add an optional `note: Option<String>` (serde default, skipped when absent) to `athena.class-label/1`. Old records still parse. The note must be a single line.",
+    "`--right` copies the introspection's own failure_class into the label. If the introspection has no class, `--right` is refused with a hint to use `--class` or `--new-class`.",
+    "A new class is written as a `FailureClass` record (status proposed, proposed_by = the introspection id) in the same commit as the label.",
+    "`labeled_by` is `person`. Reviewing an already-reviewed introspection adds a newer label, which the existing 'newest wins' rule in labeled::build already handles. The command prints a notice that it replaces the earlier label.",
+    "Unreviewed = introspections with no class-label record, the same rule as `labeled::build` (`Exclusions.unreviewed`). The status count reuses one shared helper, not a second definition.",
+    "An unknown or ambiguous introspection id, or a class id not in the registry, is an error with nothing written.",
+    "Writes go through `commit_records`, as other commands do. The `is_repeat` question is not asked."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Run `cargo test`: tests using fixture records in a temporary directory show that after `review` with each verdict (right, existing class, new class, with and without a note) a class-label record exists with the expected class, note and labeled_by person, and the introspection file is byte-identical.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`: a test shows that after a review `labeled::build` no longer counts the introspection as unreviewed (`unreviewed` drops by one).",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`: a test shows `athena status` (StatusView and its display) reports the number of unreviewed introspections and that the count falls after a review. When the count is above zero, `next` hints at `athena review`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`: tests show errors write nothing: unknown introspection id, unknown class id, no verdict flag, two verdict flags, `--right` on an introspection with no class, and a multi-line note.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`cargo clippy` (workspace, all targets) is clean and `cargo fmt --check` passes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`ClassLabel` in crates/athena-data/src/records.rs has an optional `note` field that is absent from the JSON when None. A round-trip test covers both with and without a note, and the existing label test still passes.",
+      "kind": "content"
+    },
+    {
+      "text": "The review output shows what happened, class (name and id), cause, prevention, and Jev's shadow class choice and probabilities, or says Jev was not asked or failed.",
+      "kind": "content"
+    },
+    {
+      "text": "README.md's command table lists `athena review` and notes the status count. CHANGELOG.md has an entry. The docs that describe `athena.class-label/1` (docs/design/defaults-loop.md section 10.2) mention the note and that the build now writes these records.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/review.rs",
+      "action": "create",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/labeled.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-cli/tests/review.rs",
+      "action": "create",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-cli/tests/labeled.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "README.md",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "docs/design/defaults-loop.md",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "docs/records.md",
+      "action": "modify",
+      "p": 0.3
+    }
+  ],
+  "out_of_scope": [
+    "Prompting interactively or asking the is-repeat question.",
+    "Editing, deleting or re-committing any introspection record.",
+    "Changing score-jev's scoring, split or verdict.",
+    "Reviewing in bulk, a separate command that lists unreviewed ids, or auto-labeling with a stronger model.",
+    "Governance files (athena.toml, defaults.toml, CI, lint config)."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.72,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.15,
+      "cost_usd": {
+        "p10": 0.4,
+        "p50": 0.95,
+        "p90": 2.2
+      },
+      "wall_time_s": {
+        "p10": 420.0,
+        "p50": 800.0,
+        "p90": 1300.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7931818181818181,
+      "p_verification_passes": 0.704225352112676,
+      "p_user_intervenes": 0.123943661971831,
+      "cost_usd": {
+        "p10": 0.389578395006704,
+        "p50": 0.8563387000000002,
+        "p90": 1.998789678505573
+      },
+      "wall_time_s": {
+        "p10": 476.15497070152173,
+        "p50": 752.9851795077826,
+        "p90": 1056.2533735749184
+      }
+    }
+  },
+  "departures": "The change spans three crates, adds a record field and a new command with several error paths, so cost and time sit above the reference. The flag design is an assumption, which lowers acceptance slightly."
+}

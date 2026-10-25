@@ -1,0 +1,150 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261018-073507-j8rs",
+  "base_commit": "8d4120b06754a5fed6aee88686fa7cf88a565ad3",
+  "base_fingerprint": "sha256:63e960a67ee5fc643863dd32e7168b9afce358418371bb693e9888324f2a6ee2",
+  "previous_job": "20261018-060257-vmgy",
+  "candidate_commit": "af220880147f558bd39b31f8a1791375b467f613",
+  "candidate_tree": "1f3e0e2fb2c0c4a85011215678f0fa86ca34d894",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 107477
+    },
+    {
+      "path": "crates/athena-cli/tests/common/mod.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 20741
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 84892
+    },
+    {
+      "path": "crates/athena-core/src/checks.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 20967
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 109656
+    },
+    {
+      "path": "crates/athena-core/src/store.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 21421
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 117387
+    },
+    {
+      "path": "docs/design/athena-v0.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 150631
+    },
+    {
+      "path": "docs/records.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 22693
+    }
+  ],
+  "fingerprint": "sha256:a127800d7d71b15ab3eec5dfd2309f7773868bdf9c8ae9d8cb07202c60a8042b",
+  "violations": [],
+  "producer_report": {
+    "summary": "Before the first producer invocation, Athena now runs the capability's configured checks on a fresh snapshot of the base commit and writes the results to a new job record, `athena.baseline/1`, at `<job>/baseline.json`. A check that fails, times out or cannot start is recorded as failed with a note. If the baseline cannot run at all, or the run is nested, the record has no checks and a note, and the job goes on. The record holds the job, the base commit, the number the first producer invocation will get (`before_invocation`), one run per check (name, command, exit code, passed, tests ran, duration, redacted output tail capped at 4 KiB, note) and an optional top-level note. It is recorded only. verify.rs, routing.rs and the verdict code are untouched. The snapshot is built from the base commit in `<job>/baseline` and removed afterwards, so check output cannot reach the producer's tree. I wrote `baseline_runs` in checks.rs, `Baseline` and its validation in records.rs, `JobRecords.baseline` in store.rs, and `take_baseline` plus the write in run.rs. I updated CHANGELOG.md, docs/design/athena-v0.md and docs/records.md. New tests: 2 unit tests in checks.rs, 2 in records.rs, 4 lifecycle tests. The full `cargo test --locked` run exited 0. Its output was too large for me to read back, so I did not see per-test lines for it. fmt and clippy are clean.",
+    "files": [
+      "crates/athena-data/src/records.rs",
+      "crates/athena-core/src/checks.rs",
+      "crates/athena-core/src/run.rs",
+      "crates/athena-core/src/store.rs",
+      "crates/athena-cli/tests/common/mod.rs",
+      "crates/athena-cli/tests/lifecycle.rs",
+      "CHANGELOG.md",
+      "docs/design/athena-v0.md",
+      "docs/records.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "No output."
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "Finished with no warnings."
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "The command exited 0. The output was too large to read back, so I did not see per-test lines for the full run. The new tests were run separately and passed: `cargo test --locked -p athena-cli --test lifecycle baseline` (4 passed) and `cargo test --locked -p athena-core checks::tests::baseline` (2 passed)."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A test run by `cargo test --locked` drives a job with a fake or failing check on the base commit (for example `sh -c 'exit 1'`) and asserts that the job's records contain a baseline entry for that check with passed=false and its exit code, and passed=true for a check that succeeds.",
+        "status": "met",
+        "evidence": "The lifecycle test `baseline_records_failing_and_passing_checks` configures `bad` (`exit 1`) and `good` (`exit 0`). It reads baseline.json from HEAD and asserts bad is passed=false with exit code Some(1), and good is passed=true with exit code Some(0). It passed."
+      },
+      {
+        "criterion": "A test run by `cargo test --locked` shows the baseline is taken before the first producer invocation and from the base commit, not from the candidate. For example, the entry's SHA equals the job's base and its position precedes the producer's invocation record.",
+        "status": "met",
+        "evidence": "The lifecycle test `baseline_is_taken_from_the_base_before_the_producer` uses `grep -q Hello README.md`. It asserts that baseline.base_commit equals candidate.base_commit and that README.md at that commit has no greeting. The baseline entry is passed=false and the same check in verification.json is passed=true. It asserts that `invocations/<before_invocation>-producer.json` is a Producer invocation and that the file numbered one lower does not exist. It passed."
+      },
+      {
+        "criterion": "A test run by `cargo test --locked` shows a baseline that fails, times out, or cannot start does not stop the job or change its verdict. The job continues and the record notes the failure.",
+        "status": "met",
+        "evidence": "The lifecycle test `baseline_failure_does_not_stop_the_job` shows the producer was invoked although both baseline checks failed. The `missing` check has no exit code and a 'could not start' note. A job with only the check that fails on the base lands. A job that includes the command that cannot start is Rejected, because that command also fails at verification. Unit tests `checks::tests::baseline_records_each_check_whatever_the_others_did` (fail, cannot start, no command) and `baseline_records_a_timeout_as_failed_with_a_note` cover the other cases. All passed."
+      },
+      {
+        "criterion": "The existing verification tests still pass unchanged with no edits to the verdict logic. `git diff` shows no changes to crates/athena-core/src/verify.rs judgment code or to the routing of checks, and `cargo test --locked`, `cargo clippy --all-targets --locked -- -D warnings`, and `cargo fmt --all --check` all pass.",
+        "status": "met",
+        "evidence": "`git status --short` lists nine modified files and none is verify.rs or routing.rs. No existing test was edited; tests were only added. fmt and clippy pass. `cargo test --locked` exited 0, but I could not read its full output."
+      },
+      {
+        "criterion": "The baseline record is part of the job's records: it lists each configured check by name with passed, exit code and a redacted output tail capped at the existing 4 KiB, and it is registered wherever record kinds are validated, so the records check accepts it.",
+        "status": "met",
+        "evidence": "`AnyRecord::Baseline` is wired into parse, validate, `canonical_path` and `schema` in records.rs. Unit tests cover the round trip, the right and misplaced paths, and refusal of an empty base commit or a duplicate check name. The lifecycle test checks that `check_record_file` accepts the committed baseline.json. `baseline_tail_is_capped` shows the tail is at most TAIL_BYTES plus the 3-byte ellipsis. The output tail reuses `run_check`'s existing redaction. I did not add a test with a secret canary."
+      },
+      {
+        "criterion": "The docs or CHANGELOG state in a sentence or two that the baseline is recorded only and that part 2 will use it at verification.",
+        "status": "met",
+        "evidence": "CHANGELOG.md (Unreleased, Added), the `athena.baseline/1` row in docs/design/athena-v0.md section 5.3 and the baseline.json line in docs/records.md all say it is recorded only. The CHANGELOG and design entries also say part 2 will use it at verification."
+      }
+    ],
+    "open_issues": [
+      "I did not add a lifecycle test with a secret canary to show the tail is redacted. Redaction is the same Redactor call run_check already uses for verification checks, and that existing code path is unchanged.",
+      "crates/athena-gate/src/records.rs and crates/athena-core/src/lib.rs needed no change, so I left them alone. The brief listed both as deliverables.",
+      "store.rs and docs/records.md are not in the expected deliverables. I changed them because JobRecords ignored unknown kinds and the documented layout lists the record kinds.",
+      "The baseline adds one extra run of the configured checks before the producer starts, bounded by check_timeout_s per check."
+    ],
+    "mistakes": [
+      "My first version of the base-commit assertion compared the baseline with the head taken before the job. That was the wrong commit, and the test failed. I fixed it.",
+      "I wasted some budget by dumping a large git show and a large cargo test output.",
+      "I first added a `record_at_head` helper to common/mod.rs, then removed it because lifecycle.rs already had `record_at`."
+    ],
+    "learnings": [
+      "The job's base commit is the prediction commit, which sits above the repository head at the time of `ask` (the reading commit comes first). A test therefore cannot compare the baseline's base_commit with the head taken before the job. It compares with the candidate's base_commit instead.",
+      "Check commands run with an env that has PATH, so `sh` and `grep` work.",
+      "Bash for the producer role refuses pipes, `tail` and paths outside the working directory. I could not read the saved output of the large `cargo test` run and relied on the exit status.",
+      "`Closing` is only built in `Closing::new`, so adding a field there was enough."
+    ],
+    "desires": [
+      "A way to read the persisted large tool output, or to filter cargo output, so the full test summary can be reported."
+    ]
+  }
+}

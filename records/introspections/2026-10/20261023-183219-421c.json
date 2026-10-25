@@ -1,0 +1,30 @@
+{
+  "schema": "athena.introspection/1",
+  "id": "20261023-183219-421c",
+  "at": "2026-10-23T18:32:19.630176492Z",
+  "trigger": "intervention",
+  "job": null,
+  "intervention": "20261023-183217-nth6",
+  "class_of_work": "build",
+  "category": "other",
+  "what_happened": "Two jobs running at the same time each left an 11-12 GB build cache. Together they used up the disk allowance, and job zvmr died partway through a commit. The operator was not watching disk, and Athena did not check it either. The event is logged as an intervention with no job attached.",
+  "failure_class": "20261017-003950-etr5",
+  "new_class": false,
+  "earlier_cases": [],
+  "decisions_matched": [],
+  "cause": "Athena does not treat disk as a managed resource. It starts jobs without measuring free space or estimating what a job will need. It also keeps each job's build cache after the job closes, so usage only grows. The only limit on how much runs at once is how many jobs the operator allows, and that does not account for cache size. The disk allowance was therefore protected only by the operator's attention.",
+  "prevention_kind": "code-check",
+  "prevention": "Add two checks in code. (1) Dispatch gate: before starting a job, read free disk in the state directory. If free space is below a configured reserve plus the expected cache size, hold the job in the queue with a clear \"waiting for disk\" reason instead of starting it. (2) Cache cleanup: when a job closes, whether it landed, was rejected, failed or was abandoned, delete its build cache and worktree build output. Also sweep caches left by already-closed jobs at drain start. Log both actions so the operator can see them.",
+  "proposed_request": "Make Athena manage disk itself so concurrent jobs cannot exhaust the allowance. Outcomes: (1) Before dispatching any job, Athena checks free disk in its state area. If free space is below a configurable reserve (add a setting with a sensible default), the job stays queued with a visible \"waiting for disk\" status and starts automatically once space is free. It is never started and left to die mid-run. (2) When a job closes in any final state (landed, rejected, failed or abandoned), Athena deletes that job's build cache and build output. Only the record and the artifacts that must be kept stay. (3) At drain start, Athena also removes caches left by jobs that are already closed. (4) Each hold and each cleanup is written to the log, with bytes freed. Acceptance: a test with a faked low-disk reading shows the job is held and not started. A test shows a closed job's cache directory is gone and its records are still there. A test shows a job that is already running is not touched by the sweep. Add the settings to the config schema together with their defaults, and check that the config file still parses.",
+  "evidence": {
+    "model": "claude-sonnet-5-5",
+    "cost_usd": 0.0416881,
+    "input_tokens": 2,
+    "output_tokens": 1202
+  },
+  "status": "recorded",
+  "failure": null,
+  "flags": [],
+  "dropped_ids": [],
+  "from_jev": false
+}
