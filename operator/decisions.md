@@ -287,3 +287,10 @@ Athena's decision log, not here. Newest last.
   their dependencies in their own words; next work is taken from `athena plan`, and run through `athena drain`
   instead of the operator's own go-and-land scripts. Readings are still reviewed (via `athena plan`, which
   reads queued requests) before a drain runs them. Tracking that must stay outside Athena is an intervention.
+
+## OP-23. Speed first (2026-10-25)
+
+- Sri: "Athena should prioritize anything that'll help it move faster ( includes the time wasted )" (BRIEF.md
+  addendum of 2026-10-25). Work that makes Athena faster or cuts wasted time ranks above everything else.
+- Until Athena can rank it itself (request below), the operator runs the speed and waste requests first, in
+  order of the time they save, with athena go, and pauses the records-history build after the fixture job.

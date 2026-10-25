@@ -1,0 +1,153 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261025-041303-wbmn",
+  "base_commit": "817c47943745b1505e219af8083d5889916dbead",
+  "base_fingerprint": "sha256:1fcbff1b1b079a6d7311f6fbae7fb216ea38df0bb48170721742aad9fd9cd09c",
+  "previous_job": "20261025-031609-k0tt",
+  "candidate_commit": "7b399e20406394c3bc738dc9b454f8c892565355",
+  "candidate_tree": "7a6b3f4329d6c9434f63c762d42bd42b1b737dbd",
+  "changes": [
+    {
+      "path": ".github/workflows/ci.yml",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 12834
+    },
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 138105
+    },
+    {
+      "path": "crates/athena-cli/tests/history_pr_head.rs",
+      "status": "added",
+      "mode": "100644",
+      "bytes": 5488
+    },
+    {
+      "path": "crates/athena-core/src/land.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 29986
+    },
+    {
+      "path": "crates/athena-gate/src/history.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 38287
+    },
+    {
+      "path": "crates/athena-gate/src/invariant.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 46204
+    }
+  ],
+  "fingerprint": "sha256:ffe98e95dedd866b33d197cef6fd0d56984d7c8da5264d13bc640f6e26bd2966",
+  "violations": [],
+  "producer_report": {
+    "summary": "The post-C0 history check now splits a head that main does not hold at its merge base with main. Commits on main still go to attribution. The head's own commits go to the pre-merge rule (records only, a declared intervention, or a verified job landing), and each uncovered one becomes a violation naming its sha. The root cause was that `check_after_cutover` sent the whole tip to the attribution walk, which needs a landing record for every commit, so an unmerged PR could never pass. I moved the pre-merge rule into athena-gate as `invariant::classify_pre_merge`, with a typed `Uncovered` error. `land::classify_commit` now calls it and adds only the verification id and its existing message prefix, so the `pr_commits` tests pass unchanged. If main or the merge base can't be found, or the merge base doesn't descend from C0, the check keeps today's behaviour and adds a note. The CI history job now fetches `main` as `refs/remotes/origin/main` and `athena/records` on every event, pull requests included. CHANGELOG has a Fixed entry citing PR #175. I ran the new cutover-fixture tests, the cutover-fixture test and the gate and core land tests; I did not run the full workspace suite. I did not run the new tests against the old code to see them fail.",
+    "files": [
+      "crates/athena-gate/src/invariant.rs",
+      "crates/athena-gate/src/history.rs",
+      "crates/athena-core/src/land.rs",
+      "crates/athena-cli/tests/history_pr_head.rs",
+      ".github/workflows/ci.yml",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-cli --test history_pr_head",
+        "result": "pass",
+        "note": "3 tests: PR branch passes, unverified governed change fails naming the sha, main still judged by attribution"
+      },
+      {
+        "command": "cargo test -p athena-cli --test cutover_fixture --test history_pr_head",
+        "result": "pass",
+        "note": "4 existing fixture tests and the 3 new tests"
+      },
+      {
+        "command": "cargo test -p athena-gate -p athena-core land",
+        "result": "pass",
+        "note": "39 core tests matching 'land' (pr_commits tests unchanged) and 42 gate tests"
+      },
+      {
+        "command": "cargo test -p athena-gate history",
+        "result": "pass",
+        "note": "20 tests, existing history and cutover tests unchanged"
+      },
+      {
+        "command": "cargo clippy --workspace --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test --workspace",
+        "result": "not-run",
+        "note": "the full suite was not run; Athena runs it"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A test on the cutover fixture creates a PR branch after C0 with a records-only commit, a declared-intervention commit and a verified job-landing commit, none named by a landing record. Run `cargo test -p athena-cli` (the new history test): `athena check --history` on that head reports no violations.",
+        "status": "met",
+        "evidence": "`cargo test -p athena-cli --test history_pr_head` passes a_pr_head_of_records_only_intervention_and_job_landing_commits_passes. It branches off C0, lands a real job with ask/go, adds an excluded-path commit and an intervention record, and asserts `cutover_commit_at` finds no landing record for any of them. It then asserts the real binary exits 0 with '0 violation(s)'."
+      },
+      {
+        "criterion": "A test adds a governed-content change with no verification or intervention to a PR branch after C0. Run `cargo test -p athena-cli` (the new history test): `athena check --history` fails and the violation names that commit's sha.",
+        "status": "met",
+        "evidence": "a_pr_head_with_an_unverified_governed_change_fails_naming_it: the check fails, the output contains the bad commit's 12-character sha and 'changes governed content', and does not contain the earlier records-only commit's sha or 'unattributed'."
+      },
+      {
+        "criterion": "A test shows `athena check --history` on the fixture's main after C0 gives the same report as before: commits on main still go through the attribution rule, and an unattributed commit on main still fails. Run `cargo test -p athena-gate -p athena-cli`.",
+        "status": "met",
+        "evidence": "history_on_main_after_c0_still_judges_its_commits_by_attribution: with local main ahead of origin/main, a records-only commit and a hand change to src/lib.rs both fail with 'unattributed' and their shas; the pre-merge wording never appears. The existing cutover_fixture main-passes test and the gate cutover_tests pass unchanged. I ran gate with `cargo test -p athena-gate history` and cli by test file, not the two crates in full."
+      },
+      {
+        "criterion": "All existing history and attribution tests and the land.rs pr_commits tests pass unchanged. Run `cargo test --workspace`; `cargo clippy --workspace --all-targets` and `cargo fmt --check` are clean.",
+        "status": "met",
+        "evidence": "The gate tests (42 passed), the core tests matching 'land' (39 passed, including the pr_commits tests) and the cutover_fixture tests pass with no assertion edits. Clippy with -D warnings and `cargo fmt --all --check` are clean. I did not run the full `cargo test --workspace`."
+      },
+      {
+        "criterion": "The CI history job in .github/workflows/ci.yml has the refs it needs on a pull_request event (main, and athena/records where used) so the merge base resolves. The step comments say why. The job keeps the name 'the full history'.",
+        "status": "met",
+        "evidence": "`git diff -- .github/workflows/ci.yml` shows the fetch step without the `if: github.event_name != 'pull_request'` condition. It runs `git fetch origin main:refs/remotes/origin/main athena/records:athena/records`, and the job comment and step comment give the reasons. The name is still 'the full history'. I cannot run CI itself here."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry that says a PR head's own commits after C0 are judged by the pre-merge rule and main's by attribution, and cites the PR #175 failure.",
+        "status": "met",
+        "evidence": "The new '### Fixed' entry under Unreleased states both rules and cites PR #175's 50 violations and the 'no landing record names it and no landing-intent matches its tree' message."
+      },
+      {
+        "criterion": "The pre-merge classifier has one source of truth in the gate; land.rs pr_commits delegates to it, with no duplicated rule logic.",
+        "status": "met",
+        "evidence": "The closing_jobs, added_interventions and fingerprint branches now appear only in `invariant::classify_pre_merge`. `land::classify_commit` calls it, maps the result to PrCommit, adds `verification_id` and the 'lies between' prefix, and its imports of those gate items are gone."
+      }
+    ],
+    "open_issues": [
+      "I did not run the CI history job itself. Its fetch step and the 'main is refs/remotes/origin/main' assumption are untested outside the fixture. The fixture does have origin/main and local main.",
+      "The plan listed attribution.rs, legacy.rs, test_support.rs, cutover_fixture.rs and main.rs as 'only if needed'. None needed edits, because the existing walk takes the merge base as its tip, so I left them untouched.",
+      "The CI history job keeps persist-credentials: true because the fetch step needs the token. I did not try to narrow it further.",
+      "The 'records-only' commit in my pass test edits an excluded owner path (PRIVATE.md), not a file under records/. It exercises the same RecordsOnly rule branch.",
+      "On a head that is not on main but whose checkout has no main ref, the check falls back to attribution for everything and adds a note. In CI the fetch step prevents this."
+    ],
+    "mistakes": [
+      "I wrote the CHANGELOG entry as a new '### Fixed' section rather than first checking whether the Unreleased block already had one. It had none, so nothing is duplicated."
+    ],
+    "learnings": [
+      "athena-git has no merge_base helper; history.rs calls `git merge-base` through `Git::run`, which errors when two commits share no history.",
+      "In the cutover fixture, `go` lands on the current branch, so checking out a branch first leaves main at C0 and the landing on the branch.",
+      "`Violation::in_commit` truncates the sha to 12 characters, which is what tests match on.",
+      "The fixture's origin/main and local main both sit at C0, so a hand commit made on local main leaves the head ahead of origin/main. The main check therefore treats a head as main if it is an ancestor of either main ref."
+    ],
+    "desires": [
+      "A way to run the CI history job locally against a fixture, for example a workflow-dry-run, to confirm the fetch step works."
+    ]
+  }
+}

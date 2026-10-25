@@ -9,6 +9,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A shared test fixture for the records-history cutover (D111, D120): `athena_core::test_support`, compiled
+  only for tests and the `test-support` feature of `athena-core`. `CutoverFixture::build` makes a scratch
+  repository with a bare remote and this history, all through Athena's own writers: a bootstrap commit; one job
+  read, dispatched, verified and landed the old way by `ask` and `go` (with its trailers and no landing record);
+  then the cutover job, whose change sets `[history] cutover_job`, landed through `gh::land_pr` with the real
+  records sink, so the landing intent, landing record, import with manifest and legacy-exempt record are on
+  `athena/records`. Only the host is faked. `athena-cli`'s `tests/common/mod.rs` has `cutover_fixture()` and
+  `athena_check()`; `tests/cutover_fixture.rs` pins the shape and runs `athena check --history` and
+  `athena check --attribution` on it. The trailer job and job 7 part 2 reuse it from `athena-cli` tests with
+  those helpers, and from `athena-core` tests by passing their own capabilities and scripts in a `CutoverSpec`.
+  The module text explains how. No production behavior changes.
 - The records-history cutover (job 7, part 1, of `docs/design/records-history.md`, sections 4 and 10, D111,
   D119). `athena.toml` `[history]` gains an optional `cutover_job`; `C0` is the host commit of that job's landing
   record on `athena/records`. When `athena land --pr` lands that job, after the landing record it imports
@@ -164,6 +175,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   force-push forbidden, deletion forbidden and up-to-date required as in force, not in force, or unknown (a
   failed call or unreadable reply). It sees rulesets only; classic branch protection is not visible through
   that view. It changes no host setting and is not yet wired into a command.
+
+### Fixed
+
+- `athena check --history` after the cutover no longer fails every pull request. On a head that main does not
+  hold, a pull request's own commits after `C0` (the range from the merge base with main to the head) are judged
+  by the pre-merge rule (records only, a declared intervention, or a job landing whose verification is in its
+  tree), and only main's commits are judged by the attribution rule, which needs a landing record. Before this,
+  the whole range went to attribution, so PR #175 failed the required "the full history" check with 50
+  violations, each "no landing record names it and no landing-intent matches its tree". A head that is main or
+  part of it, and a checkout with no main or no usable merge base (a note says so), are judged as before. The
+  pre-merge rule now lives once, in `athena_gate::invariant::classify_pre_merge`; `land::pr_commits` calls it
+  and its messages are unchanged. The CI history job fetches `main` and `athena/records` on pull requests too.
 
 ### Changed
 

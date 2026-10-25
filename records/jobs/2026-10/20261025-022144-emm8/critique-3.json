@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261025-022144-emm8",
+  "round": 3,
+  "at": "2026-10-25T02:27:48.492525701Z",
+  "invocation_seq": 8,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "The criteria say that after C0 check_history runs only the secrets and attribution checks, but the code also runs the records-validity and reconcile checks. The plan only says so in the docs.",
+      "evidence": "check_after_cutover runs secrets::check_history, then legacy::check_attribution_with_legacy, then RecordSet errors (Rule::ValidRecords) and reconcile::check_records. Decision 6 keeps all of them and flags the wider scope in the change description. Fix: Keep the code as it is. Have the criterion-6 history.rs test assert the exact set of rules that can come back after C0: secret, attribution (JobRecords), ValidRecords and reconcile, and no Invariant. Put the same wording in CHANGELOG.md and decisions.md so the verifier can match it to the criterion.",
+      "location": "Decision 6 / criteria 6 and 7; crates/athena-gate/src/history.rs:68-105",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The auditor's public entry point is `auditor::run`. After reading the files it goes on to call a model, so the test needs the fake path, and the plan doesn't say so.",
+      "evidence": "`pub fn run(athena, role, reference, now)` calls read_changed_files at line 271 and then starts a model run. The code uses `athena.is_fake()` at line 324. Open question 3 leaves the entry-point name to the producer. Fix: Name `auditor::run` as the entry point. State that the test runs Athena in fake mode and asserts that the files read for the pre-C0 job and the post-C0 job are the expected paths and contents. Also have a post-C0 job without the fallback fail with 'none could be read'.",
+      "location": "Decision 5 / criterion 5 auditor demonstration; crates/athena-core/src/auditor.rs:225-271",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Post-C0 landed_commit looks for 'the newest commit that adds the verification record'. The record path and fingerprint field are still open, and the plan doesn't rule out matching a records-only commit.",
+      "evidence": "Today landed_commit matches both Athena-Job and Athena-Verified-Content trailers. The replacement filter is not specified, and open question 1 defers it. Fix: Require the match to be a commit that adds the job's verification record and also changes non-records files, or that is the job_landing kind. In the lifecycle test, assert that land_pr pushes exactly the job landing commit and not the records-only commit.",
+      "location": "Decision 3; crates/athena-core/src/gh.rs:1223-1240",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the snapshot with Read and Grep; I ran nothing. The functions it names exist where it says: cutover_state and CutoverState::Shown in attribution.rs, check_after_cutover in history.rs, landed_commit in gh.rs, squash_text in athena-git, retry_landing in run.rs, and read_changed_files and run in auditor.rs. Each change is made where the fault starts: the gate skips invariant::check (so the installed hook accepts trailer-free commits), the writers strip trailers, and each trailer reader gets a C0..head fallback. Adding run.rs is justified, because resuming a blocked job after C0 would otherwise stop with 'closing commit not found'; Athena already flagged the scope. The demonstrations exercise real behavior and would fail without it. The lifecycle test checks for empty violations before and after C0, which fixes the earlier verifier failures. No athena.toml field is added, and the work fits one producer run. My three findings are all minor: the 'only secrets and attribution' wording against the code, which also runs records checks; naming the auditor entry point and running it in fake mode; and a tighter post-C0 landed_commit match."
+}

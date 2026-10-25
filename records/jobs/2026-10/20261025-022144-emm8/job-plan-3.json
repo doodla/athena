@@ -1,0 +1,290 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261025-022144-emm8",
+  "round": 3,
+  "at": "2026-10-25T02:27:12.578902338Z",
+  "invocation_seq": 7,
+  "approach": "Keep the single-switch design. One gate-side helper `attribution::after_cutover` decides \"after C0\". Writers (build_commit_in, commit_with_staged) strip Athena- trailers when it holds. gate() skips invariant::check when it holds, so the real commit-msg hook accepts trailer-free commits. Post-C0, landed_commit finds the job's commit through its verification record. run.rs retry_landing skips the trailer search after C0 and does not re-emit trailers. Squash uses a new relaxed text form. trace and the auditor fall back to C0..head. Pre-C0 paths stay byte-for-byte. A lifecycle test with a valid pre-C0 history proves it end to end.",
+  "decisions": [
+    {
+      "choice": "attribution::after_cutover(git, parent, &config) -> Result<Option<String>> returns c0 only when the parent's config has cutover_job, cutover_state is Shown and c0 is an ancestor of parent. gate() skips invariant::check (CommitMsg, Commit, CommitLegacyUsage) via a Judged.after_c0 field. Doc comment states: the Shown state comes from the records-branch tip (as check_history uses it); only the config and ancestor check are tied to the parent.",
+      "reason": "One decision point shared by the hook, plumbing commits and check_history, so no commit exists that no rule can judge.",
+      "rejected": [
+        {
+          "option": "gate_with(.., read_trailers) chosen per caller",
+          "why": "The installed hook still runs invariant::check and would refuse trailer-free commits."
+        },
+        {
+          "option": "Strip once the landing record exists (Pending)",
+          "why": "check_history still applies trailer rules until the manifest shows the cutover."
+        }
+      ]
+    },
+    {
+      "choice": "run.rs retry_landing: when after_cutover holds for the candidate base/head, skip the log_grep trailer search entirely, build the landing trailers as only Co-Authored-By (no Athena-* keys, since build_commit strips them anyway), and set Finished.prediction_commit to None. Pre-C0 branch unchanged. Add run.rs to Files. The 'closing commit not found' bail stays only on the pre-C0 path.",
+      "reason": "The search at run.rs:2524-2536 finds the blocked job's closing commit by Athena-Job to copy Prediction/Class/etc. trailers. After C0 nothing is re-emitted, so nothing needs to be found; the verification-record lookup is not used here. Fields live in the job records if ever needed.",
+      "rejected": [
+        {
+          "option": "Replace the search with the verification-record lookup",
+          "why": "That lookup finds a landing commit, not the blocked closing commit, and supplies no trailer values."
+        },
+        {
+          "option": "Leave run.rs unchanged",
+          "why": "Resuming a blocked post-C0 job would always fail with 'closing commit not found'."
+        }
+      ]
+    },
+    {
+      "choice": "Post-C0 landed_commit (gh.rs) returns the newest commit in c0..head that adds the job's verification record file and whose record fingerprint equals the verified fingerprint; pre-C0 path unchanged. Producer confirms the record path and fingerprint field from athena-data records layout before writing the log path filter.",
+      "reason": "The landing commit carries the record; no trailer needed.",
+      "rejected": [
+        {
+          "option": "Keep the commit id from the landing step",
+          "why": "athena pr runs in a later process."
+        },
+        {
+          "option": "Read the landing record on the records branch",
+          "why": "Exists only after merge."
+        }
+      ]
+    },
+    {
+      "choice": "Add squash_text_relaxed in athena-git; gh.rs uses it when after_cutover holds for head. Strict squash_text unchanged.",
+      "reason": "Pre-C0 behavior stays exact.",
+      "rejected": [
+        {
+          "option": "Relax the existing method",
+          "why": "Changes pre-C0 behavior."
+        }
+      ]
+    },
+    {
+      "choice": "Auditor test drives the public auditor entry (the pub run/audit function that read_changed_files serves) for a pre-C0 job and a post-C0 job and asserts on reported files; status.rs test drives Athena::trace.",
+      "reason": "Real entry points, not private helpers (finding 4).",
+      "rejected": [
+        {
+          "option": "Unit-test read_changed_files",
+          "why": "Private helper; failed verification before."
+        }
+      ]
+    },
+    {
+      "choice": "Docs say: old trailer/invariant rules stop after C0; secrets and attribution are the history checks; records validity and reconcile checks on records files also stay (check_after_cutover runs them). The change description flags that this is slightly wider than criterion 6/7's 'only secrets and attribution' wording.",
+      "reason": "Matches history.rs:74-104 honestly.",
+      "rejected": [
+        {
+          "option": "Remove ValidRecords/reconcile after C0",
+          "why": "Behavior change beyond scope, weakens record checks."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-gate/src/attribution.rs",
+      "action": "modify",
+      "purpose": "Add after_cutover helper with tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-gate/src/lib.rs",
+      "action": "modify",
+      "purpose": "Judged.after_c0; gate() skips invariant::check; gate tests incl. jobs check.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-gate/src/history.rs",
+      "action": "modify",
+      "purpose": "Post-C0 test (no Invariant, secret reported); fix doc comment.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/commits.rs",
+      "action": "modify",
+      "purpose": "build_commit_in strips Athena- trailers after C0; tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/manage.rs",
+      "action": "modify",
+      "purpose": "commit_with_staged strips Athena- trailers after C0.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-git/src/lib.rs",
+      "action": "modify",
+      "purpose": "squash_text_relaxed and tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "action": "modify",
+      "purpose": "Post-C0 landed_commit via verification record; relaxed squash; tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/land.rs",
+      "action": "modify",
+      "purpose": "Adapt landing path trailer/squash use post-C0; test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "purpose": "retry_landing skips trailer search and re-emission after C0; test resuming a blocked post-C0 job.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "trace: trailers up to C0, C0..head after; test via Athena::trace.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/auditor.rs",
+      "action": "modify",
+      "purpose": "C0..head fallback; test via the public auditor entry.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "purpose": "End-to-end post-C0 scratch test (criteria 1, 2).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "purpose": "Only if trace/status needs cutover context; otherwise unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Record the end of trailer writing after C0 with each reader/writer and test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Record D111 job 7 part 1b.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read athena-data records layout (verification record path/fingerprint) and the fixtures in history.rs, legacy.rs, landing_tests.rs.",
+    "Add after_cutover to attribution.rs with tests.",
+    "Add after_c0 to Judged::new; gate() skips invariant::check; gate tests (trailer-free passes, content and jobs violations still reported, pre-C0 unchanged).",
+    "Add squash_text_relaxed with strict and relaxed tests.",
+    "Strip trailers in commits.rs and manage.rs after C0; commits.rs tests for all four cases.",
+    "Implement post-C0 landed_commit and relaxed squash in gh.rs; adapt land.rs; tests.",
+    "Change run.rs retry_landing: skip trailer search after C0; test resuming a blocked post-C0 job; check the go path prediction_commit.",
+    "Add C0..head fallbacks in status.rs and auditor.rs with entry-point tests.",
+    "Add history.rs post-C0 test.",
+    "Write the lifecycle.rs scratch test with hooks installed.",
+    "Update CHANGELOG.md and docs/decisions.md.",
+    "Run fmt, clippy, test; confirm athena.toml and workflows unchanged."
+  ],
+  "risks": [
+    {
+      "risk": "Pending and Shown disagree between writers and check_history.",
+      "mitigation": "Both use after_cutover; a test asserts Pending keeps trailers."
+    },
+    {
+      "risk": "Stripping breaks callers that parse trailers back (run.rs, landed_commit).",
+      "mitigation": "Post-C0 branches avoid trailer reads; tests cover each."
+    },
+    {
+      "risk": "Scratch pre-C0 history fails the old rules again.",
+      "mitigation": "Build from passing fixtures; assert empty violations on the pre-C0 base before adding the branch."
+    },
+    {
+      "risk": "Skipping invariant::check lets a bad commit through.",
+      "mitigation": "Only when Shown and c0 is an ancestor; content, jobs, secrets, attribution still run."
+    },
+    {
+      "risk": "Extra git calls per commit.",
+      "mitigation": "after_cutover returns at once without cutover_job."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "lifecycle.rs scratch repo: bootstrap commit, old-way job landed with trailers, cutover job as C0 (landing record + manifest), hooks installed. One branch: commit_with_staged intervention, Committer records-only commit, job landing commit; land_pr with squash. Read messages via git.message.",
+      "command": "cargo test --locked post_c0_job_branch_writes_no_athena_trailers",
+      "observes": "The squash commit and each of the three PR commits (via the landing record's second parent) have no line starting with 'Athena-'; land_pr found the landed commit.",
+      "fails_without": "A writer emitting trailers leaves Athena- lines; a hook requiring trailers refuses the intervention; a trailer-based landed_commit stops land_pr with 'job is not landed'."
+    },
+    {
+      "criterion": 2,
+      "method": "Same test: assert check_history and check_attribution violations are empty on the pre-C0 base first, then read the landing record and assert the kinds, then assert both empty on the post-C0 base. No assertion that violations exist.",
+      "command": "cargo test --locked post_c0_job_branch_writes_no_athena_trailers",
+      "observes": "Kinds declared_intervention, records_only, job_landing; both reports empty.",
+      "fails_without": "Wrong classification or violations reported if attribution or the gate skip were missing."
+    },
+    {
+      "criterion": 3,
+      "method": "athena-git unit tests for strict form (exactly one Athena-Job; zero or two refused) and relaxed form (no Athena- line); gh.rs test builds the post-C0 PR request and checks commit_message.",
+      "command": "cargo test --locked squash_text",
+      "observes": "Strict unchanged; relaxed emits no Athena- line; post-C0 landing uses relaxed.",
+      "fails_without": "Without the relaxed form a trailer-free post-C0 message is refused; a changed strict form accepts zero/two Athena-Job."
+    },
+    {
+      "criterion": 4,
+      "method": "Committer::commit_records in scratch repos: Shown with c0 ancestor; no cutover_job; cutover_job but no landing record; Pending.",
+      "command": "cargo test --locked -p athena-core commits::",
+      "observes": "No Athena- line after C0 and the gate accepts it; trailers still written in the three kept cases; existing tests unchanged.",
+      "fails_without": "Without the strip the after-C0 message keeps trailers; without the guard kept cases lose them."
+    },
+    {
+      "criterion": 5,
+      "method": "status.rs test calls Athena::trace on a scratch repo with a job landed up to C0 (trailers) and one after (trailer-free); auditor.rs test drives the public auditor run on both jobs; run.rs test resumes a blocked post-C0 job via retry_landing and lands it.",
+      "command": "cargo test --locked post_c0",
+      "observes": "Pre-C0 job gives same commits/files as before; post-C0 job gives its commits/files from C0..head; blocked post-C0 job lands without the trailer search.",
+      "fails_without": "No fallback: post-C0 trace lists no commits, auditor errors 'none could be read', retry_landing bails 'closing commit not found'."
+    },
+    {
+      "criterion": 6,
+      "method": "history.rs test: trailer-free post-C0 commit gives no Rule::Invariant, planted secret still reported. lib.rs gate tests in CommitMsg and Commit scopes after C0: trailer-free commit passes; content violation still reported; a bad job record still reported by jobs::check; pre-C0 trailer-free commit still reports Rule::Invariant.",
+      "command": "cargo test --locked -p athena-gate after_cutover",
+      "observes": "Only invariant::check is dropped; content and jobs checks stay in gate; check_history after C0 runs secrets, attribution (plus records-file checks).",
+      "fails_without": "If invariant::check still ran, the trailer-free commit reports Rule::Invariant; if content or jobs were dropped the bad record passes."
+    },
+    {
+      "criterion": 7,
+      "method": "Read the diff.",
+      "command": "git diff -- CHANGELOG.md docs/decisions.md",
+      "observes": "D111 job 7 part 1b entries say writing stops after C0; name readers still using trailers up to C0 (invariant check, trace, auditor, run.rs, landed_commit); state that after C0 the history check runs secrets and attribution (noting records-file checks stay); list each writer and reader with its covering test.",
+      "fails_without": null
+    },
+    {
+      "criterion": 8,
+      "method": "Run all three, then git status and git diff --stat.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All exit 0; no athena.toml, defaults.toml or .github/workflows changes; existing pre-C0 tests pass unchanged.",
+      "fails_without": "A pre-C0 behavior change breaks an existing test; format/lint slips fail."
+    }
+  ],
+  "open_questions": [
+    "Exact verification record path and fingerprint field for the landed_commit lookup; producer confirms in athena-data before coding.",
+    "Whether main.rs needs changes for trace/status.",
+    "Name of the auditor's public entry point (producer confirms).",
+    "Whether run.rs line ~2484 (prediction_commit from trailers in the main go path) also needs a post-C0 None; producer checks and covers."
+  ],
+  "producer_section_sha256": "00af60c7db6d743cef0b5aab9114fc4d57b7943baadb67ca7440f63a163a05de"
+}
