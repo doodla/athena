@@ -251,6 +251,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- Faster tests, with none removed or weakened. `Gitleaks::scan_text` remembers each successful scan of text for
+  the life of the process, keyed by binary, configuration and text, so a run of many fake jobs no longer starts
+  gitleaks again (about 0.5 s a start, measured) for text it has scanned; commit scans are not remembered. A
+  running check is polled at 2 ms, doubling to its unchanged 200 ms cap, instead of a fixed 200 ms. Measured
+  here, one run of each binary before and after: `lifecycle` 172.47 s to 91.24 s, `job_plan` 80.03 s to 36.24 s,
+  `drain` 55.68 s to 32.06 s, `retry` 54.15 s to 28.37 s, `steward` 46.03 s to 27.87 s. The full suite's test run
+  adds up to about 405 s, so the 6 minute target is not yet met. cargo-nextest was rejected (584 s against 673 s,
+  brain-measured); sccache and a shared target directory were considered. See D126.
 - The producer deadline `producer_timeout_s` in `athena.toml` rises from 1800 to 3000 seconds. Six producer runs
   since 2026-10-24 hit the 1800 s deadline and lost all their work, several while doing legitimate work whose
   targeted test builds take 5 to 10 minutes (as reported). Splitting jobs, a faster suite and keeping work on

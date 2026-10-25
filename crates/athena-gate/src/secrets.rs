@@ -42,6 +42,28 @@ pub struct Finding {
 pub struct Gitleaks {
     bin: PathBuf,
     dir: tempfile::TempDir,
+    /// The generated configuration, part of the key of a remembered scan.
+    config_text: String,
+}
+
+/// Scans of text already made in this process, by what decides their result: the binary, the generated
+/// configuration, and the scanned text. Starting gitleaks costs about half a second (it loads its default
+/// rules), and a process that scans the same text twice, as a test run of many fake jobs does, would pay
+/// that each time for the same answer. Only successful scans are kept. Scans of commits are not: their
+/// findings name commits, and their input is a repository that changes.
+static SCANNED: std::sync::Mutex<Option<std::collections::HashMap<String, Vec<Finding>>>> =
+    std::sync::Mutex::new(None);
+
+fn remembered(key: &str) -> Option<Vec<Finding>> {
+    let guard = SCANNED.lock().unwrap_or_else(|e| e.into_inner());
+    guard.as_ref().and_then(|map| map.get(key).cloned())
+}
+
+fn remember(key: String, findings: &[Finding]) {
+    let mut guard = SCANNED.lock().unwrap_or_else(|e| e.into_inner());
+    guard
+        .get_or_insert_with(Default::default)
+        .insert(key, findings.to_vec());
 }
 
 #[derive(Serialize)]
@@ -107,12 +129,14 @@ impl Gitleaks {
         let dir = tempfile::Builder::new()
             .prefix("athena-gitleaks-")
             .tempdir()?;
-        std::fs::write(
-            dir.path().join("config.toml"),
-            generated_config(&config.secrets.allowlist),
-        )?;
+        let config_text = generated_config(&config.secrets.allowlist);
+        std::fs::write(dir.path().join("config.toml"), &config_text)?;
         std::fs::create_dir(dir.path().join("ignore"))?;
-        Ok(Gitleaks { bin, dir })
+        Ok(Gitleaks {
+            bin,
+            dir,
+            config_text,
+        })
     }
 
     fn command(&self, mode: &str) -> Command {
@@ -195,10 +219,21 @@ impl Gitleaks {
         self.run(cmd, None)
     }
 
+    /// The key of a remembered scan of `text`.
+    fn key(&self, text: &str) -> String {
+        format!("{}\0{}\0{text}", self.bin.display(), self.config_text)
+    }
+
     /// Scans text, such as an agent's free-text output before it is recorded.
     pub fn scan_text(&self, text: &str) -> Result<Vec<Finding>> {
+        let key = self.key(text);
+        if let Some(found) = remembered(&key) {
+            return Ok(found);
+        }
         let cmd = self.command("stdin");
-        self.run(cmd, Some(text.as_bytes()))
+        let findings = self.run(cmd, Some(text.as_bytes()))?;
+        remember(key, &findings);
+        Ok(findings)
     }
 }
 
@@ -262,6 +297,30 @@ mod tests {
 
     fn config() -> Config {
         crate::builtin_config()
+    }
+
+    #[test]
+    fn a_scan_of_text_is_remembered_by_binary_configuration_and_text() {
+        let scanner = |bin: &str, config_text: &str| Gitleaks {
+            bin: PathBuf::from(bin),
+            dir: tempfile::tempdir().unwrap(),
+            config_text: config_text.to_string(),
+        };
+        let first = scanner("/tools/gitleaks-a", "config one");
+        let found = vec![Finding {
+            rule: "a-rule".into(),
+            secret: "s".into(),
+            file: String::new(),
+            commit: String::new(),
+            line: 1,
+        }];
+        remember(first.key("some text"), &found);
+        assert_eq!(remembered(&first.key("some text")), Some(found));
+        assert_eq!(remembered(&first.key("other text")), None);
+        let other_config = scanner("/tools/gitleaks-a", "config two");
+        assert_eq!(remembered(&other_config.key("some text")), None);
+        let other_binary = scanner("/tools/gitleaks-b", "config one");
+        assert_eq!(remembered(&other_binary.key("some text")), None);
     }
 
     #[test]

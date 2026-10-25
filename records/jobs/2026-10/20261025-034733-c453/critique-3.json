@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261025-034733-c453",
+  "round": 3,
+  "at": "2026-10-25T18:35:59.744052212Z",
+  "invocation_seq": 8,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/checks.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/checks.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/gh.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/gh.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-data/src/config.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-data/src/config.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The wrapper may never find the pinned nextest inside Athena's own checks, and the plan has nothing that would notice. The check would then quietly fall back to plain `cargo test` and run no faster.",
+      "evidence": "Pinned tools install at `paths::tool_path`, which is under `athena_home()` (crates/athena-data/src/paths.rs:25-31, 58-64). `athena_home()` reads ATHENA_HOME, then XDG_DATA_HOME, then HOME. Checks start from an empty environment (`env_clear`, checks.rs:156). The only variables passed are `env_pass = [\"HOME\", \"PATH\"]` plus the `env_pass_if_set` list (athena.toml:39-50), and neither ATHENA_HOME nor XDG_DATA_HOME is in it. So on any machine that sets either variable, the wrapper inside a check looks in the wrong directory and falls back. The fallback only writes a warning to stderr and still passes. The planned unit tests resolve the path in the test process's own environment, not the check's. The speedup the request asks for, and the after-median the decision promises to measure, could both be wrong without anyone seeing it. Fix: Add `ATHENA_HOME = \"{athena_home}\"` to both capability env tables. The `{athena_home}` template already exists (crates/athena-agent/src/env.rs:13). Then the wrapper resolves the same directory that setup installed into. Have the wrapper print one plain line naming the runner it used (nextest, or fallback cargo test) so it appears in the check tail and job records. State in the decision that after-medians count only jobs whose check used nextest. Add a unit test that builds a check environment from the real athena.toml and asserts ATHENA_HOME is present.",
+      "location": "Decision 2 / Step 4 (wrapper path resolution); athena.toml [capabilities.change.env] and [capabilities.study.env]",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Criterion 3 asks for a checksum pin, but the plan allows an unverified pin to land. A wrong pin makes CI setup fail for every pull request, not just this one.",
+      "evidence": "The plan says the pin values cannot be obtained inside the job and may be marked UNVERIFIED. The setup installer refuses a checksum mismatch (xtask/src/main.rs:272-276), the same behaviour as for gitleaks. If CI installs nextest through setup, a wrong value stops the whole CI job. Fix: Make the CI install fail soft the same way the check does: if the nextest download fails or its checksum mismatches, warn and use the cargo test fallback. Or have Athena ask the user for the pin before production instead of letting it land unverified.",
+      "location": "Decision 6 / Risks (wrong pin)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The demonstration for criterion 5 does not show that the real test check runs nextest. It only shows that the parsers and the exit logic work on sample output.",
+      "evidence": "The producer cannot run nextest (Step 10). Every new test uses invented or documented output. Nothing shows the `test` check counting about 1190 tests through the nextest path. Fix: Say plainly that the first real nextest run happens in CI on the pull request. Have the verifier read the CI log for the nextest summary count plus the doctest count, and check that together they cover the libtest total.",
+      "location": "Demonstrations, criterion 5",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "Verdict: revise. The plan is sound overall and its main claims about the code hold up. I confirmed that `Tools` uses deny_unknown_fields (crates/athena-data/src/config.rs:267), that `count_tests` only understands libtest's `test result:` lines (crates/athena-core/src/checks.rs:29), that `failing_test_name` exists in gh.rs, and that `install_gitleaks` and the ATHENA_NESTED refusal exist in xtask. Each change sits where the fault starts. The three files outside the reading's list (checks.rs, gh.rs, config.rs) are justified, and the plan records why in the decision. Using one `test` check, so CI routing stays unchanged, is a good choice. The major problem is that the wrapper looks for the pinned nextest under athena_home(). Checks get a cleared environment that passes only HOME, PATH and a fixed list, and that list has no ATHENA_HOME or XDG_DATA_HOME. On a machine that sets either one, every check quietly falls back to `cargo test`: no speedup, and a wrong after-median. The fix is small: set ATHENA_HOME from `{athena_home}` in the capability env, and have the wrapper report which runner it used. Two minor points: a CI pin that may be unverified could break all of CI, and nothing in this job shows the real check counting tests through nextest."
+}

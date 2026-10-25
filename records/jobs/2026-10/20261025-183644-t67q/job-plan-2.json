@@ -1,0 +1,235 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261025-183644-t67q",
+  "round": 2,
+  "at": "2026-10-25T18:39:47.722243716Z",
+  "invocation_seq": 4,
+  "approach": "Add an xtask `test` wrapper that runs the suite through the pinned cargo-nextest (installed by setup from a checksum-pinned archive) then a separate `cargo test --doc`. It prints one line, `athena test runner: ...`, naming nextest or the announced `cargo test` fallback. athena.toml's test checks call the wrapper, and both capability env tables get ATHENA_HOME. run_check counts nextest Summary lines as well as libtest lines and records the runner line in the check's note. gh.rs learns nextest FAIL lines. CI installs the pin with setup, and `xtask ci` runs the wrapper with `--require-nextest`, so a missing install fails loudly. Record the measured split as decision D126 and add a CHANGELOG entry. The producer cannot download anything, so it cannot obtain a real version and sha256; it must stop and report if they are not supplied, and must not invent them.",
+  "decisions": [
+    {
+      "choice": "Wrapper lives in xtask (`cargo run --locked -p xtask -- test [--require-nextest]`), called by Athena's check, `xtask ci` and developers.",
+      "reason": "One code path prints the runner line and sets the exit status; plan logic is unit-testable without network.",
+      "rejected": [
+        {
+          "option": "Shell script wrapper",
+          "why": "Policy test allows only Rust or data files."
+        },
+        {
+          "option": "Nextest invocation directly in athena.toml run",
+          "why": "Cannot print a runner line, fall back visibly, or chain the doctest run."
+        }
+      ]
+    },
+    {
+      "choice": "Fallback to `cargo test --locked` stays but is announced in the runner line; `--require-nextest` (used by `xtask ci`, so CI) makes a missing install an error.",
+      "reason": "The user allowed a visible fallback locally; CI must not silently take the slow path.",
+      "rejected": [
+        {
+          "option": "No fallback anywhere",
+          "why": "A machine that has not rerun setup would fail every check."
+        },
+        {
+          "option": "Silent fallback",
+          "why": "The request forbids it."
+        }
+      ]
+    },
+    {
+      "choice": "Pin as `[tools.cargo-nextest]` ToolPin (version plus per-platform sha256), installed by archive download with checksum verification; download/verify code shared with gitleaks.",
+      "reason": "Matches the other tools and avoids minutes of source compile in CI.",
+      "rejected": [
+        {
+          "option": "cargo install --locked (CratePin, D79)",
+          "why": "No archive digest, and compile time defeats the speedup."
+        }
+      ]
+    },
+    {
+      "choice": "Record the runner line in CheckRun.note via run_check; run.rs prints it on its own console line.",
+      "reason": "No record schema change; visible in output, note, verifier view and console.",
+      "rejected": [
+        {
+          "option": "New CheckRun field",
+          "why": "Schema change and tests for no extra visibility."
+        }
+      ]
+    },
+    {
+      "choice": "count_tests sums nextest `N tests run` and libtest `test result:` lines.",
+      "reason": "Keeps the zero-tests rule, counts doctests, and works on the fallback path.",
+      "rejected": [
+        {
+          "option": "Count only nextest output",
+          "why": "Doctests and the fallback would report zero."
+        }
+      ]
+    },
+    {
+      "choice": "D126 records the measured split and alternatives; after numbers pending, computed only from later jobs whose note shows nextest.",
+      "reason": "Evidence default: no unmeasured claim.",
+      "rejected": [
+        {
+          "option": "Estimate an after number",
+          "why": "Would be an unmeasured claim."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "athena.toml",
+      "action": "modify",
+      "purpose": "Add [tools.cargo-nextest], ATHENA_HOME in both env tables, point change and study test checks at the wrapper.",
+      "governance": true,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "purpose": "Optional cargo-nextest pin on Tools; test over the real athena.toml.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "xtask/src/main.rs",
+      "action": "modify",
+      "purpose": "`test` subcommand, --require-nextest, nextest install in setup with shared download helpers, ci() calls the wrapper.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "xtask/tests/policy.rs",
+      "action": "modify",
+      "purpose": "Policy tests for pin, ATHENA_HOME, no filters, ci.yml shape.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/checks.rs",
+      "action": "modify",
+      "purpose": "Parse nextest Summary, runner_line in the note, tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "action": "modify",
+      "purpose": "failing_test_name reads nextest FAIL lines, with tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "purpose": "Print runner note on a console line; verifier detail keeps count beside note.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "action": "modify",
+      "purpose": "Setup installs the pinned nextest; checks step runs xtask ci with the wrapper.",
+      "governance": true,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Add D126 with measured split, alternatives, pending after median.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased entry with the measured split.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Before any code, confirm the nextest version and per-platform sha256 exist in the brief or repo. If not, stop and report.",
+    "In config.rs add the optional cargo_nextest ToolPin to Tools (serde rename \"cargo-nextest\"), keep deny_unknown_fields, and write the real-athena.toml test.",
+    "In athena.toml add [tools.cargo-nextest], ATHENA_HOME in both env tables, and change both test checks to the wrapper command with a comment.",
+    "In xtask/src/main.rs factor download/checksum/unpack out of install_gitleaks, add install_nextest (fails on download error or checksum mismatch), call it in setup, add the `test` subcommand with --require-nextest, runner line, nextest then `cargo test --doc --locked`, either nonzero exit fails; ci() calls it with --require-nextest; add unit tests with an injected runner.",
+    "In checks.rs extend count_tests for the nextest Summary line, add runner_line used in run_check's note, add tests (nextest counts, libtest parse, runner line, nonzero exit, real-config ATHENA_HOME env).",
+    "In gh.rs extend failing_test_name for nextest FAIL lines with tests.",
+    "In run.rs add the runner console line and `N tests ran; note` detail; fix tests asserting the old detail.",
+    "Update ci.yml setup step and add policy tests in xtask/tests/policy.rs.",
+    "Write D126 in docs/decisions.md (before medians 9.7 min checks, 17.6 min producers, 29 jobs; after pending) and the CHANGELOG entry.",
+    "Run cargo fmt --all, cargo clippy --all-targets --locked -- -D warnings, cargo test --locked."
+  ],
+  "risks": [
+    {
+      "risk": "No real checksum is available to the producer, so criterion 3 cannot be met.",
+      "mitigation": "Producer stops and reports; no placeholder is committed; the policy test requires 64-hex."
+    },
+    {
+      "risk": "A fallback run is mistaken for a nextest run, skewing the after median.",
+      "mitigation": "CI uses --require-nextest; locally the runner line, note and console line announce the fallback."
+    },
+    {
+      "risk": "A test fails under nextest's per-test process model.",
+      "mitigation": "Fix the test or report; never skip, filter or ignore."
+    },
+    {
+      "risk": "Nextest output formats drift between versions.",
+      "mitigation": "Pinned version; parser tests use a real-format sample."
+    },
+    {
+      "risk": "Running the wrapper via cargo adds build time per check.",
+      "mitigation": "It reuses the job's target dir; the cost is measured in later jobs, not claimed."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the new decision D126 in the diff.",
+      "command": "git diff -- docs/decisions.md",
+      "observes": "It lists compile 67 s and run 673 s on 4 cores, measured by the brain, and the slowest test binaries; the chosen change (pinned cargo-nextest plus cargo test --doc); and at least three alternatives (sccache per D79, shared target dir, splitting slow tests), each with a reason.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Read the same decision for the before medians and the after-median rule.",
+      "command": "git diff -- docs/decisions.md",
+      "observes": "It states 9.7 min checks, 17.6 min producers and 29 jobs, says after-medians count only later jobs whose check used nextest, and contains no after number.",
+      "fails_without": null
+    },
+    {
+      "criterion": 3,
+      "method": "New policy tests parse the real athena.toml; a `git diff -- athena.toml` read supplements them.",
+      "command": "cargo test --locked -p xtask --test policy",
+      "observes": "[tools.cargo-nextest] has a version and 64-hex sha256 per platform key. The change and study test checks call the wrapper with no --skip, --exclude, --ignored or -E. Both capability env tables set ATHENA_HOME to {athena_home}.",
+      "fails_without": "Removing the pin, ATHENA_HOME or the doctest step, or adding a skip or filter flag to the test check, fails the new policy tests."
+    },
+    {
+      "criterion": 4,
+      "method": "A policy test reads ci.yml; `git diff -- .github/workflows/ci.yml CHANGELOG.md` supplements it.",
+      "command": "cargo test --locked -p xtask --test policy",
+      "observes": "Setup installs the pin before `xtask ci`, which calls the wrapper with --require-nextest; the one `test` check remains; CHANGELOG has an entry with the 67 s and 673 s split.",
+      "fails_without": "If the CI install step or the nextest and doctest commands are removed, the CI policy test fails; a fallback in CI errors because of --require-nextest."
+    },
+    {
+      "criterion": 5,
+      "method": "New unit tests in checks.rs, gh.rs, config.rs and xtask: nextest Summary counts, libtest sample still parsing, nextest FAIL names, env built from the real athena.toml containing ATHENA_HOME, runner line in the note for nextest and fallback, and nonzero nextest or doctest exit failing the check.",
+      "command": "cargo test --locked",
+      "observes": "The whole suite passes.",
+      "fails_without": "Without the parser, the nextest sample counts as zero tests; without the env entry, the real-config test fails; without exit handling, the nonzero-exit tests see a passing check."
+    },
+    {
+      "criterion": 6,
+      "method": "Run clippy with warnings denied, then `cargo fmt --all --check`, over the whole change including the new xtask wrapper and tests.",
+      "command": "cargo clippy --all-targets --locked -- -D warnings",
+      "observes": "Both exit 0 with no output.",
+      "fails_without": "An unused import, unformatted code, or a lint warning in the new wrapper, parser or test code makes clippy (-D warnings) or fmt --check exit nonzero; the criterion then fails."
+    }
+  ],
+  "open_questions": [
+    "The real cargo-nextest version and per-platform sha256 cannot be fetched by the producer; the user or Athena must supply them, else the producer stops and reports.",
+    "The archive URL form (nextest-rs releases, universal-apple-darwin for both mac keys) is from memory and unchecked.",
+    "Producer guidance in crates/athena-context/prompts/producer.md is not a listed deliverable and editing it moves token budgets; leave unchanged unless the brief is extended.",
+    "Whether any test relies on libtest sharing a process across tests; nextest runs each test in its own process."
+  ],
+  "producer_section_sha256": "5844af044dd89b565f8b4fcba37c3e68ce0c56c5db6abd541c838153255a54eb"
+}

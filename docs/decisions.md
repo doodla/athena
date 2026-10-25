@@ -3134,3 +3134,58 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   the pull_request run satisfies the required check). Read: `.github/workflows/ci.yml`,
   `crates/athena-core/src/gh.rs` (`early_run_wait`, `wait_for_early_run`, `EARLY_RUN_JOB`). Not measured: the
   timings, and the outcome above.
+
+## D126 · Fake-job tests no longer start gitleaks again for text it has already scanned
+
+- **Case:** `cargo test` took 673 s to run after a 67 s compile (4 cores; measured by the brain, not re-measured
+  here). The slowest `athena-cli` test binaries were `lifecycle`, `job_plan`, `drain`, `retry` and `steward`. This
+  job found where their time goes by timing one lifecycle test (`a_request_lands_a_traceable_commit`, 9 s alone) in
+  steps (measured here, on this machine): `ask` took 1.7 s and `go` 6 s; 290 git calls took 0.69 s in total; the
+  four check runs took 0.02 s in total once polled quickly; and every one of the 15 gitleaks runs in the job took
+  0.51 to 0.64 s, about 8 s in all. A gitleaks run costs that much whatever it scans, because it loads its default
+  rules on each start. Nothing in the five files sleeps for long (`drain.rs`'s fake runner waits 5 to 300 ms), so
+  the cause in every one of them is the same: real process work, the pinned gitleaks binary, in each fake job's
+  redaction and gate steps. Repeated setup (about 7 git calls per fixture), locks and fixed sleeps are small by
+  comparison.
+- **Decision:** (1) `Gitleaks::scan_text` in `athena-gate` remembers each successful scan of text for the life of
+  the process, keyed by the binary path, the generated configuration and the text, and answers a repeat from
+  memory. The same input under the same rules gives the same findings, so no result changes. Scans of commits
+  (`scan_log`) are not remembered: their findings name commits and their input is a repository that changes. A
+  new unit test covers the key. (2) `run_check` in `athena-core` polls a running check at 2 ms and doubles up to
+  its existing 200 ms cap, instead of sleeping 200 ms every time; the deadline, the cap and the kill switch are
+  unchanged. No `[budget]` value, no `athena.toml`, no `ci.yml` and no tool pin changes, and no test is deleted,
+  ignored or weakened; the five test files and `common/mod.rs` are unchanged.
+- **Measured (this job, this machine; before is each binary run alone with `cargo test --locked --test <name>`
+  at the start, after is its line in one full `cargo test --locked -- -q` at the end):**
+
+  | Binary | Tests | Before | After | Cause found |
+  |---|---|---|---|---|
+  | `lifecycle` | 66 | 172.47 s | 91.24 s | gitleaks runs in each fake job (about 15 per job) |
+  | `job_plan` | 23 | 80.03 s | 36.24 s | the same |
+  | `drain` | 79 | 55.68 s | 32.06 s | the same; its fake runner's 5 to 300 ms waits are small |
+  | `retry` | 13 | 54.15 s | 28.37 s | the same |
+  | `steward` | 10 | 46.03 s | 27.87 s | the same; one test runs 5 jobs and took 26 s alone |
+
+  Test counts are unchanged in these five; `athena-gate` has one more test (119, was 118). The per-binary times in
+  the full run add up to about 405 s of test run (a sum of the "finished in" lines, not a wall-clock reading), so
+  the target of a full run under 6 minutes is not met. What is left was not profiled again after the change; the
+  step timing above suggests the gitleaks runs over commits (about 5 of the 15 per job) are the largest part,
+  which is an inference, not a measurement, and this decision does not touch them.
+- **Alternatives:** (a) **cargo-nextest 0.9.148: rejected.** The brain measured 584 s against 673 s, about 13%, and
+  the user declined it; it is also a new pinned tool. (b) **sccache (D79): considered, not adopted.** It acts on
+  compilation only, and compile is 67 s against a 673 s run (brain-measured); it does nothing for the run.
+  Adoption stays as D79 left it. (c) **A shared target directory: considered, not adopted.** Same reason: it acts
+  on compilation, not on the run.
+  (d) A stand-in gitleaks for fake-job tests, through `ATHENA_GITLEAKS`: rejected, because it would stop the
+  tests that need a real detection (a generated token must stop a landing). (e) Remember scans of commits
+  by their patches too: tried and removed; `lifecycle` took 94.75 s with it against 91.24 s without it (measured,
+  one run each), so it gave no gain.
+- **Tradeoff:** The memory holds each scanned text for the life of the process, which is short for `athena` and
+  one test binary for the tests. A scan that failed to run is never kept. A binary replaced at the same path
+  between two scans of the same text would not be asked again; the pin makes that a new path in practice.
+- **Reversal cost:** Low. Remove `SCANNED` and its two uses in `crates/athena-gate/src/secrets.rs` and the
+  suite is as slow as before; no record or file format depends on it.
+- **Provenance:** Measured in this job: the per-step times of the one lifecycle test and the per-binary before
+  and after times above. Brain-measured, not re-measured: the 67 s compile, the 673 s run, and nextest 584 s
+  against 673 s. Read: `crates/athena-gate/src/secrets.rs`, `crates/athena-core/src/checks.rs`,
+  `crates/athena-cli/tests/common/mod.rs`, `crates/athena-cli/tests/drain.rs`.
