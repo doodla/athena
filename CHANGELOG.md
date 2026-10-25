@@ -238,6 +238,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- The producer deadline `producer_timeout_s` in `athena.toml` rises from 1800 to 3000 seconds. Six producer runs
+  since 2026-10-24 hit the 1800 s deadline and lost all their work, several while doing legitimate work whose
+  targeted test builds take 5 to 10 minutes (as reported). Splitting jobs, a faster suite and keeping work on
+  timeout are queued. See D124.
 - `land::pr_commits` classifies each commit of a pull request (`remote_base..head`) from its content, not from
   an `Athena-Job` trailer (`docs/design/records-history.md` §5.3). Each commit is judged against its first
   parent under the first parent's exclusion rules, by the first rule that applies: it adds a job's closing
