@@ -61,6 +61,8 @@ pub struct CheckReport {
     pub commits: usize,
     pub records: usize,
     pub violations: Vec<Violation>,
+    /// Things to show that do not fail the check, such as a cutover still waiting for its import.
+    pub notes: Vec<String>,
 }
 
 fn short(id: &str) -> &str {
@@ -533,6 +535,7 @@ impl Athena {
             commits: history.commits,
             records: history.records,
             violations,
+            notes: history.notes,
         })
     }
 }

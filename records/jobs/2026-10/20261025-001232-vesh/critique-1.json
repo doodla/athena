@@ -1,0 +1,69 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261025-001232-vesh",
+  "round": 1,
+  "at": "2026-10-25T00:17:30.723678453Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/reconcile.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/reconcile.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-gate/src/lib.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-gate/src/lib.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The cutover_job value is read from the pre-merge HEAD config, which cannot contain it on the cutover landing itself.",
+      "evidence": "Athena::land_pr builds `config = athena_gate::config_at(&self.git, Some(&head))` where head is the local HEAD before the merge (gh.rs:1948-1969). This job is the one that adds cutover_job to athena.toml, so that config has cutover_job = None when this job lands. The landing hook would never fire for the job it is meant for. The reconcile catch-up has the same problem if it reads config from a local HEAD that has not yet pulled the merge. Fix: Read cutover_job from the config at the landed commit (the PR head, or LandingFacts.host_commit after the merge), or from the remote default branch's tip after the merge. Do the same in the reconcile catch-up: read from the remote main tip or from each landing's host_commit, not the local HEAD. Say which commit is used in decisions.md.",
+      "location": "Plan Files: crates/athena-core/src/gh.rs ('Athena::land_pr passes config.history.cutover_job to the sink'); snapshot crates/athena-core/src/gh.rs:1949-1969",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The land test skips the production wiring, so it would pass even when the real land path never runs the cutover.",
+      "evidence": "The demonstration drives `free land_pr with GitLandingRecords::for_remote(..).with_cutover(job)`, which hands the job id in directly. The fault above (config read from the pre-merge HEAD) sits in Athena::land_pr, which this test does not run. Criterion 1 asks that the test land 'the job named by [history] cutover_job via the land path'. Fix: Add a test, or change this one, so that cutover_job comes from athena.toml as the land path really resolves it. The job's candidate commit should set cutover_job and the base should not. Assert that the import and legacy-exempt record appear. If Athena::land_pr is too heavy to drive, factor the 'which cutover_job applies to this landing' choice into a function and test it with a base that lacks the field and a head that has it.",
+      "location": "Demonstrations, Criterion 1",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The required CI job will fail on main after the cutover lands, and the mitigation assumes facts that do not hold for this landing.",
+      "evidence": "In ci.yml (lines 100-153), 'the full history' runs on the push to main, and the merge triggers that push before the landing record, import and exempt record are written. Under Decision 6, once the landing record shows C0, a missing legacy-exempt.json is a LegacyExemptMissing finding. CI can fetch athena/records between the landing and the import. For this specific job, the installed athena that runs `land --pr` may also predate this change. With the config issue above, nothing writes the import until a later catch-up. So the required job can stay red on main for an open-ended time, not a short window. Fix: Pick one and record it in decisions.md: (a) treat C0 as shown only when the import manifest naming C0 is on the records branch. The landing alone keeps the old rules, and the history check prints a visible note (not silent) that the cutover is pending. Or (b) keep Decision 6 but document the expected red window and the exact operator step that clears it, for example `athena status` with the new binary. Option (a) still meets 'exactly as today before C0' and avoids a red required check.",
+      "location": "Decision 6 and Risks (first risk, 'written back to back in the landing hook')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Turning on persist-credentials in the required history job widens the token's exposure. The plan states the change but gives no justification for it.",
+      "evidence": "ci.yml:106 has `persist-credentials: false` for 'the full history'. The attribution job (ci.yml:186-191) turns it on, with a comment, only so it can fetch the records branch. Fix: Copy the attribution job's comment explaining the change, and confirm the workflow permissions are contents: read. Or fetch with an explicit, short-lived token only in the fetch step.",
+      "location": "Plan Files: .github/workflows/ci.yml",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The test setup does not say how the landed commits come to name the cutover job.",
+      "evidence": "LandingRecords::intent refuses commits without a verification (gh.rs:1319-1322), and C0 is found from 'the landing record whose commits name the job'. The plan does not say the scratch repo writes a verification for the job id 20261025-001232-vesh, or a stand-in id that matches the configured cutover_job. Fix: State that the test commits a verification record for the configured job id, so the landing names it. Assert that cutover_commit returns that landing's host_commit and returns None for a landing of another job.",
+      "location": "Demonstrations, Criterion 1 (scratch setup)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The plan should settle the exempt-list source rather than leave it open.",
+      "evidence": "The request says the record is built 'from [history] exempt'. The plan builds it from config_at(C0) and notes that this matches today's tip. Fix: Keep config_at(C0), which ties the record to C0, and say so in decisions.md.",
+      "location": "Open questions (exempt list source)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the plan against the snapshot. The functions it names all exist: check_history_with_exempt, legacy::check_attribution_with_legacy, legacy_exempt_record, RecordsWriter::append_to_remote, the LandingRecords trait, GitLandingRecords, try_reconcile, FindingKind::LegacyExemptMissing and the strict import_records/AlreadyImported. The recursion concern is real, because check_legacy calls check_history_with_exempt at C0, so routing only in check_history is right. The split between the strict importer and a separate cutover importer is sound. The main problem is the wiring. Athena::land_pr reads config from the local HEAD before the merge (gh.rs:1969, config_at(&self.git, Some(&head))). The cutover job is the job that adds cutover_job, so that HEAD does not have it yet. On the one landing that matters, the hook would get None and do nothing. The criterion-1 test injects with_cutover(job) directly into the free land_pr, so it would pass while the production path does nothing. Related: the plan's own mitigation for the CI window where LegacyExemptMissing makes the required job fail (import written right after the landing) does not hold for this landing. The installed athena binary may also predate the change. Expect a period where 'the full history' fails on main until a catch-up runs. Both can be fixed within the plan, so the verdict is revise."
+}

@@ -16,6 +16,7 @@ use crate::pr::{
     observe_merge, store_link,
 };
 use crate::reconcile::{CommitHost, MergedPr, ReconcileRecords, RecordsSnapshot};
+use crate::records_import::{MANIFEST_PATH, import_at_cutover};
 use crate::state::StateDir;
 use crate::{Athena, Ui};
 use anyhow::{Context, Result, bail};
@@ -1323,6 +1324,14 @@ pub trait LandingRecords {
     /// Writes the landing record, **after** the merge was confirmed, and returns its id. Its records commit
     /// takes `head` as a second parent (§6.1).
     fn landing(&self, landing: &LandingFacts) -> Result<RecordId>;
+    /// Runs after the landing record was written, with the host commit the merge made. The records-history
+    /// cutover hooks in here (`docs/design/records-history.md` §4 and §10, D111): when the landed commit's
+    /// `athena.toml` names a `[history] cutover_job`, the import at that job's `C0` and the legacy-exempt
+    /// record are written if they are not on the records branch yet. Returns a line to show when something was
+    /// written. The default does nothing.
+    fn cutover(&self, _host_commit: &str) -> Result<Option<String>> {
+        Ok(None)
+    }
 }
 
 /// What is known about a merge once the host reports it.
@@ -1540,6 +1549,147 @@ impl LandingRecords for GitLandingRecords<'_> {
         )?;
         Ok(id)
     }
+
+    fn cutover(&self, host_commit: &str) -> Result<Option<String>> {
+        // The landed commit's own `athena.toml` names the cutover job: the file that adds the setting is part
+        // of the merge that lands it. A commit that cannot be fetched cannot be read; the reconcile catch-up
+        // then finishes the work from the default branch's tip.
+        if !self
+            .git
+            .ensure_commit(&self.remote, host_commit)
+            .unwrap_or(false)
+        {
+            return Ok(None);
+        }
+        let Some(job) = cutover_job_for(self.git, host_commit) else {
+            return Ok(None);
+        };
+        Ok(self
+            .run_cutover(&job)?
+            .filter(CutoverRun::wrote)
+            .map(|run| run.describe()))
+    }
+}
+
+/// What one run of the cutover did (`docs/design/records-history.md` §4 and §10, D111).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CutoverRun {
+    /// `C0`: the host commit of the cutover job's landing record.
+    pub c0: String,
+    /// The records commit that imported `records/` at `c0` with the manifest, when this run wrote it.
+    pub import: Option<String>,
+    /// Whether this run wrote the legacy-exempt record.
+    pub exempt_written: bool,
+}
+
+impl CutoverRun {
+    /// Whether this run changed the records branch.
+    pub fn wrote(&self) -> bool {
+        self.import.is_some() || self.exempt_written
+    }
+
+    /// A line for a person.
+    pub fn describe(&self) -> String {
+        let mut did = Vec::new();
+        if let Some(commit) = &self.import {
+            did.push(format!(
+                "imported records/ at C0 ({commit} holds the files and the manifest)"
+            ));
+        }
+        if self.exempt_written {
+            did.push("wrote the legacy-exempt record".to_string());
+        }
+        format!("cutover: {} for C0 {}", did.join(" and "), self.c0)
+    }
+}
+
+/// Reads `[history] cutover_job` from the `athena.toml` at `commit`. `None` when the commit has no
+/// `athena.toml`, it does not parse, or it sets no cutover job. The built-in configuration is not consulted:
+/// the setting is only ever what a commit says.
+///
+/// The cutover job is read from the landed commit (after a merge) or the default branch's tip (in the
+/// reconcile catch-up), never from the checkout a landing started in: the job that adds the setting lands
+/// with a checkout that does not have it yet.
+pub fn cutover_job_for(git: &Git, commit: &str) -> Option<String> {
+    let bytes = git.show_file(commit, "athena.toml").ok()??;
+    athena_data::config::Config::parse(&String::from_utf8_lossy(&bytes))
+        .ok()?
+        .history
+        .cutover_job
+}
+
+impl GitLandingRecords<'_> {
+    /// Runs the cutover for `job`, the configured `[history] cutover_job`, against the remote's records
+    /// branch (the local branch is first reset to it). `C0` is the host commit of the landing record that
+    /// lands `job`; `None` when there is none yet. Each of the two records is written only when it is not on
+    /// the branch, each tested by its file: `import-manifest.json` for the import of `records/` at `C0`, and
+    /// `legacy-exempt.json` for the legacy-exempt record, built from `[history] exempt` of `athena.toml` at
+    /// `C0`. When both are missing they go in one commit, so the branch never shows an import without its
+    /// exempt record. A second run writes nothing.
+    pub fn run_cutover(&self, job: &str) -> Result<Option<CutoverRun>> {
+        let Some(tip) = RecordsWriter::new(self.git).sync_from(&self.remote)? else {
+            return Ok(None);
+        };
+        let Some(c0) = athena_gate::attribution::cutover_commit_at(self.git, &tip, job)? else {
+            return Ok(None);
+        };
+        if !self.git.ensure_commit(&self.remote, &c0)? {
+            bail!(
+                "C0 {c0}, the host commit of the landing of job {job}, is not available from remote {}",
+                self.remote
+            );
+        }
+        let has = |path: &str| -> Result<bool> { Ok(self.git.show_file(&tip, path)?.is_some()) };
+        let has_manifest = has(MANIFEST_PATH)?;
+        let exempt = if has(athena_gate::legacy::LEGACY_EXEMPT_PATH)? {
+            None
+        } else {
+            let now = crate::now();
+            let config = athena_gate::config_at(self.git, Some(&c0))?;
+            let record = athena_gate::legacy::legacy_exempt_record(
+                &config.history.exempt,
+                RecordId::generate(now),
+                now,
+            )?;
+            Some(athena_gate::legacy::legacy_exempt_change(&record)?)
+        };
+        let mut run = CutoverRun {
+            c0: c0.clone(),
+            import: None,
+            exempt_written: false,
+        };
+        if !has_manifest {
+            let extra: Vec<Change> = exempt.iter().cloned().collect();
+            run.import = Some(import_at_cutover(self.git, &self.remote, &c0, &extra)?);
+            run.exempt_written = exempt.is_some();
+        } else if let Some(change) = exempt {
+            RecordsWriter::new(self.git).append_to_remote(
+                &self.remote,
+                &format!("Legacy-exempt record for the cutover at {c0}"),
+                &[change],
+                &[],
+            )?;
+            run.exempt_written = true;
+        }
+        Ok(Some(run))
+    }
+}
+
+/// The cutover catch-up of the reconcile step (`athena land` and `athena status` run it first): reads
+/// `[history] cutover_job` from `tip`, the fetched tip of the default branch, and runs the cutover for it, so
+/// a landing whose own run stopped before the import still gets it. The lines are for a person; nothing is
+/// returned when there is nothing to do, and a failure is a line, never an error.
+pub fn cutover_catch_up(sink: &GitLandingRecords<'_>, tip: &str) -> Vec<String> {
+    let Some(job) = cutover_job_for(sink.git, tip) else {
+        return Vec::new();
+    };
+    match sink.run_cutover(&job) {
+        Ok(Some(run)) if run.wrote() => vec![run.describe()],
+        Ok(_) => Vec::new(),
+        Err(problem) => vec![format!(
+            "cutover: the import for job {job} did not finish ({problem:#}); it is tried again next time"
+        )],
+    }
 }
 
 /// Directory of declared-intervention files on the records branch (§5.3). Nothing writes it yet; a missing
@@ -1690,11 +1840,22 @@ pub fn land_pr(job: &LandPr) -> Result<PrReport> {
                         };
                         // The merge is done and stays done: a landing record that cannot be written is a
                         // warning, and reconciliation (§8.1) writes it from the intent.
-                        if let Err(problem) = records.landing(&facts) {
-                            warnings.push(format!(
+                        match records.landing(&facts) {
+                            Err(problem) => warnings.push(format!(
                                 "the pull request was merged but its landing record could not be written \
                                  ({problem:#}); landing-intent record {intent} is on the records branch for reconciliation"
-                            ));
+                            )),
+                            // The cutover runs after the landing record, and a failure of it is a warning
+                            // too: the merge and the record stay done, and the reconcile step of the next
+                            // `athena land` or `athena status` finishes the import.
+                            Ok(_) => match records.cutover(&facts.host_commit) {
+                                Ok(Some(line)) => warnings.push(line),
+                                Ok(None) => {}
+                                Err(problem) => warnings.push(format!(
+                                    "the cutover import did not finish ({problem:#}); the next `athena land` \
+                                     or `athena status` tries it again"
+                                )),
+                            },
                         }
                     }
                     _ => warnings.push(format!(
@@ -4089,6 +4250,220 @@ mod tests {
             assert!(err.to_string().contains("abc123"), "{err}");
             let id = RecordId::parse(JOB).unwrap();
             assert_eq!(verification_id(&JobId::Id(id.clone()), "abc").unwrap(), id);
+        }
+
+        /// The repository's own configuration with `[history] cutover_job` set to the test job, or removed.
+        fn cutover_config(names_job: bool) -> String {
+            athena_gate::BUILTIN_CONFIG
+                .lines()
+                .filter(|l| names_job || !l.starts_with("cutover_job = "))
+                .map(|l| {
+                    if l.starts_with("cutover_job = ") {
+                        format!("cutover_job = \"{JOB}\"")
+                    } else {
+                        l.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n"
+        }
+
+        /// A world whose pull request also adds `athena.toml` (naming the job as the cutover job when
+        /// `names_job`), and whose host merge makes a real squash commit on the remote's default branch.
+        /// Returns the world and that commit. The checkout the landing starts from has no `athena.toml`.
+        fn cutover_world(names_job: bool) -> (World, &'static str) {
+            let mut world = World::new();
+            world
+                .git
+                .run(["reset", "-q", "--hard", &world.base])
+                .unwrap();
+            let mut files = crate::land::fixtures::landed(&world.job);
+            files.push(crate::land::fixtures::plain("b.txt", "b.txt"));
+            files.push(crate::land::fixtures::plain(
+                "athena.toml",
+                &cutover_config(names_job),
+            ));
+            world.add_files(&files, "Work");
+            let tree = world.git.tree_of(&world.head).unwrap();
+            let squash = world
+                .git
+                .commit_tree(&tree, &[&world.base], "Squash", false)
+                .unwrap();
+            world
+                .git
+                .run([
+                    "push",
+                    "-q",
+                    "origin",
+                    &format!("{squash}:refs/heads/trunk"),
+                ])
+                .unwrap();
+            let squash: &'static str = Box::leak(squash.into_boxed_str());
+            world.content = FakeContent(BTreeMap::from([(squash, "verified")]));
+            (world, squash)
+        }
+
+        fn legacy_record_at(world: &World, tip: &str) -> history::LegacyExempt {
+            let bytes = world
+                .bare
+                .show_file(tip, athena_gate::legacy::LEGACY_EXEMPT_PATH)
+                .unwrap()
+                .expect("the legacy-exempt record is on the records branch");
+            match HistoryRecord::parse(&String::from_utf8(bytes).unwrap()).unwrap() {
+                HistoryRecord::LegacyExempt(record) => record,
+                other => panic!("{other:?}"),
+            }
+        }
+
+        #[test]
+        fn cutover_job_is_read_from_the_commit_given_not_the_checkout() {
+            let (world, squash) = cutover_world(true);
+            assert_eq!(cutover_job_for(&world.git, squash).as_deref(), Some(JOB));
+            // The base commit of the landing has no `athena.toml`, and the built-in configuration (which
+            // names this repository's own cutover job) is not consulted for it.
+            assert_eq!(cutover_job_for(&world.git, &world.base), None);
+            let (without, squash) = cutover_world(false);
+            assert_eq!(cutover_job_for(&without.git, squash), None);
+        }
+
+        #[test]
+        fn cutover_land_imports_at_c0_and_writes_the_legacy_exempt_record() {
+            let (world, squash) = cutover_world(true);
+            let mut host = world.host();
+            host.merge_makes = squash;
+            let sink = world.sink();
+            let report = world.run(&host, Some(&sink)).unwrap();
+            assert_eq!(report.link.state, LinkState::Landed);
+            assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
+            assert!(
+                report.warnings[0].contains("cutover: imported records/ at C0"),
+                "{:?}",
+                report.warnings
+            );
+
+            // The landing record, then one commit: the import with its manifest and the legacy-exempt record.
+            let records = world.records();
+            let (landing_commit, landing) = landings(&records)[0].clone();
+            assert_eq!(landing.host_commit, squash);
+            let tip = world.remote_tip().unwrap();
+            assert_eq!(
+                world.bare.parents(&tip).unwrap(),
+                vec![landing_commit],
+                "the import is one commit on top of the landing"
+            );
+
+            // C0 is resolved from the landing record, and the import's self-check passes against it.
+            let c0 = athena_gate::attribution::cutover_commit_at(&world.git, &tip, JOB)
+                .unwrap()
+                .expect("a landing of the cutover job");
+            assert_eq!(c0, squash);
+            crate::records_import::verify_cutover_import(&world.git, &c0, &tip).unwrap();
+            let manifest = world
+                .bare
+                .show_file(&tip, crate::records_import::MANIFEST_PATH)
+                .unwrap()
+                .expect("the manifest is on the records branch");
+            match HistoryRecord::parse(&String::from_utf8(manifest).unwrap()).unwrap() {
+                HistoryRecord::ImportManifest(m) => {
+                    assert_eq!(m.c0, squash);
+                    assert!(!m.paths.is_empty());
+                    for path in &m.paths {
+                        assert!(world.bare.show_file(&tip, &path.path).unwrap().is_some());
+                    }
+                }
+                other => panic!("{other:?}"),
+            }
+            assert!(
+                athena_gate::attribution::manifest_names(&world.git, &tip, &c0).unwrap(),
+                "the history check sees the cutover as shown"
+            );
+
+            // Seven entries, six listed in athena.toml plus 02837e0, each with a reason.
+            let exempt = legacy_record_at(&world, &tip);
+            assert_eq!(exempt.entries.len(), 7);
+            assert!(
+                exempt
+                    .entries
+                    .iter()
+                    .any(|e| e.sha.starts_with("02837e0") && !e.reason.is_empty())
+            );
+            assert!(exempt.entries.iter().all(|e| !e.reason.trim().is_empty()));
+
+            // A landing of another job is not the cutover.
+            assert_eq!(
+                athena_gate::attribution::cutover_commit_at(
+                    &world.git,
+                    &tip,
+                    "20261024-100000-zzzz"
+                )
+                .unwrap(),
+                None
+            );
+        }
+
+        #[test]
+        fn a_land_whose_config_names_no_cutover_job_writes_no_import() {
+            let (world, squash) = cutover_world(false);
+            let mut host = world.host();
+            host.merge_makes = squash;
+            let sink = world.sink();
+            let report = world.run(&host, Some(&sink)).unwrap();
+            assert_eq!(report.link.state, LinkState::Landed);
+            assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+            let tip = world.remote_tip().unwrap();
+            assert!(
+                world
+                    .bare
+                    .show_file(&tip, crate::records_import::MANIFEST_PATH)
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(world.records().len(), 2, "the intent and the landing only");
+        }
+
+        #[test]
+        fn run_cutover_writes_import_and_exempt_record_once() {
+            let (world, squash) = cutover_world(true);
+            let mut host = world.host();
+            host.merge_makes = squash;
+            // Land without the cutover: the sink the land used does nothing on the hook.
+            struct NoCutover<'a>(GitLandingRecords<'a>);
+            impl LandingRecords for NoCutover<'_> {
+                fn base_tip(&self, branch: &str) -> Result<String> {
+                    self.0.base_tip(branch)
+                }
+                fn intent(&self, pr: u64, head: &str, base: &str) -> Result<RecordId> {
+                    self.0.intent(pr, head, base)
+                }
+                fn landing(&self, facts: &LandingFacts) -> Result<RecordId> {
+                    self.0.landing(facts)
+                }
+            }
+            let plain = NoCutover(world.sink());
+            world.run(&host, Some(&plain)).unwrap();
+            let landed_tip = world.remote_tip().unwrap();
+            assert!(
+                world
+                    .bare
+                    .show_file(&landed_tip, crate::records_import::MANIFEST_PATH)
+                    .unwrap()
+                    .is_none()
+            );
+
+            let sink = world.sink();
+            let first = sink.run_cutover(JOB).unwrap().unwrap();
+            assert!(first.import.is_some() && first.exempt_written, "{first:?}");
+            let after = world.remote_tip().unwrap();
+            assert_ne!(after, landed_tip);
+            let second = sink.run_cutover(JOB).unwrap().unwrap();
+            assert!(!second.wrote(), "{second:?}");
+            assert_eq!(world.remote_tip().unwrap(), after, "nothing was written");
+            assert_eq!(
+                sink.run_cutover("20261024-100000-zzzz").unwrap(),
+                None,
+                "a job with no landing has no cutover"
+            );
         }
     }
 }

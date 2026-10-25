@@ -2869,3 +2869,74 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Reversal cost:** Low. Remove the field and the filter in `Plan::build`.
 - **Provenance:** read: `plan.rs`, `reading.rs`, `status.rs`, `display.rs`, `drain.rs`; measured: the tests named
   above under `cargo test`.
+
+## D119 · The records-history cutover: import at C0 when the cutover job lands, and a catch-up that repeats it
+
+- **Case:** D111 moves history to the `athena/records` branch. Build jobs 2 and 5 gave a one-commit importer
+  (`records_import`) and a legacy rule (`check_legacy`, `check_attribution_with_legacy`) that take `C0` as a
+  parameter, and nothing chose `C0` or ran either. The history check, required in CI as "the full history", still
+  judged every commit by its trailers.
+- **Decision:**
+  1. **Which job.** `athena.toml` `[history]` gains an optional `cutover_job`, the id of the job that is the
+     cutover. It is set to job 20261025-001232-vesh, the job that adds it. Unset, nothing below happens.
+  2. **C0.** `C0` is the `host_commit` of the landing record on `athena/records` that lands that job (a landing
+     lands a job when one of its commits names it or the intent it cites does). Nothing else chooses it.
+  3. **Which configuration names the job.** The landed commit's `athena.toml` for the land path
+     (`cutover_job_for(host_commit)`), and the fetched tip of the default branch for the catch-up. Never the
+     checkout a landing starts from: the job that adds the setting starts from a checkout that lacks it. The
+     built-in configuration is not consulted.
+  4. **Import at C0.** `athena land --pr`, after the landing record, calls the `LandingRecords::cutover` hook.
+     `GitLandingRecords::run_cutover` imports `records/` at `C0` with `import_at_cutover`, which appends one
+     commit to the remote records tip: the files, `import-manifest.json`, and the legacy-exempt record. The
+     strict `import_records` (empty branch only) is unchanged; `verify_cutover_import` is the same self-check
+     limited to `records/` and the manifest, because the landing is already on the branch. Failure is a warning on
+     the landing and never undoes the merge.
+  5. **Legacy-exempt record.** Built by `legacy_exempt_record` from `[history] exempt` of `athena.toml` at `C0`
+     (six entries and 02837e0, each with its reason) and written to `legacy-exempt.json`. It goes in the import's
+     own commit, so the branch never shows the import without it.
+  6. **Catch-up.** `Athena::try_reconcile`, the step `athena land` and `athena status` run first, calls
+     `cutover_catch_up` after repairing landing records. It runs the same routine, and each record is written only
+     when its file is missing (`import-manifest.json`, `legacy-exempt.json`), tested on the freshly fetched remote
+     tip. A second run writes nothing, and a branch with the import but no exempt record gets only the exempt
+     record. Its lines appear in the reconcile output.
+  7. **The history check.** `check_history` takes the new path only when the records branch **shows** `C0`: a
+     landing for the cutover job and an import manifest naming that landing's host commit, with `C0` an ancestor
+     of the tip. Then commits up to and including `C0` are judged by the old rules with the exempt list from the
+     legacy-exempt record, and commits after `C0` only by the attribution check against records, so a later
+     commit with no trailer passes. Findings are reported as `job-records` violations (no new rule). Gitleaks
+     still runs over every commit.
+  8. **Before C0.** With no `cutover_job`, no records branch, no landing for the job, or a landing with no
+     manifest yet, `check_history` is `check_history_with_exempt(None)`, exactly today's check; the last case adds
+     a note saying the cutover is pending, and the CLI prints it. The merge triggers CI before the landing and
+     import exist, so keying on the manifest keeps the required check from going red in that gap.
+  9. **CI.** The job keeps its name, "the full history". It fetches `athena/records` before the check, with the
+     token kept (`contents: read`, as the attribution job does). A pull request does not fetch it: its commits
+     cannot be named by a landing before they merge, so its head is judged by the old rules, as before.
+  10. **Trailers.** Commit-message trailers are still written. Ending them is a later job.
+- **Callers and writers touched, with the covering test:** `check_history`:
+  `a_commit_before_c0_is_judged_by_the_old_rules_and_one_after_only_by_records`,
+  `a_commit_after_c0_that_no_landing_names_is_flagged_by_attribution`,
+  `with_no_cutover_job_the_check_is_unchanged_even_when_records_show_a_landing`,
+  `before_the_landing_record_exists_the_check_is_unchanged`,
+  `a_landing_without_its_import_keeps_the_old_rules_and_says_the_cutover_is_pending` (`history.rs`).
+  `land_pr` hook and `run_cutover`: `cutover_land_imports_at_c0_and_writes_the_legacy_exempt_record`,
+  `a_land_whose_config_names_no_cutover_job_writes_no_import`, `cutover_job_is_read_from_the_commit_given_not_the_checkout`
+  (`gh.rs`). `try_reconcile`: `catch_up_imports_at_c0_and_writes_the_legacy_exempt_record_then_writes_nothing`,
+  `catch_up_writes_only_the_legacy_exempt_record_when_the_import_is_already_there` (`reconcile.rs`).
+  `History::cutover_job`: `cutover_job_is_optional_and_the_repo_config_names_the_cutover_job` (`config.rs`).
+- **Alternatives:** (a) Activate on the landing record alone: the required check is red from the merge until the
+  import is written, and for as long as no newer binary runs the catch-up. Rejected for the manifest key. (b) Read
+  `cutover_job` from the checkout at land time: cannot work for the landing that adds it. (c) Import before the
+  landing: `C0` is the landing's host commit, unknown until then. (d) Relax `import_records` to accept an existing
+  branch: changes tested refusals. (e) A new `Rule::Attribution`: touches `lib.rs` and its exhaustive matches for
+  no gain. (f) Run the catch-up from `athena land` and `athena status` separately: the shared reconcile step
+  already exists.
+- **Tradeoff:** After `C0`, the content, invariant and prediction checks no longer run on main's commits; the
+  attribution check and gitleaks do. That is the request's intent and narrows coverage. A cutover whose import
+  fails stays on the old rules, with a pending note, until `athena status` or `athena land` finishes it. A pull
+  request in CI is judged by the old rules, and a person running `athena check --history` on a branch with a local
+  records branch is judged by records.
+- **Reversal cost:** Low before the landing: remove `cutover_job`. After it, the import and exempt record stay on
+  the append-only branch; removing `cutover_job` from `athena.toml` returns the check to the old rules.
+- **Provenance:** read: `records_import.rs`, `legacy.rs`, `attribution.rs`, `history.rs`, `gh.rs`, `reconcile.rs`,
+  `ci.yml`; measured: the tests named above under `cargo test`. Not measured: a run against the real repository.

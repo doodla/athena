@@ -1165,6 +1165,9 @@ fn run(cli: Cli) -> Result<u8> {
                 for v in &report.violations {
                     println!("  - {v}");
                 }
+                for note in &report.notes {
+                    println!("note: {note}");
+                }
                 if history {
                     println!(
                         "checked {} commits and {} record files: {} violation(s)",
