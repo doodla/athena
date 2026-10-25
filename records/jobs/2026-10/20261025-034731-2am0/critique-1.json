@@ -1,0 +1,76 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261025-034731-2am0",
+  "round": 1,
+  "at": "2026-10-25T05:09:39.563202958Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "xtask/Cargo.toml is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, xtask/Cargo.toml",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "Cargo.lock is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, Cargo.lock",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/external_calls.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/external_calls.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/test_support.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/test_support.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The pull_request run of the required job still does a full build, and landing waits for it, so landing does not get faster.",
+      "evidence": "ci.yml:10-12 triggers on both push and pull_request, and the job checks out the PR head sha (line 31), so the landing commit gets two 'fmt, clippy, tests' runs. classify_checks returns Green only when every check run on the commit is completed ('!runs_done -> Pending'), and wait_for_checks polls it for the landing head. Under the plan, the pull_request run cannot read the branch-scoped entry (the plan says this itself) and still does the full ~15-minute build. So athena land keeps waiting about as long as it does today. The plan leaves this core outcome as an open question to be settled by the 'After' measurement, which means the request's goal (stop CI rerunning the full suite on the landing commit) is not met by design. Fix: Fix the pull_request path inside the plan. Options: (a) at verification start, also open or update the PR, then save the marker on pull_request runs too, so the merge-ref scope (refs/pull/N/merge, which lasts across synchronize events) holds an entry the landing's pull_request run can restore; or (b) stop the duplicate run on athena/* branches (for example, restrict the push trigger so only the pull_request run reports the required check), then choose the save scope to match. Whichever you pick, state which run satisfies the ruleset and which runs wait_for_checks waits on. Add a criterion-1 or criterion-3 assertion that the run actually reporting the check on the landing commit can restore the entry.",
+      "location": "Open questions 1 / Decision 3 (no saves on pull_request runs); crates/athena-core/src/gh.rs:1167-1195 (classify_checks), gh.rs:2011 (wait_for_checks)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The replace path must require that the observed remote head equals the early candidate; check_replace alone does not ensure this.",
+      "evidence": "pr.rs:170 check_replace already exists. Remote (gh.rs:571) currently has no force path, and Decision 5 adds a force-with-lease. The lease is pinned to the early candidate. If check_replace is called with remote_head as the freshly observed head, check_replace alone does not ensure that this head equals the early candidate. Fix: In publish, require remote_head == early_candidate before calling check_replace and replace. Add a gh.rs test where the remote head is a different non-descendant commit (for example, a human fix) and assert that nothing is replaced. The plan mentions this test in (c); make the equality check explicit in the code path.",
+      "location": "Decision 5 / Remote::replace",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Test (d) does not show that checks are awaited on the landing commit rather than on the early candidate.",
+      "evidence": "Test (d) only checks that merge is not requested while checks are pending. Under the current fake it does not show that the early push leaves the required-check wait in place on the landing head rather than on the candidate. Fix: Assert that the head passed to host.checks is the landing commit (the replaced head), not the early candidate.",
+      "location": "Demonstration criterion 4 (d)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Limit the Cargo.lock change to xtask's new dependency.",
+      "evidence": "Adding athena-git to xtask is a path/workspace dependency. Cargo.lock changes only in xtask's dependency list. Fix: Note in the plan that the only expected lock change is xtask's dependency entry, and fail review if any other entry changes.",
+      "location": "Steps 1 and 7 (Cargo.lock refresh)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read ci.yml, gh.rs (Remote, work_branch, publish, wait_for_checks, classify_checks) and pr.rs (check_push, check_replace), and found the plan's named code at the stated places: attrs::fingerprint at athena-git/src/attrs.rs:139, check_replace, work_branch and the Remote trait. The xtask design (pure decide/marker functions, an exact key with no restore-keys, saving only after a passing run) covers criteria 1–3 well, and the guarded replace correctly handles the fact that landing builds its own commit, which does not descend from the candidate. The design gap is this: ci.yml runs the required job on both push and pull_request events against the same sha. athena land's wait_for_checks needs every check run on the landing commit to finish (classify_checks). The plan admits the pull_request run cannot read the branch-scoped entry, so it will still do the full build and landing will barely get faster. The plan defers this to an open question rather than solving it, so the request's goal goes undelivered by design. Revise to make the run(s) that gate landing able to reuse the result. Athena's out-of-deliverable file findings are reasonable: those files are needed to compile and to make the early push happen, and the plan flags them."
+}

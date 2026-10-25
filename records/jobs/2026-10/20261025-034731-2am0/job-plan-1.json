@@ -1,0 +1,254 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261025-034731-2am0",
+  "round": 1,
+  "at": "2026-10-25T05:08:36.368234966Z",
+  "invocation_seq": 3,
+  "approach": "Add a \"ci-reuse\" logic module to xtask (`xtask ci` becomes: compute the governed fingerprint of HEAD with athena-git's existing `attrs::fingerprint`; look for a cached pass marker file for that fingerprint; reuse only if the marker parses and says exactly pass for that fingerprint; otherwise run fmt/clippy/test and write the marker only after all pass). ci.yml wraps this with a branch-scoped actions/cache keyed only on `ci-pass-<fingerprint>`: restore step, `xtask ci` (which decides), save step only if the full run passed and the entry was a miss, and only on push events (never pull_request, never main-shared keys). Separately, gh.rs gains `push_candidate_early`, which pushes the candidate to `work_branch(job)` through the `Remote` seam at verification start, best-effort; run.rs calls it just before the verifier runs. Because landing builds its own commit (not a descendant of the candidate), the later publish push must replace the early-pushed candidate; add a narrowly guarded `Remote::replace` (lease on the exact early candidate, job branch only, using existing `check_replace`). Decision log and changelog record the mechanism, the measured before-time, and a pending after-section.",
+  "decisions": [
+    {
+      "choice": "Put the reuse decision in xtask Rust (pure functions: `decide(fingerprint, marker_text) -> Reuse|RunFull`, `marker_text(fingerprint)`), with ci.yml only restoring/saving the marker file via actions/cache.",
+      "reason": "Makes the trust rules testable by `cargo test -p xtask` (criteria 1, 2) and keeps the workflow thin, as its header says. Any missing, failed, malformed or unreadable marker falls to RunFull, so the job can only pass by passing checks or by a well-formed marker for the exact fingerprint.",
+      "rejected": [
+        {
+          "option": "Decide in bash inside ci.yml",
+          "why": "Not unit-testable with the allowed commands; logic would be prose-only."
+        },
+        {
+          "option": "Skip the job with a job-level `if`",
+          "why": "A skipped required check reports success without proof, and the job name must keep reporting a real result."
+        }
+      ]
+    },
+    {
+      "choice": "Reuse athena-git's `attrs::fingerprint` by adding `athena-git` as an xtask dependency (xtask/Cargo.toml and Cargo.lock updated), computing it from HEAD with HEAD as the rules commit.",
+      "reason": "The brief says reuse the existing fingerprint and not change its definition. Records-only and owner-path changes keep the value; governed changes alter it. Cargo.lock must be updated so `--locked` still passes.",
+      "rejected": [
+        {
+          "option": "Re-implement the hash in xtask or a shell `git ls-tree | sha256sum`",
+          "why": "Would duplicate the classification rules and could drift from athena-gate."
+        },
+        {
+          "option": "Hash the whole tree or use hashFiles()",
+          "why": "hashFiles over-includes records/ and would miss on records-only landings."
+        }
+      ]
+    },
+    {
+      "choice": "Cache key is exactly `ci-pass-<fingerprint>` (no restore-keys); the cached file holds `athena-ci-pass v1 <fingerprint>`; saved only by a step that runs after `xtask ci` succeeded (default step-success condition), only on `push` events and only when the restore missed. No step reads records/ or any Athena record. The comment in ci.yml states the trust model.",
+      "reason": "A prefix restore-key could restore the wrong fingerprint; the marker also names its fingerprint so even a wrongly restored file is refused. Failures never save, so a failed or absent entry can never pass. Existing toolchain/registry/target saves stay default-branch only, so main's shared caches are still written only by pushes to main; the new key is written from branch pushes, separate from those shared keys.",
+      "rejected": [
+        {
+          "option": "Save on pull_request runs",
+          "why": "Their cache scope is the merge ref, which the landing push run on the branch cannot read (ci-routing 4.1)."
+        },
+        {
+          "option": "Save under main's shared keys from branches",
+          "why": "Out of scope and lets an unreviewed branch poison shared caches."
+        },
+        {
+          "option": "Trust a record or check result written by Athena",
+          "why": "Out of scope; CI trusts only its own cache."
+        }
+      ]
+    },
+    {
+      "choice": "Early push in gh.rs as `push_candidate_early(remote, ancestry, job, candidate) -> EarlyPush` that guards with `check_push` on `work_branch(job)` and turns any refusal or push error into a returned warning, never an error; run.rs calls it at verification start (after admission, before the verifier snapshot) with `GitRemote` on `origin`, only when origin exists, and prints the warning.",
+      "reason": "The brief asks for the push when verification starts so the branch push run (~15 min) overlaps verification. Verification never depends on it.",
+      "rejected": [
+        {
+          "option": "Push at the start of `athena land --pr`",
+          "why": "Verification has already finished by then, so no time is saved."
+        },
+        {
+          "option": "Fail verification when the push fails",
+          "why": "Criterion 4 forbids it; CI would just run the full job."
+        }
+      ]
+    },
+    {
+      "choice": "Add `Remote::replace(branch, commit, expected)` (git push --force-with-lease pinned to `expected`), and use it in `publish` only when the remote head equals the job's recorded `candidate_commit` and `check_replace` accepts the job branch. Add a `LandPr.early_candidate: Option<&str>` field, passed from `Athena::land_pr` (job.candidate.candidate_commit). All other pushes stay regular fast-forward pushes.",
+      "reason": "Landing builds its own commit (run.rs: 'landing builds its own commit'; land.rs merge-tree), which does not descend from the candidate, so `check_push` would refuse the landing push over the early candidate and break landing. The lease on the exact early candidate cannot overwrite a human fix.",
+      "rejected": [
+        {
+          "option": "Push the early candidate to a different branch",
+          "why": "Cache entries are scoped to the branch the landing run uses; it must be the PR branch."
+        },
+        {
+          "option": "Make the landing commit descend from the candidate",
+          "why": "Changes land.rs and the history rules; far larger than this change."
+        },
+        {
+          "option": "Leave publish as is",
+          "why": "Landing would be refused with NotFastForward after every early push."
+        }
+      ]
+    },
+    {
+      "choice": "Do not change the ruleset, job name, fingerprint definition or main's cache writing.",
+      "reason": "Listed as out of scope.",
+      "rejected": []
+    }
+  ],
+  "files": [
+    {
+      "path": ".github/workflows/ci.yml",
+      "action": "modify",
+      "purpose": "In the `fmt, clippy, tests` job only: add a step to print the fingerprint (xtask), restore the pass marker cache keyed `ci-pass-<fingerprint>`, keep running `xtask ci`, save the marker only after success on push events with a miss; add the trust-model comment. Job name unchanged.",
+      "governance": true,
+      "exists": true
+    },
+    {
+      "path": "xtask/src/main.rs",
+      "action": "modify",
+      "purpose": "Add `fingerprint` and marker/decide logic, make `ci()` reuse a valid marker or run the full checks and write the marker only after all pass; add the tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "xtask/Cargo.toml",
+      "action": "modify",
+      "purpose": "Add the `athena-git` workspace dependency (and dev-deps if needed) so xtask reuses `attrs::fingerprint`. Not governance; needed for the reuse.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "Cargo.lock",
+      "action": "modify",
+      "purpose": "Record the new xtask dependency so `--locked` builds pass (updated by running cargo build once without --locked).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "action": "modify",
+      "purpose": "Add `push_candidate_early`, `Remote::replace` (GitRemote and test fakes), `LandPr.early_candidate`, the guarded replace in `publish`, and the tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "purpose": "Call `gh::push_candidate_early` at verification start (before the verifier snapshot), best-effort, printing any warning. Not in the brief's file list but needed for the push to happen at verification start; flagged below.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/external_calls.rs",
+      "action": "modify",
+      "purpose": "Add `replace` to its `NoRemote` Remote impl (and any LandPr construction) so it compiles; same for crates/athena-core/src/test_support.rs LandPr construction.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/test_support.rs",
+      "action": "modify",
+      "purpose": "Set the new `early_candidate: None` field where it builds `LandPr`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Add D121: measured before-time, mechanism, rejected alternatives, branch-scoped cache explanation, pending 'After' section.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an Unreleased/Added entry.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Add athena-git to xtask/Cargo.toml; in xtask/src/main.rs add `governed_fingerprint(root)` (calling athena_git `Git` + `attrs::fingerprint(git, \"HEAD\", \"HEAD\")`), `marker_text`, `read_marker` (any io/utf8 error -> None), `decide`, and a `ci-fingerprint` subcommand printing the fingerprint for the workflow.",
+    "Change `ci()` to take a marker path ($ATHENA_CI_MARKER or target/ci-pass) and a check runner: reuse only on a valid marker; otherwise run fmt, clippy, test, then write the marker only after all pass. Keep the output line 'ci: fmt, clippy, and tests passed' for the reuse path with a 'reused' note.",
+    "Write the xtask tests (scratch git repos for records/owner/governed cases; marker cases; failing runner writes no marker; workflow-shape test over ci.yml).",
+    "Edit ci.yml's first job: fingerprint step (id), restore of `ci-pass-<fp>` to the marker path, pass the path to `xtask ci`, save step with `if: github.event_name == 'push' && steps.<restore>.outputs.cache-hit != 'true'` placed after the run; add the trust comment; leave all other jobs and the existing saves untouched.",
+    "In gh.rs add `Remote::replace`, implement for GitRemote (`push --force-with-lease=refs/heads/<b>:<expected>`), `push_candidate_early`, `LandPr.early_candidate`, and the replace branch in `publish` guarded by `check_replace`; update FakeRemote, NoRemote and test_support constructors; write the gh.rs tests.",
+    "Call `push_candidate_early` in run.rs before the verifier snapshot (about line 1641) when origin exists; show warnings through ctx.ui; pass `candidate_commit` into LandPr from `Athena::land_pr`.",
+    "Run cargo build once (no --locked) to refresh Cargo.lock, then cargo fmt, clippy -D warnings, cargo test.",
+    "Write D121 in docs/decisions.md using only the brief's measured numbers; leave 'After' pending (optionally fill from `cargo run -p xtask -- walltime` if real post-change landings exist).",
+    "Add the CHANGELOG.md Unreleased/Added entry."
+  ],
+  "risks": [
+    {
+      "risk": "Landing push refused after the early push (candidate not an ancestor of the landed commit).",
+      "mitigation": "Guarded `Remote::replace` with a lease on the exact early candidate; test that any other non-descendant head is still refused."
+    },
+    {
+      "risk": "A stale or poisoned cache entry makes CI pass without checks.",
+      "mitigation": "Exact key on the fingerprint, no restore-keys, marker must name the same fingerprint, parse strictly; saved only after a full pass; tested for missing/failed/malformed/unreadable."
+    },
+    {
+      "risk": "Early push triggers CI on a candidate that later fails verification, wasting minutes or leaving a stray branch.",
+      "mitigation": "Only the job's own athena/<job> branch is pushed; failure is a warning; cost is bounded by one run."
+    },
+    {
+      "risk": "Adding athena-git to xtask slows or breaks `cargo run -p xtask -- setup` build or `--locked`.",
+      "mitigation": "Workspace dependency already built by the workspace; update Cargo.lock and run the three checks."
+    },
+    {
+      "risk": "Fingerprint computed in CI checkout with a detached HEAD or shallow history fails.",
+      "mitigation": "ci.yml checks out fetch-depth 0; any fingerprint error falls to the full run (RunFull), never a pass."
+    },
+    {
+      "risk": "The speed-up may not show on the pull_request run (see open question).",
+      "mitigation": "The decision entry states the mechanism honestly and leaves 'After' pending until measured."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit tests in xtask build a scratch git repo (tempfile + git commands, as athena-git tests do) with .gitattributes marking an owner path athena-exclude, and records/. Store a pass marker for HEAD's fingerprint; commit a change touching only records/ and an owner path; assert the fingerprint is equal and `decide` returns Reuse with the stored marker; commit a change to a governed source file; assert the fingerprint differs and `decide` returns RunFull.",
+      "command": "cargo test -p xtask",
+      "observes": "Tests such as `records_and_owner_only_change_reuses_the_result` and `governed_change_runs_the_full_job` pass: same fingerprint and Reuse for records/owner; different fingerprint and RunFull for governed.",
+      "fails_without": "If the fingerprint ignored nothing (or xtask did not use athena-git's rules), the records-only case would give a different fingerprint and the reuse assertion would fail; if reuse ignored the fingerprint, the governed case would return Reuse and fail."
+    },
+    {
+      "criterion": 2,
+      "method": "Unit tests call `decide` with: no marker, an empty file, a marker saying fail, malformed text, truncated text, a marker naming a different fingerprint, and an unreadable path (a directory where the file should be, read through the real `read_marker` function). Also a test that `run_ci` with a failing check runner writes no marker and returns an error.",
+      "command": "cargo test -p xtask",
+      "observes": "Every one of these yields RunFull (checks run) and a failing run leaves no marker; only the exact well-formed marker for the same fingerprint yields Reuse.",
+      "fails_without": "If a missing/failed/malformed marker counted as a pass, the corresponding assertion would see Reuse instead of RunFull and the test would fail."
+    },
+    {
+      "criterion": 3,
+      "method": "A test in xtask reads .github/workflows/ci.yml (as the existing tests read repo files) and asserts: the job named `fmt, clippy, tests` exists; the cache key for the pass marker is `ci-pass-` plus the fingerprint step output with no restore-keys; the save step has `if` requiring push and a miss and is after `xtask ci`; no step in the job mentions `records/` or `athena/records`; the trust comment is present; the existing toolchain/registry/target save steps still carry the default-branch condition. Review the diff for the same.",
+      "command": "cargo test -p xtask",
+      "observes": "The workflow-shape test passes against the edited ci.yml.",
+      "fails_without": "If the save step ran on pull_request or main-shared keys were saved from branches, or restore-keys were added, the assertions fail."
+    },
+    {
+      "criterion": 4,
+      "method": "Tests in gh.rs with FakeRemote (extended with `replace` and an optional push error): (a) `push_candidate_early` pushes exactly (work_branch(job), candidate) once; (b) with a push error it returns a warning and no error, and a wrong branch/non-fast-forward is not pushed; (c) `publish` over a remote head equal to the early candidate uses `replace` with that expected head, and over any other non-descendant head is still refused; (d) `land_pr` after the early push still waits on `wait_for_checks` (merge not requested while checks are not green, existing green/red tests still pass).",
+      "command": "cargo test -p athena-core",
+      "observes": "New tests such as `early_push_goes_to_the_jobs_own_branch`, `early_push_failure_is_a_warning_not_an_error`, `landing_replaces_only_the_early_candidate`, `landing_still_waits_for_the_required_check` pass.",
+      "fails_without": "If the early push were missing the push list would be empty; if failures propagated the failure test would see an Err; if publish kept check_push alone, landing over the early candidate would be refused."
+    },
+    {
+      "criterion": 5,
+      "method": "Read the new dated entry (D121) in docs/decisions.md: it states the 15.4-minute median over 33 jobs (2026-10-23 to 2026-10-25), mechanism, rejected alternatives, the branch-scoped cache explanation (saved by the run on the PR branch, restored by the landing run on that branch, ci-routing 4.1), and an 'After' section labelled pending with no numbers unless real post-change landings were measured by `cargo run -p xtask -- walltime`.",
+      "command": "git diff docs/decisions.md",
+      "observes": "The entry has all five parts and the After section holds either measured values with their source or the word pending.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Read the CHANGELOG.md Unreleased entry in git diff, and run the three checks.",
+      "command": "cargo test",
+      "observes": "`git diff CHANGELOG.md` shows an added bullet under Unreleased/Added; cargo test, `cargo clippy --all-targets --locked -- -D warnings` and `cargo fmt --all --check` all pass (including with the updated Cargo.lock).",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "A pull_request-event run caches under refs/pull/N/merge and cannot read an entry saved by the branch's push-event run. The landing push run on the branch can; the pull_request run of the same job name may still do a full build. Whether the ruleset is satisfied early enough by the push run's check (same sha, same name) cannot be settled from the repo; the 'After' measurement will show it.",
+    "The brief lists no run.rs, xtask/Cargo.toml, Cargo.lock, test_support.rs or external_calls.rs changes, yet the verification-start push and the new dependency need them. Please confirm they are acceptable.",
+    "Brief says 'through the Host seam'; in the code `Host`/`PrHost` have no push, and the push seam is the `Remote` trait. The plan uses `Remote`.",
+    "The plan changes the stated 'no way to replace a remote head' posture of `Remote` (narrowly: job branch, lease on the early candidate). If that is unacceptable, the alternative is to have landing build on the candidate, which is a larger change.",
+    "ci-routing section 4.1 was not read by the planner; the plan relies on the brief's description of it."
+  ],
+  "producer_section_sha256": "60ab5150aae3f014733260848725a8a2a1c8eb13eff165efe1be731de9a80df6"
+}
