@@ -5,7 +5,7 @@
 //! explicit environment, writes the brief to the child's standard input (so prompts never appear in
 //! argument lists), and reads stream-json events as they arrive. It refuses to start inside a nested run.
 
-use crate::procs::{GRACE, Registry, isolate, kill_group};
+use crate::procs::{GRACE, Registry, deadline_reason, isolate, kill_group};
 use crate::stream::{ResultEvent, StreamState};
 use crate::{
     AgentDriver, AgentInvocation, AgentOutput, DriverError, UsageSink, nested_marker, refuse_nested,
@@ -353,6 +353,7 @@ impl AgentDriver for ClaudeCodeDriver {
         let deadline = clock + spec.timeout;
         let mut state = StreamState::default();
         let mut killed: Option<String> = None;
+        let mut deadline_hit = false;
         loop {
             match rx.recv_timeout(Duration::from_secs(1)) {
                 Ok(line) => {
@@ -364,7 +365,8 @@ impl AgentDriver for ClaudeCodeDriver {
             }
             if killed.is_none() {
                 if Instant::now() >= deadline {
-                    killed = Some(format!("deadline of {}s reached", spec.timeout.as_secs()));
+                    killed = Some(deadline_reason(spec.timeout.as_secs()));
+                    deadline_hit = true;
                 } else if self.registry.stopped() {
                     killed = Some("the kill switch was turned on".into());
                 }
@@ -409,7 +411,9 @@ impl AgentDriver for ClaudeCodeDriver {
                 commands_run,
             ),
             (None, reason) => AgentOutput {
-                outcome: if reason.is_some() {
+                outcome: if reason.is_some() && deadline_hit {
+                    InvocationOutcome::TimedOut
+                } else if reason.is_some() {
                     InvocationOutcome::Killed
                 } else {
                     InvocationOutcome::Error
@@ -664,7 +668,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"num_turns":2,"durat
     }
 
     #[test]
-    fn a_timed_out_invocation_is_killed_with_a_lower_bound() {
+    fn a_timed_out_invocation_is_timed_out_with_a_lower_bound() {
         // M13 (blocks): a timeout kills the group. M14: the record keeps the de-duplicated partial usage.
         let dir = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
@@ -681,7 +685,8 @@ echo '{"type":"result","subtype":"success","is_error":false,"num_turns":2,"durat
             started.elapsed() < Duration::from_secs(20),
             "the kill did not wait for the agent"
         );
-        assert_eq!(out.outcome, InvocationOutcome::Killed);
+        assert_eq!(out.outcome, InvocationOutcome::TimedOut);
+        assert_eq!(out.detail.as_deref(), Some("deadline of 2s reached"));
         assert!(!out.usage_measured);
         assert_eq!(
             out.usage,

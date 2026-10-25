@@ -49,6 +49,18 @@ impl StateDir {
         self.root.join("jobs").join(job.as_str())
     }
 
+    /// Where the work tree of a job whose producer hit its deadline is kept. It lies outside the job's own
+    /// directory, which closing removes, so a retry can start from it.
+    pub fn kept_work_dir(&self, job: &JobId) -> PathBuf {
+        self.root.join("kept").join(job.as_str()).join("work")
+    }
+
+    /// Removes the kept work of `job`, if any, and its now empty parent.
+    pub fn remove_kept_work(&self, job: &JobId) {
+        let dir = self.root.join("kept").join(job.as_str());
+        let _ = (self.remover)(&dir);
+    }
+
     /// Where records of a job are mirrored until they are committed.
     pub fn live_dir(&self, job: &JobId) -> PathBuf {
         self.job_dir(job).join("live")

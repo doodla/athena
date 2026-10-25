@@ -101,6 +101,9 @@ pub enum OutcomeState {
     Blocked,
     Rejected,
     Failed,
+    /// The producer reached its deadline. Its edits are kept and a progress note lists the changed files;
+    /// `athena retry` resumes from them. Records written before this state existed never carry it.
+    TimedOut,
     Stale,
     Dropped,
     Declined,
@@ -116,6 +119,7 @@ impl OutcomeState {
             OutcomeState::Blocked => "blocked",
             OutcomeState::Rejected => "rejected",
             OutcomeState::Failed => "failed",
+            OutcomeState::TimedOut => "timed_out",
             OutcomeState::Stale => "stale",
             OutcomeState::Dropped => "dropped",
             OutcomeState::Declined => "declined",
@@ -130,8 +134,10 @@ impl OutcomeState {
 pub enum InvocationOutcome {
     Success,
     Error,
-    /// Terminated by a deadline, a budget, the kill switch, or the death of its parent.
+    /// Terminated by a budget, the kill switch, or the death of its parent.
     Killed,
+    /// Terminated because its own deadline passed; the detail names the deadline.
+    TimedOut,
     /// The process and its state were lost; recorded later with bounds by `athena close`.
     Missing,
 }
@@ -2290,7 +2296,7 @@ impl AnyRecord {
 }
 
 /// Markdown files allowed under a job directory, beside the JSON records.
-const JOB_MARKDOWN: [&str; 2] = ["brief-producer.md", "brief-verifier.md"];
+const JOB_MARKDOWN: [&str; 3] = ["brief-producer.md", "brief-verifier.md", "progress-note.md"];
 
 /// Checks a file added under `records/`: a record at its canonical location, or an allowed Markdown file.
 /// Returns the parsed record for JSON files.
@@ -2352,6 +2358,21 @@ mod tests {
 
     fn ts() -> Timestamp {
         "2026-10-10T15:30:12Z".parse().unwrap()
+    }
+
+    #[test]
+    fn old_killed_and_failed_outcomes_still_deserialize() {
+        let killed: InvocationOutcome = serde_json::from_str("\"killed\"").unwrap();
+        assert_eq!(killed, InvocationOutcome::Killed);
+        let failed: OutcomeState = serde_json::from_str("\"failed\"").unwrap();
+        assert_eq!(failed, OutcomeState::Failed);
+        let timed_out: OutcomeState = serde_json::from_str("\"timed_out\"").unwrap();
+        assert_eq!(timed_out, OutcomeState::TimedOut);
+        assert_eq!(timed_out.as_str(), "timed_out");
+        assert_eq!(
+            serde_json::to_string(&InvocationOutcome::TimedOut).unwrap(),
+            "\"timed_out\""
+        );
     }
 
     fn job() -> JobId {

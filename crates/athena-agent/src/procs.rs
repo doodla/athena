@@ -16,6 +16,11 @@ pub const GRACE: Duration = Duration::from_secs(5);
 /// The kill-switch file inside a repository's state directory.
 pub const STOP_FILE: &str = "STOP";
 
+/// The reason recorded when an agent's own deadline of `secs` seconds passes.
+pub fn deadline_reason(secs: u64) -> String {
+    format!("deadline of {secs}s reached")
+}
+
 #[allow(unsafe_code)]
 mod sys {
     //! The only unsafe code in Athena: three libc calls, each with its contract stated.

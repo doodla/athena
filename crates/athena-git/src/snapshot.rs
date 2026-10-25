@@ -24,6 +24,10 @@ pub enum SnapshotRepo {
     /// `tree_commit`, uncommitted (a producer retry seeded from a rejected candidate). The change list is
     /// still against the base, and [`Snapshot::unchanged_since_seed`] tells whether the work tree is as seeded.
     BaseThenTree { tree_commit: String },
+    /// One commit, "base", but the work tree holds a copy of the files in `dir` (the kept work of a producer
+    /// that hit its deadline), `.git` left out. The change list is against the base, as for
+    /// [`SnapshotRepo::BaseThenTree`].
+    BaseThenDir { dir: PathBuf },
 }
 
 /// A materialized snapshot.
@@ -75,6 +79,11 @@ impl Snapshot {
             SnapshotRepo::BaseThenTree { tree_commit } => {
                 clear_work_tree(dir)?;
                 materialize(user, &tree_commit, rules_commit, dir)?;
+                snapshot.seed_tree = Some(snapshot.work_tree_tree()?);
+            }
+            SnapshotRepo::BaseThenDir { dir: kept } => {
+                clear_work_tree(dir)?;
+                copy_files(&kept, dir)?;
                 snapshot.seed_tree = Some(snapshot.work_tree_tree()?);
             }
             SnapshotRepo::None | SnapshotRepo::Base => {}
@@ -268,6 +277,45 @@ fn clear_work_tree(dir: &Path) -> Result<()> {
             std::fs::remove_dir_all(path)?;
         } else {
             std::fs::remove_file(path)?;
+        }
+    }
+    Ok(())
+}
+
+/// Copies every file under `from` into `to`, keeping modes and symlinks and leaving the top-level `.git` out.
+fn copy_files(from: &Path, to: &Path) -> Result<()> {
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        if entry.file_name() == ".git" {
+            continue;
+        }
+        let target = to.join(entry.file_name());
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            std::fs::create_dir_all(&target)?;
+            copy_files_below(&entry.path(), &target)?;
+        } else if kind.is_symlink() {
+            std::os::unix::fs::symlink(std::fs::read_link(entry.path())?, &target)?;
+        } else {
+            std::fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
+/// Like [`copy_files`], for a directory below the top level, where a `.git` is an ordinary name.
+fn copy_files_below(from: &Path, to: &Path) -> Result<()> {
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            std::fs::create_dir_all(&target)?;
+            copy_files_below(&entry.path(), &target)?;
+        } else if kind.is_symlink() {
+            std::os::unix::fs::symlink(std::fs::read_link(entry.path())?, &target)?;
+        } else {
+            std::fs::copy(entry.path(), &target)?;
         }
     }
     Ok(())
@@ -522,6 +570,45 @@ mod tests {
                 .unwrap()
                 .contains("candidate")
         );
+    }
+
+    #[test]
+    fn a_snapshot_seeded_from_a_kept_directory_copies_its_files_but_not_its_git() {
+        let (_dir, git, head) = user_repo();
+        let parent = tempfile::tempdir().unwrap();
+        let kept = parent.path().join("kept");
+        write_files(
+            &kept,
+            &[
+                ("src/added.rs", "// kept\n"),
+                ("src/main.rs", "// edited\n"),
+            ],
+        );
+        std::fs::create_dir_all(kept.join(".git")).unwrap();
+        std::fs::write(kept.join(".git/marker"), "old").unwrap();
+        let snap = Snapshot::create(
+            &git,
+            &head,
+            &head,
+            &parent.path().join("snap-dir"),
+            SnapshotRepo::BaseThenDir { dir: kept },
+        )
+        .unwrap();
+        assert_eq!(snap.git().rev_list_reverse("HEAD").unwrap().len(), 1);
+        assert!(!snap.dir().join(".git/marker").exists());
+        assert_eq!(
+            std::fs::read_to_string(snap.dir().join("src/added.rs")).unwrap(),
+            "// kept\n"
+        );
+        let mut paths: Vec<String> = snap
+            .change_list()
+            .unwrap()
+            .into_iter()
+            .map(|c| c.path)
+            .collect();
+        paths.sort();
+        assert!(paths.contains(&"src/added.rs".to_string()));
+        assert!(snap.unchanged_since_seed().unwrap());
     }
 
     #[test]

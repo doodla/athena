@@ -730,6 +730,24 @@ fn the_same_item_failing_twice_is_a_repeated_failure_naming_the_item() {
 }
 
 #[test]
+fn a_timed_out_run_is_retried_to_resume_from_its_kept_work() {
+    let stub = Stub {
+        items: vec!["a"],
+        outcomes: RefCell::new(vec![OutcomeState::TimedOut, OutcomeState::Landed]),
+        ratings: RefCell::new(vec![5]),
+        ..Stub::default()
+    };
+    let report = drain::drain(&stub, limits(5.0), &Quiet).unwrap();
+    assert_eq!(
+        &stub.log()[..4],
+        ["read a", "run a", "reread a", "run a-retry"],
+        "a timed out job is read again, as a rejected or failed one is"
+    );
+    assert_eq!(report.jobs[0].outcome, "timed_out");
+    assert_eq!(report.landed, 1);
+}
+
+#[test]
 fn a_run_with_no_outcome_is_run_again_and_never_retried() {
     // `athena retry` takes only a rejected or failed job; a job with no outcome is still proposed.
     let stub = Stub {

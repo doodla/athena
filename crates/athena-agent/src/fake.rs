@@ -110,7 +110,10 @@ impl AgentDriver for FakeAgentDriver {
             }
         }
         sink.update(&turn.usage, &turn.commands_run);
-        let completed = turn.outcome != InvocationOutcome::Killed;
+        let completed = !matches!(
+            turn.outcome,
+            InvocationOutcome::Killed | InvocationOutcome::TimedOut
+        );
         let u = turn.usage;
         Ok(AgentOutput {
             outcome: turn.outcome,

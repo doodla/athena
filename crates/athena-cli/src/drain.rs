@@ -705,7 +705,12 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 self.push(line);
                 RunStep::Failed {
                     job,
-                    retry: matches!(other, Some(OutcomeState::Rejected | OutcomeState::Failed)),
+                    retry: matches!(
+                        other,
+                        Some(
+                            OutcomeState::Rejected | OutcomeState::Failed | OutcomeState::TimedOut
+                        )
+                    ),
                     read: true,
                 }
             }
