@@ -140,6 +140,9 @@ pub struct PrCommit {
 ///
 /// An error names the commit's sha, the base and the head, and nothing is recorded: a commit nothing
 /// verified must not be written into a landing record. An empty range is an error too.
+///
+/// The head is always the landing commit: the candidate that `go` pushes early, when verification starts, is
+/// replaced by the landing commit before the head is judged (`gh::land_pr`), so it never appears here.
 pub fn pr_commits(git: &Git, remote_base: &str, head: &str) -> Result<Vec<PrCommit>> {
     let listing = git.run(["rev-list", "--reverse", &format!("{remote_base}..{head}")])?;
     let mut commits = Vec::new();

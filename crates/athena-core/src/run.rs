@@ -1640,6 +1640,10 @@ impl Athena {
         closing.candidate = Some(candidate);
         let _ = crate::pin::remove_tree(&work);
 
+        // Verification starts: open or update the job's pull request now, so the host's checks run on the
+        // candidate while the verifier works. It never merges, and a failure is a warning line only.
+        self.early_pr(&id, &c, &ctx.reading.title, ctx.ui);
+
         // The verifier's snapshot: its own two-commit repository, base then candidate, with the base's
         // check-tool configuration in the working tree.
         let verify_dir = job_dir.join("verify");

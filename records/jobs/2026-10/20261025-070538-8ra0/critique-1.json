@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261025-070538-8ra0",
+  "round": 1,
+  "at": "2026-10-25T07:09:30.560487759Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "early_push replaces any head on the branch, which can overwrite someone else's push and bypass land's refusal.",
+      "evidence": "check_replace (pr.rs:170-192) accepts any remote head on the work branch that git can place locally; the ancestry answer is ignored. So step 3 lets early_push force over any head, including a fix someone pushed to athena/<job> after an earlier attempt. That is exactly the case this request retries. early_push then stores link.head = candidate, so land no longer sees a foreign head, and the existing refusal (gh.rs:1797-1805) is silently bypassed. This contradicts Decision 4 (\"only the exact early head can be replaced\") and the risk mitigation (\"Any other head still gets the existing refusal\"). Fix: In early_push: push when the branch is missing or check_push passes (fast-forward). Replace only when the remote head equals the stored pr-early-head marker (or the link's head written by an earlier early push), with the lease pinned to that value. In every other case, print one warning and push nothing. Add a test where a foreign head is on the branch before go: early_push must not replace it, and land must still refuse.",
+      "location": "Plan step 3 (early_push: \"push with check_push, or replace with check_replace when a different head is there\")",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The criterion 1 test does not show the push happens before verification completes.",
+      "evidence": "Criterion 1 requires the push and open_pr to happen \"before verification completes\". The demonstration only asserts \"both happened before go returned\". If the step were moved to after the verdict, for example at closing, the test would still pass, so it does not show the ordering the criterion names. Fix: Have the recording EarlyPush fake and the scripted verifier (or a checks fake) append to one shared event log. Assert that the early push and open_pr events come before the first verifier or check event.",
+      "location": "Demonstrations, criterion 1",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Test (c) for criterion 4 makes a real network call to github.com through GitRemote.",
+      "evidence": "start_with_runner injects only the gh runner. Step 4 still builds a GitRemote over the real origin, and early_push calls remote_head first (step 3). GitRemote::remote_head runs `git ls-remote --heads origin` (gh.rs:589-601). With origin set to https://github.com/example/project.git, the test makes a real network call. In a sandbox it may fail slowly or wait at a credential prompt. The single warning would then come from git, not from the injected failing runner. Fix: Have the test seam take the Remote as well as the runner (for example start_with(req, ui, runner, remote)), so case (c) uses a FakeRemote and a failing runner. Or set GIT_TERMINAL_PROMPT=0 and point origin at an unreachable GitHub-shaped URL. Either way, assert that the warning text comes from the injected host error.",
+      "location": "Demonstrations, criterion 4 case (c) and plan step 4 (start_with_runner)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Code comments and refusal texts that say Athena never replaces or force-pushes a head become partly false.",
+      "evidence": "The code comments say \"nothing replaces it\" and \"Athena ... did not replace the head with the job's commit\". The PushRefusal text says \"Athena never forces a push\" (pr.rs:124). After this change those statements are only partly true. Fix: Update these comments and texts in the same change so they name the one exception: the job's own early head, replaced under a lease.",
+      "location": "Plan step 5 / land_pr comment at gh.rs:1787-1788 and refusal_text at gh.rs:1944-1948",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "No timeout or prompt guard is planned for the git calls the early step makes during go.",
+      "evidence": "The early step adds a network round trip (ls-remote, push, default_branch, open_pr) inside go for every GitHub-origin run. The plan relies on GhClient's bounded retries but says nothing about git push or ls-remote timeouts. Fix: State whether git push and ls-remote in the early step get a timeout or GIT_TERMINAL_PROMPT=0, so a credential prompt cannot stall go.",
+      "location": "Plan step 6 / Decision 5",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Two expected deliverables are left untouched without a stated reason in the change description.",
+      "evidence": "land.rs and lifecycle.rs are expected deliverables, but the plan leaves them unchanged. Fix: Say in the change description that they were deliberately left unchanged and why: the landing flow is in gh.rs, and the silent skip keeps the lifecycle tests green.",
+      "location": "Files / Expected deliverables",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan reads the request correctly, and its main design holds up against the code. land_pr (gh.rs:1775) and publish (gh.rs:1953) exist. The Remote trait (gh.rs:571) has no replace method, so a lease-pinned Remote::replace with a default body is a reasonable seam. check_replace already exists in pr.rs:170 and is never called. The insertion point is right: after `closing.candidate = Some(candidate)` (run.rs:1640) and before `verifier_snapshot` (run.rs:1647), past the admission-refusal return. The marker-file choice correctly avoids breaking PrLink literals in files outside the deliverables. Three problems need a revision. (1) Step 3 makes early_push replace whatever head the remote branch holds. That can overwrite a fix someone else pushed on a retried job, and it breaks the plan's own promise that only the recorded early head is ever replaced. (2) The criterion 1 demonstration only checks that the push happened \"before go returned\", not \"before verification completes\". (3) Test (c) for criterion 4 sends GitRemote's git ls-remote to a real github.com URL. That makes the test depend on the network and lets it hang. I checked all of this by reading gh.rs, pr.rs and run.rs in the snapshot."
+}

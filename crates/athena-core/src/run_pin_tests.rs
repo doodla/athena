@@ -356,6 +356,253 @@ fn a_study_without_a_configured_repository_stops_before_dispatch() {
     assert_eq!(git.head().unwrap(), head, "nothing was committed");
 }
 
+// ---- the early pull request, at verification start ----
+
+const GITHUB: &str = "https://github.com/owner/repo";
+
+/// A UI that keeps every line.
+#[derive(Default)]
+struct Lines(Mutex<Vec<String>>);
+
+impl crate::Ui for Lines {
+    fn line(&self, text: &str) {
+        self.0.lock().unwrap().push(text.to_string());
+    }
+}
+
+/// A content check that is never reached: the fake host reports nothing as merged.
+struct NoContent;
+
+impl crate::pr::Content for NoContent {
+    fn fingerprint_of(&self, _: &str) -> anyhow::Result<String> {
+        unreachable!("the fake host merges nothing")
+    }
+}
+
+/// One `go` run with the early seam holding a recording fake.
+struct EarlyRun {
+    git: Git,
+    athena: Athena,
+    job: athena_data::JobId,
+    fake: std::rc::Rc<crate::test_support::EarlyFake>,
+    seen: Seen,
+    lines: Vec<String>,
+    state: OutcomeState,
+    reason: String,
+    landed: Option<String>,
+    _dirs: (tempfile::TempDir, tempfile::TempDir),
+}
+
+impl EarlyRun {
+    fn warnings(&self) -> Vec<&String> {
+        self.lines
+            .iter()
+            .filter(|l| l.to_lowercase().contains("warning"))
+            .collect()
+    }
+}
+
+/// Runs `go` for a study job with `origin` as the `origin` remote (none when `None`). `setup` shapes the
+/// fake before `go` starts.
+fn early_run(origin: Option<&str>, setup: impl Fn(&crate::test_support::EarlyFake)) -> EarlyRun {
+    let (dir, git) = repo(&config(true));
+    if let Some(url) = origin {
+        git.run(["remote", "add", "origin", url]).unwrap();
+    }
+    let state = tempfile::tempdir().unwrap();
+    let seen: Seen = Arc::default();
+    let athena = athena(&dir, &state, CountingPinner::new(FAKE_SHA), seen.clone());
+    let proposal = athena.ask("study the demo", &Quiet).unwrap();
+    let probe = seen.clone();
+    let fake = crate::test_support::EarlyFake::new(move || probe.lock().unwrap().len());
+    setup(&fake);
+    let guard = crate::gh::early_seam::install(fake.clone(), fake.clone());
+    let ui = Lines::default();
+    let GoResult::Finished(finished) = athena
+        .go(proposal.job.as_str(), AcceptedBy::User, &ui)
+        .unwrap()
+    else {
+        panic!("expected the job to finish");
+    };
+    drop(guard);
+    let lines = ui.0.lock().unwrap().clone();
+    EarlyRun {
+        git,
+        athena,
+        job: proposal.job.clone(),
+        fake,
+        seen,
+        lines,
+        state: finished.state,
+        reason: finished.reason.clone(),
+        landed: finished.landed_commit.clone(),
+        _dirs: (dir, state),
+    }
+}
+
+/// Lands the run's job through `land_pr` with the run's fake as remote and host, over real git ancestry.
+fn land_early_run(run: &EarlyRun) -> anyhow::Result<crate::gh::PrReport> {
+    let landed = run.landed.clone().expect("the job landed locally");
+    let branch = crate::gh::work_branch(&run.job);
+    let squash = run.git.squash_text(&landed)?;
+    let nap = |_: std::time::Duration| {};
+    crate::gh::land_pr(&crate::gh::LandPr {
+        state: &run.athena.state,
+        job: &run.job,
+        branch: &branch,
+        commit: &landed,
+        verified_fingerprint: "unused",
+        pr: crate::gh::PrDraft {
+            title: "t",
+            body: "b",
+            head: &branch,
+        },
+        squash: &squash,
+        host_name: "github.com",
+        repository: "owner/repo",
+        merge_via_rest: true,
+        poll: crate::gh::Poll {
+            attempts: 1,
+            delay: std::time::Duration::ZERO,
+            sleep: &nap,
+        },
+        ancestry: &run.git,
+        remote: &*run.fake,
+        host: &*run.fake,
+        content: &NoContent,
+        records: None,
+    })
+}
+
+#[test]
+fn early_pr_pushes_the_candidate_and_opens_the_pull_request_before_verification_and_never_merges() {
+    let run = early_run(Some(GITHUB), |_| {});
+    assert_eq!(run.state, OutcomeState::Landed, "{}", run.reason);
+    let branch = crate::gh::work_branch(&run.job);
+    let pushes = run.fake.of("push");
+    let opens = run.fake.of("open_pr");
+    assert_eq!(pushes.len(), 1, "{:?}", run.fake);
+    assert_eq!(opens.len(), 1, "{:?}", run.fake);
+    assert_eq!(pushes[0].branch, branch);
+    assert_eq!(opens[0].branch, branch);
+    // The pushed commit is the candidate: a commit in the repository that is not the landed one.
+    assert_eq!(
+        run.git
+            .run(["cat-file", "-t", &pushes[0].commit])
+            .unwrap()
+            .trim(),
+        "commit"
+    );
+    assert_ne!(Some(&pushes[0].commit), run.landed.as_ref());
+    // At both calls only the producer had run: the verifier had not started, let alone finished.
+    assert_eq!(pushes[0].seen, 1);
+    assert_eq!(opens[0].seen, 1);
+    let roles: Vec<Role> = run.seen.lock().unwrap().iter().map(|s| s.0).collect();
+    assert_eq!(roles, vec![Role::Producer, Role::Verifier]);
+    // Push first, then the pull request; no merge, no replace, no warning.
+    let kinds: Vec<&str> = run.fake.calls.borrow().iter().map(|c| c.kind).collect();
+    assert_eq!(kinds, vec!["push", "open_pr"]);
+    assert!(run.warnings().is_empty(), "{:?}", run.lines);
+}
+
+#[test]
+fn a_failing_early_step_leaves_the_outcome_the_same_and_land_proceeds_as_before() {
+    let ok = early_run(Some(GITHUB), |_| {});
+    let bad_push = early_run(Some(GITHUB), |f| f.fail_push.set(true));
+    let bad_open = early_run(Some(GITHUB), |f| f.fail_open.set(true));
+    for run in [&bad_push, &bad_open] {
+        // The job's outcome is the no-failure outcome; the only difference is one warning line.
+        assert_eq!(run.state, ok.state);
+        assert_eq!(run.reason, ok.reason);
+        assert_eq!(run.warnings().len(), 1, "{:?}", run.lines);
+        assert!(
+            run.warnings()[0].contains("could not open the pull request early"),
+            "{:?}",
+            run.lines
+        );
+        assert!(run.fake.of("merge").is_empty());
+    }
+    assert!(ok.warnings().is_empty());
+    assert_eq!(
+        bad_push.fake.of("open_pr").len(),
+        0,
+        "no pull request without a branch"
+    );
+    assert_eq!(bad_open.fake.of("push").len(), 1);
+
+    // Land proceeds in all three. The reference landing:
+    land_early_run(&ok).unwrap();
+    let landed = ok.landed.clone().unwrap();
+    assert_eq!(
+        ok.fake.of("open_pr").len(),
+        1,
+        "land reuses the early pull request"
+    );
+    assert_eq!(ok.fake.of("replace").len(), 1);
+    assert_eq!(ok.fake.of("merge")[0].commit, landed);
+
+    // Push failed: nothing was left on the remote, so land publishes the landing commit as it always did.
+    bad_push.fake.fail_push.set(false);
+    land_early_run(&bad_push).unwrap();
+    assert_eq!(bad_push.fake.of("open_pr").len(), 1);
+    assert_eq!(
+        bad_push.fake.of("merge")[0].commit,
+        bad_push.landed.clone().unwrap()
+    );
+
+    // Push worked and opening failed: the branch holds the early head with no pull request. Land replaces
+    // that head, opens the pull request once, and merges guarded with the landing commit, as in the
+    // reference run.
+    bad_open.fake.fail_open.set(false);
+    land_early_run(&bad_open).unwrap();
+    let kinds: Vec<&str> = bad_open
+        .fake
+        .calls
+        .borrow()
+        .iter()
+        .map(|c| c.kind)
+        .collect();
+    assert_eq!(
+        kinds,
+        vec!["push", "open_pr", "replace", "open_pr", "merge"]
+    );
+    assert_eq!(
+        bad_open.fake.of("merge")[0].commit,
+        bad_open.landed.clone().unwrap()
+    );
+}
+
+#[test]
+fn a_missing_or_non_github_origin_skips_the_early_step_silently() {
+    let local = tempfile::tempdir().unwrap();
+    let lookalike = local.path().join("github.com/example/project.git");
+    std::fs::create_dir_all(&lookalike).unwrap();
+    let lookalike = lookalike.to_str().unwrap().to_string();
+    let local_path = local.path().to_str().unwrap().to_string();
+    for origin in [
+        None,
+        Some(local_path.as_str()),
+        Some(lookalike.as_str()),
+        Some("https://gitlab.example.com/owner/repo"),
+        Some("https://example.com/github.com/owner/repo"),
+    ] {
+        let run = early_run(origin, |_| {});
+        assert_eq!(
+            run.state,
+            OutcomeState::Landed,
+            "{origin:?}: {}",
+            run.reason
+        );
+        // The seam holds a fake, so a step that ran would have recorded a call.
+        assert!(
+            run.fake.calls.borrow().is_empty(),
+            "{origin:?}: {:?}",
+            run.fake
+        );
+        assert!(run.warnings().is_empty(), "{origin:?}: {:?}", run.lines);
+    }
+}
+
 const STUDY_SHA: &str = "6407052f4c521e39401ce2305dfa45d201249827";
 
 /// Commits `studies/<id>/pin.json` for each `(id, url, sha)`.

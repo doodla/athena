@@ -9,6 +9,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Verification start in `athena go` opens or updates the job's pull request, so CI caches by the candidate's
+  fingerprint while the verifier works. The candidate is pushed to the job's own `athena/<job>` branch and the
+  pull request is opened (or, when one is already linked, its branch moved) through the host seam. It never
+  merges. A missing origin, or one that is not an https URL on github.com, is skipped quietly with no output;
+  a failure on a GitHub remote is non-fatal and prints one `warning:` line, and the job's outcome is the same
+  as without the step. `athena land --pr` reuses the early pull request (no second one is opened): it replaces
+  the early head, and only that head, with the landing commit through a pinned replace
+  (`Remote::replace`, behind `check_replace`), then judges the head and merges guarded with the landing commit
+  as before. The early facts are kept beside the job's directory, which `go` removes when it finishes.
+  `Athena::go` and the CLI call sites are unchanged.
 - The 'fmt, clippy, tests' CI job reuses its own earlier pass for unchanged governed content (D121).
   `cargo run -p xtask -- fingerprint` prints athena-git's governed-content fingerprint of `HEAD` (it ignores
   `records/` and owner paths), and `xtask ci-cache check|mark|report` hold the decisions. `ci.yml` looks up

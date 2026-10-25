@@ -1,0 +1,194 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261025-055626-er96",
+  "round": 1,
+  "at": "2026-10-25T07:01:06.090309026Z",
+  "invocation_seq": 3,
+  "approach": "When a job's candidate passes admission in `produce_and_verify` (run.rs, just before the verifier snapshot and checks), call a new `EarlyPr` seam. Its production implementation (`GhEarly`, in gh.rs) uses `GitRemote` and `GhClient` over `GhCli`. A pure function, `early_publish` in gh.rs, takes `&dyn Remote` and `&dyn PrHost`. It pushes the candidate commit to `work_branch(job)`, opens the PR once and stores the PrLink as `land` does. It also stores a small \"early head\" marker file beside the link (pr.rs). It never calls merge. Run.rs logs any error as a warning and ignores it, so the outcome is unchanged. The landing must not break: the landing commit is a different commit (it is built on the branch head and does not descend from the candidate). `land_pr` therefore refuses today, because the remote head differs from the landing commit. Fix: when an open link exists, the marker names the commit now on the remote branch, and that commit is not the landing commit, `land_pr` replaces the branch head with the landing commit. It uses a new `Remote::replace` (git `--force-with-lease` pinned to the early head) behind the existing, currently unused `check_replace` guard. It then clears the marker and carries on to the checks and merge as today, reusing the early PR.",
+  "decisions": [
+    {
+      "choice": "A new `EarlyPr` seam trait, held in `RunContext` and passed down from `go` through `go_job` and `dispatch`. `Athena::go` keeps its signature and uses the production `GhEarly`. A new `go_with_early` takes the seam, so tests inject fakes.",
+      "reason": "The CLI, which is not a deliverable, calls `go` and builds `Athena` literals. Adding an `Athena` field or changing `go`'s signature would force edits there. `RunContext` is local to run.rs and has one constructor (run.rs line 382).",
+      "rejected": [
+        {
+          "option": "A new field on `Athena`",
+          "why": "Every `Athena { .. }` literal (CLI, run_pin_tests.rs, reconcile.rs, invocation.rs) would change."
+        },
+        {
+          "option": "A `Runner` parameter on `go`",
+          "why": "This changes the CLI call sites and drain."
+        }
+      ]
+    },
+    {
+      "choice": "Have `land_pr` replace the branch head via a new `Remote::replace` (force-with-lease on the early head) when the remote head equals the recorded early head. The guard is the existing `check_replace`. `replace` has a default body that bails, so other `Remote` impls (the CLI's `NoRemote`) still compile.",
+      "reason": "The landing commit is not a descendant of the candidate, so a plain push is a non-fast-forward. `check_push` and the open-PR head check in `land_pr` would both refuse. A lease pinned to the exact head Athena pushed cannot clobber anyone else's push. `check_replace` already exists, is tested, and says the job's own branch may be rewritten.",
+      "rejected": [
+        {
+          "option": "Make the landing commit a descendant of the candidate (a merge or a replay)",
+          "why": "This changes the landing commit's shape and the records history, which is out of scope."
+        },
+        {
+          "option": "Leave the early branch alone and push the landing commit to a second branch",
+          "why": "This breaks acceptance criterion 4 (same branch, same PR, no second open)."
+        },
+        {
+          "option": "Push the candidate first and have `land` push a fast-forward on top",
+          "why": "The candidate is not an ancestor of the landing commit, so this is not possible."
+        }
+      ]
+    },
+    {
+      "choice": "Record the early head in a separate state-dir file (`pr-early.json`, load/store/clear helpers in pr.rs), not a new field on `PrLink`.",
+      "reason": "`PrLink` is built as a literal in 9 places, 3 of them in CLI files outside the deliverables. A marker file keeps `land` strict: only a head Athena itself pushed early may be replaced. Any other head still gets today's refusal.",
+      "rejected": [
+        {
+          "option": "An `early: bool` field on `PrLink`",
+          "why": "It edits CLI literals that are outside the deliverables."
+        },
+        {
+          "option": "Treat any remote head equal to `link.head` as replaceable",
+          "why": "This silently widens today's refusal for a fix pushed by hand."
+        }
+      ]
+    },
+    {
+      "choice": "The hook runs after admission passes, before the verifier snapshot, and is synchronous. Every error is shown as a `warning:` line and discarded.",
+      "reason": "The candidate commit exists only after admission, and an inadmissible candidate should not reach CI. CI takes minutes, so the push and PR open cost little by comparison. Swallowing every error meets the requirement that a push failure not fail the job.",
+      "rejected": [
+        {
+          "option": "A background thread",
+          "why": "More machinery for a seconds-long call, and test ordering would be non-deterministic."
+        },
+        {
+          "option": "Push before admission",
+          "why": "A refused candidate would reach CI."
+        }
+      ]
+    },
+    {
+      "choice": "When a link and marker already exist (a retried job with a new candidate), `early_publish` replaces the branch head with the new candidate and does not open another PR. When a link exists without a marker (landing already ran), it does nothing.",
+      "reason": "This keeps one PR per job and never touches a landed or hand-fixed branch.",
+      "rejected": [
+        {
+          "option": "Open a new PR per attempt",
+          "why": "This breaks the reuse requirement."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "action": "modify",
+      "purpose": "Add `Remote::replace`, with a default body that bails, and the `GitRemote` lease push. Add `early_publish` and the `EarlyPr` trait with the `GhEarly` production impl. Teach `land_pr` to replace an early head. Add fake-host tests (FakeRemote `replace`).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/pr.rs",
+      "action": "modify",
+      "purpose": "Add the early-head marker helpers (`store_early`, `load_early`, `clear_early`) beside the link helpers, with tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "purpose": "Add an `early` field to `RunContext` and a `go_with_early` entry point; `go` delegates with `GhEarly`. Thread the seam through `go_job` and `dispatch`. Call it after admission, before the verifier snapshot, logging and ignoring errors. Add the go-flow tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add the entry for the early PR open, CI caching by fingerprint, non-fatal failures, and landing replacing the early head.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "pr.rs: add `early_path`, `store_early`, `load_early`, `clear_early` (JSON in the job's state dir, next to pr-link.json), with a round-trip test.",
+    "gh.rs: add `Remote::replace(&self, branch, commit, expected_head)` with a default bail. Implement it in `GitRemote` as `git push --force-with-lease=refs/heads/<branch>:<expected> <remote> <commit>:refs/heads/<branch>`. Update the trait doc: replacement is allowed only against a named expected head.",
+    "gh.rs: add the `EarlyPush` args struct, `early_publish(&EarlyPush) -> Result<()>` and the `EarlyPr` trait. `early_publish`: if a link and marker exist and the remote head equals the marker, `check_replace` then `replace` to the new candidate and update the link head and marker. If a link exists without a marker, return Ok and do nothing. Otherwise do `check_push`, `default_branch`, `push`, `open_pr`, then `store_link` and `store_early`. Never call `merge`. Add `GhEarly` (git, state): it reads the origin URL with `parse_remote`, builds `GhClient` over `GhCli` and `GitRemote`, and calls `early_publish`.",
+    "gh.rs `land_pr`: make `head` mutable. Before the `head != job.commit` refusal, add the early-head case: if `load_early` matches the remote head and the head is not the landing commit, `check_replace`, `job.remote.replace(branch, job.commit, &head)`, set `head = job.commit` and `clear_early`. Everything else is unchanged.",
+    "gh.rs tests: extend FakeRemote with `replace` (records calls, moves the head). Add `early_` tests: push and open once and no merge; each failure returns Err without a link; early then land opens once and replaces the head with L; the hand-fix head is still refused.",
+    "run.rs: add `early: &'a dyn EarlyPr` to `RunContext`. Add `pub fn go_with_early(..., early: &dyn EarlyPr)`, with `go` calling it with `GhEarly`. Thread `early` through `go_job` and `dispatch`, including its recursive call. In `produce_and_verify`, right after `closing.candidate = Some(candidate)` and before `verifier_snapshot`, call the seam with the job id, the candidate commit `c` and the PR title and body. On Err, `ctx.ui.line(\"warning: ...\")` and continue.",
+    "run.rs tests: reuse the existing fake-driver harness. A recording `EarlyPr` shares an event log with the fake verifier. Assert one early call with the candidate commit before the verifier event. For each failing variant (push, open, no origin) assert the same `GoResult` state and records as the success run. Update existing callers and tests so none reach `GhEarly`.",
+    "CHANGELOG.md: add the entry in the file's existing format.",
+    "Run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Fix any CLI test that implements `Remote`; the default method should keep it compiling."
+  ],
+  "risks": [
+    {
+      "risk": "`--force-with-lease` weakens the 'no way to replace a remote head' stance of the Remote trait.",
+      "mitigation": "`replace` is reachable only from `land_pr` and `early_publish`. Both go through `check_replace` and `work_branch`. The lease is pinned to the exact head the marker records, so any other push to the branch makes git refuse, and the marker is required."
+    },
+    {
+      "risk": "The early step slows the start of verification, or blocks if `gh` or git hangs.",
+      "mitigation": "It is a handful of REST and push calls against minutes of CI. Errors are swallowed. If a hang shows up in practice, run it on a thread."
+    },
+    {
+      "risk": "The early PR body differs from the landing body.",
+      "mitigation": "The PR title and body come from the job title and reading. The merge text comes from `squash`, not the PR body, so merged content is unaffected."
+    },
+    {
+      "risk": "`go` now touches the network, so existing go-flow tests that do not inject a seam would call real `gh`.",
+      "mitigation": "Existing tests go through `go_with_early` with a no-op or recording seam. Only `go` uses `GhEarly`. The producer must check the existing tests, and the CLI integration tests, do not reach `GhEarly`."
+    },
+    {
+      "risk": "Pushing a candidate that fails the fingerprint or an admission check.",
+      "mitigation": "The hook runs only after admission passes. The landing re-asserts the verified fingerprint (`land::plan`), so nothing unverified lands."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Two tests. (a) In the gh.rs tests, call `early_publish` with FakeRemote and FakeHost, and assert one push of the candidate to `athena/<job>`, one `open_pr`, a stored link, and the early marker. (b) A `go_with_early` test over the existing fake-driver harness (reuse the helpers in run_pin_tests.rs) with a recording `EarlyPr`. It logs into one shared event list, alongside the fake verifier's invocation. Assert the early call carries the candidate commit and precedes the verifier event.",
+      "command": "cargo test -p athena-core early_",
+      "observes": "The recorded push and `open_pr` happen once with the candidate sha, and the early event comes before the verifier event.",
+      "fails_without": "With no hook in `produce_and_verify`, the recorded list has no early event and the assertion fails. With the hook after the verifier, the ordering assertion fails."
+    },
+    {
+      "criterion": 2,
+      "method": "Table of cases: the early step fails at the push, at `open_pr`, at `parse_remote` (no origin), and by a seam error. For each, run the same `go_with_early` job and compare the `GoResult` state, its closing records and its job outcome with the no-failure run.",
+      "command": "cargo test -p athena-core early_",
+      "observes": "The outcome is identical in every case: the job is not failed, and a `warning:` line appears in the UI. No link is stored when the open fails.",
+      "fails_without": "If the hook propagated errors with `?`, the job would end failed or `go` would return Err and the equality assertion would fail."
+    },
+    {
+      "criterion": 3,
+      "method": "In the gh.rs tests, assert `FakeHost.merges == 0` and `merge_heads` is empty after `early_publish`. In the run test, a recording seam implements only push and open, so a merge is impossible by construction.",
+      "command": "cargo test -p athena-core early_",
+      "observes": "Zero merge calls from the early step. Merge is requested only in the `land_pr` test, after the early step.",
+      "fails_without": "An early step that called `merge` would raise `merges` above 0 and the assertion would fail."
+    },
+    {
+      "criterion": 4,
+      "method": "In the gh.rs tests: run `early_publish` (candidate C), then `land_pr` with landing commit L, which is not a descendant of C. Use a FakeRemote with a `replace` that moves the head and records the call. Add a negative case where the remote head is not the marker (a hand fix): `land_pr` still refuses with today's text.",
+      "command": "cargo test -p athena-core early_",
+      "observes": "`opened == 1` over the whole sequence, and the same PR number is in the report. FakeRemote receives `replace(branch, L, expected C)`, and its head is L. Merge is requested once, after the replace. The marker is cleared. Hand-fix case: no replace, refusal text as before.",
+      "fails_without": "Without the replace path, `land_pr` bails with the 'not the job's landing commit' refusal. Without link reuse, `opened` would be 2."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the three Athena checks.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All exit 0 with no warnings. The existing land_pr and go tests are unchanged and pass, which shows today's landing is intact when no early step ran.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Read the diff.",
+      "command": "git diff CHANGELOG.md",
+      "observes": "A new entry in the format of the entries above it saying that verification start opens or updates the job's PR so CI caches by fingerprint, that failures are non-fatal, and that the landing replaces the early head.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Whether land.rs and test_support.rs (listed as expected deliverables) need edits. I found none: the early step lives in gh.rs and run.rs, and the test_support FakeHost (cutover fixtures) is a different type from the gh.rs test FakeHost. Edit them only if the go-flow test needs helpers.",
+    "Which existing go-flow harness has a fake driver that reaches verification. I saw only run_pin_tests.rs line 142 onward, not its tests. The producer should reuse it and keep the tests in run.rs or run_pin_tests.rs.",
+    "Whether the `[landing]` setting or the host should gate the early step when there is no GitHub origin. The plan treats it as a swallowed error (`parse_remote` fails), so nothing is skipped explicitly.",
+    "A job that fails verification leaves its early PR open, because nothing closes it. This is out of scope here; the PR should be closed on a later close or retry."
+  ],
+  "producer_section_sha256": "5a84b4c3578f86fdacc8cd9366dfc485120a876e5576fb94845a82b0f6ec7d10"
+}

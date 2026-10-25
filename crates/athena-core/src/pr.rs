@@ -79,6 +79,97 @@ pub fn load_link(state: &StateDir, job: &JobId) -> Result<Option<PrLink>> {
     }
 }
 
+/// Where the early step keeps its facts about a job. It is beside the job's own directory, not inside it,
+/// because the job's directory is removed when `go` finishes, and landing comes after that.
+pub fn early_dir(state: &StateDir, job: &JobId) -> PathBuf {
+    state.root().join("early-pr").join(job.as_str())
+}
+
+/// The file that holds the commit an early push left on a job's branch.
+pub fn early_path(state: &StateDir, job: &JobId) -> PathBuf {
+    early_dir(state, job).join("pr-early.json")
+}
+
+/// The file that holds the link of the pull request opened early. Landing moves it to [`link_path`].
+pub fn early_link_path(state: &StateDir, job: &JobId) -> PathBuf {
+    early_dir(state, job).join("pr-link.json")
+}
+
+/// Writes the link of a pull request opened early.
+pub fn store_early_link(state: &StateDir, job: &JobId, link: &PrLink) -> Result<()> {
+    let path = early_link_path(state, job);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut text = serde_json::to_string_pretty(link)?;
+    text.push('\n');
+    std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))
+}
+
+/// The link of the pull request opened early, or `None` when there is none.
+pub fn load_early_link(state: &StateDir, job: &JobId) -> Result<Option<PrLink>> {
+    let path = early_link_path(state, job);
+    match std::fs::read(&path) {
+        Ok(bytes) => Ok(Some(
+            serde_json::from_slice(&bytes)
+                .with_context(|| format!("parsing {}", path.display()))?,
+        )),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+    }
+}
+
+/// The job's link: the one in its own directory, else the one opened early, which is then moved into its
+/// own directory so every later look finds it there.
+pub fn load_link_or_adopt_early(state: &StateDir, job: &JobId) -> Result<Option<PrLink>> {
+    if let Some(link) = load_link(state, job)? {
+        return Ok(Some(link));
+    }
+    let Some(link) = load_early_link(state, job)? else {
+        return Ok(None);
+    };
+    store_link(state, job, &link)?;
+    let path = early_link_path(state, job);
+    std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+    Ok(Some(link))
+}
+
+/// Records the commit pushed early (at verification start) as the head of the job's branch. Landing replaces
+/// exactly this head, and no other, with the landing commit.
+pub fn store_early(state: &StateDir, job: &JobId, head: &str) -> Result<()> {
+    let path = early_path(state, job);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut text = serde_json::to_string_pretty(&serde_json::json!({ "head": head }))?;
+    text.push('\n');
+    std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))
+}
+
+/// The commit an early push left on the job's branch, or `None` when there was none.
+pub fn load_early(state: &StateDir, job: &JobId) -> Result<Option<String>> {
+    let path = early_path(state, job);
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            let value: serde_json::Value = serde_json::from_slice(&bytes)
+                .with_context(|| format!("parsing {}", path.display()))?;
+            Ok(value["head"].as_str().map(str::to_string))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+    }
+}
+
+/// Forgets the early head once landing has replaced it.
+pub fn clear_early(state: &StateDir, job: &JobId) -> Result<()> {
+    let path = early_path(state, job);
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("removing {}", path.display())),
+    }
+}
+
 /// The ancestry question the push guard asks of git.
 pub trait Ancestry {
     fn is_ancestor(&self, ancestor: &str, descendant: &str) -> Result<bool>;
@@ -319,6 +410,41 @@ mod tests {
         store_link(&state, &job, &l).unwrap();
         assert!(link_path(&state, &job).starts_with(dir.path()));
         assert_eq!(load_link(&state, &job).unwrap(), Some(l));
+    }
+
+    #[test]
+    fn an_early_head_is_stored_loaded_and_cleared() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = StateDir::new(dir.path().to_path_buf());
+        let job = JobId::parse("bootstrap").unwrap();
+        assert_eq!(load_early(&state, &job).unwrap(), None);
+        store_early(&state, &job, "abc123").unwrap();
+        assert!(early_path(&state, &job).starts_with(dir.path()));
+        assert_eq!(load_early(&state, &job).unwrap().as_deref(), Some("abc123"));
+        clear_early(&state, &job).unwrap();
+        assert_eq!(load_early(&state, &job).unwrap(), None);
+        clear_early(&state, &job).unwrap();
+    }
+
+    #[test]
+    fn the_early_files_survive_the_job_directory_being_removed_and_the_link_is_adopted() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = StateDir::new(dir.path().to_path_buf());
+        let job = JobId::parse("bootstrap").unwrap();
+        store_early(&state, &job, "abc123").unwrap();
+        store_early_link(&state, &job, &link("bootstrap")).unwrap();
+        std::fs::create_dir_all(state.job_dir(&job)).unwrap();
+        // What `go` does when it finishes.
+        assert!(state.clean_job(&job).error.is_none());
+        assert_eq!(load_early(&state, &job).unwrap().as_deref(), Some("abc123"));
+        assert_eq!(load_link(&state, &job).unwrap(), None);
+        // Adopting moves the early link into the job's own directory.
+        assert_eq!(
+            load_link_or_adopt_early(&state, &job).unwrap(),
+            Some(link("bootstrap"))
+        );
+        assert_eq!(load_early_link(&state, &job).unwrap(), None);
+        assert_eq!(load_link(&state, &job).unwrap(), Some(link("bootstrap")));
     }
 
     struct Fixed(bool);

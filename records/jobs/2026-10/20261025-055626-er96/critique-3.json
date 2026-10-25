@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261025-055626-er96",
+  "round": 3,
+  "at": "2026-10-25T07:04:45.345629211Z",
+  "invocation_seq": 7,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "GhEarly on the Athena::go path will print a 'warning:' line in CLI tests that assert no warning appears, so cargo test fails (criterion 5).",
+      "evidence": "lifecycle.rs go_with_script and go_with_cache call athena.go(...) and reach verification (outcomes Landed and Rejected). assert_cache_gone_and_reported (lifecycle.rs:2627-2631) asserts `!said(ui).iter().any(|l| l.contains(\"warning\"))`. A grep of lifecycle.rs for 'origin' or 'remote' finds no remote setup, so GhEarly's `git remote get-url origin`/parse_remote fails. Decision 5 turns every error into a 'warning:' line. The CLI test files are not deliverables, and the plan's mitigation (go_with_early with a no-op seam) covers only the athena-core tests. The lifecycle suite alone has about 50 go calls (counted with grep). Fix: Settle open question 3 in the plan. GhEarly skips without printing a warning when origin is missing or is not a GitHub remote, and the skip is a quiet no-op or a line without the word 'warning'. Only a failure after the host is known (push, open_pr) prints a warning. Add a test that runs go with no origin and checks that no warning line appears, and list the CLI lifecycle tests as a known check in criterion 5.",
+      "location": "Decision 1 / Decision 5 / Risks 'Existing go tests would call real gh' / Open question 3; crates/athena-cli/tests/lifecycle.rs:2601-2658",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "On the link path, the plan does not say that link.head must be updated to the landing commit after the replace and before the head check and merge guard.",
+      "evidence": "land_pr reads remote_head, sets link.head = head, and refuses when head != job.commit. If replace_early_head runs after that read without the value being read again or set to L, the stale C is compared or passed to host.merge(link.pr_number, &link.head, ...). Fix: State in step 5 that replace_early_head runs before the remote_head read at gh.rs:1789, or that it sets link.head to L and stores the link on success. In the criterion 4 test, assert that the merge is guarded with L (merge_heads == [L]).",
+      "location": "Step 5; gh.rs:1789-1805",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "In production, GhEarly needs a gh Runner, but Athena::go has none; the plan does not name where one comes from.",
+      "evidence": "Athena::land_pr takes `runner: &dyn Runner` from the CLI (gh.rs:2099). Athena::go(job_ref, accepted_by, ui) at run.rs:142 has no runner. GhCli implements Runner (gh.rs:52). Fix: Say that GhEarly builds GhCli itself (or say which runner it uses), with a HostErrorLog in a suitable WorkPhase, so the go signature and the CLI call sites stay unchanged.",
+      "location": "Decision 1 / Step 4",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan fits the request and the accepted reading. Everything it names exists in the snapshot: Remote (gh.rs:571), the stale comments at gh.rs:574-577 and 1787-1788, land_pr (1775), publish (1953), work_branch (1215), Athena::land_pr with the title and body built at 2132-2137, check_push and check_replace (pr.rs:134 and 170; check_replace is not yet called outside tests), and RunContext, produce_and_verify and verifier_snapshot in run.rs. The design holds up: the marker is written right after the push, and the lease-pinned replace goes through check_replace on both landing paths. The demonstrations would fail without the behavior. One problem stops me accepting it. Athena::go switches to GhEarly in production, and the CLI integration tests call Athena::go directly. Those tests are not deliverables, so the producer cannot change them, and at least two of them assert that no line contains \"warning\". Their fixtures have no GitHub origin, so with the plan as written GhEarly fails and the plan prints a warning: line. That breaks criterion 5. The plan's own risk list leaves this to the producer to \"check\", and open question 3 leaves it undecided. The planner needs to settle it."
+}

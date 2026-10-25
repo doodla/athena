@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261025-074335-zyqr",
+  "round": 2,
+  "at": "2026-10-25T07:49:34.676512815Z",
+  "invocation_seq": 6,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "Early PRs for jobs that fail verification stay open, and the plan does not mention it.",
+      "evidence": "The early step opens a PR for every admitted candidate. If verification then fails, or the job is abandoned, nothing in the plan closes the PR or deletes athena/<job>. So the plan leaves open PRs that will never land, each named 'Verification in progress'. Fix: Add this as a risk. Say in CHANGELOG.md that failed jobs leave their early PR open. Or name it as follow-up work; closing PRs needs a new PrHost method, which is out of scope.",
+      "location": "Plan Risks / Decision 4; run.rs produce_and_verify",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The synchronous early step delays the start of verification.",
+      "evidence": "early_pr runs synchronously on the go thread before verifier_snapshot. A slow git push, or GhClient retries, delays the start of verification by that much, and that works against the stated goal of a faster pipeline. Fix: State the bound in Risks: the GhClient retry limit and the git push time. Note that running the step in the background was rejected to keep go simple and deterministic.",
+      "location": "Step 6 (run.rs call before verifier_snapshot)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The land half of criterion 2 does not say how land avoids the real remote.",
+      "evidence": "Athena::land_pr (gh.rs:2096–2155) builds a real GitRemote and GitLandingRecords::for_remote. The cfg(test) seam described covers only the early step. Land at the Athena level with an https origin would try a real push. Fix: Say that the land half of criterion 2 uses the free land_pr through the test_support.rs helper (line 411–423), with the same FakeRemote state and the pr-early.json that go wrote. Or say the seam also covers Athena::land_pr.",
+      "location": "Demonstration for criterion 2, 'Then run land on (b) and (c)'",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The 'no verification record present' check names no file.",
+      "evidence": "The plan does not name the file or record whose absence it checks, and verification results may be written only at closing. Fix: Name the exact path or record that is checked, or rely only on the verifier invocation count.",
+      "location": "Demonstration for criterion 1",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read gh.rs, pr.rs and run.rs and checked the plan against them. The plan fits the code. `check_replace` and `ReplaceRequest` already exist in pr.rs (lines 152–192) and nothing calls them yet, so using them is natural. `Remote` (gh.rs:571) has no replace method, and its docs say there is \"deliberately no way to replace a remote head\". The plan adds a default-bodied method and updates those docs. That keeps `NoRemote` in crates/athena-cli/tests/external_calls.rs:437 compiling. `publish` (gh.rs:1953) calls `check_push`, which would refuse to put L over C, so the plan's state-file-then-replace design fixes a real failure mode. `parse_remote` (gh.rs:1199) uses `url.find(HOST)`, so the https guard is justified. `produce_and_verify` runs on the caller's thread: run.rs:418 calls it directly and run.rs has no spawn, so the thread-local seam will reach it. The insertion point after admission (run.rs:1640) and before `verifier_snapshot` (run.rs:1647) means only admitted candidates are pushed. Each demonstration covers its criterion and would fail without the behavior. The remaining issues are minor: early PRs are left open when verification fails, the early step blocks verifier start, and the criterion-2 land step needs a stated route."
+}
