@@ -1054,3 +1054,8 @@ It should become demonstrably less likely to make the same kind of mistake again
 
 * Everything you're keeping track of, Athena should
 * Relay note: "you" is the operator. What the operator has been tracking outside Athena (the order of next work, the remaining records-history build steps and their preconditions, items waiting on Sri, measurements still owed, known traps) moves into Athena as queued requests with their dependencies stated, so `athena plan` and `athena status` show it. The operator works from Athena's plan and runs work through Athena (`athena drain`), and logs any tracking it still does outside Athena as an intervention.
+
+### 2026-10-25: Close the learning loop; a sanity-and-housekeeping role
+
+* Yes, queue them all. I also want something that sanity checks the system and keeps everything neat and clean. Does our pantheon have anything that'll get built?
+* Relay note: "them all" are the operator's proposals of that conversation: a system-facts file the planner and critic always read; read-only git history and the budget printout for the planner and critic; the top recurring failure classes shown to the planner and critic; running `athena propose` automatically; and `athena status` evaluating the job-planning keep rule. For the second part the operator pointed to Hestia (continuity: knowledge, documentation, operational health, long-term quality), with Hades's cleanup folded in until evidence calls for a separate role, per decision 2A.
