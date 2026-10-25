@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261025-074335-zyqr",
+  "round": 1,
+  "at": "2026-10-25T07:47:39.753132182Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "If the early push works but open_pr fails, land later fails, which breaks criterion 2.",
+      "evidence": "Step 3 runs push, then default_branch, then open_pr, and only then stores the link and the early head. If open_pr fails after the push worked, the remote branch athena/<job> holds the candidate C, but there is no link and no early head on disk. At land, land_pr finds no link and calls publish. publish calls check_push with remote_head = C and local_head = L. The plan itself says L does not descend from C, so check_push returns NotFastForward and land fails. Step 5's replace path does not help: it only runs when a link exists, and publish runs before it. Fix: Record the early head as soon as the push succeeds, before default_branch and open_pr. Make the no-link path in land_pr (publish) also accept a remote head equal to the stored early head: check_replace, then replace with L, then open_pr. Extend the criterion-2 demonstration to run land after the failing early push or open_pr, and show the landing (merge_heads == [L]) matches the no-failure case.",
+      "location": "Plan step 3 (open_early_pr order) and step 5 (land_pr replace path); gh.rs:1953-1967, pr.rs:141-147",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The claim that a path origin fails parse_remote is false: any URL containing 'github.com', including local paths, passes, and CLI tests use such origins.",
+      "evidence": "parse_remote calls url.find(HOST), so a filesystem path containing 'github.com' passes. reconcile.rs adds origin as <tmp>/github.com/example/project.git, a local path that parses as a GitHub remote. In any CLI test that runs go with such an origin, the early step would really push to the local bare repository and run `gh`. That can print a 'warning:' line, which breaks criteria 4 and 5, and it can leave a pushed branch with no link that makes a later land fail. Fix: Find which CLI tests run go with a github.com-like path origin, and handle them explicitly. Either treat only real network URLs (https:// or similar, no local path) as GitHub for the early step, or confirm those tests' fake gh accepts the open_pr call and that land still succeeds afterwards. Correct the risk text. Add a demonstration with a path origin containing 'github.com' that shows no 'warning' line and a land that still succeeds.",
+      "location": "Plan decision 4, Risks and criterion-4 demonstration; gh.rs:1199-1211; athena-cli/tests/reconcile.rs:98-108",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The early PR's title and body are not specified.",
+      "evidence": "Land builds the PR body from verification.summary, which does not exist yet when verification starts. Land reuses the early PR and never calls open_pr again, so whatever the early step writes stays. Fix: Specify the early title and body (for example job.title() and a 'verification in progress for job <id>' body), and say whether land edits the body or leaves it as is.",
+      "location": "Plan steps 3-4; gh.rs:2132-2137",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The criterion-1 demonstration does not show how a test sees that the early calls came before verification finished.",
+      "evidence": "The fakes record push and open_pr calls, but the plan does not say how their timing relative to verification is observed. Fix: Have the fake push or open_pr record whether the verification record exists at call time, or record the fake driver's verifier invocation count, and assert the early calls came first.",
+      "location": "Criterion-1 demonstration",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The Remote trait docs say it can never replace a remote head, which Remote::replace contradicts.",
+      "evidence": "The trait docs say 'There is no force option' and 'There is deliberately no way to replace a remote head.' Fix: Update these doc comments in the same change. Explain that replace is lease-pinned and only reached through check_replace for the job's own early head.",
+      "location": "gh.rs:574-578",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The plan does not say which host-error log or work phase the early GhClient uses.",
+      "evidence": "land_pr builds GhClient with a HostErrorLog tied to WorkPhase::Landing (gh.rs:2143-2148). Fix: Say whether the early step attaches a HostErrorLog and which WorkPhase it records under, or state that it attaches none.",
+      "location": "Plan step 4",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan fits the request and the accepted reading. The code it names all exists: `Remote`/`GitRemote` (gh.rs:571-626), `check_replace` and `check_push` (pr.rs:134-192), `land_pr` and `publish` (gh.rs:1775, 1953), `parse_remote` (gh.rs:1199), the point after `closing.candidate = Some(candidate)` at run.rs:1640, and `make_athena` (test_support.rs:451). The candidate commit is built in `self.git` (run.rs:1586), so pushing it from the user's repository can work. Two design flaws would break criteria. (1) The early step stores the early head only after `open_pr` succeeds. If the push works but `open_pr` fails, the branch holds the candidate with no link and no stored early head. At land, `publish` then calls `check_push`, which refuses because the candidate is not an ancestor of the landing commit L (pr.rs:141-147). Land fails, so criterion 2 is broken, and the plan's criterion-2 test compares only the `go` outcome, not a later land, so it would not catch this. (2) The plan says a path origin is skipped because it fails `parse_remote`. In fact `parse_remote` matches any URL containing \"github.com\" (gh.rs:1202), and the CLI tests already use path origins such as `<tmp>/github.com/example/project.git` (reconcile.rs:98-108). In those runs the early step would really push and call `gh`, which can print warnings or later make land fail. Smaller gaps: the PR title and body for the early open are not specified, the 'before verification completes' check is vague, and the trait comment that forbids replacing a remote head needs updating."
+}

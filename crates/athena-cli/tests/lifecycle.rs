@@ -225,6 +225,12 @@ fn a_request_lands_a_traceable_commit() {
         fx.file("README.md").unwrap().contains("Hello, reader."),
         "the change is in the checkout"
     );
+    // The fixture has no GitHub origin, so the early pull-request step is skipped without a word.
+    let lines = ui.0.lock().unwrap().clone();
+    assert!(
+        !lines.iter().any(|l| l.to_lowercase().contains("warning")),
+        "no warning line: {lines:?}"
+    );
 
     let head = fx.head();
     let trailers = fx.git.trailers(&fx.git.message(&head).unwrap()).unwrap();

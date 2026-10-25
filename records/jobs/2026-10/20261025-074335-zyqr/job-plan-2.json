@@ -1,0 +1,257 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261025-074335-zyqr",
+  "round": 2,
+  "at": "2026-10-25T07:48:16.800551604Z",
+  "invocation_seq": 5,
+  "approach": "Add an early step in `produce_and_verify` (run.rs), after `closing.candidate` is set and before `verifier_snapshot`. A generic `open_early_pr` in gh.rs pushes the candidate to `work_branch(job)` and then opens the PR. It never merges. `Athena::early_pr` finds `origin`, runs only for real https GitHub URLs, and builds its own `GhCli`/`GhClient`/`GitRemote`, so the `go` signature is unchanged. Any error becomes one `warning:` line. The early head is stored in a state-dir file right after the push succeeds, before `open_pr`. `land_pr` handles both the link case and the no-link case. If the remote branch holds exactly the stored early head, it takes a lease-pinned `Remote::replace` to L, guarded by `check_replace`. It then reuses the link or calls `open_pr` once. It sets `link.head = L` before the head check and merges guarded with L. A cfg(test) thread-local seam lets tests drive real `go` with fakes.",
+  "decisions": [
+    {
+      "choice": "Persist the early head (pr-early.json via store_early/load_early in pr.rs) immediately after a successful push, before default_branch and open_pr. land_pr's no-link publish path also accepts a remote head equal to the stored early head: check_replace, replace with L, then open_pr as today.",
+      "reason": "If the push works and open_pr fails, the remote holds candidate C with no link. L does not descend from C, so check_push would refuse and land would fail, breaking criterion 2. Recording first and letting both land paths replace the early head removes this.",
+      "rejected": [
+        {
+          "option": "Store the link and head only after open_pr",
+          "why": "Leaves an unrecorded pushed branch when open_pr fails, so land fails (finding 1)."
+        },
+        {
+          "option": "Delete the remote branch when open_pr fails",
+          "why": "Needs a delete operation on the Remote seam that does not exist, and the delete could also fail."
+        }
+      ]
+    },
+    {
+      "choice": "Add `Remote::replace(branch, commit, expected_old)` with a default error body. GitRemote overrides it with `git push --force-with-lease=refs/heads/<b>:<old>`. Update the Remote trait docs ('no force option', 'deliberately no way to replace a remote head') to say replace is lease-pinned and reachable only through check_replace for the job's own stored early head.",
+      "reason": "L is built from the user's head and does not descend from C, so a plain push would be refused. The default body keeps the impl in external_calls.rs compiling. The docs must not contradict the code (finding 5).",
+      "rejected": [
+        {
+          "option": "Required trait method",
+          "why": "Breaks the external_calls.rs impl, which is not a deliverable."
+        },
+        {
+          "option": "Unpinned force push",
+          "why": "Could clobber someone else's push."
+        }
+      ]
+    },
+    {
+      "choice": "The early step runs only when `git remote get-url origin` succeeds, the URL starts with `https://`, and `parse_remote` returns Ok. Everything else (no origin, a path, a file URL, a path that merely contains 'github.com') is skipped silently.",
+      "reason": "parse_remote uses url.find(HOST), so a local path like <tmp>/github.com/example/project.git, as in athena-cli/tests/reconcile.rs, parses as GitHub. Without the guard the early step would push to that local bare repo and run gh, which could print a warning and leave a pushed branch. The scheme guard makes those tests skip silently and keeps land unchanged for them.",
+      "rejected": [
+        {
+          "option": "Rely on parse_remote alone",
+          "why": "Accepts local paths containing 'github.com' (finding 2)."
+        },
+        {
+          "option": "Change parse_remote",
+          "why": "Land and other callers depend on it; the change would alter their behavior."
+        }
+      ]
+    },
+    {
+      "choice": "The early PR uses the job's title as its title. The body is 'Verification in progress for job <id>. This pull request is updated when the job lands.' Land reuses the PR and leaves title and body as they are.",
+      "reason": "No verification summary exists at verification start. The brief forbids a second open_pr, and land has no edit-body call on PrHost.",
+      "rejected": [
+        {
+          "option": "Edit the body at land",
+          "why": "Needs a new PrHost method, which is out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "The early GhClient attaches no HostErrorLog and records no WorkPhase. Failures only surface as the one warning line.",
+      "reason": "WorkPhase::Landing is for the landing ledger. Early failures are non-fatal and should not appear as landing errors (finding 6).",
+      "rejected": [
+        {
+          "option": "Log under WorkPhase::Landing",
+          "why": "Would mislabel a pre-verification step."
+        }
+      ]
+    },
+    {
+      "choice": "Use a #[cfg(test)] thread-local seam in gh.rs holding fake Remote and PrHost, with an RAII guard that clears it. Tests install it, run real `Athena::go`, and read the recorded calls.",
+      "reason": "Athena has no injectable host field, and adding one breaks every literal. The seam shows that `go` itself triggers the step.",
+      "rejected": [
+        {
+          "option": "New field on Athena",
+          "why": "Breaks the Athena literals in many files and the CLI."
+        },
+        {
+          "option": "Test only open_early_pr",
+          "why": "Would not show that go calls it."
+        }
+      ]
+    },
+    {
+      "choice": "Early step with a stored link: only replace the head, lease-pinned, and update the link. With no link: push, store the early head, open_pr, then store the link.",
+      "reason": "Gives 'open or update' and avoids a duplicate PR on retry.",
+      "rejected": [
+        {
+          "option": "Always call open_pr",
+          "why": "May create a duplicate PR."
+        }
+      ]
+    },
+    {
+      "choice": "Tests and docs use only https://github.com/owner/repo URLs. No identity is added.",
+      "reason": "Criterion 6 and the earlier refusal.",
+      "rejected": [
+        {
+          "option": "SSH-form remotes in tests",
+          "why": "Contain email-like text."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "action": "modify",
+      "purpose": "Add Remote::replace and the GitRemote override, with the trait docs updated. Add open_early_pr, Athena::early_pr (https guard, own GhCli, no HostErrorLog), and the cfg(test) seam. Change land_pr and publish to replace an early head with L via check_replace. Add FakeRemote.replace and tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/pr.rs",
+      "action": "modify",
+      "purpose": "Add store_early/load_early/clear_early for the early head file, with unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "purpose": "Call self.early_pr in produce_and_verify after admission and before verifier_snapshot, ignoring its result and skipping when nested. Add go-level tests for criteria 1 to 4.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/land.rs",
+      "action": "modify",
+      "purpose": "Update the landing description comment for the replace step.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/test_support.rs",
+      "action": "modify",
+      "purpose": "Add a recording fake remote/host pair that records verifier count and verification-record presence at call time, plus a go-with-seam helper.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "purpose": "Assert no output line contains 'warning' in existing lifecycle runs.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add the entry required by criterion 8.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "pr.rs: add store_early/load_early/clear_early (state-dir pr-early.json) with tests.",
+    "gh.rs: add Remote::replace (default error body) and the GitRemote override with --force-with-lease=refs/heads/<b>:<old>. Update the Remote trait doc comments. Make FakeRemote record replaces.",
+    "gh.rs: write open_early_pr. Read the remote head. With no link: check_push, push, store_early immediately, default_branch, open_pr (title is job.title(), body is the in-progress text), then store the link. With a link and a differing head: check_replace, replace, update the link and the early head.",
+    "gh.rs: add Athena::early_pr. It runs `git remote get-url origin`, requires an https:// prefix and parse_remote Ok, and otherwise returns silently. It builds GhCli, GhClient (no HostErrorLog) and GitRemote, or takes the cfg(test) seam. An Err prints one 'warning: could not open the pull request early: ...' line and is not propagated.",
+    "gh.rs land_pr and publish: when the remote head equals load_early (and differs from L), run check_replace and remote.replace(branch, L, early). With a link, set link.head = L and store it, then continue into the head check and the guarded merge. With no link, replace and then open_pr as today. Clear the early file. Any other head gets the existing refusal.",
+    "run.rs: call self.early_pr in produce_and_verify before verifier_snapshot, ignoring its result and skipping when nested.",
+    "Add tests: gh.rs land tests (criterion 3), run.rs go tests with the seam (criteria 1, 2, 4, including the push-ok-open_pr-fails then land case and the github.com path origin), and a lifecycle.rs no-'warning' assertion. Confirm each fails with the new code removed.",
+    "CHANGELOG entry and a land.rs comment. Run cargo fmt, clippy and cargo test --workspace. Scan the diff for email-like text."
+  ],
+  "risks": [
+    {
+      "risk": "The early push publishes a candidate with no records or trailers.",
+      "mitigation": "It goes only to the job's own athena/<job> branch (check_push and check_replace enforce the name), and land replaces it with L under a lease."
+    },
+    {
+      "risk": "Early network calls add latency or hang.",
+      "mitigation": "The step runs once, errors are non-fatal, and the existing GhClient retry bounds apply."
+    },
+    {
+      "risk": "The thread-local seam leaks between tests.",
+      "mitigation": "An RAII guard clears it on drop, and cargo runs each test on its own thread."
+    },
+    {
+      "risk": "The lease replace fails because the remote moved.",
+      "mitigation": "Land returns its usual error and nothing is merged. A foreign head keeps today's refusal."
+    },
+    {
+      "risk": "Path origins containing 'github.com' parse as GitHub (reconcile.rs).",
+      "mitigation": "The early step requires an https:// URL, so these origins are skipped. A test covers this."
+    },
+    {
+      "risk": "The early PR body lacks the verification summary.",
+      "mitigation": "The body is explicit that verification is in progress. Land leaves it as it is."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Core test drives real `Athena::go` via the make_athena fake-driver rig with the cfg(test) seam holding recording FakeRemote and FakeHost. At the moment of each push and open_pr call, the fakes record the fake driver's verifier invocation count and whether the verification record file exists. Origin is set to an https://github.com/owner/repo URL.",
+      "command": "cargo test -p athena-core early_pr",
+      "observes": "One push of the candidate to athena/<job> and one open_pr with head athena/<job> are recorded. Each was recorded with verifier invocations == 0 and no verification record present. merge was never called, so the calls came before verification completed.",
+      "fails_without": "With the early step removed, no push or open_pr is recorded, so the assertions fail."
+    },
+    {
+      "criterion": 2,
+      "method": "Run `go` on identical fixtures: (a) working fakes, (b) failing push, (c) push ok but failing open_pr. Compare state, reason and outcome. Then run land on (b) and (c) and on (a).",
+      "command": "cargo test -p athena-core early_pr",
+      "observes": "Outcomes of (b) and (c) equal (a), and the only difference is one warning line. After land in (c), where the remote holds C and the early head is stored but there is no link, land replaces C with L, calls open_pr once, and gets merge_heads == [L], the same as (a).",
+      "fails_without": "If errors propagated, go would fail and the equality assertion would break. If the head were not stored before open_pr, land in (c) would be refused with NotFastForward."
+    },
+    {
+      "criterion": 3,
+      "method": "gh.rs land_pr tests with FakeRemote (records replace and its expected-old argument), FakeHost and a spy ancestry. Cases: a stored link and early head E on the remote; a stored early head with no link; a foreign head X.",
+      "command": "cargo test -p athena-core land_pr",
+      "observes": "With a link: open_pr count 0, one replace(branch, L, E), check_replace ran, link.head == L before the head check, merge_heads == [L]. With no link: one open_pr after the replace. With foreign X: no replace, and the existing refusal text.",
+      "fails_without": "Without the replace path, the remote head E != L hits the refusal, or open_pr is called twice."
+    },
+    {
+      "criterion": 4,
+      "method": "Core tests run `go` with (i) no origin, (ii) a path origin, (iii) a path origin like <tmp>/github.com/example/project.git, collecting UI lines. A fourth test uses an https GitHub origin with a failing host. The CLI lifecycle tests are extended to assert no output line contains 'warning'. Test (iii) also runs land and shows it succeeds as before.",
+      "command": "cargo test --workspace",
+      "observes": "For (i), (ii) and (iii): no 'warning' in any line, no push, no open_pr, and land succeeds. For the failing GitHub host: exactly one warning line.",
+      "fails_without": "If the step ran for path origins, it would push or warn and the no-'warning' assertion would fail."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the full suites. Each new test asserts a push, open_pr, replace or skip call that the base code cannot produce.",
+      "command": "cargo test --workspace",
+      "observes": "All tests pass, including the existing CLI lifecycle tests, with no new 'warning' line. `cargo clippy --workspace --all-targets` and `cargo fmt --check` exit 0 clean.",
+      "fails_without": "A test that does not exercise the new behavior would pass against the base. Each new test is written to fail with the early step or replace path removed."
+    },
+    {
+      "criterion": 6,
+      "method": "Inspect the diff for '@' followed by a host, or user@host:owner/repo text, in source, tests and CHANGELOG.",
+      "command": "git diff",
+      "observes": "Added lines contain only https://github.com/owner/repo URLs and no email-like text.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Inspect the diff.",
+      "command": "git diff",
+      "observes": "The `go` signature is unchanged, there is no crates/athena-cli/src hunk, and `GhCli` is constructed inside `Athena::early_pr`.",
+      "fails_without": null
+    },
+    {
+      "criterion": 8,
+      "method": "Read the CHANGELOG hunk.",
+      "command": "git diff",
+      "observes": "The entry says verification start opens or updates the job's PR so CI caches by fingerprint, that it never merges, that a missing or non-GitHub origin is skipped quietly, and that failures are non-fatal.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Which CLI tests run go with a github.com-containing path origin: reconcile.rs does; the others were not read. The https guard makes them skip regardless.",
+    "Whether run_pin_tests helpers are reusable from run.rs tests. The plan uses test_support.rs make_athena instead.",
+    "land.rs may need only a comment change."
+  ],
+  "producer_section_sha256": "ecf538715521750877b9557572ff9d4a9755e880b9ce73467c552fe4e6fd671a"
+}

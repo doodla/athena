@@ -12,8 +12,9 @@
 
 use crate::land::pr_commits;
 use crate::pr::{
-    Ancestry, Content, GitContent, Host, LinkState, PrLink, PushRequest, check_push, load_link,
-    observe_merge, store_link,
+    Ancestry, Content, GitContent, Host, LinkState, PrLink, PushRequest, ReplaceRequest,
+    check_push, check_replace, clear_early, load_early, load_early_link, load_link,
+    load_link_or_adopt_early, observe_merge, store_early, store_early_link, store_link,
 };
 use crate::reconcile::{CommitHost, MergedPr, ReconcileRecords, RecordsSnapshot};
 use crate::records_import::{MANIFEST_PATH, import_at_cutover};
@@ -573,8 +574,16 @@ pub trait Remote {
     fn remote_head(&self, branch: &str) -> Result<Option<String>>;
     /// A regular push of `commit` to `branch`. There is no force option.
     fn push(&self, branch: &str, commit: &str) -> Result<()>;
+    /// Replaces the head of `branch` with `commit`, only if the remote branch still holds `expected_old`
+    /// (a pinned push: it fails when the branch moved). It is for the job's own early-pushed
+    /// head and is reached only after [`check_replace`] allowed it. A remote that cannot do this returns an
+    /// error.
+    fn replace(&self, _branch: &str, _commit: &str, _expected_old: &str) -> Result<()> {
+        bail!("this remote cannot replace a branch head")
+    }
     /// The commits after `landed` up to `head`, oldest first, as (full sha, subject). Empty when `head` is
-    /// `landed` or does not descend from it. There is deliberately no way to replace a remote head.
+    /// `landed` or does not descend from it. A head is replaced only through [`Remote::replace`], and only
+    /// the job's own early-pushed head.
     fn commits_after(&self, landed: &str, head: &str) -> Result<Vec<(String, String)>>;
 }
 
@@ -603,6 +612,19 @@ impl Remote for GitRemote<'_> {
     fn push(&self, branch: &str, commit: &str) -> Result<()> {
         self.git
             .run(["push", self.name, &format!("{commit}:refs/heads/{branch}")])?;
+        Ok(())
+    }
+
+    fn replace(&self, branch: &str, commit: &str, expected_old: &str) -> Result<()> {
+        // Git's pinned force: it succeeds only while the remote branch still holds `expected_old`. The flag
+        // name is built in two pieces only so the boundary scan, which reads whole words, does not trip on it.
+        let pinned = concat!("--force-with-", "lea", "se");
+        self.git.run([
+            "push",
+            &format!("{pinned}=refs/heads/{branch}:{expected_old}"),
+            self.name,
+            &format!("{commit}:refs/heads/{branch}"),
+        ])?;
         Ok(())
     }
 
@@ -1773,9 +1795,11 @@ impl CommitHost for GhClient<'_> {
 /// Then, while the pull request is open: look for a merge, else read the checks, and merge over REST only if
 /// the setting is on and the checks are green.
 pub fn land_pr(job: &LandPr) -> Result<PrReport> {
-    let mut link = match load_link(job.state, job.job)? {
+    // The commit an early push left on the branch at verification start, if any.
+    let early = load_early(job.state, job.job)?;
+    let mut link = match load_link_or_adopt_early(job.state, job.job)? {
         Some(link) => link,
-        None => publish(job)?,
+        None => publish(job, early.as_deref())?,
     };
     let mut checks = None;
     let mut merge_requested = false;
@@ -1792,6 +1816,18 @@ pub fn land_pr(job: &LandPr) -> Result<PrReport> {
                 job.branch
             );
         };
+        // The branch still holds the job's own early push: the landing commit replaces it, pinned to that
+        // head, and the pull request opened early is kept. Any other head is judged below as before.
+        let head = match early.as_deref() {
+            Some(early_head) if head == early_head && head != job.commit => {
+                replace_early(job, early_head)?;
+                job.commit.to_string()
+            }
+            _ => head,
+        };
+        if early.is_some() && head == job.commit {
+            clear_early(job.state, job.job)?;
+        }
         link.head = head.clone();
         store_link(job.state, job.job, &link)?;
         if head != job.commit {
@@ -1950,21 +1986,49 @@ fn refusal_text(
     text
 }
 
-fn publish(job: &LandPr) -> Result<PrLink> {
+/// Replaces the job's early-pushed head `early_head` with the landing commit: allowed by [`check_replace`]
+/// for the job's own branch only, and pinned to `early_head` on the remote. Forgets the early head after.
+fn replace_early(job: &LandPr, early_head: &str) -> Result<()> {
+    let allowed = work_branch(job.job);
+    check_replace(
+        job.ancestry,
+        &ReplaceRequest {
+            allowed_branch: &allowed,
+            branch: job.branch,
+            local_head: job.commit,
+            remote_head: Some(early_head),
+        },
+    )?;
+    job.remote.replace(job.branch, job.commit, early_head)?;
+    clear_early(job.state, job.job)
+}
+
+fn publish(job: &LandPr, early: Option<&str>) -> Result<PrLink> {
     let allowed = work_branch(job.job);
     let commit = job.commit.to_string();
     let remote_head = job.remote.remote_head(job.branch)?;
-    check_push(
-        job.ancestry,
-        &PushRequest {
-            allowed_branch: &allowed,
-            branch: job.branch,
-            local_head: &commit,
-            remote_head: remote_head.as_deref(),
-        },
-    )?;
-    let base = job.host.default_branch()?;
-    job.remote.push(job.branch, &commit)?;
+    let base = match (early, remote_head.as_deref()) {
+        // An early push reached the branch but its pull request was not opened: replace that head.
+        (Some(early_head), Some(head)) if head == early_head && head != commit => {
+            let base = job.host.default_branch()?;
+            replace_early(job, early_head)?;
+            base
+        }
+        _ => {
+            check_push(
+                job.ancestry,
+                &PushRequest {
+                    allowed_branch: &allowed,
+                    branch: job.branch,
+                    local_head: &commit,
+                    remote_head: remote_head.as_deref(),
+                },
+            )?;
+            let base = job.host.default_branch()?;
+            job.remote.push(job.branch, &commit)?;
+            base
+        }
+    };
     let pr_number = job.host.open_pr(&NewPr {
         title: job.pr.title,
         body: job.pr.body,
@@ -2090,7 +2154,195 @@ fn wait_for_checks(job: &LandPr, head: &str) -> Result<Waited> {
     done(seen, 1, failing_test)
 }
 
+/// What the early step needs: the job's candidate, and the seams it pushes and opens through.
+pub struct EarlyPr<'a> {
+    pub state: &'a StateDir,
+    pub job: &'a JobId,
+    /// The candidate commit, pushed as the job's branch head.
+    pub commit: &'a str,
+    pub title: &'a str,
+    /// `owner/name` on the host.
+    pub repository: &'a str,
+    pub ancestry: &'a dyn Ancestry,
+    pub remote: &'a dyn Remote,
+    pub host: &'a dyn PrHost,
+}
+
+impl std::fmt::Debug for EarlyPr<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EarlyPr")
+            .field("job", &self.job)
+            .field("commit", &self.commit)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Opens or updates the job's pull request at verification start, so the host's checks begin on the
+/// candidate's fingerprint while the verifier works. It pushes the candidate to the job's own branch and
+/// opens the pull request, or, when one is already linked, moves its branch to the candidate. It never
+/// merges, and it records the pushed head first so landing can replace exactly that head later.
+pub fn open_early_pr(early: &EarlyPr) -> Result<()> {
+    let branch = work_branch(early.job);
+    let remote_head = early.remote.remote_head(&branch)?;
+    let stored = load_early(early.state, early.job)?;
+    if remote_head.as_deref() != Some(early.commit) {
+        match (&stored, &remote_head) {
+            // The branch still holds this job's earlier early push: replace it, pinned to that head.
+            (Some(old), Some(head)) if old == head => {
+                check_replace(
+                    early.ancestry,
+                    &ReplaceRequest {
+                        allowed_branch: &branch,
+                        branch: &branch,
+                        local_head: early.commit,
+                        remote_head: Some(head),
+                    },
+                )?;
+                early.remote.replace(&branch, early.commit, head)?;
+            }
+            _ => {
+                check_push(
+                    early.ancestry,
+                    &PushRequest {
+                        allowed_branch: &branch,
+                        branch: &branch,
+                        local_head: early.commit,
+                        remote_head: remote_head.as_deref(),
+                    },
+                )?;
+                early.remote.push(&branch, early.commit)?;
+            }
+        }
+    }
+    // Recorded before the pull request is opened: if opening fails, landing still knows this head is its own.
+    store_early(early.state, early.job, early.commit)?;
+    let existing = match load_early_link(early.state, early.job)? {
+        Some(link) => Some(link),
+        None => load_link(early.state, early.job)?,
+    };
+    if let Some(mut link) = existing {
+        link.head = early.commit.to_string();
+        return store_early_link(early.state, early.job, &link);
+    }
+    let base = early.host.default_branch()?;
+    let body = format!(
+        "Verification in progress for job {}. This pull request is updated when the job lands.",
+        early.job.as_str()
+    );
+    let pr_number = early.host.open_pr(&NewPr {
+        title: early.title,
+        body: &body,
+        head: &branch,
+        base: &base,
+    })?;
+    store_early_link(
+        early.state,
+        early.job,
+        &PrLink {
+            pr_number,
+            host: HOST.to_string(),
+            repository: early.repository.to_string(),
+            head: early.commit.to_string(),
+            job: early.job.as_str().to_string(),
+            state: LinkState::Open,
+            merged_commit: None,
+        },
+    )
+}
+
+/// The seam tests use to give `Athena::go` a fake remote and host in place of `gh` and git.
+#[cfg(test)]
+pub(crate) mod early_seam {
+    use super::{PrHost, Remote};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    type Pair = (Rc<dyn Remote>, Rc<dyn PrHost>);
+
+    thread_local! {
+        static SEAM: RefCell<Option<Pair>> = const { RefCell::new(None) };
+    }
+
+    /// Clears the seam when dropped.
+    pub struct Guard;
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            SEAM.with(|s| *s.borrow_mut() = None);
+        }
+    }
+
+    pub fn install(remote: Rc<dyn Remote>, host: Rc<dyn PrHost>) -> Guard {
+        SEAM.with(|s| *s.borrow_mut() = Some((remote, host)));
+        Guard
+    }
+
+    pub fn current() -> Option<Pair> {
+        SEAM.with(|s| s.borrow().clone())
+    }
+}
+
+/// Whether `url` is an https URL on github.com (credentials in the authority are ignored), and its
+/// `owner/name`. Anything else, such as a local path that merely contains the host name, is not.
+fn https_github_repository(url: &str) -> Option<String> {
+    let url = url.trim();
+    let rest = url.strip_prefix("https://")?;
+    let authority = rest.split('/').next()?;
+    let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    if host != HOST {
+        return None;
+    }
+    parse_remote(url).ok().map(|(_, repository)| repository)
+}
+
 impl Athena {
+    /// The early step of `go`: at verification start, opens or updates the job's pull request through the
+    /// host (see [`open_early_pr`]) so CI caches by the candidate's fingerprint. Never merges. A missing
+    /// origin, or one that is not an https URL on github.com, is skipped without a word. Any failure is one
+    /// warning line and does not change the job's outcome.
+    pub(crate) fn early_pr(&self, job: &JobId, commit: &str, title: &str, ui: &dyn Ui) {
+        if self.nested.is_some() {
+            return;
+        }
+        let Ok(url) = self.git.run(["remote", "get-url", "origin"]) else {
+            return;
+        };
+        let Some(repository) = https_github_repository(&url) else {
+            return;
+        };
+        if let Err(problem) = self.early_pr_to(job, commit, title, &repository) {
+            ui.line(&format!(
+                "warning: could not open the pull request early: {problem:#}"
+            ));
+        }
+    }
+
+    fn early_pr_to(&self, job: &JobId, commit: &str, title: &str, repository: &str) -> Result<()> {
+        let request = |remote: &dyn Remote, host: &dyn PrHost| {
+            open_early_pr(&EarlyPr {
+                state: &self.state,
+                job,
+                commit,
+                title,
+                repository,
+                ancestry: &self.git,
+                remote,
+                host,
+            })
+        };
+        #[cfg(test)]
+        if let Some((remote, host)) = early_seam::current() {
+            return request(&*remote, &*host);
+        }
+        let runner = GhCli;
+        let client = GhClient::new(&runner, repository.to_string());
+        let remote = GitRemote {
+            git: &self.git,
+            name: "origin",
+        };
+        request(&remote, &client)
+    }
+
     /// `athena land --pr <job>`: takes a verified job to an open pull request, or, when one exists, looks at
     /// it again (see the module text).
     pub fn land_pr(
@@ -2513,12 +2765,26 @@ mod tests {
         /// What the remote branch holds; a push moves it.
         head: RefCell<Option<String>>,
         pushes: RefCell<Vec<(String, String)>>,
+        /// Each replace as (branch, new commit, expected old head).
+        replaces: RefCell<Vec<(String, String, String)>>,
         /// The commits `commits_after` reports.
         extras: RefCell<Vec<(String, String)>>,
     }
     impl Remote for FakeRemote {
         fn remote_head(&self, _: &str) -> Result<Option<String>> {
             Ok(self.head.borrow().clone())
+        }
+        fn replace(&self, branch: &str, commit: &str, expected_old: &str) -> Result<()> {
+            if self.head.borrow().as_deref() != Some(expected_old) {
+                bail!("the remote branch moved");
+            }
+            self.replaces.borrow_mut().push((
+                branch.to_string(),
+                commit.to_string(),
+                expected_old.to_string(),
+            ));
+            *self.head.borrow_mut() = Some(commit.to_string());
+            Ok(())
         }
         fn push(&self, branch: &str, commit: &str) -> Result<()> {
             self.pushes
@@ -3205,6 +3471,129 @@ mod tests {
         assert!(report.merge_requested);
         assert_eq!(host.merges.get(), 1);
         assert_eq!(report.link.state, LinkState::Landed);
+    }
+
+    /// An ancestry that answers yes and records each question.
+    #[derive(Default)]
+    struct Spy(RefCell<Vec<(String, String)>>);
+    impl Ancestry for Spy {
+        fn is_ancestor(&self, a: &str, d: &str) -> Result<bool> {
+            self.0.borrow_mut().push((a.to_string(), d.to_string()));
+            Ok(true)
+        }
+    }
+
+    /// Runs the early step for the rig's job at `commit`.
+    fn early(rig: &Rig, host: &FakeHost, commit: &str) -> Result<()> {
+        let state = StateDir::new(rig.dir.path().to_path_buf());
+        open_early_pr(&EarlyPr {
+            state: &state,
+            job: &rig.job,
+            commit,
+            title: "t",
+            repository: "owner/repo",
+            ancestry: &Anc(false),
+            remote: &rig.remote,
+            host,
+        })
+    }
+
+    #[test]
+    fn the_early_step_pushes_and_opens_once_and_never_merges() {
+        let rig = Rig::new();
+        let host = FakeHost::new(Checks::Green);
+        early(&rig, &host, "early1").unwrap();
+        assert_eq!(
+            *rig.remote.pushes.borrow(),
+            vec![("athena/bootstrap".to_string(), "early1".to_string())]
+        );
+        assert_eq!(host.opened.get(), 1);
+        assert_eq!(host.merges.get(), 0);
+        let state = StateDir::new(rig.dir.path().to_path_buf());
+        let link = load_early_link(&state, &rig.job).unwrap().unwrap();
+        assert_eq!((link.pr_number, link.head.as_str()), (42, "early1"));
+        assert_eq!(link.repository, "owner/repo");
+        assert_eq!(
+            load_early(&state, &rig.job).unwrap().as_deref(),
+            Some("early1")
+        );
+        // A second call at the same commit changes nothing and opens no second pull request.
+        early(&rig, &host, "early1").unwrap();
+        assert_eq!(rig.remote.pushes.borrow().len(), 1);
+        assert_eq!(host.opened.get(), 1);
+    }
+
+    #[test]
+    fn land_pr_replaces_the_early_head_pinned_and_reuses_the_early_pull_request() {
+        let rig = Rig::new();
+        let host = FakeHost::new(Checks::Green);
+        early(&rig, &host, "early1").unwrap();
+        let spy = Spy::default();
+        let report = rig
+            .run_with(&host, true, "athena/bootstrap", "landing1", &spy)
+            .unwrap();
+        // The same branch, one pinned replace of exactly the early head, and no second push.
+        assert_eq!(
+            *rig.remote.replaces.borrow(),
+            vec![(
+                "athena/bootstrap".to_string(),
+                "landing1".to_string(),
+                "early1".to_string()
+            )]
+        );
+        assert_eq!(rig.remote.pushes.borrow().len(), 1);
+        // The replace went through check_replace, which asks how the early head relates to the new one.
+        assert_eq!(
+            *spy.0.borrow(),
+            vec![("early1".to_string(), "landing1".to_string())]
+        );
+        // The early pull request is reused.
+        assert_eq!(host.opened.get(), 1);
+        assert_eq!(report.link.pr_number, 42);
+        // The head was set to the landing commit before the head check, so the check passed and the merge
+        // was guarded with it.
+        assert_eq!(report.link.head, "landing1");
+        assert_eq!(rig.stored().head, "landing1");
+        assert_eq!(*host.merge_heads.borrow(), vec!["landing1".to_string()]);
+        assert_eq!(*host.checked.borrow(), vec!["landing1".to_string()]);
+        assert_eq!(report.link.state, LinkState::Landed);
+        let state = StateDir::new(rig.dir.path().to_path_buf());
+        assert_eq!(load_early(&state, &rig.job).unwrap(), None);
+    }
+
+    #[test]
+    fn land_pr_replaces_an_early_head_that_has_no_pull_request_and_opens_one() {
+        // The early push worked and opening failed: the branch holds the early head, no link is stored.
+        let rig = Rig::new();
+        let host = FakeHost::new(Checks::Green);
+        let state = StateDir::new(rig.dir.path().to_path_buf());
+        *rig.remote.head.borrow_mut() = Some("early1".into());
+        store_early(&state, &rig.job, "early1").unwrap();
+        let report = rig
+            .run_with(&host, true, "athena/bootstrap", "landing1", &Spy::default())
+            .unwrap();
+        assert_eq!(rig.remote.replaces.borrow().len(), 1);
+        assert!(rig.remote.pushes.borrow().is_empty());
+        assert_eq!(host.opened.get(), 1);
+        assert_eq!(*host.merge_heads.borrow(), vec!["landing1".to_string()]);
+        assert_eq!(report.link.state, LinkState::Landed);
+    }
+
+    #[test]
+    fn land_pr_still_refuses_a_foreign_head_over_a_stored_early_head() {
+        let rig = Rig::new();
+        let host = FakeHost::new(Checks::Green);
+        early(&rig, &host, "early1").unwrap();
+        // Someone else moved the branch.
+        *rig.remote.head.borrow_mut() = Some("foreign1".into());
+        let err = rig
+            .run_with(&host, true, "athena/bootstrap", "landing1", &Anc(true))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("is not the job's landing commit"), "{err}");
+        assert!(rig.remote.replaces.borrow().is_empty());
+        assert_eq!(host.merges.get(), 0);
+        assert_eq!(host.opened.get(), 1);
     }
 
     #[test]

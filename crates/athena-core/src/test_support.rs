@@ -237,6 +237,140 @@ impl PrHost for FakeHost<'_> {
     }
 }
 
+/// One call the early step made on [`EarlyFake`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EarlyCall {
+    /// `push`, `replace`, `open_pr` or `merge`.
+    pub kind: &'static str,
+    /// The branch pushed or replaced, or the pull request's head branch.
+    pub branch: String,
+    /// The commit pushed or replaced to; empty for the other calls.
+    pub commit: String,
+    /// What the probe reported when the call arrived (for `go` tests: how many agents had run).
+    pub seen: usize,
+}
+
+/// A remote and a host in one recording fake, for tests that drive `go` through the early-pull-request seam.
+/// It records every call with a probe reading taken at call time, and can be told to refuse a push or an
+/// open.
+pub struct EarlyFake {
+    /// What the remote branch holds; a push or replace moves it.
+    pub head: RefCell<Option<String>>,
+    pub calls: RefCell<Vec<EarlyCall>>,
+    pub fail_push: std::cell::Cell<bool>,
+    pub fail_open: std::cell::Cell<bool>,
+    probe: Box<dyn Fn() -> usize>,
+}
+
+impl std::fmt::Debug for EarlyFake {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EarlyFake")
+            .field("calls", &self.calls)
+            .finish_non_exhaustive()
+    }
+}
+
+impl EarlyFake {
+    /// A fake whose calls record `probe()` as they arrive.
+    pub fn new(probe: impl Fn() -> usize + 'static) -> std::rc::Rc<Self> {
+        std::rc::Rc::new(EarlyFake {
+            head: RefCell::new(None),
+            calls: RefCell::new(Vec::new()),
+            fail_push: std::cell::Cell::new(false),
+            fail_open: std::cell::Cell::new(false),
+            probe: Box::new(probe),
+        })
+    }
+
+    fn record(&self, kind: &'static str, branch: &str, commit: &str) {
+        self.calls.borrow_mut().push(EarlyCall {
+            kind,
+            branch: branch.to_string(),
+            commit: commit.to_string(),
+            seen: (self.probe)(),
+        });
+    }
+
+    /// The calls of one kind, in order.
+    pub fn of(&self, kind: &str) -> Vec<EarlyCall> {
+        self.calls
+            .borrow()
+            .iter()
+            .filter(|c| c.kind == kind)
+            .cloned()
+            .collect()
+    }
+}
+
+impl crate::gh::Remote for EarlyFake {
+    fn remote_head(&self, _: &str) -> Result<Option<String>> {
+        Ok(self.head.borrow().clone())
+    }
+
+    fn push(&self, branch: &str, commit: &str) -> Result<()> {
+        self.record("push", branch, commit);
+        if self.fail_push.get() {
+            bail!("the remote refused the push");
+        }
+        *self.head.borrow_mut() = Some(commit.to_string());
+        Ok(())
+    }
+
+    fn replace(&self, branch: &str, commit: &str, expected_old: &str) -> Result<()> {
+        self.record("replace", branch, commit);
+        if self.head.borrow().as_deref() != Some(expected_old) {
+            bail!("the remote branch moved");
+        }
+        *self.head.borrow_mut() = Some(commit.to_string());
+        Ok(())
+    }
+
+    fn commits_after(&self, _: &str, _: &str) -> Result<Vec<(String, String)>> {
+        Ok(Vec::new())
+    }
+}
+
+impl Host for EarlyFake {
+    fn merged_commit(&self, _: &PrLink) -> Result<Option<String>> {
+        Ok(None)
+    }
+}
+
+impl PrHost for EarlyFake {
+    fn default_branch(&self) -> Result<String> {
+        Ok("main".to_string())
+    }
+
+    fn open_pr(&self, pr: &NewPr) -> Result<u64> {
+        self.record("open_pr", pr.head, "");
+        if self.fail_open.get() {
+            bail!("the host refused the pull request");
+        }
+        Ok(7)
+    }
+
+    fn checks(&self, _: &str) -> Result<Checks> {
+        Ok(Checks::Green)
+    }
+
+    fn merge(&self, _: u64, head: &str, _: &CommitText) -> Result<MergeMethod> {
+        self.record("merge", "", head);
+        Ok(MergeMethod::Merge)
+    }
+
+    fn ci_runs(&self, _: &str) -> Result<Vec<CiRunState>> {
+        Ok(Vec::new())
+    }
+
+    fn rerun_failed(&self, _: u64) -> Result<()> {
+        Ok(())
+    }
+
+    fn failing_test(&self, _: u64) -> Result<Option<String>> {
+        Ok(None)
+    }
+}
+
 impl CutoverFixture {
     /// Builds the history described in the module text. Fails, and builds nothing partial that matters, if a
     /// writer refuses a step: the error names the step.
