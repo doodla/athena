@@ -1,0 +1,316 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261025-095436-hasm",
+  "round": 1,
+  "at": "2026-10-25T09:57:17.201384087Z",
+  "invocation_seq": 2,
+  "approach": "Add Priority::Urgent (sorts before High) and teach from_text/as_str/parse about it. Add a new per-job record kind athena.priority/1 (`priority-<n>.json`, fields job, n, at, priority string validated to urgent|high|normal|low) that is loaded into JobRecords.priorities; a single JobRecords::priority() resolves latest priority record, else the request's `Priority:` line, else Urgent when the latest reading carries an urgent_reason, else Normal. plan_entry and status::job_line both call it, so plan order and status change without touching the request record. A new `Athena::set_priority` (in store.rs) resolves the job, requires JobState::Queued, rejects unknown levels, and commits one priority record; new CLI command `athena priority <job> <level>` calls it, with help text mentioning urgent. For the reader: ReadingOutput and Reading gain `urgent_reason: Option<String>` (Reading side `#[serde(default, skip_serializing_if = \"Option::is_none\")]` so old records stay valid); the urgent-marking rule is a doc comment on the ReadingOutput field in outputs.rs (it becomes the schema description the reader sees, and the reader budget test does not count schema text), so reader.md is untouched. build_reading redacts and records the reason, treating blank as None; the fake reader marks requests that mention speeding up/faster work as urgent. Decisions log: append D122 (alternatives, own Provenance) after D121 without touching earlier text, CHANGELOG entry, and a test in crates/athena-cli/src/decisions.rs that parses docs/decisions.md into `## D<n> · ` entries and checks Provenance, unique ascending ids, and that the first 230046 bytes (the base file, ending after D121) still hash to the pinned base value.",
+  "decisions": [
+    {
+      "choice": "A new record kind athena.priority/1, appended per job, read as the latest by n",
+      "reason": "Request records must not be rewritten (out of scope) and records are append-only; D118 alternative (a) already named this design as the later step. Latest-wins by n gives re-prioritising without edits.",
+      "rejected": [
+        {
+          "option": "Rewrite or append to the request text",
+          "why": "Request records are not rewritten; out of scope."
+        },
+        {
+          "option": "Reuse an existing record kind (intervention, correction)",
+          "why": "Their meanings differ (corrections trigger a re-read); a new tiny kind keeps status/plan logic explicit."
+        }
+      ]
+    },
+    {
+      "choice": "Resolve precedence in one method JobRecords::priority(): priority record, then request text line, then reading urgent_reason, then normal",
+      "reason": "One place used by plan_entry and status::job_line so plan and status cannot disagree.",
+      "rejected": [
+        {
+          "option": "Compute separately in plan and status",
+          "why": "The two drifted risk; D118 already routes both through one function."
+        }
+      ]
+    },
+    {
+      "choice": "Put the urgent-marking rule as a doc comment on ReadingOutput.urgent_reason in outputs.rs",
+      "reason": "Schemars turns it into the schema description the reader receives; reader.md is at 1997/2000 tokens and the budget test composes frames, defaults and catalog, not the schema.",
+      "rejected": [
+        {
+          "option": "Add a bullet to reader.md",
+          "why": "Would exceed the 2000-token budget and the brief forbids growing it."
+        },
+        {
+          "option": "Put it in briefs.rs",
+          "why": "Possible, but the field's own description keeps rule and field together."
+        }
+      ]
+    },
+    {
+      "choice": "Pin the base decisions.md by byte length 230046 and a SHA-256 of that prefix inside the guard test",
+      "reason": "cargo test cannot know the base commit; a prefix hash proves existing entries are byte-identical and any later additions at the end still pass. Together with structure checks it catches mid-file insertion like the D121/D122 damage.",
+      "rejected": [
+        {
+          "option": "Compare against `git show <base>` in the test",
+          "why": "Base ref is not known at test time and the test must pass in a bare checkout."
+        },
+        {
+          "option": "Check structure only",
+          "why": "Would not catch an edit to an existing entry that keeps headings valid."
+        }
+      ]
+    },
+    {
+      "choice": "Allow set_priority only for Queued jobs",
+      "reason": "Matches the brief (unknown or non-queued requests rejected); only queued requests are still waiting in the plan.",
+      "rejected": [
+        {
+          "option": "Allow any open state",
+          "why": "Brief says non-queued is an error."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/plan.rs",
+      "action": "modify",
+      "purpose": "Priority::Urgent first; as_str, from_text and a parse(&str) helper; update the old 'urgent reads as normal' assertion; ordering tests; module doc.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "purpose": "New PriorityRecord (athena.priority/1) with validate, AnyRecord variant, canonical_path, schema; Reading.urgent_reason (serde default, skipped when None); sample_reading update; tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/store.rs",
+      "action": "modify",
+      "purpose": "JobRecords.priorities, add(), job_of(), JobRecords::priority(), Athena::set_priority (resolve, Queued only, commit); tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "job_line uses JobRecords::priority().",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "plan_entry uses JobRecords::priority(); build_reading carries urgent_reason (redacted, blank means None); Reading literals in tests; reading tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/outputs.rs",
+      "action": "modify",
+      "purpose": "ReadingOutput.urgent_reason with the urgent-marking rule as its doc comment; schema test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Reading literal in the test fixture gets the new field; show an urgent reason in the reading rendering only if one already exists there, otherwise no change beyond the fixture.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/prompts/reader.md",
+      "action": "modify",
+      "purpose": "Listed as deliverable but must not grow; touch only if needed to shorten (net zero or smaller). Expected: no change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "purpose": "New `priority <job> <level>` command and dispatch arm; help of drain/plan mentions urgent and the command.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/decisions.rs",
+      "action": "modify",
+      "purpose": "Add the decisions-log structure guard test (entries, Provenance, ids, pinned prefix hash) plus a small parse helper.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append D122 after D121 only, with alternatives and its own Provenance; nothing earlier changes (decision-links.toml line numbers stay valid).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Entry for urgent priority, the priority command, urgent_reason and the log guard.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/records.md",
+      "action": "modify",
+      "purpose": "Document athena.priority/1 and Reading.urgent_reason.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/admission.rs",
+      "action": "modify",
+      "purpose": "Reading literal in test gets urgent_reason: None.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/pr_check.rs",
+      "action": "modify",
+      "purpose": "Reading literal in test gets urgent_reason: None.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-gate/src/landing_tests.rs",
+      "action": "modify",
+      "purpose": "Reading literal gets urgent_reason: None.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-agent/src/fake.rs",
+      "action": "modify",
+      "purpose": "Fake reader emits urgent_reason: a reason when the request mentions speeding Athena up (e.g. faster/speed up), else null.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/common/mod.rs",
+      "action": "modify",
+      "purpose": "Scripted reading JSON gets urgent_reason (null by default) and a helper for an urgent one.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Priority-record override test through plan output, and the speed vs ordinary fake-agent urgent test; existing High test unaffected.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Compute SHA-256 and byte length of the base docs/decisions.md (git show HEAD:docs/decisions.md) before editing; record both for the guard test.",
+    "plan.rs: add Urgent variant first, as_str, parse helper, from_text arm; fix the existing 'Priority: urgent' => Normal assertion; add ordering tests (urgent < high < normal; urgent dependent still after its dependency).",
+    "records.rs: add PriorityRecord, SCHEMA const, AnyRecord::Priority variant, parse validation, canonical_path `<job>/priority-<n>.json`, schema(); add Reading.urgent_reason; update sample_reading; add round-trip and validation tests.",
+    "store.rs: add priorities to JobRecords, add()/job_of()/sort, JobRecords::priority(), and Athena::set_priority (Records::resolve, Queued only, level validated, next n, commit_records with Athena-Record and Athena-Job trailers).",
+    "status.rs and reading.rs plan_entry: call JobRecords::priority().",
+    "outputs.rs: add urgent_reason field with the rule doc comment; reading.rs build_reading: include in redacted text, blank to None, set on Reading; update all Reading literals (admission, pr_check, landing_tests, briefs, reading tests).",
+    "fake.rs and tests/common/mod.rs: emit urgent_reason; add reading and drain tests (urgent vs ordinary request; priority record override with no new request record).",
+    "main.rs: add Priority command (job, level) and arm printing the result; add urgent and the command to drain/plan help text.",
+    "decisions.rs: add structure-guard test and negative cases; docs/decisions.md: append D122 at end only; CHANGELOG.md and docs/records.md entries.",
+    "Run cargo fmt --all, cargo clippy --all-targets --locked -- -D warnings, cargo test --locked, and the budgets test; check git diff shows reader.md unchanged and decisions.md additions only."
+  ],
+  "risks": [
+    {
+      "risk": "Repeating the D121/D122 damage by editing mid-file in docs/decisions.md.",
+      "mitigation": "Append D122 with a single insertion at end of file; the new guard test and a git diff check prove no earlier byte changed. decision-links.toml uses line numbers, which stay valid."
+    },
+    {
+      "risk": "Reader budget at 1997/2000 tokens.",
+      "mitigation": "Put the rule in the ReadingOutput doc comment (schema), keep reader.md unchanged, and run the budgets test."
+    },
+    {
+      "risk": "Adding a field to Reading breaks deny_unknown_fields parsing of old records and every struct literal.",
+      "mitigation": "Reading.urgent_reason uses serde default and skip_serializing_if None, so old records parse and re-serialize identically; grep for every `Reading {` literal (admission, pr_check, landing_tests, briefs tests, reading tests, records sample) and update."
+    },
+    {
+      "risk": "Hardened schema requires all properties, so real reader output always includes the field; fixtures that omit it must still parse.",
+      "mitigation": "Treat a missing field as None (Option) and update fake.rs and tests/common to emit it; run_pin_tests.rs fixtures omit it and still parse."
+    },
+    {
+      "risk": "A reading-derived Urgent could silently override an explicit `Priority: low` in the text.",
+      "mitigation": "Use the stated precedence in one method; reading urgency only applies when no record and no text priority is set."
+    },
+    {
+      "risk": "The pinned hash is wrong or computed from the edited file.",
+      "mitigation": "Unit test that tests/ and the pinned hash are computed from `git show HEAD:docs/decisions.md` for the producer; state the hash derivation in a test comment."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit tests in plan.rs build entries with Urgent, High, Normal priorities and one urgent entry that depends on a normal one; assert Plan::build order.",
+      "command": "cargo test --locked -p athena-core plan::tests",
+      "observes": "order is urgent, high, normal; the dependency precedes its urgent dependent (and itself runs before unrelated high items, since its effective priority is raised).",
+      "fails_without": "Without Urgent sorting before High, or without the dependency rule, the urgent-before-high-before-normal and urgent-dependent-still-after-dependency assertions fail."
+    },
+    {
+      "criterion": 2,
+      "method": "Test in store.rs/reading.rs/status.rs: a queued job whose request says `Priority: low` gets a priority record `urgent` via Athena::set_priority; load Records, build plan and status line.",
+      "command": "cargo test --locked -p athena-core priority_record",
+      "observes": "plan order puts the job first, status job_line priority is urgent, and the job's request.json is byte-identical with exactly one new priority-1.json file.",
+      "fails_without": "If the record were ignored, plan order would stay as the request text says and status priority would not change; if a request record were rewritten the record-count assertion fails."
+    },
+    {
+      "criterion": 3,
+      "method": "reading.rs test parses ReadingOutput JSON with urgent_reason text and with null, then runs build_reading and checks Reading.urgent_reason; a second test asks the fake agent a speed-improving request and an ordinary one (also in tests/drain.rs).",
+      "command": "cargo test --locked -p athena-core urgent_reason",
+      "observes": "Some(reason) recorded for the speed request, None for null and the ordinary request; plan priority is urgent only for the first.",
+      "fails_without": "Without the field, deny_unknown_fields rejects the urgent output; without the build_reading wiring the recorded Reading has no reason; without the fake reader rule the speed request is not marked."
+    },
+    {
+      "criterion": 4,
+      "method": "Tests call set_priority with `bogus`, an unknown job id and a proposed job, assert errors naming the problem; Priority::from_text(\"Priority: urgent\") == Urgent; a help test renders `athena --help` and `athena priority --help` and checks for 'urgent' and 'priority'.",
+      "command": "cargo test --locked -p athena-cli priority",
+      "observes": "three clear errors, no new file committed, urgent parsed, help text contains both words.",
+      "fails_without": "Without validation the bad level, unknown job or non-queued job would commit a record; without the parse arm `Priority: urgent` stays Normal."
+    },
+    {
+      "criterion": 5,
+      "method": "Test in outputs.rs generates the reading schema and checks the urgent_reason property description contains the rule terms (faster, failed or rejected attempts, planning stops, timeouts, redo, thrash, duplicated checks, reason required); git diff of reader.md shows no growth.",
+      "command": "cargo test --locked -p athena-context outputs",
+      "observes": "description holds each term; `git diff --stat` for reader.md is empty.",
+      "fails_without": "If the rule text were absent from the generated schema, the schema-description assertion fails."
+    },
+    {
+      "criterion": 6,
+      "method": "Run the existing budgets test unchanged.",
+      "command": "cargo test --locked -p athena-cli --test budgets",
+      "observes": "reader set stays at or under 2000 tokens.",
+      "fails_without": "A rule added to reader.md would push the reader set over 2000 tokens and fail."
+    },
+    {
+      "criterion": 7,
+      "method": "Test in decisions.rs reads docs/decisions.md, splits on `## D<n> · ` headings, checks each entry has a `- **Provenance:**` bullet, ids unique and ascending, and hashes the first 230046 bytes against the pinned base hash (computed by the producer from `git show HEAD:docs/decisions.md`). Include negative unit cases on small strings (missing Provenance, duplicate id, out-of-order id).",
+      "command": "cargo test --locked -p athena-cli decisions",
+      "observes": "all structure checks pass on the final file and the prefix hash matches; the negative cases return errors.",
+      "fails_without": "An entry inserted mid-file, a duplicated or descending id, an entry without Provenance, or any edit to the first 230046 bytes fails the guard."
+    },
+    {
+      "criterion": 8,
+      "method": "Inspect the diff.",
+      "command": "git diff HEAD -- docs/decisions.md CHANGELOG.md",
+      "observes": "decisions.md diff is additions only after the D121 entry (new D122 with Case, Decision, Alternatives, Tradeoff, Reversal cost, Provenance); CHANGELOG.md has a new entry; no removed lines.",
+      "fails_without": null
+    },
+    {
+      "criterion": 9,
+      "method": "Run cargo fmt --all --check, cargo clippy --all-targets --locked -- -D warnings and cargo test --locked.",
+      "command": "cargo test --locked",
+      "observes": "all three exit 0.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Whether the 230046-byte prefix hash is acceptable as the 'against the base commit' check, since cargo test cannot see the base commit; the producer must compute the hash from the base file, not the edited one.",
+    "Which exact request words count as 'speed-improving' for the fake reader; the real reader decides by the schema rule, the fake only needs a deterministic trigger.",
+    "Whether `athena status` should show 'priority urgent' via display.rs unchanged; display.rs prints any non-normal priority, so it is expected to work without edits."
+  ],
+  "producer_section_sha256": "b1f104b4973b24f643535ebb7246b3a0e8c59d1859cf1e25fb9a729a41efdd79"
+}

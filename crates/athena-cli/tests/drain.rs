@@ -15,7 +15,7 @@ use athena_cli::drain::{
 };
 use athena_core::audience::Page;
 use athena_core::commits::{Committer, message};
-use athena_core::plan::PlanEntry;
+use athena_core::plan::{PlanEntry, Priority};
 use athena_core::steward::{ProposedChange, RequestQueue};
 use athena_core::store::{JobState, Records};
 use athena_core::{Athena, Quiet};
@@ -945,6 +945,28 @@ fn drain_help_documents_the_flags_and_lists_every_stop_reason() {
         .output()
         .unwrap();
     assert!(!out.status.success());
+}
+
+#[test]
+fn priority_help_and_the_drain_help_mention_urgent_and_the_command() {
+    let help_of = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_athena"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let help = help_of(&["priority", "--help"]);
+    for needle in ["urgent", "high", "normal", "low", "queued"] {
+        assert!(help.contains(needle), "{needle}: {help}");
+    }
+    assert!(help_of(&["--help"]).contains("priority"));
+    let drain = help_of(&["drain", "--help"]);
+    assert!(
+        drain.contains("urgent") && drain.contains("athena priority"),
+        "{drain}"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -2676,6 +2698,164 @@ fn the_reserve_for_the_source_check_grows_with_the_number_of_studies() {
     commit_study(&fx, "two", &Texts::correct().files());
     commit_study(&fx, "three", &Texts::correct().files());
     assert!((steps.check_cap() - 3.0 * one_call).abs() < 1e-9);
+}
+
+/// The fake agents answer every role from the request alone.
+fn deterministic() -> Script {
+    Box::new(athena_agent::fake::deterministic_turn)
+}
+
+#[test]
+fn a_priority_record_overrides_the_priority_in_the_request_text() {
+    let fx = Fixture::new();
+    let athena = fx.athena(deterministic());
+    let (slow, _) = athena
+        .queue("Tidy the notes in docs.\nPriority: low")
+        .unwrap();
+    let (other, _) = athena.queue("Tidy the other notes in docs.").unwrap();
+    let lander = RecordingLander::default();
+    let steps = real_steps(&athena, &lander);
+
+    // By its words the low request comes after the unmarked one.
+    let before = drain::plan(&steps, 2.0, &Quiet).unwrap();
+    assert_eq!(before.plan.order, [other.as_str(), slow.as_str()]);
+    // Read, so no longer queued: a priority cannot be set now.
+    let late = athena.set_priority(slow.as_str(), "urgent").unwrap_err();
+    assert!(late.to_string().contains("only a queued request"), "{late}");
+
+    // A second pair, left queued: the record changes plan order and status, not the request.
+    let fx = Fixture::new();
+    let athena = fx.athena(deterministic());
+    let (slow, _) = athena
+        .queue("Tidy the notes in docs.\nPriority: low")
+        .unwrap();
+    let (other, _) = athena.queue("Tidy the other notes in docs.").unwrap();
+    let request_before = Records::load(&fx.git, &fx.head()).unwrap().jobs[slow.as_str()]
+        .request
+        .clone();
+    let priority_of = |athena: &Athena, job: &str| {
+        athena
+            .status()
+            .unwrap()
+            .open
+            .into_iter()
+            .find(|l| l.id == job)
+            .unwrap()
+            .priority
+    };
+    assert_eq!(priority_of(&athena, slow.as_str()), Priority::Low);
+
+    let (id, level) = athena.set_priority(slow.as_str(), "URGENT").unwrap();
+    assert_eq!((id.as_str(), level), (slow.as_str(), Priority::Urgent));
+
+    assert_eq!(priority_of(&athena, slow.as_str()), Priority::Urgent);
+    assert_eq!(priority_of(&athena, other.as_str()), Priority::Normal);
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    assert_eq!(records.jobs[slow.as_str()].request, request_before);
+    assert_eq!(records.request_jobs().len(), 2, "no new request record");
+    assert_eq!(records.jobs[slow.as_str()].priorities.len(), 1);
+    assert_eq!(records.jobs[slow.as_str()].priorities[0].n, 1);
+    let lander = RecordingLander::default();
+    let steps = real_steps(&athena, &lander);
+    let after = drain::plan(&steps, 2.0, &Quiet).unwrap();
+    assert_eq!(after.plan.order, [slow.as_str(), other.as_str()]);
+
+    // A later record wins over an earlier one.
+    let fx2 = Fixture::new();
+    let athena2 = fx2.athena(deterministic());
+    let (job, _) = athena2.queue("Tidy the notes in docs.").unwrap();
+    athena2.set_priority(job.as_str(), "urgent").unwrap();
+    athena2.set_priority(job.as_str(), "low").unwrap();
+    assert_eq!(priority_of(&athena2, job.as_str()), Priority::Low);
+}
+
+#[test]
+fn setting_a_priority_rejects_an_unknown_level_an_unknown_job_and_a_job_that_is_not_queued() {
+    let fx = Fixture::new();
+    let athena = fx.athena(deterministic());
+    let (job, _) = athena.queue("Tidy the notes in docs.").unwrap();
+    let head = fx.head();
+
+    let error = athena.set_priority(job.as_str(), "bogus").unwrap_err();
+    assert!(error.to_string().contains("unknown priority"), "{error}");
+    assert!(error.to_string().contains("urgent, high, normal, low"));
+    let error = athena
+        .set_priority("no-such-job-at-all", "urgent")
+        .unwrap_err();
+    assert!(!error.to_string().is_empty());
+    assert_eq!(fx.head(), head, "a refused priority commits nothing");
+
+    // Once read the request is proposed, not queued.
+    athena.ask("Tidy the other notes in docs.", &Quiet).unwrap();
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    let read = records
+        .request_jobs()
+        .into_iter()
+        .find(|j| j.state() != JobState::Queued)
+        .unwrap()
+        .id()
+        .as_str()
+        .to_string();
+    let head = fx.head();
+    let error = athena.set_priority(&read, "urgent").unwrap_err();
+    assert!(
+        error.to_string().contains("only a queued request"),
+        "{error}"
+    );
+    assert_eq!(fx.head(), head);
+}
+
+#[test]
+fn a_speed_improving_request_is_read_as_urgent_with_a_reason_and_an_ordinary_one_is_not() {
+    let fx = Fixture::new();
+    let athena = fx.athena(deterministic());
+    let fast = athena
+        .ask("Speed up planning so it times out less.", &Quiet)
+        .unwrap();
+    let plain = athena.ask("Fix a typo in the README.", &Quiet).unwrap();
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    let urgent = &records.jobs[fast.job.as_str()];
+    let ordinary = &records.jobs[plain.job.as_str()];
+    assert!(
+        urgent.latest_reading().unwrap().urgent_reason.is_some(),
+        "{:?}",
+        urgent.latest_reading()
+    );
+    assert_eq!(urgent.priority(), Priority::Urgent);
+    assert_eq!(ordinary.latest_reading().unwrap().urgent_reason, None);
+    assert_eq!(ordinary.priority(), Priority::Normal);
+}
+
+#[test]
+fn a_scripted_reading_with_an_urgent_reason_reaches_the_recorded_reading_and_null_does_not() {
+    for (given, recorded) in [
+        (
+            json!("cuts redo-work retries"),
+            Some("cuts redo-work retries"),
+        ),
+        (json!("  "), None),
+        (json!(null), None),
+    ] {
+        let fx = Fixture::new();
+        let mut scenario = Scenario::default();
+        scenario.reading["urgent_reason"] = given;
+        let athena = fx.athena(scenario.script());
+        let proposal = athena.ask("Add a greeting to the README.", &Quiet).unwrap();
+        let reading = proposal.reading.expect("the reading was recorded");
+        assert_eq!(reading.urgent_reason.as_deref(), recorded);
+        let records = Records::load(&fx.git, &fx.head()).unwrap();
+        let job = &records.jobs[proposal.job.as_str()];
+        assert_eq!(
+            job.latest_reading().unwrap().urgent_reason.as_deref(),
+            recorded
+        );
+        let expected = if recorded.is_some() {
+            Priority::Urgent
+        } else {
+            Priority::Normal
+        };
+        assert_eq!(job.priority(), expected);
+    }
 }
 
 #[test]

@@ -298,6 +298,7 @@ pub fn reading(deliverables: &[(&str, &str)], criteria: &[(&str, &str)]) -> Valu
         "defaults_applied": [{ "id": "strangers", "how": "plain words" }],
         "assumptions": ["English is fine."],
         "question": null,
+        "urgent_reason": null,
         "acceptance_criteria": criteria.iter().map(|(kind, text)| json!({ "text": text, "kind": kind })).collect::<Vec<_>>(),
         "deliverables": deliverables.iter().map(|(path, action)| json!({ "path": path, "action": action, "p": 0.9 })).collect::<Vec<_>>(),
         "out_of_scope": ["Other files"],

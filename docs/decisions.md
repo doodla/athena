@@ -3007,3 +3007,50 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   the landing median after this change, the cold xtask build time on a runner, and a real run of the workflow;
   the after-figure is deferred to a later measurement. This is part A1 of a larger speed-up; the early push of
   the candidate is a separate job.
+
+## D122 · Priority gains `urgent` and a priority record; the log's append-only rule gets a test
+
+- **Case:** Plan order knew `high`, `normal` and `low`, read only from a `Priority:` line in the request's words.
+  A request already queued could not be moved without rewriting it, and nothing let the reader say that a request
+  makes Athena faster. The first attempt at this change also inserted its decision in the middle of
+  `docs/decisions.md`, which broke D121 and shifted every line number in `docs/decision-links.toml`; nothing
+  checked the log's structure, so the damage was found late.
+- **Decision:** (1) `Priority::Urgent` sorts before `High`; `Priority: urgent` parses. A dependency still comes
+  before its dependent, and a prerequisite takes the best priority of what needs it, as before. (2) A new record
+  kind `athena.priority/1` (`<job>/priority-<n>.json`: `n`, `at`, `priority`) is appended by `athena priority
+  <job> <level>`. It is accepted only for a queued request and only for `urgent`, `high`, `normal` or `low`; the
+  request record is never touched. `JobRecords::priority()` is the one place that resolves priority: the latest
+  priority record, else the request's `Priority:` line, else urgent when the latest reading has an
+  `urgent_reason`, else normal. Plan (`reading::plan_entry`) and status (`job_line`) both call it, so they cannot
+  disagree. (3) The reader's output gains `urgent_reason` (null, or a reason); `Reading` records it, optional and
+  absent in older readings. The rule for marking a request urgent (it makes Athena faster or cuts wasted time:
+  failed or rejected attempts, planning stops, timeouts, redo-work retries, thrash, duplicated checks; a reason is
+  required) is the field's description in the reading schema (`outputs.rs`), because the reader set is at its
+  2000 token budget and `reader.md` must not grow. The fake reader marks requests that name speed-up words.
+  (4) A test in `crates/athena-cli/src/decisions.rs` parses `docs/decisions.md` into `## D<n> · ` entries and
+  checks that each has a Provenance bullet, that ids are unique and ascending, and that the first 230046 bytes
+  (the log through D121) hash to a pinned SHA-256, so an edit or insertion before the end fails and only appending
+  passes. Appending D122 needed no change to `docs/decision-links.toml`.
+- **Alternatives:** (a) Append a line to the request text, or rewrite `request.json`: records are append-only and
+  the request is the user's words verbatim. (b) Reuse the correction or intervention records: a correction
+  triggers a new reading and an intervention counts against the job's score, and neither means 'work this sooner'.
+  (c) Compute priority separately in plan and in status: the two drift, and a user would see an order that status
+  does not explain. (d) Put the urgent rule in `reader.md`: the reader set would pass 2000 tokens and the budgets
+  test would fail. (e) Let the reader's `urgent` override a `Priority:` line in the words or a priority record:
+  the user's own choice must win over a model's guess. (f) Allow a priority record on any open job: a read job is
+  already planned and may be running, so only the queue is reordered. (g) Check the log with `git show` against a
+  base commit in the test: the base is unknown when tests run in a snapshot; a pinned prefix hash needs no git.
+  (h) Check structure only: an edit to an old entry would pass.
+- **Tradeoff:** The pinned length and hash must be raised by hand in the test each time an entry is appended
+  and the test's constants are advanced to cover it; the test prints the actual hash when it differs, but a person
+  decides whether the change is legitimate. A reader that over-marks urgent jumps the queue, since a reading's
+  urgency counts when the words and the user say nothing. The fake reader's trigger words are a stand-in for a
+  model's judgment, and the reason a model gives is not checked beyond being non-empty.
+- **Reversal cost:** Low to medium. Remove `Urgent`, the priority record kind and command, and the reading field
+  (old records parse without it); records already written would need to stay readable, so the record kind would
+  remain in the parser. The log test can be deleted independently.
+- **Provenance:** stated: the request for an urgent level, a command that records a priority without rewriting
+  the request, and a test that guards the log's structure after the earlier attempt damaged it. Read:
+  `plan.rs`, `store.rs`, `status.rs`, `reading.rs`, `outputs.rs`, `reader.md`, `budgets.rs`, `docs/records.md`.
+  Measured: `cargo test` for the tests named in the CHANGELOG entry. Not measured: how often a real reader marks
+  a request urgent, or whether urgent requests then run faster.

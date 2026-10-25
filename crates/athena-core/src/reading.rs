@@ -4,6 +4,7 @@ use crate::capability::{JobConfig, ToolGrant};
 use crate::checks::tail;
 use crate::commits::{NewFile, message};
 use crate::invocation::InvocationFacts;
+use crate::plan::Priority;
 use crate::store::{JobRecords, JobState, Records};
 use crate::{Athena, Ui};
 use anyhow::{Context, Result, bail};
@@ -21,8 +22,8 @@ use athena_data::records::{
     AnyRecord, Correction, CorrectionKind, Criterion, CriterionKind, CritiqueVerdict,
     DefaultApplied, Deliverable, DeliverableAction, Forecast, Forecasts, Intervention,
     InterventionCategory, InterventionSource, IntrospectionRecord, IntrospectionStatus,
-    IntrospectionTrigger, Invocation, OutcomeState, PreventionKind, Quantiles, Reading, Request,
-    Role,
+    IntrospectionTrigger, Invocation, OutcomeState, PreventionKind, PriorityRecord, Quantiles,
+    Reading, Request, Role,
 };
 use athena_data::{JobId, RecordId};
 use athena_gate::redact::Redactor;
@@ -502,6 +503,13 @@ impl Athena {
             out_of_scope,
             forecasts: Forecasts { reader, reference },
             departures: opt(&text[4]),
+            // A blank reason is no reason, so the request is not marked urgent.
+            urgent_reason: out
+                .urgent_reason
+                .as_deref()
+                .map(str::trim)
+                .filter(|r| !r.is_empty())
+                .map(str::to_string),
         };
         let mut reading = reading;
         ensure_changelog(&mut reading);
@@ -575,6 +583,43 @@ impl Athena {
             ),
         )?;
         Ok((job, commit))
+    }
+
+    /// `athena priority <job> <level>`: appends a priority record for a queued request. The request record
+    /// is not touched; plan and status prefer the latest priority record over the request's words. The level
+    /// is checked and the job must be queued before anything is committed.
+    pub fn set_priority(&self, job_ref: &str, level: &str) -> Result<(JobId, Priority)> {
+        let Some(priority) = Priority::parse(level) else {
+            bail!(
+                "unknown priority {level:?}; use one of {}",
+                athena_data::records::PRIORITY_LEVELS.join(", ")
+            );
+        };
+        let head = self.head()?;
+        let records = crate::store::Records::load(&self.git, &head)?;
+        let job_id = records.resolve(job_ref)?;
+        let job = records.jobs.get(job_id.as_str()).expect("resolved");
+        if job.state() != JobState::Queued {
+            bail!(
+                "job {job_id} is {}; only a queued request can be given a priority",
+                job.state().name()
+            );
+        }
+        let n = job.priorities.iter().map(|p| p.n).max().unwrap_or(0) + 1;
+        self.commit_records(
+            &[NewFile::record(&AnyRecord::Priority(PriorityRecord {
+                job: job_id.clone(),
+                n,
+                at: crate::now(),
+                priority: priority.as_str().to_string(),
+            }))],
+            &message(
+                &format!("Set priority {}: {job_id}", priority.as_str()),
+                "A priority record for a queued request. The request is unchanged; plan and status use the latest priority record.",
+                &[("Athena-Job", job_id.as_str().to_string())],
+            ),
+        )?;
+        Ok((job_id, priority))
     }
 
     /// Reads a queued request for the first time, as `ask` would have.
@@ -1511,7 +1556,7 @@ pub fn plan_entry(
     let text = job.request.as_ref().map_or("", |r| r.text.as_str());
     let first = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
     let mut entry = crate::plan::PlanEntry::bare(job.id().as_str(), &job.title());
-    entry.priority = crate::plan::Priority::from_text(text);
+    entry.priority = job.priority();
     entry.depends_on = job_ids_in(text)
         .into_iter()
         .map(|id| id.as_str().to_string())
@@ -1876,6 +1921,7 @@ mod tests {
                 reference: forecast,
             },
             departures: None,
+            urgent_reason: None,
         }
     }
 

@@ -2,12 +2,13 @@
 //!
 //! No record holds a mutable status. A job's state is a function of which of its records exist.
 
+use crate::plan::Priority;
 use anyhow::{Result, anyhow, bail};
 use athena_data::records::{
     AnyRecord, Baseline, Candidate, Correction, Critique, DecisionState, DecisionStateKind,
     DefaultExpectations, FailureClass, HostError, Intervention, IntrospectionRecord, Invocation,
-    Job, JobPlan, Outcome, OutcomeState, ProposalRecord, Reading, Request, Resolution, Restart,
-    Role, Score, Verification, fold_decision_states,
+    Job, JobPlan, Outcome, OutcomeState, PriorityRecord, ProposalRecord, Reading, Request,
+    Resolution, Restart, Role, Score, Verification, fold_decision_states,
 };
 use athena_data::{JobId, RecordId};
 use athena_gate::records::RecordSet;
@@ -21,6 +22,8 @@ pub struct JobRecords {
     pub request: Option<Request>,
     pub readings: Vec<Reading>,
     pub corrections: Vec<Correction>,
+    /// The user's priority records, by `n` (`athena.priority/1`); the latest wins.
+    pub priorities: Vec<PriorityRecord>,
     pub job: Option<Job>,
     pub invocations: Vec<Invocation>,
     pub candidate: Option<Candidate>,
@@ -79,6 +82,31 @@ impl JobRecords {
 
     pub fn reading(&self, n: u32) -> Option<&Reading> {
         self.readings.iter().find(|r| r.n == n)
+    }
+
+    /// How soon the job should be worked, in order of precedence: the latest priority record
+    /// (`athena priority`); a `Priority:` line in the request's words; urgent when the latest reading gave an
+    /// urgent reason; else normal. Plan and status both read it here, so they cannot disagree.
+    pub fn priority(&self) -> Priority {
+        if let Some(p) = self
+            .priorities
+            .iter()
+            .max_by_key(|p| p.n)
+            .and_then(|p| Priority::parse(&p.priority))
+        {
+            return p;
+        }
+        let from_words = Priority::from_text(self.request.as_ref().map_or("", |r| r.text.as_str()));
+        if from_words != Priority::Normal {
+            return from_words;
+        }
+        if self
+            .latest_reading()
+            .is_some_and(|r| r.urgent_reason.is_some())
+        {
+            return Priority::Urgent;
+        }
+        Priority::Normal
     }
 
     pub fn state(&self) -> JobState {
@@ -143,6 +171,7 @@ impl JobRecords {
             AnyRecord::Request(r) => self.request = Some(r),
             AnyRecord::Reading(r) => self.readings.push(*r),
             AnyRecord::Correction(c) => self.corrections.push(c),
+            AnyRecord::Priority(p) => self.priorities.push(p),
             AnyRecord::Job(j) => self.job = Some(*j),
             AnyRecord::Invocation(i) => self.invocations.push(*i),
             AnyRecord::Candidate(c) | AnyRecord::Candidate2(c) => self.candidate = Some(*c),
@@ -162,6 +191,7 @@ impl JobRecords {
     fn sort(&mut self) {
         self.readings.sort_by_key(|r| r.n);
         self.corrections.sort_by_key(|c| c.n);
+        self.priorities.sort_by_key(|p| p.n);
         self.invocations.sort_by_key(|i| i.seq);
         self.scores.sort_by_key(|s| s.at);
         self.plans.sort_by_key(|p| p.round);
@@ -221,6 +251,7 @@ fn job_of(record: &AnyRecord) -> Option<&JobId> {
         AnyRecord::Request(r) => Some(&r.job),
         AnyRecord::Reading(r) => Some(&r.job),
         AnyRecord::Correction(r) => Some(&r.job),
+        AnyRecord::Priority(r) => Some(&r.job),
         AnyRecord::Job(r) => Some(&r.id),
         AnyRecord::Invocation(r) => Some(&r.job),
         AnyRecord::Candidate(r) | AnyRecord::Candidate2(r) => Some(&r.job),

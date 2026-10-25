@@ -9,6 +9,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- An `urgent` priority above `high` in plan order, a new `athena priority <job> <level>` command and a guard on
+  `docs/decisions.md` (D122). The command appends an `athena.priority/1` record (`priority-<n>.json`) for a queued
+  request; the request is not rewritten, and plan and status both prefer the latest priority record over a
+  `Priority:` line in its words (`Priority: urgent` now parses). A dependency still comes before its dependent
+  whatever the priority. The reader may mark a request urgent, with a required `urgent_reason`, when doing it makes
+  Athena faster or cuts wasted time; the rule is the field's description in the reading schema, so `reader.md`
+  does not grow. Readings gain an optional `urgent_reason`. A test in `decisions.rs` parses the log, checks every
+  entry has a Provenance bullet and ids ascend, and pins the earlier bytes so entries are only appended.
 - Verification start in `athena go` opens or updates the job's pull request, so CI caches by the candidate's
   fingerprint while the verifier works. The candidate is pushed to the job's own `athena/<job>` branch and the
   pull request is opened (or, when one is already linked, its branch moved) through the host seam. It never
