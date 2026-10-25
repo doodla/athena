@@ -1,0 +1,164 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261025-110525-8hzb",
+  "round": 1,
+  "at": "2026-10-25T11:07:50.448667659Z",
+  "invocation_seq": 2,
+  "approach": "In run.rs, move the self.early_pr(&id, &c, &ctx.reading.title, ctx.ui) call (now at ~1645, after admission, fingerprinting and remove_tree(&work)) to directly after `candidate.candidate_tree = Some(tree.clone())` (~1595), ahead of admission, fingerprinting and every Athena check. Update the comment there. The call is already best-effort (one warning line on failure) and never merges, so the merge stays gated on verification and athena land. Update the early_pr doc comment in gh.rs (~2300) to say \"right after the candidate commit\". Extend the fake-host tests to record ordering against the run's progress and add never-merged tests for an admission/check failure and a verifier rejection. Add a CHANGELOG entry that records no measured landing time.",
+  "decisions": [
+    {
+      "choice": "Call early_pr immediately after the candidate commit is created, before admit() and fingerprint()",
+      "reason": "The brief and criterion 4 ask for exactly this. Admission and the checks precede verification, and the 12-minute check run is what wastes the CI head start. The call needs only the commit id c, which exists at that point.",
+      "rejected": [
+        {
+          "option": "Call it after admission but before the checks",
+          "why": "Criterion 4 says before admission. Admission is fast, so this would gain little, but it would depart from the accepted reading."
+        },
+        {
+          "option": "Call it from inside the checks stage or on a thread",
+          "why": "More machinery for no gain. The call is synchronous and already fails soft."
+        }
+      ]
+    },
+    {
+      "choice": "Leave a failed candidate's PR open for the retry, as now; make no new close logic",
+      "reason": "The retry force-updates the same branch, and closing with the job is existing behavior. Out of scope to change how land merges or closes.",
+      "rejected": [
+        {
+          "option": "Close the PR when admission or checks fail",
+          "why": "Adds new host calls and works against the retry reusing the branch."
+        }
+      ]
+    },
+    {
+      "choice": "Observe ordering in the test with a probe that reads the run's progress (agents seen plus UI lines) at call time, via EarlyFake's existing probe closure",
+      "reason": "The fake already records a probe value per call. The 'candidate …' UI line is emitted after admission and before the checks, so a push and open_pr recorded before that line prove they came before admission and the checks. Zero verifier agents seen proves they came before the verifier.",
+      "rejected": [
+        {
+          "option": "Assert only on agent counts",
+          "why": "The agent count is 1 both before and after the old position, so it cannot show the move."
+        }
+      ]
+    },
+    {
+      "choice": "Record no number in CHANGELOG; write that the next real landing's time is to be recorded there as measured, and label the 12-minute and 16-minute figures from the request as estimates",
+      "reason": "The producer cannot measure a real landing, and the brief forbids inventing one.",
+      "rejected": [
+        {
+          "option": "Insert an expected landing time",
+          "why": "An invented number violates the evidence default."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "purpose": "Move the early_pr call to just after the candidate commit and tree are recorded, before admission and fingerprinting. Update the comment.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "action": "modify",
+      "purpose": "Doc comment on early_pr (~2300) updated to say it runs right after the candidate commit. No logic change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "action": "modify",
+      "purpose": "Extend the ordering test. Add failure-path tests (admission refusal, verifier fail) showing no merge and the PR left open. Share a UI log with the probe.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/test_support.rs",
+      "action": "modify",
+      "purpose": "Only if needed: let EarlyCall record progress beyond the agent count, e.g. a probe returning the UI line count, or a helper to compare against the 'candidate' line.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Entry for opening the early PR right after the candidate commit. It says the next real landing time is to be recorded as measured and labels the figures from the request as estimates.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In run.rs, cut the early_pr call and its comment at ~1643-1645 and paste them directly after `candidate.candidate_tree = Some(tree.clone());` (~1595). Reword the comment: the candidate is committed, so open or update the PR now so CI runs alongside Athena's checks and the verifier. It never merges, and a failure is one warning line.",
+    "Update the doc comment on early_pr in gh.rs (~2300) to match. Make no other gh.rs change unless the helper needs it.",
+    "In run_pin_tests.rs, make the Lines UI observable from the fake's probe, and extend the early_pr ordering test to assert push and open_pr come before the 'candidate …' line and before any verifier. Keep the existing assertions that still hold.",
+    "Add the two failure tests with athena_with tweaks and a capability or setup that makes admission refuse. Assert a non-Landed state, an empty of('merge'), and push and open_pr present.",
+    "Run a_failing_early_step and fix any call-sequence expectations that changed.",
+    "Add a CHANGELOG.md entry in the file's existing format. Do not invent a landing time.",
+    "Run cargo fmt --all --check, cargo clippy --all-targets --locked -- -D warnings and cargo test --locked."
+  ],
+  "risks": [
+    {
+      "risk": "Other tests assert call counts or the 'seen' value at the old position.",
+      "mitigation": "Update the existing assertions deliberately and keep the single push then open_pr sequence. Run the whole athena-core suite."
+    },
+    {
+      "risk": "Calling early_pr before remove_tree(&work) or before closing.candidate is set could interact with early returns.",
+      "mitigation": "The call only uses the commit id and branch name, and the work tree is removed afterwards. Run the tests that exercise remove_tree to confirm."
+    },
+    {
+      "risk": "A refused candidate is now pushed to a remote branch.",
+      "mitigation": "Flag this in the CHANGELOG and in open_questions. The push is of a candidate commit that is not on any branch locally, and the PR is left for the retry."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Extend early_pr_pushes_the_candidate_and_opens_the_pull_request_before_verification_and_never_merges. The probe records, for each fake call, the verifier count and whether the 'candidate …' line (printed after admission, before the checks) has appeared. Add a check spec to the test capability if needed, and assert that no check line precedes the push.",
+      "command": "cargo test -p athena-core early_pr",
+      "observes": "push then open_pr are recorded with 0 verifier agents run and before the 'candidate …' line, the pushed commit exists in git and is not the landed one, and the call kinds are exactly push, open_pr.",
+      "fails_without": "With the call at its old position (after admission and before the verifier), the calls are recorded after the 'candidate …' line, so the before-admission assertion fails."
+    },
+    {
+      "criterion": 2,
+      "method": "Add two fake-host tests. (a) A candidate that admission refuses, e.g. a capability admit violation or an oversize file, so the job fails before the checks. (b) A verifier tweak returning verdict fail, via athena_with. Each uses early_run-style setup with the fake installed.",
+      "command": "cargo test -p athena-core",
+      "observes": "The outcome is not Landed, run.fake.of('merge') is empty, push and open_pr each occurred once, and no close or replace call is made. The PR is left for the retry, and closing with the job is unchanged.",
+      "fails_without": "If any failure path merged, or the early step were skipped on failure, the merge-empty or push-present assertion would fail."
+    },
+    {
+      "criterion": 3,
+      "method": "Run the existing test a_failing_early_step_leaves_the_outcome_the_same_and_land_proceeds_as_before unchanged, with its expected call sequences re-checked after the move.",
+      "command": "cargo test -p athena-core a_failing_early_step",
+      "observes": "The bad-push and bad-open runs have the same state and reason as the good run, exactly one 'could not open the pull request early' warning, and no merge.",
+      "fails_without": "If the move changed the outcome or added or lost a warning, the state, reason or warning-count assertions would fail."
+    },
+    {
+      "criterion": 4,
+      "method": "Read the diff of run.rs and gh.rs.",
+      "command": "git diff",
+      "observes": "In run.rs the early_pr call follows candidate.candidate_tree = Some(...) and precedes the admit(...) call, with the comment saying so. gh.rs shows only the doc-comment change, or nothing.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "Read the CHANGELOG diff.",
+      "command": "git diff CHANGELOG.md",
+      "observes": "A new entry describes the reorder, says the next real landing's time is to be recorded there as measured, labels the 12 and 16 minute figures as estimates from the request, and contains no invented measured landing time.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Run the three Athena checks (each is a whole simple command and may be run separately).",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "Formatting is clean, clippy has no warnings, and all tests pass.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "The study test capability has no checks, so no check-start event exists to observe. The plan uses the 'candidate …' UI line, which is emitted before the checks, as the boundary. The producer may add a check spec to a test capability if it can do so cheaply.",
+    "Pushing before admission means a candidate that admission refuses (e.g. one with personal data or an oversize file) is pushed to the remote branch. The brief explicitly asks for this, so the plan follows it, but the maintainer may want admission-first. Admission is fast, so the CI head start would be nearly the same.",
+    "Which existing path closes a failed job's PR was not traced. The criterion 2 test asserts only that no merge happens and that no new close call is added."
+  ],
+  "producer_section_sha256": "a47a53a19042bebccbe2a2fb3fc47c9cba3f56accf7e71da4589b05e9baa2a97"
+}

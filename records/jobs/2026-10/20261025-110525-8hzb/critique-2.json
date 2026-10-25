@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261025-110525-8hzb",
+  "round": 2,
+  "at": "2026-10-25T11:08:53.818514759Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The planned move does not change when CI starts relative to Athena's checks; the root cause is somewhere else",
+      "evidence": "run.rs:1645 calls self.early_pr, and run.rs:1700 starts check_runs = crate::routing::run_routed(...). Only admit(), fingerprint(), a ui.line and remove_tree sit between candidate.candidate_tree = Some(...) at 1595 and the current call. Moving the call to 1596 gains seconds, not the 12 minutes the request describes. The plan says the 12-minute checks are what waste the head start, but that is not true of this code. The root-cause default asks for the fault to be fixed where it originates. Fix: Trace where the time actually goes before writing the change. Candidates: (a) take_baseline at run.rs:1347 runs the configured checks before the producer starts, but no candidate exists then. (b) gh.rs replace_early (1989-2003) swaps the early head for a different landing commit, so the landing SHA has no CI result, which matches 'found no cached pass'. (c) The early run had not finished when landing began (passed at 10:46:49, landing run started at 10:45:15). Present what you find, and say whether the reorder still delivers the saving. If the real cause is (b) or (c) and lies outside the listed files or the out-of-scope bounds, name it and propose the fix, as the root-cause default requires. Do not ship a reorder that is described as saving 12 minutes.",
+      "location": "Plan Decision 1 / Step 1; run.rs:1595-1700",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The criterion 1 test uses the 'candidate …' UI line as its boundary, which does not show the call happens before the checks",
+      "evidence": "The old position (1645) was already before the checks (1700) and before the verifier. Only the 'candidate …' line (run.rs:1621) separates the old and new positions. So the test passes or fails on admission order only. Criterion 1 and the request ask about 'before the checks start'. A test that passes both before and after on that point does not show the requested behavior. The plan's open question admits there is no check-start event. Fix: Add a fake check spec (or a probe on run_routed or SnapExec) so the test records when the checks start, and assert that push and open_pr come before it. Also state plainly that the old code already passed that assertion. Then base any claim about the gain on the traced root cause from the first finding.",
+      "location": "Demonstrations, criterion 1; Decision 3",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Pushing before admission sends refused candidates to the remote, which can include content that admission blocks for personal data or size",
+      "evidence": "admit() checks personal_data and max_file_bytes. With the move, a candidate that admission refuses for personal data is pushed to a public branch and gets a pull request first. Fix: If the move is kept, keep the push after admission. Admission takes seconds, so this costs nothing measurable. Otherwise, justify the exposure explicitly and test that it is acceptable. Then update criterion 4 with the user.",
+      "location": "Risks / Open questions; run.rs:1598-1607 (personal_data, max_file_bytes)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The admission-refusal never-merged test depends on the risky ordering",
+      "evidence": "The test asserts that push and open_pr are present for an admission-refused candidate. That locks in pushing refused content to the remote. Fix: Use a check failure (a fake check that fails) for the 'fails Athena's checks' case, as criterion 2 states. Assert no merge either way.",
+      "location": "Demonstrations, criterion 2(a)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": "The reading assumes Athena's checks run before the early pull request call. In the snapshot they run after it. In produce_and_verify (run.rs), the candidate commit is made at 1586-1595, admission and fingerprinting run at 1598-1639, early_pr is called at 1645, and the routed checks (run_routed) start at 1700. The reading itself notes \"the checks at about line 1700\". So the 12 minutes the request blames are already after the early pull request call. The only work between the commit and the call is admission, fingerprinting, one UI line and remove_tree, which takes seconds. The request's timing figures still need a cause. Code that may explain them: the baseline checks run on the base commit before the producer (run.rs:1345-1366, take_baseline), and landing replaces the early head with a different landing commit (gh.rs:1819-1823 and 1989-2003, replace_early), so CI runs fresh on the landing SHA. The reading does not trace either one.",
+  "summary": "The plan names real code and lines. run.rs:1595 is the candidate tree, 1645 is the early_pr call, and gh.rs:2303 is the early_pr helper. But it rests on a premise the snapshot contradicts: Athena's routed checks start at run.rs:1700, after the existing early_pr call. Moving the call ahead of admission saves seconds, not the 12 minutes the request describes, so the root cause is not addressed. Two leads are visible in the code: the landing commit replacing the early head with a new SHA (gh.rs replace_early), and the early run not finishing before landing began. The criterion 1 test's boundary (the 'candidate …' UI line) measures only the admission ordering, not 'before the checks start'. Pushing before admission also sends personal-data-refused candidates to the remote for no measurable gain. The planner should trace the actual delay, fix it where it starts or name it as outside scope, and make the ordering test observe the start of the checks."
+}
