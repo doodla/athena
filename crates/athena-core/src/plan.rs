@@ -4,8 +4,14 @@
 //!
 //! The plan is pure data and deterministic code; it calls no model:
 //!
-//! - **Order.** Items with every dependency done form a wave. Within a wave the order is the ladder (the top
-//!   rung first), then age (oldest first) as the tiebreak. A dependent item always comes after what it needs.
+//! - **Order.** Dependencies first, then priority, then rung, then age. Items with every dependency done form
+//!   the ready set; only the ready items with the best effective priority make the next wave, and within a
+//!   wave the order is the ladder (the top rung first), then age (oldest first) as the tiebreak. An item's
+//!   effective priority is its own, raised to the best priority of anything that depends on it, so the
+//!   prerequisites of a high-priority item run before unrelated older normal items. A dependent item always
+//!   comes after what it needs. A request's priority is [`Priority`]: high, normal (the default) or low,
+//!   read from a `Priority: <level>` line in its words. With no priority set every item is normal and the
+//!   order is the ladder, then age.
 //! - **Parallel groups.** A wave is split into groups of items that no dependency links and whose touched
 //!   paths are disjoint; the items of one group could run side by side. An item that names no touched path is
 //!   never grouped with another, because nothing is known about what it changes. The shared append-only files
@@ -31,6 +37,45 @@
 use athena_data::roles::Ladder;
 use serde::Serialize;
 
+/// How soon a request should be worked, ahead of its rung and age. High sorts first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Priority {
+    High,
+    #[default]
+    Normal,
+    Low,
+}
+
+impl Priority {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Priority::High => "high",
+            Priority::Normal => "normal",
+            Priority::Low => "low",
+        }
+    }
+
+    /// The priority a request's words give: the first line that, trimmed, starts with `Priority:` (any case)
+    /// followed by exactly `high`, `normal` or `low` (any case). Anything else, or no such line, is normal.
+    pub fn from_text(text: &str) -> Priority {
+        for line in text.lines() {
+            let line = line.trim();
+            let Some(head) = line.get(..9) else { continue };
+            if !head.eq_ignore_ascii_case("priority:") {
+                continue;
+            }
+            match line[9..].trim().to_ascii_lowercase().as_str() {
+                "high" => return Priority::High,
+                "normal" => return Priority::Normal,
+                "low" => return Priority::Low,
+                _ => {}
+            }
+        }
+        Priority::Normal
+    }
+}
+
 /// One request, fleshed out.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PlanEntry {
@@ -49,6 +94,8 @@ pub struct PlanEntry {
     pub depends_on: Vec<String>,
     /// Repository paths (a directory ends with `/`) the request will change.
     pub touches: Vec<String>,
+    /// How soon the request should be worked; normal unless its words say otherwise.
+    pub priority: Priority,
 }
 
 impl PlanEntry {
@@ -63,6 +110,7 @@ impl PlanEntry {
             open_questions: Vec::new(),
             depends_on: Vec::new(),
             touches: Vec::new(),
+            priority: Priority::Normal,
         }
     }
 
@@ -173,6 +221,30 @@ impl Plan {
             }
         }
         let known: Vec<&str> = pending.iter().map(|(_, e)| e.id.as_str()).collect();
+        // Effective priority: an item's own, raised to the best of whatever depends on it (to a fixpoint).
+        let mut effective: Vec<Priority> = pending.iter().map(|(_, e)| e.priority).collect();
+        loop {
+            let mut changed = false;
+            for i in 0..pending.len() {
+                for dep in &pending[i].1.depends_on {
+                    if let Some(j) = known.iter().position(|k| k == dep)
+                        && effective[i] < effective[j]
+                    {
+                        effective[j] = effective[i];
+                        changed = true;
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        let effective_of = |id: &str| {
+            known
+                .iter()
+                .position(|k| *k == id)
+                .map_or(Priority::Normal, |i| effective[i])
+        };
         let mut done: Vec<String> = Vec::new();
         while !pending.is_empty() {
             let mut ready: Vec<(usize, &PlanEntry)> = pending
@@ -187,6 +259,9 @@ impl Plan {
             if ready.is_empty() {
                 plan.cyclic = pending.iter().map(|(_, e)| e.id.clone()).collect();
                 break;
+            }
+            if let Some(best) = ready.iter().map(|(_, e)| effective_of(&e.id)).min() {
+                ready.retain(|(_, e)| effective_of(&e.id) == best);
             }
             ready.sort_by_key(|(age, e)| (e.rung, *age));
             // Greedy groups: an item joins the first group all of whose members it can run beside.
@@ -495,6 +570,82 @@ mod tests {
         let (_, low) = rungs();
         let plan = Plan::build(&[entry("a", low, &["a"], &["landed-long-ago"])]);
         assert_eq!(plan.order, ["a"]);
+    }
+
+    fn with_priority(mut e: PlanEntry, p: Priority) -> PlanEntry {
+        e.priority = p;
+        e
+    }
+
+    #[test]
+    fn a_newer_high_priority_item_comes_before_older_normal_ones() {
+        let (_, low) = rungs();
+        let plan = Plan::build(&[
+            entry("n1", low, &["a/"], &[]),
+            entry("n2", low, &["b/"], &[]),
+            entry("n3", low, &["c/"], &[]),
+            with_priority(entry("h", low, &["d/"], &[]), Priority::High),
+        ]);
+        assert_eq!(plan.order, ["h", "n1", "n2", "n3"]);
+    }
+
+    #[test]
+    fn priority_ranks_high_then_normal_then_low() {
+        assert!(Priority::High < Priority::Normal && Priority::Normal < Priority::Low);
+        let (_, low) = rungs();
+        let plan = Plan::build(&[
+            with_priority(entry("l", low, &["a/"], &[]), Priority::Low),
+            entry("n", low, &["b/"], &[]),
+        ]);
+        assert_eq!(plan.order, ["n", "l"]);
+    }
+
+    #[test]
+    fn dependencies_win_over_priority_and_pull_their_prerequisites_forward() {
+        let (_, low) = rungs();
+        let plan = Plan::build(&[
+            entry("n1", low, &["a/"], &[]),
+            entry("n2", low, &["b/"], &[]),
+            entry("n3", low, &["c/"], &[]),
+            with_priority(entry("h", low, &["d/"], &["n1"]), Priority::High),
+        ]);
+        assert_eq!(plan.order, ["n1", "h", "n2", "n3"]);
+        // A low item with a high dependent runs before the normals.
+        let plan = Plan::build(&[
+            entry("n", low, &["a/"], &[]),
+            with_priority(entry("base", low, &["b/"], &[]), Priority::Low),
+            with_priority(entry("h", low, &["c/"], &["base"]), Priority::High),
+        ]);
+        assert_eq!(plan.order, ["base", "h", "n"]);
+    }
+
+    #[test]
+    fn without_priorities_the_order_is_rung_then_age() {
+        let (top, low) = rungs();
+        let plan = Plan::build(&[
+            entry("a", low, &["a/"], &[]),
+            entry("b", top, &["b/"], &[]),
+            entry("c", low, &["c/"], &[]),
+            entry("d", top, &["d/"], &["a"]),
+        ]);
+        assert_eq!(plan.order, ["b", "a", "c", "d"]);
+        assert_eq!(plan.groups, [vec!["b", "a", "c"], vec!["d"]]);
+    }
+
+    #[test]
+    fn priority_is_read_from_a_line_in_the_words() {
+        assert_eq!(
+            Priority::from_text("Fix it\nPriority: high\n"),
+            Priority::High
+        );
+        assert_eq!(Priority::from_text("x\n  priority: HIGH"), Priority::High);
+        assert_eq!(Priority::from_text("Priority: low"), Priority::Low);
+        assert_eq!(Priority::from_text("Fix it"), Priority::Normal);
+        assert_eq!(Priority::from_text("Priority: urgent"), Priority::Normal);
+        assert_eq!(
+            Priority::from_text("this is a high priority: high stakes"),
+            Priority::Normal
+        );
     }
 
     #[test]

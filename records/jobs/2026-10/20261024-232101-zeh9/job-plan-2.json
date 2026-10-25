@@ -1,0 +1,192 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261024-232101-zeh9",
+  "round": 2,
+  "at": "2026-10-24T23:24:15.227226052Z",
+  "invocation_seq": 3,
+  "approach": "Add a Priority enum (High, Normal, Low; derived Ord, High first) to plan.rs with Priority::from_text reading a case-insensitive 'Priority: <level>' line, and a priority field on PlanEntry (Normal in bare). Plan::build sorts each ready wave by (priority, rung, age); the wave loop is untouched so dependencies still win. reading::plan_entry sets priority from the request text. JobLine gains a priority string filled in status::job_line from the same parser. display::plan prints a priority line per item; status open/recent lines get a priority suffix. Add tests, a CHANGELOG entry and a decisions.md entry.",
+  "decisions": [
+    {
+      "choice": "Priority is the first sort key within a ready wave: (priority, rung, age); wave loop unchanged.",
+      "reason": "Smallest change; priority before age while dependencies stay first.",
+      "rejected": [
+        {
+          "option": "Boost dependencies of a high item transitively",
+          "why": "Changes dependency semantics; out of scope."
+        },
+        {
+          "option": "Sort priority after rung",
+          "why": "The cutover request would still sit behind older higher-rung work."
+        }
+      ]
+    },
+    {
+      "choice": "Read priority from a 'Priority: <level>' line via one shared parser Priority::from_text used by plan_entry and status.",
+      "reason": "No new command or stored field; one parser keeps plan and status consistent.",
+      "rejected": [
+        {
+          "option": "Command-set stored field",
+          "why": "Needs new command and record schema; out of scope. Recorded in decisions.md."
+        },
+        {
+          "option": "Separate parser in display.rs",
+          "why": "Parsers can drift."
+        }
+      ]
+    },
+    {
+      "choice": "Closed set high/normal/low; unknown or missing gives Normal; first valid line wins.",
+      "reason": "A typo must not reorder the queue; default keeps today's order.",
+      "rejected": [
+        {
+          "option": "Numeric priority",
+          "why": "More surface, no stated need."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/plan.rs",
+      "action": "modify",
+      "purpose": "Priority enum and parser, PlanEntry.priority, sort key, module doc, tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "plan_entry sets priority from request text; test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "JobLine priority filled in job_line.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "purpose": "Priority line in plan items; priority suffix in status lines; test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Plan display test covers priority lines and high item first.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Entry for request priority.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Decision entry with alternatives and cutover motivation.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read the tails of CHANGELOG.md and docs/decisions.md for format and next decision number.",
+    "In plan.rs add Priority (High, Normal, Low; derives incl. Ord, Serialize kebab-case; as_str; from_text), PlanEntry.priority (Normal in bare), sort key (priority, rung, age), module doc update.",
+    "Add plan.rs tests: high newest first, dependency beats priority, no-priority order unchanged, low last, parser cases.",
+    "In reading.rs plan_entry set priority from the text; add test.",
+    "In status.rs add priority to JobLine, set in job_line.",
+    "In display.rs add priority line in entry_lines and suffix on status lines; add test.",
+    "Extend drain.rs plan display test.",
+    "Add CHANGELOG and decisions.md entries.",
+    "Run cargo fmt, cargo clippy --all-targets --locked -- -D warnings, cargo test --locked."
+  ],
+  "risks": [
+    {
+      "risk": "Existing exact-output tests break.",
+      "mitigation": "Add priority as a separate line in plan and a suffix in status; run full cargo test."
+    },
+    {
+      "risk": "Derived Ord puts wrong end first.",
+      "mitigation": "Variant order High, Normal, Low; test asserts it."
+    },
+    {
+      "risk": "Prose mentioning priority reorders the queue.",
+      "mitigation": "Only a line starting with 'Priority:' and an exact level counts; tested."
+    },
+    {
+      "risk": "PlanEntry literals break on new field.",
+      "mitigation": "Use ..PlanEntry::bare; compile errors reveal exceptions."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit test in plan.rs: n1,n2,n3 normal plus newer high h, same rung, no dependencies; assert Plan::build order.",
+      "command": "cargo test -p athena-core plan",
+      "observes": "order == [h, n1, n2, n3].",
+      "fails_without": "Without the priority sort key the newer high entry is last and the order assertion fails."
+    },
+    {
+      "criterion": 2,
+      "method": "Unit test: h high depends_on older normal n1, plus unrelated normal n2; assert position(n1) < position(h).",
+      "command": "cargo test -p athena-core plan",
+      "observes": "n1 is before h.",
+      "fails_without": "If priority overrode dependencies, h would precede n1 and the test fails."
+    },
+    {
+      "criterion": 3,
+      "method": "New plan.rs test with no priorities, varied rungs and ages, asserting rung-then-age order; existing plan and drain tests run unchanged.",
+      "command": "cargo test",
+      "observes": "Order is rung then age; all tests pass.",
+      "fails_without": "If the default order changed, the no-priority test and existing tests fail."
+    },
+    {
+      "criterion": 4,
+      "method": "drain.rs plan display test with a high and a normal entry asserts 'priority' lines for both; display.rs test builds a JobLine with priority high and asserts the status line contains 'priority high'.",
+      "command": "cargo test -p athena-cli",
+      "observes": "Plan output has a priority line per item; status lines show priority.",
+      "fails_without": "Without the display change the priority needles are absent and assertions fail."
+    },
+    {
+      "criterion": 5,
+      "method": "Tests for Priority::from_text ('Priority: high', 'priority: HIGH', indented, absent, 'Priority: urgent') and reading::plan_entry on a request with the line.",
+      "command": "cargo test -p athena-core",
+      "observes": "High for the line in any case; Normal otherwise.",
+      "fails_without": "Without the parser every request reads as normal and the high assertions fail."
+    },
+    {
+      "criterion": 6,
+      "method": "Read the module doc diff.",
+      "command": "git diff crates/athena-core/src/plan.rs",
+      "observes": "The Order bullet names priority, then rung, then age, with dependencies first.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Review the diff.",
+      "command": "git diff CHANGELOG.md docs/decisions.md",
+      "observes": "A CHANGELOG entry for request priority; a decisions.md entry with words-in-request versus command-field alternatives and the 2026-10-24 cutover motivation.",
+      "fails_without": null
+    },
+    {
+      "criterion": 8,
+      "method": "Run clippy with warnings denied, then cargo fmt --all --check, over the code including the new tests and field.",
+      "command": "cargo clippy --all-targets --locked -- -D warnings",
+      "observes": "No warnings and no formatting diff; both exit 0.",
+      "fails_without": "An unused item, an unformatted line or a missed Priority field in a struct literal would make clippy or fmt exit non-zero, failing the criterion."
+    }
+  ],
+  "open_questions": [
+    "Whether JobLine is constructed elsewhere (compile errors will show).",
+    "Exact heading format and next D-number in CHANGELOG.md and decisions.md.",
+    "Whether JobLine JSON should carry priority; assumed yes."
+  ],
+  "producer_section_sha256": "2d3f52359e66166c0a6c5e13261660f09f9cad21fcf3b2e86a5d0c6a5b68df12"
+}
