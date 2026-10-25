@@ -308,7 +308,8 @@ pub fn reading(deliverables: &[(&str, &str)], criteria: &[(&str, &str)]) -> Valu
             "cost_usd": { "p10": 0.05, "p50": 0.2, "p90": 0.8 },
             "wall_time_s": { "p10": 5.0, "p50": 30.0, "p90": 300.0 },
             "departures": null
-        }
+        },
+        "urgent_reason": null
     })
 }
 

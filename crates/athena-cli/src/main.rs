@@ -218,8 +218,9 @@ and the page text passed the source check
 
 Order: planning comes first. Every open request is fleshed out (goal, requirements-ladder rung, acceptance, \
 open questions, dependencies, the paths it touches) and all of them are planned together. Drain works the \
-items in plan order (a dependent after what it needs, then a `Priority: high|normal|low` line in the \
-request's words, then higher rung, then age as the tiebreak; no priority line means normal), not oldest \
+items in plan order (a dependent after what it needs, then priority: urgent, high, normal, low, from the \
+newest `athena priority` record, else the reader's urgent mark, else a `Priority: urgent|high|normal|low` \
+line in the request's words; then higher rung, then age as the tiebreak; no priority means normal), not oldest \
 first, and the report shows the plan's groups: items in one group have no dependency and touch disjoint paths, \
 so they can run in parallel: drain runs up to `[parallel] max_concurrency` of them at once (athena.toml; \
 default 1, which is one job at a time; at most 8). Landing and rating stay one at a time, and a group starts \
@@ -261,6 +262,20 @@ Exit code: 0 only when the target was met; 2 for any other stop; 1 when Athena i
     /// rated as usual), no further job is started, and the drain reports `stop requested`. Nothing is killed;
     /// to kill running work use `athena stop`.
     DrainStop,
+    /// Set the priority of a queued request: urgent, high, normal or low. It is recorded as a new record
+    /// (`athena.priority/1`); the request is not rewritten and is not re-queued. The newest priority record
+    /// wins over a `Priority:` line in the request's words and over the reader's urgent mark, in `athena plan`,
+    /// `athena drain` and `athena status`. Urgent ranks above high; the reader marks a request urgent itself
+    /// when it makes Athena faster or cuts wasted time. Only queued requests can be given a priority.
+    Priority {
+        job: String,
+        /// urgent, high, normal or low.
+        level: String,
+        #[arg(long)]
+        why: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Close a job that will not run or finish.
     Close {
         job: String,
@@ -989,6 +1004,21 @@ fn run(cli: Cli) -> Result<u8> {
                 print_json(&report)?;
             } else {
                 print!("{}", display::plan(&report));
+            }
+            Ok(0)
+        }
+        Command::Priority {
+            job,
+            level,
+            why,
+            json,
+        } => {
+            let athena = open(true)?;
+            let (id, priority, commit) = athena.set_priority(&job, &level, &why, &Terminal)?;
+            if json {
+                print_json(
+                    &serde_json::json!({ "job": id.as_str(), "priority": priority.as_str(), "commit": commit }),
+                )?;
             }
             Ok(0)
         }

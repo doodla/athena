@@ -3002,6 +3002,50 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   passed once is reused. Entries are immutable per key, and a rerun after a pass hits the entry instead of saving.
 - **Reversal cost:** Low. Remove the new steps and conditions from `ci.yml`, the `fingerprint` and `ci-cache`
   commands and the xtask to athena-git edge.
+
+## D122 · An urgent priority above high, set by the reader or by a priority record
+
+- **Case:** BRIEF.md's addendum of 2026-10-25 says Athena should prioritise anything that helps it move faster,
+  including time wasted. D118 gave requests high, normal and low, but nothing ranked speed work above other high
+  requests, and the only way to change a queued request's priority was to re-queue it with new words.
+- **Decision:** (1) `Priority::Urgent` sorts before `High` in `plan.rs`; `Priority::from_text` reads
+  `Priority: urgent`, and `Priority::parse` reads one level word. `Plan::build` is unchanged: dependencies stay
+  first and a prerequisite inherits its dependent's rank. (2) `athena priority <job> <level> --why <text>` appends
+  one `athena.priority/1` record, `<job dir>/priority-<n>.json` (level, why, time), with n one above the job's
+  highest. Requests stay append-only. It refuses an unknown level, an unknown job, a missing `--why` and any job
+  that is not queued, and writes nothing in those cases. (3) `reading::job_priority` gives a request's priority:
+  the record with the highest n, else urgent when the latest reading has an `urgent_reason`, else the `Priority:`
+  line in its words. `reading::plan_entry` and `status::job_line` both call it, so `athena plan`, `athena drain`
+  and `athena status` agree. A record outranks the reader, so a wrongly urgent request can be demoted. (4) The
+  reader marks urgency in a new required, nullable `urgent_reason` of its output, recorded on the reading
+  (`athena.reading/1`, optional so older readings still parse). The rule is the field's doc in `outputs.rs`,
+  which becomes the schema description: urgent when the request makes Athena faster or cuts wasted time (failed
+  or rejected attempts, planning stops, timeouts, retries that redo work, thrash, duplicated checks), and a reason
+  is required. `reader.md` is unchanged because it sits at its 2,000-token budget (D25).
+- **Tests:** `urgent_comes_before_high_and_high_before_normal`,
+  `an_urgent_dependent_still_comes_after_its_prerequisite`, `priority_is_read_from_a_line_in_the_words`
+  (`plan.rs`); `a_priority_record_overrides_the_priority_in_the_request_text`,
+  `a_priority_record_moves_a_newer_request_ahead_of_an_older_high_one`,
+  `a_speed_request_is_urgent_with_its_reason_and_an_ordinary_one_is_not` (`reading.rs`);
+  `a_priority_record_reorders_the_plan_and_changes_status_without_a_new_request` and
+  `the_priority_command_refuses_a_bad_level_an_unknown_job_and_a_job_that_is_not_queued` (`tests/drain.rs`);
+  `the_reading_schema_requires_urgent_reason_and_holds_the_urgent_rule` (`outputs.rs`);
+  `a_priority_record_belongs_at_priority_n_json_and_has_a_known_level` (`records.rs`).
+- **Alternatives:** (a) Rewrite the `Priority:` line in `request.json`: breaks the append-only rule. (b) One
+  global priorities file: every other fact is a record in its job's directory, and the registry validates those.
+  (c) The newest record by time: equal or skewed clocks make it non-deterministic; the sequence number does not.
+  (d) The best of all sources: a record could then never lower a priority. (e) Put the rule in `reader.md`: over
+  budget. (f) A bare `urgent` boolean from the reader: the reason is the audit trail. (g) Match speed words in
+  `plan_entry`: brittle; the reader's judgement is the mechanism. (h) Move `Priority` into `athena-data`: a wider
+  refactor, when the record can hold a validated string. (i) Allow any open job: the request was for queued ones,
+  which are what the plan orders.
+- **Tradeoff:** Urgency rests on the reader's judgement, so it can over-mark; the record is the correction. A
+  reader that marks too many requests urgent makes urgent mean little. The new required output field adds a few
+  tokens to every reading's schema (not measured; the reader budget test passes).
+- **Reversal cost:** Low. Remove the variant, the command, the record kind and the output field; old
+  `priority-<n>.json` files and `urgent_reason` keys would then need the record gate to keep accepting them.
+- **Provenance:** stated: BRIEF.md addendum of 2026-10-25 and the request; read: `plan.rs`, `reading.rs`,
+  `store.rs`, `status.rs`, `outputs.rs`, `records.rs`; measured: the tests above under `cargo test`.
 - **Provenance:** measured: the 15.4 minute median over 33 jobs (2026-10-23 to 25) from the job records; the
   tests above under `cargo test -p xtask`; read: `attrs.rs`, `ci.yml`, GitHub's cache scoping rules. Not measured:
   the landing median after this change, the cold xtask build time on a runner, and a real run of the workflow;

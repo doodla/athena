@@ -519,9 +519,7 @@ fn job_line(job: &JobRecords, state: &str) -> JobLine {
         class: job.class().map(str::to_string),
         cost_usd: job.spent_usd(),
         plan: plan_state(job).map(PlanState::text),
-        priority: crate::plan::Priority::from_text(
-            job.request.as_ref().map_or("", |r| r.text.as_str()),
-        ),
+        priority: crate::reading::job_priority(job),
     }
 }
 

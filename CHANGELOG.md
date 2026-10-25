@@ -9,6 +9,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- An `urgent` priority above `high`, and `athena priority <job> <level> --why <text>`. Urgent requests lead the
+  plan and the drain (dependencies still come first, and a prerequisite takes its dependent's rank). The command
+  appends an `athena.priority/1` record (`priority-<n>.json`) for a queued request; the newest record wins over
+  the `Priority:` line in the request and over the reader's urgent mark, in `athena plan`, `athena drain` and
+  `athena status`, with no new request record and no re-queue. The reader now answers a required `urgent_reason`:
+  non-null, with a reason, when the request makes Athena faster or cuts wasted time (failed or rejected attempts,
+  planning stops, timeouts, retries that redo work, thrash, duplicated checks). It is recorded on the reading
+  (optional, so older readings parse) and makes the request urgent. The rule lives in the field's doc in
+  `outputs.rs`; `reader.md` is unchanged. See D122.
 - Verification start in `athena go` opens or updates the job's pull request, so CI caches by the candidate's
   fingerprint while the verifier works. The candidate is pushed to the job's own `athena/<job>` branch and the
   pull request is opened (or, when one is already linked, its branch moved) through the host seam. It never

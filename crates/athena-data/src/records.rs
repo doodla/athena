@@ -446,6 +446,10 @@ pub struct Reading {
     pub out_of_scope: Vec<String>,
     pub forecasts: Forecasts,
     pub departures: Option<String>,
+    /// Why the reader marked the request urgent: it makes Athena faster or cuts wasted time. None when the
+    /// request is not urgent. Absent from readings written before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub urgent_reason: Option<String>,
 }
 
 impl Reading {
@@ -1919,6 +1923,47 @@ impl Critique {
 }
 
 // ---------------------------------------------------------------------------------------------------------
+// The priority of a queued request
+
+pub const PRIORITY_SCHEMA: &str = "athena.priority/1";
+
+/// The priority levels a priority record may hold, best first.
+pub const PRIORITY_LEVELS: [&str; 4] = ["urgent", "high", "normal", "low"];
+
+/// `athena.priority/1`: a priority set for a queued request, at `<job>/priority-<n>.json`. The request
+/// itself is never rewritten. The record with the highest `n` for a job wins over the priority in the
+/// request's words, so the order can change without re-queuing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PriorityRecord {
+    pub job: JobId,
+    /// The sequence number of this record for the job, from 1. The highest wins.
+    pub n: u32,
+    pub at: Timestamp,
+    /// One of [`PRIORITY_LEVELS`].
+    pub level: String,
+    /// Why the priority was set.
+    pub why: String,
+}
+
+impl PriorityRecord {
+    /// Why this record is not acceptable, if it is not.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.n == 0 {
+            return Err("a priority record's n starts at 1".into());
+        }
+        if !PRIORITY_LEVELS.contains(&self.level.as_str()) {
+            return Err(format!(
+                "a priority level is one of {}, not {:?}",
+                PRIORITY_LEVELS.join(", "),
+                self.level
+            ));
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------
 // The baseline of checks
 
 pub const BASELINE_SCHEMA: &str = "athena.baseline/1";
@@ -2033,6 +2078,8 @@ pub enum AnyRecord {
     Critique(Box<Critique>),
     #[serde(rename = "athena.baseline/1")]
     Baseline(Box<Baseline>),
+    #[serde(rename = "athena.priority/1")]
+    Priority(PriorityRecord),
 }
 
 /// Why a file under `records/` is not acceptable.
@@ -2116,6 +2163,7 @@ impl AnyRecord {
             AnyRecord::JobPlan(p) => p.validate().map_err(invalid)?,
             AnyRecord::Critique(c) => c.validate().map_err(invalid)?,
             AnyRecord::Baseline(b) => b.validate().map_err(invalid)?,
+            AnyRecord::Priority(p) => p.validate().map_err(invalid)?,
             AnyRecord::DefaultsProposal(p) => p.validate().map_err(invalid)?, // Totals are what reconciliation checks an outcome against; only the bootstrap has none
             // (acceptance verification 2).
             AnyRecord::Outcome(o) if o.job.is_request() && o.totals.is_none() => {
@@ -2210,6 +2258,7 @@ impl AnyRecord {
             AnyRecord::JobPlan(r) => format!("{}/job-plan-{}.json", r.job.dir(), r.round),
             AnyRecord::Critique(r) => format!("{}/critique-{}.json", r.job.dir(), r.round),
             AnyRecord::Baseline(r) => format!("{}/baseline.json", r.job.dir()),
+            AnyRecord::Priority(r) => format!("{}/priority-{}.json", r.job.dir(), r.n),
         }
     }
 
@@ -2243,6 +2292,7 @@ impl AnyRecord {
             AnyRecord::JobPlan(_) => JOB_PLAN_SCHEMA,
             AnyRecord::Critique(_) => CRITIQUE_SCHEMA,
             AnyRecord::Baseline(_) => BASELINE_SCHEMA,
+            AnyRecord::Priority(_) => PRIORITY_SCHEMA,
         }
     }
 }
@@ -2363,6 +2413,56 @@ mod tests {
                 reference: forecast,
             },
             departures: None,
+            urgent_reason: None,
+        }
+    }
+
+    #[test]
+    fn a_reading_without_an_urgent_reason_parses_and_leaves_the_key_out() {
+        let record = AnyRecord::Reading(Box::new(sample_reading()));
+        let text = record.to_json();
+        assert!(
+            !text.contains("urgent_reason"),
+            "old readings stay as they were"
+        );
+        let mut urgent = sample_reading();
+        urgent.urgent_reason = Some("cuts retries that redo work".into());
+        let record = AnyRecord::Reading(Box::new(urgent));
+        let text = record.to_json();
+        assert!(text.contains("\"urgent_reason\": \"cuts retries that redo work\""));
+        assert_eq!(AnyRecord::parse("x", text.as_bytes()).unwrap(), record);
+    }
+
+    fn sample_priority(n: u32, level: &str) -> PriorityRecord {
+        PriorityRecord {
+            job: job(),
+            n,
+            at: ts(),
+            level: level.into(),
+            why: "cuts retries".into(),
+        }
+    }
+
+    #[test]
+    fn a_priority_record_belongs_at_priority_n_json_and_has_a_known_level() {
+        let record = AnyRecord::Priority(sample_priority(2, "urgent"));
+        assert_eq!(record.schema(), "athena.priority/1");
+        let json = record.to_json();
+        assert_eq!(AnyRecord::parse("x", json.as_bytes()).unwrap(), record);
+        let right = format!("{}/priority-2.json", job().dir());
+        assert_eq!(record.canonical_path(), right);
+        assert!(check_record_file(&right, json.as_bytes()).is_ok());
+        let wrong = format!("{}/priority-1.json", job().dir());
+        assert!(matches!(
+            check_record_file(&wrong, json.as_bytes()),
+            Err(RecordError::Misplaced { .. })
+        ));
+        for bad in [sample_priority(1, "asap"), sample_priority(0, "high")] {
+            let record = AnyRecord::Priority(bad);
+            assert!(matches!(
+                AnyRecord::parse("x", record.to_json().as_bytes()),
+                Err(RecordError::Invalid { .. })
+            ));
         }
     }
 
