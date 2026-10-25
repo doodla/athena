@@ -1,0 +1,148 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261025-172350-xrbk",
+  "round": 1,
+  "at": "2026-10-25T17:25:00.072113643Z",
+  "invocation_seq": 2,
+  "approach": "Change the `push:` entry under `on:` in .github/workflows/ci.yml from \"every branch\" to `branches: [main]`, leaving pull_request, workflow_dispatch and the weekly schedule as they are, and add a short comment above it saying why. Append decision D125 to the end of docs/decisions.md (after D124), in the same layout as D124, with the alternatives and the PR #185 timings labeled as taken from the request. Add one bullet under the existing `### Changed` section of [Unreleased] in CHANGELOG.md. No job names, cache keys, pass-marker logic or other workflows change. The header comment (lines 1-11) still holds: it says only a default-branch push saves the shared caches, and that pass markers are saved on pull-request branches, both of which remain true, so it is not edited. The post-landing outcome is recorded in D125 as a follow-up and not claimed.",
+  "decisions": [
+    {
+      "choice": "Allow-list the push trigger: `push: branches: [main]`.",
+      "reason": "Main pushes still run after each landing and save the shared default-branch caches (header comment, lines 5-7). Pull-request branches then get only the pull_request run, in the pull request's own cache scope, which the required check reads.",
+      "rejected": [
+        {
+          "option": "Remove `push:` entirely.",
+          "why": "Nothing would run on main after a merge, so the shared default-branch caches would refresh only on the weekly schedule."
+        },
+        {
+          "option": "`branches-ignore:` with the pull-request branch patterns.",
+          "why": "Any new branch name would still run twice, so the rule is weaker than an allow-list."
+        },
+        {
+          "option": "Keep `push:` on all branches and add a `concurrency` group with cancel-in-progress.",
+          "why": "Push runs would still start and use runners, and they would still sit in the push cache scope that misses the cached pass."
+        },
+        {
+          "option": "A `paths` filter on the push trigger.",
+          "why": "It does not remove the duplicate for code changes, which is the case in the request."
+        }
+      ]
+    },
+    {
+      "choice": "Append D125 at the end of docs/decisions.md and change no earlier entry.",
+      "reason": "The D122 test pins SHA-256 hashes of the log through D121, so only appending passes. Appending needs no change to docs/decision-links.toml (D122 notes this).",
+      "rejected": [
+        {
+          "option": "Edit an existing decision or insert in the middle of the log.",
+          "why": "The pinned hash test fails on any edit before the end."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": ".github/workflows/ci.yml",
+      "action": "modify",
+      "purpose": "Change the push trigger to `branches: [main]` and add a comment giving the reason (cache scope, PR #185 timings, D125). Nothing else changes.",
+      "governance": true,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append D125 after D124: the case, the decision, rejected alternatives, tradeoff, reversal cost, provenance, and the post-landing follow-up. Append only.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add one bullet under [Unreleased] ### Changed describing the push trigger limit and pointing to D125.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read crates/athena-core/src/gh.rs around `early_run_wait` to see whether it filters by event. If it needs a push run, stop and report.",
+    "Edit .github/workflows/ci.yml: under `on:`, add a comment above `push:` (cache scope, PR #185 timings, D125), then change `push:` to `push:` with `branches: [main]`. Leave the header comment, pull_request, workflow_dispatch, schedule and job names unchanged.",
+    "Append the D125 entry to the end of docs/decisions.md, using the D124 layout. Include the rejected alternatives, the PR #185 timings labeled as stated in the request, and the post-landing follow-up.",
+    "Add one bullet under `### Changed` in [Unreleased] in CHANGELOG.md, after the D124 bullet, pointing to D125.",
+    "Run `cargo test --locked` and `cargo clippy`; both must pass.",
+    "Check the diff: only the three named files changed, and the job name is unchanged."
+  ],
+  "risks": [
+    {
+      "risk": "Pushes to branches other than main no longer run CI, including athena/records.",
+      "mitigation": "Code changes are covered by the pull_request run; workflow_dispatch still runs on demand. D125 records the change."
+    },
+    {
+      "risk": "The early_run_wait logic may count or wait for push runs that no longer exist.",
+      "mitigation": "Read gh.rs before editing; if it depends on a push run, stop and report instead of changing Rust code."
+    },
+    {
+      "risk": "The one-run-per-commit outcome is not verified before landing.",
+      "mitigation": "D125 records it as a follow-up to check on the next landing's pull request. The decision does not claim it."
+    },
+    {
+      "risk": "Editing an earlier decision entry or the middle of docs/decisions.md breaks the D122 pinned hash test.",
+      "mitigation": "Append D125 only, at the end of the file."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the on: block of the changed workflow and its diff.",
+      "command": "git diff -- .github/workflows/ci.yml",
+      "observes": "The push entry has only `branches: [main]`; the pull_request, workflow_dispatch and cron lines are unchanged; a comment above the push entry states the cache-scope reason and cites D125 and PR #185.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Read the appended decision text.",
+      "command": "git diff -- docs/decisions.md",
+      "observes": "A new `## D125` entry follows D124 with Case, Decision, Alternatives (the rejected options above), Tradeoff, Reversal cost and Provenance. It gives the PR #185 timings (pull_request run 26 s via cached pass, two push runs about 16 min, landing waited 17m51s) and labels them as stated in the request. Earlier lines are unchanged.",
+      "fails_without": null
+    },
+    {
+      "criterion": 3,
+      "method": "Read the changelog diff.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "One new bullet under `## [Unreleased]` in `### Changed`, after the D124 bullet, describing the push trigger limit to main and pointing to D125.",
+      "fails_without": null
+    },
+    {
+      "criterion": 4,
+      "method": "Confirm the change set and that the job name line is untouched.",
+      "command": "git diff --stat",
+      "observes": "Only .github/workflows/ci.yml, docs/decisions.md and CHANGELOG.md appear. In the ci.yml diff, `name: fmt, clippy, tests` and the job structure are unchanged.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "Read the header comment (lines 1-11) to confirm it is unchanged and still accurate for the new trigger.",
+      "command": "git diff -- .github/workflows/ci.yml",
+      "observes": "Lines 1-11 do not appear in the diff. The text still says only a default-branch push saves shared caches and that pass markers are saved on pull-request branches, which remains true with the new trigger.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Run the Rust test and lint commands.",
+      "command": "cargo test --locked; cargo clippy",
+      "observes": "Both finish with exit status 0 and no warnings. The policy tests that read ci.yml (xtask/tests/policy.rs, checks_job_steps) and the D122 log-hash test still pass.",
+      "fails_without": "A broken YAML edit, a changed job name, or an edit to an earlier decision entry would fail cargo test; a clippy warning would fail cargo clippy."
+    },
+    {
+      "criterion": 7,
+      "method": "Cannot be run before landing. The producer and verifier cannot observe the next landing's pull request. It is recorded in D125 as a follow-up.",
+      "command": "none runnable before landing",
+      "observes": "After landing: the next landing's pull request shows one CI run per commit. Until then the claim is not made.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Does `early_run_wait` in crates/athena-core/src/gh.rs filter runs by event? It was not read. If it expects a push run, the wait for the early commit's run could change. The producer should read it before editing ci.yml; this plan changes no Rust code.",
+    "The request assumes the host's default branch is named `main`. The plan relies on that and did not check it against the host settings.",
+    "Pushes to non-main branches (such as the `athena/records` branch) will no longer start CI. This is intended, since records are not code, but the decision entry should say so."
+  ],
+  "producer_section_sha256": "26274385c4518454583e6960905f9748699d0ea2a2ce4244fa97bf31eca08472"
+}

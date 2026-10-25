@@ -3103,3 +3103,34 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   still hold no usable work after the raise, or if cost per job rises with no fall in lost runs.
 - **Provenance:** stated: the request of 2026-10-25 (the value, the failed jobs, the alternatives and the
   reversal). Read: `athena.toml`. Not measured: the build times, the sixth job, or the cost effect.
+
+## D125 · CI runs a push only on main, so a pull request branch gets one run per commit
+
+- **Case:** Taken from the request. On PR #185, `ci.yml` had `push:` with no branch filter, so each commit of a
+  pull request branch ran the workflow twice: once for `pull_request` and once for `push`. The `pull_request` run's
+  'fmt, clippy, tests' job reused the cached pass in 26 s. The two `push` runs of the same commit each ran the full
+  16 minutes, because push runs use a different cache scope from pull request runs and miss that pass. The landing
+  waited 17m51s for them. These timings were not re-measured here.
+- **Decision:** `ci.yml` triggers a push run only for `main`: `push: branches: [main]`. `pull_request`,
+  `workflow_dispatch` and the weekly schedule are unchanged, and so are the job names and the cache logic. A pull
+  request branch now gets one run per commit, the `pull_request` run, in the pull request's own cache scope, and
+  that run satisfies the required check 'fmt, clippy, tests'. Pushes to other branches, including `athena/records`,
+  no longer start CI. `early_run_wait` in `crates/athena-core/src/gh.rs` matches the job name on the early commit
+  and does not filter by event, so it still finds the `pull_request` run.
+- **Alternatives:** (a) Remove `push:` entirely: nothing would run on main after a merge, so the shared
+  default-branch caches would refresh only on the weekly schedule. (b) `branches-ignore:` with the pull request
+  branch patterns: a new branch name would still run twice, so the rule is weaker than an allow-list. (c) Keep
+  `push:` on all branches and add a `concurrency` group with cancel-in-progress: push runs would still start and use
+  runners, and they would still sit in the push cache scope that misses the cached pass. (d) A `paths` filter on
+  the push trigger: it does not remove the duplicate for code changes, which is the case in the request.
+- **Tradeoff:** A branch with no pull request gets no automatic CI run on push; `workflow_dispatch` runs it on
+  demand. A push to a non-main branch no longer shows a push run's result; the pull request run is the result that
+  counts.
+- **Reversal cost:** Low. Restore `push:` with no branch filter in `ci.yml`; the duplicate runs return.
+- **Outcome (follow-up, not claimed):** Not observed before landing. After the next landing, check that its pull
+  request shows one CI run per commit, and record the run count and the landing time here or in a later entry. Until
+  then, the claim of one run per commit is not made.
+- **Provenance:** stated: the request of 2026-10-25 (the PR #185 timings, the 17m51s landing wait, and the rule that
+  the pull_request run satisfies the required check). Read: `.github/workflows/ci.yml`,
+  `crates/athena-core/src/gh.rs` (`early_run_wait`, `wait_for_early_run`, `EARLY_RUN_JOB`). Not measured: the
+  timings, and the outcome above.

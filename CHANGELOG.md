@@ -255,6 +255,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   since 2026-10-24 hit the 1800 s deadline and lost all their work, several while doing legitimate work whose
   targeted test builds take 5 to 10 minutes (as reported). Splitting jobs, a faster suite and keeping work on
   timeout are queued. See D124.
+- CI (`.github/workflows/ci.yml`) runs a push only for `main`, not for every branch, so a pull request branch gets one
+  run per commit: the `pull_request` run, in the pull request's own cache scope. Before, each commit also ran a push
+  run that missed the cached pass; on PR #185 the two push runs each took the full 16 minutes and landing waited
+  17m51s (timings from the request). Pushes to other branches, including `athena/records`, no longer start CI. The
+  `pull_request`, `workflow_dispatch` and weekly schedule triggers are unchanged. See D125.
 - `land::pr_commits` classifies each commit of a pull request (`remote_base..head`) from its content, not from
   an `Athena-Job` trailer (`docs/design/records-history.md` §5.3). Each commit is judged against its first
   parent under the first parent's exclusion rules, by the first rule that applies: it adds a job's closing
