@@ -6,8 +6,8 @@ use anyhow::{Result, anyhow, bail};
 use athena_data::records::{
     AnyRecord, Baseline, Candidate, Correction, Critique, DecisionState, DecisionStateKind,
     DefaultExpectations, FailureClass, HostError, Intervention, IntrospectionRecord, Invocation,
-    Job, JobPlan, Outcome, OutcomeState, ProposalRecord, Reading, Request, Resolution, Restart,
-    Role, Score, Verification, fold_decision_states,
+    Job, JobPlan, Outcome, OutcomeState, PriorityRecord, ProposalRecord, Reading, Request,
+    Resolution, Restart, Role, Score, Verification, fold_decision_states,
 };
 use athena_data::{JobId, RecordId};
 use athena_gate::records::RecordSet;
@@ -35,6 +35,8 @@ pub struct JobRecords {
     pub critiques: Vec<Critique>,
     /// The checks run on the base commit before the producer (`athena.baseline/1`). Recorded only.
     pub baseline: Option<Baseline>,
+    /// The priorities set for the request (`athena.priority/1`), by n; the last wins.
+    pub priorities: Vec<PriorityRecord>,
     pub briefs: BTreeMap<String, String>,
 }
 
@@ -153,6 +155,7 @@ impl JobRecords {
             AnyRecord::JobPlan(p) => self.plans.push(*p),
             AnyRecord::Critique(c) => self.critiques.push(*c),
             AnyRecord::Baseline(b) => self.baseline = Some(*b),
+            AnyRecord::Priority(p) => self.priorities.push(p),
             other => {
                 let _ = (path, other);
             }
@@ -166,6 +169,7 @@ impl JobRecords {
         self.scores.sort_by_key(|s| s.at);
         self.plans.sort_by_key(|p| p.round);
         self.critiques.sort_by_key(|c| c.round);
+        self.priorities.sort_by_key(|p| p.n);
     }
 }
 
@@ -230,6 +234,7 @@ fn job_of(record: &AnyRecord) -> Option<&JobId> {
         AnyRecord::JobPlan(r) => Some(&r.job),
         AnyRecord::Critique(r) => Some(&r.job),
         AnyRecord::Baseline(r) => Some(&r.job),
+        AnyRecord::Priority(r) => Some(&r.job),
         _ => None,
     }
 }

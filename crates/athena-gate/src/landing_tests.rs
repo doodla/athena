@@ -94,6 +94,7 @@ fn reading(times: &Times) -> Reading {
             reference: forecast,
         },
         departures: None,
+        urgent_reason: None,
     }
 }
 

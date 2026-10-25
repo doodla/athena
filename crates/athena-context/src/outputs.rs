@@ -31,6 +31,10 @@ pub struct ReadingOutput {
     pub deliverables: Vec<DeliverableOutput>,
     pub out_of_scope: Vec<String>,
     pub forecast: ForecastOutput,
+    /// Null unless the request makes Athena faster or cuts wasted time: failed or rejected attempts, planning
+    /// stops, timeouts, retries that redo work, thrash, duplicated checks. Then one sentence naming which, and
+    /// the request is urgent. A reason is required; an ordinary request is null.
+    pub urgent_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -711,6 +715,36 @@ mod tests {
             schema.to_string().find("$ref").is_none(),
             "subschemas are inlined"
         );
+    }
+
+    #[test]
+    fn the_reading_schema_requires_urgent_reason_and_holds_the_urgent_rule() {
+        let schema = reading_schema(&choices());
+        assert!(
+            schema["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("urgent_reason"))
+        );
+        let doc = schema["properties"]["urgent_reason"]["description"]
+            .as_str()
+            .unwrap()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for term in [
+            "faster",
+            "wasted time",
+            "failed or rejected attempts",
+            "planning stops",
+            "timeouts",
+            "retries",
+            "thrash",
+            "duplicated checks",
+            "reason",
+        ] {
+            assert!(doc.contains(term), "{term}: {doc}");
+        }
     }
 
     #[test]

@@ -32,6 +32,7 @@ records/
     reading-<n>.json             athena.reading/1       a reading with both forecasters' forecasts
     correction-<n>.json          athena.correction/1    a one-line correction of reading n, or an answer
     job.json                     athena.job/1           the dispatched job: accepted reading, owner, models, caps
+    priority-<n>.json            athena.priority/1      a priority set for a queued request; the highest n wins over the request's words
     brief-producer.md            the producer brief, verbatim
     baseline.json                athena.baseline/1      the configured checks run on the base commit before the producer; recorded only
     invocations/<seq>-<role>.json athena.invocation/1   one model invocation

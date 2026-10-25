@@ -425,6 +425,7 @@ impl Athena {
             out.decline_reason.clone().unwrap_or_default(),
             out.question.clone().unwrap_or_default(),
             f.departures.clone().unwrap_or_default(),
+            out.urgent_reason.clone().unwrap_or_default(),
         ];
         let fixed = text.len();
         text.extend(out.assumptions.iter().cloned());
@@ -502,6 +503,7 @@ impl Athena {
             out_of_scope,
             forecasts: Forecasts { reader, reference },
             departures: opt(&text[4]),
+            urgent_reason: opt(&text[5]),
         };
         let mut reading = reading;
         ensure_changelog(&mut reading);
@@ -575,6 +577,57 @@ impl Athena {
             ),
         )?;
         Ok((job, commit))
+    }
+
+    /// `athena priority`: records a priority for a queued request as a new `athena.priority/1` record. The
+    /// request is not rewritten; [`job_priority`] reads the newest record over the request's words, so the
+    /// order of `athena plan` and `athena status` changes without re-queuing. Refused, with nothing written,
+    /// for an unknown level, an unknown job, or a job that is not queued.
+    pub fn set_priority(
+        &self,
+        job_ref: &str,
+        level: &str,
+        why: &str,
+        ui: &dyn Ui,
+    ) -> Result<(JobId, crate::plan::Priority, String)> {
+        let Some(priority) = crate::plan::Priority::parse(level) else {
+            bail!("unknown priority {level:?}; use urgent, high, normal or low");
+        };
+        if why.trim().is_empty() {
+            bail!("say why the priority is set with --why");
+        }
+        let head = self.head()?;
+        let records = crate::store::Records::load(&self.git, &head)?;
+        let id = records.resolve(job_ref)?;
+        let Some(_lock) = self.state.try_lock_job(&id)? else {
+            bail!("job {id} is running in another athena process; `athena stop` terminates it");
+        };
+        let job = records.jobs.get(id.as_str()).expect("resolved");
+        if job.state() != crate::store::JobState::Queued {
+            bail!(
+                "job {id} is {}, not queued; a priority orders queued requests only",
+                job.state().name()
+            );
+        }
+        let config = JobConfig::at(&self.git, &head)?.config;
+        let redactor = self.redactor(&config, Some(&id))?;
+        let record = athena_data::records::PriorityRecord {
+            job: id.clone(),
+            n: job.priorities.iter().map(|p| p.n).max().unwrap_or(0) + 1,
+            at: crate::now(),
+            level: priority.as_str().to_string(),
+            why: redactor.redact(why.trim())?,
+        };
+        let commit = self.commit_records(
+            &[NewFile::record(&AnyRecord::Priority(record.clone()))],
+            &message(
+                &format!("Set priority {}: {}", priority.as_str(), job.title()),
+                &record.why,
+                &[("Athena-Job", id.as_str().to_string())],
+            ),
+        )?;
+        ui.line(&format!("priority  {id} · {}", priority.as_str()));
+        Ok((id, priority, commit))
     }
 
     /// Reads a queued request for the first time, as `ask` would have.
@@ -1489,6 +1542,27 @@ fn is_bullet(line: &str) -> bool {
             .is_some_and(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
 }
 
+/// The priority a request has now: the newest `athena.priority/1` record, else urgent when the latest
+/// reading gives an `urgent_reason`, else the `Priority:` line in the request's words. `athena plan` and
+/// `athena status` both use it, so they agree.
+pub fn job_priority(job: &JobRecords) -> crate::plan::Priority {
+    if let Some(p) = job
+        .priorities
+        .iter()
+        .max_by_key(|p| p.n)
+        .and_then(|p| crate::plan::Priority::parse(&p.level))
+    {
+        return p;
+    }
+    if job
+        .latest_reading()
+        .is_some_and(|r| r.urgent_reason.is_some())
+    {
+        return crate::plan::Priority::Urgent;
+    }
+    crate::plan::Priority::from_text(job.request.as_ref().map_or("", |r| r.text.as_str()))
+}
+
 /// Planning, the first stage: fleshes out one open request into a plan entry (design: planning first).
 /// Deterministic code; it calls no model and fills nothing in by default.
 ///
@@ -1511,7 +1585,7 @@ pub fn plan_entry(
     let text = job.request.as_ref().map_or("", |r| r.text.as_str());
     let first = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
     let mut entry = crate::plan::PlanEntry::bare(job.id().as_str(), &job.title());
-    entry.priority = crate::plan::Priority::from_text(text);
+    entry.priority = job_priority(job);
     entry.depends_on = job_ids_in(text)
         .into_iter()
         .map(|id| id.as_str().to_string())
@@ -1876,6 +1950,7 @@ mod tests {
                 reference: forecast,
             },
             departures: None,
+            urgent_reason: None,
         }
     }
 
@@ -2300,6 +2375,105 @@ mod tests {
         assert_eq!(
             plan_entry(&job, None, &nothing_known()).priority,
             Priority::High
+        );
+    }
+
+    #[test]
+    fn a_priority_record_overrides_the_priority_in_the_request_text() {
+        use crate::plan::Priority;
+        use athena_data::records::PriorityRecord;
+        let mut job = job_with_checks(vec![]);
+        job.request.as_mut().unwrap().text = "Fix the typo in README.md\nPriority: normal".into();
+        assert_eq!(job_priority(&job), Priority::Normal);
+        let id = job.id().clone();
+        let record = |n: u32, level: &str| PriorityRecord {
+            job: id.clone(),
+            n,
+            at: crate::now(),
+            level: level.into(),
+            why: "test".into(),
+        };
+        job.priorities = vec![record(1, "urgent")];
+        assert_eq!(job_priority(&job), Priority::Urgent);
+        assert_eq!(
+            plan_entry(&job, None, &nothing_known()).priority,
+            Priority::Urgent
+        );
+        // The highest n wins, so a later record can demote.
+        job.priorities = vec![record(1, "urgent"), record(2, "low")];
+        assert_eq!(job_priority(&job), Priority::Low);
+        // The request's words were never touched.
+        assert!(
+            job.request
+                .as_ref()
+                .unwrap()
+                .text
+                .ends_with("Priority: normal")
+        );
+    }
+
+    #[test]
+    fn a_priority_record_moves_a_newer_request_ahead_of_an_older_high_one() {
+        use crate::plan::Priority;
+        use athena_data::records::PriorityRecord;
+        let entry_of = |text: &str, record: Option<&str>| {
+            let mut job = job_with_checks(vec![]);
+            job.request.as_mut().unwrap().text = format!("{text}\n- it is done");
+            if let Some(level) = record {
+                job.priorities = vec![PriorityRecord {
+                    job: job.id().clone(),
+                    n: 1,
+                    at: crate::now(),
+                    level: level.into(),
+                    why: "test".into(),
+                }];
+            }
+            plan_entry(
+                &job,
+                Some(athena_data::roles::Ladder::Implementation),
+                &nothing_known(),
+            )
+        };
+        let mut older = entry_of("Fix a typo in README.md\nPriority: high", None);
+        older.id = "older".into();
+        let mut newer = entry_of("Fix another typo in README.md", None);
+        newer.id = "newer".into();
+        assert_eq!(
+            crate::plan::Plan::build(&[older.clone(), newer.clone()]).order,
+            ["older", "newer"]
+        );
+        let mut newer = entry_of("Fix another typo in README.md", Some("urgent"));
+        newer.id = "newer".into();
+        assert_eq!(newer.priority, Priority::Urgent);
+        assert_eq!(
+            crate::plan::Plan::build(&[older, newer]).order,
+            ["newer", "older"]
+        );
+    }
+
+    #[test]
+    fn a_speed_request_is_urgent_with_its_reason_and_an_ordinary_one_is_not() {
+        use crate::plan::Priority;
+        let mut job = job_with_checks(vec![]);
+        job.request.as_mut().unwrap().text =
+            "Cache the baseline so retries do not redo work".into();
+        let mut reading = final_reading(&job);
+        reading.urgent_reason = Some("cuts retries that redo work".into());
+        job.readings = vec![reading.clone()];
+        assert_eq!(
+            plan_entry(&job, None, &nothing_known()).priority,
+            Priority::Urgent
+        );
+        assert_eq!(
+            job.latest_reading().unwrap().urgent_reason.as_deref(),
+            Some("cuts retries that redo work")
+        );
+        reading.urgent_reason = None;
+        job.readings = vec![reading];
+        job.request.as_mut().unwrap().text = "Fix the typo in README.md".into();
+        assert_eq!(
+            plan_entry(&job, None, &nothing_known()).priority,
+            Priority::Normal
         );
     }
 

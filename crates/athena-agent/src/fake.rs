@@ -210,7 +210,8 @@ pub fn deterministic_turn(spec: &AgentInvocation) -> FakeTurn {
                     "cost_usd": { "p10": 0.001, "p50": 0.001, "p90": 0.002 },
                     "wall_time_s": { "p10": 1.0, "p50": 5.0, "p90": 60.0 },
                     "departures": "a fake reader: no model call"
-                }
+                },
+                "urgent_reason": null
             }))
         }
         Role::Producer => {

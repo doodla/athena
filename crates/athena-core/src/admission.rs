@@ -595,6 +595,7 @@ mod tests {
                 reference: forecast,
             },
             departures: None,
+            urgent_reason: None,
         }
     }
 

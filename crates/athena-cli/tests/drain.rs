@@ -1515,6 +1515,103 @@ fn a_second_plan_lists_the_same_open_requests_and_reads_nothing_again() {
     assert_eq!(two.spent_usd, 0.0);
 }
 
+// ---------------------------------------------------------------------------------------------------------
+// `athena priority`: a priority record changes the order without re-queuing
+
+const OLDER_HIGH: &str = "Fix the typo in README.md\nPriority: high\n- it reads right";
+const NEWER_NORMAL: &str = "Fix the typo in src/lib.rs\n- it reads right";
+
+#[test]
+fn a_priority_record_reorders_the_plan_and_changes_status_without_a_new_request() {
+    let fx = Fixture::new();
+    let athena = fx.athena(rated_scenario().script());
+    let (older, _) = athena.queue(OLDER_HIGH).unwrap();
+    let (newer, _) = athena.queue(NEWER_NORMAL).unwrap();
+    let lander = RecordingLander::default();
+    let steps = real_steps(&athena, &lander);
+    let order = |steps: &RealSteps| drain::plan(steps, 0.0, &Quiet).unwrap().plan.order;
+    let status_priority = |id: &str| {
+        athena
+            .status()
+            .unwrap()
+            .open
+            .into_iter()
+            .find(|j| j.id == id)
+            .unwrap()
+            .priority
+    };
+    use athena_core::plan::Priority;
+
+    // The text's priority: the older high request leads, and status shows each text's priority.
+    assert_eq!(order(&steps), [older.as_str(), newer.as_str()]);
+    assert_eq!(status_priority(newer.as_str()), Priority::Normal);
+    assert_eq!(status_priority(older.as_str()), Priority::High);
+    let before = Records::load(&fx.git, &fx.head()).unwrap();
+
+    let (_, level, _) = athena
+        .set_priority(newer.as_str(), "urgent", "cuts retries", &Quiet)
+        .unwrap();
+    assert_eq!(level, Priority::Urgent);
+
+    assert_eq!(order(&steps), [newer.as_str(), older.as_str()]);
+    assert_eq!(status_priority(newer.as_str()), Priority::Urgent);
+    assert_eq!(status_priority(older.as_str()), Priority::High);
+    // Exactly one new file, a priority record; both requests are unchanged and still queued.
+    let changed = fx
+        .git
+        .run(["diff", "--name-status", "HEAD~1", "HEAD"])
+        .unwrap();
+    assert_eq!(changed.lines().count(), 1, "{changed}");
+    assert!(
+        changed.starts_with('A') && changed.contains("/priority-1.json"),
+        "{changed}"
+    );
+    let after = Records::load(&fx.git, &fx.head()).unwrap();
+    for id in [&older, &newer] {
+        assert_eq!(
+            after.jobs[id.as_str()].request,
+            before.jobs[id.as_str()].request
+        );
+        assert_eq!(after.jobs[id.as_str()].state(), JobState::Queued);
+    }
+    assert_eq!(after.jobs[newer.as_str()].priorities.len(), 1);
+
+    // The newest record wins, so a later one demotes it again.
+    athena
+        .set_priority(newer.as_str(), "low", "after all, not now", &Quiet)
+        .unwrap();
+    assert_eq!(order(&steps), [older.as_str(), newer.as_str()]);
+    assert_eq!(status_priority(newer.as_str()), Priority::Low);
+}
+
+#[test]
+fn the_priority_command_refuses_a_bad_level_an_unknown_job_and_a_job_that_is_not_queued() {
+    let fx = Fixture::new();
+    let scenario = rated_scenario();
+    let athena = fx.athena(scenario.script());
+    let (queued, _) = athena.queue(NEWER_NORMAL).unwrap();
+    let (read, _) = athena.queue(FIRST).unwrap();
+    let lander = RecordingLander::default();
+    // The plan reads a request whose own words leave it incomplete; it is then proposed, not queued.
+    drain::plan(&real_steps(&athena, &lander), 2.0, &Quiet).unwrap();
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    assert_eq!(records.jobs[read.as_str()].state(), JobState::Proposed);
+    assert_eq!(records.jobs[queued.as_str()].state(), JobState::Queued);
+    let head = fx.head();
+
+    let err = |job: &str, level: &str, why: &str| {
+        athena
+            .set_priority(job, level, why, &Quiet)
+            .unwrap_err()
+            .to_string()
+    };
+    assert!(err(queued.as_str(), "asap", "x").contains("unknown priority"));
+    assert!(err("no-such-job", "urgent", "x").contains("no-such-job"));
+    assert!(err(read.as_str(), "urgent", "x").contains("not queued"));
+    assert!(err(queued.as_str(), "urgent", " ").contains("--why"));
+    assert_eq!(fx.head(), head, "nothing was written");
+}
+
 #[test]
 fn drain_works_the_requests_a_plan_read_in_plan_order_without_reading_them_again() {
     let fx = Fixture::new();
