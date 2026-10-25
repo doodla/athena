@@ -3134,3 +3134,53 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   the pull_request run satisfies the required check). Read: `.github/workflows/ci.yml`,
   `crates/athena-core/src/gh.rs` (`early_run_wait`, `wait_for_early_run`, `EARLY_RUN_JOB`). Not measured: the
   timings, and the outcome above.
+
+## D126 · The test run is cut by remembering text scans and polling checks sooner, with no test changed
+
+- **Case:** The full `cargo test --locked` took 673 s to run against 67 s to compile (brain-measured, 4 cores, not
+  re-measured in this job). Run time, not compile time, sets the length of a job's checks. The request set a target
+  of under 7 minutes (420 s).
+- **Cause, found by measuring:** Every recorded text goes through the redactor, and each pass spawns the gitleaks
+  process (`Gitleaks::scan_text`), so the same fixture and agent texts were scanned again and again across the
+  tests of one binary. A second, smaller cause: `run_check` looked at a running check only every 200 ms, so every
+  quick check waited out a whole pause. Splitting the two in the steward and retry binaries (memo on, poll still
+  200 ms): steward 49.91 s to 30.14 s, retry 55.06 s to 32.52 s (measured). The poll change then took about 2 to 4 s
+  more off each (28.16 s and 28.66 s with both). The other three binaries were measured only with both changes on,
+  not split. No cause was found in `run.rs`; it is unchanged, as is every test file.
+- **Decision:** (1) `Gitleaks::scan_text` remembers results for the life of the process. The key is a digest of the
+  binary's content, the generated configuration and the scanned text, so no scanned text is kept, and a replaced
+  binary or changed configuration is scanned afresh. Only successful scans are remembered, the scan runs outside the
+  lock, and the map is emptied at 1024 entries. `scan_log` and `scan_staged` are not remembered, because they depend
+  on repository state. (2) `run_check` looks at a running check after 5 ms and doubles the wait up to 200 ms;
+  the deadline and kill-switch tests run on every look, as before. Tests: the memo returns what an uncached scan
+  returns (a stub that counts runs, plus a comparison against real gitleaks where it is installed), misses on a
+  changed configuration, text or binary, never keeps an error, and clears at the cap; the poll tests cover a check
+  that passes, one that fails, one that outlasts the cap, a deadline and the kill switch.
+- **Measured, each test binary run alone with `cargo test --locked --test <name>`, the 'finished in' line:**
+
+  | Binary | Before | After |
+  | --- | --- | --- |
+  | lifecycle (66 tests) | 178.49 s | 93.55 s |
+  | job_plan (23 tests) | 82.77 s | 39.31 s |
+  | drain (79 tests) | 58.23 s | 35.11 s |
+  | retry (13 tests) | 55.06 s | 28.66 s |
+  | steward (10 tests) | 49.91 s | 28.16 s |
+
+  Before means the same code with the memo and the 200 ms poll switched off by a temporary edit, not a separate
+  checkout. The run counts are the same as before (66, 23, 79, 13, 10 passed, none ignored).
+- **Total:** After, the full `cargo test --locked -- --quiet` passed with 0 failed; the 'finished in' times of its
+  binaries add up to about 398 s (measured lines, summed by hand; not a stopwatch of the whole command). Before, the
+  full run was 673 s (brain-measured, not re-run in this job). A temporary always-failing assertion made
+  `cargo test --locked -p athena-core --lib poll_schedule` exit 101; it was removed.
+- **Alternatives:** (a) cargo-nextest 0.9.148: rejected. It ran the suite in 584 s against 673 s, about 13% (brain-
+  measured), which would not reach 7 minutes, and adopting it was out of scope. (b) sccache, per D79: considered;
+  it, like (c) a shared target directory across jobs, can only cut the 67 s compile, so neither can reach a target
+  set by run time. (d) Remembering results by path and modification time: rejected, a replaced binary with a
+  preserved time would be served stale. (e) Remembering the raw text as the key: rejected, it keeps secrets in memory.
+- **Tradeoff:** The memo holds up to 1024 sets of findings per process and hashes the gitleaks binary once per path.
+  The margin to 420 s is about 22 s (estimate from one run), so a slower machine may miss the target. The share of the
+  gain in lifecycle, job_plan and drain that comes from the memo versus the poll was not measured.
+- **Reversal cost:** Low. Remove the memo in `secrets.rs` and restore the fixed 200 ms wait in `checks.rs`.
+- **Provenance:** measured in this job: the table, the split for steward and retry, the full run. Stated: 673 s,
+  67 s, 584 s and the 4 cores (brain measurements in the request). Read: `crates/athena-cli/tests/common/mod.rs`,
+  `crates/athena-gate/src/secrets.rs`, `crates/athena-core/src/checks.rs`, D46 and D79.

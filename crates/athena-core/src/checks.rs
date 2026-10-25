@@ -139,6 +139,10 @@ pub struct CheckContext<'a> {
     pub redactor: &'a Redactor,
 }
 
+/// The first pause between looks at a running check, and the longest.
+const POLL_FIRST: Duration = Duration::from_millis(5);
+const POLL_MAX: Duration = Duration::from_millis(200);
+
 /// Runs one check.
 pub fn run_check(spec: &CheckSpec, ctx: &CheckContext<'_>) -> Result<CheckRun> {
     let started = Instant::now();
@@ -184,6 +188,8 @@ pub fn run_check(spec: &CheckSpec, ctx: &CheckContext<'_>) -> Result<CheckRun> {
         .register(pgid, ctx.job, &format!("check {}", spec.name))?;
     let deadline = started + ctx.timeout;
     let mut note = None;
+    // A quick check is noticed within milliseconds; the wait doubles up to the old fixed pause.
+    let mut poll = POLL_FIRST;
     let status = loop {
         if let Some(status) = child.try_wait()? {
             break Some(status);
@@ -201,7 +207,8 @@ pub fn run_check(spec: &CheckSpec, ctx: &CheckContext<'_>) -> Result<CheckRun> {
             let _ = child.wait();
             break None;
         }
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(poll);
+        poll = (poll * 2).min(POLL_MAX);
     };
     ctx.registry.unregister(pgid);
     let output = String::from_utf8_lossy(&std::fs::read(output_file.path())?).into_owned();
@@ -438,6 +445,54 @@ mod tests {
         let run = run_check(&slow, &ctx).unwrap();
         assert!(!run.passed);
         assert!(run.note.unwrap().contains("deadline"));
+    }
+
+    /// Runs `script` as a command check under `timeout`, with the kill switch on when `stopped`.
+    fn run_script(script: &str, timeout: Duration, stopped: bool) -> (CheckRun, Duration) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let registry = Registry::new(state.path());
+        if stopped {
+            std::fs::write(registry.stop_file(), "stopped\n").unwrap();
+        }
+        let redactor = Redactor::new(&athena_gate::builtin_config()).unwrap();
+        let env = BTreeMap::from([("PATH".to_string(), std::env::var("PATH").unwrap())]);
+        let ctx = CheckContext {
+            dir: dir.path(),
+            env: &env,
+            timeout,
+            registry: &registry,
+            job: "j",
+            redactor: &redactor,
+        };
+        let started = Instant::now();
+        let run = run_check(&sh_spec("poll", script), &ctx).unwrap();
+        (run, started.elapsed())
+    }
+
+    #[test]
+    fn the_poll_schedule_still_sees_a_check_complete_or_fail() {
+        let (ok, _) = run_script("exit 0", Duration::from_secs(30), false);
+        assert!(ok.passed && ok.exit_code == Some(0) && ok.note.is_none());
+        let (bad, _) = run_script("echo broke; exit 3", Duration::from_secs(30), false);
+        assert!(!bad.passed && bad.exit_code == Some(3));
+        assert!(bad.output_tail.contains("broke"));
+        // A check that outlasts several polls, past the point where the pause has reached its cap.
+        let (slow, took) = run_script("sleep 1; echo done", Duration::from_secs(30), false);
+        assert!(slow.passed && slow.output_tail.contains("done"));
+        assert!(took >= Duration::from_secs(1) && took < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn the_poll_schedule_still_enforces_the_deadline_and_the_kill_switch() {
+        let (late, took) = run_script("sleep 30", Duration::from_millis(300), false);
+        assert!(!late.passed && late.exit_code.is_none());
+        assert!(late.note.unwrap().contains("deadline"));
+        assert!(took < Duration::from_secs(20));
+        let (killed, took) = run_script("sleep 30", Duration::from_secs(60), true);
+        assert!(!killed.passed && killed.exit_code.is_none());
+        assert!(killed.note.unwrap().contains("kill switch"));
+        assert!(took < Duration::from_secs(20));
     }
 
     #[test]
