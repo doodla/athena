@@ -19,9 +19,7 @@ use crate::{Athena, Ui};
 use anyhow::{Context, Result, bail};
 use athena_data::history::LandingKind;
 use athena_data::{JobId, RecordId};
-use athena_gate::invariant::{added_interventions, closing_jobs};
-use athena_gate::jobs::JobFiles;
-use athena_gate::{Change, Judged};
+use athena_gate::invariant::classify_pre_merge;
 use athena_git::Git;
 use athena_git::attrs::{classification_changes, fingerprint};
 use std::collections::BTreeSet;
@@ -165,50 +163,19 @@ pub fn classify_commit(git: &Git, remote_base: &str, head: &str, sha: &str) -> R
             "commit {sha} lies between the remote base and the PR head (base {remote_base}, head {head})"
         )
     };
-    let change = Change::of_commit(git, sha)?;
-    let judged = Judged::new(git, &change)?;
-    let jobs = closing_jobs(git, &change, &judged)?;
-    let (kind, job, verification) = if let Some(job) = jobs.iter().next() {
-        if jobs.len() > 1 {
-            bail!(
-                "{} and adds the closing records of {} jobs (it can land one); nothing was recorded",
-                between(),
-                jobs.len()
-            );
-        }
-        if JobFiles::load(git, &change.tree, job)?
-            .verification
-            .is_none()
-        {
-            bail!(
-                "{} and adds the records of job {job} without its verification, so no verification \
-                 covers it; nothing was recorded",
-                between()
-            );
-        }
-        (
-            LandingKind::JobLanding,
-            Some(job.clone()),
-            Some(verification_id(job, sha)?),
-        )
-    } else if !added_interventions(&judged).is_empty() {
-        (LandingKind::DeclaredIntervention, None, None)
-    } else if fingerprint(git, &change.tree, &judged.rules)?
-        != fingerprint(git, &judged.base, &judged.rules)?
-    {
-        bail!(
-            "{} and changes governed content without landing a verified job or declaring an \
-             intervention, so no verification covers it; nothing was recorded",
-            between()
-        );
-    } else {
-        (LandingKind::RecordsOnly, None, None)
+    let covered = match classify_pre_merge(git, sha)? {
+        Ok(covered) => covered,
+        Err(uncovered) => bail!("{} and {}", between(), uncovered.clause()),
+    };
+    let verification = match &covered.job {
+        Some(job) => Some(verification_id(job, sha)?),
+        None => None,
     };
     Ok(PrCommit {
         sha: sha.to_string(),
-        tree: change.tree,
-        kind,
-        job,
+        tree: covered.tree,
+        kind: covered.kind,
+        job: covered.job,
         verification,
     })
 }

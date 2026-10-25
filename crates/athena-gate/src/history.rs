@@ -64,7 +64,61 @@ pub fn check_history(git: &Git, tip: &str) -> Result<HistoryReport> {
     }
 }
 
-/// The history check once the cutover is shown: the old rules up to and including `c0`, attribution after.
+/// How a tip after the cutover relates to main.
+enum MainSplit {
+    /// The tip is main or part of it: every commit after `C0` is on main and goes to attribution.
+    OnMain,
+    /// The tip is a head that main does not hold; its commits after `merge_base` are not on main.
+    Head { merge_base: String },
+    /// Main cannot be told apart from the checkout; why.
+    Unknown(String),
+}
+
+/// The refs that may name main in a checkout: the remote's, as CI fetches it, then the local branch.
+const MAIN_REFS: [&str; 2] = ["refs/remotes/origin/main", "refs/heads/main"];
+
+/// Splits `tip` from main. The tip is on main when it is an ancestor of (or equal to) either main ref; the
+/// merge base is taken with the first main ref that exists. A merge base that does not descend from `c0`
+/// cannot divide the commits after `c0`, so it is `Unknown`.
+fn split_from_main(git: &Git, tip: &str, c0: &str) -> Result<MainSplit> {
+    let mut mains = Vec::new();
+    for name in MAIN_REFS {
+        if let Some(main) = git.rev_parse(name)? {
+            mains.push(main);
+        }
+    }
+    let Some(first) = mains.first() else {
+        return Ok(MainSplit::Unknown(
+            "main is not in this checkout (neither origin/main nor main)".into(),
+        ));
+    };
+    for main in &mains {
+        if git.is_ancestor(tip, main)? {
+            return Ok(MainSplit::OnMain);
+        }
+    }
+    // `git merge-base` exits non-zero when the two share no history.
+    let Some(merge_base) = git
+        .run(["merge-base", first, tip])
+        .ok()
+        .map(|out| out.trim().to_string())
+        .filter(|base| !base.is_empty())
+    else {
+        return Ok(MainSplit::Unknown(
+            "the head shares no history with main".into(),
+        ));
+    };
+    if !git.is_ancestor(c0, &merge_base)? {
+        return Ok(MainSplit::Unknown(format!(
+            "the head's merge base with main ({}) does not descend from {c0}",
+            &merge_base[..merge_base.len().min(12)]
+        )));
+    }
+    Ok(MainSplit::Head { merge_base })
+}
+
+/// The history check once the cutover is shown: the old rules up to and including `c0`, attribution after
+/// for the commits on main, and the pre-merge rule for a head's own commits that main does not hold yet.
 fn check_after_cutover(
     git: &Git,
     tip: &str,
@@ -75,7 +129,44 @@ fn check_after_cutover(
     report
         .violations
         .extend(secrets::check_history(git, tip_config, tip)?);
-    let judged = legacy::check_attribution_with_legacy(git, tip, jiff::Timestamp::now(), c0)?;
+    // A head that is not on main holds commits no landing record can name yet. Attribution judges only the
+    // part that is on main (up to the merge base); the head's own commits get the pre-merge rule.
+    let (attribution_tip, own_commits) = match split_from_main(git, tip, c0)? {
+        MainSplit::OnMain => (tip.to_string(), Vec::new()),
+        MainSplit::Unknown(why) => {
+            report.notes.push(format!(
+                "{why}, so every commit after {c0} is judged by the attribution rule"
+            ));
+            (tip.to_string(), Vec::new())
+        }
+        MainSplit::Head { merge_base } => {
+            let range = format!("{merge_base}..{tip}");
+            let own = git
+                .run(["rev-list", "--reverse", &range])?
+                .lines()
+                .map(str::to_string)
+                .collect();
+            (merge_base, own)
+        }
+    };
+    for sha in &own_commits {
+        if let Err(uncovered) = invariant::classify_pre_merge(git, sha)? {
+            report.violations.push(
+                Violation::new(
+                    Rule::JobRecords,
+                    format!(
+                        "this commit is on the head but not on main, and {}",
+                        uncovered.clause()
+                    ),
+                    "land verified work through athena land --pr, declare the intervention, or \
+                     keep the commit to records only",
+                )
+                .in_commit(Some(sha)),
+            );
+        }
+    }
+    let judged =
+        legacy::check_attribution_with_legacy(git, &attribution_tip, jiff::Timestamp::now(), c0)?;
     for finding in judged.findings {
         report.violations.push(
             Violation::new(

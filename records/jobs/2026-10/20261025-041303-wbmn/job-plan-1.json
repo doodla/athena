@@ -1,0 +1,217 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261025-041303-wbmn",
+  "round": 1,
+  "at": "2026-10-25T04:15:08.569383725Z",
+  "invocation_seq": 2,
+  "approach": "Fault: after C0, check_after_cutover hands the whole tip to attribution::walk, which needs a landing record for each commit on main, so an unmerged PR's commits all fail. Fix in the history check. Move the pre-merge classifier (the body of land.rs classify_commit) into athena-gate as the single source. In check_after_cutover, resolve main's tip (refs/remotes/origin/main, else refs/heads/main). If the tip is an ancestor of, or equal to, main, nothing changes. Otherwise take the merge base, run the attribution walk with the merge base as its tip (commits on main), and classify each commit in merge_base..tip with the gate classifier. Each uncovered commit becomes a Rule::JobRecords violation naming its sha. If main or the merge base is missing, keep today's behavior and add a note. land.rs pr_commits/classify_commit delegate to the gate classifier and keep their messages. CI fetches origin main and athena/records on pull_request events too. CHANGELOG entry. Tests run the real binary on the cutover fixture.",
+  "decisions": [
+    {
+      "choice": "Gate owns the classifier: a function taking (git, sha) that returns kind, job and tree, or a typed 'uncovered' error (multiple jobs, no verification, governed change without cover). land.rs adds the verification id (athena-core gh::verification_id) and the 'commit X lies between…' message prefix.",
+      "reason": "athena-gate cannot depend on athena-core, and verification_id lives in core. One rule source; land.rs messages and tests stay the same.",
+      "rejected": [
+        {
+          "option": "Copy the rules into history.rs",
+          "why": "Two sources of truth; criterion 7 forbids it."
+        },
+        {
+          "option": "Make gate depend on core",
+          "why": "Reverses the crate layering and would be a dependency cycle."
+        }
+      ]
+    },
+    {
+      "choice": "Run attribution on the merge base as the walk tip, not on the PR head.",
+      "reason": "C0 is a common ancestor of main and the head, so the merge base descends from C0 and attribution covers exactly the post-C0 commits on main. The walk code is unchanged, so main's result is unchanged.",
+      "rejected": [
+        {
+          "option": "Add an exclusion list to attribution::walk",
+          "why": "It touches the rule for main (out of scope) and risks changing its report."
+        }
+      ]
+    },
+    {
+      "choice": "A head is 'main' when it is an ancestor of, or equal to, main's tip; then the code path is the old one exactly.",
+      "reason": "Guarantees criterion 3 (main unchanged), including a push to main in CI.",
+      "rejected": [
+        {
+          "option": "Detect by branch name or CI environment variables",
+          "why": "Fragile and not testable on fixtures."
+        }
+      ]
+    },
+    {
+      "choice": "CI: on all events fetch origin main as refs/remotes/origin/main and athena/records. Persist credentials only if the fetch step needs them (it does; keep true, comment why).",
+      "reason": "The merge base needs main; the cutover state needs the records branch. The existing comment about skipping the fetch on PRs is now wrong and is rewritten.",
+      "rejected": [
+        {
+          "option": "Skip the check on pull requests",
+          "why": "Hides the failure instead of fixing the range split (root-cause default)."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-gate/src/invariant.rs",
+      "action": "modify",
+      "purpose": "Home of the pre-merge classifier (next to closing_jobs and added_interventions): classify_pre_merge(git, sha) -> kind, job, tree, or a typed Uncovered error.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-gate/src/history.rs",
+      "action": "modify",
+      "purpose": "check_after_cutover: find main, split the range, attribute main's part at the merge base, classify the PR's part, add the fallback note; unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/land.rs",
+      "action": "modify",
+      "purpose": "classify_commit delegates to the gate classifier; keeps PrCommit, verification_id and message text.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "action": "modify",
+      "purpose": "History job fetches main and athena/records on pull_request events; comments updated.",
+      "governance": true,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Entry for the change citing PR #175.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/history_pr_head.rs",
+      "action": "create",
+      "purpose": "Fixture tests: PR branch passes, unverified governed change fails naming sha, main with unattributed commit fails.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-core/src/test_support.rs",
+      "action": "modify",
+      "purpose": "Only if needed: a helper to make a verified job-landing commit on a branch off C0.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/cutover_fixture.rs",
+      "action": "modify",
+      "purpose": "Only if the main-unchanged assertion is best placed here; otherwise untouched.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-gate/src/attribution.rs",
+      "action": "modify",
+      "purpose": "Only if walk needs a small visibility change; the rule is not changed. Likely untouched.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-gate/src/legacy.rs",
+      "action": "modify",
+      "purpose": "Only if the legacy wrapper needs a separate attribution tip; likely untouched (pass the merge base as main_tip).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "purpose": "Only if the check output needs new wording for the note; likely untouched.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Add classify_pre_merge and its Uncovered error to invariant.rs, moving the rule body out of land.rs classify_commit; keep unit coverage via the existing land.rs tests.",
+    "Make land.rs classify_commit call it, then attach verification_id and the 'lies between' message prefix.",
+    "In history.rs add main resolution and the range split in check_after_cutover; classify each commit in merge_base..tip, collecting all violations with in_commit(sha); add a note on fallback.",
+    "Write crates/athena-cli/tests/history_pr_head.rs (pass case, unverified-change case, main with unattributed commit); add a test_support helper if needed.",
+    "Edit ci.yml: the history job fetches main (as origin/main) and athena/records on every event, with comments saying why; keep the name.",
+    "Add the CHANGELOG entry citing PR #175.",
+    "Run cargo fmt, clippy, and cargo test --workspace."
+  ],
+  "risks": [
+    {
+      "risk": "Messages in land.rs change slightly and break pr_commits tests.",
+      "mitigation": "The gate error type carries the tail text verbatim; land.rs only adds the existing prefix. Run the existing tests unchanged."
+    },
+    {
+      "risk": "Shallow or partial checkout lacks main, so the merge base is missing and the check silently passes or fails wrongly.",
+      "mitigation": "Fallback is today's behavior plus a note; CI uses fetch-depth 0 and fetches main explicitly."
+    },
+    {
+      "risk": "A PR branched before C0 or with merge commits.",
+      "mitigation": "C0 is a common ancestor, so the merge base descends from C0; classify merge commits against the first parent as land.rs does."
+    },
+    {
+      "risk": "Persisting the token in the history job widens exposure.",
+      "mitigation": "The token is read-only (contents: read) and already persisted there today; limit the change to fetching."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "New test history_pr_head.rs builds the cutover fixture, branches from main (C0), adds a records-only commit, an intervention commit and a job-landing commit with a passing verification (no landing record names any), checks out the branch and runs the real binary via athena_check(&fx, \"--history\").",
+      "command": "cargo test -p athena-cli --test history_pr_head",
+      "observes": "exit success and '0 violation(s)' for the passing-branch test.",
+      "fails_without": "Without the range split, attribution flags every branch commit as 'no landing record names it', so the test fails with violations."
+    },
+    {
+      "criterion": 2,
+      "method": "Same file: a branch with a commit that changes governed content (src/lib.rs) with no verification or intervention; run check --history.",
+      "command": "cargo test -p athena-cli --test history_pr_head",
+      "observes": "the command fails and its output contains that commit's sha and the 'changes governed content' text.",
+      "fails_without": "If the pre-merge rule were not applied, the violation would be the attribution message (or none if the commit were skipped); the sha plus governed-content assertion fails."
+    },
+    {
+      "criterion": 3,
+      "method": "The existing cutover_fixture test (history and attribution pass on main) plus a new test that adds an unattributed hand commit on main after C0 and asserts check --history fails naming it; a gate unit test in history.rs for the tip-is-ancestor-of-main path.",
+      "command": "cargo test -p athena-gate -p athena-cli",
+      "observes": "main passes with 0 violations as before; an unattributed commit on main still fails, with the attribution wording.",
+      "fails_without": "If main's commits were routed to the pre-merge rule, the unattributed hand commit that is records-only or verified-looking would no longer be flagged, or the report would change."
+    },
+    {
+      "criterion": 4,
+      "method": "Run the full suite and lints; land.rs pr_commits tests and the attribution/history tests are untouched.",
+      "command": "cargo test --workspace",
+      "observes": "all pass, with no edits to existing assertions; then cargo clippy --workspace --all-targets and cargo fmt --check are clean.",
+      "fails_without": "A changed message or behavior in land.rs would fail the existing pr_commits tests."
+    },
+    {
+      "criterion": 5,
+      "method": "Read the diff of ci.yml: the history job's fetch steps run on every event and bring main and athena/records; comments give the reason; name stays 'the full history'. CI itself is not runnable here; the merge-base logic it depends on is covered by the fixture tests.",
+      "command": "git diff -- .github/workflows/ci.yml",
+      "observes": "no 'if: github.event_name != pull_request' on the fetch step, a fetch of main, and the job name unchanged.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Read the CHANGELOG diff.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "an entry stating PR-head commits after C0 are judged by the pre-merge rule, main's by attribution, citing PR #175 (50 violations).",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Inspect that land.rs classify_commit has no rule logic of its own and calls the gate classifier; grep for the rule conditions.",
+      "command": "git diff -- crates/athena-core/src/land.rs crates/athena-gate/src/invariant.rs",
+      "observes": "closing_jobs/added_interventions/fingerprint rule branches appear once, in the gate; land.rs only maps the result to PrCommit and error text.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "How to build a verified job-landing commit on a branch in the fixture: whether land_through_pr (test_support.rs:400) can be reused without merging to main, or a new helper is needed. I did not read it.",
+    "Which ref names 'main' in CI: the plan assumes origin/main, then local main. The config default branch was not checked.",
+    "check_history in manage.rs passes the current HEAD; I assumed it is the PR head in CI (the workflow checks out the head sha)."
+  ],
+  "producer_section_sha256": "6c44973a0c412b71f64bcf8feb4ff50398afa8e12e2d0a2d8886516173bea689"
+}

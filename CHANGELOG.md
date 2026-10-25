@@ -176,6 +176,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   failed call or unreadable reply). It sees rulesets only; classic branch protection is not visible through
   that view. It changes no host setting and is not yet wired into a command.
 
+### Fixed
+
+- `athena check --history` after the cutover no longer fails every pull request. On a head that main does not
+  hold, a pull request's own commits after `C0` (the range from the merge base with main to the head) are judged
+  by the pre-merge rule (records only, a declared intervention, or a job landing whose verification is in its
+  tree), and only main's commits are judged by the attribution rule, which needs a landing record. Before this,
+  the whole range went to attribution, so PR #175 failed the required "the full history" check with 50
+  violations, each "no landing record names it and no landing-intent matches its tree". A head that is main or
+  part of it, and a checkout with no main or no usable merge base (a note says so), are judged as before. The
+  pre-merge rule now lives once, in `athena_gate::invariant::classify_pre_merge`; `land::pr_commits` calls it
+  and its messages are unchanged. The CI history job fetches `main` and `athena/records` on pull requests too.
+
 ### Changed
 
 - `land::pr_commits` classifies each commit of a pull request (`remote_base..head`) from its content, not from

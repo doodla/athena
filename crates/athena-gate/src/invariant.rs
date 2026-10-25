@@ -254,6 +254,89 @@ pub fn closing_jobs(git: &Git, change: &Change, judged: &Judged) -> Result<BTree
     Ok(jobs)
 }
 
+/// A commit the pre-merge rule covers: what it contains, judged from its content alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreMergeCommit {
+    pub tree: String,
+    pub kind: athena_data::history::LandingKind,
+    /// The job whose closing records the commit adds, exactly for a job landing.
+    pub job: Option<JobId>,
+}
+
+/// Why nothing covers a commit under the pre-merge rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Uncovered {
+    /// It adds the closing records of more than one job.
+    SeveralJobs(usize),
+    /// It adds the records of a job without that job's verification.
+    NoVerification(JobId),
+    /// It changes governed content without landing a verified job or declaring an intervention.
+    GovernedChange,
+}
+
+impl Uncovered {
+    /// What the commit does that nothing covers, as a clause that follows "the commit".
+    pub fn clause(&self) -> String {
+        match self {
+            Uncovered::SeveralJobs(n) => format!(
+                "adds the closing records of {n} jobs (it can land one); nothing was recorded"
+            ),
+            Uncovered::NoVerification(job) => format!(
+                "adds the records of job {job} without its verification, so no verification \
+                 covers it; nothing was recorded"
+            ),
+            Uncovered::GovernedChange => "changes governed content without landing a verified job \
+                 or declaring an intervention, so no verification covers it; nothing was recorded"
+                .to_string(),
+        }
+    }
+}
+
+/// The pre-merge rule for one commit of a pull request (§5.3 of `docs/design/records-history.md`): the single
+/// source of truth for it, used by `athena_core::land::pr_commits` and by the history check for the commits
+/// of a pull request head that are not on main yet. Messages are never read. The commit is judged against its
+/// first parent, under the first parent's exclusion rules, by the first rule that applies:
+///
+/// 1. It adds the closing records of a job ([`closing_jobs`]): a job landing, which needs that job's
+///    verification record in the commit's tree. Closing records of more than one job are [`Uncovered`].
+/// 2. It adds an intervention record: a declared intervention.
+/// 3. Otherwise, if the governed fingerprint changed, nothing covers the change: [`Uncovered::GovernedChange`].
+/// 4. Otherwise it touched only records and excluded paths: records only.
+pub fn classify_pre_merge(
+    git: &Git,
+    sha: &str,
+) -> Result<std::result::Result<PreMergeCommit, Uncovered>> {
+    use athena_data::history::LandingKind;
+    let change = Change::of_commit(git, sha)?;
+    let judged = Judged::new(git, &change)?;
+    let jobs = closing_jobs(git, &change, &judged)?;
+    let (kind, job) = if let Some(job) = jobs.iter().next() {
+        if jobs.len() > 1 {
+            return Ok(Err(Uncovered::SeveralJobs(jobs.len())));
+        }
+        if JobFiles::load(git, &change.tree, job)?
+            .verification
+            .is_none()
+        {
+            return Ok(Err(Uncovered::NoVerification(job.clone())));
+        }
+        (LandingKind::JobLanding, Some(job.clone()))
+    } else if !added_interventions(&judged).is_empty() {
+        (LandingKind::DeclaredIntervention, None)
+    } else if fingerprint(git, &change.tree, &judged.rules)?
+        != fingerprint(git, &judged.base, &judged.rules)?
+    {
+        return Ok(Err(Uncovered::GovernedChange));
+    } else {
+        (LandingKind::RecordsOnly, None)
+    };
+    Ok(Ok(PreMergeCommit {
+        tree: change.tree,
+        kind,
+        job,
+    }))
+}
+
 /// Whether `files` record an outcome and none of the recorded outcomes is landed.
 fn not_landed(files: &JobFiles) -> bool {
     let outcomes: Vec<_> = [&files.outcome, &files.later_outcome]
