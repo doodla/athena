@@ -9,6 +9,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `athena land --pr` waits for the early commit's CI run to finish before it replaces the early head with the
+  landing commit, so the landing run finds the cached pass. The race it closes: on PR #180 the early run passed
+  at 10:46:49 but the landing run had started at 10:45:15 and ran the full 16 minutes. The wait looks at the
+  commit's workflow runs every 20 seconds, for at most 10 minutes (`PrHost::early_run_wait`), then pushes
+  anyway. A failed run, no runs, or an unreadable reply stop the wait at once and the push and merge go on as
+  before. The wait covers all runs of the commit (the host reply carries no workflow name). The report gains
+  one warning line saying how many seconds it waited and why it stopped. The landing time after this change is
+  still to be measured: it is recorded here, with its PR number and run timestamps, once a real landing has
+  been observed.
 - An `urgent` priority above `high` in plan order, a new `athena priority <job> <level>` command and a guard on
   `docs/decisions.md` (D122). The command appends an `athena.priority/1` record (`priority-<n>.json`) for a queued
   request; the request is not rewritten, and plan and status both prefer the latest priority record over a

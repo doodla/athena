@@ -1,0 +1,104 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261025-110959-pmgf",
+  "base_commit": "029f490189912a6ad4a4f8f56cdd11c10222b2ca",
+  "base_fingerprint": "sha256:f6aa9267d910e615aa24dfbea8fb5881093819cbf8e05630eb9466452a9429a8",
+  "previous_job": "20261025-095436-hasm",
+  "candidate_commit": "eddf20bdea8ddd81b6bc7eafd902e06fa776a5ee",
+  "candidate_tree": "f5285b39258ed40e3ae2469ed1e5820d656169c8",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 141848
+    },
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 207677
+    }
+  ],
+  "fingerprint": "sha256:7750d56dc9e6b63a147e6a7eb3c9f1a64145aa1557dcafae21aa5f47fd93c33b",
+  "violations": [],
+  "producer_report": {
+    "summary": "Before `land_pr` or `publish` replaces the early-pushed head with the landing commit, it now waits for the early commit's CI runs to finish. The wait is in `replace_early` in gh.rs, so one place covers both callers. It looks at `ci_runs` every 20 seconds. It stops when all runs have completed, or when 10 minutes have passed and it pushes anyway. A failed run, no runs, or a `ci_runs` error stop it at once, so the push and merge go on as before. The 10 minute bound is a new default method `PrHost::early_run_wait`, which tests override, and the wait sleeps through the existing `poll.sleep`. `replace_early` returns a one-line note (seconds waited and the reason). It is added to the report's warnings. I added 5 fake-host tests with a shared event log of looks, sleeps and the replace. I also added a CHANGELOG entry that describes the PR #180 race and says the landing time after this change is still to be measured.",
+    "files": [
+      "crates/athena-core/src/gh.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test --locked -q -p athena-core -p athena-cli",
+        "result": "pass",
+        "note": "all pass. Other crates not run."
+      },
+      {
+        "command": "cargo test -p athena-core --locked gh::tests",
+        "result": "pass",
+        "note": "70 passed, including the 5 new tests"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A fake-host test (run with cargo test -p athena-core) shows land_pr, with the early head's CI run still in progress, polling ci_runs on the early commit and pushing the landing commit only after the run reports completed.",
+        "status": "met",
+        "evidence": "Test land_pr_waits_for_the_early_run_before_pushing passes. The shared event log is ci_runs early1, sleep 20, ci_runs early1, sleep 20, ci_runs early1, replace."
+      },
+      {
+        "criterion": "A fake-host test shows that when the early run is already completed, the landing push happens at once with no sleep calls.",
+        "status": "met",
+        "evidence": "Test land_pr_pushes_at_once_when_the_early_run_is_completed passes. The log is exactly ci_runs early1, replace, and the note says waited 0s, already completed."
+      },
+      {
+        "criterion": "A test shows that when the run never completes within the bounded wait, the landing commit is still pushed, and that the wait is bounded (default about 10 minutes, injectable so the test needs no real sleeping).",
+        "status": "met",
+        "evidence": "Test land_pr_pushes_anyway_when_the_early_run_never_completes passes. With the injected 60s bound there are 3 recorded sleeps of 20s, then the replace, and the landing is merged. The same test asserts the trait default is 600s."
+      },
+      {
+        "criterion": "A test shows that a failed (or timed-out) early run, and an early commit with no runs or a ci_runs error, change nothing about merging: land pushes and merges exactly as before and the full landing run decides.",
+        "status": "met",
+        "evidence": "Test land_pr_early_run_failure_changes_nothing passes. It covers failure, timed_out, no runs and an Err reply. Each has no sleep, one look and a replace. Merge heads are landing1, and link, checks, reruns and merge_requested equal the baseline run."
+      },
+      {
+        "criterion": "cargo test and cargo clippy --all-targets are clean, and cargo fmt --check passes; existing land_pr and publish tests still pass.",
+        "status": "met",
+        "evidence": "fmt --check, clippy -D warnings and cargo test for athena-core and athena-cli were all clean. The existing land_pr tests ran unmodified."
+      },
+      {
+        "criterion": "The wait applies only when an early head exists and differs from the landing commit; the wait is logged or reported in a way a reader can see how long it waited and why it stopped.",
+        "status": "met",
+        "evidence": "The wait is only called from replace_early, which both callers reach only when the early head equals the remote head and differs from the landing commit. Test land_pr_reports_why_the_early_wait_stopped_only_when_there_is_an_early_head shows no ci_runs calls and no warnings for no early head, or for an early head equal to the landing commit. Each note carries waited Ns and the reason, and goes into PrReport.warnings."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry for this change that says the next real landing's time is still to be measured. It must not state an invented number. The measured time is recorded only once a real landing has been observed, with its source (for example the PR number and the run timestamps).",
+        "status": "met",
+        "evidence": "The Unreleased Added entry cites PR #180 timestamps from the request and says the landing time after this change is still to be measured, to be recorded with PR number and run timestamps. It states no new measurement."
+      }
+    ],
+    "open_issues": [
+      "The wait covers all runs of the early commit, because CiRunState has no workflow name. An unrelated slow workflow could hold the push for up to the 10 minute bound.",
+      "The real landing time cannot be measured in this job, so the CHANGELOG says it is pending.",
+      "land.rs, run.rs and test_support.rs are unchanged. This is not a departure from the plan; the compiler did not require edits to them.",
+      "The wait note is appended to PrReport.warnings, so it shows up whenever a replace happens, even on a clean run.",
+      "Only the athena-core and athena-cli test suites were run, not the full workspace."
+    ],
+    "mistakes": [],
+    "learnings": [
+      "PrHost has only a few implementors. The other fakes (test_support FakeHost and EarlyFake) return empty ci_runs, so with the default method they stop the wait at once.",
+      "The Bash policy in this job blocks pipes and tail, so test output was read through quiet-mode cargo runs."
+    ],
+    "desires": []
+  }
+}

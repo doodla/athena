@@ -1,0 +1,178 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261025-110959-pmgf",
+  "round": 1,
+  "at": "2026-10-25T11:11:29.130783068Z",
+  "invocation_seq": 2,
+  "approach": "Add a bounded wait inside gh.rs `replace_early`, the one place the landing commit overwrites the early head. It runs only when an early head exists and differs from the landing commit. Before `job.remote.replace`, it polls `host.ci_runs(early_head)` every fixed step (20s), sleeping through `job.poll.sleep`. It stops when ci_runs is non-empty and every run has status completed, or when the summed sleeps reach a new `LandPr.early_run_wait` (production 10 minutes, tests inject a small value). It then pushes as today. A failed run, no runs, or a ci_runs error stop the wait at once, so merging is unchanged. It returns a one-line note (waited N s, reason: completed / already completed / no runs / ci_runs error / timed out) which land_pr and publish record in the report warnings or the existing report text. Existing code is untouched otherwise.",
+  "decisions": [
+    {
+      "choice": "Wait in replace_early, driven by job.poll.sleep, with a new LandPr field early_run_wait: Duration and a const step of 20s",
+      "reason": "replace_early is the single push of the landing commit over the early head, called from both publish and land_pr. Reusing the injected sleep means tests never really sleep. A separate field keeps the bound independent of the check-wait attempts. The summed-sleep bound is deterministic in tests.",
+      "rejected": [
+        {
+          "option": "Put the wait in land.rs",
+          "why": "land.rs only plans and classifies; it does not push."
+        },
+        {
+          "option": "Add a field to Poll",
+          "why": "Poll is used for the pages wait and the checks wait as well, so it would change their meaning."
+        },
+        {
+          "option": "Derive the bound from poll.attempts*delay",
+          "why": "Tests use delay ZERO and attempts 1, so the bound would be zero or unbounded and could not be controlled per test."
+        },
+        {
+          "option": "Wait for the run named 'fmt, clippy, tests' only",
+          "why": "CiRunState has no name field and the brief says no new host call. Waiting for all runs of the commit is a superset that is safe because of the bound."
+        }
+      ]
+    },
+    {
+      "choice": "Wait ends at once without delay on failure, no runs or ci_runs error",
+      "reason": "Only a pending run can produce a cached pass worth waiting for; everything else must behave exactly as before.",
+      "rejected": [
+        {
+          "option": "Retry on ci_runs error until timeout",
+          "why": "It delays landing with no cache to gain and it changes today's behaviour."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "action": "modify",
+      "purpose": "Add `LandPr.early_run_wait`, the step const and the 10 minute default const. Add `wait_for_early_run` and call it from `replace_early`. Surface the note. Set the field in the production literal at ~2412 and the test literals. Add the new tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/test_support.rs",
+      "action": "modify",
+      "purpose": "Set `early_run_wait` in the LandPr literal at ~557. Add a fake-host helper for scripted ci_runs and an event log if the existing fakes lack one.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "purpose": "Only if run.rs builds a LandPr or passes the config through; the grep shows no LandPr literal there, so expected unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/land.rs",
+      "action": "modify",
+      "purpose": "Expected unchanged: it plans and classifies and does no pushing. Touch it only if the compiler requires it.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Entry for the wait, saying the next real landing's time is still to be measured.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "action": "modify",
+      "purpose": "Set the new LandPr field in the literal at ~449 (a required compile fix).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/external_calls.rs",
+      "action": "modify",
+      "purpose": "Set the new LandPr field in the literal at ~465 (a required compile fix).",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read the LandPr and PrReport definitions and the FakeHost ci_runs in gh.rs tests (~2898) and test_support.rs.",
+    "Add consts EARLY_RUN_STEP (20s) and EARLY_RUN_WAIT (10 min), and the field `early_run_wait: Duration` on LandPr.",
+    "Write `wait_for_early_run(job, early_head) -> String`. Loop: call ci_runs. On Err or empty return a note and stop. If all are completed return a note and stop. If elapsed >= early_run_wait return a timed-out note. Otherwise call job.poll.sleep(step) and add step to elapsed.",
+    "Call it in replace_early before check_replace and the push, and return the note up to publish and land_pr, which record it in the report warnings.",
+    "Set the field in the production literal (EARLY_RUN_WAIT) and in all test literals (ZERO). Fix run_pin_tests.rs, test_support.rs and external_calls.rs.",
+    "Add the tests for criteria 1 to 4 and 6, using a shared event log between the fake host, the fake remote and the recording sleep.",
+    "Add the CHANGELOG entry with the pending-measurement wording.",
+    "Run cargo fmt, clippy --all-targets and cargo test."
+  ],
+  "risks": [
+    {
+      "risk": "Adding a LandPr field breaks every struct literal (6 in gh.rs, plus test_support.rs, run_pin_tests.rs and external_calls.rs).",
+      "mitigation": "Update each literal to ZERO. Compiler errors list all of them."
+    },
+    {
+      "risk": "Production landing could be delayed 10 minutes if the early run hangs.",
+      "mitigation": "The wait is bounded and ends with a push as today."
+    },
+    {
+      "risk": "Existing fakes whose ci_runs returns in_progress would now sleep through the bound.",
+      "mitigation": "Existing tests set early_run_wait to ZERO, so the bound is reached with no sleep."
+    },
+    {
+      "risk": "The measured landing time cannot be produced in this job.",
+      "mitigation": "The CHANGELOG marks it pending and gives the source format. A follow-up entry is needed after a real landing."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Fake-host test: ci_runs for the early commit returns in_progress twice, then completed/success. A recording sleep and the fake remote share an event log.",
+      "command": "cargo test -p athena-core land_pr_waits_for_the_early_run_before_pushing",
+      "observes": "The log shows ci_runs polls on the early commit and sleeps before the replace push, with the push last. The poll count is 3.",
+      "fails_without": "Without the wait the push is logged before any ci_runs call or sleep, and the ordering assertion fails."
+    },
+    {
+      "criterion": 2,
+      "method": "The fake ci_runs returns a completed run from the first call.",
+      "command": "cargo test -p athena-core land_pr_pushes_at_once_when_the_early_run_is_completed",
+      "observes": "Zero sleep calls, one ci_runs call, the push happens, and the note says already completed.",
+      "fails_without": "A wait that always sleeps first records at least one sleep and fails the zero-sleep assertion."
+    },
+    {
+      "criterion": 3,
+      "method": "The fake ci_runs always returns in_progress. early_run_wait is set to 60s, and the recording sleep does not block.",
+      "command": "cargo test -p athena-core land_pr_pushes_anyway_when_the_early_run_never_completes",
+      "observes": "The recorded sleeps sum to at least 60s and no more than 60s plus one step, the landing push still happens, and the note says timed out. A second assertion checks that the production default is 10 minutes.",
+      "fails_without": "An unbounded wait never returns and the test would hang or hit the call cap in the fake. Without the push-anyway fallthrough the landing is not pushed."
+    },
+    {
+      "criterion": 4,
+      "method": "Table of cases (failed run, timed_out run, empty run list, ci_runs Err). Each runs land_pr to merge and compares the report and merge calls with a baseline run with no early head wait.",
+      "command": "cargo test -p athena-core land_pr_early_run_failure_changes_nothing",
+      "observes": "No sleeps, the push happens, merge is called with the landing commit, and the PrReport matches the baseline apart from the note.",
+      "fails_without": "A wait that treats failure as pending sleeps until the bound, and one that propagates the ci_runs error aborts the landing."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the full suite. Existing land_pr and publish tests are updated only to set early_run_wait: ZERO in their LandPr literals. Then run cargo clippy --all-targets --locked -- -D warnings and cargo fmt --all --check.",
+      "command": "cargo test --locked",
+      "observes": "All three commands exit clean.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Check the note for each stop reason. A case with no early head, and one where the early head equals the landing commit, makes zero ci_runs calls.",
+      "command": "cargo test -p athena-core land_pr_reports_why_the_early_wait_stopped",
+      "observes": "The note contains the seconds waited and the reason. Without an early head or when the heads are equal there are no ci_runs calls and no note.",
+      "fails_without": "A wait that runs unconditionally would call ci_runs in the no-early-head case, which fails the zero-call assertion."
+    },
+    {
+      "criterion": 7,
+      "method": "Inspect the added entry.",
+      "command": "git diff CHANGELOG.md",
+      "observes": "It describes the wait and the race (PR #180: early run passed 10:46:49, landing run started 10:45:15). It states that the next real landing's time is still to be measured, with no new number. It says to record the measurement with its PR number and run timestamps once observed.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "CiRunState carries no workflow name, so the wait covers all runs of the early commit, not only 'fmt, clippy, tests'. This is fine if that workflow is the only one. If other slow workflows exist, the wait may reach the 10 minute bound.",
+    "Where the note should appear in PrReport: the existing warnings vec versus a new field. I did not read the PrReport definition in full.",
+    "The deliverables list run.rs and land.rs, but I found no change needed in either."
+  ],
+  "producer_section_sha256": "093f8ab8ab496879fbea04fd98814d951c78085c000cd520f4e20664107e8345"
+}
