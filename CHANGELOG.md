@@ -221,6 +221,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- The wait before the landing push now waits only for the early candidate's `fmt, clippy, tests` check run.
+  It used to stop at the first failed workflow run, but the candidate's history and pull-request-head jobs
+  always fail (a candidate is not a landing), so it never waited for the job the cache serves and the landing
+  ran the full suite again. That job completing ends the wait; that job failing, or being absent, pushes at
+  once; the other jobs' results are ignored. The step and the bound are unchanged.
 - `athena check --history` after the cutover no longer fails every pull request. On a head that main does not
   hold, a pull request's own commits after `C0` (the range from the merge base with main to the head) are judged
   by the pre-merge rule (records only, a declared intervention, or a job landing whose verification is in its

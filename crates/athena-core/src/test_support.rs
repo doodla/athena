@@ -228,6 +228,10 @@ impl PrHost for FakeHost<'_> {
         Ok(Vec::new())
     }
 
+    fn check_run(&self, _: &str, _: &str) -> Result<Option<CiRunState>> {
+        Ok(None)
+    }
+
     fn rerun_failed(&self, _: u64) -> Result<()> {
         Ok(())
     }
@@ -360,6 +364,10 @@ impl PrHost for EarlyFake {
 
     fn ci_runs(&self, _: &str) -> Result<Vec<CiRunState>> {
         Ok(Vec::new())
+    }
+
+    fn check_run(&self, _: &str, _: &str) -> Result<Option<CiRunState>> {
+        Ok(None)
     }
 
     fn rerun_failed(&self, _: u64) -> Result<()> {

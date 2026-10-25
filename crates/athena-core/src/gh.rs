@@ -417,6 +417,9 @@ pub trait PrHost: Host {
     fn merge(&self, number: u64, head: &str, text: &CommitText) -> Result<MergeMethod>;
     /// The workflow runs of a commit: whether each is still going, how it ended, and which try it is on.
     fn ci_runs(&self, commit: &str) -> Result<Vec<CiRunState>>;
+    /// The latest check run of a commit with the given job name (workflow runs cannot name a job); none when
+    /// the commit has no such check run.
+    fn check_run(&self, commit: &str, name: &str) -> Result<Option<CiRunState>>;
     /// Asks the host to run the failed jobs of one completed workflow run again. The host refuses while the
     /// run is still in progress.
     fn rerun_failed(&self, run_id: u64) -> Result<()>;
@@ -434,6 +437,9 @@ pub trait PrHost: Host {
 pub const EARLY_RUN_WAIT: Duration = Duration::from_secs(600);
 /// How often land looks at the early commit's runs while it waits.
 const EARLY_RUN_STEP: Duration = Duration::from_secs(20);
+/// The check run land waits for on the early commit: the job of the CI workflow whose pass the host caches.
+/// It must match the job name in the CI workflow.
+const EARLY_RUN_JOB: &str = "fmt, clippy, tests";
 
 /// One workflow run of a commit, as the host reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -470,6 +476,25 @@ pub fn parse_ci_runs(reply: &Value) -> Vec<CiRunState> {
             })
         })
         .collect()
+}
+
+/// The latest check run (highest id) with the given name in a check-runs reply, as a [`CiRunState`] without
+/// an attempt. Only fixed fields are read.
+pub fn parse_check_run(reply: &Value, name: &str) -> Option<CiRunState> {
+    reply["check_runs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|r| r["name"].as_str() == Some(name))
+        .filter_map(|r| {
+            Some(CiRunState {
+                id: r["id"].as_u64()?,
+                status: r["status"].as_str().unwrap_or("").to_string(),
+                conclusion: r["conclusion"].as_str().map(str::to_string),
+                attempt: None,
+            })
+        })
+        .max_by_key(|r| r.id)
 }
 
 /// The longest test name kept from a log.
@@ -865,6 +890,16 @@ impl PrHost for GhClient<'_> {
             &[],
         )?;
         Ok(parse_ci_runs(&reply))
+    }
+
+    fn check_run(&self, commit: &str, name: &str) -> Result<Option<CiRunState>> {
+        let reply = self.api(
+            HostOperation::ReadChecks,
+            "GET",
+            &self.repo_path(&format!("commits/{commit}/check-runs?per_page=100")),
+            &[],
+        )?;
+        Ok(parse_check_run(&reply, name))
     }
 
     fn rerun_failed(&self, run_id: u64) -> Result<()> {
@@ -2023,11 +2058,13 @@ fn replace_early(job: &LandPr, early_head: &str) -> Result<String> {
     Ok(note)
 }
 
-/// Waits for the workflow runs of the early commit to complete, at most [`PrHost::early_run_wait`], looking
-/// every [`EARLY_RUN_STEP`] through the poll's sleep. A run that passed is cached by the host, so the landing
-/// commit's run (the same tree) is short. Runs that failed, no runs, or an unreadable reply end the wait at
-/// once: nothing is gained by waiting, and the push and the merge go on as without a wait. Returns a note
-/// with the seconds waited and why the wait stopped.
+/// Waits for the check run named [`EARLY_RUN_JOB`] of the early commit to complete, at most
+/// [`PrHost::early_run_wait`], looking every [`EARLY_RUN_STEP`] through the poll's sleep. Only that job
+/// decides: a candidate is not a landing, so its other jobs (the full history, the pull request head) always
+/// fail there and say nothing about the job the host caches. That job, once passed, is cached by the host, so
+/// the landing commit's run (the same tree) is short. The job failed, missing, or an unreadable reply end the
+/// wait at once: nothing is gained by waiting, and the push and the merge go on as without a wait. Returns a
+/// note with the seconds waited and why the wait stopped.
 fn wait_for_early_run(job: &LandPr, early_head: &str) -> String {
     let bound = job.host.early_run_wait();
     let short: String = early_head.chars().take(12).collect();
@@ -2039,15 +2076,20 @@ fn wait_for_early_run(job: &LandPr, early_head: &str) -> String {
     };
     let mut waited = Duration::ZERO;
     loop {
-        match job.host.ci_runs(early_head) {
+        match job.host.check_run(early_head, EARLY_RUN_JOB) {
             Err(problem) => {
                 return note(waited, &format!("its runs could not be read ({problem:#})"));
             }
-            Ok(runs) if runs.is_empty() => return note(waited, "it has no runs"),
-            Ok(runs) if runs.iter().any(CiRunState::failed) => {
-                return note(waited, "a run failed, so the landing run decides");
+            Ok(None) => {
+                return note(waited, &format!("it has no {EARLY_RUN_JOB:?} check run"));
             }
-            Ok(runs) if runs.iter().all(|r| r.status == "completed") => {
+            Ok(Some(run)) if run.failed() => {
+                return note(
+                    waited,
+                    &format!("{EARLY_RUN_JOB} failed, so the landing run decides"),
+                );
+            }
+            Ok(Some(run)) if run.status == "completed" => {
                 return note(
                     waited,
                     if waited.is_zero() {
@@ -2966,6 +3008,9 @@ mod tests {
                 script.remove(0)
             })
         }
+        fn check_run(&self, _: &str, _: &str) -> Result<Option<CiRunState>> {
+            Ok(None)
+        }
         fn ci_runs(&self, _: &str) -> Result<Vec<CiRunState>> {
             self.run_looks.set(self.run_looks.get() + 1);
             let attempt = if self.reruns.get() == 0 {
@@ -3679,12 +3724,14 @@ mod tests {
         inner: FakeHost,
         /// Replies to the early commit's run looks, taken from the front; the last repeats. `Err` is an
         /// unreadable reply.
-        script: RefCell<Vec<std::result::Result<Vec<CiRunState>, ()>>>,
+        script: RefCell<Vec<Look>>,
         log: EventLog,
         bound: Duration,
     }
+    /// One look at the early commit's check runs: each job's name and state, or an unreadable reply.
+    type Look = std::result::Result<Vec<(String, CiRunState)>, ()>;
     impl RunHost {
-        fn new(rig: &Rig, script: Vec<std::result::Result<Vec<CiRunState>, ()>>) -> Self {
+        fn new(rig: &Rig, script: Vec<Look>) -> Self {
             RunHost {
                 inner: FakeHost::new(Checks::Green),
                 script: RefCell::new(script),
@@ -3712,17 +3759,21 @@ mod tests {
             self.inner.merge(number, head, text)
         }
         fn ci_runs(&self, commit: &str) -> Result<Vec<CiRunState>> {
+            self.inner.ci_runs(commit)
+        }
+        fn check_run(&self, commit: &str, name: &str) -> Result<Option<CiRunState>> {
             if commit != "early1" {
-                return self.inner.ci_runs(commit);
+                return self.inner.check_run(commit, name);
             }
-            self.log.borrow_mut().push(format!("ci_runs {commit}"));
+            self.log.borrow_mut().push(format!("check_run {commit}"));
             let mut script = self.script.borrow_mut();
             let reply = if script.len() > 1 {
                 script.remove(0)
             } else {
                 script[0].clone()
             };
-            reply.map_err(|()| anyhow::anyhow!("the host did not answer"))
+            let jobs = reply.map_err(|()| anyhow::anyhow!("the host did not answer"))?;
+            Ok(jobs.into_iter().find(|(n, _)| n == name).map(|(_, r)| r))
         }
         fn rerun_failed(&self, run_id: u64) -> Result<()> {
             self.inner.rerun_failed(run_id)
@@ -3735,13 +3786,94 @@ mod tests {
         }
     }
 
-    fn run_state(status: &str, conclusion: Option<&str>) -> Vec<CiRunState> {
-        vec![CiRunState {
-            id: 5,
-            status: status.into(),
-            conclusion: conclusion.map(String::from),
-            attempt: Some(1),
-        }]
+    fn job(name: &str, id: u64, status: &str, conclusion: Option<&str>) -> (String, CiRunState) {
+        (
+            name.to_string(),
+            CiRunState {
+                id,
+                status: status.into(),
+                conclusion: conclusion.map(String::from),
+                attempt: None,
+            },
+        )
+    }
+
+    /// The early commit's check runs where only the job land waits for is present.
+    fn run_state(status: &str, conclusion: Option<&str>) -> Vec<(String, CiRunState)> {
+        vec![job(EARLY_RUN_JOB, 5, status, conclusion)]
+    }
+
+    /// Like [`run_state`], with the candidate's history job failed, as it always is on a candidate.
+    fn run_state_with_failed_history(
+        status: &str,
+        conclusion: Option<&str>,
+    ) -> Vec<(String, CiRunState)> {
+        let mut jobs = run_state(status, conclusion);
+        jobs.push(job("the full history", 6, "completed", Some("failure")));
+        jobs
+    }
+
+    #[test]
+    fn parse_check_run_picks_the_latest_run_of_that_name() {
+        let reply = serde_json::json!({"check_runs": [
+            {"id": 3, "name": "fmt, clippy, tests", "status": "completed", "conclusion": "failure"},
+            {"id": 9, "name": "the full history", "status": "completed", "conclusion": "failure"},
+            {"id": 7, "name": "fmt, clippy, tests", "status": "in_progress", "conclusion": null},
+        ]});
+        let run = parse_check_run(&reply, EARLY_RUN_JOB).unwrap();
+        assert_eq!(run.id, 7);
+        assert_eq!(run.status, "in_progress");
+        assert_eq!(run.conclusion, None);
+        assert!(parse_check_run(&reply, "absent").is_none());
+        assert!(parse_check_run(&serde_json::json!({}), EARLY_RUN_JOB).is_none());
+    }
+
+    #[test]
+    fn land_pr_waits_for_the_named_check_run_when_the_history_job_failed() {
+        let rig = Rig::new();
+        let host = RunHost::new(
+            &rig,
+            vec![
+                Ok(run_state_with_failed_history("in_progress", None)),
+                Ok(run_state_with_failed_history("in_progress", None)),
+                Ok(run_state_with_failed_history("completed", Some("success"))),
+            ],
+        );
+        let report = land_over_early(&rig, &FakeHost::new(Checks::Green), &host);
+        assert_eq!(
+            log_of(&rig),
+            [
+                "check_run early1",
+                "sleep 20",
+                "check_run early1",
+                "sleep 20",
+                "check_run early1",
+                "replace"
+            ]
+        );
+        assert!(
+            report.warnings[0].contains("waited 40s") && report.warnings[0].contains("completed"),
+            "{:?}",
+            report.warnings
+        );
+    }
+
+    #[test]
+    fn land_pr_pushes_at_once_when_the_named_check_run_failed() {
+        for others in ["in_progress", "completed"] {
+            let rig = Rig::new();
+            let mut jobs = run_state("completed", Some("failure"));
+            jobs.push(job("the full history", 6, others, None));
+            jobs.push(job("the pull request head", 8, others, None));
+            let host = RunHost::new(&rig, vec![Ok(jobs)]);
+            let report = land_over_early(&rig, &FakeHost::new(Checks::Green), &host);
+            assert_eq!(log_of(&rig), ["check_run early1", "replace"], "{others}");
+            assert!(
+                report.warnings[0].contains("fmt, clippy, tests failed"),
+                "{:?}",
+                report.warnings
+            );
+        }
     }
 
     /// Opens the early pull request at `early1`, then lands `landing1` against `host`.
@@ -3771,11 +3903,11 @@ mod tests {
         assert_eq!(
             log_of(&rig),
             [
-                "ci_runs early1",
+                "check_run early1",
                 "sleep 20",
-                "ci_runs early1",
+                "check_run early1",
                 "sleep 20",
-                "ci_runs early1",
+                "check_run early1",
                 "replace"
             ]
         );
@@ -3793,7 +3925,7 @@ mod tests {
         let rig = Rig::new();
         let host = RunHost::new(&rig, vec![Ok(run_state("completed", Some("success")))]);
         let report = land_over_early(&rig, &FakeHost::new(Checks::Green), &host);
-        assert_eq!(log_of(&rig), ["ci_runs early1", "replace"]);
+        assert_eq!(log_of(&rig), ["check_run early1", "replace"]);
         assert!(
             report.warnings[0].contains("waited 0s")
                 && report.warnings[0].contains("already completed"),
@@ -3832,10 +3964,10 @@ mod tests {
 
     #[test]
     fn land_pr_early_run_failure_changes_nothing() {
-        let cases: Vec<(&str, std::result::Result<Vec<CiRunState>, ()>)> = vec![
+        let cases: Vec<(&str, Look)> = vec![
             ("failed", Ok(run_state("completed", Some("failure")))),
             ("failed", Ok(run_state("completed", Some("timed_out")))),
-            ("no runs", Ok(vec![])),
+            ("no \"fmt, clippy, tests\" check run", Ok(vec![])),
             ("could not be read", Err(())),
         ];
         // The baseline: the same landing where the early commit shows a plain success.
@@ -3848,7 +3980,7 @@ mod tests {
             let rig = Rig::new();
             let host = RunHost::new(&rig, vec![reply]);
             let report = land_over_early(&rig, &FakeHost::new(Checks::Green), &host);
-            assert_eq!(log_of(&rig), ["ci_runs early1", "replace"], "{why}");
+            assert_eq!(log_of(&rig), ["check_run early1", "replace"], "{why}");
             assert!(report.warnings[0].contains(why), "{:?}", report.warnings);
             assert_eq!(
                 *host.inner.merge_heads.borrow(),

@@ -1,0 +1,94 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261025-132633-06hy",
+  "base_commit": "f37b9bcaac194e411d54b2f150bfc44ad3931f66",
+  "base_fingerprint": "sha256:6134c91f0aba5ae3ee6242c6aaea14eb4a964998fda4b9fe77c534ae82b0ec8d",
+  "previous_job": "20261025-033731-5hac",
+  "candidate_commit": "84308a19486bb78fbfe9749c9ca061aa5ad5913b",
+  "candidate_tree": "c1c3b04acf42c6d05e5570e3ee9a34b87e8b7400",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 143036
+    },
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 213143
+    },
+    {
+      "path": "crates/athena-core/src/test_support.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 23967
+    }
+  ],
+  "fingerprint": "sha256:b3fd97b3ea0bcba52afb4c325308ff41f009bc1ba136ce6e73c07f7f89ebb813",
+  "violations": [],
+  "producer_report": {
+    "summary": "The wait before the landing push now decides only from the candidate's check run named \"fmt, clippy, tests\". The other jobs' conclusions are ignored. Root cause: the old wait read workflow runs, which cannot name a job, so the candidate's always-failing history and PR-head jobs ended it at once. I added `PrHost::check_run`, which reads `commits/{sha}/check-runs` and takes the highest-id run of that name. All PrHost implementations are updated (the real client, the two test_support fakes, and the gh.rs test hosts). A missing check run, an unreadable reply and the timeout behave as before. The 20 s step and the bound are unchanged. I ran the gh:: tests, clippy and fmt; I did not run the full workspace suite.",
+    "files": [
+      "crates/athena-core/src/gh.rs",
+      "crates/athena-core/src/test_support.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-core --lib gh::",
+        "result": "pass",
+        "note": "73 passed, including the two new tests and the parse_check_run test"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "after running cargo fmt --all"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A new fake-host test in gh.rs: the candidate has a failed history job and 'fmt, clippy, tests' in progress then completed; land polls (sleeps) until 'fmt, clippy, tests' completes and only then replaces the early head. Run cargo test -p athena-core and see it pass.",
+        "status": "met",
+        "evidence": "land_pr_waits_for_the_named_check_run_when_the_history_job_failed passes. It scripts a failed 'the full history' job on every look and expects the log check_run, sleep 20, check_run, sleep 20, check_run, replace, with a note saying waited 40s and completed. Run via cargo test -p athena-core --lib gh::."
+      },
+      {
+        "criterion": "A new test: 'fmt, clippy, tests' on the candidate is already failed, with the other jobs in any state; land pushes at once with no sleeping and the note says that job failed. Run cargo test -p athena-core.",
+        "status": "met",
+        "evidence": "land_pr_pushes_at_once_when_the_named_check_run_failed passes. It runs with the other jobs in progress and with them completed, and expects the log [check_run early1, replace] and a note containing 'fmt, clippy, tests failed'."
+      },
+      {
+        "criterion": "Existing early-run tests (waits before pushing, pushes at once when completed, pushes anyway on timeout, unreadable or no runs) still pass, and cargo clippy and cargo fmt --check are clean.",
+        "status": "met",
+        "evidence": "The existing early-run tests were adapted to script the named job and pass in the gh:: run. Clippy with -D warnings and fmt --check are clean."
+      },
+      {
+        "criterion": "wait_for_early_run no longer ends on any failed workflow run; it decides only from the check run named 'fmt, clippy, tests' (a constant), found through the host seam, and its doc comment says so and why (a candidate is not a landing).",
+        "status": "met",
+        "evidence": "wait_for_early_run calls job.host.check_run(early_head, EARLY_RUN_JOB) and no longer calls ci_runs. EARLY_RUN_JOB is a const, and the doc comment says why: a candidate is not a landing, so its other jobs always fail there."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry describing the changed wait.",
+        "status": "met",
+        "evidence": "A new Fixed entry under Unreleased describes waiting only for the candidate's 'fmt, clippy, tests' check run."
+      }
+    ],
+    "open_issues": [
+      "I did not run the full workspace suite (cargo test --locked); only the gh:: tests and clippy over all targets.",
+      "EARLY_RUN_JOB must match the job name in the CI workflow; if the name changes, the wait silently pushes at once, and the note says the check run is missing.",
+      "The plan suggested a RunHost helper that adds a failed history job; I added run_state_with_failed_history for it. The failed-job test builds its other jobs inline."
+    ],
+    "mistakes": [],
+    "learnings": [
+      "The ci_runs workflow-run data cannot name a job; the check-runs endpoint can.",
+      "RunHost in the gh.rs tests logs the early-commit look with the label check_run early1 (it was ci_runs early1)."
+    ],
+    "desires": []
+  }
+}
