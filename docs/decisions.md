@@ -2940,3 +2940,26 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   the append-only branch; removing `cutover_job` from `athena.toml` returns the check to the old rules.
 - **Provenance:** read: `records_import.rs`, `legacy.rs`, `attribution.rs`, `history.rs`, `gh.rs`, `reconcile.rs`,
   `ci.yml`; measured: the tests named above under `cargo test`. Not measured: a run against the real repository.
+
+## D120 · History tests share one fixture, built only through Athena's real writers
+
+- **Case:** Job 20261025-022144-emm8 and its two earlier attempts built the records-history fixture by hand, and
+  the history it made did not match what the writers produce, so tests passed on a shape no repository has. The
+  trailer job and job 7 part 2 need the same history.
+- **Decision:** `athena_core::test_support` (compiled for tests and for the `test-support` feature, which only
+  `athena-cli`'s dev-dependencies turn on) builds a scratch repository with a bare remote: a bootstrap commit, one
+  job read, dispatched, verified and landed by `ask` and `go` (trailers, no landing record), then the cutover job
+  landed through `gh::land_pr` with the real records sink, remote and content check, and only the host faked. That
+  writes the landing intent, the landing record, the import with its manifest and the legacy-exempt record.
+  `tests/common/mod.rs` of `athena-cli` supplies the capabilities and scripts (`cutover_fixture()`,
+  `athena_check`), and `tests/cutover_fixture.rs` pins the shape and runs `athena check --history` and
+  `athena check --attribution`. A history test builds on this fixture and does not hand-build commits or records.
+- **Alternatives:** (a) Script the `gh` REST calls through `Athena::land_pr`: many endpoints to imitate, and the
+  records are written by the same sink either way. (b) Copy the fixture into each crate's tests: copies drift.
+  (c) A separate test-support crate: a new workspace member for one module.
+- **Tradeoff:** Building the fixture runs two whole jobs against the fake agents (about 5 to 10 seconds), and a
+  change to the writers can change the fixture's shape; that is the point, and the shape test is where it shows.
+  The fake host's squash message is title and body only, without the "(#n)" suffix a real host adds.
+- **Reversal cost:** Low. Delete the module, the feature, the dev-dependency and the test file.
+- **Provenance:** read: `gh.rs`, `pr.rs`, `run.rs`, `attribution.rs`, `legacy.rs`, `history.rs`; measured:
+  `cargo test -p athena-cli --test cutover_fixture`.

@@ -1,0 +1,151 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261025-031609-k0tt",
+  "base_commit": "495bec2f5d5248832bae3b00d8a850908dfbd226",
+  "base_fingerprint": "sha256:30a02d174ea92ec2fb7475a4b58bda340d3c16879cca5d70ddf07e6a6a5ec924",
+  "previous_job": "20261025-001232-vesh",
+  "candidate_commit": "ca4d1fdd5866b0021f2bd1869953052d5ae2efb8",
+  "candidate_tree": "0fb6596f030c9136ac6bb60ac2aaf8871db4c8fa",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 137103
+    },
+    {
+      "path": "crates/athena-cli/Cargo.toml",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 900
+    },
+    {
+      "path": "crates/athena-cli/tests/common/mod.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 24571
+    },
+    {
+      "path": "crates/athena-cli/tests/cutover_fixture.rs",
+      "status": "added",
+      "mode": "100644",
+      "bytes": 7735
+    },
+    {
+      "path": "crates/athena-core/Cargo.toml",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 894
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 11846
+    },
+    {
+      "path": "crates/athena-core/src/test_support.rs",
+      "status": "added",
+      "mode": "100644",
+      "bytes": 19742
+    },
+    {
+      "path": "docs/decisions.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 225711
+    }
+  ],
+  "fingerprint": "sha256:1fcbff1b1b079a6d7311f6fbae7fb216ea38df0bb48170721742aad9fd9cd09c",
+  "violations": [],
+  "producer_report": {
+    "summary": "Added the shared records-history cutover fixture. It is `athena_core::test_support` (compiled for tests and the off-by-default `test-support` feature, which only the cli dev-dependency enables). `CutoverFixture::build` makes a work repo and a bare remote, then runs through Athena's real writers: a bootstrap commit; one old-way job read, dispatched, verified and landed by `ask` and `go` with trailers; then the cutover job, which sets `[history] cutover_job` and is landed through the public `gh::land_pr` with the real records sink, remote and content check. Only the host is faked. That writes the landing intent, landing record, import with manifest and legacy-exempt record. The cli `tests/common/mod.rs` has `cutover_fixture()` and `athena_check()`. `tests/cutover_fixture.rs` has 4 tests that pin the shape and run the real `athena check --history` and `athena check --attribution` (both pass). Docs are in the module text, the CHANGELOG and a new D120 in docs/decisions.md. No production code changed. fmt, clippy and the full test suite pass.",
+    "files": [
+      "crates/athena-core/src/test_support.rs",
+      "crates/athena-core/src/lib.rs",
+      "crates/athena-core/Cargo.toml",
+      "crates/athena-cli/Cargo.toml",
+      "crates/athena-cli/tests/common/mod.rs",
+      "crates/athena-cli/tests/cutover_fixture.rs",
+      "CHANGELOG.md",
+      "docs/decisions.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test --locked -p athena-cli --test cutover_fixture",
+        "result": "pass",
+        "note": "4 tests pass"
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "exit status 0; the full log was too large to read back, so the pass rests on the exit status"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A test using the helper runs `athena check --history` and `athena check --attribution` on the fixture's main and both report no violations; run `cargo test` and see it pass.",
+        "status": "met",
+        "evidence": "cutover_fixture.rs the_history_and_attribution_checks_pass_on_the_fixtures_main runs the real athena binary (athena_check) in the fixture work repo, asserts exit 0, '0 violation(s)', 'attribution pass' and '0 finding(s)'. Passed in cargo test -p athena-cli --test cutover_fixture and in cargo test --locked."
+      },
+      {
+        "criterion": "A test asserts the old-way landing commit carries its Athena trailers, produced through the real landing path (not hand-built commit text), and that the job was read, dispatched, verified and landed.",
+        "status": "met",
+        "evidence": "the_old_way_job_landed_with_its_trailers_and_was_read_dispatched_and_verified asserts Athena-Job and Athena-Verified-Content on the landing made by Athena::go, ancestry from the bootstrap, and Records::load shows a reading, a candidate, a Pass verification and JobState::Closed(Landed). Passes."
+      },
+      {
+        "criterion": "A test asserts C0 resolves from the cutover job's landing record on athena/records, and that the import commit and legacy-exempt record exist there; the import manifest self-check passes.",
+        "status": "met",
+        "evidence": "c0_resolves_from_the_cutover_landing_and_the_import_and_exempt_record_are_on_the_records_branch uses cutover_commit_at on the bare remote's records tip, checks the import commit's parent is the landing record commit, calls verify_cutover_import, parses import-manifest.json and legacy-exempt.json, and checks the cutover warning. Passes."
+      },
+      {
+        "criterion": "The fixture has a bare remote, a bootstrap commit, and [history] cutover_job names the cutover job; `cargo test`, `cargo clippy --all-targets` and `cargo fmt --check` pass.",
+        "status": "met",
+        "evidence": "the_fixture_has_a_bare_remote_a_bootstrap_commit_and_names_the_cutover_job asserts rev-parse --is-bare-repository is true, remote main equals local main, the root is the bootstrap commit with Athena-Job: bootstrap, and cutover_job_for(main) equals the cutover job id. cargo test --locked, clippy -D warnings and fmt --check all exit 0."
+      },
+      {
+        "criterion": "The helper has doc comments (and a CHANGELOG.md entry) explaining its shape and how the trailer job and job 7 part 2 should reuse it from both athena-core and athena-cli tests.",
+        "status": "met",
+        "evidence": "test_support.rs module doc has 'The shape of the history' and 'Reusing it' sections naming athena-cli (cutover_fixture, athena_check) and athena-core (CutoverSpec) use; CHANGELOG [Unreleased] Added entry names both later jobs; D120 added to docs/decisions.md."
+      },
+      {
+        "criterion": "No production behavior changes: no edits to run.rs, gh.rs, land.rs, or gate code; the fixture is test-only and compiled only for tests.",
+        "status": "met",
+        "evidence": "git status shows changes only to the two Cargo.toml files, athena-core lib.rs (one cfg(any(test, feature = \"test-support\")) pub mod line plus a doc line), cli tests/common/mod.rs, new test_support.rs and cutover_fixture.rs, CHANGELOG.md and decisions.md. The feature is off by default and only the cli dev-dependency enables it."
+      }
+    ],
+    "open_issues": [
+      "crates/athena-cli/Cargo.toml was edited (dev-dependency athena-core with feature test-support); it is not in the brief's deliverables but is needed for cli tests to see the module.",
+      "The brief listed test_support.rs as modify; it did not exist, so it was created.",
+      "Core tests that reuse the fixture must pass their own capabilities and scripts in a CutoverSpec; whether athena-cap-change can be a core dev-dependency was not checked.",
+      "The fake host's squash message is title and body only, without the '(#n)' suffix a real host adds.",
+      "The full-suite pass rests on the exit status; the log was too large to read back.",
+      "Each fixture build takes about 5 to 10 seconds; the four tests each build their own."
+    ],
+    "mistakes": [
+      "Earlier drafts had an unused capabilities field on CutoverFixture and a doc reference to a method that did not exist; both were fixed before the final run."
+    ],
+    "learnings": [
+      "Admission refuses a change to athena.toml unless the accepted reading lists it as a deliverable and an acceptance criterion names it.",
+      "go's local landing commit sits behind the job's own record commits (proposal, prediction), so its parent is not the bootstrap commit and candidate.base_commit is not the bootstrap; use ancestry checks.",
+      "The cutover needs a non-empty [history] exempt list whose entries have known reasons; a fixture's exempt list must equal the built-in one or the history check flags the commit that adds entries not yet in history.",
+      "check --attribution runs the part-1 walk from the earliest intent's expected base; with the cutover shown, check --history uses check_after_cutover.",
+      "Athena::resync_onto_merge is public and moves local main onto the host squash commit, as athena land --pr does.",
+      "gh::land_pr is public and takes trait objects, so the real flow can be driven with only a fake PrHost; ask/go need a capability, which core lacks, so callers pass them."
+    ],
+    "desires": [
+      "A way to read a persisted large tool output inside the working directory, to confirm per-binary test results of the full suite.",
+      "A note in the brief on whether athena-cli/Cargo.toml may be edited for a dev-dependency."
+    ]
+  }
+}

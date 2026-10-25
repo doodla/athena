@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261025-001234-2hax",
+  "round": 3,
+  "at": "2026-10-25T01:26:18.424183104Z",
+  "invocation_seq": 6,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-gate/src/lib.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-gate/src/lib.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/manage.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/manage.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "land_pr only lands a job's pull request, so the plan's 'three pull requests, each landed through land_pr' cannot include a standalone intervention PR or records-only PR.",
+      "evidence": "gh.rs:1260 LandPr takes a required `job`, `commit` (the job's landed commit) and `verified_fingerprint`. land_pr (gh.rs:1775) loads or publishes a link keyed on job.job and bails if the PR head differs from job.commit (gh.rs:1797-1805). The CLI wrapper (gh.rs:2156-2171) gets the commit from landed_commit(job, fingerprint) and the squash from squash_text. An intervention or records-only commit has no job, so it can only reach a landing record as an earlier commit inside some job's PR range: pr_commits(remote_base, head) at land.rs:145, classified at land.rs:162. The demonstration as written would either not compile against LandPr or quietly turn into something else. Fix: Rewrite the scratch test. After landing the cutover job, build one job branch whose range holds (a) an intervention commit made through commit_with_staged, (b) a records-only commit made through Committer, and (c) the job's closing commit. Land it with a single land_pr call. Assert the landing record lists the three shas with kinds DeclaredIntervention, RecordsOnly and JobLanding. Alternatively, use two job PRs, but say how each non-job commit gets into a PR range. Before fixing this, confirm the gh.rs World supports it (open question 2).",
+      "location": "Decision 5 / Demonstrations for criteria 1-2 (gh.rs scratch test)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The plan does not say how the fake host merges. Under a squash merge the PR's own commits never reach the base branch, so 'records attribute all three commits on HEAD' may not hold the way the test asserts.",
+      "evidence": "land_pr passes `squash: &self.git.squash_text(&landed)` (gh.rs:2171), and reconcile.rs:208 merge_method follows the commit shape. With a squash merge, the base branch gets one host-written commit whose message comes from squash_text. Its body is the job commit's message, so it would be trailer-free only if that message is. The intervention and records-only commits would not be on HEAD for check_history or check_attribution_with_legacy to judge. The plan also relaxes squash_text for post-C0 but does not test that the squash commit on the base carries no Athena- line. Fix: State the merge method the test uses. With a merge commit or rebase, assert that all three PR commits and the merge commit on HEAD have no Athena- lines and that each is attributed. With a squash, assert that the squash commit has no Athena- lines and is attributed. Then explain how criterion 1's 'intervention and records-only commit' is still shown, for example with a second, non-squash landing.",
+      "location": "Demonstrations for criteria 1-2: merge method and which commits reach the base",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The rationale misdescribes the history check. After C0 it skips content, invariant and jobs checks for every commit, not only invariant::check.",
+      "evidence": "history.rs:50-52: when the cutover is Shown, check_history calls check_after_cutover (history.rs:68-106). That runs only secrets::check_history and legacy::check_attribution_with_legacy. Line 161 is in check_history_with_exempt, the pre-cutover/old-rules path, and runs invariant::check on every commit it walks. Fix: Correct the rationale in the plan and in the docs/decisions.md text. The gate deliberately stays stricter than the post-C0 history check: it keeps content and jobs checks and drops only the trailer-dependent invariant::check. Confirm jobs::check and content::check need no trailers for Athena's own post-C0 commits (no trailer reads were found in jobs.rs or content.rs).",
+      "location": "Decision 3 rationale ('history.rs:161 runs invariant::check only for commits up to C0, as check_history already does')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "This is a conditional deliverable, which decision 6 itself rejects as hard to check.",
+      "evidence": "Decision 6 rejects keeping files 'only if needed' because conditional deliverables are hard to check, yet the lifecycle.rs entry adds an optional CLI check. Fix: Either commit to the CLI-level `athena check --history`/`--attribution` run in lifecycle.rs, which would directly back criterion 2's wording, or drop it.",
+      "location": "Files: crates/athena-cli/tests/lifecycle.rs ('a CLI-level check ... if cheap')",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan's core design holds up against the code: strip trailers once in Committer::build_commit_in (commits.rs:150) and commit_with_staged (manage.rs:407), keyed on the parent's cutover state; keep the trailer readers and add a C0..head fallback; add a strict/relaxed squash_text split (athena-git lib.rs:715). Moving the change into gate lib.rs and manage.rs is justified, and both stay inside the named crates. The weak point is the main demonstration. land_pr is a job-landing entry point: LandPr requires a job, its landed commit and a verified fingerprint, and it refuses when the PR head differs from the job commit (gh.rs:1260, 1775-1805). So the planned 'three PRs, each through land_pr' cannot land a standalone intervention or records-only PR. The plan also leaves the fake host's merge method open, and under a squash the PR's own commits never reach HEAD to be judged. The plan's description of the history check is also inaccurate: after C0 it skips content, invariant and jobs checks, not just invariant. The planner should restructure the scratch test as one job PR whose range holds all three commit kinds, state the merge method, and correct the rationale. Verdict: revise."
+}

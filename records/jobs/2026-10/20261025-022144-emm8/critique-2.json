@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261025-022144-emm8",
+  "round": 2,
+  "at": "2026-10-25T02:26:36.802451755Z",
+  "invocation_seq": 6,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The run.rs trailer read is not a landed-commit lookup, so the verification-record lookup cannot replace it, and run.rs is missing from the Files list.",
+      "evidence": "run.rs:2524-2535 runs log_grep for `^Athena-Job: <id>$` to find the blocked job's closing commit, the one carrying `Athena-Prediction`. It copies that commit's Prediction/Class/Capability/Producer/Verifier/Cost trailers and fails with 'the blocked closing commit of job {id} was not found' when it finds none. After C0 that closing commit has no trailers, so this path always fails. Finding the newest commit that adds the verification record does not find the blocked closing commit and does not supply those fields. Step 6 edits run.rs, but run.rs is in neither the plan's Files list nor the reading's deliverables. Fix: Add crates/athena-core/src/run.rs to Files. After C0, skip the trailer search (or take the needed values from the job's records) and do not re-emit trailers. Add a test that resumes a blocked post-C0 job to its landing and fails if the trailer search is still used. Settle the open question about run.rs now, not in the producer.",
+      "location": "Plan Decision 2 / Step 6; crates/athena-core/src/run.rs:2523-2536",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The docs wording disagrees with criterion 7.",
+      "evidence": "Criterion 7 says that after C0 the history check runs only secrets and attribution. The plan's docs would say that secrets, attribution, records-validity and reconcile checks run. history.rs:74-104 (check_after_cutover) does run ValidRecords and reconcile::check_records as well. So the plan matches the code but not the criterion's text. Fix: Say in the docs that the old trailer and invariant rules stop and that secrets and attribution are the history checks. Mention records validity and reconcile as the records-file checks that stay, and flag the difference from the criterion's wording in the change description.",
+      "location": "Demonstration for criterion 7",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Criterion 6's demonstration does not show that the jobs check is kept.",
+      "evidence": "Criterion 6 requires the gate to keep both content and jobs checks after C0. The planned lib.rs test only asserts that a content violation is still reported. Fix: Add a gate case after C0 where jobs::check reports a violation (for example a bad job record), and assert it is still reported in the CommitMsg and Commit scopes.",
+      "location": "Demonstration for criterion 6",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The auditor demonstration may test a private helper instead of the real entry point.",
+      "evidence": "read_changed_files is a private fn. Criterion 5 asks for 'the auditor reading a post-C0 job's files' through the real entry point, and the last attempt failed for testing helpers. Fix: Drive the public auditor run for both the pre-C0 and post-C0 jobs, and assert on the files it reports.",
+      "location": "Demonstration for criterion 5; crates/athena-core/src/auditor.rs:168",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The writers' cutover decision reads the records-branch tip, not the parent.",
+      "evidence": "attribution::cutover_state (attribution.rs:132) resolves the records-branch tip, not the parent commit. Only the config and the ancestor check are tied to the parent. Fix: Say in the doc comment that the Shown state comes from the records-branch tip, as check_history uses it.",
+      "location": "Decision 1, after_cutover",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the code by reading the gate, history, attribution, gh.rs, run.rs and the records types. Most of it is sound. gate() (lib.rs:313-359) is the one place where invariant::check runs for the hook and plumbing scopes, so putting the after-C0 skip in Judged::new and gate() is the right fix point. check_after_cutover (history.rs:68-106) already runs only secrets, attribution, records validity and reconcile after C0. jobs.rs reads no trailers. The Verification record carries verified_fingerprint (records.rs:721), so the post-C0 landed_commit lookup can work. One major gap remains. The run.rs trailer read (run.rs:2523-2536) looks for a blocked job's closing commit by its Athena-Job and Athena-Prediction trailers and copies its other trailers. It is not a landed-commit lookup, so the verification-record lookup the plan proposes cannot replace it, and run.rs is missing from the Files list. Smaller issues: the criterion 6 demonstration does not cover the jobs check, the criterion 5 auditor test may target a private helper, and the docs wording differs slightly from criterion 7. The planner can fix all of these, so the verdict is revise."
+}

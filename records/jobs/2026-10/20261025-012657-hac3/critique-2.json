@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261025-012657-hac3",
+  "round": 2,
+  "at": "2026-10-25T01:32:44.967687863Z",
+  "invocation_seq": 6,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The plan drops the accepted criterion's 'reachable via the landing record's second parent' check, and its reason is factually wrong.",
+      "evidence": "The plan rejects walking the second parent because 'a squash host commit has one parent'. But criterion 1 means the landing record's commit on the records branch, not the host squash commit. gh.rs:1324-1326 says the landing records commit 'takes `head` as a second parent (§6.1)', and the existing test gh.rs:3934 is named land_pr_writes_the_intent_then_the_landing_with_the_head_as_second_parent. Swapping in commits[].sha changes an accepted criterion without the user agreeing. Fix: Keep the commits[].sha == base..head check. Also find the Landing record's commit on the records branch, take its second parent (which must equal the PR head), walk base..that parent, and assert no 'Athena-' line on each of the three commits, as criterion 1 states. Remove the open question.",
+      "location": "Plan decision 7 and criterion 1 demonstration",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Nothing shows that post-C0 landings actually use the relaxed squash text: the end-to-end test supplies the squash text itself.",
+      "evidence": "Athena::land_pr builds the squash text at gh.rs:2171 (`squash: &self.git.squash_text(&landed)?`) and passes it in through LandPr to the free fn land_pr (gh.rs:1775), which is what the test calls. The plan admits that reverting Athena::land_pr to strict 'would not be caught'. So criterion 3's 'is used for post-C0 landings' is unshown, and the end-to-end test passes whether or not production uses the relaxed form. Fix: Have the free land_pr (or a helper it calls) choose the squash text from its commit by cutover state, and remove the precomputed `squash` field. Athena::land_pr and the test then share one code path, and the end-to-end test fails if the strict form is used.",
+      "location": "Decision 1; criterion 3 demonstration; gh.rs:2171",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "One test-name filter is meant to cover tests in three modules; that only works if each test carries that substring.",
+      "evidence": "`cargo test -p athena-core trace_and_audit_read_trailers_up_to_c0` is meant to cover status.rs, auditor.rs and gh.rs landed_commit tests. The plan names no separate tests for each. Fix: Name each test with the shared substring, or list one filter per module, so the verifier's command runs all three plus the no-cutover control.",
+      "location": "Criterion 6 demonstration",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A known reader that fails on post-C0 trailer-free commits is left open with no plan.",
+      "evidence": "The plan's own risk note says retry_landing reads Athena-Prediction from the closing commit and would fail for a blocked post-C0 job. Fix: Either add a records-based fallback in run.rs, listed as a deliverable, or name it explicitly as a follow-up in the CHANGELOG and D111 text so the docs do not overstate which readers work.",
+      "location": "Open question on run.rs::retry_landing",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the code with Read and Grep only. Most of the design holds: there is one cutover predicate, trailers are stripped at build_commit_in and commit_with_staged, the gate drops only invariant::check, and readers get a C0..head fallback. Commit kinds are classified from content, not messages (land.rs:128-214), so stripping trailers does not break classification. Two major gaps remain. First, the plan drops the accepted criterion-1 check through the landing record's second parent, claiming no second parent exists; in fact the landing records commit takes the PR head as its second parent (gh.rs:1324-1326, test at gh.rs:3934). Second, the end-to-end test supplies its own squash text to the free land_pr, so nothing shows that production landings use the relaxed form; the plan admits this. Both are fixable, so the verdict is revise."
+}

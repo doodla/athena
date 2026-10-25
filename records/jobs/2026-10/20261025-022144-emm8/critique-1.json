@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261025-022144-emm8",
+  "round": 1,
+  "at": "2026-10-25T02:24:50.646901494Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The installed commit-msg hook still runs invariant::check after C0, so the trailer-free commit_with_staged commit (and any ordinary git commit) gets refused.",
+      "evidence": "manage.rs:429-434: commit_with_staged makes the commit by running `git commit -q -F -`, which fires the repository's hooks. hooks.rs:35-43 runs `gate(&git, &change, Scope::CommitMsg)`, and lib.rs:331-332 runs `invariant::check` for CommitMsg. That check requires an Athena-Job, Athena-Intervention or Athena-Record trailer (invariant.rs:153). The plan only adds `gate_with(.., false)` for the callers it edits, so the hook path keeps the trailer rule. A scratch test with no hooks installed would pass while a real repository refuses the commit. The writer change would be made at the caller, not where the fault starts. Fix: Make the cutover decision inside the gate itself: gate() or Judged::new computes after_cutover from the parent's config and skips invariant::check when it holds. Then the hooks, commit_with_staged and Committer all agree. Or at least route hooks.rs through the same helper. Add a test that installs the hooks (as athena init does) in the scratch repo and commits a post-C0 intervention through commit_with_staged.",
+      "location": "Decision 1 / Files: crates/athena-gate/src/lib.rs, crates/athena-core/src/manage.rs; crates/athena-cli/src/hooks.rs (not in the plan)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The plan has no design for how land_pr and run.rs find a job's landed commit once the trailers are gone, and land_pr is the entry point criterion 1 depends on.",
+      "evidence": "gh.rs:1223-1239: landed_commit finds the commit by `log_grep` for `^Athena-Verified-Content: {fingerprint}$` and needs an Athena-Job trailer too. If neither exists it stops with 'job is not landed on this branch'. Once build_commit_in strips the trailers, the job landing commit carries neither, so land_pr cannot find what to push. The plan lists this only as an open question and leaves it to the producer. Fix: Choose and state the post-C0 lookup. Options: the commit's records (the job's landing or outcome record added in that commit), or the landing record on the records branch, or keep the commit id from the landing step instead of searching for it again. Apply the same lookup to the run.rs reads around lines 2486-2602. Name a test that lands a trailer-free job through land_pr and fails if the lookup still uses trailers.",
+      "location": "Open questions (run.rs, gh.rs landed_commit) / Step 5",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "After C0, check_history also runs the records-validity and reconcile checks, not only secrets and attribution, so the planned test must not assert 'only secrets and attribution findings' literally.",
+      "evidence": "history.rs:68-105: check_after_cutover runs secrets::check_history and legacy::check_attribution_with_legacy, and also RecordSet errors (Rule::ValidRecords) and reconcile::check_records. Fix: Have the test assert that no Rule::Invariant (trailer-based) violation appears for a trailer-free post-C0 commit and that a planted secret is still reported. Word the docs to say the old trailer rules no longer run after C0, rather than 'only secrets and attribution'.",
+      "location": "Criterion 6 demonstration / Step 7",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The writers would read the cutover state from the head while check_history reads it from the tip's config, so it is not clear which config decides.",
+      "evidence": "history.rs:44-51 takes cutover_job from config_at(tip) and needs c0 to be an ancestor of the tip. The plan's after_cutover(git, head, cutover_job) leaves open where cutover_job comes from for the writers, for example the job branch base or HEAD. Fix: State that writers take cutover_job from the parent commit's config, matching Judged::new, and require c0 to be an ancestor of that parent.",
+      "location": "Decision 2 / Risks",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan matches the reading and names real code: cutover_state (attribution.rs:132), gate (lib.rs:313), squash_text (athena-git lib.rs:715), Athena::trace (status.rs:788), land_pr, check_history (history.rs:39) and check_attribution. Two design gaps would break it at the real entry points. First, commit_with_staged commits through `git commit`, which fires the installed commit-msg hook. That hook calls gate(CommitMsg) and still runs invariant::check, so the plan's per-caller gate_with(false) does not cover it. The cutover decision belongs inside the gate. Second, land_pr's landed_commit looks for Athena-Verified-Content and Athena-Job trailers, and the plan leaves its post-C0 replacement as an open question, so criterion 1's land_pr path has no planned way to work. Two smaller points: check_history after C0 also runs the records and reconcile checks, so criterion 6's test needs care; and the plan should say which config the writers read cutover_job from. Verdict: revise."
+}
