@@ -9,6 +9,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `docs/system-facts.md`: a short, sourced list of facts about how Athena runs that the code cannot show (host
+  merge rules, what each role's copy holds, prompt budgets and current sizes, the request format `athena plan`
+  parses, what `land` lands, where records live, remotes, CI caches, the early pull request). The planner and
+  critic briefs carry it whole in a "System facts" section (`SYSTEM_FACTS` in `athena-context`). The budgets
+  test `system_facts_budgets_match_computed` fails when a budget or size recorded in the file differs from the
+  computed one, and `system_facts_drift_is_rejected` shows a doctored value is refused. Prompt budgets are
+  unchanged.
 - `athena land --pr` waits for the early commit's CI run to finish before it replaces the early head with the
   landing commit, so the landing run finds the cached pass. The race it closes: on PR #180 the early run passed
   at 10:46:49 but the landing run had started at 10:45:15 and ran the full 16 minutes. The wait looks at the
