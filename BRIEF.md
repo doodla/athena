@@ -1070,3 +1070,8 @@ It should become demonstrably less likely to make the same kind of mistake again
 
 * I thought we had speed as a priority. Athena should prioritize anything that'll help it move faster ( includes the time wasted )
 * Relay note: a standing rule. Work that makes Athena faster, or cuts the time it wastes (failed and rejected attempts, planning stops, timeouts, retries that redo work, thrash, duplicated checks), ranks above all other work, including the rest of the records-history build, which pauses after the fixture job then running.
+
+### 2026-10-25: Evidence labels Jev
+
+* Evidence should label jev imo
+* Relay note: in answer to who labels introspections so `athena score-jev` can judge Jev's shadow class answers (the operator had asked whether Sri or the auditor should): neither a person nor a model's opinion; the labels come from what happened afterwards.
