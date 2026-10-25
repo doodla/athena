@@ -177,6 +177,97 @@ impl Fixture {
     }
 }
 
+/// The files of a demo repository's bootstrap commit under `config`: the same tree [`Fixture::with_config`]
+/// commits.
+pub fn demo_files(config: &str) -> Vec<(String, String)> {
+    [
+        ("athena.toml", config),
+        ("defaults.toml", include_str!("../../../../defaults.toml")),
+        (
+            ".gitattributes",
+            "/PRIVATE.md athena-exclude\n/SPEC.md athena-readonly\n",
+        ),
+        ("PRIVATE.md", "owner notes: PRIVATE-CANARY\n"),
+        ("SPEC.md", "the spec\n"),
+        ("README.md", "# Demo\n"),
+        ("rustfmt.toml", "style = \"strict\"\n"),
+        ("src/lib.rs", "pub fn one() -> u32 {\n    1\n}\n"),
+    ]
+    .into_iter()
+    .map(|(path, content)| (path.to_string(), content.to_string()))
+    .collect()
+}
+
+/// The records-history cutover fixture (decision D111), shared with `athena-core`'s tests: a scratch
+/// repository with a bare remote, a bootstrap commit, one job landed the old way, and the cutover job landed
+/// through the pull-request path with its landing record, import and legacy-exempt record on
+/// `athena/records`. Built only through Athena's own writers; see `athena_core::test_support` for the shape
+/// and for how a later job (the trailer job, job 7 part 2) reuses it.
+///
+/// Building runs two whole jobs against the fake agents, so a test that only needs the history should build
+/// it once and share it.
+pub fn cutover_fixture() -> athena_core::test_support::CutoverFixture {
+    use athena_core::test_support::{CutoverFixture, CutoverSpec, Step};
+    let capabilities = athena_cli::wiring::capabilities;
+    let scripts = |step: Step<'_>| -> Script {
+        match step {
+            Step::OldWay => Scenario::default().script(),
+            Step::CutoverRead | Step::CutoverGo { .. } => {
+                let mut scenario = Scenario {
+                    reading: reading(
+                        &[("README.md", "modify"), ("athena.toml", "modify")],
+                        &[
+                            (
+                                "content",
+                                "athena.toml names this job as the cutover job, and README.md says so",
+                            ),
+                            ("behavior", "the tests still pass"),
+                        ],
+                    ),
+                    ..Scenario::default()
+                };
+                if let Step::CutoverGo { athena_toml } = step {
+                    scenario.edits = vec![
+                        (
+                            "README.md".into(),
+                            Some("# Demo\n\nHello, reader.\n\nThis is the cutover.\n".into()),
+                        ),
+                        ("athena.toml".into(), Some(athena_toml.to_string())),
+                    ];
+                }
+                scenario.script()
+            }
+        }
+    };
+    CutoverFixture::build(CutoverSpec {
+        files: demo_files(&test_config()),
+        capabilities: &capabilities,
+        scripts: &scripts,
+    })
+    .expect("the cutover fixture builds")
+}
+
+/// Runs the real `athena check <flag>` in the fixture's work repository, with a scratch state directory and
+/// no `CI` variable. `--attribution` also gets `--no-checkpoint`, so the records branch is left as built.
+pub fn athena_check(
+    fixture: &athena_core::test_support::CutoverFixture,
+    flag: &str,
+) -> std::process::Output {
+    let scratch = tempfile::tempdir().unwrap();
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_athena"));
+    cmd.current_dir(fixture.root())
+        .arg("check")
+        .arg(flag)
+        .env("ATHENA_STATE_DIR", scratch.path())
+        .env_remove("CI")
+        .env_remove("ATHENA_NESTED")
+        .env_remove("ATHENA_SCRATCH_DIR");
+    if flag == "--attribution" {
+        cmd.arg("--no-checkpoint");
+    }
+    cmd.output().unwrap()
+}
+
 pub fn write(root: &Path, files: &[(&str, &str)]) {
     for (path, content) in files {
         let full = root.join(path);

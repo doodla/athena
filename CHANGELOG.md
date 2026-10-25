@@ -9,6 +9,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A shared test fixture for the records-history cutover (D111, D120): `athena_core::test_support`, compiled
+  only for tests and the `test-support` feature of `athena-core`. `CutoverFixture::build` makes a scratch
+  repository with a bare remote and this history, all through Athena's own writers: a bootstrap commit; one job
+  read, dispatched, verified and landed the old way by `ask` and `go` (with its trailers and no landing record);
+  then the cutover job, whose change sets `[history] cutover_job`, landed through `gh::land_pr` with the real
+  records sink, so the landing intent, landing record, import with manifest and legacy-exempt record are on
+  `athena/records`. Only the host is faked. `athena-cli`'s `tests/common/mod.rs` has `cutover_fixture()` and
+  `athena_check()`; `tests/cutover_fixture.rs` pins the shape and runs `athena check --history` and
+  `athena check --attribution` on it. The trailer job and job 7 part 2 reuse it from `athena-cli` tests with
+  those helpers, and from `athena-core` tests by passing their own capabilities and scripts in a `CutoverSpec`.
+  The module text explains how. No production behavior changes.
 - The records-history cutover (job 7, part 1, of `docs/design/records-history.md`, sections 4 and 10, D111,
   D119). `athena.toml` `[history]` gains an optional `cutover_job`; `C0` is the host commit of that job's landing
   record on `athena/records`. When `athena land --pr` lands that job, after the landing record it imports

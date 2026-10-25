@@ -52,6 +52,8 @@
 //!   evidence; the prompt is a fixed constant, protected from jobs by nothing else until the warden request
 //!   (prose-only);
 //! - [`pin`]: a study's repository ref resolved to a commit by the core, and mounted read-only;
+//! - `test_support` (compiled for tests and the `test-support` feature only): the shared records-history
+//!   cutover fixture, a scratch repository with a bare remote and a history made through the real writers;
 //! - [`plan`]: planning, the first stage: every open request fleshed out and all of them planned together into
 //!   one ordered plan with parallel groups, which `athena drain` follows; and the plan-stage audit's tracing
 //!   of logged gaps to stages.
@@ -92,6 +94,8 @@ pub mod state;
 pub mod status;
 pub mod steward;
 pub mod store;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 pub mod toolconfig;
 pub mod verify;
 pub mod watcher;
