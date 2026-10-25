@@ -706,6 +706,16 @@ pub fn producer_prompt_with_plan(brief: &str, section: &str) -> String {
     format!("{brief}\n\n{section}")
 }
 
+/// Facts about how Athena runs that the code cannot reveal, each with its source (`docs/system-facts.md`).
+/// Embedded so the binary needs no `docs/` at run time; a test in `crates/athena-cli/tests/budgets.rs` checks
+/// the budget lines in it against the computed ones.
+pub const SYSTEM_FACTS: &str = include_str!("../../../docs/system-facts.md");
+
+/// The planner's and critic's briefs both carry the system facts, after the request and the reading.
+fn system_facts_section(out: &mut String) {
+    let _ = writeln!(out, "## System facts\n\n{}\n", SYSTEM_FACTS.trim_end());
+}
+
 /// What the planner is told about one deliverable's path in the base snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeliverableFact {
@@ -748,6 +758,7 @@ pub fn planner_brief(inputs: &PlannerInputs) -> String {
     );
     let _ = writeln!(out, "## Request (verbatim)\n\n{}\n", quote(&inputs.request));
     reading_sections(&mut out, &inputs.reading);
+    system_facts_section(&mut out);
     let _ = writeln!(out, "## Checks Athena will run on the result\n");
     for check in &inputs.checks {
         let _ = writeln!(out, "- {}: `{}`", check.name, check.command);
@@ -816,6 +827,7 @@ pub fn critic_brief(inputs: &CriticInputs) -> String {
     );
     let _ = writeln!(out, "## Request (verbatim)\n\n{}\n", quote(&inputs.request));
     reading_sections(&mut out, &inputs.reading);
+    system_facts_section(&mut out);
     let _ = writeln!(out, "## Plan under review (round {})\n", inputs.plan.round);
     plan_body(&mut out, &inputs.plan);
     let _ = writeln!(out, "\n## Athena's own findings on this plan\n");
@@ -1698,6 +1710,108 @@ mod tests {
             "planner_usd",
         ] {
             assert!(!lower.contains(absent), "the critic brief holds {absent}");
+        }
+    }
+
+    fn critic_inputs() -> CriticInputs {
+        CriticInputs {
+            job: "20261010-153012-k7q2".into(),
+            request: "add a changelog".into(),
+            reading: AcceptedReading::new(&reading(), &defaults(), |_| false),
+            plan: plan(1),
+            athena_findings: vec![],
+        }
+    }
+
+    #[test]
+    fn planner_and_critic_briefs_carry_the_system_facts_whole() {
+        let planner = planner_brief(&planner_inputs(None));
+        let critic = critic_brief(&critic_inputs());
+        for (who, brief) in [("planner", &planner), ("critic", &critic)] {
+            assert!(
+                brief.contains("## System facts\n"),
+                "the {who} brief has no section"
+            );
+            assert!(
+                brief.contains(SYSTEM_FACTS.trim_end()),
+                "the {who} brief omits the facts file"
+            );
+        }
+        // After the reading, before the checks (planner) or the plan (critic).
+        let at = planner.find("## System facts").unwrap();
+        assert!(at < planner.find("## Checks Athena will run").unwrap());
+        let at = critic.find("## System facts").unwrap();
+        assert!(at < critic.find("## Plan under review").unwrap());
+    }
+
+    #[test]
+    fn the_system_facts_state_every_fact_with_a_source_and_stay_short() {
+        // Line breaks in the file are not part of a fact.
+        let flat = SYSTEM_FACTS
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for marker in [
+            "squash-merges",
+            "linear history",
+            "up to date",
+            "one-commit snapshot",
+            "no remote and no other branches",
+            "plain copy",
+            "without git or `records/`",
+            "Prompt sets and budgets",
+            "- budget reader: ",
+            "acceptance as bullets",
+            "dependencies as job ids",
+            "`Priority: high`",
+            "lands only a job's own pull request",
+            "`athena/records`",
+            "after C0",
+            "SSH remote is refused at admission",
+            "scopes a cache",
+            "Early pull request",
+            "waits",
+        ] {
+            assert!(flat.contains(marker), "the facts omit {marker:?}");
+        }
+        let facts: Vec<&str> = SYSTEM_FACTS.split("\n- **").skip(1).collect();
+        assert!(facts.len() >= 11, "{} fact bullets", facts.len());
+        for fact in facts {
+            assert!(fact.contains("Source"), "no source in: {fact}");
+        }
+        assert!(
+            SYSTEM_FACTS.len() < 5_000,
+            "the facts file is {} bytes; keep it short",
+            SYSTEM_FACTS.len()
+        );
+    }
+
+    #[test]
+    fn the_system_facts_name_the_boundary_source_and_hold_no_banned_word_or_email() {
+        assert!(SYSTEM_FACTS.contains("boundary_words()"));
+        assert!(SYSTEM_FACTS.contains("xtask/tests/policy.rs"));
+        assert!(!SYSTEM_FACTS.contains('@'));
+        // Whole words, as the scan matches: anything but a letter, digit or hyphen separates words.
+        let words: String = SYSTEM_FACTS
+            .to_lowercase()
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || c == '-' {
+                    c
+                } else {
+                    ' '
+                }
+            })
+            .collect();
+        let padded = format!(
+            " {} ",
+            words.split_whitespace().collect::<Vec<_>>().join(" ")
+        );
+        for word in boundary_words() {
+            assert!(
+                !padded.contains(&format!(" {} ", word.to_lowercase())),
+                "the facts file holds a banned word"
+            );
         }
     }
 

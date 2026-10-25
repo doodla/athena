@@ -3054,3 +3054,30 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   `plan.rs`, `store.rs`, `status.rs`, `reading.rs`, `outputs.rs`, `reader.md`, `budgets.rs`, `docs/records.md`.
   Measured: `cargo test` for the tests named in the CHANGELOG entry. Not measured: how often a real reader marks
   a request urgent, or whether urgent requests then run faster.
+
+## D123 · A system-facts file goes into the planner and critic briefs, with a drift test on its budgets
+
+- **Case:** The planner and critic plan and judge a change without seeing how Athena runs: the host merge
+  rules, what a producer's snapshot holds, the prompt budgets, the request format `athena plan` parses, where
+  records live. Reading the code does not show these, and plans and critiques have missed them.
+- **Decision:** (1) `docs/system-facts.md` lists those facts briefly, each with its source. Where only the user's
+  request is the source, the file says so. (2) `athena-context` embeds it as `briefs::SYSTEM_FACTS`
+  (`include_str!`), and `planner_brief` and `critic_brief` add it whole as a "System facts" section after the
+  reading. Tests in `briefs.rs` check both briefs carry it, that each fact has a source, that it holds no
+  email-like text and no banned word, and that it stays under 5000 bytes. (3) The file records each set's size and
+  budget as `- budget <set>: <size> of <budget>` lines. `system_facts_budgets_match_computed` in
+  `crates/athena-cli/tests/budgets.rs` compares them with the computed values, and
+  `system_facts_drift_is_rejected` shows a doctored size, budget, missing set or extra set is refused. (4) The
+  banned words are not listed; the file names `boundary_words()` in `xtask/tests/policy.rs`. (5) Prompt budgets and
+  the planner and critic frames are unchanged: the briefs sit outside the budgeted sets.
+- **Alternatives:** (a) Read the file at run time: a run-time copy has no `docs/` and may not match the binary.
+  (b) Put the facts in the planner and critic frames: they would spend the fixed budgets. (c) Record per-capability
+  sizes: longer, and the request asks for a short file. (d) List the banned words: the scan would flag the file.
+- **Tradeoff:** Every planner and critic call now carries the file (about 5000 bytes at most, set by the test),
+  and any prompt edit that moves a size fails the drift test until the line is updated by hand. Two facts rest on
+  the user's request and not on code that was found: the plain copy for reader, planner and critic, and the
+  refusal of an SSH remote at admission.
+- **Reversal cost:** Low. Remove the const, the section and the two tests; the file can stay as documentation.
+- **Provenance:** stated: the request of 2026-10-25 (the file, its facts, the brief inclusion and the drift test).
+  Read: `briefs.rs`, `lib.rs`, `budgets.rs`, `plan.rs`, `reading.rs`, `gh.rs`, `ci.yml`, `records-history.md`.
+  Measured: sizes from `cargo test -p athena-cli --test budgets`. Not found: code that refuses an SSH remote.

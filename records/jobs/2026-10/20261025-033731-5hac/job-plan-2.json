@@ -1,0 +1,181 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261025-033731-5hac",
+  "round": 2,
+  "at": "2026-10-25T12:24:32.741226005Z",
+  "invocation_seq": 4,
+  "approach": "Write docs/system-facts.md as short sourced bullets, with budget lines in a fixed parseable form (`- budget <set>: <size> of <budget>`). Embed it in briefs.rs as `pub const SYSTEM_FACTS: &str = include_str!(...)` and emit a \"## System facts\" section in planner_brief and critic_brief. In budgets.rs, factor the existing set composition into a helper returning (name, size, budget) rows, add a checker that parses the file's budget lines and compares them to the computed rows, and test it on the real file and a doctored copy. Record the change in CHANGELOG.md and docs/decisions.md.",
+  "decisions": [
+    {
+      "choice": "Embed the file with include_str! in a pub const in briefs.rs and add a '## System facts' section to both briefs, after the request and reading and before the plan or checks.",
+      "reason": "Both briefs carry the same text and the binary has no run-time dependence on docs/. budgets.rs reads the same const, so the test checks what ships.",
+      "rejected": [
+        {
+          "option": "Read the file at run time",
+          "why": "The run-time copy has no docs/ and the snapshot may not match the binary."
+        },
+        {
+          "option": "Put it in the system prompt frames",
+          "why": "It would spend the fixed planner and critic prompt budgets, which the request does not ask to change."
+        }
+      ]
+    },
+    {
+      "choice": "Record sizes for the sets the budgets test already computes: contract, reader, producer, verifier, planner, critic (producer and verifier as the maximum across capabilities), and compare them and the budgets to the computed values.",
+      "reason": "Uses existing numbers; drift in either size or budget fails the test.",
+      "rejected": [
+        {
+          "option": "Record per-capability sizes",
+          "why": "Longer file; the request asks for a short one."
+        },
+        {
+          "option": "Add steward, audience and auditor sets",
+          "why": "The budgets test does not compute them today."
+        }
+      ]
+    },
+    {
+      "choice": "The checker is a function returning Result<(), String> taking the text and the computed rows; tests call it on the real file (Ok) and on a copy with one number changed (Err).",
+      "reason": "Gives the required negative case without editing files.",
+      "rejected": [
+        {
+          "option": "Only assert on the real file",
+          "why": "It would not show the test can fail."
+        }
+      ]
+    },
+    {
+      "choice": "The file names boundary_words() in xtask/tests/policy.rs as the source and lists no banned word; the [personal_data] allow-list is referred to by name only.",
+      "reason": "Satisfies criterion 2 and keeps the file clear of the scan.",
+      "rejected": [
+        {
+          "option": "List the words",
+          "why": "Out of scope and would trip the scan."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "docs/system-facts.md",
+      "action": "create",
+      "purpose": "Short sourced run-time facts, including budget lines in a parseable form.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Add SYSTEM_FACTS const, the section in planner_brief and critic_brief, and unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/budgets.rs",
+      "action": "modify",
+      "purpose": "Factor set sizes into a helper; add the checker, real-file test and doctored negative test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Entry for the file, brief inclusion and drift test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Record the decision and why frames and budgets are unchanged.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read briefs.rs near boundary_words(), the tests module and the planner and critic fixtures.",
+    "Grep the sources for each fact (host rules, records branch, land, plan request parser, SSH admission, caches) and note each path.",
+    "Refactor budgets.rs so one helper returns (name, size, budget) rows; keep existing tests passing.",
+    "Write docs/system-facts.md with every required fact and its Source, filling budget lines from the helper.",
+    "Add pub const SYSTEM_FACTS and the '## System facts' section to planner_brief and critic_brief.",
+    "Add the briefs.rs tests: inclusion in both briefs, content markers, no '@', no banned words, size cap.",
+    "Add the budgets.rs checker, real-file test and doctored-copy test.",
+    "Add the CHANGELOG.md and docs/decisions.md entries.",
+    "Run cargo fmt, cargo clippy --all-targets --locked -- -D warnings and cargo test --locked."
+  ],
+  "risks": [
+    {
+      "risk": "The parser is brittle against markdown edits.",
+      "mitigation": "Accept only the fixed line form, state it in the file, and fail if a set is missing."
+    },
+    {
+      "risk": "The file bloats every planner and critic call or breaks their budgets.",
+      "mitigation": "Keep it short; a briefs test caps its bytes; budgets are not raised."
+    },
+    {
+      "risk": "The file trips the boundary or personal-data scan.",
+      "mitigation": "A briefs test checks for '@' and every boundary word; the SSH example uses a placeholder."
+    },
+    {
+      "risk": "A prompt edit changes a size so the file goes stale.",
+      "mitigation": "That is intended; the failing test message names the set and the computed value."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "A briefs test asserts the file has a marker phrase for each required fact and a 'Source:' on every fact bullet and is under a byte cap; the verifier also reads the file against the criterion's list.",
+      "command": "cargo test -p athena-context",
+      "observes": "The test passes; the file is short and each listed fact has a source.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "A briefs test asserts the file has no '@', contains 'boundary_words' and 'xtask/tests/policy.rs', and contains none of the words from boundary_words().",
+      "command": "cargo test -p athena-context",
+      "observes": "The test passes.",
+      "fails_without": "If a banned word or an email-like string were in the file, or the source pointer were missing, the assertion would fail."
+    },
+    {
+      "criterion": 3,
+      "method": "Unit tests build planner and critic inputs from the existing fixtures and assert each output contains SYSTEM_FACTS.",
+      "command": "cargo test -p athena-context",
+      "observes": "Both outputs contain the whole file text.",
+      "fails_without": "If the section were not added to planner_brief or critic_brief, the contains assertion would fail."
+    },
+    {
+      "criterion": 4,
+      "method": "system_facts_budgets_match_computed runs the checker on the real file; system_facts_drift_is_rejected changes one number in a copy and asserts Err naming the set.",
+      "command": "cargo test -p athena-cli --test budgets",
+      "observes": "The real file passes and the doctored copy is rejected.",
+      "fails_without": "If the checker did not compare numbers, the doctored copy would return Ok and the negative test would fail; stale numbers in the file would fail the real-file test."
+    },
+    {
+      "criterion": 5,
+      "method": "The existing every_role_set_is_within_its_budget and an_over_budget_role_set_fails run in the same binary, now over the briefs that include the facts file, with budgets unchanged in the test.",
+      "command": "cargo test -p athena-cli --test budgets",
+      "observes": "Both pass with the planner and critic sets within their budgets.",
+      "fails_without": "If the included file pushed the planner or critic set over its budget, or the helper refactor broke the sets, every_role_set_is_within_its_budget would fail."
+    },
+    {
+      "criterion": 6,
+      "method": "Review the diff of CHANGELOG.md and docs/decisions.md.",
+      "command": "git diff",
+      "observes": "A CHANGELOG entry and a decisions entry covering the file, the brief inclusion and the drift test.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Run cargo test, cargo clippy --all-targets --locked -- -D warnings and cargo fmt --all --check at the root.",
+      "command": "cargo test",
+      "observes": "All three succeed.",
+      "fails_without": "A failing new test, a clippy warning in the new code, or unformatted code would make the matching command exit non-zero."
+    }
+  ],
+  "open_questions": [
+    "Exact current sizes are unknown until the helper runs; the producer fills the file from computed values.",
+    "Source paths for each fact must be found by the producer (host rules, records branch, land, plan request parser).",
+    "The briefs.rs test fixtures were not read; the producer reuses what exists."
+  ],
+  "producer_section_sha256": "78be2ff4764512bad22441471d15f6d9fa9388b09db2799675754473fad07b6f"
+}
