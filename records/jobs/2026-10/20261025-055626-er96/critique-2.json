@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261025-055626-er96",
+  "round": 2,
+  "at": "2026-10-25T07:02:49.609979617Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "A partial early failure (push ok, open_pr failed) makes the later landing fail, because publish() refuses the non-fast-forward push.",
+      "evidence": "If the early push works but open_pr fails, the plan stores no link (the criterion 2 demonstration says \"no link stored when open fails\"), and step order suggests the marker is stored only after the PR opens. land_pr then has no link, so it calls publish(). publish() runs check_push with remote_head = C (the candidate) and local_head = L (the landing commit). The plan itself says L does not descend from C, so check_push returns PushRefusal::NotFastForward and the landing fails. That breaks 'A push failure must not fail the job; land behaves as today'. The plan only adds the replace path inside the link-exists branch of land_pr, and only tests the go outcome, not a landing after a partial failure. Fix: Store the early-head marker right after a successful push, before open_pr. In land_pr's no-link path (publish), when the remote head equals the marker, replace the head under check_replace instead of running check_push, then open the PR. Add a fake-host test: early push ok, open_pr fails, then land_pr pushes L, opens exactly one PR and merges. Extend criterion 2's demonstration so it shows land proceeding after each failure variant, not just an unchanged go outcome.",
+      "location": "Plan step 3 (early_publish) and step 4 (land_pr); gh.rs publish() lines 1953-1983",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The criterion 2 table does not say how the run.rs tests produce push and open_pr failures.",
+      "evidence": "The table mixes failures inside early_publish (push, open_pr, parse_remote) with 'a seam error', and says each 'runs the same go_with_early job'. But push and open_pr failures come from FakeRemote/FakeHost inside early_publish. The parse_remote failure exists only in GhEarly, which the run.rs tests avoid. Fix: State that the run.rs test seam wraps early_publish over FakeRemote/FakeHost configured to fail at each point, or split the test: gh.rs proves early_publish returns Err, and run.rs proves any Err leaves GoResult unchanged.",
+      "location": "Demonstration for criterion 2 (table test)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan does not say where the early PR's title, body and head come from.",
+      "evidence": "publish() builds NewPr from LandPr.pr (a PrDraft). The go flow has no PrDraft today. Fix: Name or factor out the function that builds the PrDraft in Athena::land_pr, and reuse it so the early PR and the landing agree on head and title.",
+      "location": "Plan step 3 / Decision 1",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Doc comments that say Remote can never replace a head become false.",
+      "evidence": "'There is no force option', 'There is deliberately no way to replace a remote head', and 'nothing replaces it'. Fix: Update these comments to describe the narrow lease-pinned replace.",
+      "location": "gh.rs lines 574-577 and 1787-1788",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against gh.rs, pr.rs and land.rs in the snapshot. Most of what it relies on exists as described: produce_and_verify, RunContext, verifier_snapshot, check_replace with ReplaceRequest, work_branch, LandPr.ancestry/remote/host, and FakeRemote/FakeHost. Its reasoning holds up. land::plan builds a new tree with closing records added, so the landing commit L does not descend from the candidate C. That makes a lease-pinned replace behind check_replace a reasonable way to keep the same branch and PR. One real gap remains (major). If the early push succeeds but opening the PR fails, no link or marker is stored. land_pr then takes the publish() path, whose check_push refuses the non-fast-forward push of L over C, so landing fails. That breaks the 'push failure must not fail the job; land behaves as today' requirement, and no demonstration covers it. Storing the marker right after the push and letting publish() replace a marker-matching head, with a test for it, fixes this. The smaller issues are how the run.rs failure table reaches the early_publish failures, where the early PR's title and body come from, and doc comments that become false."
+}
