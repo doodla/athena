@@ -172,6 +172,130 @@ mod tests {
     use super::*;
     use crate::backtest::parse_supersessions;
 
+    /// Length in bytes of `docs/decisions.md` when the log was last known good (it ended with D121). Entries
+    /// are never rewritten, so these bytes must stay exactly as they were; new entries go after them.
+    const PINNED_LEN: usize = 230046;
+    /// SHA-256 of the first `PINNED_LEN` bytes, computed from the file at that commit (`git show
+    /// <commit>:docs/decisions.md`) before D122 was appended. Raise both constants only when a later
+    /// entry is appended, to the length and hash of the log up to and including that entry.
+    const PINNED_SHA256: &str = "bbb3929b73240f6c45520338447ec5b17083aa2a96a171674ac2999b0b5bdca1";
+
+    /// Check the log's structure: every `## D<n> · ` entry has a Provenance bullet, ids are unique and
+    /// ascending, and the first `pinned_len` bytes hash to `pinned_sha256` (existing entries untouched, with
+    /// additions only after them).
+    fn check_log(text: &str, pinned_len: usize, pinned_sha256: &str) -> Result<(), String> {
+        let mut starts: Vec<(u32, usize)> = Vec::new();
+        let mut offset = 0;
+        for line in text.split_inclusive('\n') {
+            if let Some(rest) = line.strip_prefix("## D") {
+                let (digits, tail) =
+                    rest.split_at(rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(0));
+                if !digits.is_empty() && tail.starts_with(" · ") {
+                    let id: u32 = digits.parse().map_err(|_| format!("bad id in {line:?}"))?;
+                    if let Some(&(prev, _)) = starts.last() {
+                        if id == prev {
+                            return Err(format!("D{id} appears twice"));
+                        }
+                        if id < prev {
+                            return Err(format!("D{id} comes after D{prev}: ids must ascend"));
+                        }
+                    }
+                    starts.push((id, offset));
+                }
+            }
+            offset += line.len();
+        }
+        if starts.is_empty() {
+            return Err("no decision entries found".into());
+        }
+        for (i, &(id, from)) in starts.iter().enumerate() {
+            let to = starts.get(i + 1).map_or(text.len(), |&(_, s)| s);
+            if !text[from..to].contains("- **Provenance:**") {
+                return Err(format!("D{id} has no Provenance bullet"));
+            }
+        }
+        let prefix = text
+            .as_bytes()
+            .get(..pinned_len)
+            .ok_or("the log is shorter than the pinned base: existing entries were removed")?;
+        if athena_data::sha256_hex(prefix) != pinned_sha256 {
+            return Err(format!(
+                "the first {pinned_len} bytes changed: entries are append-only, add new ones at the end"
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn the_decision_log_is_well_formed_and_only_appended_to() {
+        let text = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/decisions.md"
+        ))
+        .unwrap();
+        if let Err(e) = check_log(&text, PINNED_LEN, PINNED_SHA256) {
+            panic!(
+                "docs/decisions.md: {e} (actual prefix hash {})",
+                athena_data::sha256_hex(&text.as_bytes()[..PINNED_LEN])
+            );
+        }
+    }
+
+    #[test]
+    fn the_log_guard_rejects_a_missing_provenance_duplicate_and_descending_ids_and_edits() {
+        let good =
+            "# t\n\n## D01 · a\n\n- **Provenance:** x\n\n## D02 · b\n\n- **Provenance:** y\n";
+        let hash = athena_data::sha256_hex(good.as_bytes());
+        assert_eq!(check_log(good, good.len(), &hash), Ok(()));
+        // Appending after the pinned bytes is allowed.
+        let more = format!("{good}\n## D03 · c\n\n- **Provenance:** z\n");
+        assert_eq!(check_log(&more, good.len(), &hash), Ok(()));
+        // A new entry without Provenance.
+        let bare = format!("{good}\n## D03 · c\n\n- **Decision:** z\n");
+        assert!(
+            check_log(&bare, good.len(), &hash)
+                .unwrap_err()
+                .contains("D3 has no Provenance")
+        );
+        // A duplicate id and a descending id.
+        let dup = format!("{good}\n## D02 · c\n\n- **Provenance:** z\n");
+        assert!(
+            check_log(&dup, good.len(), &hash)
+                .unwrap_err()
+                .contains("twice")
+        );
+        let down = format!("{good}\n## D01 · c\n\n- **Provenance:** z\n");
+        assert!(
+            check_log(&down, good.len(), &hash)
+                .unwrap_err()
+                .contains("ascend")
+        );
+        // An entry inserted in the middle (ids stay ascending) changes the pinned bytes.
+        let spaced =
+            "# t\n\n## D01 · a\n\n- **Provenance:** x\n\n## D03 · b\n\n- **Provenance:** y\n";
+        let spaced_hash = athena_data::sha256_hex(spaced.as_bytes());
+        let mid = spaced.replace("## D03", "## D02 · m\n\n- **Provenance:** m\n\n## D03");
+        let hash = spaced_hash;
+        let good = spaced;
+        assert!(
+            check_log(&mid, good.len(), &hash)
+                .unwrap_err()
+                .contains("changed")
+        );
+        // An edit to an existing entry, and a removal.
+        let edited = good.replace("x", "q");
+        assert!(
+            check_log(&edited, good.len(), &hash)
+                .unwrap_err()
+                .contains("changed")
+        );
+        assert!(
+            check_log(&good[..good.len() - 1], good.len(), &hash)
+                .unwrap_err()
+                .contains("shorter")
+        );
+    }
+
     const LOG: &str = "## D01 · a\n- Revised, superseded by D02's rule.\n\n## D02 · b\n- **Decision:** Amends D01.\n\n## D03 · c\n- **Decision:** Supersedes D01.\n";
 
     fn list(text: &str) -> ConfirmedLinks {

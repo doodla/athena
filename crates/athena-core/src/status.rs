@@ -24,7 +24,8 @@ pub struct JobLine {
     /// "plan accepted r<n>" or "plan stopped r<n>", for a job that went through job planning; absent otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan: Option<String>,
-    /// The priority the request's words give; normal when they give none.
+    /// The job's priority: the latest priority record, else the request's words, else urgent if the reading
+    /// gave an urgent reason, else normal (`JobRecords::priority`).
     pub priority: crate::plan::Priority,
 }
 
@@ -519,9 +520,7 @@ fn job_line(job: &JobRecords, state: &str) -> JobLine {
         class: job.class().map(str::to_string),
         cost_usd: job.spent_usd(),
         plan: plan_state(job).map(PlanState::text),
-        priority: crate::plan::Priority::from_text(
-            job.request.as_ref().map_or("", |r| r.text.as_str()),
-        ),
+        priority: job.priority(),
     }
 }
 

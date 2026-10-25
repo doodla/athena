@@ -169,6 +169,16 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Set how soon a queued request is worked: urgent, high, normal or low. Appends a priority record; the
+    /// request is not changed, and plan and status prefer the latest record over a `Priority:` line in its words.
+    Priority {
+        /// The queued request (a job id, or a unique prefix or suffix of it).
+        job: String,
+        /// One of: urgent, high, normal, low.
+        level: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Run a proposed job to its end, read a queued one, or retry the landing of a blocked one.
     Go {
         job: String,
@@ -218,8 +228,9 @@ and the page text passed the source check
 
 Order: planning comes first. Every open request is fleshed out (goal, requirements-ladder rung, acceptance, \
 open questions, dependencies, the paths it touches) and all of them are planned together. Drain works the \
-items in plan order (a dependent after what it needs, then a `Priority: high|normal|low` line in the \
-request's words, then higher rung, then age as the tiebreak; no priority line means normal), not oldest \
+items in plan order (a dependent after what it needs, then priority urgent, high, normal or low from a \
+`Priority:` line in the request's words or a later `athena priority <job> <level>` record, which wins, \
+then higher rung, then age as the tiebreak; no priority means normal), not oldest \
 first, and the report shows the plan's groups: items in one group have no dependency and touch disjoint paths, \
 so they can run in parallel: drain runs up to `[parallel] max_concurrency` of them at once (athena.toml; \
 default 1, which is one job at a time; at most 8). Landing and rating stay one at a time, and a group starts \
@@ -913,6 +924,16 @@ fn run(cli: Cli) -> Result<u8> {
                 print!("{}", display::reading(proposal.job.as_str(), r, false));
             }
             print!("{}", display::follow_up(&proposal));
+            Ok(0)
+        }
+        Command::Priority { job, level, json } => {
+            let athena = open(true)?;
+            let (id, priority) = athena.set_priority(&job, &level)?;
+            if json {
+                print_json(&serde_json::json!({ "job": id.as_str(), "priority": priority }))?;
+            } else {
+                println!("{id} is now {} priority", priority.as_str());
+            }
             Ok(0)
         }
         Command::Go { job, json } => {

@@ -31,6 +31,11 @@ pub struct ReadingOutput {
     pub deliverables: Vec<DeliverableOutput>,
     pub out_of_scope: Vec<String>,
     pub forecast: ForecastOutput,
+    /// Null unless the request is urgent. Mark it urgent, with a reason, only when doing it makes Athena
+    /// faster or cuts wasted time: failed or rejected attempts, planning stops, timeouts, redo-work retries,
+    /// thrash, duplicated checks. A reason is required for urgent, never a bare flag: one sentence naming which of these it
+    /// cuts. An ordinary request, or one that only asks for a feature, a fix or a tidy-up, is null.
+    pub urgent_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -569,6 +574,64 @@ mod tests {
             "findings": [{ "severity": "major", "summary": "s", "location": "l",
                 "evidence": "e", "fix": "f" }]
         })
+    }
+
+    fn sample_reading_output(urgent_reason: Value) -> Value {
+        json!({
+            "title": "t", "summary": "s", "class_of_work": "docs", "capability": "change",
+            "decline_reason": null, "producer_model": "m", "defaults_applied": [],
+            "assumptions": [], "question": null, "urgent_reason": urgent_reason,
+            "acceptance_criteria": [{ "text": "c", "kind": "content" }],
+            "deliverables": [{ "path": "a", "action": "modify", "p": 0.5 }],
+            "out_of_scope": [],
+            "forecast": {
+                "p_reading_accepted": 0.8, "p_verification_passes": 0.8, "p_user_intervenes": 0.1,
+                "cost_usd": { "p10": 0.1, "p50": 0.2, "p90": 0.3 },
+                "wall_time_s": { "p10": 1.0, "p50": 2.0, "p90": 3.0 },
+                "departures": null
+            }
+        })
+    }
+
+    #[test]
+    fn the_reading_output_parses_an_urgent_reason_and_null_and_the_schema_states_the_rule() {
+        let urgent = sample_reading_output(json!("cuts redo-work retries"));
+        let parsed: ReadingOutput = serde_json::from_value(urgent).unwrap();
+        assert_eq!(
+            parsed.urgent_reason.as_deref(),
+            Some("cuts redo-work retries")
+        );
+        let ordinary: ReadingOutput =
+            serde_json::from_value(sample_reading_output(Value::Null)).unwrap();
+        assert_eq!(ordinary.urgent_reason, None);
+
+        // The reader sees the rule as the field's description in its schema (reader.md is at its budget).
+        let schema = reading_schema(&ReaderChoices::default());
+        assert_eq!(
+            schema["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|k| *k == "urgent_reason")
+                .count(),
+            1
+        );
+        let rule = schema["properties"]["urgent_reason"]["description"]
+            .as_str()
+            .expect("the urgent_reason field carries the rule");
+        for term in [
+            "faster",
+            "wasted time",
+            "failed or rejected attempts",
+            "planning stops",
+            "timeouts",
+            "redo-work retries",
+            "thrash",
+            "duplicated checks",
+            "reason is required",
+        ] {
+            assert!(rule.contains(term), "the rule lacks {term:?}: {rule}");
+        }
     }
 
     #[test]

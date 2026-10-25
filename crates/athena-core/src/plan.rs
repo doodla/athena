@@ -9,9 +9,10 @@
 //!   wave the order is the ladder (the top rung first), then age (oldest first) as the tiebreak. An item's
 //!   effective priority is its own, raised to the best priority of anything that depends on it, so the
 //!   prerequisites of a high-priority item run before unrelated older normal items. A dependent item always
-//!   comes after what it needs. A request's priority is [`Priority`]: high, normal (the default) or low,
-//!   read from a `Priority: <level>` line in its words. With no priority set every item is normal and the
-//!   order is the ladder, then age.
+//!   comes after what it needs. A request's priority is [`Priority`]: urgent, high, normal (the default) or
+//!   low, read from a `Priority: <level>` line in its words, or from a later priority record
+//!   (`athena priority`), which wins. With no priority set every item is normal and the order is the
+//!   ladder, then age.
 //! - **Parallel groups.** A wave is split into groups of items that no dependency links and whose touched
 //!   paths are disjoint; the items of one group could run side by side. An item that names no touched path is
 //!   never grouped with another, because nothing is known about what it changes. The shared append-only files
@@ -37,10 +38,11 @@
 use athena_data::roles::Ladder;
 use serde::Serialize;
 
-/// How soon a request should be worked, ahead of its rung and age. High sorts first.
+/// How soon a request should be worked, ahead of its rung and age. Urgent sorts first, then high.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Priority {
+    Urgent,
     High,
     #[default]
     Normal,
@@ -50,14 +52,27 @@ pub enum Priority {
 impl Priority {
     pub fn as_str(self) -> &'static str {
         match self {
+            Priority::Urgent => "urgent",
             Priority::High => "high",
             Priority::Normal => "normal",
             Priority::Low => "low",
         }
     }
 
+    /// The priority named by a bare level word (`urgent`, `high`, `normal` or `low`, any case, trimmed).
+    pub fn parse(word: &str) -> Option<Priority> {
+        match word.trim().to_ascii_lowercase().as_str() {
+            "urgent" => Some(Priority::Urgent),
+            "high" => Some(Priority::High),
+            "normal" => Some(Priority::Normal),
+            "low" => Some(Priority::Low),
+            _ => None,
+        }
+    }
+
     /// The priority a request's words give: the first line that, trimmed, starts with `Priority:` (any case)
-    /// followed by exactly `high`, `normal` or `low` (any case). Anything else, or no such line, is normal.
+    /// followed by exactly `urgent`, `high`, `normal` or `low` (any case). Anything else, or no such line, is
+    /// normal.
     pub fn from_text(text: &str) -> Priority {
         for line in text.lines() {
             let line = line.trim();
@@ -65,11 +80,8 @@ impl Priority {
             if !head.eq_ignore_ascii_case("priority:") {
                 continue;
             }
-            match line[9..].trim().to_ascii_lowercase().as_str() {
-                "high" => return Priority::High,
-                "normal" => return Priority::Normal,
-                "low" => return Priority::Low,
-                _ => {}
+            if let Some(p) = Priority::parse(&line[9..]) {
+                return p;
             }
         }
         Priority::Normal
@@ -620,6 +632,26 @@ mod tests {
     }
 
     #[test]
+    fn urgent_comes_before_high_before_normal_and_a_dependency_still_comes_first() {
+        let (_, low) = rungs();
+        assert!(Priority::Urgent < Priority::High);
+        let plan = Plan::build(&[
+            entry("n", low, &["a/"], &[]),
+            with_priority(entry("h", low, &["b/"], &[]), Priority::High),
+            with_priority(entry("u", low, &["c/"], &[]), Priority::Urgent),
+        ]);
+        assert_eq!(plan.order, ["u", "h", "n"]);
+        // An urgent item that needs a normal one: the normal one runs first, then the urgent one, ahead of
+        // an unrelated high item.
+        let plan = Plan::build(&[
+            with_priority(entry("h", low, &["b/"], &[]), Priority::High),
+            entry("base", low, &["a/"], &[]),
+            with_priority(entry("u", low, &["c/"], &["base"]), Priority::Urgent),
+        ]);
+        assert_eq!(plan.order, ["base", "u", "h"]);
+    }
+
+    #[test]
     fn without_priorities_the_order_is_rung_then_age() {
         let (top, low) = rungs();
         let plan = Plan::build(&[
@@ -641,7 +673,10 @@ mod tests {
         assert_eq!(Priority::from_text("x\n  priority: HIGH"), Priority::High);
         assert_eq!(Priority::from_text("Priority: low"), Priority::Low);
         assert_eq!(Priority::from_text("Fix it"), Priority::Normal);
-        assert_eq!(Priority::from_text("Priority: urgent"), Priority::Normal);
+        assert_eq!(Priority::from_text("Priority: urgent"), Priority::Urgent);
+        assert_eq!(Priority::from_text("Priority: asap"), Priority::Normal);
+        assert_eq!(Priority::parse(" Urgent "), Some(Priority::Urgent));
+        assert_eq!(Priority::parse("bogus"), None);
         assert_eq!(
             Priority::from_text("this is a high priority: high stakes"),
             Priority::Normal

@@ -1190,6 +1190,7 @@ mod tests {
                 reference: f,
             },
             departures: None,
+            urgent_reason: None,
         }
     }
 

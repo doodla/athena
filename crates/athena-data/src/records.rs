@@ -446,6 +446,10 @@ pub struct Reading {
     pub out_of_scope: Vec<String>,
     pub forecasts: Forecasts,
     pub departures: Option<String>,
+    /// Why the reader marked the request urgent (it makes Athena faster or cuts wasted time); None when it
+    /// did not. An older reading has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub urgent_reason: Option<String>,
 }
 
 impl Reading {
@@ -479,6 +483,39 @@ pub struct Correction {
     pub text: String,
     /// The intervention recorded for it automatically.
     pub intervention: RecordId,
+}
+
+/// The levels a priority record may name, best first.
+pub const PRIORITY_LEVELS: [&str; 4] = ["urgent", "high", "normal", "low"];
+
+/// `athena.priority/1`: the user's choice of how soon a queued request is worked, at `<job>/priority-<n>.json`.
+/// The request record is never rewritten; the latest priority record (highest `n`) wins over any
+/// `Priority:` line in the request's words.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PriorityRecord {
+    pub job: JobId,
+    /// 1 for the first priority record of the job, then counting up.
+    pub n: u32,
+    pub at: Timestamp,
+    /// One of [`PRIORITY_LEVELS`].
+    pub priority: String,
+}
+
+impl PriorityRecord {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.n == 0 {
+            return Err("a priority record is numbered from 1".into());
+        }
+        if !PRIORITY_LEVELS.contains(&self.priority.as_str()) {
+            return Err(format!(
+                "priority {:?} is not one of {}",
+                self.priority,
+                PRIORITY_LEVELS.join(", ")
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1983,6 +2020,8 @@ pub enum AnyRecord {
     Reading(Box<Reading>),
     #[serde(rename = "athena.correction/1")]
     Correction(Correction),
+    #[serde(rename = "athena.priority/1")]
+    Priority(PriorityRecord),
     #[serde(rename = "athena.job/1")]
     Job(Box<Job>),
     #[serde(rename = "athena.invocation/1")]
@@ -2061,6 +2100,7 @@ impl AnyRecord {
         };
         match &record {
             AnyRecord::Reading(r) => r.validate().map_err(invalid)?,
+            AnyRecord::Priority(p) => p.validate().map_err(invalid)?,
             AnyRecord::Candidate(c) if c.base_fingerprint.is_some() || c.previous_job.is_some() => {
                 return Err(invalid(
                     "athena.candidate/1 has no base_fingerprint or previous_job; use athena.candidate/2"
@@ -2139,6 +2179,7 @@ impl AnyRecord {
             AnyRecord::Request(r) => format!("{}/request.json", r.job.dir()),
             AnyRecord::Reading(r) => format!("{}/reading-{}.json", r.job.dir(), r.n),
             AnyRecord::Correction(r) => format!("{}/correction-{}.json", r.job.dir(), r.n),
+            AnyRecord::Priority(r) => format!("{}/priority-{}.json", r.job.dir(), r.n),
             AnyRecord::Job(r) => format!("{}/job.json", r.id.dir()),
             AnyRecord::Invocation(r) => {
                 format!(
@@ -2218,6 +2259,7 @@ impl AnyRecord {
             AnyRecord::Request(_) => "athena.request/1",
             AnyRecord::Reading(_) => "athena.reading/1",
             AnyRecord::Correction(_) => "athena.correction/1",
+            AnyRecord::Priority(_) => "athena.priority/1",
             AnyRecord::Job(_) => "athena.job/1",
             AnyRecord::Invocation(_) => "athena.invocation/1",
             AnyRecord::Candidate(_) => "athena.candidate/1",
@@ -2363,6 +2405,7 @@ mod tests {
                 reference: forecast,
             },
             departures: None,
+            urgent_reason: None,
         }
     }
 

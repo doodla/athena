@@ -175,6 +175,16 @@ fn first_enum(schema: &Value, field: &str, prefer: &str) -> Value {
         .unwrap_or(Value::Null)
 }
 
+/// Words that make the fake reader mark a request urgent: it speeds Athena up or cuts wasted time.
+pub const SPEED_WORDS: [&str; 6] = [
+    "speed up",
+    "faster",
+    "wasted time",
+    "timeouts",
+    "thrash",
+    "duplicated checks",
+];
+
 /// The file the deterministic producer writes.
 pub const FAKE_DELIVERABLE: &str = "FAKE-CHANGE.md";
 
@@ -190,7 +200,14 @@ pub fn deterministic_turn(spec: &AgentInvocation) -> FakeTurn {
                 .chars()
                 .take(50)
                 .collect();
+            // A request that asks to make Athena faster or to cut wasted time is marked urgent, with a reason.
+            let lowered = request.to_lowercase();
+            let urgent_reason = SPEED_WORDS
+                .iter()
+                .find(|w| lowered.contains(*w))
+                .map(|w| format!("A fake reader: the request mentions \"{w}\", so it makes Athena faster or cuts wasted time."));
             FakeTurn::output(json!({
+                "urgent_reason": urgent_reason,
                 "title": format!("Record the request in {FAKE_DELIVERABLE}"),
                 "summary": format!("A fake reading made without a model call: write the request \"{short}\" to {FAKE_DELIVERABLE}."),
                 "class_of_work": first_enum(&spec.json_schema, "class_of_work", "other"),
