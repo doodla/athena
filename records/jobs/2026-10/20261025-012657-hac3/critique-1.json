@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261025-012657-hac3",
+  "round": 1,
+  "at": "2026-10-25T01:31:26.574824186Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "No test runs the code that picks the strict or relaxed squash text in Athena::land_pr, so 'relaxed is used for post-C0 landings' goes unshown.",
+      "evidence": "The choice lives only in `Athena::land_pr` (gh.rs:2171, `squash: &self.git.squash_text(&landed)?`). The records_flow `World::run` calls the free `land_pr(&LandPr{ squash: &text(), .. })` (gh.rs:3855-3866), which skips that line. FakeHost does not build a commit from the text: its merge returns a commit the test made beforehand (`merge_makes: &'static str`, gh.rs:2540; cutover_world sets `host.merge_makes = squash` from a `commit_tree(.., \"Squash\", ..)` it built itself). The plan admits this ('The squash commit is built in the test from the real squash_text_relaxed output'), so the test's 'no Athena- line in the squash' assertion passes even if Athena::land_pr still calls strict squash_text. The plan also mentions 'a gh.rs/land_pr test' for the choice but gives no way to reach Athena::land_pr without building a full Athena, which Decision 2 rejects as too heavy. Fix: Pull the choice out into a function, e.g. `pub(crate) fn squash_text_for(git, landed) -> Result<CommitText>`, that calls cutover_base on the landed commit's parent and returns the strict or relaxed form. Athena::land_pr calls it at gh.rs:2171. The end-to-end test gets its squash text from the same function and passes it as LandPr.squash. Unit-test it on both a pre-C0 parent (strict; refuses a trailer-free commit) and a post-C0 parent (relaxed). Then reverting the choice makes criterion 1 and 3 tests fail.",
+      "location": "Plan: Demonstrations for criteria 1 and 3; Decision 4; crates/athena-core/src/gh.rs:2171 and 3848-3866, 2540",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan says the fake host does something it does not do.",
+      "evidence": "FakeHost.merge_makes is a fixed commit id (gh.rs:2540, 2594). The text passed to `merge` is not used to create a commit. Fix: Say that the test builds the squash commit with commit_tree from the chosen CommitText (title plus body) and sets merge_makes to that commit. Assert on that commit's message.",
+      "location": "Plan: Demonstration criterion 1 ('the fake host's merge makes a real squash commit from that text')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The criterion says the PR commits are reached through the landing record's second parent. The plan uses commits[].sha instead and leaves the difference as an open question.",
+      "evidence": "The accepted criterion 1 text says 'reachable via the landing record's second parent'. The plan's open question notes that a squash host commit has one parent. Fix: Keep commits[].sha (it is the faithful reading for a squash), but also check that the three listed shas are exactly the job branch range base..head, in order. That way the test proves it covers every PR commit.",
+      "location": "Plan: Demonstration criterion 1 / Open question 2",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "A test that looks for phrases only proves the docs contain words, not that they describe the behavior correctly.",
+      "evidence": "Criterion 7 is a content criterion, which the verifier checks by reading the docs. The phrase test adds little. Fix: Optional: drop it, or keep it narrow and do not count it as the evidence for criterion 7.",
+      "location": "Plan: Files, crates/athena-cli/tests/lifecycle.rs docs-content test",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan fits the request and the accepted reading. I read the code and found that what the plan names exists. `cutover_state` (attribution.rs:132), `check_after_cutover` (history.rs:68), which already runs only secrets and attribution, `build_commit_in` (commits.rs:150), which gates after commit_tree, `commit_with_staged` (manage.rs:407), strict `squash_text` (git lib.rs:715) and `records_flow`/`cutover_world` in gh.rs are all there. jobs.rs reads no trailers, so keeping jobs::check in the gate is sound. Keying on the Shown cutover state, stripping at the two commit choke points, and dropping only invariant::check in the gate are reasonable choices. One major gap remains: the end-to-end test calls the free `land_pr` with a squash commit the test builds itself, and FakeHost never turns the text into a commit. So the strict-or-relaxed choice in `Athena::land_pr` (gh.rs:2171) is never exercised, and criteria 1 and 3 would still pass if that line kept calling strict `squash_text`. Moving the choice into one function that both Athena::land_pr and the test call fixes this. The other findings are small."
+}
