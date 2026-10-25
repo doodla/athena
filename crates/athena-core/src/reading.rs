@@ -884,11 +884,13 @@ pub fn earlier_attempt_with(
     if !interrupted
         && !matches!(
             state,
-            JobState::Closed(OutcomeState::Rejected | OutcomeState::Failed)
+            JobState::Closed(
+                OutcomeState::Rejected | OutcomeState::Failed | OutcomeState::TimedOut
+            )
         )
     {
         bail!(
-            "job {id} is {}; only a rejected or failed job can be tried again, or one that was interrupted",
+            "job {id} is {}; only a rejected or failed job can be tried again (so can a timed out one), or one that was interrupted",
             state.name()
         );
     }
@@ -1284,7 +1286,7 @@ fn carry(job: &JobRecords, redactor: &Redactor) -> Result<Option<EarlierAttempt>
     let failed = job
         .outcome
         .as_ref()
-        .is_some_and(|o| o.state == OutcomeState::Failed);
+        .is_some_and(|o| matches!(o.state, OutcomeState::Failed | OutcomeState::TimedOut));
     if let Some(outcome) = &job.outcome
         && (failed || job.verification.is_none())
         && !outcome.reason.trim().is_empty()

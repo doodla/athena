@@ -8,7 +8,7 @@ use crate::commits::{NewFile, Refusal, message};
 use crate::invocation::InvocationFacts;
 use crate::land::{Plan, plan};
 use crate::pin::{is_full_sha, mount};
-use crate::reading::{Proposal, TreeRetrySeed, same_scope, tree_retry_seed};
+use crate::reading::{Proposal, TreeRetrySeed, retried_job, same_scope, tree_retry_seed};
 use crate::scoring::{self, Happened, score, totals};
 use crate::store::{JobRecords, JobState, Records};
 use crate::verify::{MAP_PATH, VerdictInputs, Verified, judge, mark_pre_existing, verified};
@@ -225,6 +225,100 @@ impl Athena {
         Ok(Some(seed))
     }
 
+    /// The kept work of a timed out job that a retry resumes from: the request must be "try again on <job>"
+    /// for a job that closed `timed_out`; its kept work tree and progress note must still exist; and the
+    /// files agents see at `head` must be those the job's base had (only `records/` differs), so that
+    /// resuming cannot undo later work. Otherwise `None`: the retry starts from the base.
+    fn timeout_seed(
+        &self,
+        records: &Records,
+        request: &str,
+        head: &str,
+    ) -> Result<Option<TimeoutSeed>> {
+        let Some(id) = retried_job(records, request) else {
+            return Ok(None);
+        };
+        let Some(job) = records.jobs.get(id.as_str()) else {
+            return Ok(None);
+        };
+        if job.state() != JobState::Closed(OutcomeState::TimedOut) {
+            return Ok(None);
+        }
+        let dir = self.state.kept_work_dir(&id);
+        let (Some(note), Some(base)) = (
+            job.briefs.get("progress-note"),
+            job.job.as_ref().and_then(|j| j.base_commit.clone()),
+        ) else {
+            return Ok(None);
+        };
+        if !dir.is_dir() || self.git.rev_parse(&base)?.is_none() {
+            return Ok(None);
+        }
+        let changed = self.git.diff_tree(&base, head)?;
+        if changed.iter().any(|c| !c.path.starts_with("records/")) {
+            return Ok(None);
+        }
+        Ok(Some(TimeoutSeed {
+            job: id,
+            note: note.clone(),
+            dir,
+        }))
+    }
+
+    /// Ends a producer that hit its deadline. The work tree moves out of the job's directory, which closing
+    /// removes, and the progress note listing the changed files goes into the closing. A study's pinned
+    /// checkout is mounted inside the work tree, so a pinned job keeps nothing.
+    fn keep_timed_out_work(
+        &self,
+        ctx: &RunContext<'_>,
+        snapshot: &Snapshot,
+        reason: &str,
+        closing: &mut Closing,
+    ) -> Result<()> {
+        let id = ctx.id().clone();
+        let changes = snapshot.change_list().unwrap_or_default();
+        let kept_dir = self.state.kept_work_dir(&id);
+        let kept = if ctx.pin_dir.is_some() {
+            Err("a pinned study keeps no work tree".to_string())
+        } else {
+            std::fs::create_dir_all(kept_dir.parent().expect("has a parent"))
+                .and_then(|_| std::fs::rename(snapshot.dir(), &kept_dir))
+                .map_err(|e| e.to_string())
+        };
+        let mut texts = vec![format!(
+            "# Progress note\n\nThe producer of job {id} stopped: {reason}.\n\n"
+        )];
+        let mut listing = if changes.is_empty() {
+            "No file had been changed.\n".to_string()
+        } else {
+            let mut s = format!(
+                "Changed files ({}), against the base commit:\n\n",
+                changes.len()
+            );
+            for c in &changes {
+                s.push_str(&format!("- {} {}\n", c.status, c.path));
+            }
+            s
+        };
+        match &kept {
+            Ok(()) => listing.push_str(
+                "\nThe edits were kept; `athena retry` starts the next producer from them.\n",
+            ),
+            Err(why) => listing.push_str(&format!(
+                "\nThe edits could not be kept ({why}); a retry starts from the base.\n"
+            )),
+        }
+        texts[0].push_str(&listing);
+        ctx.redactor.redact_all(&mut texts)?;
+        closing.files.push(NewFile::text(
+            format!("{}/progress-note.md", id.dir()),
+            texts.remove(0),
+        ));
+        closing.happened = self.failure(ctx, &format!("the producer did not complete: {reason}"));
+        closing.happened.state = Some(OutcomeState::TimedOut);
+        Ok(())
+    }
+
     fn dispatch(
         &self,
         head: &str,
@@ -289,6 +383,11 @@ impl Athena {
         let request_text = job.request.as_ref().map(|r| r.text.as_str()).unwrap_or("");
         let pinned = self.pin_repo(capability, &jc, &id, head, request_text)?;
         let retry_seed = self.tree_seed(records, request_text, &redactor, head)?;
+        let resume = if retry_seed.is_none() && pinned.is_none() {
+            self.timeout_seed(records, request_text, head)?
+        } else {
+            None
+        };
 
         // The prediction commit: the accepted reading's job record and the producer brief, before any work.
         let producer_grant = capability.producer_grant(&jc);
@@ -312,11 +411,21 @@ impl Athena {
             checks: check_views.clone(),
             commands: athena_agent::policy::describe_commands(&producer_grant.commands),
             pin: pinned.as_ref().map(|(record, _)| record.clone()),
-            retry_from: retry_seed.as_ref().map(|s| RetrySeed {
-                job: s.job.as_str().to_string(),
-                unmet: s.unmet.clone(),
-                findings: s.findings.clone(),
-            }),
+            retry_from: match (&retry_seed, &resume) {
+                (Some(s), _) => Some(RetrySeed {
+                    job: s.job.as_str().to_string(),
+                    unmet: s.unmet.clone(),
+                    findings: s.findings.clone(),
+                    progress_note: None,
+                }),
+                (None, Some(r)) => Some(RetrySeed {
+                    job: r.job.as_str().to_string(),
+                    unmet: Vec::new(),
+                    findings: Vec::new(),
+                    progress_note: Some(r.note.clone()),
+                }),
+                (None, None) => None,
+            },
         });
         let dispatched_at = crate::now();
         let clock = Instant::now();
@@ -390,6 +499,7 @@ impl Athena {
             ui,
             pin_dir: pinned.map(|(_, dir)| dir),
             seed_commit: retry_seed.map(|s| s.candidate_commit),
+            resume,
         };
         // Job planning (docs/design/job-planning.md): one accepted round, before the producer. The round
         // seeds the closing with its invocations, plan and critique, so the producer's invocation is
@@ -1061,6 +1171,15 @@ struct RunContext<'a> {
     pin_dir: Option<PathBuf>,
     /// The rejected candidate commit the producer's working directory is seeded from, for a tree-seeded retry.
     seed_commit: Option<String>,
+    /// The timed out job whose kept work tree seeds the producer's working directory, for a resumed retry.
+    resume: Option<TimeoutSeed>,
+}
+
+/// The kept work of a timed out job and the progress note it left.
+struct TimeoutSeed {
+    job: JobId,
+    note: String,
+    dir: PathBuf,
 }
 
 impl RunContext<'_> {
@@ -1372,11 +1491,14 @@ impl Athena {
         if work.exists() {
             crate::pin::remove_tree(&work)?;
         }
-        let repo = match &ctx.seed_commit {
-            Some(tree_commit) => SnapshotRepo::BaseThenTree {
+        let repo = match (&ctx.seed_commit, &ctx.resume) {
+            (Some(tree_commit), _) => SnapshotRepo::BaseThenTree {
                 tree_commit: tree_commit.clone(),
             },
-            None => SnapshotRepo::Base,
+            (None, Some(resume)) => SnapshotRepo::BaseThenDir {
+                dir: resume.dir.clone(),
+            },
+            (None, None) => SnapshotRepo::Base,
         };
         let snapshot = Snapshot::create(&self.git, &p, &p, &work, repo)?;
         if let Some(pin_dir) = &ctx.pin_dir {
@@ -1437,6 +1559,11 @@ impl Athena {
                 record.commands_run.len()
             ));
             closing.new_invocations.push(record.clone());
+            if output.outcome == InvocationOutcome::TimedOut {
+                let reason = record.detail.clone().unwrap_or_default();
+                self.keep_timed_out_work(ctx, &snapshot, &reason, &mut closing)?;
+                return Ok(closing);
+            }
             if output.outcome != InvocationOutcome::Success {
                 closing.happened = self.failure(
                     ctx,
@@ -2304,6 +2431,9 @@ impl Athena {
             .expect("a committed closing has a score");
         ctx.ui.line(&format!("{:<10} {reason}", state.as_str()));
         crate::state::report_clean(ctx.ui, &self.state.clean_job(&id));
+        if let Some(resumed) = &ctx.resume {
+            self.state.remove_kept_work(&resumed.job);
+        }
         Ok(GoResult::Finished(Box::new(Finished {
             job: id,
             state,
@@ -2479,6 +2609,9 @@ impl Athena {
         }
         if state != OutcomeState::Blocked {
             crate::state::report_clean(ctx.ui, &self.state.clean_job(&id));
+            if let Some(resumed) = &ctx.resume {
+                self.state.remove_kept_work(&resumed.job);
+            }
         }
         Ok(GoResult::Finished(Box::new(Finished {
             job: id,

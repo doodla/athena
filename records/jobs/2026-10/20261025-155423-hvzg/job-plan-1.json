@@ -1,0 +1,243 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261025-155423-hvzg",
+  "round": 1,
+  "at": "2026-10-25T15:57:10.700971112Z",
+  "invocation_seq": 3,
+  "approach": "Add a distinct `timed_out` value to both enums. `InvocationOutcome::TimedOut` is emitted when the agent's own deadline fires (claude.rs; the fake script can emit it). `OutcomeState::TimedOut` is the job's closing state. Both are additive snake_case variants, so old `killed` and `failed` records still parse. When the producer's outcome is TimedOut, run.rs does five things. (a) It lists the changed files from `snapshot.change_list()`. (b) It writes a progress note `records/jobs/<id>/progress-note.md` through the closing's record files. (c) It moves the producer's `work` directory out of the job directory, which `clean_job` deletes at close, to `<state root>/kept/<job>/work`. (d) It records the deadline text as the outcome reason and the invocation detail. (e) It closes the job as TimedOut. `athena retry` and `try again on` accept TimedOut jobs. At dispatch, a new seed finds the kept directory, checks that the visible base is unchanged (same rule as `tree_seed`), and starts the producer with a new `SnapshotRepo::BaseThenDir` that copies the kept files over a fresh base snapshot. The brief gains a \"Resume\" section with the note. Kill-switch kills and other failures stay `Killed`/`Failed` as before.",
+  "decisions": [
+    {
+      "choice": "Add InvocationOutcome::TimedOut and OutcomeState::TimedOut instead of reusing Killed/Failed plus a detail string.",
+      "reason": "Criterion 1 needs the job recorded as timed out. Matching the text 'deadline of Ns reached' would be brittle, and Killed also covers the kill switch and parent death, which must not keep work. Both enums have few exhaustive matches: `as_str` in records.rs and a few `matches!` sites. The rest use wildcards.",
+      "rejected": [
+        {
+          "option": "Keep Killed/Failed and add a `timed_out: bool` field on the outcome or invocation record.",
+          "why": "The status line and retry guards would check a flag, and old readers would silently ignore it. A distinct state is clearer and equally additive."
+        },
+        {
+          "option": "Detect the deadline by the detail prefix 'deadline of'.",
+          "why": "Breaks if the wording changes. Existing tests use that exact detail with `Killed` and expect `Failed`, which must keep working for criterion 4."
+        }
+      ]
+    },
+    {
+      "choice": "Keep the work tree by moving it to `<state root>/kept/<job>/work`; keep the progress note in the committed records.",
+      "reason": "`clean_job` removes the whole job directory at close, so the work must be moved before that. The note, committed with the closing, survives state cleanup and is readable by the retry's brief. Work files can be large and may hold private content, so they stay out of records.",
+      "rejected": [
+        {
+          "option": "Skip `clean_job` for timed-out jobs.",
+          "why": "It leaves snapshots, build directories and a read-only mount in the job directory, and the next cleanup is hard to reason about."
+        },
+        {
+          "option": "Commit the work tree into the user's repository as a candidate commit.",
+          "why": "Athena would write unverified work into history, and the existing tree-seed path requires verified candidates."
+        }
+      ]
+    },
+    {
+      "choice": "Seed the retry with a new `SnapshotRepo::BaseThenDir { dir }` that copies files, skipping `.git`.",
+      "reason": "It mirrors the existing `BaseThenTree`. The new snapshot is still a one-commit base repository, so the change list stays against the base, as the producer brief promises.",
+      "rejected": [
+        {
+          "option": "Reuse the old snapshot directory, `.git` included.",
+          "why": "The directory belongs to a closed job, and its git state is not the new job's base."
+        }
+      ]
+    },
+    {
+      "choice": "Reuse the existing 'try again on <job>' flow: accept TimedOut in the retry guards, and make the kept-work check parallel to `tree_seed`, refusing a stale base.",
+      "reason": "`athena retry` already calls `ask` with that phrase, so resume needs no new command. A base that moved since the timeout could be undone by the old edits, so it starts clean, with the same guard as the tree-seed path.",
+      "rejected": [
+        {
+          "option": "A new `athena resume` command.",
+          "why": "Out of scope; the request asks for `athena retry` to resume."
+        }
+      ]
+    },
+    {
+      "choice": "Do not touch verifier-stage handling, the deadline length, or planning.",
+      "reason": "Out of scope. Only the producer attempt loop in run.rs branches on TimedOut.",
+      "rejected": []
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "purpose": "Add `InvocationOutcome::TimedOut` and `OutcomeState::TimedOut` (`as_str` 'timed_out') with docs. Add the old-record deserialization test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-agent/src/procs.rs",
+      "action": "modify",
+      "purpose": "Add a `deadline_reason(secs)` helper returning 'deadline of Ns reached', used for the record text. It is not a unit test host for kept work.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-agent/src/claude.rs",
+      "action": "modify",
+      "purpose": "When the deadline (not the kill switch) fires, finish with `InvocationOutcome::TimedOut` and the `deadline_reason` text. Update the unit test a_timed_out_invocation_is_killed_with_a_lower_bound. Not in the brief's deliverable list but required.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-agent/src/fake.rs",
+      "action": "modify",
+      "purpose": "Treat TimedOut like Killed for `completed`, usage_measured and cost, so a scripted timeout still applies the turn's edits first.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/invocation.rs",
+      "action": "modify",
+      "purpose": "Treat TimedOut like Killed when recording bounds for partial usage (around line 321).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "purpose": "On a TimedOut producer, list the changed files, write the progress note record, move `work` to the kept directory, and close as TimedOut with the deadline reason. Add `timeout_seed` and pass the kept directory to `Snapshot::create` through `RunContext`. Not in the brief's deliverable list but required.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Accept `Closed(TimedOut)` in the retry guard and its messages. Carry the note and the changed files into the earlier-attempt data.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-git/src/snapshot.rs",
+      "action": "modify",
+      "purpose": "Add `SnapshotRepo::BaseThenDir { dir }`, which copies the kept files over the base snapshot, plus a unit test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Add an optional progress note to the producer brief's retry data, rendered as a 'Resume' section. Update the tests' struct literals.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Include TimedOut in the `retry: matches!` flag at line 708. Also change steward.rs line 537 if it applies to retry decisions.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "purpose": "Add the tests for criteria 1–4 (timeout keeps work, retry resumes, status distinguishes, old Killed unchanged).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Add a test that drain offers a retry for a timed-out job. Fix any match that now needs the new variant.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an Unreleased entry for the timed-out outcome, kept work, progress note and resume.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Add `TimedOut` to `InvocationOutcome` and `OutcomeState` in records.rs with `as_str`, docs and a deserialization test. Fix every compile error that follows.",
+    "Add `procs::deadline_reason`. In claude.rs, make the deadline branch yield TimedOut; leave the kill switch as Killed. Treat TimedOut like Killed in fake.rs and invocation.rs.",
+    "Add `SnapshotRepo::BaseThenDir` in snapshot.rs with a unit test.",
+    "In run.rs, handle a TimedOut producer at the `output.outcome != Success` check. Build the change list and the redacted note, add the note as a closing record file, move `work` to `kept/<job>/work`, and set `Happened` state TimedOut with the deadline reason.",
+    "Add `timeout_seed` and the stale-base guard in run.rs. Use `BaseThenDir` when it applies. Pass the note into `ProducerInputs`/`RetrySeed` and render the 'Resume' section in briefs.rs. Clean the kept directory once a retry closes.",
+    "Accept TimedOut in reading.rs `earlier_attempt` and its messages, in drain.rs's retry flag and in the retry help text. Check the status and display output.",
+    "Write the lifecycle tests for criteria 1–4 and the drain test. Keep the existing Killed→Failed tests unchanged.",
+    "Add a CHANGELOG.md Unreleased entry, then run fmt, clippy and test, and fix any warnings."
+  ],
+  "risks": [
+    {
+      "risk": "Adding enum variants breaks exhaustive matches elsewhere, including test files not read.",
+      "mitigation": "Build with `cargo clippy --all-targets`; fix each non-exhaustive match explicitly. Most sites use wildcards."
+    },
+    {
+      "risk": "Moving the work tree fails, or the tree is read-only because of the snapshot lock or pin mount.",
+      "mitigation": "Unlock before the move, as the verifier path does. If the move fails, still close TimedOut and say in the note that the files could not be kept; the retry then starts clean."
+    },
+    {
+      "risk": "Kept directories pile up under the state root.",
+      "mitigation": "Remove `kept/<job>` once a retry of that job closes, or when the job is cleaned by close or abandon. Cover it in a test."
+    },
+    {
+      "risk": "The resumed work is stale against a changed base and undoes later work.",
+      "mitigation": "Reuse the tree-seed guard: resume only when only `records/` changed since the base commit; otherwise start clean and say so."
+    },
+    {
+      "risk": "The note leaks secrets or private paths into records.",
+      "mitigation": "Pass the note text through the existing redactor, and list only paths and counts, not file contents."
+    },
+    {
+      "risk": "The producer prompt set exceeds its token budget.",
+      "mitigation": "Edit only the `producer_brief` function, which sits outside the fixed-budget sets, and rerun `system_facts_budgets_match_computed`."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "New lifecycle test. The fake producer script edits two files and returns `InvocationOutcome::TimedOut` with detail 'deadline of 1800s reached'. After `go`, the test reads the head records.",
+      "command": "cargo test --locked -p athena-cli --test lifecycle a_producer_that_hits_its_deadline_keeps_its_work_and_closes_timed_out",
+      "observes": "The outcome record state is `timed_out`, not `failed`. A `progress-note.md` record in the job's records lists both edited paths. The kept directory `<state>/kept/<job>/work` holds both edited files.",
+      "fails_without": "The producer's TimedOut outcome would close the job as Failed, with no note and no kept directory, because the work tree is deleted by clean_job."
+    },
+    {
+      "criterion": 2,
+      "method": "New lifecycle test. After the timeout above, run `athena.retry(job)` then `go`. The second script records, inside the producer call, whether the edited files exist in `spec.workdir` and whether the brief text contains the note and the changed paths. A second case changes a base file first and asserts the retry starts clean.",
+      "command": "cargo test --locked -p athena-cli --test lifecycle retrying_a_timed_out_job_starts_from_the_kept_work_with_the_note",
+      "observes": "The files are present in the new work directory before the producer edits anything. The brief has the 'Resume' section naming the earlier changed files. The new job is a different job. With a moved base, the files are absent and the brief has no Resume section.",
+      "fails_without": "A clean checkout would be seeded with no kept files, and the brief would carry no note."
+    },
+    {
+      "criterion": 3,
+      "method": "New test. It closes one job as timed out and one as failed (using the existing killed_producer scenario), then renders status or the job listing for each.",
+      "command": "cargo test --locked -p athena-cli --test lifecycle status_shows_timed_out_apart_from_failed",
+      "observes": "The timed-out job prints `timed_out` (or 'timed out') and the failed job prints `failed`. The outcome reason and the invocation detail both contain 'deadline of 1800s reached'.",
+      "fails_without": "The status text would show `failed` for both, or the reason would be lost."
+    },
+    {
+      "criterion": 4,
+      "method": "New unit test in records.rs deserializes literal JSON with `\"outcome\":\"killed\"` (invocation) and `\"state\":\"failed\"` (outcome), and round-trips `timed_out`. The existing killed-invocation and kill-switch lifecycle tests, plus the happy-path lifecycle tests, must pass unchanged. Add one drain.rs test if drain's retry flag needs it.",
+      "command": "cargo test --locked -p athena-data records::tests::old_killed_and_failed_outcomes_still_deserialize && cargo test --locked -p athena-cli --test lifecycle a_killed_invocation_is_recorded_with_bounds",
+      "observes": "Old values parse to Killed and Failed. A Killed producer still closes Failed. A job that finishes in time still lands with the same records.",
+      "fails_without": "A rename or reshape of the enums would break the old-record parse. Treating every Killed as a timeout would turn the existing Killed/Failed expectations into TimedOut."
+    },
+    {
+      "criterion": 5,
+      "method": "The doc is the `OutcomeState::TimedOut` and `InvocationOutcome::TimedOut` rustdoc plus a CHANGELOG.md Unreleased entry. A small test in lifecycle.rs or records.rs asserts that CHANGELOG.md contains 'timed out', if the repo already tests changelog content. Otherwise the verifier reads the entry with git diff.",
+      "command": "cargo test --locked",
+      "observes": "The Unreleased section of CHANGELOG.md names the timed-out outcome, the kept work, the progress note and the retry resume. The enum doc comments describe the outcome.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Run the three checks Athena runs, in that order.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All pass with no warnings. That includes the budgets test `system_facts_budgets_match_computed`, which stays green because PRODUCER_FRAME and the always-loaded prompt text are not edited.",
+      "fails_without": "A missed match arm for the new variants, or an unformatted file, would fail the build, clippy or fmt."
+    }
+  ],
+  "open_questions": [
+    "Where status or the job listing renders the outcome state is not yet read (display.rs line 676 handles Stale). The producer must check that the new `as_str` flows through and whether the status line needs separate text.",
+    "Whether athena-gate invariants or a records JSON schema validate the set of outcome states or invocation outcomes was not checked beyond a grep of `Killed`/`Abandoned`. The producer should run check_history in the new test.",
+    "The brief's deliverable list omits run.rs, reading.rs, claude.rs, snapshot.rs and briefs.rs, which this design must change. The list was carried over unverified, so these are not governance files, but the list may need widening.",
+    "A pinned study capability mounts a read-only checkout inside `work`. This plan keeps and resumes only unpinned jobs; the pinned case starts clean."
+  ],
+  "producer_section_sha256": "7c13f1d7a469049c8cfccb5d653e70f7521fab937c85997bf0bea606c63f19b4"
+}

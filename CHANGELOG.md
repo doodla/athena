@@ -9,6 +9,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A producer that reaches its deadline no longer loses its work. The invocation now ends `timed_out` (new
+  `InvocationOutcome::TimedOut`; the kill switch and a dead parent stay `killed`) and the job closes with the
+  new outcome state `timed_out` (`OutcomeState::TimedOut`), not `failed`. The outcome reason and the invocation
+  detail keep the deadline text, such as "deadline of 1800s reached". Athena moves the job's work tree to
+  `kept/<job>/work` in the state directory before it removes the job directory, and commits a progress note,
+  `records/jobs/<month>/<job>/progress-note.md`, that lists the changed files against the base. `athena retry`
+  and "try again on <job>" accept a timed out job; the new producer starts from the kept files (a copy laid over
+  a fresh base snapshot) and its brief gains a "Resume" section quoting the note. When the visible base changed
+  since the timed out job, or the job was a pinned study, the retry starts from the base as before. The kept
+  work is removed when the retry closes. `athena status` and the job lists show `timed_out` apart from
+  `failed`, and `athena drain` retries a timed out job as it does a rejected or failed one. Records written
+  before this change (`killed` invocations, `failed` outcomes) read unchanged. Only the producer stage is
+  covered; verifier deadlines and the deadline length are unchanged.
 - `docs/system-facts.md`: a short, sourced list of facts about how Athena runs that the code cannot show (host
   merge rules, what each role's copy holds, prompt budgets and current sizes, the request format `athena plan`
   parses, what `land` lands, where records live, remotes, CI caches, the early pull request). The planner and

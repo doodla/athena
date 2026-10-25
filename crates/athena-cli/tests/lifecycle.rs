@@ -2123,6 +2123,262 @@ fn hand_work_is_declared_with_staged_changes_and_rescores_the_job() {
     );
 }
 
+/// What a producer that was resumed from kept work saw: whether the earlier edit was in its working directory
+/// before it did anything, and its brief.
+type Seen = Arc<Mutex<Vec<(bool, String)>>>;
+
+/// A script whose first producer run edits two files and then hits its deadline; later producer runs record
+/// what they see and finish normally. `kill_with` makes the first run end with that outcome instead.
+fn deadline_script(
+    seen: Seen,
+    kill_with: athena_data::records::InvocationOutcome,
+) -> athena_agent::fake::Script {
+    let base = Scenario::default().script();
+    let runs = Arc::new(Mutex::new(0u32));
+    Box::new(move |spec| {
+        let mut turn = base(spec);
+        if spec.role == Role::Producer {
+            let mut runs = runs.lock().unwrap();
+            *runs += 1;
+            if *runs == 1 {
+                turn.outcome = kill_with;
+                turn.structured = None;
+                turn.detail = Some("deadline of 1800s reached".into());
+                turn.edits = vec![
+                    ("src/partial.rs".into(), Some("// half done\n".into())),
+                    ("README.md".into(), Some("# Demo\n\nHello\n".into())),
+                ];
+            } else {
+                seen.lock().unwrap().push((
+                    spec.workdir.join("src/partial.rs").exists(),
+                    spec.user_prompt.clone(),
+                ));
+            }
+        }
+        turn
+    })
+}
+
+#[test]
+fn a_producer_that_hits_its_deadline_keeps_its_work_and_closes_timed_out() {
+    let fx = Fixture::new();
+    let athena = fx.athena(deadline_script(
+        Seen::default(),
+        athena_data::records::InvocationOutcome::TimedOut,
+    ));
+    let proposal = athena.ask("add a greeting", &Lines::default()).unwrap();
+    let f = finished(
+        athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(f.state, OutcomeState::TimedOut, "{}", f.reason);
+    let dir = proposal.job.dir();
+    let head = fx.head();
+    match record_at(&fx, &head, &format!("{dir}/outcome.json")) {
+        Some(AnyRecord::Outcome(outcome)) => {
+            assert_eq!(outcome.state, OutcomeState::TimedOut);
+            assert!(outcome.reason.contains("deadline of 1800s reached"));
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+    match record_at(&fx, &head, &format!("{dir}/invocations/02-producer.json")) {
+        Some(AnyRecord::Invocation(inv)) => {
+            assert_eq!(
+                inv.outcome,
+                athena_data::records::InvocationOutcome::TimedOut
+            );
+            assert!(inv.detail.unwrap().contains("deadline of 1800s reached"));
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+    let note = String::from_utf8(
+        fx.git
+            .show_file(&head, &format!("{dir}/progress-note.md"))
+            .unwrap()
+            .expect("a progress note is committed with the closing"),
+    )
+    .unwrap();
+    assert!(
+        note.contains("src/partial.rs") && note.contains("README.md"),
+        "{note}"
+    );
+    let kept = fx
+        .state
+        .path()
+        .join("repo/kept")
+        .join(proposal.job.as_str())
+        .join("work");
+    assert_eq!(
+        std::fs::read_to_string(kept.join("src/partial.rs")).unwrap(),
+        "// half done\n"
+    );
+    assert!(kept.join("README.md").exists());
+    assert!(
+        athena.check_history().unwrap().violations.is_empty(),
+        "the records of a timed out job pass the history check"
+    );
+}
+
+#[test]
+fn retrying_a_timed_out_job_starts_from_the_kept_work_with_the_note() {
+    let fx = Fixture::new();
+    let seen = Seen::default();
+    let athena = fx.athena(deadline_script(
+        seen.clone(),
+        athena_data::records::InvocationOutcome::TimedOut,
+    ));
+    let first = athena.ask("add a greeting", &Lines::default()).unwrap();
+    let f = finished(
+        athena
+            .go(first.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(f.state, OutcomeState::TimedOut);
+
+    let (second, _) = athena.retry(first.job.as_str(), &Lines::default()).unwrap();
+    assert_ne!(second.job, first.job);
+    finished(
+        athena
+            .go(second.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    {
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        let (had_file, brief) = &seen[0];
+        assert!(
+            *had_file,
+            "the earlier edit is in the new working directory"
+        );
+        assert!(brief.contains("## Resume"), "{brief}");
+        assert!(
+            brief.contains("src/partial.rs") && brief.contains("README.md"),
+            "{brief}"
+        );
+    }
+    assert!(
+        !fx.state
+            .path()
+            .join("repo/kept")
+            .join(first.job.as_str())
+            .exists(),
+        "the kept work is removed once the retry closes"
+    );
+}
+
+#[test]
+fn retrying_a_timed_out_job_whose_base_moved_starts_clean() {
+    let fx = Fixture::new();
+    let seen = Seen::default();
+    let athena = fx.athena(deadline_script(
+        seen.clone(),
+        athena_data::records::InvocationOutcome::TimedOut,
+    ));
+    let first = athena.ask("add a greeting", &Lines::default()).unwrap();
+    finished(
+        athena
+            .go(first.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    write(
+        fx.root(),
+        &[("src/lib.rs", "pub fn one() -> u32 {\n    2\n}\n")],
+    );
+    commit_by_hand(&fx, "Change the base");
+    let (second, _) = athena.retry(first.job.as_str(), &Lines::default()).unwrap();
+    finished(
+        athena
+            .go(second.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert!(!seen[0].0, "the kept work is not applied on a moved base");
+    assert!(!seen[0].1.contains("## Resume"));
+}
+
+#[test]
+fn status_shows_timed_out_apart_from_failed() {
+    let fx = Fixture::new();
+    let mode = Arc::new(Mutex::new(
+        athena_data::records::InvocationOutcome::TimedOut,
+    ));
+    let base = deadline_script(
+        Seen::default(),
+        athena_data::records::InvocationOutcome::TimedOut,
+    );
+    let script: athena_agent::fake::Script = {
+        let mode = mode.clone();
+        Box::new(move |spec| {
+            let mut turn = base(spec);
+            if spec.role == Role::Producer {
+                turn.outcome = *mode.lock().unwrap();
+                turn.structured = None;
+            }
+            turn
+        })
+    };
+    let athena = fx.athena(script);
+    let timed = athena.ask("add a greeting", &Lines::default()).unwrap();
+    finished(
+        athena
+            .go(timed.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    *mode.lock().unwrap() = athena_data::records::InvocationOutcome::Killed;
+    let failed = athena.ask("add a farewell", &Lines::default()).unwrap();
+    let f = finished(
+        athena
+            .go(failed.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(f.state, OutcomeState::Failed);
+    let status = athena.status().unwrap();
+    let state_of = |id: &athena_data::JobId| {
+        status
+            .recent
+            .iter()
+            .find(|l| l.id == id.as_str())
+            .map(|l| l.state.clone())
+    };
+    assert_eq!(state_of(&timed.job).as_deref(), Some("timed_out"));
+    assert_eq!(state_of(&failed.job).as_deref(), Some("failed"));
+    assert_eq!(status.jobs_by_state.get("timed_out"), Some(&1));
+}
+
+#[test]
+fn a_killed_producer_keeps_nothing_and_a_job_in_time_leaves_no_note() {
+    let fx = Fixture::new();
+    let athena = fx.athena(killed_producer());
+    let proposal = athena.ask("add a greeting", &Lines::default()).unwrap();
+    let f = finished(
+        athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(f.state, OutcomeState::Failed);
+    let dir = proposal.job.dir();
+    assert!(
+        fx.git
+            .show_file(&fx.head(), &format!("{dir}/progress-note.md"))
+            .unwrap()
+            .is_none()
+    );
+    assert!(!fx.state.path().join("repo/kept").exists());
+
+    let fx = Fixture::new();
+    let athena = fx.athena(Scenario::default().script());
+    let proposal = athena.ask("add a greeting", &Lines::default()).unwrap();
+    let f = finished(
+        athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(f.state, OutcomeState::Landed, "{}", f.reason);
+    assert!(!fx.state.path().join("repo/kept").exists());
+}
+
 /// Commits the work tree as it is, with hooks off, the way a user who skips them would.
 fn commit_by_hand(fx: &Fixture, message: &str) -> String {
     fx.git.run(["add", "-A"]).unwrap();
