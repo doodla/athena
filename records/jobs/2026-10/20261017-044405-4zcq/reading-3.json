@@ -1,0 +1,153 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261017-044405-4zcq",
+  "n": 3,
+  "at": "2026-10-25T14:18:43.539047084Z",
+  "invocation_seq": 3,
+  "base_commit": "ce742581056853a6b2fa2ca5a8359acf8a491d15",
+  "config_sha256": "3e7cc960653f0ff759df6d538550903cc95dc3a03a6aae705d66278de36b4208",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Keep work and resume on producer deadline; record as timed out",
+  "summary": "When a producer stage hits its deadline, keep the job's worktree edits and write a progress note. Record the job as timed out rather than failed, and have `athena retry` resume from the kept work with the note. Status output tells timed out from failed. The user narrowed this to the producer stage only: no verifier-stage timeouts and no multi-part planning. The audience is the Athena operator, who loses 20–30 minutes of work per timeout.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "outcome-check",
+      "how": "Criteria check that edits are kept and the retry resumes from them, not that types exist."
+    },
+    {
+      "id": "tested",
+      "how": "cargo test, clippy and fmt --check must pass."
+    },
+    {
+      "id": "small",
+      "how": "Producer stage only, per the user's narrowing."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Tests exercise the deadline and retry flow with the fake agent."
+    },
+    {
+      "id": "root-cause",
+      "how": "Keep the work at the point where the timeout discards it, rather than adding a workaround."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Scope is the producer stage only, per the user's reply. Verifier-stage timeouts and multi-part planning are excluded.",
+    "A deadline kill is currently recorded as killed or failed and the worktree is discarded; I did not confirm this by reading the code.",
+    "The progress note is a file in the job directory or worktree, passed into the retry producer's prompt.",
+    "Deliverable paths are guesses from a grep for 'deadline' and 'Killed'; I did not read the files."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A test with the fake agent hits a producer deadline after editing files. Afterwards the edits remain in the job worktree, a progress note exists, and the job is recorded as timed out, not failed. Run: cargo test.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test retries a timed-out job. The new producer starts from the kept worktree (not a clean checkout) and is given the progress note. Run: cargo test.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Status output distinguishes a timed-out job from a failed one, and the deadline reason (e.g. 'deadline of 1800s reached') is kept in the record. Run: cargo test.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test shows existing records with killed or failed outcomes still deserialize unchanged. Run: cargo test.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The new timed-out outcome is documented and CHANGELOG.md mentions the change.",
+      "kind": "content"
+    },
+    {
+      "text": "cargo test, cargo clippy and cargo fmt --check all pass with no new warnings.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-agent/src/procs.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-agent/src/fake.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/invocation.rs",
+      "action": "modify",
+      "p": 0.3
+    }
+  ],
+  "out_of_scope": [
+    "Verifier-stage deadline handling",
+    "Splitting multi-part requests into one plan item per part",
+    "Changing the deadline values"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.8,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.4,
+        "p90": 3.2
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 1700.0,
+        "p90": 3400.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7281690140845071,
+      "p_verification_passes": 0.6445497630331753,
+      "p_user_intervenes": 0.06244343891402715,
+      "cost_usd": {
+        "p10": 0.4556546,
+        "p50": 1.1025992,
+        "p90": 2.4222845
+      },
+      "wall_time_s": {
+        "p10": 541.9690476993549,
+        "p50": 1431.2462265114382,
+        "p90": 2938.907077635363
+      }
+    }
+  },
+  "departures": "Cost and time are above the reference because the change spans the agent, data and CLI crates and needs new retry-resume tests.",
+  "urgent_reason": "Timeouts discard 20–30 minutes of producer work and force redo-work retries; keeping that work cuts wasted time."
+}

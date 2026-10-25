@@ -3081,3 +3081,25 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Provenance:** stated: the request of 2026-10-25 (the file, its facts, the brief inclusion and the drift test).
   Read: `briefs.rs`, `lib.rs`, `budgets.rs`, `plan.rs`, `reading.rs`, `gh.rs`, `ci.yml`, `records-history.md`.
   Measured: sizes from `cargo test -p athena-cli --test budgets`. Not found: code that refuses an SSH remote.
+
+## D124 · The producer deadline rises from 1800 to 3000 seconds
+
+- **Case:** A producer that reaches its deadline is stopped and all its work is lost. Six producer runs since
+  2026-10-24 hit the 1800 s deadline (`producer_timeout_s` in `athena.toml` `[budget]`). The request names five:
+  jobs 20261019-013309-nvbb, 20261023-234149-jcd2, 20261024-140624-ewbs, 20261025-034731-2am0 and
+  20261017-044405-4zcq. The sixth, the one before nvbb, is not named. The request reports that several were doing
+  legitimate work whose targeted test builds take 5 to 10 minutes each; this is reported, not measured here.
+- **Decision:** `producer_timeout_s` is 3000. No other budget value changes; `verifier_timeout_s` and
+  `check_timeout_s` stay as they were. No code changes.
+- **Alternatives:** (a) Split jobs into smaller ones so each fits in 1800 s: queued, not built here. (b) Make
+  the test suite faster so targeted builds take less time: queued, not built here. (c) Keep a producer's work when
+  it times out, so a deadline costs time and not the whole result: queued, not built here; it needs code in
+  `crates/`. (d) Leave the deadline at 1800 s: runs doing legitimate work keep being lost.
+- **Tradeoff:** A run that hangs now holds its slot and spends money for up to 1200 s longer before it is
+  stopped. The new value, 3000 s, is a choice sized to the reported 5 to 10 minute builds, not a measured need.
+  Whether it fits within the per-job cost cap was not checked.
+- **Reversal cost:** Low. Set `producer_timeout_s` back to 1800 in `athena.toml` and run `cargo test --locked`.
+  Proposed signal, not measured: reverse it if the three alternatives land, or if runs that hit the deadline
+  still hold no usable work after the raise, or if cost per job rises with no fall in lost runs.
+- **Provenance:** stated: the request of 2026-10-25 (the value, the failed jobs, the alternatives and the
+  reversal). Read: `athena.toml`. Not measured: the build times, the sixth job, or the cost effect.
