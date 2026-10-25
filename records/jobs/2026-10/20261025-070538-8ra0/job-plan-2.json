@@ -1,0 +1,225 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261025-070538-8ra0",
+  "round": 2,
+  "at": "2026-10-25T07:09:56.711136472Z",
+  "invocation_seq": 5,
+  "approach": "Add an early-publish step in produce_and_verify, after admission and before the verifier snapshot/checks. `early_push` (gh.rs, generic over Remote, PrHost, Ancestry) pushes the candidate to the job's work branch only when the branch is missing, a fast-forward (check_push passes), or its head equals the recorded early-head marker (then a lease-pinned replace). Any other head: one warning, nothing pushed. It opens the PR if no link, stores link and marker, never merges. Errors become one `warning:` line. A trait `EarlyPush` is the seam; `go` calls `go_with_early(.., &GhEarly)` so signatures are unchanged. `GhEarly` returns silently without a GitHub origin; otherwise it builds GhCli/GhClient/GitRemote itself. Land runs `replace_early_head` (lease-pinned, marker-gated) before reading the remote head and sets link.head to L.",
+  "decisions": [
+    {
+      "choice": "Inject via trait EarlyPush passed to new Athena::go_with_early; go passes &GhEarly; carried in RunContext.",
+      "reason": "Keeps go signature and CLI call sites unchanged; lets tests observe push/open_pr from inside go.",
+      "rejected": [
+        {
+          "option": "New field on Athena",
+          "why": "Struct literals outside deliverables would break."
+        },
+        {
+          "option": "New parameter on go",
+          "why": "Out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "early_push replaces a remote head only if it equals the pr-early-head marker (lease pinned to it); fast-forward or missing branch pushes normally; any other head gives one warning and no push, leaving link untouched so land still refuses.",
+      "reason": "Answers finding 1: a foreign head must never be overwritten or laundered into link.head.",
+      "rejected": [
+        {
+          "option": "Replace whenever check_replace passes",
+          "why": "check_replace ignores ancestry, so it would overwrite someone else's fix and bypass land's refusal."
+        }
+      ]
+    },
+    {
+      "choice": "Silent skip decided inside GhEarly (no origin or parse_remote fails). Test seam start_with(req, ui, runner, remote) takes both runner and Remote.",
+      "reason": "Matches user decision; finding 3: case (c) must not touch the network, so it uses a FakeRemote and failing runner and asserts the warning text comes from the injected host error.",
+      "rejected": [
+        {
+          "option": "Inject only the runner",
+          "why": "GitRemote::remote_head runs real git ls-remote to github.com."
+        }
+      ]
+    },
+    {
+      "choice": "Marker file pr-early-head in the job state dir (helpers in pr.rs); no new PrLink field.",
+      "reason": "PrLink literals exist in non-deliverable files; marker also covers push-ok/open_pr-failed.",
+      "rejected": [
+        {
+          "option": "early flag on PrLink",
+          "why": "Breaks literals elsewhere."
+        }
+      ]
+    },
+    {
+      "choice": "Remote::replace with default bail; GitRemote uses push --force-with-lease=refs/heads/b:old. Production git calls in the early step (ls-remote, push) run with GIT_TERMINAL_PROMPT=0 so a credential prompt cannot stall go; GitRemote's git command builder gets that env (harmless for land). No extra timeout added beyond this and GhClient's bounded retries; stated as a known limit.",
+      "reason": "Finding 5; L is not a descendant of C so plain push is refused.",
+      "rejected": [
+        {
+          "option": "Plain force push",
+          "why": "Could overwrite others."
+        },
+        {
+          "option": "New timeout machinery",
+          "why": "Larger than the request."
+        }
+      ]
+    },
+    {
+      "choice": "Update comments and refusal text (gh.rs land_pr comment near 1787, refusal_text near 1944, pr.rs PushRefusal 'never forces') to name the one exception: the job's own early head replaced under a lease.",
+      "reason": "Finding 4: statements would otherwise be false.",
+      "rejected": [
+        {
+          "option": "Leave wording",
+          "why": "Misleading."
+        }
+      ]
+    },
+    {
+      "choice": "Skip early step when self.nested.is_some(); run after admission.",
+      "reason": "Nested runs have no CI; refused candidates must not be pushed.",
+      "rejected": [
+        {
+          "option": "Push at dispatch",
+          "why": "No candidate yet."
+        }
+      ]
+    },
+    {
+      "choice": "land.rs and lifecycle.rs left unchanged on purpose; the change description says so.",
+      "reason": "Finding 6: landing flow lives in gh.rs; silent skip keeps lifecycle tests green.",
+      "rejected": [
+        {
+          "option": "Edit them anyway",
+          "why": "No need."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "action": "modify",
+      "purpose": "Remote::replace + GitRemote lease impl (GIT_TERMINAL_PROMPT=0), EarlyRequest, EarlyPush, early_push, GhEarly, start_with, replace_early_head in land_pr/publish, updated comments/refusal text, tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "purpose": "go -> go_with_early, thread early through RunContext, call after admission, event-log go tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/pr.rs",
+      "action": "modify",
+      "purpose": "Early-head marker helpers with tests; update PushRefusal wording.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/test_support.rs",
+      "action": "modify",
+      "purpose": "Shared event-log recording fakes if needed for go-level tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Record the behavior.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "pr.rs: add marker store/load/clear helpers with unit test; update PushRefusal wording to name the early-head exception.",
+    "gh.rs: add Remote::replace (default bail) and GitRemote lease-pinned impl; set GIT_TERMINAL_PROMPT=0 on its git calls; update trait docs.",
+    "gh.rs: add EarlyRequest, EarlyPush, early_push: push if branch missing or check_push passes; replace (check_replace + lease) only if remote head equals marker; otherwise warn once and push nothing; write marker after push; open_pr only without link; store link; never merge; Err -> one warning.",
+    "gh.rs: add GhEarly and start_with(req, ui, runner, remote); GhEarly returns silently on missing origin or parse_remote failure, else builds GhCli/GhClient/GitRemote.",
+    "gh.rs: add replace_early_head (marker == remote head and != job.commit: check_replace, remote.replace, clear marker, set link.head = commit); call in land_pr before remote_head read and in publish; update comments and refusal_text.",
+    "run.rs: go_with_early, thread early via go_job/dispatch/RunContext; call after admission and before verifier snapshot unless nested.",
+    "Tests: extend FakeRemote/FakeHost; add early+land tests, foreign-head test, GhEarly skip/warn tests, go-level event-log tests.",
+    "CHANGELOG.md entry with the four points.",
+    "Run cargo fmt --all, clippy, cargo test --workspace; mutation-check each new test."
+  ],
+  "risks": [
+    {
+      "risk": "Early network calls add latency or hang go.",
+      "mitigation": "Skipped without GitHub origin; GIT_TERMINAL_PROMPT=0; GhClient bounded retries; failures only warn."
+    },
+    {
+      "risk": "Land force-replaces a branch head.",
+      "mitigation": "Only the job's work branch, only when remote head equals the marker, lease pinned to it; other heads still refused."
+    },
+    {
+      "risk": "Push ok but open_pr fails leaves no link.",
+      "mitigation": "Marker written right after push; publish calls replace_early_head first; tested."
+    },
+    {
+      "risk": "Trait/signature changes break fakes outside deliverables.",
+      "mitigation": "Remote::replace has a default body; no PrLink or Athena field added."
+    },
+    {
+      "risk": "New warning line in CLI lifecycle tests.",
+      "mitigation": "Silent skip inside GhEarly; workspace tests run."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Go-level test in run.rs runs go_with_early with a recording EarlyPush fake that calls early_push over fake Remote/PrHost; the fake remote, host and the scripted verifier/check fake all append to one shared event log.",
+      "command": "cargo test -p athena-core early",
+      "observes": "Log shows push(candidate to athena/<job>) and open_pr events before the first verifier/check event; open_pr count 1; merge count 0.",
+      "fails_without": "Without the early call in produce_and_verify no push/open_pr events exist; if moved after the verdict the ordering assertion fails."
+    },
+    {
+      "criterion": 2,
+      "method": "Run go three times: working fakes, failing Remote::push, failing PrHost::open_pr; compare final state/verdict.",
+      "command": "cargo test -p athena-core early",
+      "observes": "Outcome identical in all three; go returns Ok; failing runs print one warning line; landing proceeds.",
+      "fails_without": "If early errors propagated, go would return Err or the job state would differ."
+    },
+    {
+      "criterion": 3,
+      "method": "gh.rs tests with extended FakeRemote (replace, recorded list) and FakeHost (merge_heads): early_push with C then land_pr with L; second case early open_pr fails so land goes via publish; third case foreign head pushed before early_push: early_push warns and pushes nothing, land still refuses.",
+      "command": "cargo test -p athena-core land_pr",
+      "observes": "One open_pr total; one lease-pinned replace (branch, L, expected C) after check_replace; link.head == L before head check; merge_heads == [L]; foreign head case: no replace, refusal.",
+      "fails_without": "Without replace_early_head land sees head C != L and refuses (or publish check_push refuses non-fast-forward)."
+    },
+    {
+      "criterion": 4,
+      "method": "GhEarly::start with collecting Ui in a temp git repo: (a) no origin, (b) local-path origin; assert no 'warning' line and nothing pushed. (c) start_with using FakeRemote plus failing runner on a GitHub-shaped origin: exactly one warning whose text is the injected host error, no network. CLI lifecycle tests run unchanged.",
+      "command": "cargo test --workspace",
+      "observes": "No warning in (a),(b); one injected-error warning in (c); lifecycle tests pass.",
+      "fails_without": "If skips warned or errored, (a)/(b) and the lifecycle tests would show a warning line."
+    },
+    {
+      "criterion": 5,
+      "method": "Run workspace tests, then cargo clippy --workspace --all-targets and cargo fmt --check; mutate-check each new test by removing the early call or replace_early_head.",
+      "command": "cargo test --workspace",
+      "observes": "All pass clean; each new test fails under its mutation.",
+      "fails_without": "Removing the early call or replace makes the criterion 1-3 tests fail."
+    },
+    {
+      "criterion": 6,
+      "method": "Inspect the diff.",
+      "command": "git diff",
+      "observes": "go signature unchanged; no diff under crates/athena-cli/src; GhCli built inside GhEarly.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Read the new entry.",
+      "command": "git diff CHANGELOG.md",
+      "observes": "States verification start opens/updates the job's PR so CI caches by fingerprint, never merges, missing/non-GitHub origin skipped quietly, failures non-fatal.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Is a PR body written before verification acceptable (land does not rewrite it)? Assumed yes.",
+    "Exact go-level scaffolding to be copied from run_pin_tests.rs (not read in full).",
+    "No hard timeout on git push/ls-remote beyond GIT_TERMINAL_PROMPT=0; acceptable?"
+  ],
+  "producer_section_sha256": "912ee3c2f8e072b4fba6d5134c9e7d91e71ed9f5ad80327b6d98f0b80e19c7e8"
+}

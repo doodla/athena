@@ -1,0 +1,199 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261025-070538-8ra0",
+  "round": 1,
+  "at": "2026-10-25T07:08:17.256661131Z",
+  "invocation_seq": 3,
+  "approach": "Add an early-publish step that runs once the candidate is admitted and verification is about to start. `early_push` (in gh.rs, generic over Remote, PrHost and Ancestry) pushes the candidate commit to the job's work branch, opens the PR if the job has no link, stores the link, and never merges. Every error is turned into one \"warning:\" line and the job goes on. A new trait `EarlyPush` is the seam; `Athena::go` calls `go_with_early(.., &GhEarly)`, so the `go` signature is unchanged. `GhEarly` reads `origin`. If the remote is missing or not GitHub, it returns silently. Otherwise it builds `GhCli`, `GhClient` and `GitRemote` itself and calls `early_push`. Tests inject a fake `EarlyPush`. Landing builds its own commit L, which is not a descendant of the candidate, so land must replace the early head. I add `Remote::replace` (default method that bails; `GitRemote` uses `push --force-with-lease=ref:old`). I record the early head in a small marker file in the job's state dir. `land_pr` and `publish` call `replace_early_head`, which runs `check_replace` and then the lease-pinned replace, only when the marker equals the current remote head. It runs before the `remote_head` read and sets `link.head = L`. The existing refusal of a head someone else pushed is unchanged.",
+  "decisions": [
+    {
+      "choice": "Inject the fake through a trait `EarlyPush` passed to a new `Athena::go_with_early`; `go` passes `&GhEarly`. The trait value is carried in `RunContext` through `go_job`, `dispatch` and `produce_and_verify`, all in run.rs.",
+      "reason": "Keeps the `go` signature and every CLI call site unchanged, and lets a fake-host test observe the push and open_pr from inside go.",
+      "rejected": [
+        {
+          "option": "New field on `Athena`",
+          "why": "About ten struct literals, several outside the deliverables (cli wiring.rs, tests/common, proposals.rs), would break."
+        },
+        {
+          "option": "A new parameter on `go`",
+          "why": "Out of scope; it changes CLI call sites."
+        }
+      ]
+    },
+    {
+      "choice": "The silent skip is decided inside `GhEarly` (no origin, or `parse_remote` fails). Host errors on a GitHub remote become a `warning:` line from `early_push`.",
+      "reason": "Matches the user's decision and the root-cause default: the step decides, the tests are not patched. The CLI lifecycle tests have no origin, so they stay green.",
+      "rejected": [
+        {
+          "option": "Warn on every failure, then edit the CLI tests to tolerate it",
+          "why": "Contradicts the accepted reading and adds test edits."
+        }
+      ]
+    },
+    {
+      "choice": "Record the early head in a marker file (`pr-early-head`) in the job's state dir, with helpers in pr.rs. It is written right after the push succeeds, before open_pr.",
+      "reason": "`PrLink` literals exist in files that are not deliverables (external_calls.rs, display.rs), so a new field would break them. The marker also covers a push that succeeded while open_pr failed: land then finds no link, but still knows the remote branch holds the early head and may replace it.",
+      "rejected": [
+        {
+          "option": "Add `early: bool` to `PrLink`",
+          "why": "Breaks struct literals outside the deliverables."
+        },
+        {
+          "option": "Replace whenever link.head equals the remote head",
+          "why": "Would change the existing refusal behavior for pushes by others."
+        }
+      ]
+    },
+    {
+      "choice": "Add `Remote::replace(branch, commit, expected_old)` with a default body that bails. `GitRemote` overrides it with `--force-with-lease`, always behind `check_replace` and the work-branch guard.",
+      "reason": "L is not a descendant of the candidate, so a plain push is refused. The lease means only the exact early head can be replaced. The default keeps `NoRemote` in external_calls.rs compiling.",
+      "rejected": [
+        {
+          "option": "Plain force push",
+          "why": "Could overwrite someone else's fix on the branch."
+        },
+        {
+          "option": "Push L as a fast-forward by merging",
+          "why": "Changes what is landed."
+        }
+      ]
+    },
+    {
+      "choice": "Skip the early step in nested runs (`self.nested.is_some()`) and run it after admission passes, before the verifier snapshot and checks.",
+      "reason": "Nested runs skip checks and have no CI to warm. Admission-refused candidates should never be pushed.",
+      "rejected": [
+        {
+          "option": "Push at dispatch",
+          "why": "No candidate commit exists yet."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "action": "modify",
+      "purpose": "Add `Remote::replace` (default bail) and the `GitRemote` lease-pinned implementation. Add `EarlyRequest`, the `EarlyPush` trait, `early_push`, `GhEarly` and `start_with_runner`. Add `replace_early_head`, called in `land_pr` before the remote_head read and in `publish`. Fake-host tests for criteria 1-4.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "purpose": "`go` becomes a wrapper over `go_with_early(.., &GhEarly)`. Thread `early` through `go_job`, `dispatch` and `RunContext`. Call it in `produce_and_verify` after admission and before verification, skipped when nested. Go-level tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/pr.rs",
+      "action": "modify",
+      "purpose": "Helpers `store_early_head`, `load_early_head` and `clear_early_head` for the marker file in the job's state dir; unit tests. `PrLink` is not changed.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/test_support.rs",
+      "action": "modify",
+      "purpose": "Only if the shared fake for the go-level test belongs here (a recording `EarlyPush` fake). The `FakeHost` there needs no change otherwise.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Record the early PR open, no merge, quiet skip and non-fatal failures.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "pr.rs: add the early-head marker helpers (store, load, clear) next to `store_link`/`load_link`, with a unit test.",
+    "gh.rs: add `Remote::replace` with a default bail, and the `GitRemote` impl using `git push --force-with-lease=refs/heads/<b>:<old> <remote> <commit>:refs/heads/<b>`. Update the trait doc that says there is no way to replace.",
+    "gh.rs: add `EarlyRequest` (git, state, job, commit, title, body), the `EarlyPush` trait and `early_push(req, remote, host, ancestry, host_name, repository, ui)`. It does: load_link; remote_head; push with check_push, or replace with check_replace when a different head is there; store the marker; default_branch and open_pr only when there is no link; store the link (head = candidate, Open). It never calls merge. Any Err becomes one `warning:` ui line and returns.",
+    "gh.rs: add `GhEarly` and `start_with_runner(req, ui, runner)`. The origin url lookup or `parse_remote` failing returns silently. Otherwise build `GhClient` over the runner (`GhCli` for production) and `GitRemote`, then call `early_push`.",
+    "gh.rs: add `replace_early_head(job, remote_head)`. If the marker equals the remote head and differs from `job.commit`, run check_replace, then `remote.replace(branch, commit, marker)`, clear the marker, and set and store `link.head = commit`. Call it in `land_pr` for an Open link before the `remote_head` read (re-reading the head afterwards), and in `publish` before check_push.",
+    "run.rs: rename the body of `go` to `go_with_early(.., early: &dyn EarlyPush)` and have `go` call it with `&GhEarly`. Thread `early` through `go_job`, `dispatch` (including the recursive call) and `RunContext`. In `produce_and_verify`, after `closing.candidate = Some(candidate)` and before `verifier_snapshot`, call `ctx.early.start(..)` unless `self.nested.is_some()`.",
+    "Tests: extend the gh.rs `FakeRemote` (replace, recorded list) and `FakeHost` (merge_heads). Add the early + land tests (criteria 1 and 3 at the land_pr level) and the GhEarly skip and warn tests. Add go-level tests in run.rs for criteria 1 and 2 with a recording fake.",
+    "CHANGELOG.md: add the entry with the four points of criterion 7.",
+    "Run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --workspace`. Check that each new test fails when its behavior is removed."
+  ],
+  "risks": [
+    {
+      "risk": "Early push and open_pr add network latency to every verification, and a hanging gh call would stall go.",
+      "mitigation": "The step is skipped without a GitHub origin. `GhClient` already has bounded retries. Failures only warn."
+    },
+    {
+      "risk": "Land replaces a branch head, which is a force push.",
+      "mitigation": "Only the job's own work branch (`check_replace`), only when the remote head equals the recorded early head, and with `--force-with-lease` pinned to that value. Any other head still gets the existing refusal."
+    },
+    {
+      "risk": "Early push succeeds but open_pr fails, so there is no link and land's check_push would refuse C -> L.",
+      "mitigation": "The marker is written right after the push, and `publish` calls `replace_early_head` first. A test covers this case."
+    },
+    {
+      "risk": "Adding a trait method or changing signatures breaks fakes outside the deliverables, such as `NoRemote` in external_calls.rs.",
+      "mitigation": "`Remote::replace` has a default body, and no struct field is added to `PrLink` or `Athena`."
+    },
+    {
+      "risk": "The CLI lifecycle tests print a new 'warning' line.",
+      "mitigation": "The skip for a missing or non-GitHub origin is silent and decided in `GhEarly`; the lifecycle tests are run in the workspace test."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "A fake-host test in run.rs's test module runs `Athena::go_with_early` with a fake `EarlyPush` that calls `early_push` over a fake Remote and PrHost, using the test_support harness (model it on run_pin_tests.rs). It asserts the fake remote saw a push of the candidate commit to `athena/<job>`, the host saw one `open_pr`, both happened before go returned, and the merge count is 0.",
+      "command": "cargo test -p athena-core early",
+      "observes": "The push is recorded with the candidate commit and the work branch; open_pr count is 1; merges are 0.",
+      "fails_without": "Without the early step in `produce_and_verify`, the fake sees no push and no open_pr, so the assertions fail."
+    },
+    {
+      "criterion": 2,
+      "method": "Run the same go twice, once with a working fake and once with a fake whose Remote::push fails and a variant whose PrHost::open_pr fails. Compare the final GoResult state and verdict across the runs. Also assert that a `warning:` line was printed in the failing runs.",
+      "command": "cargo test -p athena-core early",
+      "observes": "The outcome state and verification are identical in all three runs, and nothing returns Err.",
+      "fails_without": "If errors propagated from the early step, go would return Err or the job would fail, so the comparison would differ."
+    },
+    {
+      "criterion": 3,
+      "method": "A gh.rs test uses FakeRemote (extended with `replace` and a recorded list) and FakeHost (extended with a `merge_heads` list). It runs `early_push` with candidate C, then `land_pr` with landing commit L. It asserts: no second open_pr; the replace is recorded as (branch, L, expected C) after `check_replace` passed; the stored link head is L; the remote head is L; merge_heads == [L]. A second case makes the early open_pr fail, so land goes through `publish`: it must replace C with L and then open the PR once. A third case has someone else push after the early push; land still refuses, as before.",
+      "command": "cargo test -p athena-core land_pr",
+      "observes": "Exactly one open_pr in total; one lease-pinned replace; link.head == L; merge_heads == [L].",
+      "fails_without": "Without `replace_early_head`, land sees head C != L and bails with the refusal. Or publish's check_push refuses C -> L as a non-fast-forward."
+    },
+    {
+      "criterion": 4,
+      "method": "Tests call `GhEarly::start` with a collecting Ui in a real temp git repo: (a) no origin, (b) origin set to a local path (non-GitHub). Both assert no output line contains 'warning' and nothing is pushed. (c) origin is `https://github.com/example/project.git` with an injected runner that fails (via `start_with_runner`), and asserts exactly one 'warning' line and Ok. The CLI lifecycle tests also run go with no origin.",
+      "command": "cargo test --workspace",
+      "observes": "No 'warning' line in cases (a) and (b); one warning in (c); lifecycle tests pass unchanged.",
+      "fails_without": "If the origin lookup errors were warned or propagated, (a) and (b) would print a warning or fail, and the lifecycle tests would show a new warning line."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the full workspace test, clippy and fmt. Each new test is checked to fail when the early call in produce_and_verify, or the replace_early_head call in land_pr, is removed.",
+      "command": "cargo test --workspace",
+      "observes": "All pass; `cargo clippy --workspace --all-targets` and `cargo fmt --check` are clean.",
+      "fails_without": "Removing the early call or the replace makes the criterion 1-3 tests fail, as described above."
+    },
+    {
+      "criterion": 6,
+      "method": "Inspect the diff. `GhEarly` builds `GhCli`, `GhClient` and `GitRemote` itself. `Athena::go`'s signature and the call sites in athena-cli are unchanged. The workspace builds without any CLI edit.",
+      "command": "git diff",
+      "observes": "`pub fn go(&self, job_ref: &str, accepted_by: AcceptedBy, ui: &dyn Ui)` is unchanged, there is no diff under crates/athena-cli/src, and `GhCli` appears inside `GhEarly`.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Read the CHANGELOG diff for the new entry.",
+      "command": "git diff CHANGELOG.md",
+      "observes": "The entry says verification start opens or updates the job's PR so CI caches by fingerprint, that it never merges, that a missing or non-GitHub origin is skipped quietly, and that failures are non-fatal.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "The PR opened early carries a title and body written before verification (the reading title, 'Verified job' wording avoided). Land reuses the PR and does not rewrite the body. Is a stale body acceptable? The plan assumes yes.",
+    "I did not read run_pin_tests.rs or the cli lifecycle harness in full, so the exact go-level test scaffolding (script and fake driver setup) is left for the producer to copy from run_pin_tests.rs.",
+    "land.rs and lifecycle.rs are listed as deliverables but the plan has no change for them. The silent skip keeps the CLI tests green, and the landing flow lives in gh.rs. Touch them only if the producer finds a need."
+  ],
+  "producer_section_sha256": "40d5977e767760ae1eee607f3850fa1935a2cd50630cede303ff7fc6bce34396"
+}
