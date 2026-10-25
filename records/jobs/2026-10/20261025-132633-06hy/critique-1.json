@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261025-132633-06hy",
+  "round": 1,
+  "at": "2026-10-25T13:29:33.897033247Z",
+  "invocation_seq": 3,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "The check-runs read is not filtered by name, so the named run could fall off the first page.",
+      "evidence": "gh.rs:825 reads check-runs?per_page=100 with no filter. GitHub's commit check-runs endpoint takes a check_name parameter. Without it, a commit with more than 100 check runs (for example after many re-runs) could leave the named run off the first page. Fix: Request commits/{commit}/check-runs?check_name=<url-encoded EARLY_RUN_JOB>&per_page=100, and still filter by name in parse_check_run so the fakes and the parse test stay valid.",
+      "location": "Plan step 3 (GhClient::check_run)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "No test proves that workflow-run results are ignored.",
+      "evidence": "The plan relies on reading the diff to show that ci_runs is no longer used in wait_for_early_run. No test proves that the workflow-run reply is ignored. Fix: In test 1, have RunHost's ci_runs for early1 also return a failed workflow run (or log any call to it), and assert that the log has no 'ci_runs early1' entry. Then a regression back to ci_runs fails a test, not just a review.",
+      "location": "Demonstrations, criterion 4",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The 'no runs' case label in the existing failure test must change with the new wording.",
+      "evidence": "The existing failure test checks the note for 'failed' (gh.rs:3836). The new failed-job note says 'fmt, clippy, tests failed', which still contains it, but the 'no runs' case changes wording. Fix: Keep the new wording containing 'no' and 'check run', and update the case label in land_pr_early_run_failure_changes_nothing in the same edit.",
+      "location": "Plan step 4, notes",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the snapshot by reading the code. The plan fixes the problem where it starts. wait_for_early_run (gh.rs:2031–2068) asks ci_runs for workflow runs and stops at the first failed one (line 2047). A workflow run lumps all its jobs together, so the always-failing jobs on a candidate end the wait. The plan adds a PrHost::check_run seam, reads commits/{sha}/check-runs (the endpoint checks already uses, gh.rs:825), and decides only from the check run named in the new EARLY_RUN_JOB constant. That name matches ci.yml:27 exactly (\"fmt, clippy, tests\"), and the other job names (ci.yml:168, :285) confirm the diagnosis. There are five PrHost implementations: GhClient, two in test_support.rs and two in gh.rs tests. The plan names all five and rightly gives the new method no default body. The demonstrations exercise the behaviour through RunHost. Test 1 scripts a failed 'the full history' job next to an in-progress named job and expects two sleeps before the replace; the old code would replace on the first look. Test 2 expects a push with no sleep and a note naming the failed job, including a variant where the other jobs are still running. The existing tests at gh.rs:3759–3860 are adapted to the new log label and wording, and the timeout and 600 s default checks are kept. The 20 s step and the bound are unchanged, nothing touches athena.toml, and the work fits one producer run. I found only minor points."
+}

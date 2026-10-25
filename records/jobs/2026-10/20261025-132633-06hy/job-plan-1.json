@@ -1,0 +1,137 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261025-132633-06hy",
+  "round": 1,
+  "at": "2026-10-25T13:28:50.924446787Z",
+  "invocation_seq": 2,
+  "approach": "Add a PrHost method `check_run(commit, name) -> Result<Option<CiRunState>>` that reads the commit's check runs (same endpoint `checks` uses) and returns the latest one with the given name. Rewrite wait_for_early_run to decide only from the check run named by a new constant EARLY_RUN_JOB = \"fmt, clippy, tests\": none -> push at once; failed -> push at once naming that job; completed -> push; otherwise sleep 20 s and look again, up to the unchanged bound. Update all five PrHost impls and the early-run tests, add two tests, add a CHANGELOG entry.",
+  "decisions": [
+    {
+      "choice": "New seam method check_run returning Option<CiRunState> (reusing the struct; attempt None, failed() works), with a pure parse function parse_check_run(reply, name) picking the highest id of that name.",
+      "reason": "ci_runs reports workflow runs, which cannot name a job; the check-runs endpoint (commits/{sha}/check-runs) names each job. Reuse keeps the change small and parse is unit-testable.",
+      "rejected": [
+        {
+          "option": "Read workflow jobs via actions/runs/{id}/jobs",
+          "why": "Needs one extra call per run and the run ids first; check-runs is one call already used by checks."
+        },
+        {
+          "option": "Keep ci_runs and filter failed runs differently",
+          "why": "Workflow runs hold all jobs together; the failure of the history job cannot be separated from the cached job."
+        },
+        {
+          "option": "Give check_run a default body in the trait",
+          "why": "A silent default would hide an unimplemented fake; the request says update every host."
+        }
+      ]
+    },
+    {
+      "choice": "Name held in a const EARLY_RUN_JOB; wait unchanged otherwise (20 s step, host bound).",
+      "reason": "Out of scope to change the timeout or CI job names; one constant makes the coupling to ci.yml visible.",
+      "rejected": [
+        {
+          "option": "Read the name from configuration",
+          "why": "Governance/config change not requested."
+        }
+      ]
+    },
+    {
+      "choice": "Missing named check run is treated as no runs: push at once.",
+      "reason": "Matches the accepted reading and the old no-runs behaviour; the landing run decides.",
+      "rejected": [
+        {
+          "option": "Keep waiting for it to appear",
+          "why": "The run may never be created; costs up to 10 minutes for nothing."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "action": "modify",
+      "purpose": "Add EARLY_RUN_JOB const, PrHost::check_run, parse_check_run, GhClient impl (check-runs endpoint, ReadChecks op), rewrite wait_for_early_run and its doc; update test FakeHost and RunHost (script of named jobs, log label check_run), adapt existing early-run tests, add the two new tests and a parse_check_run unit test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/test_support.rs",
+      "action": "modify",
+      "purpose": "Implement check_run for FakeHost and EarlyFake (return Ok(None)).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased entry for the changed pre-push wait.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In gh.rs add `const EARLY_RUN_JOB: &str = \"fmt, clippy, tests\";` near EARLY_RUN_STEP and `PrHost::check_run(&self, commit, name) -> Result<Option<CiRunState>>` with a doc comment.",
+    "Add `parse_check_run(reply: &Value, name: &str) -> Option<CiRunState>` (reads check_runs array: name, id, status, conclusion; highest id wins; attempt None).",
+    "Implement check_run in GhClient: GET commits/{commit}/check-runs?per_page=100 (HostOperation::ReadChecks), then parse_check_run.",
+    "Rewrite wait_for_early_run: call check_run; Err -> unreadable note; None -> note 'it has no \"fmt, clippy, tests\" check run'; Some(r) if r.failed() -> note 'fmt, clippy, tests failed, so the landing run decides'; status completed -> already completed/completed; else the same sleep/bound loop. Update its doc comment (why: a candidate is not a landing, so its history and PR-head jobs always fail) and replace_early's doc reference.",
+    "Add check_run to test_support FakeHost and EarlyFake returning Ok(None); and to gh.rs test FakeHost (Ok(None)).",
+    "Change RunHost: script replies become Result<Vec<(String, CiRunState)>, ()>; check_run for commit early1 logs 'check_run early1', takes the script step and finds the named job like the host would; run_state helper builds the named job, plus a helper adding a failed 'the full history' job.",
+    "Adapt existing early-run tests to the new log label and the 'no check run' wording; add the two new tests and a parse_check_run test (several same-name runs, other names ignored).",
+    "Add the CHANGELOG.md Unreleased entry.",
+    "Run cargo fmt, clippy -D warnings and cargo test -p athena-core."
+  ],
+  "risks": [
+    {
+      "risk": "Job name in ci.yml changes and the wait silently stops waiting (named run missing -> push at once).",
+      "mitigation": "The constant is documented with the ci.yml name; the note says when the check run is missing, so it shows in the report."
+    },
+    {
+      "risk": "Check-runs not yet created right after push, so push happens at once.",
+      "mitigation": "Early commit was pushed at verification start, long before land; same as old no-runs behaviour."
+    },
+    {
+      "risk": "Existing tests assert the 'ci_runs early1' log label and 'no runs' text.",
+      "mitigation": "Update them together with RunHost in the same change; run the full athena-core suite."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "New test in gh.rs using RunHost whose script returns, per look, the named job in_progress, in_progress, completed/success, and a failed 'the full history' job each time. Asserts the log is check_run early1, sleep 20, check_run early1, sleep 20, check_run early1, replace, and the note says waited 40s and completed.",
+      "command": "cargo test -p athena-core land_pr_waits_for_the_named_check_run_when_the_history_job_failed",
+      "observes": "land sleeps until 'fmt, clippy, tests' completes and only then replaces the early head, despite the failed history job.",
+      "fails_without": "The old code stops at the failed history run on the first look, so the log would be one look then replace with no sleeps and the test fails."
+    },
+    {
+      "criterion": 2,
+      "method": "New test: named job completed/failure (and a variant with the other jobs in_progress); asserts log is exactly [check_run early1, replace], no sleep entry, and the note contains 'fmt, clippy, tests' and 'failed'.",
+      "command": "cargo test -p athena-core land_pr_pushes_at_once_when_the_named_check_run_failed",
+      "observes": "Immediate push with no sleeping and a note that names the failed job.",
+      "fails_without": "If the wait did not read the named job's failure it would sleep while the other job runs, so a sleep entry would appear."
+    },
+    {
+      "criterion": 3,
+      "method": "Existing early-run tests (waits before pushing, pushes at once when completed, pushes anyway on timeout, failure/no-run/unreadable) are adapted to script the named check run through RunHost; run the full suite and lint.",
+      "command": "cargo test -p athena-core && cargo clippy --all-targets --locked -- -D warnings && cargo fmt --all --check",
+      "observes": "All pass; the timeout test still shows 3 sleeps at a 60 s bound and the default bound is 600 s.",
+      "fails_without": "A wait that ignored the named job's in-progress state or bound would break the waits and timeout tests."
+    },
+    {
+      "criterion": 4,
+      "method": "Inspect the diff: wait_for_early_run calls job.host.check_run(early_head, EARLY_RUN_JOB), contains no CiRunState::failed over ci_runs, and its doc comment says it reads only that job because a candidate is not a landing so the other jobs always fail there. Also grep that ci_runs is no longer called in wait_for_early_run.",
+      "command": "git diff crates/athena-core/src/gh.rs",
+      "observes": "The constant, the seam call and the doc comment are present; no workflow-run conclusion is used.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "Inspect the diff for a new entry under Unreleased describing that land waits only for the candidate's 'fmt, clippy, tests' check run and ignores other jobs.",
+      "command": "git diff CHANGELOG.md",
+      "observes": "The entry is present in the Unreleased section.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Whether the check-runs reply, filtered by check_name, can return several runs of the same name (re-runs); plan picks the highest id, which is what the parse test should pin."
+  ],
+  "producer_section_sha256": "a0e53cdb3e4a9739a8c2c407e7a0ff62fd5ee4565bbcf61700360d6077e20d33"
+}
