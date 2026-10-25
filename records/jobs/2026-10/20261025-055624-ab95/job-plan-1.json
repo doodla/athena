@@ -1,0 +1,225 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261025-055624-ab95",
+  "round": 1,
+  "at": "2026-10-25T05:58:14.40497372Z",
+  "invocation_seq": 2,
+  "approach": "Add `xtask fingerprint` (prints athena_git::attrs::fingerprint(git, \"HEAD\", \"HEAD\") for the cwd repo) and `xtask ci-cache check|mark` (pure decision logic over a marker file in a cache directory). In ci.yml's 'fmt, clippy, tests' job, right after checkout and before any cache restore or 'Set up', build xtask with the runner's preinstalled cargo, compute the fingerprint, actions/cache/restore a `ci-pass/` directory under key `ci-pass-<fingerprint>`, then run `ci-cache check`, which says skip only if the restored marker file exists and names that fingerprint. Every later step is `if: steps.gate.outputs.skip != 'true'`, except a hit-report step that writes fingerprint and matched key to the log and step summary. After the checks step, a `ci-cache mark` step (implicit success()) writes the marker, then actions/cache/save stores it, on PR branches too. The three shared caches keep their default-branch-only save conditions. Docs and tests follow.",
+  "decisions": [
+    {
+      "choice": "Trust the marker file's content, not just the cache-hit output; `check` returns skip only if the marker exists and carries the same fingerprint.",
+      "reason": "A cache hit of an empty or foreign directory must not skip; the marker means 'passed', and a failed run never writes one. The logic is plain Rust, so tests exercise it.",
+      "rejected": [
+        {
+          "option": "Skip on steps.<id>.outputs.cache-hit alone",
+          "why": "Not testable outside Actions, and a hit does not prove the entry is a pass."
+        },
+        {
+          "option": "Store a pass/fail status in the entry",
+          "why": "A failed run should leave no entry; absence is simpler and cannot be misread."
+        }
+      ]
+    },
+    {
+      "choice": "Put the logic in xtask subcommands (`ci-cache check`, `ci-cache mark --outcome <o>`), where mark writes only when outcome is `success`.",
+      "reason": "The brief wants the step script tested by cargo test; the workflow only calls the subcommands.",
+      "rejected": [
+        {
+          "option": "Inline bash in ci.yml",
+          "why": "No unit test; only a static look at the YAML."
+        }
+      ]
+    },
+    {
+      "choice": "Reuse athena-git by adding an xtask -> athena-git edge, updating the architecture table row for xtask to 'data, git' and the stale comment in policy.rs.",
+      "reason": "The fingerprint must be the same one athena land uses (no reimplementation). `dependency_direction_matches_the_architecture` compares the documented table with cargo metadata, so editing the table keeps it passing; athena-git remains a leaf.",
+      "rejected": [
+        {
+          "option": "Copy the fingerprint algorithm into xtask",
+          "why": "Drifts from the gate's rules and violates the brief."
+        },
+        {
+          "option": "Call the athena binary",
+          "why": "It is not installed before setup, and setup is what the skip avoids."
+        }
+      ]
+    },
+    {
+      "choice": "Save the pass marker on every event including pull requests, keyed by fingerprint; leave the three shared-cache saves with their default-branch-only conditions.",
+      "reason": "GitHub scopes caches by branch, so PR entries serve only that branch and main's caches stay written only from main.",
+      "rejected": [
+        {
+          "option": "Save the pass entry only from main",
+          "why": "PR runs, which is the landing case, would never be reused."
+        }
+      ]
+    },
+    {
+      "choice": "Place lookup immediately after checkout, before the toolchain/registry/target restores; gate those restores, report, setup, checks and the shared saves on skip != 'true'.",
+      "reason": "A hit then costs only checkout, a small xtask build and the lookup.",
+      "rejected": [
+        {
+          "option": "Restore the target cache first to speed the xtask build",
+          "why": "Violates 'lookup before setup' and wastes restore time on a hit."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "xtask/src/main.rs",
+      "action": "modify",
+      "purpose": "Add `fingerprint` and `ci-cache check|mark|report` subcommands (or a small ci_cache module) and usage text.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "xtask/Cargo.toml",
+      "action": "modify",
+      "purpose": "Add athena-git workspace dependency.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "Cargo.lock",
+      "action": "modify",
+      "purpose": "Record the new xtask -> athena-git edge.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/architecture.md",
+      "action": "modify",
+      "purpose": "xtask row: depends on data, git.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "action": "modify",
+      "purpose": "Fingerprint lookup before setup, skip conditions, pass marker save; header comment updated; name kept.",
+      "governance": true,
+      "exists": true
+    },
+    {
+      "path": "xtask/tests/fingerprint.rs",
+      "action": "create",
+      "purpose": "Temp-repo fingerprint tests and ci-cache decision tests.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "xtask/tests/policy.rs",
+      "action": "modify",
+      "purpose": "Workflow-structure test; update the stale 'may not depend on athena-git' comment.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "New decision entry with mechanism, 15.4 min median over 33 jobs, alternatives, after-figure unmeasured.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Matching entry.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read crates/athena-git/src/attrs.rs (classify, PathClass) and the Git::at constructor and error type; confirm the call fingerprint(&Git::at(cwd), \"HEAD\", \"HEAD\").",
+    "Add athena-git to xtask/Cargo.toml, update the architecture.md xtask row, refresh Cargo.lock with cargo build.",
+    "Implement `fingerprint` and `ci-cache check <dir> <fp>`, `ci-cache mark <dir> <fp> --outcome <o>` and a hit report that writes fingerprint and matched key to stdout and a summary path; add usage text.",
+    "Write xtask/tests/fingerprint.rs: temp-repo fingerprint tests and the ci-cache logic tests.",
+    "Edit ci.yml: after checkout add the fingerprint step, actions/cache/restore (path ci-pass, key ci-pass-<fp>), the check step with id gate, and the hit-report step; add the skip condition to later steps; add mark and save steps after the checks; update the header comment; keep the job name.",
+    "Add the workflow-structure test to policy.rs and fix the stale comment.",
+    "Add the decisions.md and CHANGELOG.md entries, following the formats of neighbouring entries.",
+    "Run cargo fmt --all, cargo clippy --all-targets --locked -- -D warnings, cargo test --locked."
+  ],
+  "risks": [
+    {
+      "risk": "Building xtask before setup is cold and could eat much of the saved time, or fail on an old preinstalled toolchain.",
+      "mitigation": "Use `cargo +stable run --locked -q -p xtask`; keep xtask's dependencies as they are; record the cost in decisions.md; the after-measurement is deferred."
+    },
+    {
+      "risk": "A false skip, where changed code is reported as passing.",
+      "mitigation": "The key holds the governed fingerprint, the marker must repeat it, and only `mark --outcome success` after the checks step writes it."
+    },
+    {
+      "risk": "Fingerprint ignores non-governed paths such as workflow files if they are owner paths, so edits to ci.yml could reuse a pass.",
+      "mitigation": "Check how ci.yml and rust-toolchain.toml are classified; if owner paths, add the workflow file's hash into the key and say so in decisions.md."
+    },
+    {
+      "risk": "Immutable cache keys: a rerun after a pass cannot re-save.",
+      "mitigation": "A rerun hits the entry and skips, so no save is needed; the save step also tolerates an already-existing key."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Integration test xtask/tests/fingerprint.rs builds a temp git repo (with the attribute rules the repo uses for owner paths, and a records/ dir), runs the built xtask binary `fingerprint` in it via CARGO_BIN_EXE_xtask, and compares outputs: equal after adding a records/ file, equal after changing an owner-path file, different after changing a governed file.",
+      "command": "cargo test -p xtask --test fingerprint",
+      "observes": "Test names such as fingerprint_ignores_records_and_owner_paths and fingerprint_changes_with_governed_content pass.",
+      "fails_without": "If the command hashed the whole tree, or records/owner changes leaked in, the equality asserts fail; if governed changes were ignored, the inequality assert fails."
+    },
+    {
+      "criterion": 2,
+      "method": "Tests of `ci-cache` in the same file/unit tests: empty or missing dir -> skip=false; marker with another fingerprint -> false; marker with the right fingerprint -> true; `mark --outcome failure` (or cancelled) writes no marker, `--outcome success` writes one that `check` then accepts; and a sequence test: miss -> run -> failed outcome -> still miss; success -> hit. A policy.rs test parses ci.yml and asserts the save step has no condition beyond success, comes after the mark step, which comes after the checks step.",
+      "command": "cargo test -p xtask",
+      "observes": "All ci_cache_* tests and the workflow-order test pass.",
+      "fails_without": "If mark wrote on failure, or check skipped on a missing/foreign marker, the corresponding asserts fail."
+    },
+    {
+      "criterion": 3,
+      "method": "A policy.rs test reads ci.yml: job name is 'fmt, clippy, tests'; index of the cache/restore step with key ci-pass- precedes 'Set up'; the existing restores, report, setup, checks and shared saves carry `steps.gate.outputs.skip != 'true'`; the pass-save step follows the checks step.",
+      "command": "cargo test -p xtask --test policy",
+      "observes": "The new workflow-structure test passes.",
+      "fails_without": "Removing a skip condition or reordering the lookup after setup fails the test."
+    },
+    {
+      "criterion": 4,
+      "method": "The same policy.rs test asserts the pass-save step has no default-branch condition and a key starting ci-pass- plus the fingerprint output, that the three shared saves still contain the default-branch condition, and that the marker is written only by `ci-cache mark` after checks (covered by criterion 2 tests).",
+      "command": "cargo test -p xtask --test policy",
+      "observes": "Assertions on keys and conditions pass.",
+      "fails_without": "A save step gated to the default branch, or shared saves opened to PRs, fails the assertions."
+    },
+    {
+      "criterion": 5,
+      "method": "A test of `ci-cache check`/a report subcommand output: on a hit it prints and appends to the summary file (path from an argument) the fingerprint and matched key; the policy test checks the hit-report step passes the matched-key output and runs only on skip.",
+      "command": "cargo test -p xtask",
+      "observes": "Output contains the fingerprint and key; the summary file has them.",
+      "fails_without": "If the report omitted the fingerprint or key, the contains asserts fail."
+    },
+    {
+      "criterion": 6,
+      "method": "Inspect with cargo tree that xtask depends on athena-git, and run the existing graph test; a grep-free check is that main.rs calls athena_git::attrs::fingerprint.",
+      "command": "cargo tree -p xtask",
+      "observes": "athena-git appears under xtask; dependency_direction_matches_the_architecture passes in cargo test -p xtask --test policy.",
+      "fails_without": "Without the architecture.md row update, dependency_direction_matches_the_architecture fails on the undocumented xtask -> git edge."
+    },
+    {
+      "criterion": 7,
+      "method": "Read the new docs/decisions.md and CHANGELOG.md entries; the existing policy tests that check decisions and changelog format must still pass.",
+      "command": "cargo test -p xtask --test policy",
+      "observes": "Entries state the mechanism, 15.4 minutes over 33 jobs (2026-10-23 to 25), the alternatives, and 'after-figure not yet measured'; format tests pass.",
+      "fails_without": null
+    },
+    {
+      "criterion": 8,
+      "method": "Run the full gates.",
+      "command": "cargo test",
+      "observes": "All pass; also cargo clippy --all-targets -- -D warnings and cargo fmt --check are clean.",
+      "fails_without": "Any new warning, format drift or failing test fails the run."
+    }
+  ],
+  "open_questions": [
+    "Whether the runner's preinstalled cargo can build xtask despite rust-toolchain.toml and the workspace rust-version; the plan uses `cargo +stable` and a separate CARGO_TARGET_DIR, but this cannot be tested here.",
+    "The exact attribute names for owner paths and how records/ is classified: read crates/athena-git/src/attrs.rs (classify) before writing the temp-repo test.",
+    "Whether decisions.md and CHANGELOG.md have format tests (numbering, headings) the new entries must satisfy."
+  ],
+  "producer_section_sha256": "6a87071ee6994a75cf5a2017028f4547e1db7a59eb5ffc056624767770f76e89"
+}
