@@ -1059,3 +1059,9 @@ It should become demonstrably less likely to make the same kind of mistake again
 
 * Yes, queue them all. I also want something that sanity checks the system and keeps everything neat and clean. Does our pantheon have anything that'll get built?
 * Relay note: "them all" are the operator's proposals of that conversation: a system-facts file the planner and critic always read; read-only git history and the budget printout for the planner and critic; the top recurring failure classes shown to the planner and critic; running `athena propose` automatically; and `athena status` evaluating the job-planning keep rule. For the second part the operator pointed to Hestia (continuity: knowledge, documentation, operational health, long-term quality), with Hades's cleanup folded in until evidence calls for a separate role, per decision 2A.
+
+### 2026-10-25: Planning intelligence, context, speed, and a guard against rabbit holes
+
+* Tell Athena to manage and upgrade intelligence in planning. Effort should also be explicit.
+* Also a context/knowledge engineer. We want to make sure that the context provided to agents is sufficient and good. What could've been planned better etc. Also, we need to be faster. Learnings need to go back into the system, but I want some role responsible for ensuring we don't rabbit hole into unnecessary work.
+* Relay note: the operator mapped the two roles to the pantheon for Athena to confirm or change: the context/knowledge engineer to Hermes (orchestration: context and handoffs) working with Hestia (knowledge), and the role that stops rabbit holes to Artemis (boundaries: scope and impact beyond the request) with Demeter's view of cost.
