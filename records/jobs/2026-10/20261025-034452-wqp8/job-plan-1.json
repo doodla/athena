@@ -1,0 +1,325 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261025-034452-wqp8",
+  "round": 1,
+  "at": "2026-10-25T09:06:48.624931134Z",
+  "invocation_seq": 3,
+  "approach": "Add Priority::Urgent as the first (best) variant. Add a new `athena.priority/1` record (job, sequence n, level, why, time) at `<job dir>/priority-<n>.json`, loaded into JobRecords; the highest n wins. Add `Athena::set_priority` (in reading.rs) and a CLI command `athena priority <job> <level> --why ...` that checks the level, finds the job, requires it to be queued, and commits one new record. One function in reading.rs, `job_priority(job)`, gives the priority from the newest record, else urgent if the latest reading carries an `urgent_reason`, else the `Priority:` line in the text. `plan_entry` and `status::job_line` both call it, so `athena plan` and `athena status` agree. The reader marks urgency with a new `ReadingOutput.urgent_reason: Option<String>`, a hardened required property. Its field doc in outputs.rs holds the rule, so reader.md is not edited. The Reading record gains an optional `urgent_reason` that old records still parse without. Tests cover the ordering, the override (including through the real command on a fixture repo), and the reading. CHANGELOG.md and docs/decisions.md get entries.",
+  "decisions": [
+    {
+      "choice": "A new append-only record kind `athena.priority/1`, one file per record, `<job dir>/priority-<n>.json`; the highest n wins.",
+      "reason": "Requests stay append-only. It follows how corrections are stored (`correction-<n>.json`). Highest n gives a deterministic latest-wins that does not depend on timestamps, and it keeps history. Re-prioritising needs no re-queue.",
+      "rejected": [
+        {
+          "option": "Rewrite the Priority line in request.json",
+          "why": "Breaks the append-only rule and is out of scope."
+        },
+        {
+          "option": "A separate global priorities file",
+          "why": "A record per job is how all job data is stored, and the schema registry then validates it."
+        },
+        {
+          "option": "Latest by timestamp",
+          "why": "Equal or skewed clocks make it non-deterministic. The existing scores use the timestamp, but a sequence number is safer."
+        }
+      ]
+    },
+    {
+      "choice": "The priority record stores the level as a string (urgent/high/normal/low), validated in AnyRecord::parse and again in the command. Conversion to `plan::Priority` happens in core.",
+      "reason": "athena-data cannot depend on athena-core, where `Priority` lives. A validated string avoids moving the enum between crates.",
+      "rejected": [
+        {
+          "option": "Move Priority into athena-data",
+          "why": "A wider refactor touching the status, display and drain callers, for no gain."
+        }
+      ]
+    },
+    {
+      "choice": "The reader marks urgency through a new required nullable field `urgent_reason` in ReadingOutput. The rule is its field doc, which goes into the generated schema. A non-empty reason means urgent. reader.md is not changed.",
+      "reason": "reader.md is at 1997 of 2000 tokens. Requiring the field makes the reader answer it every time. Requiring a reason keeps the record auditable. The field doc is the only place the rule lives.",
+      "rejected": [
+        {
+          "option": "Add the rule to reader.md",
+          "why": "It would exceed the budget, and the user chose outputs.rs or briefs.rs."
+        },
+        {
+          "option": "A bare `urgent: bool`",
+          "why": "The request requires the reason to be recorded in the reading."
+        },
+        {
+          "option": "Keyword-match speed words in plan_entry",
+          "why": "Brittle. The reader's judgement is the intended mechanism."
+        }
+      ]
+    },
+    {
+      "choice": "Precedence in `job_priority`: the newest priority record, else Urgent if the latest reading has an urgent_reason, else the text's Priority line. The record overrides everything, including the reader's urgency.",
+      "reason": "The operator's explicit later choice should beat both automatic sources. This also lets the operator demote a wrongly urgent request.",
+      "rejected": [
+        {
+          "option": "The maximum of the sources",
+          "why": "It would make demotion impossible, which contradicts 'overriding'."
+        }
+      ]
+    },
+    {
+      "choice": "The command takes only queued jobs (JobState::Queued) and rejects unknown ids and unknown levels with a clear error before writing anything.",
+      "reason": "Matches the request and criterion 4. Queued jobs are what plan orders, and the check gives a clear error instead of a silent no-op.",
+      "rejected": [
+        {
+          "option": "Allow any open state",
+          "why": "It was explicitly scoped to queued requests."
+        }
+      ]
+    },
+    {
+      "choice": "The Reading record's new field is `#[serde(default, skip_serializing_if = \"Option::is_none\")] urgent_reason: Option<String>`.",
+      "reason": "Existing committed readings have no such key and the struct denies unknown fields, so old records must still parse. None-valued fields stay out of the JSON, so ordinary readings serialise as before.",
+      "rejected": [
+        {
+          "option": "A required field",
+          "why": "It would invalidate every existing reading record."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/plan.rs",
+      "action": "modify",
+      "purpose": "Add Urgent as the first variant, 'urgent' in as_str and from_text, and the doc comments. Add the ordering tests and update the existing from_text test, which currently expects 'urgent' to give Normal.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "purpose": "Add `Reading.urgent_reason` (serde default, skipped when None). Add the `PriorityRecord` struct, the AnyRecord::Priority variant tagged `athena.priority/1`, validation of the level and a non-empty job, canonical_path `<job dir>/priority-<n>.json`, and schema(). Update the Reading literal in its tests and add round-trip and path tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/store.rs",
+      "action": "modify",
+      "purpose": "Not in the brief's file list, but required: JobRecords.add ignores unknown record kinds. Add `priorities: Vec<PriorityRecord>` (sorted by n) and the job_of arm, so the records are loaded. Without this the override cannot be read.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Carry `urgent_reason` from ReadingOutput into Reading, redacted, with a blank reason as None. Add `job_priority(job)` with the precedence record, then reading urgency, then text. Use it in plan_entry. Add `Athena::set_priority(job_ref, level, why, ui)`, which validates, resolves the job, requires Queued, and commits one record. Update the Reading literal at ~1878 and add tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "job_line uses reading::job_priority, so the status priority follows the record.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/outputs.rs",
+      "action": "modify",
+      "purpose": "Add `urgent_reason: Option<String>` to ReadingOutput. Its doc holds the urgent-marking rule, which is the only place the rule lives. Add the schema test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Only the Reading literal at ~1192 gets the new field. The rule stays in outputs.rs, with no brief text added.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "purpose": "Add `Command::Priority { job, level, why, json }`, its dispatch calling set_priority, and help text. Update the drain and plan help to say `urgent|high|normal|low`, and mention the new command.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/admission.rs",
+      "action": "modify",
+      "purpose": "Reading literal at ~597 gets `urgent_reason: None`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/pr_check.rs",
+      "action": "modify",
+      "purpose": "Reading literal at ~253 gets `urgent_reason: None`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-gate/src/landing_tests.rs",
+      "action": "modify",
+      "purpose": "Reading literal at ~96 gets `urgent_reason: None`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "action": "modify",
+      "purpose": "Fake reader JSON at ~182 gets `\"urgent_reason\": null`, and any ReadingOutput-shaped literal near ~894 is checked.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-agent/src/fake.rs",
+      "action": "modify",
+      "purpose": "The fake reader's JSON at ~212 gets `\"urgent_reason\": null` so it matches the hardened schema.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/common/mod.rs",
+      "action": "modify",
+      "purpose": "The reading() helper JSON at ~310 gets `\"urgent_reason\": null`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/priority.rs",
+      "action": "create",
+      "purpose": "Fixture test: two queued requests, set_priority, then plan order, status priority, one new record, and request.json unchanged. Also the error cases.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "docs/records.md",
+      "action": "modify",
+      "purpose": "List `priority-<n>.json` as `athena.priority/1`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Entry for the urgent level, the priority command, the priority record, and the reader's urgent_reason.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Decision with the alternatives above.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/prompts/reader.md",
+      "action": "modify",
+      "purpose": "Deliverable in the brief, but not edited: it is at 1997 of 2000 tokens. Touch it only to remove text, never to grow it.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Grep for `athena.baseline/1`, `AnyRecord::Baseline` and the Reading literals to confirm every place that needs an update. Check how RecordSet or the docs tests enumerate record kinds.",
+    "plan.rs: add Urgent first, update as_str, from_text and docs, and write the ordering tests (urgent < high < normal < low, and a dependency before its urgent dependent). Fix the old from_text assertion.",
+    "records.rs: add Reading.urgent_reason, PriorityRecord and AnyRecord::Priority (validation, canonical_path, schema), and tests. Add the field to Reading literals in records.rs, admission.rs, pr_check.rs, landing_tests.rs, reading.rs and briefs.rs.",
+    "store.rs: add `priorities`, the add arm, the sort by n, and the job_of arm.",
+    "outputs.rs: add `urgent_reason` with the rule in its doc, plus the schema test. Add `\"urgent_reason\": null` to the fake and fixture JSON.",
+    "reading.rs: carry urgent_reason through parse (redact, blank to None), add job_priority, use it in plan_entry, add Athena::set_priority (validate the level, resolve, require Queued, take the lock, commit priority-<n>.json), and the tests for criteria 2 and 3.",
+    "status.rs: job_line uses reading::job_priority.",
+    "main.rs: add the Priority command and dispatch. Update the help text to mention urgent and the command.",
+    "Write crates/athena-cli/tests/priority.rs using Fixture: queue, plan, set priority, plan and status again, check the files, then the error cases.",
+    "Run cargo fmt, cargo clippy --all-targets --locked -- -D warnings, cargo test --locked, and the budgets test. Do not edit reader.md.",
+    "Write the CHANGELOG.md entry, the docs/decisions.md decision with alternatives, and the docs/records.md line."
+  ],
+  "risks": [
+    {
+      "risk": "The new required ReadingOutput field breaks fixtures and fake agents that emit reader JSON without it.",
+      "mitigation": "Add `\"urgent_reason\": null` to the listed fixtures. Run the full cargo test early, after the field is added."
+    },
+    {
+      "risk": "The field doc and the new required property push the reader set over its 2000-token budget, if the schema is counted.",
+      "mitigation": "Keep the doc short (about 60 words). Run the budgets test right after the edit. If it fails, trim the doc, not reader.md."
+    },
+    {
+      "risk": "Adding a field to Reading breaks parsing of old committed records or the record gate.",
+      "mitigation": "serde default plus skip_serializing_if. Add a test that parses a reading JSON without the key and round-trips one with it."
+    },
+    {
+      "risk": "store.rs is outside the brief's file list, and a wide change there could conflict with other jobs.",
+      "mitigation": "The change is two small additions (one field, one match arm). It is stated in the plan, and there is no other way to load the record."
+    },
+    {
+      "risk": "The existing from_text test and display tests assert 'urgent' gives Normal, or match Priority exhaustively.",
+      "mitigation": "Update the plan.rs assertion. The compiler flags non-exhaustive matches, and display.rs uses only as_str and a Normal comparison."
+    },
+    {
+      "risk": "Two priority commands racing could write the same n.",
+      "mitigation": "Take the job lock as close_with does, and write n = max + 1 against the head's records. A collision fails at commit instead of overwriting."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "A unit test in plan.rs builds entries with Urgent, High, Normal and Low priorities and a dependency chain. It asserts the order urgent < high < normal < low, and that an urgent dependent still comes after its low-priority prerequisite. Because the prerequisite inherits the urgent dependent's priority, it also comes before unrelated high items. It also asserts `Priority::Urgent < Priority::High`.",
+      "command": "cargo test -p athena-core plan::",
+      "observes": "The test passes, showing the order urgent, high, normal, low, and the dependency before its urgent dependent.",
+      "fails_without": "Without the Urgent variant sorted before High, the urgent entry would not come first, or the test would not compile. Without the dependency rule, the urgent dependent would precede its prerequisite."
+    },
+    {
+      "criterion": 2,
+      "method": "Unit tests in reading.rs: a job whose text says `Priority: normal` plus a priority record of urgent. Assert that `plan_entry(...).priority` is Urgent, that Plan::build puts it before an older high item, that the status line's priority (`status::job_line`) is Urgent, and that the request is unchanged. A CLI integration test in crates/athena-cli/tests/priority.rs uses the Fixture to queue two requests with `ask --later`, then reads the plan order and status. It runs set_priority (the same function the command calls), reads them again, and asserts the order and status changed. It also checks that exactly one new `priority-1.json` file was added, request.json is byte-identical, and an unknown level or a non-queued or unknown job errors.",
+      "command": "cargo test --locked -p athena-core priority && cargo test --locked -p athena-cli --test priority",
+      "observes": "Plan order and the status priority flip after the record, with no new or changed request record. Errors name the bad level or job.",
+      "fails_without": "If plan_entry or job_line ignored the record, the order and status would not change. If the command rewrote the request, the byte-identity check would fail."
+    },
+    {
+      "criterion": 3,
+      "method": "Reading tests. (a) A reading with `urgent_reason: Some(\"cuts retries that redo work\")` gives `plan_entry(...).priority == Urgent`, and the reason is on the Reading. (b) A reading with None, for an ordinary request, is not urgent. (c) The parse path (the function around reading.rs:385) takes a ReadingOutput JSON with a reason and one with null, and checks the recorded `urgent_reason` is redacted-and-kept or None. A blank reason counts as None. (d) The schema from `reading_schema` lists `urgent_reason` as required, with the rule in its description (an outputs.rs test).",
+      "command": "cargo test --locked -p athena-core reading::",
+      "observes": "The speed request comes out Urgent with its reason recorded, and the ordinary one does not.",
+      "fails_without": "If urgent_reason were not carried from the output into the record, or not used by plan_entry, test (a) would find a Normal priority."
+    },
+    {
+      "criterion": 4,
+      "method": "Tests: `Priority::from_text(\"Priority: urgent\") == Urgent` (the old assertion at plan.rs:644 expecting Normal is updated). The command's tests cover an unknown level, an unknown job id, and a non-queued job (a read job), each failing with a message and writing nothing. A valid call appends only a `priority-<n>.json`. A clap parse test or the existing help test checks that the help text names urgent and the command.",
+      "command": "cargo test --locked -p athena-core plan:: && cargo test --locked -p athena-cli",
+      "observes": "from_text parses urgent. The error cases fail with clear messages. The help contains 'urgent' and 'priority'.",
+      "fails_without": "None of the error cases would be rejected without the validation, and from_text would still return Normal for 'urgent'."
+    },
+    {
+      "criterion": 5,
+      "method": "A test in outputs.rs asserts that the generated reading schema's `urgent_reason` description contains the rule terms (faster, wasted time, failed or rejected attempts, planning stops, timeouts, retries, thrash, duplicated checks, reason). `git diff` shows reader.md unchanged, or only shorter if text was removed.",
+      "command": "git diff --stat",
+      "observes": "The outputs.rs doc holds the rule. reader.md does not appear in the diff, or has fewer lines.",
+      "fails_without": "If the rule were missing from the field doc, the schema test would fail."
+    },
+    {
+      "criterion": 6,
+      "method": "Run the existing budgets test. The reader set (prompt, defaults, and so on) must stay within 2000 tokens. reader.md is untouched.",
+      "command": "cargo test --locked -p athena-cli --test budgets",
+      "observes": "every_role_set_is_within_its_budget passes. The reader count is at or below the budget.",
+      "fails_without": "If reader.md grew, the test would fail by exceeding the budget."
+    },
+    {
+      "criterion": 7,
+      "method": "Inspect the new CHANGELOG.md entry (urgent level, priority command, reader urgent_reason, record kind). Inspect the new docs/decisions.md decision with its alternatives. Both are written in the prevailing house style. Also check docs/records.md lists `athena.priority/1`.",
+      "command": "git diff CHANGELOG.md docs/decisions.md docs/records.md",
+      "observes": "The diff shows an entry in each file, and the decision lists the rejected alternatives.",
+      "fails_without": null
+    },
+    {
+      "criterion": 8,
+      "method": "Run the three checks Athena runs.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0.",
+      "fails_without": "Any missed fixture (a Reading literal lacking the new field) fails compilation and so the whole suite."
+    }
+  ],
+  "open_questions": [
+    "Does the record-set loader or a docs-vs-code test (docs/records.md, schema lists) enumerate record kinds so that a new kind needs a registration I did not see? I read AnyRecord, JobRecords.add and job_of, but not athena-gate's RecordSet. The producer should grep for `athena.baseline/1` style registries first.",
+    "Do the fixtures that build reader JSON (fake.rs, common/mod.rs, run_pin_tests.rs) validate against the hardened schema? If so the new required `urgent_reason` needs `null` added. If not, the key is harmless either way.",
+    "Does the budgets test count the generated JSON schema in the reader set? If it does, the field doc's length counts against 2000 and must stay short. I have not read budgets.rs fully.",
+    "I did not read manage.rs's `message` and `NewFile` helpers or the Fixture's `ask --later` API. set_priority in reading.rs needs the same imports as close_with, and the integration test needs the Fixture's way of queuing a request."
+  ],
+  "producer_section_sha256": "b6e84fd3ae0243ee1aaa76c69299127d0a6874494905f9b72d5284672281481a"
+}
