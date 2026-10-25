@@ -1065,3 +1065,8 @@ It should become demonstrably less likely to make the same kind of mistake again
 * Tell Athena to manage and upgrade intelligence in planning. Effort should also be explicit.
 * Also a context/knowledge engineer. We want to make sure that the context provided to agents is sufficient and good. What could've been planned better etc. Also, we need to be faster. Learnings need to go back into the system, but I want some role responsible for ensuring we don't rabbit hole into unnecessary work.
 * Relay note: the operator mapped the two roles to the pantheon for Athena to confirm or change: the context/knowledge engineer to Hermes (orchestration: context and handoffs) working with Hestia (knowledge), and the role that stops rabbit holes to Artemis (boundaries: scope and impact beyond the request) with Demeter's view of cost.
+
+### 2026-10-25: Speed first
+
+* I thought we had speed as a priority. Athena should prioritize anything that'll help it move faster ( includes the time wasted )
+* Relay note: a standing rule. Work that makes Athena faster, or cuts the time it wastes (failed and rejected attempts, planning stops, timeouts, retries that redo work, thrash, duplicated checks), ranks above all other work, including the rest of the records-history build, which pauses after the fixture job then running.
