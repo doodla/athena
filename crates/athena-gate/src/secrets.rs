@@ -19,8 +19,10 @@ use athena_data::Config;
 use athena_data::config::SecretAllow;
 use athena_git::Git;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{LazyLock, Mutex};
 
 /// One finding, as gitleaks reports it (only the fields Athena uses; author and email are never read).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -42,6 +44,8 @@ pub struct Finding {
 pub struct Gitleaks {
     bin: PathBuf,
     dir: tempfile::TempDir,
+    /// SHA-256 of the generated configuration text, part of the key of a remembered text scan.
+    config_digest: String,
 }
 
 #[derive(Serialize)]
@@ -104,15 +108,21 @@ impl Gitleaks {
                 path: bin.display().to_string(),
             });
         }
+        Gitleaks::at(bin, &generated_config(&config.secrets.allowlist))
+    }
+
+    /// A gitleaks at `bin` with the generated configuration text `config`.
+    fn at(bin: PathBuf, config: &str) -> Result<Gitleaks> {
         let dir = tempfile::Builder::new()
             .prefix("athena-gitleaks-")
             .tempdir()?;
-        std::fs::write(
-            dir.path().join("config.toml"),
-            generated_config(&config.secrets.allowlist),
-        )?;
+        std::fs::write(dir.path().join("config.toml"), config)?;
         std::fs::create_dir(dir.path().join("ignore"))?;
-        Ok(Gitleaks { bin, dir })
+        Ok(Gitleaks {
+            bin,
+            dir,
+            config_digest: athena_data::sha256_hex(config.as_bytes()),
+        })
     }
 
     fn command(&self, mode: &str) -> Command {
@@ -196,10 +206,114 @@ impl Gitleaks {
     }
 
     /// Scans text, such as an agent's free-text output before it is recorded.
+    ///
+    /// A text scanned before by the same gitleaks binary (by content) under the same generated configuration
+    /// returns the findings of that scan without running gitleaks again: the findings depend on nothing else.
+    /// Only successful scans are remembered, so a failing gitleaks still fails every time.
     pub fn scan_text(&self, text: &str) -> Result<Vec<Finding>> {
-        let cmd = self.command("stdin");
-        self.run(cmd, Some(text.as_bytes()))
+        let key = binary_digest(&self.bin).map(|binary| {
+            athena_data::sha256_hex(
+                format!(
+                    "{binary}\n{}\n{}",
+                    self.config_digest,
+                    athena_data::sha256_hex(text.as_bytes())
+                )
+                .as_bytes(),
+            )
+        });
+        if let Some(key) = &key
+            && let Some(found) = SCAN_MEMO.get(key)
+        {
+            return Ok(found);
+        }
+        let found = self.run(self.command("stdin"), Some(text.as_bytes()))?;
+        if let Some(key) = key {
+            SCAN_MEMO.put(key, found.clone());
+        }
+        Ok(found)
     }
+}
+
+/// The most text scans remembered at once; the memory is emptied when it fills.
+const MEMO_CAP: usize = 1024;
+
+/// Findings of earlier text scans, keyed by a digest of the binary, the configuration and the text, so the
+/// scanned text itself (which may hold a secret) is never kept.
+struct Memo {
+    cap: usize,
+    map: Mutex<HashMap<String, Vec<Finding>>>,
+}
+
+impl Memo {
+    fn new(cap: usize) -> Memo {
+        Memo {
+            cap,
+            map: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn get(&self, key: &str) -> Option<Vec<Finding>> {
+        let map = self.map.lock().unwrap_or_else(|e| e.into_inner());
+        map.get(key).cloned()
+    }
+
+    fn put(&self, key: String, found: Vec<Finding>) {
+        let mut map = self.map.lock().unwrap_or_else(|e| e.into_inner());
+        if map.len() >= self.cap {
+            map.clear();
+        }
+        map.insert(key, found);
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.map.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+}
+
+static SCAN_MEMO: LazyLock<Memo> = LazyLock::new(|| Memo::new(MEMO_CAP));
+
+/// What identifies a file's state without reading it: inode, size, and modification and change times.
+type Stamp = (u64, u64, i64, i64, i64, i64);
+
+static BINARIES: LazyLock<Mutex<HashMap<PathBuf, (Stamp, String)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn stamp_of(path: &Path) -> Option<Stamp> {
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::metadata(path).ok()?;
+    Some((
+        m.ino(),
+        m.len(),
+        m.mtime(),
+        m.mtime_nsec(),
+        m.ctime(),
+        m.ctime_nsec(),
+    ))
+}
+
+/// SHA-256 of the binary's content. It is computed once per path and again whenever the file's inode, size,
+/// modification time or change time differs; a file that cannot be read has no digest, and its scans are not
+/// remembered.
+fn binary_digest(path: &Path) -> Option<String> {
+    let stamp = stamp_of(path)?;
+    {
+        let known = BINARIES.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((seen, digest)) = known.get(path)
+            && *seen == stamp
+        {
+            return Some(digest.clone());
+        }
+    }
+    let digest = athena_data::sha256_hex(&std::fs::read(path).ok()?);
+    // The file may have changed while it was read; a digest without a settled stamp is not kept.
+    if stamp_of(path)? == stamp {
+        BINARIES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(path.to_path_buf(), (stamp, digest.clone()));
+    }
+    Some(digest)
 }
 
 fn violations(findings: Vec<Finding>, commit: Option<&str>) -> Vec<Violation> {
@@ -389,6 +503,135 @@ mod tests {
         std::fs::remove_file(dir.path().join("old.txt")).unwrap();
         commit(&git, "remove\n\nAthena-Job: bootstrap\n");
         assert!(!check_history(&git, &config(), "HEAD").unwrap().is_empty());
+    }
+
+    /// A stand-in gitleaks: it counts its runs in `count`, fails while `count.fail` exists, and otherwise reports
+    /// one finding whose rule is `tag`. Tests build `Gitleaks` from its path directly, never through the
+    /// `ATHENA_GITLEAKS` variable, which would change every test running beside them.
+    fn write_stub(bin: &Path, tag: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let count = format!("{}.count", bin.display());
+        let script = format!(
+            "#!/bin/sh\necho x >> '{count}'\ncat > /dev/null\n[ -e '{count}.fail' ] && exit 3\n\
+             while [ $# -gt 0 ]; do [ \"$1\" = --report-path ] && r=$2; shift; done\n\
+             printf '[{{\"RuleID\":\"{tag}\",\"Secret\":\"s\",\"File\":\"f\",\"StartLine\":3}}]' > \"$r\"\n"
+        );
+        std::fs::write(bin, script).unwrap();
+        std::fs::set_permissions(bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    fn stub_runs(bin: &Path) -> usize {
+        std::fs::read_to_string(format!("{}.count", bin.display()))
+            .map(|t| t.lines().count())
+            .unwrap_or(0)
+    }
+
+    fn stub_in(dir: &Path, tag: &str) -> PathBuf {
+        let bin = dir.join("gitleaks");
+        write_stub(&bin, tag);
+        bin
+    }
+
+    #[test]
+    fn a_remembered_text_scan_runs_gitleaks_once_and_returns_the_same_findings() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = stub_in(dir.path(), "once");
+        let gitleaks = Gitleaks::at(bin.clone(), "config-a").unwrap();
+        let first = gitleaks.scan_text("memo text one").unwrap();
+        let second = gitleaks.scan_text("memo text one").unwrap();
+        assert_eq!(stub_runs(&bin), 1);
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].rule, "once");
+        assert_eq!(first[0].line, 3);
+        // Another Gitleaks value for the same binary and configuration shares the answer.
+        let other = Gitleaks::at(bin.clone(), "config-a").unwrap();
+        assert_eq!(other.scan_text("memo text one").unwrap(), first);
+        assert_eq!(stub_runs(&bin), 1);
+    }
+
+    #[test]
+    fn a_different_text_or_configuration_is_scanned_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = stub_in(dir.path(), "diff");
+        let a = Gitleaks::at(bin.clone(), "config-a").unwrap();
+        let b = Gitleaks::at(bin.clone(), "config-b").unwrap();
+        a.scan_text("memo text two").unwrap();
+        a.scan_text("memo text three").unwrap();
+        assert_eq!(stub_runs(&bin), 2, "another text is scanned");
+        b.scan_text("memo text two").unwrap();
+        assert_eq!(stub_runs(&bin), 3, "another configuration is scanned");
+    }
+
+    #[test]
+    fn a_replaced_binary_is_not_served_the_old_findings() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = stub_in(dir.path(), "aaaa");
+        let gitleaks = Gitleaks::at(bin.clone(), "config-a").unwrap();
+        assert_eq!(
+            gitleaks.scan_text("memo text four").unwrap()[0].rule,
+            "aaaa"
+        );
+        // Same length, same modification time, different content.
+        let modified = std::fs::metadata(&bin).unwrap().modified().unwrap();
+        write_stub(&bin, "bbbb");
+        std::fs::File::options()
+            .write(true)
+            .open(&bin)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+        assert_eq!(
+            gitleaks.scan_text("memo text four").unwrap()[0].rule,
+            "bbbb"
+        );
+        assert_eq!(stub_runs(&bin), 2);
+    }
+
+    #[test]
+    fn a_failed_scan_is_not_remembered() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = stub_in(dir.path(), "fail");
+        let gitleaks = Gitleaks::at(bin.clone(), "config-a").unwrap();
+        let fail = format!("{}.count.fail", bin.display());
+        std::fs::write(&fail, "").unwrap();
+        assert!(matches!(
+            gitleaks.scan_text("memo text five"),
+            Err(GateError::Gitleaks(_))
+        ));
+        assert!(gitleaks.scan_text("memo text five").is_err(), "still fails");
+        std::fs::remove_file(&fail).unwrap();
+        assert_eq!(gitleaks.scan_text("memo text five").unwrap().len(), 1);
+        assert_eq!(stub_runs(&bin), 3);
+    }
+
+    #[test]
+    fn the_memory_is_emptied_when_it_reaches_its_cap() {
+        let memo = Memo::new(2);
+        memo.put("a".into(), vec![]);
+        memo.put("b".into(), vec![]);
+        assert_eq!(memo.len(), 2);
+        memo.put("c".into(), vec![]);
+        assert_eq!(memo.len(), 1);
+        assert!(memo.get("a").is_none() && memo.get("c").is_some());
+    }
+
+    #[test]
+    fn remembered_findings_equal_a_fresh_scan_by_the_real_gitleaks() {
+        // Skips without the pinned gitleaks, like the tests above that need it would fail closed.
+        let Ok(gitleaks) = Gitleaks::new(&config()) else {
+            return;
+        };
+        let text = format!("first line\nauth = \"{}\"\nlast line\n", fake_token());
+        let fresh = gitleaks.run(gitleaks.command("stdin"), Some(text.as_bytes()));
+        let first = gitleaks.scan_text(&text).unwrap();
+        let remembered = gitleaks.scan_text(&text).unwrap();
+        let fresh = fresh.unwrap();
+        assert!(!fresh.is_empty(), "the token is found");
+        assert_eq!(first, fresh);
+        assert_eq!(remembered, fresh);
+        assert_eq!(fresh[0].rule, "github-pat");
+        assert_eq!(fresh[0].line, 2);
     }
 
     #[test]

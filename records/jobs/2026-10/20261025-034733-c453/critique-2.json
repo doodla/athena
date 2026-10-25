@@ -1,0 +1,76 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261025-034733-c453",
+  "round": 2,
+  "at": "2026-10-25T18:34:16.962904895Z",
+  "invocation_seq": 6,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/checks.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/checks.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/gh.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/gh.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-data/src/config.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-data/src/config.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "Running `cargo nextest` as a cargo subcommand will not work, because the plan installs the binary only under the Athena home tools directory.",
+      "evidence": "xtask/src/main.rs install_gitleaks installs to paths::tool_path (crates/athena-data/src/paths.rs:58), which is athena_home()/tools/<tool>/<ver>. That directory is not on PATH and is not ~/.cargo/bin. `cargo nextest` needs a `cargo-nextest` program on PATH. athena.toml line 39 passes PATH through unchanged. So adding `nextest` to producer_commands allows a command that fails with 'no such command'. Step 10 and the criterion 5 demonstration both depend on that command. Fix: Have the producer, the verifier and the demonstrations run the wrapper (`cargo run --locked -q -p xtask -- test`). `cargo run` is already allowed (athena.toml lines 61 and 63). Then either drop the `nextest` allow-list entry, or also put the pinned binary on the agents' PATH and say how.",
+      "location": "Plan decision 5, step 10, Risks (first item), Demonstration for criterion 5",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The producer cannot get or check the nextest version, the checksums or real output. Pins written from memory would break setup and CI.",
+      "evidence": "producer_commands (athena.toml line 61) allow cargo, git, ls, rm, mv and chmod, with no curl or other download tool. Setup refuses to run inside a job (refuse_inside_a_job, xtask/src/main.rs:214). So in this job the producer can neither install nextest nor download the release checksums. Step 5's 'capture real nextest output' cannot happen. CI runs setup before its checks, and install_gitleaks-style code fails hard when a checksum does not match. A guessed sha256 would turn every CI run red. Fix: Put the exact nextest version and the per-archive sha256 values into the plan, taken from the release's published checksum files by someone who has network access. Also put in one captured sample of nextest's pass, fail and summary output for the unit tests. If that is not possible, the plan must say the pin is unverified and that the pull request's CI run is the first real check of it.",
+      "location": "Open questions 1–2; Steps 3 and 5; Decision 4",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Once this lands, every later job's `test` check fails until someone re-runs setup on the machine. The plan has no rollout step for this.",
+      "evidence": "Checks run from the base commit's athena.toml (athena.toml header, lines 3–5). After landing, the new `test` check calls the nextest binary by absolute path under athena_home/tools. Machines set up before the change do not have it. The plan says the wrapper 'fails loudly'. A check cannot fix this itself, because setup refuses ATHENA_NESTED. Fix: Add an explicit rollout: the CHANGELOG and decision entry tell the user to run ./setup.sh after landing. If a silent slowdown is acceptable, the wrapper could instead fall back to `cargo test --locked` with a clear warning when the binary is missing. Pick one, and test it.",
+      "location": "Risks ('nextest is not found by checks'); Decision 1",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Renaming the CI checks step can break existing policy tests that find the step by its name.",
+      "evidence": "xtask/tests/policy.rs:537 and :571 find the checks step with step_index(&steps, \"cargo fmt --check\"), and :575 asserts it carries `id: checks`. Fix: Keep the substring `cargo fmt --check` and `id: checks` in the renamed step, or update those policy tests in the same change.",
+      "location": "Step 7 (ci.yml step names)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The producer guidance change is conditional and vague. The reading says nextest is adopted for producer guidance too, and the request names producer time as a cost.",
+      "evidence": "The plan edits run.rs only 'if grep finds' guidance, so a producer may never learn the faster loop. Fix: Say what guidance producers get (for example 'run the full suite with `cargo run -q -p xtask -- test`'), where it goes, and that the brief budgets (system facts) still pass.",
+      "location": "Files: crates/athena-core/src/run.rs; the reading's 'producer guidance'",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Editing these three files outside the deliverables list is justified.",
+      "evidence": "Tools in crates/athena-data/src/config.rs:266-273 has deny_unknown_fields. checks.rs:29-41 counts only libtest `test result:` lines, and checks.rs:209-211 fails a Test-kind check that counts zero tests. Fix: Keep the edits, and add the three files to the decision's justification so the verifier sees why.",
+      "location": "Athena findings 1–3 (checks.rs, gh.rs, config.rs out of list)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The design is sound, and I checked its main claims in the snapshot. One `test` check behind an xtask wrapper avoids the hard-coded STEPS in ci_result.rs and the reuse-by-name in routing.rs. Tools has deny_unknown_fields, so config.rs must change. count_tests only reads libtest summary lines, and a Test-kind check that counts zero tests fails. CI already runs `cargo run --locked -p xtask -- ci`. Three things stop the plan working as written. First, the binary lives under the Athena home tools directory, not on PATH, so the `cargo nextest` allow-list entry, step 10 and the criterion 5 demonstration rely on a command that fails. Second, the producer cannot download anything or run setup inside a job, so the nextest version, the checksums and the 'real output' samples cannot be checked here, and a wrong checksum would break CI. Third, after landing, every later job's test check fails until setup is re-run, and the plan has no rollout step for that. Fix these three, keep the policy-test step name in mind, and make the producer guidance concrete."
+}

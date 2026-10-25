@@ -1,0 +1,197 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261025-190606-eebk",
+  "round": 1,
+  "at": "2026-10-25T19:07:59.517194515Z",
+  "invocation_seq": 3,
+  "approach": "Measure first, then cut. The one cost I found in code: `run_check` in crates/athena-core/src/checks.rs polls `child.try_wait()` and then sleeps a fixed 200 ms. A fast check (the fixtures' `sh -c grep…` checks) almost never exits before the first poll, so every check run pays about 200 ms, and each lifecycle/job_plan/retry/steward/drain job runs several checks. Change the poll to start at 2 ms and double up to the existing 200 ms cap. The cap, the deadline and the kill-switch logic stay as they are. Then time each of the five binaries with `cargo test --locked --test <name>` before and after (the producer's own machine), profile what remains (fixture git init/commit per test, process spawns, drain's sleeping fakes) and cut only what profiling shows: build a template fixture repo once per binary (copy it or `git clone --local` instead of init+config+add+commit), and drop needless git calls in common/mod.rs. Record measured results and the cause per binary in docs/decisions.md, and add a CHANGELOG entry. No test is removed or weakened.",
+  "decisions": [
+    {
+      "choice": "Backoff poll (2 ms doubling to the 200 ms cap) in run_check",
+      "reason": "The fixed 200 ms sleep is the one unconditional per-check delay I saw in code; backoff removes it for fast checks and keeps the same cap and timeout for slow ones, so timeout and kill-switch tests still behave.",
+      "rejected": [
+        {
+          "option": "Add a poll-interval field to CheckContext, set short only in tests",
+          "why": "Needs edits at 2 run.rs sites and 5 checks.rs test sites, and the tests would need a hook through Athena; larger for the same gain."
+        },
+        {
+          "option": "Leave checks.rs alone and only change test fixtures",
+          "why": "Cannot remove a delay that lives in production code that every fixture job runs."
+        },
+        {
+          "option": "Block on child.wait() in a helper thread",
+          "why": "A bigger change to deadline and kill handling than the request needs."
+        }
+      ]
+    },
+    {
+      "choice": "Build the fixture repository once per test binary and copy it per test, only if profiling shows git setup matters",
+      "reason": "Fixture::with_config runs git init, four config calls, add and commit for every test; a template copy keeps each test isolated while doing the work once.",
+      "rejected": [
+        {
+          "option": "Share one mutable repository between tests",
+          "why": "Tests mutate it and run in parallel; it would make them flaky and weaken isolation."
+        },
+        {
+          "option": "Adopt cargo-nextest, sccache or a shared target dir",
+          "why": "Out of scope. The user rejected nextest (584 s vs 673 s, about 13%, brain-measured); sccache (D79) and a shared target dir are recorded as considered alternatives only."
+        }
+      ]
+    },
+    {
+      "choice": "Report only numbers measured in the job in docs/decisions.md; the 67 s compile / 673 s run split and nextest figures are labeled brain-measured",
+      "reason": "The evidence rule: every number is measured or labeled.",
+      "rejected": [
+        {
+          "option": "Estimate times for binaries not re-timed",
+          "why": "The criteria forbid unmeasured numbers."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/checks.rs",
+      "action": "modify",
+      "purpose": "Poll backoff in run_check (not on the deliverable list; it is where the 200 ms delay lives).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/common/mod.rs",
+      "action": "modify",
+      "purpose": "Build the fixture repo once and copy it; remove needless git calls, if profiling shows it.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "purpose": "Use shared fixtures; cut repeated setup, with assertions unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/job_plan.rs",
+      "action": "modify",
+      "purpose": "Same as lifecycle.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Same; shorten its fake runner's run_ms waits (about line 3023) only where the test does not depend on them.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/retry.rs",
+      "action": "modify",
+      "purpose": "Same as lifecycle.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/steward.rs",
+      "action": "modify",
+      "purpose": "Same as lifecycle.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "purpose": "Only if profiling shows avoidable git/process work in the job path; otherwise leave it unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "New decision with measured per-binary times, causes and alternatives.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased entry.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Record a baseline: `cargo test --locked --no-run`, then time each of `--test lifecycle|job_plan|drain|retry|steward` separately and the total test count (`cargo test --locked` summary).",
+    "Profile the slowest tests in each binary (`-- --report-time` is unstable, so use per-test timing from running with `--test-threads=1` and a wall-clock timer, or a temporary timer in the helper) to see whether setup, checks or sleeps dominate.",
+    "Implement the backoff in checks.rs run_check; keep the cap, deadline and kill-switch code.",
+    "Cut the remaining costs found: template fixture in common/mod.rs, trimmed setup in the five test files, and shorter fake waits where no assertion depends on them. Touch run.rs only if it is needed.",
+    "Re-time the five binaries and the full `cargo test --locked`; run the suite twice to look for flakes.",
+    "Write the decision in docs/decisions.md (measured before/after and cause per binary; compile 67 s / run 673 s as brain-measured; nextest rejected; sccache and shared target dir considered) and the CHANGELOG entry.",
+    "Run `cargo fmt --all --check` and `cargo clippy --all-targets --locked -- -D warnings`."
+  ],
+  "risks": [
+    {
+      "risk": "Faster polling lets timing-dependent tests race, for example a kill-switch test that expects a check to still be running.",
+      "mitigation": "Run each affected binary several times and the full suite twice; fix any flake by changing the test's synchronization without weakening assertions."
+    },
+    {
+      "risk": "The fixture template copy changes test isolation or git state such as hooks and config.",
+      "mitigation": "Copy the whole tree including .git into a fresh tempdir per test, and keep the same config and commit message."
+    },
+    {
+      "risk": "The 6-minute target is missed.",
+      "mitigation": "Report the measured result honestly in the decision and the CHANGELOG, with the remaining cost by binary."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the new decision in the diff and compare its numbers with the producer's reported timings.",
+      "command": "git diff -- docs/decisions.md",
+      "observes": "A new decision with before/after seconds labeled measured for lifecycle, job_plan, drain, retry and steward, and a cause per binary.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Read the decision text.",
+      "command": "git diff -- docs/decisions.md",
+      "observes": "Compile 67 s vs run 673 s on 4 cores labeled brain-measured; nextest 0.9.148 (584 s vs 673 s, about 13%) listed as rejected with that reason; sccache per D79 and a shared target dir listed as considered; no other unmeasured number.",
+      "fails_without": null
+    },
+    {
+      "criterion": 3,
+      "method": "Check the changed-file list and the test diffs; compare the `cargo test --locked` test totals with the baseline total in the producer report.",
+      "command": "git diff --stat",
+      "observes": "No athena.toml, ci.yml or tool pin changed; CHANGELOG.md has an entry; no #[test] removed or #[ignore] added; assertions are unchanged.",
+      "fails_without": null
+    },
+    {
+      "criterion": 4,
+      "method": "Read the diff of checks.rs, run.rs and the tests.",
+      "command": "git diff -- crates",
+      "observes": "Only the poll backoff (the 200 ms cap unchanged) and fixture/test changes; no default config or timeout value changed.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "Run the full suite and read the totals.",
+      "command": "cargo test --locked",
+      "observes": "All tests pass with none ignored; the timeout and kill-switch tests in checks.rs still pass, so a failing or slow check still fails the run. Wall time is the producer's report; the verifier confirms only the passes.",
+      "fails_without": "If the backoff broke deadline or kill handling, the checks.rs timeout tests (300 ms deadline on `sleep 30`) would fail; if a test were dropped, the total count would fall."
+    },
+    {
+      "criterion": 6,
+      "method": "Run clippy, then `cargo fmt --all --check`.",
+      "command": "cargo clippy --all-targets --locked -- -D warnings",
+      "observes": "Both exit 0 with no warnings or diffs.",
+      "fails_without": "Unformatted or lint-warning code would make them fail."
+    }
+  ],
+  "open_questions": [
+    "checks.rs is not on the deliverable list but holds the 200 ms poll; the backoff keeps the 200 ms cap, but a strict reading of 'production defaults unchanged' may object. If so, add a test-only interval instead.",
+    "Whether the full suite gets under 6 minutes depends on how much the remaining time is in compile, git setup or process spawns; I could not run the tests, so the real split per binary is unknown until the producer measures it.",
+    "Does the fake runner in drain.rs (line ~3023, run_ms) set real durations that tests assert on? Not read in full."
+  ],
+  "producer_section_sha256": "46287dc814e05b926fdc2fa0628f37992356009ac24cc729e18d5d3c2880de23"
+}

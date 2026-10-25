@@ -1,0 +1,166 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261025-034733-c453",
+  "n": 1,
+  "at": "2026-10-25T18:04:13.078069986Z",
+  "invocation_seq": 1,
+  "base_commit": "b9cd12971f1b91c3bc5b67e05f8c2c0cc1560632",
+  "config_sha256": "8fe89c4edaa823d770160390564d75d68be6850d0873a9f8f769511a6f40103c",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Measure compile vs run split of checks and cut the larger",
+  "summary": "Goal: faster Athena checks, CI and producer test loops, judged by the user reading docs/decisions.md and later job times. The producer measures compile (cargo test --no-run) against run time for the ~1190-test suite, records that split, and makes the smallest change that cuts the larger part, keeping every test running and failures failing the check.",
+  "class_of_work": "config",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "evidence",
+      "how": "Split and medians are measured or labeled estimates in decisions.md."
+    },
+    {
+      "id": "buy-first",
+      "how": "Prefers sccache/nextest or existing tools over custom code; the call is recorded."
+    },
+    {
+      "id": "tested",
+      "how": "cargo test and clippy must stay clean."
+    },
+    {
+      "id": "verified",
+      "how": "Verifier runs cargo test, clippy and fmt --check."
+    },
+    {
+      "id": "outcome-check",
+      "how": "Success is lower check time on later jobs, not merely a config edit."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria require the full test count to still run."
+    },
+    {
+      "id": "small",
+      "how": "One focused change chosen by the measured split."
+    },
+    {
+      "id": "mechanism",
+      "how": "Test failure still fails the check via the check command exit code."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "sccache was adopted in D80 and removed in D84 after 0 hits over 4 jobs; re-adopting it needs a new decision that explains why it would hit now, so it is an alternative to weigh, not the default.",
+    "The producer cannot run sccache or nextest directly (allowed cargo subcommands are build/check/test/clippy/etc.), so the split is measured with timed cargo test --no-run versus cargo test, and nextest is not assumed installed.",
+    "The 'after' median on jobs run after the change cannot exist at commit time; decisions.md records the measured before, the method, and a placeholder or follow-up for the post-change median, and the CHANGELOG states it is unmeasured.",
+    "Only files that the chosen change needs are edited; the listed files are candidates, not a to-do list.",
+    "Compile-time cuts that fit the gate: e.g. drop the separate clippy build duplication via shared profile settings, reduce debug info for tests in Cargo.toml profile, or CI caching; the producer picks by the measured split."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "docs/decisions.md has a new decision giving the measured compile time and test run time of the suite (commands and numbers or labeled estimates), the chosen change, and at least three alternatives (sccache per D79/D84, shared target dir, cargo nextest, splitting slow tests) with reasons.",
+      "kind": "content"
+    },
+    {
+      "text": "The decision states the before medians (9.7 min checks, 17.6 min producers, from 29 jobs) and how the after median will be measured on jobs run after the change; it does not claim an after number that was not measured.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo test --locked`: the full suite still runs every test (test count about 1190, none newly ignored or filtered) and passes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A deliberately failing test still fails the check: the test command in athena.toml/CI still exits non-zero when a test fails (confirm by reading the check definition; run `cargo test` on the repo to confirm it passes clean).",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo clippy --all-targets --locked -- -D warnings` and `cargo fmt --all --check`: both clean.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has an entry describing the change and the measured split.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "athena.toml",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "action": "modify",
+      "p": 0.45
+    },
+    {
+      "path": "Cargo.toml",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "p": 0.15
+    },
+    {
+      "path": "xtask/src/main.rs",
+      "action": "modify",
+      "p": 0.1
+    }
+  ],
+  "out_of_scope": [
+    "Deleting, ignoring or filtering tests",
+    "Measuring the after median before any job has run on the change",
+    "Changing the verifier's allowed command list"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.65,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.2,
+        "p90": 2.8
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 1700.0,
+        "p90": 3400.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7657142857142857,
+      "p_verification_passes": 0.6451612903225806,
+      "p_user_intervenes": 0.12258064516129032,
+      "cost_usd": {
+        "p10": 0.009288949030418008,
+        "p50": 0.42130600000000007,
+        "p90": 0.6555729401864422
+      },
+      "wall_time_s": {
+        "p10": 262.2867364468202,
+        "p50": 754.0380174400001,
+        "p90": 2016.1403666162764
+      }
+    }
+  },
+  "departures": "Slightly higher cost and time than reference: the producer must time a cold build and full test run, and sccache was already tried and removed (D84), so the choice needs care.",
+  "urgent_reason": "Cuts check, CI and producer wait time: the median 9.7-minute check and 17.6-minute producer run are duplicated, redo-heavy work."
+}
