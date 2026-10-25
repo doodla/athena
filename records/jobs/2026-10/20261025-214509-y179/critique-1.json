@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261025-214509-y179",
+  "round": 1,
+  "at": "2026-10-25T21:47:44.529061065Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "A process-wide scan memo may never get a hit in the slow binaries, because each athena command in a test is a new process.",
+      "evidence": "common/mod.rs:257 runs `std::process::Command::new(env!(\"CARGO_BIN_EXE_athena\"))`. lifecycle.rs, drain.rs, job_plan.rs and retry.rs use CARGO_BIN_EXE_athena or call the library directly (grep counts: 9, 4, 3, 3). A static Mutex<HashMap> lives only as long as one process, so repeated scans across separate athena launches always miss. The plan names repeated gitleaks launches as the likely cause but has no step to confirm that the repeats happen inside one process. Fix: In step 1, count gitleaks launches per process (or per athena command) in each slow binary before choosing the memo design. If the repeats span processes, either drop the memo or say why the measured saving still justifies it, and move the saving to test-side changes such as sharing fixtures or calling the library directly. Record the measured hit count in the decision so the memo's effect is shown, not assumed.",
+      "location": "Decision 1 / Step 2; crates/athena-cli/tests/common/mod.rs:257",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "There is no concrete plan for reaching criterion 5 if the two production changes are not enough, so the main goal could go unmet.",
+      "evidence": "The plan leaves every test-side fix to measurement and its open questions admit the causes are unmeasured. Combined with the memo finding, the most likely result is that the production changes save only seconds while the suite runs for about 673 s. Fix: Set a budget after step 1: if the measured saving from the memo and poll changes is projected to leave the total above 7 minutes, the producer must find and apply test-side changes in the five binaries and common/mod.rs (for example shared fixture setup or fewer redundant athena launches) that keep every assertion. Name the measurement that decides which ones.",
+      "location": "Risks: 'two changes alone miss the 7-minute goal'; Criterion 5 demonstration",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Showing the memo result equals an uncached scan proves nothing on its own, since a memo that does nothing also passes.",
+      "evidence": "The 'fails without' text relies on 'the second call would not hit the memo'. Only the hit-counter assertion separates a working memo from no memo. Fix: State that the test asserts the hit count rises on a repeated immutable range and stays flat for a moved ref (HEAD advanced) and for an Err result. Also check that a later commit containing a token is found.",
+      "location": "Criterion 4 demonstration, memo test",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The cache key may leave out inputs gitleaks reads from outside the generated config.",
+      "evidence": "`Gitleaks::run` scans a git dir; gitleaks can also read ignore files and baselines from the scanned source. The key covers config text, binary path, git dir and resolved ids only. Fix: Have the producer check the command line `Gitleaks::command` builds and add any other input file to the key, or confirm in a comment that none is read.",
+      "location": "Decision 1, cache key",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A timing assertion can be flaky on a loaded 4-core machine running the suite in parallel.",
+      "evidence": "The plan asserts wall time against a threshold; parallel test load can delay even a 5 ms sleep. Fix: Use a generous bound (for example under 150 ms, measured over several runs and taking the minimum), or test the schedule function on its own (5, 10, 20 ... capped at 200 and clamped to the time left before the deadline).",
+      "location": "Criterion 4 demonstration, poll test 'quick check returns in well under 200 ms'",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The temporary failing test is never recorded, so this part of the criterion leaves no evidence.",
+      "evidence": "The plan says the test is 'temporary, not committed' and records no observation of it. Fix: Have the producer record in its report the exit code of the run that included the temporary failing test.",
+      "location": "Criterion 5 demonstration, 'A failing test still fails the run'",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan matches the accepted reading and names code that exists: `Gitleaks::scan_log` (secrets.rs:191), the fixed 200 ms sleep in `run_check` (checks.rs:204) and `Git::rev_parse` (athena-git lib.rs:289). The poll schedule design is sound, and the content criteria are covered. The main gap is the memo. It is process-wide, but the athena-cli test fixture launches the `athena` binary as a new process for each command (common/mod.rs:257, `CARGO_BIN_EXE_athena`). A memo held in one process gets no hits across those launches, so the plan's leading cause may produce little saving in the five slow binaries. Nothing in the plan checks that the memo actually gets hits where the time is spent. There is also no step for missing the 7-minute goal, beyond \"report honestly\". A few demonstrations are weak or lack a \"fails without\" case. The planner can fix all of this."
+}
