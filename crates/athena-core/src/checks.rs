@@ -184,6 +184,9 @@ pub fn run_check(spec: &CheckSpec, ctx: &CheckContext<'_>) -> Result<CheckRun> {
         .register(pgid, ctx.job, &format!("check {}", spec.name))?;
     let deadline = started + ctx.timeout;
     let mut note = None;
+    // Poll quickly at first so a check that ends at once is not held for a whole interval, then back
+    // off to the long interval a slow check is polled at.
+    let mut pause = Duration::from_millis(2);
     let status = loop {
         if let Some(status) = child.try_wait()? {
             break Some(status);
@@ -201,7 +204,8 @@ pub fn run_check(spec: &CheckSpec, ctx: &CheckContext<'_>) -> Result<CheckRun> {
             let _ = child.wait();
             break None;
         }
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(pause);
+        pause = (pause * 2).min(Duration::from_millis(200));
     };
     ctx.registry.unregister(pgid);
     let output = String::from_utf8_lossy(&std::fs::read(output_file.path())?).into_owned();
