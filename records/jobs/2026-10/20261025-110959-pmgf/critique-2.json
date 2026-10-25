@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261025-110959-pmgf",
+  "round": 2,
+  "at": "2026-10-25T11:13:04.201022635Z",
+  "invocation_seq": 4,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "The plan does not say how the wait note gets out of publish and into the report.",
+      "evidence": "publish returns only PrLink, and land_pr builds `warnings` only after publish returns (gh.rs 1800-1808). A note from replace_early on the publish path cannot reach the report unless publish's return type changes. Fix: Say explicitly that publish returns (PrLink, Option<String>), or takes a &mut Vec<String>, and that land_pr seeds `warnings` with that note. Criterion 6's test should cover the publish path (early head pushed, no PR link) as well as the land_pr path.",
+      "location": "Plan step 4 / gh.rs publish (line 2006) returns Result<PrLink>",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "An informational note goes into a list that otherwise holds only real warnings.",
+      "evidence": "Every existing warnings entry is a problem: a landing record that was not written, a merge that was not confirmed, a cutover that did not finish (gh.rs 1880-1900). Tests at 4329 and 4802 assert `report.warnings.is_empty()`. Those tests do not hit the early path, but a routine 'waited 40s, completed' line would show up to readers as a warning. Fix: Word the note so it reads as information, for example 'early CI wait: 40s, run completed'. Or emit it only when the wait actually ran, and say in the plan that warnings is being used as the report's log channel.",
+      "location": "Decision 3: note goes into PrReport.warnings",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "An empty run list ends the wait at once, which makes 'no runs yet' and 'no CI' the same case.",
+      "evidence": "CiRunState covers all workflow runs, and the host can list a commit with no runs for a short time after a push. Ending the wait on an empty list fits the request's 'push as today' fallback. But it makes 'no runs yet' and 'no CI configured' the same case. Fix: Keep the behavior, but name it in Risks or Open questions so a maintainer knows an empty list means no wait.",
+      "location": "Decision 2: empty run list ends the wait at once",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The criterion 4 baseline is not defined.",
+      "evidence": "The plan does not say how the baseline is built once the wait is always in the code: no early head, or a wait bound of ZERO. Fix: Name the baseline, for example the same rig with early_run_wait overridden to ZERO and a completed success run, and assert the merge calls and merge head are the same.",
+      "location": "Criterion 4 demonstration: 'compares ... with a baseline run with no early-head wait'",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read gh.rs and test_support.rs in the snapshot; I did not run any commands. The plan puts the bounded wait in the one place the race starts: gh.rs replace_early (line 1991). Both landing paths reach it, land_pr through line 1823 and publish through line 2014, and it sits before check_replace and remote.replace. The pieces the plan names exist: PrHost::ci_runs, CiRunState with status/conclusion and failed(), and the trait implementors (GhClient, the in-crate FakeHost, test_support's FakeHost and EarlyFake). A default trait method for the 10-minute bound avoids changing struct literals outside the deliverables. Existing tests look safe. Both test_support fakes return an empty run list, so the wait stops at once. The in-crate FakeHost returns a completed failure by default, so it also stops with no sleep. The one test that asserts run_looks == 0 (line 3158) has no early head. Each demonstration checks ordering or timing and would fail without the behavior, and the CHANGELOG criterion is honestly marked as pending a measurement. What is left is minor: how the note gets out of publish, using warnings for an informational line, what an empty run list means, and an unnamed baseline in the criterion 4 test."
+}
