@@ -676,8 +676,11 @@ with a person-visible review.
    `athena.class-label/1` (`crates/athena-data/src/records.rs`): the introspection it labels, the reviewed class
    (a registry id, or none), who labeled it (`person`, or `stronger-model` with a person's spot-check), when, and
    optionally whether the event repeats, and optionally a one-line note. The newest label per introspection
-   counts. `athena review` writes these records (§10.2); `score-jev` itself still only reads them, and labels are
-   added before Jev's answers are read (§10.2 label hygiene).
+   counts, except that a person's or stronger model's label beats an evidence-derived one (`labeled_by:
+   evidence`, with a `basis` citing the records it rests on) whichever is newer. `athena review` writes the
+   person's records (§10.2); `score-jev` itself only reads them, and `score-jev --derive` first appends the
+   evidence-derived ones with `crates/athena-core/src/evidence_labels.rs` (D137). Labels are added before Jev's
+   answers are read (§10.2 label hygiene).
    The labeled set is every introspection with a label and a usable stored Jev answer (`IntrospectionJev`); the
    report counts the unreviewed, the reviewed ones with no Jev answer, and the reviewed ones whose Jev call
    failed, each left out. Scoring covers §10.3 matching: the Brier score of Jev's failure-class probabilities

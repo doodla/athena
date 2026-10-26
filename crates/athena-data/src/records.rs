@@ -1493,6 +1493,9 @@ pub enum Labeler {
     Person,
     /// A stronger model named the class and a person spot-checked it.
     StrongerModel,
+    /// Code derived the class from what happened afterwards, citing the records in the label's `basis`. No
+    /// person or model judged it, and any label from a person or a stronger model outranks it.
+    Evidence,
 }
 
 impl Labeler {
@@ -1500,15 +1503,60 @@ impl Labeler {
         match self {
             Labeler::Person => "person",
             Labeler::StrongerModel => "stronger-model",
+            Labeler::Evidence => "evidence",
         }
     }
+
+    /// Whether a person or a stronger model gave the label. Such a label always beats an evidence-derived one.
+    pub fn is_judgement(self) -> bool {
+        !matches!(self, Labeler::Evidence)
+    }
+}
+
+/// The kind of later event that an evidence-derived class label rests on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EvidenceKind {
+    /// The retry that followed the introspection's proposed request landed, or failed for the same cause.
+    RetryOutcome,
+    /// After a prevention for the class landed, the class stopped recurring or kept recurring.
+    RecurrenceAfterPrevention,
+    /// The critic's or the verifier's findings on the same job name the same cause.
+    SameCauseFindings,
+}
+
+impl EvidenceKind {
+    pub const ALL: [EvidenceKind; 3] = [
+        EvidenceKind::RetryOutcome,
+        EvidenceKind::RecurrenceAfterPrevention,
+        EvidenceKind::SameCauseFindings,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EvidenceKind::RetryOutcome => "retry-outcome",
+            EvidenceKind::RecurrenceAfterPrevention => "recurrence-after-prevention",
+            EvidenceKind::SameCauseFindings => "same-cause-findings",
+        }
+    }
+}
+
+/// One piece of evidence behind a derived label: its kind, the ids of the records it rests on (job ids,
+/// introspection ids and proposal record ids), and one line saying what they show.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LabelBasis {
+    pub kind: EvidenceKind,
+    pub records: Vec<String>,
+    pub detail: String,
 }
 
 /// `athena.class-label/1`: the failure class a reviewer assigned to one recorded introspection, written before
 /// Jev's answers are read (`docs/design/defaults-loop.md` section 10.2). Introspections without such a record
 /// are unreviewed and are not part of the labeled set. A later label for the same introspection replaces an
-/// earlier one (the newest by time, then id, counts). `athena review` writes these records; the introspection
-/// itself is never edited.
+/// earlier one (the newest by time, then id, counts), except that a label from a person or a stronger model
+/// always beats one derived from evidence, whichever is newer. `athena review` writes the person's records and
+/// `athena score-jev --derive` writes the evidence-derived ones; the introspection itself is never edited.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClassLabel {
@@ -1526,6 +1574,38 @@ pub struct ClassLabel {
     /// A one-line note from the reviewer. Absent when none was given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// What an evidence-derived label rests on: one entry per kind of evidence, each citing its records.
+    /// Required (and non-empty) when `labeled_by` is `evidence`, and absent otherwise. A label written before
+    /// evidence labels existed has none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub basis: Vec<LabelBasis>,
+}
+
+impl ClassLabel {
+    /// Why this record is not acceptable, if it is not.
+    pub fn validate(&self) -> Result<(), String> {
+        match (self.labeled_by, self.basis.is_empty()) {
+            (Labeler::Evidence, true) => {
+                Err("an evidence-derived label cites the records it rests on".into())
+            }
+            (Labeler::Evidence, false) if self.class.is_none() => {
+                Err("an evidence-derived label names a class".into())
+            }
+            (Labeler::Evidence, false)
+                if self.basis.iter().any(|b| {
+                    b.records.is_empty()
+                        || b.records.iter().any(|r| r.trim().is_empty())
+                        || b.detail.trim().is_empty()
+                }) =>
+            {
+                Err("each piece of evidence cites records and says what they show".into())
+            }
+            (Labeler::Person | Labeler::StrongerModel, false) => {
+                Err("only an evidence-derived label has a basis".into())
+            }
+            _ => Ok(()),
+        }
+    }
 }
 
 /// The schema tag of a defaults proposal.
@@ -2354,6 +2434,7 @@ impl AnyRecord {
             AnyRecord::FailureClass(c) if c.name.trim().is_empty() => {
                 return Err(invalid("a failure class has a name".into()));
             }
+            AnyRecord::ClassLabel(l) => l.validate().map_err(invalid)?,
             AnyRecord::Role(r) => r.validate().map_err(invalid)?,
             AnyRecord::WorkItem(w) => w.validate().map_err(invalid)?,
             AnyRecord::WorkDecision(d) => d.validate().map_err(invalid)?,
@@ -3100,6 +3181,7 @@ mod tests {
             labeled_by: Labeler::StrongerModel,
             is_repeat: None,
             note: None,
+            basis: vec![],
         };
         let record = AnyRecord::ClassLabel(label.clone());
         assert_eq!(record.schema(), "athena.class-label/1");
@@ -3111,16 +3193,68 @@ mod tests {
         assert!(json.contains("\"labeled_by\": \"stronger-model\""));
         assert!(!json.contains("is_repeat"));
         assert!(!json.contains("note"));
+        assert!(!json.contains("basis"));
         assert_eq!(AnyRecord::parse("x", json.as_bytes()).unwrap(), record);
 
         // With a note the field is written and read back.
         let noted = AnyRecord::ClassLabel(ClassLabel {
             note: Some("The cause is the missing default.".into()),
-            ..label
+            ..label.clone()
         });
         let json = noted.to_json();
         assert!(json.contains("\"note\": \"The cause is the missing default.\""));
         assert_eq!(AnyRecord::parse("x", json.as_bytes()).unwrap(), noted);
+    }
+
+    #[test]
+    fn a_label_written_before_evidence_labels_existed_still_parses_and_a_derived_one_round_trips() {
+        // The exact shape older records have: no `basis` key.
+        let old = r#"{
+          "schema": "athena.class-label/1",
+          "id": "20261014-120000-1abc",
+          "at": "2026-10-14T12:00:00Z",
+          "introspection": "20261014-100000-aaaa",
+          "class": null,
+          "labeled_by": "person"
+        }"#;
+        let AnyRecord::ClassLabel(old) = AnyRecord::parse("x", old.as_bytes()).unwrap() else {
+            panic!("a class label");
+        };
+        assert!(old.basis.is_empty());
+
+        let derived = ClassLabel {
+            id: RecordId::parse("20261014-120000-1abc").unwrap(),
+            at: ts(),
+            introspection: RecordId::parse("20261014-100000-aaaa").unwrap(),
+            class: Some(RecordId::parse("20261001-000000-c001").unwrap()),
+            labeled_by: Labeler::Evidence,
+            is_repeat: None,
+            note: None,
+            basis: vec![LabelBasis {
+                kind: EvidenceKind::RetryOutcome,
+                records: vec!["20261014-100000-aaaa".into(), "20261014-110000-bbbb".into()],
+                detail: "The retry landed.".into(),
+            }],
+        };
+        let record = AnyRecord::ClassLabel(derived.clone());
+        let json = record.to_json();
+        assert!(json.contains("\"labeled_by\": \"evidence\""));
+        assert!(json.contains("\"kind\": \"retry-outcome\""));
+        assert_eq!(AnyRecord::parse("x", json.as_bytes()).unwrap(), record);
+
+        // The rules: evidence needs a basis and a class; a person's label has no basis.
+        let refused = |edit: &dyn Fn(&mut ClassLabel)| {
+            let mut l = derived.clone();
+            edit(&mut l);
+            AnyRecord::parse("x", AnyRecord::ClassLabel(l).to_json().as_bytes()).is_err()
+        };
+        assert!(refused(&|l| l.basis.clear()));
+        assert!(refused(&|l| l.class = None));
+        assert!(refused(&|l| l.basis[0].records.clear()));
+        assert!(refused(&|l| l.basis[0].detail = " ".into()));
+        assert!(refused(&|l| l.labeled_by = Labeler::Person));
+        assert!(!Labeler::Evidence.is_judgement());
+        assert!(Labeler::StrongerModel.is_judgement());
     }
 
     fn sample_work_item() -> WorkItem {

@@ -1,10 +1,11 @@
 //! The labeled set and the scoring of Jev's shadow answers (`docs/design/defaults-loop.md` sections 10.2 to
 //! 10.4; build order step 6).
 //!
-//! **The labeled set** is every recorded introspection that has a reviewer's `athena.class-label/1` record
-//! (the failure class a person, or a stronger model that a person spot-checked, assigned; `none` when no
-//! registry class fits). Each row keeps who labeled it. Introspections with no label are *unreviewed* and are
-//! left out and counted. A reviewed introspection with no stored Jev answer, or whose Jev call failed, is also
+//! **The labeled set** is every recorded introspection that has an `athena.class-label/1` record (the failure
+//! class a person, or a stronger model that a person spot-checked, assigned; `none` when no registry class
+//! fits; or a class derived from what happened afterwards, with its basis, by [`crate::evidence_labels`]). A
+//! person's or a stronger model's label beats an evidence-derived one whichever is newer. Each row keeps who
+//! labeled it. Introspections with no label are *unreviewed* and are left out and counted. A reviewed introspection with no stored Jev answer, or whose Jev call failed, is also
 //! left out and counted, so the report shows how much of the record base it rests on.
 //!
 //! **The score** compares Jev's stored failure-class probabilities with the label, by Brier score (the sum
@@ -151,16 +152,31 @@ pub struct Exclusions {
 pub struct LabeledSet {
     pub rows: Vec<Row>,
     pub excluded: Exclusions,
+    pub sources: LabelSources,
 }
 
-/// The label that counts for each introspection id: where several exist, the newest by time, then id.
+/// Where the labels that count came from, over the recorded introspections.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct LabelSources {
+    /// Introspections whose counting label is from a person or a stronger model.
+    pub reviewed: usize,
+    /// Introspections whose counting label is derived from evidence.
+    pub evidence: usize,
+    /// Of those, how many cite each kind of evidence (a label citing two kinds counts in both).
+    pub evidence_by_kind: BTreeMap<String, usize>,
+    /// Introspections that have an evidence label which a reviewer's label overrides (not counted above).
+    pub evidence_overridden: usize,
+}
+
+/// The label that counts for each introspection id. A label from a person or a stronger model beats a label
+/// derived from evidence, whichever is newer; among labels of the same kind of source the newest by time, then
+/// id, counts.
 pub fn newest_labels(labels: &[ClassLabel]) -> BTreeMap<String, &ClassLabel> {
     let mut newest: BTreeMap<String, &ClassLabel> = BTreeMap::new();
     for label in labels {
         let key = label.introspection.to_string();
-        let better = newest
-            .get(&key)
-            .is_none_or(|old| (label.at, &label.id) > (old.at, &old.id));
+        let rank = |l: &ClassLabel| (l.labeled_by.is_judgement(), l.at, l.id.clone());
+        let better = newest.get(&key).is_none_or(|old| rank(label) > rank(old));
         if better {
             newest.insert(key, label);
         }
@@ -194,10 +210,33 @@ pub fn build(inputs: &Inputs) -> LabeledSet {
     set.excluded.labels_without_introspection =
         newest.keys().filter(|k| !known.contains(*k)).count();
     set.excluded.unreviewed = unreviewed(&inputs.introspections, &inputs.labels).len();
+    let overridden: BTreeSet<String> = inputs
+        .labels
+        .iter()
+        .filter(|l| l.labeled_by == Labeler::Evidence)
+        .filter(|l| {
+            newest
+                .get(&l.introspection.to_string())
+                .is_some_and(|n| n.labeled_by.is_judgement())
+        })
+        .map(|l| l.introspection.to_string())
+        .collect();
     for i in &inputs.introspections {
         let Some(label) = newest.get(&i.id.to_string()) else {
             continue;
         };
+        if label.labeled_by == Labeler::Evidence {
+            set.sources.evidence += 1;
+            for kind in label.basis.iter().map(|b| b.kind).collect::<BTreeSet<_>>() {
+                *set.sources
+                    .evidence_by_kind
+                    .entry(kind.as_str().to_string())
+                    .or_default() += 1;
+            }
+        } else {
+            set.sources.reviewed += 1;
+            set.sources.evidence_overridden += usize::from(overridden.contains(i.id.as_str()));
+        }
         let Some(jev) = &i.jev else {
             set.excluded.no_jev_answer += 1;
             continue;
@@ -474,6 +513,10 @@ pub struct Verdict {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Report {
     pub excluded: Exclusions,
+    /// Who or what the counting labels came from, including how many are derived from evidence.
+    pub sources: LabelSources,
+    /// What `score-jev --derive` did just before scoring; absent when it did not run.
+    pub derivation: Option<crate::evidence_labels::Summary>,
     /// Rows before the cut.
     pub calibration: usize,
     /// Rows from the cut on; the only rows scored.
@@ -503,6 +546,8 @@ pub fn report(set: &LabeledSet, classes: &[ClassRow], cut: Option<Timestamp>) ->
     let (cut, calibration, test) = split(&set.rows, cut);
     let mut report = Report {
         excluded: set.excluded.clone(),
+        sources: set.sources.clone(),
+        derivation: None,
         calibration: calibration.len(),
         test: test.len(),
         cut,
@@ -816,8 +861,8 @@ mod tests {
     use crate::introspect::ask_jev;
     use crate::jev::{Answer, Evaluation, FakeJev, JevError, Usage};
     use athena_data::records::{
-        ClassStatus, FailureClass, IntrospectionJev, IntrospectionStatus, IntrospectionTrigger,
-        PreventionKind,
+        ClassStatus, EvidenceKind, FailureClass, IntrospectionJev, IntrospectionStatus,
+        IntrospectionTrigger, LabelBasis, PreventionKind,
     };
     use athena_data::{JobId, RecordId};
 
@@ -933,6 +978,25 @@ mod tests {
             labeled_by: by,
             is_repeat: repeat,
             note: None,
+            basis: vec![],
+        }
+    }
+
+    /// An evidence-derived label of `class` for case `i`, made at `at(minute)`.
+    fn evidence_label(i: u32, class: &str, minute: u32) -> ClassLabel {
+        ClassLabel {
+            id: rid(minute, 700 + i),
+            at: at(minute),
+            introspection: rid(i, 1),
+            class: Some(RecordId::parse(class).unwrap()),
+            labeled_by: Labeler::Evidence,
+            is_repeat: None,
+            note: None,
+            basis: vec![LabelBasis {
+                kind: EvidenceKind::RetryOutcome,
+                records: vec![rid(i, 1).to_string()],
+                detail: "The retry landed.".into(),
+            }],
         }
     }
 
@@ -1157,6 +1221,60 @@ mod tests {
         };
         assert_eq!(row.label.as_deref(), Some(A));
         assert_eq!(row.labeled_by, Labeler::Person);
+    }
+
+    #[test]
+    fn a_persons_label_beats_an_evidence_label_whichever_is_newer() {
+        for evidence_minute in [0, 50] {
+            let mut inputs = registry();
+            inputs
+                .introspections
+                .push(introspection(1, "x", Some(jev_says(A, 0.9, 0.1))));
+            // The person labeled at minute 1 (the helper's time); the evidence label is older or newer.
+            inputs.labels.push(label(1, Some(B), Labeler::Person, None));
+            inputs.labels.push(evidence_label(1, A, evidence_minute));
+            let newest = newest_labels(&inputs.labels);
+            let counted = newest[&rid(1, 1).to_string()];
+            assert_eq!(counted.labeled_by, Labeler::Person);
+            assert_eq!(counted.class.as_ref().map(|c| c.as_str()), Some(B));
+            let set = build(&inputs);
+            let [row] = set.rows.as_slice() else {
+                panic!("one row")
+            };
+            assert_eq!(
+                (row.label.as_deref(), row.labeled_by),
+                (Some(B), Labeler::Person)
+            );
+            assert_eq!(
+                (
+                    set.sources.reviewed,
+                    set.sources.evidence,
+                    set.sources.evidence_overridden
+                ),
+                (1, 0, 1)
+            );
+        }
+    }
+
+    #[test]
+    fn evidence_labels_count_alone_newest_first_and_are_reported_by_kind() {
+        let mut inputs = registry();
+        inputs
+            .introspections
+            .push(introspection(1, "x", Some(jev_says(A, 0.9, 0.1))));
+        inputs.labels.push(evidence_label(1, B, 5));
+        inputs.labels.push(evidence_label(1, A, 9));
+        let set = build(&inputs);
+        let [row] = set.rows.as_slice() else {
+            panic!("one row")
+        };
+        assert_eq!(
+            (row.label.as_deref(), row.labeled_by),
+            (Some(A), Labeler::Evidence)
+        );
+        assert_eq!(set.sources.evidence, 1);
+        assert_eq!(set.sources.evidence_by_kind["retry-outcome"], 1);
+        assert_eq!(report(&set, &inputs.classes, None).sources, set.sources);
     }
 
     #[test]

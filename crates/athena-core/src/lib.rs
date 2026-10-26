@@ -33,6 +33,10 @@
 //!   check; `defaults.toml` is never written by Athena;
 //! - [`labeled`]: the labeled set of reviewed introspections and the scoring of Jev's recorded shadow answers
 //!   against it, read-only;
+//! - [`evidence_labels`]: class labels derived from what happened after an introspection (the retry that
+//!   followed it, the class recurring after a prevention landed, the critic's or verifier's findings on the
+//!   same job), appended as `athena.class-label/1` records marked `evidence` with the records they rest on;
+//!   `athena score-jev --derive` runs it;
 //! - [`review`]: `athena review`, a person's verdict on an introspection's class, committed as a class-label
 //!   record (and a class record for a new class); the introspection is never edited;
 //! - [`watcher`]: decisions put under review by exact matching of host-error records, run at landing;
@@ -74,6 +78,7 @@ pub mod ci_result;
 pub mod code_health;
 pub mod commits;
 pub mod disk;
+pub mod evidence_labels;
 pub mod fake;
 pub mod gh;
 pub mod hestia;

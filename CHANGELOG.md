@@ -9,6 +9,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Class labels derived from evidence, so `athena score-jev` has labeled cases without anyone's opinion (BRIEF.md
+  addendum of 2026-10-25: the labels come from what happened afterwards). `athena score-jev --derive` reads the
+  records and appends `athena.class-label/1` records with `labeled_by: evidence` and a `basis` that cites the
+  records it rests on, from three kinds of later event: the retry that followed the introspection's proposed
+  request landed or failed for the same class (`retry-outcome`); an accepted prevention for the class landed and
+  the class then kept recurring or stopped over at least 5 closed jobs (`recurrence-after-prevention`); a
+  finding of the job's critic, or of its verifier, shares enough words with the cause to name it
+  (`same-cause-findings`; the verifier's blocker and major findings do not count for a rejection or a failure,
+  because the introspection was written from them). A case with no evidence stays unlabeled, kinds that name
+  different classes leave it unlabeled, and a label from a person or a stronger model always beats an evidence
+  label, whichever is newer. Derivation only adds records and a rerun adds none. `score-jev` now states how many
+  counting labels come from evidence, per kind, and how many a review overrode. `ClassLabel` gains an optional
+  `basis`; labels without it still read. See D137.
 - The model and the effort level of every agent invocation are explicit. `athena.toml` `[models]` gains
   `reader_effort`, `producer_effort` and `verifier_effort` (one of `low`, `medium`, `high`, `xhigh`, `max`;
   anything else is refused when the file is read; a file without them reads as `medium`), and the hard-job
