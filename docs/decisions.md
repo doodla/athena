@@ -3259,3 +3259,34 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Provenance:** stated: the request of this job and its figures. Read: BRIEF.md pantheon table and the
   2026-10-25 addendum, D127 and `docs/design/scope-guard.md`. Not measured: every figure from `records/`, and
   every threshold and budget.
+
+## D130 · Jev answers five typed code-health questions per landing, in shadow mode first (proposed)
+
+- **Status:** proposed. Not accepted; the build jobs are not queued. The design is
+  [`docs/design/jev-code-health.md`](design/jev-code-health.md).
+- **Case:** The BRIEF.md addendum of 2026-10-26 asks for Jev checks for code health. Jev answers typed choice
+  questions with a probability per option for about $0.00001 a call (the request's figure, not measured here),
+  so it can judge every changed function and file at every landing, where line counts cannot say what a
+  function does.
+- **Decision (proposed):** Five `choice` questions: does a function do one thing, does a change add coupling,
+  which module a new item belongs in, is a file drifting toward a god object, does a change duplicate existing
+  logic. Functions are judged for the first and last, files for the others; the state is a bounded excerpt plus
+  path and module context. Each has a numeric finding threshold and, for four, a higher threshold for a
+  structural-pass request that also needs the deterministic code-health measure (request 20261026-042558-5p65,
+  planned) to trip. Jev never blocks a landing. All start in shadow mode: answers are recorded and nothing
+  acts. Each is scored from later landing records (a flagged file later breaks or churns; a recommended split
+  lands and churn drops) against a deterministic baseline, and leaves shadow only on measured lift, accepted by
+  Sri. Estimated cost: about 19 calls, about $0.0002 a landing, capped at 100 calls. The build is six
+  one-producer jobs.
+- **Alternatives:** (a) Line counts only: rejected, cannot judge what a function does. (b) One call per file
+  with all functions, or whole-file state: rejected, unbounded cost and unscoreable verdicts. (c) A model
+  reviewer per landing: rejected, far costlier. (d) Act at once, no shadow: rejected, no measured precision.
+  (e) Jev alone triggers structural passes: rejected, a false positive costs a producer run. (f) Score by
+  review or opinion: rejected, the addendum asks for evidence.
+- **Tradeoff:** A small recurring cost and a shadow period with no visible benefit; a question may never show
+  lift and be dropped. Every threshold, window and call count is an estimate to be replaced by calibration.
+- **Reversal cost:** Low before the build (this entry and the design). Low after, since shadow mode acts on
+  nothing and the checks can be switched off.
+- **Provenance:** stated: the request of this job and its price. Read: `docs/design/defaults-loop.md` section 6,
+  D127, D129, `docs/design/hestia.md` and `docs/design/scope-guard.md`. Not measured: every count and threshold,
+  the landing-record field names, and whether one call answers several questions.
