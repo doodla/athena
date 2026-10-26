@@ -9,6 +9,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- Added the Jev code-health design (`docs/design/jev-code-health.md`): five typed questions about changed files
+  and functions, run first in shadow mode and scored by later landing records, with cost per landing, and
+  proposed decision D130 for it. Design only: no code, and the build jobs are not queued.
 - Added the Hestia design (`docs/design/hestia.md`), a continuity sweep with Hades's cleanup folded in, and
   proposed decision D129 for it. Design only: no code, and the build jobs are not queued.
 - The producer self-check no longer sends a report back over a criterion the producer left to Athena's
