@@ -7,6 +7,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- Introspection records gain a post-mortem field and a planning-stopped marker. Jev's call has a third
+  question, "What one piece of context, if the agent had read it, would have prevented this?", answered from a
+  fixed list (`system-facts-line`, `failure-class`, `brief-assembly`, `vocabulary-term`, `spec-fix`,
+  `structure`, `none`) and stored as `jev.context_prevention`; an answer that is not on the list is stored as an
+  error and blocks nothing. The question is optional in the Jev reply parser, so a reply without it still
+  returns the failure-class and is-repeat answers. `planning_stopped` is set on the record of a job that failed
+  in planning. Both fields are omitted when empty, so older records read unchanged. Decision D130 is accepted.
+
+### Fixed
+
+- A retry now carries the previous attempt's blocker and major findings in both paths. The unseeded retry (one
+  that starts from the base) had no findings at all in its producer brief, and the seeded one listed them
+  unlabelled. Both now show a "Findings you must address" block, built from one shared formatter, holding every
+  blocker and major finding of the retried job's final verification. No "resolved" state is invented:
+  findings have none, so none is left out for having been fixed in a later round.
+
 ### Changed
 
 - Tests no longer depend on the machine's real free disk space. The shared CLI test configuration (`test_config`)

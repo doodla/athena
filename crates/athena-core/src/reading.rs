@@ -20,7 +20,7 @@ use athena_context::outputs::{
 use athena_context::{CONTRACT, Component, Composed, READER_FRAME, compose};
 use athena_data::records::{
     AnyRecord, Correction, CorrectionKind, Criterion, CriterionKind, CritiqueVerdict,
-    DefaultApplied, Deliverable, DeliverableAction, Forecast, Forecasts, Intervention,
+    DefaultApplied, Deliverable, DeliverableAction, Finding, Forecast, Forecasts, Intervention,
     InterventionCategory, InterventionSource, IntrospectionRecord, IntrospectionStatus,
     IntrospectionTrigger, Invocation, OutcomeState, PreventionKind, PriorityRecord, Quantiles,
     Reading, Request, Role,
@@ -1115,6 +1115,8 @@ pub struct TreeRetrySeed {
     pub unmet: Vec<String>,
     /// The verification's findings, redacted.
     pub findings: Vec<String>,
+    /// The blocker and major findings among `findings`: those the retry must address.
+    pub must_address: Vec<String>,
 }
 
 /// The seed for a request of the form "try again on <job>" when [`qualifies_for_tree_retry`] holds for that
@@ -1151,29 +1153,74 @@ pub fn tree_retry_seed(
         .map(|c| format!("{}: {}", c.criterion, c.evidence))
         .collect();
     let unmet_count = texts.len();
-    texts.extend(verification.findings.iter().map(|f| {
-        let location = f
-            .location
-            .as_deref()
-            .map_or(String::new(), |l| format!(" ({l})"));
-        format!(
-            "{}{location}: {} {}",
-            format!("{:?}", f.severity).to_lowercase(),
-            f.summary,
-            f.evidence
-        )
-        .trim_end()
-        .to_string()
-    }));
+    texts.extend(verification.findings.iter().map(finding_text));
     redactor.redact_all(&mut texts)?;
     let findings = texts.split_off(unmet_count);
+    // The blocking findings are picked from the redacted list by position, so both retry paths show the
+    // same text for the same finding.
+    let must_address = verification
+        .findings
+        .iter()
+        .zip(&findings)
+        .filter(|(f, _)| crate::verify::finding_blocks(f))
+        .map(|(_, text)| text.clone())
+        .collect();
     Ok(Some(TreeRetrySeed {
         job: id,
         base_commit: candidate.base_commit.clone(),
         candidate_commit,
         unmet: texts,
         findings,
+        must_address,
     }))
+}
+
+/// One finding as a retry brief shows it: severity, location, summary and evidence.
+fn finding_text(f: &Finding) -> String {
+    let location = f
+        .location
+        .as_deref()
+        .map_or(String::new(), |l| format!(" ({l})"));
+    format!(
+        "{}{location}: {} {}",
+        format!("{:?}", f.severity).to_lowercase(),
+        f.summary,
+        f.evidence
+    )
+    .trim_end()
+    .to_string()
+}
+
+/// The job a request "try again on <job>" retries, and every blocker and major finding of that job's final
+/// verification, redacted, in the form [`tree_retry_seed`] uses. Findings have no resolved state, so none is
+/// left out because a later round might have fixed it. `None` when the request is not a retry, the job has
+/// no verification, or no finding blocks.
+pub fn retry_findings(
+    records: &Records,
+    request: &str,
+    redactor: &Redactor,
+) -> Result<Option<(JobId, Vec<String>)>> {
+    let Some(id) = retried_job(records, request) else {
+        return Ok(None);
+    };
+    let Some(verification) = records
+        .jobs
+        .get(id.as_str())
+        .and_then(|j| j.verification.as_ref())
+    else {
+        return Ok(None);
+    };
+    let mut texts: Vec<String> = verification
+        .findings
+        .iter()
+        .filter(|f| crate::verify::finding_blocks(f))
+        .map(finding_text)
+        .collect();
+    if texts.is_empty() {
+        return Ok(None);
+    }
+    redactor.redact_all(&mut texts)?;
+    Ok(Some((id, texts)))
 }
 
 /// The reference after "try again on " at the start of `request`; `None` when it is not that form.
@@ -1244,20 +1291,7 @@ fn carry(job: &JobRecords, redactor: &Redactor) -> Result<Option<EarlierAttempt>
     };
     let mut texts = vec![earlier.text.clone()];
     if let Some(verification) = &job.verification {
-        texts.extend(verification.findings.iter().map(|f| {
-            let location = f
-                .location
-                .as_deref()
-                .map_or(String::new(), |l| format!(" ({l})"));
-            format!(
-                "{}{location}: {} {}",
-                format!("{:?}", f.severity).to_lowercase(),
-                f.summary,
-                f.evidence
-            )
-            .trim_end()
-            .to_string()
-        }));
+        texts.extend(verification.findings.iter().map(finding_text));
         texts.extend(verification.reasons.iter().map(|r| format!("reason: {r}")));
         texts.extend(verification.checks.iter().filter(|c| !c.passed).map(|c| {
             let exit = c.exit_code.map_or("no exit code".to_string(), |code| {
@@ -2731,6 +2765,119 @@ mod tests {
             ),
             "{:?}",
             seed.findings
+        );
+    }
+
+    /// Two major findings (at docs paths so the job qualifies for a tree retry) and a minor one.
+    fn two_majors_and_a_minor() -> JobRecords {
+        use athena_data::records::Severity;
+        let mut job = docs_only_rejection();
+        let mut first = finding(Severity::Major, Some("docs/a.md:1"));
+        first.summary = "FIRST-SUMMARY".into();
+        first.evidence = "FIRST-EVIDENCE".into();
+        let mut second = finding(Severity::Major, Some("docs/b.md:2"));
+        second.summary = "SECOND-SUMMARY".into();
+        second.evidence = "SECOND-EVIDENCE".into();
+        let mut minor = finding(Severity::Minor, Some("docs/c.md"));
+        minor.summary = "MINOR-SUMMARY".into();
+        job.verification.as_mut().unwrap().findings = vec![first, minor, second];
+        job
+    }
+
+    #[test]
+    fn both_retry_paths_carry_every_major_finding_in_the_same_form() {
+        use athena_context::briefs::{
+            AcceptedReading, ProducerInputs, RetryFindings, RetrySeed, producer_brief,
+        };
+        let redactor = Redactor::new(&athena_gate::builtin_config()).unwrap();
+        let job = two_majors_and_a_minor();
+        let id = job.id().clone();
+        let records = records_with(job);
+        let request = format!("try again on {id}");
+
+        let seed = tree_retry_seed(&records, &request, &redactor)
+            .unwrap()
+            .expect("a seed");
+        let (retried, unseeded) = retry_findings(&records, &request, &redactor)
+            .unwrap()
+            .expect("findings");
+        assert_eq!(retried, id);
+        assert_eq!(seed.must_address, unseeded);
+        assert_eq!(unseeded.len(), 2, "{unseeded:?}");
+        for (text, parts) in unseeded.iter().zip([
+            ["major (docs/a.md:1)", "FIRST-SUMMARY", "FIRST-EVIDENCE"],
+            ["major (docs/b.md:2)", "SECOND-SUMMARY", "SECOND-EVIDENCE"],
+        ]) {
+            for part in parts {
+                assert!(text.contains(part), "{part} missing from {text}");
+            }
+        }
+        assert!(seed.findings.iter().any(|f| f.contains("MINOR-SUMMARY")));
+
+        let brief_of = |seeded: bool| {
+            let mut inputs = ProducerInputs {
+                job: "20261026-000000-test".into(),
+                request: request.clone(),
+                reading: AcceptedReading {
+                    n: 1,
+                    title: "t".into(),
+                    summary: "s".into(),
+                    assumptions: vec![],
+                    criteria: vec![],
+                    deliverables: vec![],
+                    out_of_scope: vec![],
+                    defaults: vec![],
+                },
+                checks: vec![],
+                commands: vec![],
+                pin: None,
+                retry_from: None,
+                retry_findings: None,
+            };
+            if seeded {
+                inputs.retry_from = Some(RetrySeed {
+                    job: id.as_str().to_string(),
+                    unmet: seed.unmet.clone(),
+                    findings: seed.findings.clone(),
+                    must_address: seed.must_address.clone(),
+                    progress_note: None,
+                });
+            } else {
+                inputs.retry_findings = Some(RetryFindings {
+                    job: id.as_str().to_string(),
+                    findings: unseeded.clone(),
+                });
+            }
+            producer_brief(&inputs)
+        };
+        for seeded in [true, false] {
+            let brief = brief_of(seeded);
+            let start = brief.find("## Findings you must address").expect("a block");
+            let rest = &brief[start..];
+            let end = ["\n\n## ", "\n\nAll of the"]
+                .iter()
+                .filter_map(|stop| rest.find(stop))
+                .min()
+                .unwrap_or(rest.len());
+            let block = &rest[..end];
+            for text in &unseeded {
+                assert!(
+                    block.contains(&format!("> {text}")),
+                    "seeded={seeded}: {block}"
+                );
+            }
+            assert!(!block.contains("MINOR-SUMMARY"), "seeded={seeded}: {block}");
+        }
+
+        // A job without a blocking finding has nothing to carry.
+        let mut quiet = two_majors_and_a_minor();
+        quiet.verification.as_mut().unwrap().findings =
+            vec![finding(athena_data::records::Severity::Minor, None)];
+        let id = quiet.id().clone();
+        let records = records_with(quiet);
+        assert_eq!(
+            retry_findings(&records, &format!("try again on {id}"), &redactor).unwrap(),
+            None
         );
     }
 

@@ -747,6 +747,7 @@ mod tests {
                 failure: None,
                 flags: vec![],
                 dropped_ids: vec![],
+                planning_stopped: false,
                 from_jev: false,
                 jev: None,
             })),

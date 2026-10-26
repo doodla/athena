@@ -3269,9 +3269,12 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   2026-10-25 addendum, D127 and `docs/design/scope-guard.md`. Not measured: every figure from `records/`, and
   every threshold and budget.
 
-## D130 · Hermes owns the craft of context efficiency, with Hestia keeping it (proposed)
+## D130 · Hermes owns the craft of context efficiency, with Hestia keeping it (accepted)
 
-- **Status:** proposed. Not accepted; the build jobs are not queued. The design is
+- **Status:** accepted, decided by the brain under Sri's delegation (BRIEF.md addenda of 2026-10-23 to
+  2026-10-26). Job 1 of the design (the size and touch report) is covered by the code-health check (request
+  20261026-042558-5p65 and its retry). Jobs 2, 3 and 5 are not built. The post-mortem field, the
+  planning-stopped marker and the retry findings (job 4) are built. The design is
   [`docs/design/context-engineer.md`](design/context-engineer.md).
 - **Case:** The BRIEF.md addenda of 2026-10-25 and 2026-10-26 ask that the context given to agents be sufficient
   and good, and that Athena write for agents, with a role that owns the craft. The request cites, as stated and
@@ -3279,7 +3282,7 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   earlier verifier's findings; planning stopped on facts no file stated. Measured at the base commit: `gh.rs`
   is 5,276 lines, `produce_and_verify` spans 737 lines (the request says 724), this file was 3,261 lines
   (the request says 3,231), and the reader prompt is at 1997 of 2000.
-- **Decision (proposed):** Hermes owns the craft: conventions for file and function size, one concern per
+- **Decision:** Hermes owns the craft: conventions for file and function size, one concern per
   module, short indexed docs with one fact in one place and a question-to-file map, and what agents are given.
   Hestia keeps it through her sweep, which stays non-gating (D127). The post-mortem is an extension of the
   existing introspection record, not a second record: it covers rejected, failed and planning-stopped jobs, and

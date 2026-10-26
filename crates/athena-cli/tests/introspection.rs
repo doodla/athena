@@ -7,7 +7,9 @@ mod common;
 
 use athena_agent::fake::{FakeTurn, Script};
 use athena_core::introspect::{CASE_CAP, CaseRow, Event, Records as Past, narrow_cases};
-use athena_core::introspect::{JEV_CLASS_KEY, JEV_NEW_OPTION, JEV_REPEAT_KEY};
+use athena_core::introspect::{
+    JEV_CLASS_KEY, JEV_CONTEXT_KEY, JEV_CONTEXT_QUESTION, JEV_NEW_OPTION, JEV_REPEAT_KEY, ask_jev,
+};
 use athena_core::jev::{Answer, Evaluation, FakeJev, JevError, Question, Usage};
 use athena_core::manage::InterveneArgs;
 use athena_core::run::GoResult;
@@ -532,7 +534,7 @@ fn jev_is_asked_in_shadow_and_both_answers_are_recorded_without_changing_the_cla
     };
     assert_eq!(
         questions.keys().map(String::as_str).collect::<Vec<_>>(),
-        [JEV_CLASS_KEY, JEV_REPEAT_KEY]
+        [JEV_CONTEXT_KEY, JEV_CLASS_KEY, JEV_REPEAT_KEY]
     );
     let sent: Value = serde_json::from_str(state).unwrap();
     assert_eq!(sent, model.prompts.lock().unwrap()[0]);
@@ -593,8 +595,234 @@ fn a_failed_jev_call_is_recorded_and_blocks_nothing() {
     let stored = record.jev.as_ref().unwrap();
     assert!(stored.error.as_deref().unwrap().contains("HTTP 401"));
     assert!(stored.class.is_none() && stored.repeat_probability.is_none());
+    assert!(stored.context_prevention.is_none());
     assert_eq!((stored.input_tokens, stored.output_tokens), (0, 0));
     assert!(record.validate().is_ok());
+}
+
+/// A reply to the three questions with this post-mortem answer.
+fn with_context(answer: Option<Answer>) -> Evaluation {
+    let mut evaluation = chosen("not-a-registry-class", 0.25);
+    if let Some(answer) = answer {
+        evaluation
+            .answers
+            .insert(JEV_CONTEXT_KEY.to_string(), answer);
+    }
+    evaluation
+}
+
+fn context_choice(choice: &str) -> Answer {
+    Answer::Choice {
+        choice: choice.into(),
+        probabilities: BTreeMap::from([(choice.to_string(), 0.8)]),
+        confidence: 0.7,
+    }
+}
+
+const OUTCOMES: [&str; 7] = [
+    "brief-assembly",
+    "failure-class",
+    "none",
+    "spec-fix",
+    "structure",
+    "system-facts-line",
+    "vocabulary-term",
+];
+
+#[test]
+fn jevs_call_asks_what_context_would_have_prevented_it_and_the_answer_reads_back() {
+    let model = Model::default();
+    model.say(reply(
+        "new",
+        "The job removed README.md.",
+        "Nothing stops a deleted file.",
+    ));
+    let jev = FakeJev::new().then(Ok(with_context(Some(context_choice("spec-fix")))));
+    let (fx, mut athena) = setup(rejecting(), &model);
+    athena.jev = Some(Box::new(jev.clone()));
+    let finished = run_job(&athena, "remove the readme");
+    assert_eq!(finished.state, OutcomeState::Rejected);
+
+    let calls = jev.calls();
+    let Question::Choice {
+        instructions,
+        criteria,
+    } = &calls[0].1[JEV_CONTEXT_KEY]
+    else {
+        panic!("the context question is a choice")
+    };
+    assert!(instructions.contains(
+        "What one piece of context, if the agent had read it, would have prevented this?"
+    ));
+    assert_eq!(instructions, JEV_CONTEXT_QUESTION);
+    assert_eq!(
+        criteria.keys().map(String::as_str).collect::<Vec<_>>(),
+        OUTCOMES
+    );
+
+    // A rejected job yields the field, and it reads back from git equal to what was written.
+    let [record] = introspections(&fx)
+        .try_into()
+        .unwrap_or_else(|_| panic!("one"));
+    assert!(!record.planning_stopped);
+    let answer = record
+        .jev
+        .as_ref()
+        .unwrap()
+        .context_prevention
+        .as_ref()
+        .unwrap();
+    assert_eq!(answer.outcome.as_deref(), Some("spec-fix"));
+    assert_eq!(answer.error, None);
+    assert!(record.validate().is_ok());
+    let any = AnyRecord::Introspection(Box::new(record));
+    let parsed = AnyRecord::parse("x.json", any.to_json().as_bytes()).unwrap();
+    assert_eq!(parsed, any);
+}
+
+#[test]
+fn a_failed_job_gets_the_context_field_and_no_planning_marker() {
+    let model = Model::default();
+    model.say(reply(
+        "new",
+        "A governance file changed.",
+        "The reading did not list it.",
+    ));
+    let mut scenario = Scenario::default();
+    scenario
+        .edits
+        .push(("rustfmt.toml".into(), Some("style = \"relaxed\"\n".into())));
+    let (fx, mut athena) = setup(scenario, &model);
+    athena.jev = Some(Box::new(
+        FakeJev::new().then(Ok(with_context(Some(context_choice("none"))))),
+    ));
+    let finished = run_job(&athena, "add a greeting");
+    assert_eq!(finished.state, OutcomeState::Failed);
+    let [record] = introspections(&fx)
+        .try_into()
+        .unwrap_or_else(|_| panic!("one"));
+    assert!(!record.planning_stopped);
+    let answer = record.jev.unwrap().context_prevention.unwrap();
+    assert_eq!(answer.outcome.as_deref(), Some("none"));
+}
+
+#[test]
+fn a_landed_job_yields_no_record_and_asks_jev_nothing() {
+    let model = Model::default();
+    let jev = FakeJev::new();
+    let (fx, mut athena) = setup(Scenario::default(), &model);
+    athena.jev = Some(Box::new(jev.clone()));
+    let finished = run_job(&athena, "add a greeting");
+    assert_eq!(finished.state, OutcomeState::Landed);
+    assert!(introspections(&fx).is_empty());
+    assert!(jev.calls().is_empty());
+}
+
+#[test]
+fn a_job_that_failed_in_planning_is_marked_and_carries_the_context_field() {
+    let model = Model::default();
+    model.say(reply(
+        "new",
+        "Planning stopped.",
+        "The plan was rejected by the critic.",
+    ));
+    let fx = Fixture::with_config(&format!("{}\n[job_plan]\nenabled = true\n", test_config()));
+    let scenario = Scenario {
+        plans: vec![json!({
+        "approach": "Add a greeting line to README.md.",
+        "decisions": [],
+        "files": [{ "path": "README.md", "action": "modify", "purpose": "Hold the greeting." }],
+        "steps": ["Edit README.md."],
+        "risks": [],
+        "demonstrations": [
+            { "criterion": 1, "method": "run the tests", "command": "cargo test --locked",
+              "observes": "criterion 1 holds", "fails_without": "the greeting test fails" },
+            { "criterion": 2, "method": "run the tests", "command": "cargo test --locked",
+              "observes": "criterion 2 holds", "fails_without": "the suite fails" }
+        ],
+        "open_questions": []
+        })],
+        critiques: vec![json!({
+            "verdict": "reject",
+            "findings": [{ "severity": "major", "summary": "The plan misses the request",
+                "location": "approach", "evidence": "it edits the wrong file",
+                "fix": "edit the right file" }],
+            "request_reading_mismatch": null,
+            "summary": "The critic says reject."
+        })],
+        ..Scenario::default()
+    };
+    let jev = FakeJev::new().then(Ok(with_context(Some(context_choice("brief-assembly")))));
+    let mut athena = fx.athena(model.script(scenario.script()));
+    athena.jev = Some(Box::new(jev));
+    let finished = run_job(&athena, "tidy the readme");
+    assert_eq!(finished.state, OutcomeState::Failed);
+    assert!(
+        finished
+            .reason
+            .starts_with("planning stopped before any code was written:"),
+        "{}",
+        finished.reason
+    );
+    let [record] = introspections(&fx)
+        .try_into()
+        .unwrap_or_else(|_| panic!("one"));
+    assert!(record.planning_stopped);
+    let outcome = record
+        .jev
+        .as_ref()
+        .unwrap()
+        .context_prevention
+        .as_ref()
+        .and_then(|a| a.outcome.clone())
+        .expect("an outcome");
+    assert!(OUTCOMES.contains(&outcome.as_str()), "{outcome}");
+    assert_eq!(outcome, "brief-assembly");
+    assert!(record.validate().is_ok());
+    // The marker is stored and reads back.
+    let any = AnyRecord::Introspection(Box::new(record));
+    assert!(
+        any.to_json().contains("\"planning_stopped\": true")
+            || any.to_json().contains("\"planning_stopped\":true")
+    );
+    assert_eq!(
+        AnyRecord::parse("x.json", any.to_json().as_bytes()).unwrap(),
+        any
+    );
+}
+
+#[test]
+fn a_missing_or_bad_context_answer_is_kept_and_blocks_nothing() {
+    let classes = Vec::new();
+    // Missing: the class and repeat answers are stored and the field is empty.
+    let stored = ask_jev(
+        &FakeJev::new().then(Ok(with_context(None))),
+        "state",
+        &classes,
+    );
+    assert!(stored.error.is_none());
+    assert!(stored.class.is_some() && stored.repeat_probability.is_some());
+    assert!(stored.context_prevention.is_none());
+    // Out of the list.
+    let stored = ask_jev(
+        &FakeJev::new().then(Ok(with_context(Some(context_choice("more-docs"))))),
+        "state",
+        &classes,
+    );
+    assert!(stored.class.is_some() && stored.repeat_probability.is_some());
+    let answer = stored.context_prevention.unwrap();
+    assert_eq!(answer.outcome, None);
+    assert!(answer.error.unwrap().contains("more-docs"));
+    // Wrong type.
+    let stored = ask_jev(
+        &FakeJev::new().then(Ok(with_context(Some(Answer::Boolean { probability: 0.5 })))),
+        "state",
+        &classes,
+    );
+    assert!(stored.class.is_some() && stored.repeat_probability.is_some());
+    let answer = stored.context_prevention.unwrap();
+    assert_eq!(answer.outcome, None);
+    assert!(answer.error.is_some());
 }
 
 #[test]
@@ -853,6 +1081,7 @@ fn earlier_cases_are_narrowed_by_class_of_work_and_category_and_capped() {
         what: "w".into(),
         why: "y".into(),
         at: "2026-10-02T00:00:00Z".parse().unwrap(),
+        planning_stopped: false,
     };
     let cases = narrow_cases(&past, &event);
     assert_eq!(cases.len(), CASE_CAP);
