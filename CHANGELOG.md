@@ -9,6 +9,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- Added the Jev code-health design (`docs/design/jev-code-health.md`): five typed questions asked in one batched
+  call per landing, in shadow, on the existing Jev client, fake and `athena score-jev` scorer, scored by later
+  breakage and churn. Proposed decision D131. Design only: no code, and the build jobs are not queued.
 - Added the context and knowledge engineer design (`docs/design/context-engineer.md`): Hermes owns the craft of
   context efficiency in what Athena writes and gives agents, Hestia keeps it, and the post-mortem extends the
   introspection record. Proposed decision D130. Design only: no code, and the build jobs are not queued.
