@@ -3169,3 +3169,33 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Provenance:** stated: the request. Measured: `cargo test -p athena-gate secrets` and
   `cargo test -p athena-core checks` pass; the before and after times above (summed per-binary times, one run
   each). Not measured: true wall-clock time including build.
+
+## D127 · A scope guard (Artemis, with Demeter's cost view) weighs improvement work and watches for thrash (proposed)
+
+- **Status:** proposed. Nothing is built; the design is [`docs/design/scope-guard.md`](design/scope-guard.md).
+- **Case:** The BRIEF.md addendum of 2026-10-25 asks for a role responsible for ensuring Athena does not
+  rabbit-hole into unnecessary work, while learnings still go back into the system. The request cites, as
+  supplied by it and not checked here: the trailer job (three rejected attempts, about $11 before the split),
+  about 80 minutes lost to a prompt-budget trap, 49 open requests of which many were done or superseded, and the
+  test-suite speedup (three rejected attempts, about $9 and 4 hours, each a real gain but rejected for a time
+  target set without a measurement; D126 records the work that landed).
+- **Decision (proposed):** Artemis (BRIEF.md pantheon row "Boundaries") owns a rules-first scope guard; Demeter
+  ("Sustainability") supplies the cost side of its test; Hestia stays knowledge and does not gate work. Before
+  work is queued, a value record (failure class, goal or need, frequency, each with a source) is weighed against
+  expected dollars and wall time, giving queue, merge, defer or drop. Running lines are watched by five
+  numeric signals (retries, plan growth, cost against forecast p90, the same criterion rejected twice, wall
+  time), all estimates to be tuned. Code decides the signals and the table; a model only scores inputs and may
+  only move a decision toward asking Sri. On its own the guard may defer, merge exact duplicates, and pause
+  (never kill) a line; dropping, re-scoping and governance changes go to Sri through the steward channel.
+  Learnings work has a protected quota, proceeds on doubt, and can be appealed. The build is ten small jobs.
+- **Alternatives:** (a) Demeter owns it: rejected, cost alone cuts cheap but pointless work and misses repeated
+  rejection. (b) Hestia owns it: rejected, it blurs capturing learnings with throttling them. (c) Model-only
+  judgment: rejected, costly, not reproducible. (d) Rules only: rejected, cannot tell if work is done or serves
+  a failure class. (e) A dollar cap only: rejected, the speedup attempts were each cheap.
+- **Tradeoff:** A new check adds some latency and may hold work that was worth doing; default-to-proceed, the
+  quota, the appeal path and a keep rule bound that. All thresholds are estimates until measured.
+- **Reversal cost:** Low before the build (this entry and the design only); low after it, since the guard only
+  defers and pauses and can be switched off by the keep rule.
+- **Provenance:** stated: the request of 2026-10-25 and its figures. Read: BRIEF.md pantheon table and relay note,
+  `docs/design/job-planning.md` section 9, `docs/design/roles-and-ladder.md`, D125 and D126. Not measured: every
+  figure from `records/`, and every threshold.

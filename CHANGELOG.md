@@ -18,6 +18,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A design for the scope guard, `docs/design/scope-guard.md`, and a proposed decision, D127 in
+  `docs/decisions.md`. Artemis (boundaries) owns a role that weighs improvement work's value against expected
+  cost before it is queued, and watches running lines of work for thrash, with Demeter supplying the cost
+  view. Design only; no code, and nothing is stopped yet.
 - Free disk space is checked before a job is dispatched and before its checks. The new `[disk] min_free_gb`
   setting in `athena.toml` (default 10, defined in `config.rs`, so `athena.toml` needs no change and the
   setting does not move a reading's configuration digest) is the minimum. When space is below it, Athena first
