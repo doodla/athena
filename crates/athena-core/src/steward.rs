@@ -100,6 +100,8 @@ impl Athena {
         {
             return;
         }
+        // The code-health check reads the checkout and the records; it queues work and never fails the job.
+        self.run_code_health(ui);
         let role = steward(crate::now());
         match tick(&self.state, role.cadence_tasks) {
             Ok(false) => {}

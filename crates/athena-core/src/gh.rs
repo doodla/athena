@@ -2574,6 +2574,11 @@ impl Athena {
         {
             self.resync_onto_merge(landed, merged, ui)?;
         }
+        // The landing is done and the checkout holds it: measure the code. A failed resync above skips this;
+        // the next landing or finished job measures again, since nothing is kept but the records.
+        if report.link.state == LinkState::Landed {
+            self.run_code_health(ui);
+        }
         // The merge is done and stays done: a failed Pages watch is shown, never returned as an error.
         if report.link.state == LinkState::Landed
             && let Some(merged) = &report.link.merged_commit

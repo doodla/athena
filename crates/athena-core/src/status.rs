@@ -138,6 +138,9 @@ pub struct StatusView {
     /// Lines of work the scope guard flagged or paused, with their signals T1 to T5 (`crate::scope_guard`).
     /// Pauses first. Empty when no mark file exists.
     pub lines: Vec<crate::scope_guard::LineMark>,
+    /// The code-health table (`crate::code_health`): per-file lines, longest function, weekly landings and
+    /// citations, with the limits and the test suite's run time.
+    pub code_health: crate::code_health::CodeHealth,
     pub invalid_records: Vec<String>,
     pub next: Vec<String>,
     /// The reconciliation that ran before this view was built (`Athena::status_with_reconcile`); absent from
@@ -799,6 +802,7 @@ impl Athena {
             audience: audience_view(&records),
             audit: audit_view(&records),
             lines,
+            code_health: crate::code_health::measure(self.git.dir(), &records, crate::now()),
             invalid_records: records.invalid.clone(),
             next,
             reconcile: None,

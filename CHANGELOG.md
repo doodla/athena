@@ -7,6 +7,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- A code-health check (`code_health.rs`, decision D131). It measures each Rust file under `crates/`: production
+  lines, longest function, landings in the last 7 days and failure citations, and `athena status` shows the table
+  with the limits (2000 lines, 200-line functions, 1500 lines with 5 landings a week) and the test suite's run
+  time. A breach queues one `Structural pass: <path>` request; every 10th landing queues a high-priority,
+  design-only design-review request. The check runs after each finished job and each landed pull request.
+
 ### Changed
 
 - Added the context and knowledge engineer design (`docs/design/context-engineer.md`): Hermes owns the craft of
