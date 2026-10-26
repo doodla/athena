@@ -1814,6 +1814,107 @@ impl Audit {
     }
 }
 
+/// The schema tag of a Hestia sweep.
+pub const HESTIA_SWEEP_SCHEMA: &str = "athena.hestia-sweep/1";
+
+/// Where a Hestia finding stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HestiaFindingState {
+    /// Reported and not yet seen to be fixed.
+    Open,
+    /// Seen to be fixed by a later sweep.
+    Resolved,
+}
+
+impl HestiaFindingState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HestiaFindingState::Open => "open",
+            HestiaFindingState::Resolved => "resolved",
+        }
+    }
+}
+
+/// One thing a Hestia check reports (`docs/design/hestia.md` section 9, job 1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HestiaFinding {
+    /// The id of the check that reported it.
+    pub check: String,
+    /// What the finding is about: a branch, a path, a request, a binary.
+    pub subject: String,
+    /// What the check saw, or the error it hit. Never empty.
+    pub evidence: String,
+    /// How long the problem has stood, in whole seconds; 0 for one first seen in this sweep.
+    pub age_seconds: u64,
+    pub state: HestiaFindingState,
+}
+
+/// What one check did in one sweep. A check that ran and found nothing is listed with a count of 0.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HestiaCheckResult {
+    pub check: String,
+    /// How many things the check looked at.
+    pub examined: u32,
+    /// How many findings the check reported; equals the sweep's findings for this check.
+    pub count: u32,
+    /// True when the check failed to run. Its error is then one of its findings, so it never looks clean.
+    pub errored: bool,
+}
+
+/// `athena.hestia-sweep/1`: one run of Hestia's checks. Sweeps are never edited; the latest is the newest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HestiaSweep {
+    pub id: RecordId,
+    pub at: Timestamp,
+    /// Every check that was registered, in order, with its count.
+    pub checks: Vec<HestiaCheckResult>,
+    pub findings: Vec<HestiaFinding>,
+}
+
+impl HestiaSweep {
+    /// The most recent of `sweeps`, by time and then id; None when there are none.
+    pub fn latest(sweeps: &[HestiaSweep]) -> Option<&HestiaSweep> {
+        sweeps
+            .iter()
+            .max_by(|a, b| (a.at, &a.id).cmp(&(b.at, &b.id)))
+    }
+
+    /// Why this record is not acceptable, if it is not.
+    pub fn validate(&self) -> Result<(), String> {
+        for (i, c) in self.checks.iter().enumerate() {
+            if c.check.trim().is_empty() {
+                return Err("every check has an id".into());
+            }
+            if self.checks[..i].iter().any(|p| p.check == c.check) {
+                return Err(format!("check {} is listed twice", c.check));
+            }
+            let reported = self.findings.iter().filter(|f| f.check == c.check).count();
+            if reported != c.count as usize {
+                return Err(format!(
+                    "check {} counts {} finding(s) but the sweep holds {reported}",
+                    c.check, c.count
+                ));
+            }
+        }
+        for f in &self.findings {
+            if !self.checks.iter().any(|c| c.check == f.check) {
+                return Err(format!(
+                    "a finding names check {}, which is not listed",
+                    f.check
+                ));
+            }
+            if f.subject.trim().is_empty() || f.evidence.trim().is_empty() {
+                return Err("every finding has a subject and evidence".into());
+            }
+        }
+        Ok(())
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------------
 // Job planning (`docs/design/job-planning.md` sections 3 to 5)
 
@@ -2072,6 +2173,8 @@ pub enum AnyRecord {
     AudienceRating(Box<AudienceRating>),
     #[serde(rename = "athena.audit/1")]
     Audit(Box<Audit>),
+    #[serde(rename = "athena.hestia-sweep/1")]
+    HestiaSweep(Box<HestiaSweep>),
     #[serde(rename = "athena.job-plan/1")]
     JobPlan(Box<JobPlan>),
     #[serde(rename = "athena.critique/1")]
@@ -2159,6 +2262,7 @@ impl AnyRecord {
             AnyRecord::WorkDecision(d) => d.validate().map_err(invalid)?,
             AnyRecord::AudienceRating(a) => a.validate().map_err(invalid)?,
             AnyRecord::Audit(a) => a.validate().map_err(invalid)?,
+            AnyRecord::HestiaSweep(s) => s.validate().map_err(invalid)?,
             AnyRecord::JobPlan(p) => p.validate().map_err(invalid)?,
             AnyRecord::Critique(c) => c.validate().map_err(invalid)?,
             AnyRecord::Baseline(b) => b.validate().map_err(invalid)?,
@@ -2254,6 +2358,9 @@ impl AnyRecord {
                 format!("records/audience-ratings/{}/{}.json", r.id.month(), r.id)
             }
             AnyRecord::Audit(r) => format!("records/audits/{}/{}.json", r.id.month(), r.id),
+            AnyRecord::HestiaSweep(r) => {
+                format!("records/hestia-sweeps/{}/{}.json", r.id.month(), r.id)
+            }
             AnyRecord::JobPlan(r) => format!("{}/job-plan-{}.json", r.job.dir(), r.round),
             AnyRecord::Critique(r) => format!("{}/critique-{}.json", r.job.dir(), r.round),
             AnyRecord::Baseline(r) => format!("{}/baseline.json", r.job.dir()),
@@ -2288,6 +2395,7 @@ impl AnyRecord {
             AnyRecord::WorkDecision(_) => "athena.work-decision/1",
             AnyRecord::AudienceRating(_) => AUDIENCE_RATING_SCHEMA,
             AnyRecord::Audit(_) => AUDIT_SCHEMA,
+            AnyRecord::HestiaSweep(_) => HESTIA_SWEEP_SCHEMA,
             AnyRecord::JobPlan(_) => JOB_PLAN_SCHEMA,
             AnyRecord::Critique(_) => CRITIQUE_SCHEMA,
             AnyRecord::Baseline(_) => BASELINE_SCHEMA,
@@ -3063,6 +3171,84 @@ mod tests {
         let mut no_summary = sample_audit();
         no_summary.summary.clear();
         assert!(no_summary.validate().is_err());
+    }
+
+    fn sweep_with(id: &str) -> HestiaSweep {
+        HestiaSweep {
+            id: RecordId::parse(id).unwrap(),
+            at: ts(),
+            checks: vec![
+                HestiaCheckResult {
+                    check: "branches".into(),
+                    examined: 4,
+                    count: 0,
+                    errored: false,
+                },
+                HestiaCheckResult {
+                    check: "binary-age".into(),
+                    examined: 0,
+                    count: 1,
+                    errored: true,
+                },
+            ],
+            findings: vec![HestiaFinding {
+                check: "binary-age".into(),
+                subject: "binary-age".into(),
+                evidence: "the check failed: no installed binary".into(),
+                age_seconds: 0,
+                state: HestiaFindingState::Open,
+            }],
+        }
+    }
+
+    #[test]
+    fn a_hestia_sweep_has_a_path_a_schema_and_round_trips() {
+        let sweep = sweep_with("20261026-090000-5abc");
+        let record = AnyRecord::HestiaSweep(Box::new(sweep.clone()));
+        assert_eq!(record.schema(), "athena.hestia-sweep/1");
+        assert_eq!(
+            record.canonical_path(),
+            "records/hestia-sweeps/2026-10/20261026-090000-5abc.json"
+        );
+        let json = record.to_json();
+        let parsed = AnyRecord::parse(&record.canonical_path(), json.as_bytes()).unwrap();
+        assert_eq!(parsed, record);
+        let AnyRecord::HestiaSweep(parsed) = parsed else {
+            panic!("a sweep parses as a sweep");
+        };
+        assert_eq!(*parsed, sweep);
+        assert!(check_record_file(&record.canonical_path(), json.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn the_latest_sweep_is_the_most_recent_by_time_whatever_the_order() {
+        assert!(HestiaSweep::latest(&[]).is_none());
+        let older = sweep_with("20261026-090000-5abc");
+        let mut newer = sweep_with("20261026-100000-6abc");
+        newer.at = older
+            .at
+            .checked_add(jiff::SignedDuration::from_secs(3600))
+            .unwrap();
+        let sweeps = vec![newer.clone(), older];
+        assert_eq!(HestiaSweep::latest(&sweeps), Some(&newer));
+    }
+
+    #[test]
+    fn a_hestia_sweep_with_inconsistent_counts_or_ids_is_refused() {
+        let mut wrong_count = sweep_with("20261026-090000-5abc");
+        wrong_count.checks[0].count = 2;
+        assert!(wrong_count.validate().is_err());
+        let mut duplicate = sweep_with("20261026-090000-5abc");
+        duplicate.checks[1].check = "branches".into();
+        assert!(duplicate.validate().is_err());
+        let mut stray = sweep_with("20261026-090000-5abc");
+        stray.findings[0].check = "unlisted".into();
+        assert!(stray.validate().is_err());
+        let mut no_evidence = sweep_with("20261026-090000-5abc");
+        no_evidence.findings[0].evidence = " ".into();
+        assert!(no_evidence.validate().is_err());
+        let record = AnyRecord::HestiaSweep(Box::new(wrong_count));
+        assert!(AnyRecord::parse("x", record.to_json().as_bytes()).is_err());
     }
 
     #[test]

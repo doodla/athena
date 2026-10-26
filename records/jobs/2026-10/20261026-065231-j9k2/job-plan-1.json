@@ -1,0 +1,279 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261026-065231-j9k2",
+  "round": 1,
+  "at": "2026-10-26T09:23:41.138506291Z",
+  "invocation_seq": 2,
+  "approach": "Add three small record types in athena-data (`HestiaSweep`, with per-check results and `HestiaFinding`) as a new record `athena.hestia-sweep/1` stored at `records/hestia-sweeps/<month>/<id>.json`, following the Audit pattern: AnyRecord variant, validate, canonical_path, schema, and a `hestia_sweeps` list in `Records::load` (sorted by time). In athena-core, `hestia.rs` re-exports those as `Finding` etc., defines a `Check` trait (`id()` and `run(now)` returning a scan of how many subjects were looked at plus findings), and a `run_sweep(checks, now, id)` that turns every `Err` from a check into a Finding by code (check id, subject = the check id, evidence = the error text, age 0, state open) and never skips the remaining checks. `Athena::hestia_sweep(checks)` runs it and commits the record; `Athena::last_sweep()` reads the newest one. The CLI gets `athena hestia sweep` and `athena hestia last`; the printing lives in a new `athena-cli/src/hestia.rs` so it is unit-testable. The trigger is settled as an explicit command; the skeleton ships an empty default check list, so a sweep with no checks says so explicitly. D129 becomes accepted with the trigger and alternatives, plus a CHANGELOG entry.",
+  "decisions": [
+    {
+      "choice": "Trigger is an explicit command: `athena hestia sweep` runs a sweep and `athena hestia last` prints the newest. A drain hook is deferred to a later job.",
+      "reason": "No timer or daemon exists in the code; a command is testable, cheap, and does not put a sweep on the drain path, which would conflict with D129's rule that Hestia never gates work (D127). A later job can call the same `Athena::hestia_sweep` from drain without changing the record.",
+      "rejected": [
+        {
+          "option": "Drain hook (sweep at the end of every drain)",
+          "why": "Makes drain slower and couples a report-only role to the work path; the hook can be added later on top of the command."
+        },
+        {
+          "option": "Timer or daemon",
+          "why": "Nothing in the repo runs a timer; it would be new infrastructure and out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "Store the sweep as a new immutable record type `athena.hestia-sweep/1` under `records/hestia-sweeps/<YYYY-MM>/<id>.json`, one record per sweep holding the check results and the findings.",
+      "reason": "Matches how audits and audience ratings are stored and loaded (AnyRecord variant, Records list, gate validation), so `last` is a read of the newest record and round-trips through the existing parser.",
+      "rejected": [
+        {
+          "option": "A state-directory file outside records",
+          "why": "Not visible to the records gate or history, and diverges from every other role's output."
+        },
+        {
+          "option": "One record per finding",
+          "why": "The report must list checks with zero findings too; a per-sweep record keeps the check list and counts together."
+        }
+      ]
+    },
+    {
+      "choice": "The data types live in athena-data and `hestia.rs` re-exports them as `Finding`, `CheckResult` and `Sweep`. Per-check entries carry `id`, `looked_at`, `findings` (count) and `errored`.",
+      "reason": "athena-data is the leaf crate that defines every record shape, and athena-core already depends on it. The re-export keeps `athena_core::hestia::Finding` as the design names it. Counts are always present, so an empty result is still a listed check with 0.",
+      "rejected": [
+        {
+          "option": "Define Finding only in athena-core and have records.rs depend on it",
+          "why": "athena-data is a leaf crate and must not depend on athena-core."
+        }
+      ]
+    },
+    {
+      "choice": "A check's `Err` becomes a Finding in `run_sweep` (check id, subject = check id, evidence containing the error text, age 0, state open); the entry is marked `errored` and the other checks still run.",
+      "reason": "The brief's mechanism default: error-to-finding is done by code. Marking `errored` lets the printout tell a failed check from a clean one, so a failed check never looks like a clean 0.",
+      "rejected": [
+        {
+          "option": "Abort the sweep on the first error",
+          "why": "One broken check would hide all others; the acceptance requires the others still be listed."
+        }
+      ]
+    },
+    {
+      "choice": "Validation: non-empty and unique check ids, every finding's check_id is a listed check, per-check counts equal the findings per check, evidence non-empty.",
+      "reason": "Stops a record that lies about its own counts from being accepted by the gate.",
+      "rejected": []
+    },
+    {
+      "choice": "The default check list is empty and `hestia sweep` prints 'no checks registered' when it is; `hestia last` prints 'no sweep recorded' when there is none.",
+      "reason": "no-empty-success: an empty result is never reported as plain success. Real checks are rows 1-8 in jobs 2-10, which are out of scope.",
+      "rejected": [
+        {
+          "option": "Ship a placeholder always-pass check",
+          "why": "Would pass as a real check and mislead; not part of the design."
+        }
+      ]
+    },
+    {
+      "choice": "Add `crates/athena-cli/tests/hestia.rs` driving the real binary for both `last` cases, in addition to unit tests of the renderer.",
+      "reason": "Criterion 4 asks for a CLI test; a binary-level test shows the command is wired. It is a test file, not governance.",
+      "rejected": [
+        {
+          "option": "Renderer unit tests only",
+          "why": "Would not show the subcommand is wired into main.rs."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/hestia.rs",
+      "action": "create",
+      "purpose": "Check trait, Scan result, run_sweep (check errors become findings by code), re-exports of Finding/CheckResult/Sweep, `Athena::hestia_sweep` and `Athena::last_sweep`, empty `default_checks()`, and unit tests.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "purpose": "Add `pub mod hestia;` and a module doc bullet.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/store.rs",
+      "action": "modify",
+      "purpose": "Add `hestia_sweeps: Vec<HestiaSweep>` to `Records`, collect it in `Records::load`, and sort it by (at, id). Needed because `load` matches on AnyRecord and an unlisted variant would reach the 'names its job' panic in the fallback arm.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "purpose": "Add HESTIA_SWEEP_SCHEMA, HestiaFinding, HestiaCheckResult, HestiaSweep with validate, and the AnyRecord variant with its parse validation, canonical_path and schema arms; add record tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/lib.rs",
+      "action": "modify",
+      "purpose": "Update the record-type count in the module doc (it says twelve and is already stale; rewrite it without a number or add hestia sweeps).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/hestia.rs",
+      "action": "create",
+      "purpose": "Render a sweep (or 'no sweep recorded', or 'no checks registered') as text, with unit tests.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-cli/src/lib.rs",
+      "action": "modify",
+      "purpose": "Add `pub mod hestia;`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "purpose": "Add the `Hestia` subcommand with `sweep` and `last` (both with `--json`), calling the core and the renderer.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/hestia.rs",
+      "action": "create",
+      "purpose": "Binary-level test of `athena hestia last` with no sweep and after a sweep, using the existing fixture helpers in tests/common.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "D129: heading and Status accepted, decided by the brain under Sri's delegation, with the settled trigger, alternatives and reasons; remove 'Not accepted; the build jobs are not queued'. D130 untouched.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/hestia.md",
+      "action": "modify",
+      "purpose": "Section 10: point the trigger open point at D129; section 9 intro: drop 'queueing needs the decision accepted' wording to say it is accepted. Small.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased > Added entry for the sweep skeleton, the two commands, the record location and the accepted decision.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read crates/athena-cli/tests/common and the binary.rs status test to learn the fixture setup.",
+    "In athena-data/src/records.rs, add HESTIA_SWEEP_SCHEMA, `FindingState`, `HestiaFinding { check_id, subject, evidence, age_seconds, state }`, `HestiaCheckResult { id, looked_at, findings, errored }` and `HestiaSweep { id, at, checks, findings }` with `validate`; add the AnyRecord variant and its parse, canonical_path (records/hestia-sweeps/<month>/<id>.json) and schema arms; add round-trip, path and validation tests. Fix the lib.rs doc count.",
+    "In athena-core/src/store.rs, add `hestia_sweeps` to Records, collect it in `load` and sort it.",
+    "Create athena-core/src/hestia.rs: re-exports, `Check` trait, `Scan`, `run_sweep` (an Err becomes a Finding, `errored` set, remaining checks still run), `default_checks()` returning an empty list, `Athena::hestia_sweep` (generate a record id like auditor.rs does, build the record, `commit_records` with an Athena-Record trailer) and `Athena::last_sweep` (Records::load at head, take the last). Tests: all-clean, one error, a finding with counts, last of two.",
+    "Add `pub mod hestia;` and the doc bullet to athena-core/src/lib.rs.",
+    "Create athena-cli/src/hestia.rs with the renderer (checks with counts, findings with the five fields, 'no sweep recorded', 'no checks registered', errored marker) and unit tests; add `pub mod hestia;` to athena-cli/src/lib.rs.",
+    "Add `Command::Hestia` with `HestiaCommand::{Sweep, Last}` to main.rs; both use `open` (sweep with writes, last read-only) and support `--json`.",
+    "Add crates/athena-cli/tests/hestia.rs covering `hestia last` with no sweep and after a sweep.",
+    "Edit D129 in docs/decisions.md: heading, Status, 'Decision (accepted)', the trigger with alternatives, provenance; edit hestia.md sections 9 and 10 lightly; add the CHANGELOG entry.",
+    "Run cargo fmt --all, cargo clippy --all-targets --locked -- -D warnings, cargo test --locked; fix anything flagged, including the budgets tests if prompt-set files were touched (none should be)."
+  ],
+  "risks": [
+    {
+      "risk": "The new AnyRecord variant reaches the fallback arm in `Records::load` and panics ('every other record names its job').",
+      "mitigation": "Add the `hestia_sweeps` arm in Records::load and `canonical_path`/`schema` arms in the same change; the compiler flags the exhaustive matches in records.rs, and a core test commits a sweep and loads it."
+    },
+    {
+      "risk": "Existing tests enumerate record types or schemas, or the records gate rejects a new directory.",
+      "mitigation": "Add the `hestia` field only to what `load` fills; run `cargo test` for the whole workspace, including tests/repo_config.rs, and keep new tests free of the records-history cutover helpers."
+    },
+    {
+      "risk": "A failed check could look like a clean 0 in the printout.",
+      "mitigation": "Print 'errored' next to such a check, add a renderer test for it, and mark the entry `errored` in the record."
+    },
+    {
+      "risk": "Scope creep into real checks or a drain hook.",
+      "mitigation": "Keep to the plan's file list, with no real checks and no changes to config files."
+    },
+    {
+      "risk": "The boundary-word scan or the personal-data list rejects doc text.",
+      "mitigation": "Write the changelog and decision text with plain words (no operator or machine names, no emails), then run the policy test via `cargo test`."
+    },
+    {
+      "risk": "A name clash with the existing `Finding` in records.rs (verification finding).",
+      "mitigation": "Do not name the new type `Finding` inside athena-data. Use `HestiaFinding` there and alias it in athena-core."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit test in hestia.rs with three fake checks that each return no findings, run through `run_sweep`.",
+      "command": "cargo test -p athena-core hestia",
+      "observes": "The report lists all three check ids, each with findings = 0 and looked_at as given, and the findings list is empty.",
+      "fails_without": "If run_sweep dropped clean checks from the report, or reported only checks with findings, the assertion that every registered id appears with count 0 and findings is empty would fail."
+    },
+    {
+      "criterion": 2,
+      "method": "Unit test in hestia.rs with one fake check returning Err and two clean ones; also a check that returns a real finding to show the counts.",
+      "command": "cargo test -p athena-core hestia",
+      "observes": "The report holds one finding with the failing check id, a subject, evidence containing the error text, age and state open. That check is marked errored. The other checks are still listed with counts.",
+      "fails_without": "If an Err from a check were propagated or ignored, the test would fail: either run_sweep would return an error or the report would have no finding for that check."
+    },
+    {
+      "criterion": 3,
+      "method": "Record-level tests in records.rs: serialize a sweep with AnyRecord::to_json, parse it with AnyRecord::parse at its canonical path and compare for equality; check the path is records/hestia-sweeps/<month>/<id>.json; check validate rejects mismatched counts and duplicate check ids. A core test (cargo test -p athena-core hestia) commits two sweeps and checks that `last_sweep` returns the later.",
+      "command": "cargo test -p athena-data",
+      "observes": "Round-trip equality, the canonical path, the rejection cases, and that the last of two sweeps comes back.",
+      "fails_without": "If the variant, validate, canonical_path or the Records load path were missing, parse of the serialized sweep or the newest-first selection would fail. A sweep whose counts disagree with its findings must also be rejected."
+    },
+    {
+      "criterion": 4,
+      "method": "Test in crates/athena-cli/tests/hestia.rs runs the built binary (`athena hestia last`) in a fixture repository: first with no sweep, then after `athena hestia sweep` or a committed sweep record with a failing fake check. Renderer unit tests in crates/athena-cli/src/hestia.rs cover the text. Manual exercise: `cargo run -- hestia last`.",
+      "command": "cargo test -p athena-cli hestia",
+      "observes": "With none recorded, stdout contains 'no sweep recorded'. With a sweep, stdout lists each check with its count and each finding with its check id, subject, evidence, age and state.",
+      "fails_without": "If `hestia last` printed nothing or succeeded silently on an empty repository, the stdout assertion for 'no sweep recorded' would fail. If the subcommand were not wired, the binary run would fail on both cases."
+    },
+    {
+      "criterion": 5,
+      "method": "The hestia tests in athena-core build a `Finding` through the public path `athena_core::hestia::Finding` with all five fields; also read the diff of lib.rs (`git diff`) for `pub mod hestia;` and its module doc line.",
+      "command": "cargo test -p athena-core hestia",
+      "observes": "The tests compile and pass using all five fields; lib.rs exports the module.",
+      "fails_without": "The test would not compile if Finding lacked check_id, subject, evidence, age or state, or if `athena_core::hestia` were not exported from lib.rs."
+    },
+    {
+      "criterion": 6,
+      "method": "Read the diff of docs/decisions.md.",
+      "command": "git diff",
+      "observes": "The D129 heading ends with '(accepted)' and the Status line says accepted, decided by the brain under Sri's delegation (BRIEF.md addenda of 2026-10-23 to 2026-10-26). The settled trigger (explicit command, drain hook deferred) is stated with the alternatives (drain hook, timer) and why. 'Not accepted; the build jobs are not queued' is gone, and D130 is unchanged.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Read the diff of CHANGELOG.md.",
+      "command": "git diff",
+      "observes": "An entry under [Unreleased] > Added describing the Hestia sweep skeleton, `athena hestia sweep` and `athena hestia last`, the record location, and that D129 is accepted. It is written for an outside reader and says no checks ship yet.",
+      "fails_without": null
+    },
+    {
+      "criterion": 8,
+      "method": "Run the three checks Athena runs: `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`.",
+      "command": "cargo test --locked",
+      "observes": "All three exit 0 across the workspace, including the budgets and repo_config tests and the boundary-word scan over the new docs.",
+      "fails_without": null
+    },
+    {
+      "criterion": 9,
+      "method": "`git status` and `git diff` over the changed paths.",
+      "command": "git status",
+      "observes": "The changed paths are only the listed deliverables plus the new test file and crates/athena-cli/src/hestia.rs. athena.toml, defaults.toml, workflows and Cargo.toml lint settings are untouched. The default check list is empty, and no row 1-8 check exists.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Whether a check's 'age' should be seconds, days, or a first-seen timestamp. The design only says 'age'. The plan stores whole seconds as `age_seconds` (0 for a new finding), and job 9 (resolution times) may refine it.",
+    "Whether `hestia sweep` should commit a record when no checks are registered. The plan commits it (the record shows 0 checks) and prints 'no checks registered', so `last` is never misleading.",
+    "The tests/common fixture helpers were not read in full. The producer should mirror `status_and_check_work_from_the_repository_alone` in crates/athena-cli/tests/binary.rs for the binary test setup.",
+    "Whether any docs list the record directories (a records layout doc) that should also name `records/hestia-sweeps/`. A grep of docs for 'audience-ratings' would show it; the plan assumes none is required."
+  ],
+  "producer_section_sha256": "4e2a0ea5388c10e844ea48a08f295049e0a8853df52da3d0fc4d8449bcc6f5d0"
+}

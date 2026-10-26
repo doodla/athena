@@ -51,6 +51,9 @@
 //!   goals, never against the job's own acceptance criteria, and records findings that each cite their
 //!   evidence; the prompt is a fixed constant, protected from jobs by nothing else until the warden request
 //!   (prose-only);
+//! - [`hestia`]: `athena hestia sweep` and `athena hestia last`, the skeleton of Hestia's continuity sweep: a
+//!   list of checks run into one recorded report that lists every check with its count, where a failed check
+//!   becomes a finding; no checks ship yet;
 //! - [`pin`]: a study's repository ref resolved to a commit by the core, and mounted read-only;
 //! - `test_support` (compiled for tests and the `test-support` feature only): the shared records-history
 //!   cutover fixture, a scratch repository with a bare remote and a history made through the real writers;
@@ -69,6 +72,7 @@ pub mod commits;
 pub mod disk;
 pub mod fake;
 pub mod gh;
+pub mod hestia;
 pub mod host_rules;
 pub mod introspect;
 pub mod invocation;

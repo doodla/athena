@@ -1,6 +1,7 @@
 # Hestia: the continuity role, with Hades's cleanup folded in
 
-Status: proposed design, no code. Decision: D129 in [`docs/decisions.md`](../decisions.md), status proposed.
+Status: accepted design. Job 1 of section 9 (the sweep skeleton) is built in `crates/athena-core/src/hestia.rs`;
+the checks and later jobs are not. Decision: D129 in [`docs/decisions.md`](../decisions.md), status accepted.
 Readers: Sri, the brain, and the producers who will build the jobs in section 9.
 
 ## 1. What this is
@@ -142,8 +143,8 @@ Until then a second role would add a prompt set and a budget for one group of mo
 ## 9. Build plan
 
 Each job is sized for one producer run (a focused change of a few files, with tests). Deterministic checks come
-first. A job lists what it delivers, how it is checked, and what it needs. No job is queued by this design;
-queueing needs the decision accepted.
+first. A job lists what it delivers, how it is checked, and what it needs. The decision is accepted
+(D129) and job 1 is built; jobs 2 to 10 are not queued.
 
 Job 1. **Sweep skeleton and findings record.**
 Deliverables: a `hestia` module in `athena-core` with a `Finding` type (check id, subject, evidence, age,
@@ -204,7 +205,8 @@ the split notice. Depends on: 7, 9.
 
 ## 10. Open points
 
-- The trigger (drain hook, timer or command) is not settled from the code and is decided in job 1.
+- The trigger is settled in D129: an explicit command (`athena hestia sweep`, `athena hestia last`). A drain hook
+  stays possible later on the same function; a timer is not built.
 - Every figure in sections 2, 4 and 5 is an estimate; the failures' own figures come from the request and were
   not re-measured.
 - The rules marked "prose only" above (the allow-list before job 6, the never-gates rule) have no code

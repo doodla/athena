@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261026-091156-d0k9",
+  "round": 3,
+  "at": "2026-10-26T09:16:34.523360144Z",
+  "invocation_seq": 7,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The durable 'code-health baseline' marker is not designed as a record type. Records cannot hold it as described, and the crate that would define it is not in the plan.",
+      "evidence": "Records are typed: AnyRecord in crates/athena-data/src/records.rs:2022 is a serde enum tagged on `schema`. Records::add in crates/athena-core/src/store.rs:169 maps known variants and drops the rest. A free-form 'records file carrying the landed count' has no variant, so a JSON record with an unknown schema tag will not parse through AnyRecord. A non-record file would not be read back by Records::load at all. The plan's Files list has no change to athena-data. The criterion-4 demonstration (case A: the marker persists, then the 10th landing fires) depends on reading this marker back, so it cannot pass as planned. Fix: Say exactly how the marker is stored. Option 1: add a variant such as athena.code-health-baseline/1 to AnyRecord in crates/athena-data/src/records.rs, with a path and its schema/round-trip test, and a field on Records to read it. List those files. Option 2: take the baseline from something records already hold, for example the landed count at the first landing whose candidate base already contains code_health.rs. Either way, keep a test that reloads Records from git and shows the baseline survives a fresh state directory.",
+      "location": "Decision 1 / Step 5 / Files list (baseline marker record)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan does not name the existing queueing path or say how high priority is set.",
+      "evidence": "Athena::queue (crates/athena-core/src/reading.rs:550) already writes an AnyRecord::Request through commit_records. Priority comes either from a PriorityRecord (`athena priority`) or from a 'Priority: high' line in the request text (System facts). The plan says only 'via Committer::commit_records' and 'High-priority'. Fix: Reuse Athena::queue (or its record-building code, if a Committer is needed). State whether high priority comes from a 'Priority: high' line or a PriorityRecord. Make the criterion-4 test assert high priority through the same function that plan/status use to resolve priority.",
+      "location": "Step 4/5 (how requests are queued and given high priority)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The Run line lists only cargo fmt, though the criterion needs all three commands.",
+      "evidence": "Run: `cargo fmt --all --check`, while Observes says 'All three exit 0'. Fix: Put all three in the Run line: `cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked`.",
+      "location": "Demonstration for criterion 8",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Say where in land_pr the hook goes relative to resync_onto_merge, which can return early with `?`.",
+      "evidence": "In gh.rs:2572-2576, resync_onto_merge(...)? runs before the Pages watch. If the hook goes after it, a resync failure skips the hook, and the hook then relies on note_finished or the next landing to catch up. Fix: Put the hook after the resync and the Pages watch, and note that a skipped run is caught up by the idempotent next call. Or call it before the resync, using the merged commit.",
+      "location": "Decision 3 / gh.rs land_pr",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan follows the accepted reading: it retries the earlier design, adds a code_health module with syn-based function lengths, a status table, deduplicated structural-pass requests, and a 10-landing design-review cadence anchored so it does not fire on existing history. It hooks both landing paths: land_pr in gh.rs and note_finished in steward.rs, which is called from run.rs:152 and is pub(crate), as the plan says. I checked the main code it names: land_pr, note_finished, Committer::commit_records, StatusView, display::status and OutcomeState all exist where the plan says. The demonstrations map onto the criteria and include controls that fail without the behavior. One major gap remains. The durable baseline marker is the core of the fix for the earlier finding, but it has no record type: records parse through the typed AnyRecord enum in athena-data, and that crate is not in the plan. As written, the marker cannot be written and read back, so criterion 4 case A cannot be shown. The other findings are minor: reuse Athena::queue and state how high priority is set, put all three gate commands in the criterion-8 Run line, and say where the land_pr hook sits relative to the resync. Verdict: revise."
+}
