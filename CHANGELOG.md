@@ -9,6 +9,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Readers of `records/` move to the `athena/records` worktree (D111 job 7 part 2, D134). When the repository's
+  state directory holds a checkout of that branch, `athena status`, `audit`, `priority`, `ask`, `retry`,
+  `correct`, `propose`, `land --pr`, `backtest`, scoring and `xtask walltime` read its tip instead of the
+  checkout's `records/`; scoring does so whatever head it is passed. With no such worktree every reader falls
+  back to the in-tree `records/` or the given commit, as before. A linked checkout finds the worktree through
+  git's common directory. `xtask ci` and a test run `records_reader_scan`, which fails on a new read of `records/`
+  at a named commit unless its (file, function) is on an allow-list; the list names the reads of a past commit in
+  the gate, the run's own writer-side reads, and the follow-ups (`drain`, `audience`, `code_health`, `hestia`,
+  `review`, `scope_guard`, `steward`, `watcher`, `work_decisions`) that move later. The study site generator
+  (`xtask site`) reads `studies/`, not `records/`, and is out of scope.
 - A planning stop at the round cap can be resumed. When a job fails because its plan still needed revising in
   the last planning round, its round-3 `job-plan` and `critique` records are the kept plan and findings, and
   `athena retry` of that job starts the planner from them: one revision round that answers every finding, then

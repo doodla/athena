@@ -4,6 +4,13 @@ use crate::Result;
 use athena_data::records::{AnyRecord, RecordError, check_record_file};
 use athena_git::Git;
 
+/// A handle on the `athena/records` worktree of the repository `git` belongs to, when it has one. A repository
+/// whose common directory cannot be read has none.
+pub fn records_worktree_git(git: &Git) -> Option<Git> {
+    let common = git.common_dir().ok()?;
+    athena_data::paths::records_worktree(&common).map(Git::at)
+}
+
 /// One file under `records/` in a tree.
 #[derive(Debug, Clone)]
 pub struct RecordFile {
@@ -53,6 +60,16 @@ impl RecordSet {
             )
             .collect();
         Ok(RecordSet { files })
+    }
+
+    /// Loads the current records: those at the tip of the `athena/records` worktree when the repository has one
+    /// (D111), else those of `treeish` exactly as [`RecordSet::load`] reads them. The worktree is used whatever
+    /// `treeish` is.
+    pub fn load_current(git: &Git, treeish: &str) -> Result<RecordSet> {
+        match records_worktree_git(git) {
+            Some(worktree) => RecordSet::load(&worktree, "HEAD"),
+            None => RecordSet::load(git, treeish),
+        }
     }
 
     /// Every parsed record with its path.

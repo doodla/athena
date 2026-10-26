@@ -10,7 +10,8 @@
 //! - [`id`]: time-sortable ids, and the reserved `bootstrap` job id;
 //! - [`config`]: `athena.toml`, the repository's configuration;
 //! - [`defaults`]: `defaults.toml`, the model of the user's default expectations;
-//! - [`paths`]: where Athena keeps machine-local things (install and state directories).
+//! - [`paths`]: where Athena keeps machine-local things (install and state directories), including the
+//!   `athena/records` worktree that readers of records prefer when it exists (D111).
 //!
 //! This crate is a leaf: it depends on no other Athena crate.
 //!

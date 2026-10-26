@@ -2510,7 +2510,7 @@ impl Athena {
             ui.line(&line);
         }
         let head = self.head()?;
-        let records = crate::store::Records::load(&self.git, &head)?;
+        let records = crate::store::Records::load_current(&self.git, &head)?;
         let id = records.resolve(job_ref)?;
         let Some(_lock) = self.state.try_lock_job(&id)? else {
             bail!("job {id} is busy in another athena process");
@@ -2648,6 +2648,119 @@ impl Athena {
         }
         self.code_health_after_landing(ui);
         Ok(())
+    }
+}
+
+/// Which records `land_pr` reads: the `athena/records` worktree when there is one, else the in-tree `records/`
+/// (D111). Job `W` is only in the worktree and job `T` only in the tree, so the error shows which was read.
+#[cfg(test)]
+mod records_source_tests {
+    use super::*;
+    use crate::test_support::make_athena;
+    use std::path::Path;
+    use std::process::Command;
+
+    const W: &str = "20260101-000000-wwww";
+    const T: &str = "20260101-000000-tttt";
+
+    struct Refuses;
+
+    impl Runner for Refuses {
+        fn gh(&self, _: &[String]) -> Result<String> {
+            bail!("the host must not be asked")
+        }
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    }
+
+    fn plant(root: &Path, id: &str) {
+        let dir = root.join("records/jobs/2026-01").join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("brief-producer.md"), "a brief\n").unwrap();
+    }
+
+    /// The error `land_pr` gives for `job`, in a repository whose tree holds `T` and, when `with_worktree`,
+    /// whose records worktree under the temporary state directory holds only `W`.
+    fn land_error(job: &str, with_worktree: bool) -> String {
+        let base = tempfile::tempdir().unwrap();
+        let state = base.path().join("state");
+        athena_data::paths::with_state_root(&state, || {
+            let repo = base.path().join("repo");
+            std::fs::create_dir_all(&repo).unwrap();
+            git(&repo, &["init", "-q", "-b", "main"]);
+            plant(&repo, T);
+            git(&repo, &["add", "."]);
+            git(&repo, &["commit", "-q", "-m", "init"]);
+            let git_repo = Git::at(&repo);
+            if with_worktree {
+                let wt = athena_data::paths::records_worktree_dir(
+                    &athena_data::paths::repo_state_dir(&git_repo.common_dir().unwrap()),
+                );
+                assert!(
+                    wt.starts_with(base.path()),
+                    "the worktree is under the temp dir"
+                );
+                git(
+                    &repo,
+                    &[
+                        "worktree",
+                        "add",
+                        "-q",
+                        "-b",
+                        "athena/records",
+                        wt.to_str().unwrap(),
+                    ],
+                );
+                std::fs::remove_dir_all(wt.join("records")).unwrap();
+                plant(&wt, W);
+                git(&wt, &["add", "-A"]);
+                git(&wt, &["commit", "-q", "-m", "records"]);
+            }
+            let athena = make_athena(
+                &git_repo,
+                &state.join("athena-state"),
+                Vec::new(),
+                Box::new(|_| unreachable!("no agent runs")),
+            );
+            let poll = Poll {
+                attempts: 1,
+                delay: Duration::ZERO,
+                sleep: &|_| {},
+            };
+            athena
+                .land_pr(job, &Refuses, poll, &crate::Quiet)
+                .unwrap_err()
+                .to_string()
+        })
+    }
+
+    #[test]
+    fn worktree_land_pr() {
+        // Found in the worktree: it fails later, for lack of a verification, so the id was resolved.
+        let found = land_error(W, true);
+        assert!(!found.contains("no job matches"), "{found}");
+        assert!(found.contains("has no verification"), "{found}");
+        // The in-tree id is unknown to the worktree.
+        let unknown = land_error(T, true);
+        assert!(unknown.contains("no job matches"), "{unknown}");
+    }
+
+    #[test]
+    fn fallback_land_pr() {
+        let found = land_error(T, false);
+        assert!(!found.contains("no job matches"), "{found}");
+        assert!(found.contains("has no verification"), "{found}");
+        let unknown = land_error(W, false);
+        assert!(unknown.contains("no job matches"), "{unknown}");
     }
 }
 

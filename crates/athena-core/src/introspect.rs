@@ -310,6 +310,21 @@ pub(crate) fn month_files(root: &Path, kind: &str) -> Result<Vec<(String, Vec<u8
     Ok(files)
 }
 
+/// The directory whose `records/` is current for the repository at `root`: its `athena/records` worktree when it
+/// has one (D111), else `root` itself.
+pub fn records_root(root: &Path) -> std::path::PathBuf {
+    athena_git::Git::at(root)
+        .common_dir()
+        .ok()
+        .and_then(|common| athena_data::paths::records_worktree(&common))
+        .unwrap_or_else(|| root.to_path_buf())
+}
+
+/// [`read_records`] on the current records of the repository at `root` (see [`records_root`]).
+pub fn read_records_current(root: &Path) -> Result<Records> {
+    read_records(&records_root(root))
+}
+
 /// Read job outcomes (`records/jobs/<month>/<job>/outcome*.json`), interventions
 /// (`records/interventions/<month>/<id>.json`), host errors, introspections and the class registry. A missing
 /// `records/` reads as empty.
@@ -1243,7 +1258,7 @@ impl Athena {
     }
 
     fn event_of_job(&self, job: &JobId) -> Result<Option<Event>> {
-        let records = GitRecords::load(&self.git, &self.head()?)?;
+        let records = GitRecords::load_current(&self.git, &self.head()?)?;
         let Some(job_records) = records.jobs.get(job.as_str()) else {
             return Ok(None);
         };
@@ -1280,7 +1295,7 @@ impl Athena {
     }
 
     fn event_of_intervention(&self, id: &RecordId) -> Result<Event> {
-        let records = GitRecords::load(&self.git, &self.head()?)?;
+        let records = GitRecords::load_current(&self.git, &self.head()?)?;
         let i = records
             .interventions
             .iter()
@@ -1311,8 +1326,8 @@ impl Athena {
     pub fn introspect(&self, event: Event, ui: &dyn Ui) -> Result<IntrospectionRecord> {
         let head = self.head()?;
         let root = self.git.dir().to_path_buf();
-        let known = GitRecords::load(&self.git, &head)?;
-        let past = read_records(&root)?;
+        let known = GitRecords::load_current(&self.git, &head)?;
+        let past = read_records_current(&root)?;
         let cases = narrow_cases(&past, &event);
         let candidates = match &event.intervention {
             Some(id) => match starts_from_history(&root) {

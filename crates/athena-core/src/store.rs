@@ -270,9 +270,19 @@ fn job_of(record: &AnyRecord) -> Option<&JobId> {
 }
 
 impl Records {
+    /// Loads the current records: those at the tip of the `athena/records` worktree when the repository has
+    /// one (D111), else those of `treeish` as [`Records::load`] reads them. The worktree wins whatever
+    /// `treeish` is; callers that mean a named past commit call [`Records::load`].
+    pub fn load_current(git: &Git, treeish: &str) -> Result<Records> {
+        Records::from_set(&RecordSet::load_current(git, treeish)?)
+    }
+
     /// Loads every record in `treeish`.
     pub fn load(git: &Git, treeish: &str) -> Result<Records> {
-        let set = RecordSet::load(git, treeish)?;
+        Records::from_set(&RecordSet::load(git, treeish)?)
+    }
+
+    fn from_set(set: &RecordSet) -> Result<Records> {
         let mut records = Records::default();
         for file in &set.files {
             if file.error.is_some() {
