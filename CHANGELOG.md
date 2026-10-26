@@ -9,6 +9,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- The producer self-check no longer sends a report back over a criterion the producer left to Athena's
+  checks. A criterion that names `cargo fmt`, `cargo clippy` or the full `cargo test` (with no `-p`, `--lib`
+  or similar scope) and whose evidence starts with "left to Athena's checks" is passed to the verifier, which
+  judges it from the recorded checks; a failed recorded check still fails the job. Targeted-test and content
+  criteria that are unmet or omitted still go back. The producer brief now says how to mark such a criterion.
+  Before, the producer could not run the full suite, so its report showed these criteria unmet and cost a
+  send-back.
 - `athena retry` now starts the producer from the rejected candidate, not the base, when a job was rejected
   although every check passed, no criterion was unmet, and every blocking (blocker or major) finding cites
   only documentation or other non-code files (Markdown, a CHANGELOG, or anything under `docs/`). Before, such

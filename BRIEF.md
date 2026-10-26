@@ -1075,3 +1075,17 @@ It should become demonstrably less likely to make the same kind of mistake again
 
 * Evidence should label jev imo
 * Relay note: in answer to who labels introspections so `athena score-jev` can judge Jev's shadow class answers (the operator had asked whether Sri or the auditor should): neither a person nor a model's opinion; the labels come from what happened afterwards.
+
+### 2026-10-26: Quality is noticed, not pointed out
+
+* All the changes that we're making, what's the codebase quality of Athena?
+* The question is I had to point it out
+* Relay note: the operator's measurement showed gh.rs at 5,276 lines and run.rs's produce_and_verify at 724 lines, the two files most changed and most broken this week, and nothing in Athena had flagged it; Sri's request of 2026-10-17 for Athena to reconsider its own design every few jobs had sat unrun in the queue. Athena should notice decline in its own code and design and act on it without the owner asking.
+
+### 2026-10-26: Jev checks for code health
+
+* Get Jev checks designed for code health
+
+### 2026-10-26: Written for agents
+
+* Everything is for agents. So Athena should architect to be context efficient in what it writes, and some role should own the craft there

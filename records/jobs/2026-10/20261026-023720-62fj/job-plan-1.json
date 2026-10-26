@@ -1,0 +1,155 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261026-023720-62fj",
+  "round": 1,
+  "at": "2026-10-26T04:16:28.896919282Z",
+  "invocation_seq": 2,
+  "approach": "Add a public marker constant (LEFT_TO_ATHENA = \"left to Athena's checks\") in briefs.rs and a producer-brief paragraph before the criteria list telling producers to start the evidence with it for criteria only Athena's recorded fmt, clippy or full-suite test checks can show. In run.rs, unmet_criteria (signature unchanged) skips a criterion when a matching entry's evidence starts with the marker AND the criterion text is recognizably an Athena-check criterion (names cargo fmt, cargo clippy or cargo test, with no targeted-test scope such as -p, --package, --test, --lib, --bin, --doc, --bench, --example). A new helper lists the criteria so left, and they go to the verifier as one more non-failing CheckResultView, next to the existing producer-report-gaps entry. Judging is untouched, so a failed recorded check still fails the verdict. No enum change: the existing met/unmet status plus the evidence prefix carry the marking. outputs.rs gets only a doc comment on the evidence field.",
+  "decisions": [
+    {
+      "choice": "Marker is an evidence prefix, matched case-insensitively after trimming, accepted with either met or unmet status; the recognizer on the criterion text is the gate.",
+      "reason": "Keeps CriterionStatusOutput and its JSON schema unchanged. The root cause is that the self-check counts Athena-owned checks as unmet. A marker alone would let a producer dodge any criterion, so the criterion text must also be an Athena-check criterion.",
+      "rejected": [
+        {
+          "option": "Add a third status variant 'left_to_athena'",
+          "why": "Changes the enum and schema in outputs.rs and the stored ReportedCriterion record; wider than needed."
+        },
+        {
+          "option": "Trust the marker with no recognizer on criterion text",
+          "why": "A producer could skip targeted-test or content criteria and avoid the send-back; the request says those must still go back."
+        },
+        {
+          "option": "Make the self-check skip every cargo test criterion",
+          "why": "Criteria like 'cargo test -p athena-core' are targeted; the producer still runs those and must report them met with evidence."
+        }
+      ]
+    },
+    {
+      "choice": "Pass left-over criteria to the verifier as a passed:true CheckResultView, as report_gaps is, and leave verify::judge untouched.",
+      "reason": "The verifier gets told to judge them from the recorded checks. judge() already pushes 'check <name> failed' for any failed recorded check, so the verdict still fails.",
+      "rejected": [
+        {
+          "option": "Change judge() or the verdict inputs",
+          "why": "Out of scope: the request keeps how the verifier judges unchanged."
+        }
+      ]
+    },
+    {
+      "choice": "Keep unmet_criteria's signature and add a separate helper for the left-over list; put the new tests in a new #[cfg(test)] module in run.rs.",
+      "reason": "Existing callers in run_pin_tests.rs stay valid. run.rs has no test module today, and criterion 1 asks for the test in run.rs.",
+      "rejected": [
+        {
+          "option": "Return a struct from unmet_criteria",
+          "why": "Would force edits to many run_pin_tests.rs call sites, a file not in the deliverables."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Add the pub const LEFT_TO_ATHENA marker. Add the criteria_check paragraph before the criteria list. Add a test asserting the wording.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "purpose": "unmet_criteria honours the marker for Athena-check criteria. Add the recognizer, the left-over helper, the extra verifier check entry, and a #[cfg(test)] module with the tests for criteria 1 to 3.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/outputs.rs",
+      "action": "modify",
+      "purpose": "Doc comment on CriterionCheckOutput::evidence naming the marker; enum and schema shape unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased entry for the change.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In briefs.rs add `pub const LEFT_TO_ATHENA: &str = \"left to Athena's checks\";` and extend the criteria_check_section intro (before the criteria loop). The text says: a criterion only Athena's recorded checks (cargo fmt --check, cargo clippy, the full or workspace cargo test) can show gets evidence starting with the marker, and is not sent back. Targeted-test and content criteria must still be reported met with evidence of what you ran or read.",
+    "Add the briefs.rs test asserting the marker (via the constant), the fmt, clippy and full-suite words and the targeted-test sentence.",
+    "In run.rs add `is_athena_check_criterion(text)` and `marked_left(check)` (evidence trimmed, lowercased, starts with the marker). Update unmet_criteria so a criterion with a matching entry that is marked and recognized is not unmet. Add `left_to_athena(report, accepted) -> Vec<String>`.",
+    "In the producer loop, call left_to_athena before redact_report moves the report, and keep the latest list in a variable declared beside report_gaps (around line 1536).",
+    "Where report_gaps becomes a CheckResultView (around line 1951), also push a passed:true 'not a check' entry named for the left-over criteria. Its detail says to judge them from the recorded check results.",
+    "Add `#[cfg(test)] mod` tests in run.rs for criteria 1 to 3, using helpers that build ProducerOutput from JSON and AcceptedReading, and a failed CheckRun passed to crate::verify::judge.",
+    "Add the evidence doc comment in outputs.rs and the CHANGELOG.md Unreleased entry.",
+    "Run cargo fmt, cargo clippy --all-targets and cargo test; fix any failures."
+  ],
+  "risks": [
+    {
+      "risk": "The recognizer is too loose and lets a criterion skip a send-back.",
+      "mitigation": "Require a cargo fmt/clippy/test keyword, reject targeted-scope flags, and pass every left criterion to the verifier. Tests cover content and targeted criteria."
+    },
+    {
+      "risk": "The recognizer is too strict, so full-suite criteria with unusual wording are still sent back.",
+      "mitigation": "Match case-insensitively on the substrings 'cargo fmt', 'cargo clippy' and 'cargo test'. A miss only falls back to today's single send-back."
+    },
+    {
+      "risk": "The new brief text adds lines after the criteria and breaks the existing test that expects the criteria to be the last lines of the section.",
+      "mitigation": "Put the new text before the criteria list."
+    },
+    {
+      "risk": "The doc comment in outputs.rs changes a schema description that a test pins.",
+      "mitigation": "Run cargo test --locked; if a pin breaks, keep the wording only in briefs.rs and drop the outputs.rs edit."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit test in run.rs: accepted criteria are a full-suite one ('cargo clippy --all-targets and cargo fmt --check are clean, and cargo test for the workspace passes') and a targeted one ('cargo test -p athena-core passes the new test'). The report marks the first with evidence 'left to Athena's checks: ...' and omits the second. Call unmet_criteria.",
+      "command": "cargo test -p athena-core",
+      "observes": "unmet_criteria returns only the targeted-test criterion; the full-suite criterion is not returned.",
+      "fails_without": "Without the marker handling the full-suite criterion would also be returned, so the report would be sent back."
+    },
+    {
+      "criterion": 2,
+      "method": "Unit test in run.rs: mark with the same evidence prefix (a) a content criterion ('the docs name the flag'), (b) a targeted-test criterion ('cargo test -p athena-core passes'), and (c) a non-prefixed full-suite criterion reported unmet. Call unmet_criteria.",
+      "command": "cargo test -p athena-core",
+      "observes": "(a) and (b) are returned as unmet. (c) is returned too, and the left-over helper lists none of the three.",
+      "fails_without": "If the marker alone sufficed, the content and targeted criteria would be skipped and the test would fail."
+    },
+    {
+      "criterion": 3,
+      "method": "Unit test in run.rs: the report leaves the full-suite criterion to Athena's checks, so unmet_criteria is empty and the left-over helper lists it. Then call verify::judge with a failed CheckRun (passed false, exit 101) and the left-over criterion as a Criterion.",
+      "command": "cargo test -p athena-core",
+      "observes": "final_verdict is Fail and reasons contains 'check test failed', while the self-check did not send the report back.",
+      "fails_without": "If the left-over handling suppressed or changed the recorded-check failure, the verdict would not be Fail."
+    },
+    {
+      "criterion": 4,
+      "method": "briefs.rs test builds the producer brief, takes the criteria_check section and asserts it contains \"left to Athena's checks\" (via the constant), fmt, clippy and the full test suite, and says targeted-test criteria are still reported met with evidence. The existing test requiring the last two lines of the section to be the criteria stays green, because the new text goes before the criteria list.",
+      "command": "cargo test -p athena-context",
+      "observes": "The section contains the exact marker text and the targeted-test sentence.",
+      "fails_without": "Without the brief wording the assertions on the marker and on the targeted-test sentence fail."
+    },
+    {
+      "criterion": 5,
+      "method": "Read the diff for a new entry under Unreleased in CHANGELOG.md.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "The entry says the producer self-check no longer sends back full-suite, fmt and clippy criteria the producer left to Athena's checks, and that targeted-test criteria still go back.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Run cargo fmt --all --check, cargo clippy --all-targets --locked -- -D warnings and cargo test --locked, the checks Athena records. Run the fmt check with the allowed command cargo fmt.",
+      "command": "cargo test",
+      "observes": "All three exit 0, including the budgets and policy tests, since the briefs.rs wording sits outside the budgeted prompt sets.",
+      "fails_without": "Any formatting, lint or test regression, including a schema or budget test broken by the outputs.rs doc comment."
+    }
+  ],
+  "open_questions": [
+    "Does any test snapshot the producer JSON schema text, so the evidence doc comment would change it? Not checked; the producer should grep outputs.rs and cli tests before editing.",
+    "A mixed criterion that names cargo test plus other content would be eligible if marked. The plan accepts this; the verifier still judges it, and the brief tells producers to mark only criteria that Athena's checks alone can show."
+  ],
+  "producer_section_sha256": "35d06703e037b101fc081978579d8fc6121710d138db714ecda1f4ab236155ca"
+}
