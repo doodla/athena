@@ -368,6 +368,15 @@ impl Athena {
                 ui,
             );
         }
+        // Free disk space, before anything is committed or any agent runs. When it stays low after the idle
+        // build directories are removed, the job is held: it stays queued, not rejected, and a later drain
+        // picks up the same job. A hold is an error from `go`; no state changed.
+        if let Some(low) = self.disk_gate(jc.config.min_free_gb(), &id, ui) {
+            crate::disk::write_hold(&self.state, &id, &low);
+            ui.line(&format!("held       {}", low.text()));
+            return Err(low.into());
+        }
+        crate::disk::clear_hold(&self.state, &id);
         let capability_id = reading.capability.clone().expect("checked by the caller");
         let capability = self.capability(&capability_id)?;
         let spent = job.spent_usd();
@@ -1766,6 +1775,23 @@ impl Athena {
         }
         closing.candidate = Some(candidate);
         let _ = crate::pin::remove_tree(&work);
+
+        // Free disk space, before the checks. Low space makes builds fail in ways that look like faults in the
+        // work, so after the idle build directories are removed, space that is still low fails the job with a
+        // retryable environment reason. Nothing is held: the job closes, and `athena retry` reads it again.
+        if let Some(low) = self.disk_gate(jc.config.min_free_gb(), &id, ctx.ui) {
+            let changed_paths = std::mem::take(&mut closing.happened.changed_paths);
+            closing.happened = self.failure(
+                ctx,
+                &format!(
+                    "{} before the checks; this is the environment, not the work. Free disk space, then `athena retry {id}`",
+                    low.text()
+                ),
+            );
+            closing.happened.changed_paths = changed_paths;
+            closing.happened.verification_passed = None;
+            return Ok(closing);
+        }
 
         // Verification starts: open or update the job's pull request now, so the host's checks run on the
         // candidate while the verifier works. It never merges, and a failure is a warning line only.

@@ -731,7 +731,11 @@ fn plan_suffix(j: &athena_core::status::JobLine) -> String {
         .plan
         .as_ref()
         .map_or(String::new(), |plan| format!(" · {plan}"));
-    format!("{priority}{plan}")
+    let hold = j
+        .hold
+        .as_ref()
+        .map_or(String::new(), |hold| format!(" · {hold} (still queued)"));
+    format!("{priority}{plan}{hold}")
 }
 
 /// `athena status`.
@@ -1398,6 +1402,7 @@ mod tests {
             cost_usd: 0.0,
             plan: Some("plan accepted r1".into()),
             priority,
+            hold: None,
         };
         assert_eq!(
             plan_suffix(&line(Priority::High)),

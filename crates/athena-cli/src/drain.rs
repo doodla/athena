@@ -85,6 +85,10 @@
 //!   of work, deliverables) is unchanged and runs it in the same drain. If the scope changed, the item is
 //!   left queued with the reason (outcome `needs accepting`, plus a note); that is not a failure and stops
 //!   nothing.
+//! - **Low disk holds a job.** When free disk space is below `[disk] min_free_gb` (default 10) at dispatch,
+//!   even after idle jobs' build directories are removed, `athena go` returns [`athena_core::disk::LowDisk`].
+//!   The item is left queued (outcome `environment: low disk`, with the free and required amounts, plus a
+//!   note); that is not a failure, is not retried, and stops nothing. A later drain runs the same job.
 //! - **In-limit proposals are approved, approved jobs are worked.** An open proposal whose rung the role that
 //!   raised it may change itself (its newest recorded definition decides; a role with no recorded definition
 //!   has no limit) is approved as `athena approve-work` would, which reads the job and records the decision.
@@ -265,6 +269,10 @@ pub struct Run {
     /// is not run until a person accepts it. The job is still proposed: it is neither retried nor counted as
     /// a failure.
     pub needs_accepting: bool,
+    /// True when dispatch was held for lack of free disk space (`environment: low disk`). The job is still
+    /// proposed and was not run: it is neither retried nor counted as a failure, and a later drain runs the
+    /// same job once space is free.
+    pub held: bool,
 }
 
 /// The paths whose change can change the explainer page: the studies it is written from (`studies/`, the
@@ -542,6 +550,8 @@ enum ItemEnd {
     Idle,
     /// The item's reading was made again with a different scope; it stays queued, and nothing else stops.
     NeedsAccepting,
+    /// Dispatch was held for lack of free disk space; the item stays queued, and nothing else stops.
+    Held,
 }
 
 enum RunStep {
@@ -558,6 +568,9 @@ enum RunStep {
     /// The job was read again with a different scope and waits for a person to accept it. It is not a
     /// failure and not tried again.
     NeedsAccepting,
+    /// The job was held at dispatch for lack of free disk space. It is not a failure and not tried again in
+    /// this run.
+    Held,
     Budget,
     JobLimit,
     /// Another worker had already ended the run.
@@ -700,6 +713,18 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 self.push(line);
                 RunStep::NeedsAccepting
             }
+            _ if run.held => {
+                line.outcome = athena_core::disk::LOW_DISK.into();
+                self.note(format!(
+                    "item {} is left queued: {}",
+                    item.job,
+                    line.reason
+                        .as_deref()
+                        .unwrap_or("free disk space is below the minimum")
+                ));
+                self.push(line);
+                RunStep::Held
+            }
             other => {
                 line.outcome = other.map_or("no outcome", OutcomeState::as_str).to_string();
                 self.push(line);
@@ -770,6 +795,7 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                     RunStep::JobLimit => return ItemEnd::JobLimit,
                     RunStep::Ended => return ItemEnd::Idle,
                     RunStep::NeedsAccepting => return ItemEnd::NeedsAccepting,
+                    RunStep::Held => return ItemEnd::Held,
                     RunStep::Passed(job, at) => passed = Some((job, at)),
                     RunStep::Failed {
                         job,
@@ -1052,7 +1078,7 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
             ItemEnd::Budget => self.set_stop(Stop::BudgetSpent, None),
             ItemEnd::JobLimit => self.set_stop(Stop::JobLimit, None),
             ItemEnd::Stop => self.set_stop(Stop::Requested, None),
-            ItemEnd::Idle | ItemEnd::NeedsAccepting => {}
+            ItemEnd::Idle | ItemEnd::NeedsAccepting | ItemEnd::Held => {}
         }
     }
 
@@ -1630,6 +1656,7 @@ impl Steps for RealSteps<'_> {
                 reason: f.reason,
                 cost,
                 needs_accepting: false,
+                held: false,
             },
             Ok(athena_core::run::GoResult::Reread(p)) => Run {
                 outcome: None,
@@ -1641,12 +1668,14 @@ impl Steps for RealSteps<'_> {
                 ),
                 cost,
                 needs_accepting: true,
+                held: false,
             },
             Err(error) => Run {
                 outcome: None,
                 reason: format!("{error:#}"),
                 cost,
                 needs_accepting: false,
+                held: error.downcast_ref::<athena_core::disk::LowDisk>().is_some(),
             },
         }
     }

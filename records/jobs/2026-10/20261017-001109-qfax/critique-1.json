@@ -1,0 +1,69 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261017-001109-qfax",
+  "round": 1,
+  "at": "2026-10-26T00:25:12.375277984Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/state.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/state.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/status.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/status.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "A hold at the verification stage has no working resume path. The job stays Dispatched, so `go` refuses it as interrupted, and `athena retry` re-reads the job, which likely runs the producer again.",
+      "evidence": "go_job bails on JobState::Dispatched with 'job {id} was interrupted ... `athena retry {id}` reads it again to resume' (run.rs:189-195). By line 1768 the producer has finished and `remove_tree(&work)` has run. reading.rs:699 `retry` returns a new Proposal, so the user's 'verification goes ahead' becomes a re-production, not a resumed verification. Fix: Do the verification-stage check before the producer's spend can be lost. One way: check at the start of produce_and_verify, or before the prediction commit for both stages, so that a held job is never Dispatched. The other way: give a held dispatched job its own resume path that skips the producer and goes straight to verification. The candidate commit is known at that point, so record it in the hold marker and let `go` accept a Dispatched job that has a disk-hold marker. Say which approach you chose and why.",
+      "location": "Decision 5 / Step 4 (produce_and_verify check before early_pr); crates/athena-core/src/run.rs:157-195, 1768-1772",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The resume test only covers a job held before dispatch, so verification going ahead after a hold at the verification stage is not shown.",
+      "evidence": "The test runs `go` on a proposed job with constant-low disk, then runs `go` again. That job was never dispatched. With a hold at verification, the second `go` hits the 'interrupted' bail at run.rs:193. Fix: Add a test: disk is high at dispatch and low at verification, so the job is held. Free the space, run the documented resume command, and assert that the verifier runs on the same candidate commit, that the producer is not invoked again, and that the marker is cleared.",
+      "location": "Demonstrations, criterion 3",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "In drain, a verification-stage hold leaves the item queued. On the next pass it hits the 'interrupted' error and is counted as a failure, which defeats the point of Decision 7.",
+      "evidence": "A Dispatched job makes `go` bail (run.rs:189-195). RealSteps::run would map that to a failed run, not a held one. Fix: Make sure a queued item after a hold resumes correctly in drain, using the same fix as the first finding. Add a drain test where a hold at verification is followed by a pass with free space, and assert that the job finishes and no failure is counted.",
+      "location": "Decision 7 / Step 6 (drain held run left queued)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Status would still label a job held at verification 'interrupted'. Listing held jobs separately alongside that label misleads the user.",
+      "evidence": "status.rs:586 maps `JobState::Dispatched` (not running) to \"interrupted\". Fix: When the disk-hold marker is present, use 'environment: low disk' as the job's state label instead of 'interrupted', and test this in the status display test.",
+      "location": "Step 5 / Demonstration criterion 6; crates/athena-core/src/status.rs:585-586",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The risk text says a hold at verification returns before the prediction commit and leaves the job Proposed. That is false for the check before early_pr.",
+      "evidence": "The prediction commit happens in dispatch (run.rs:392 onward), long before produce_and_verify reaches early_pr at run.rs:1772. Fix: Correct the risk text and its asserted state to match the design you choose.",
+      "location": "Risks, third bullet",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Probing with try_lock_job creates `job.lock` (and its parent directories) in every directory the sweep visits.",
+      "evidence": "lock_file calls create_dir_all on the parent and opens with create(true) (state.rs:69-78). Fix: Only probe directories that already exist under jobs/, and drop the lock right after removing their target/ directories.",
+      "location": "Decision 6 (idle_sweep via try_lock_job)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The pre-dispatch half of the plan holds up. The places it names exist: dispatch, check_budget, early_pr, with_remover, try_lock_job, clean_job, format_bytes and reading_inputs. A hold as a typed error, the lock-gated idle sweep and the fake disk measured from the real directory tree are all sound choices. The verification-stage hold is the weak point. By the time of the check before early_pr, the job is already dispatched, the producer has run and spent money, and its work tree has been removed (run.rs:1768). After a hold there, a second `go` stops with \"job was interrupted\" (run.rs:193-195). The status view labels the job \"interrupted\" (status.rs:586). Drain would leave the item queued and then fail it on the next pass. The criterion-3 test only resumes a job held before dispatch, so verification going ahead after a hold at verification is never shown. The risks section also says a verification hold leaves the job Proposed, which cannot be true. The state.rs and status.rs scope additions that Athena flagged are justified, and the plan says why it needs them."
+}

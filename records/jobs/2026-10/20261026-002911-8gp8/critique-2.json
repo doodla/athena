@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261026-002911-8gp8",
+  "round": 2,
+  "at": "2026-10-26T00:33:38.391610608Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/src/main.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/src/main.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "Adding GoResult::Held forces edits in many files besides main.rs, and the plan does not list them.",
+      "evidence": "Grep shows full `match` blocks on GoResult with only Finished and Reread arms and no wildcard in test_support.rs (`landed`), lifecycle.rs, steward.rs, history_pr_head.rs and job_plan.rs. retry.rs and introspection.rs already use `other =>`. Decision 7 says main.rs is the only file outside the deliverables that the compiler forces, which is wrong. The scope grows by at least five files the plan does not mention. Fix: List every match that must change (test_support.rs and the four test files) in Files, and say in the open questions that they go beyond the deliverables. Or avoid a new variant: for example, let the hold reach drain as a typed error or as a field on an existing result, and explain how drain's mapping still works.",
+      "location": "Plan decision 7 and Files list; crates/athena-core/src/test_support.rs:620-633, crates/athena-cli/tests/{lifecycle.rs:17-20, steward.rs:27-30, history_pr_head.rs:65-71, job_plan.rs:22-25}",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The real `df` reader becomes the default for every existing test, so on a host with less than 10 GB free the existing dispatch tests would hold or fail.",
+      "evidence": "The plan makes the real `df -Pk` reader the StateDir default and injects a fake only in the new tests. Existing tests build Athena through helpers such as test_support.rs and run `go` for real, so each one would pass through disk_gate against the host's real free space in its temp dir. The risks list covers a missing df, but not a host that is simply low on space, and the suite would then fail for reasons outside the code. Fix: Have the shared test helpers (test_support and the CLI test fixtures) install a fake that reports plenty of space, or make the gate a no-op unless a reader is injected in tests. State which helpers change and add them to Files.",
+      "location": "Decision 2 / state.rs free_space default; Risks",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A single static atomic shared by tests that run in parallel in the same binary can leak low or high disk into other tests.",
+      "evidence": "The reader is a plain `fn` pointer, so its state must be a global. tests/drain.rs holds many tests that cargo runs on parallel threads, and core tests also run in parallel. Fix: Key the fake on the path it is given (for example a per-test marker file holding the simulated free bytes inside the temp state dir), or give each test its own static, so tests cannot affect each other.",
+      "location": "Demonstration for criterion 3 / step 7 (static-atomic fake)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Whether retry accepts the pre-checks Failed closure is left to the producer to find out; the criterion says 'retryable', so the demonstration should prove it.",
+      "evidence": "The criterion 4 demonstration checks state Failed and the reason text, but never runs `athena retry` or a drain retry on the job. Fix: Add to the criterion 4 test a retry (or a drain retry) of the failed job once the fake reports space, and assert that it proceeds.",
+      "location": "Open question 3 / criterion 4",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read run.rs, state.rs, config.rs and drain.rs, and searched every match on GoResult. The plan follows the accepted reading: a hold at dispatch that leaves the job Proposed, a retryable Failed before the checks with no hold marker, an idle target/ sweep that skips locked jobs, and a config default that leaves the digest alone. The hooks it names exist (with_remover, try_lock_job, verifier_snapshot, reading_inputs, needs_accepting), and the demonstrations would mostly fail without the behavior. Two design gaps need fixing. First, adding GoResult::Held breaks full matches without a wildcard in test_support.rs and four CLI test files, not only main.rs as decision 7 says, so the real scope is understated. Second, making the real df reader the default puts every existing dispatch test at the mercy of the host's free disk. Smaller points: the shared static fake can leak between parallel tests, and criterion 4 should prove the job can actually be retried. Athena's finding about main.rs stands and is broader than it says."
+}

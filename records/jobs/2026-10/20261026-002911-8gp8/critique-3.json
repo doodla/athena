@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261026-002911-8gp8",
+  "round": 3,
+  "at": "2026-10-26T00:35:20.689241445Z",
+  "invocation_seq": 7,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/test_support.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/test_support.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/common/mod.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/common/mod.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "Put the pre-checks gate before `early_pr`, not just before `verifier_snapshot`.",
+      "evidence": "run.rs:1772 calls `self.early_pr(...)` to open or update the job's pull request, and only then, at 1777, calls `verifier_snapshot`. A gate placed directly before `verifier_snapshot` would open a pull request for a job that then closes Failed for low disk. Fix: Place the disk gate before `self.early_pr` at run.rs:1772, after the admission check. Name the first `verifier_snapshot` call (1778) as the gate's place, not the rerun at 2060.",
+      "location": "Step 4 / run.rs:1772-1778 (pre-checks gate)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Any test site that misses the fake reads the host's real disk. On a host with under 10 GB free, that test fails for no reason related to the change.",
+      "evidence": "The plan says 'If a test site is missed, the gate reads the real disk'. A failed read means proceed, but a read that succeeds and reports little space would hold or fail the job. Fix: Have the producer grep for every `StateDir::new` and `Athena` builder used by tests that call `go`, and install the fake at each one. Alternatively, make the default reader in test builds a plenty-of-space fake via cfg(test), and report each site.",
+      "location": "Decision 3 / Risks (missed test StateDir sites)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "`athena go` on a held job prints an error and exits non-zero, which a reader may take for a failure.",
+      "evidence": "The plan accepts this as a risk and relies on the error text. Fix: Make sure the LowDisk Display text says the job stays queued and gives the free and required amounts, and add a line about this to the README.",
+      "location": "Decision 1 (athena go exit on hold)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the code the plan relies on in run.rs, drain.rs, state.rs and config.rs, and it matches what the plan says. `go` takes the job lock at run.rs:163 before it calls `dispatch`, and `dispatch` (run.rs:322) commits nothing before the reread and budget steps. So a gate at the top of `dispatch` can return `Err(LowDisk)`, leave the job Proposed, and skip the job's own workspace in the sweep. `RealSteps::run` (drain.rs:1623) has an `Err` arm where the error can be downcast. `Run` derives Default, and `needs_accepting` is already handled as \"left queued, not a failure\" (drain.rs:691, 772, 1055), so `held` can copy that pattern. `reading_inputs` (config.rs:377) already resets parts of the config the reader does not see, so the new setting can be reset there too. `with_remover`, `try_lock_job` and `failure()` all exist. Each demonstration watches the behavior it claims and would fail without it: cleanup order, a hold rather than a rejection, the same job id running on a later drain, a failure that can be retried with no hold marker left, and a sweep that respects the job lock. Athena's two scope findings are justified: without those two files, existing tests would depend on how much disk the host has free. What remains is two minor placement points and a nit."
+}

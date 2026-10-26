@@ -27,6 +27,10 @@ pub struct JobLine {
     /// The job's priority: the latest priority record, else the request's words, else urgent if the reading
     /// gave an urgent reason, else normal (`JobRecords::priority`).
     pub priority: crate::plan::Priority,
+    /// "environment: low disk: 3.0 GB free, 10.0 GB required" for a proposed job whose dispatch was held for
+    /// lack of disk space; absent otherwise. The job is still queued to run, not rejected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hold: Option<String>,
 }
 
 /// How job planning ended for one job: the round of the last critique and whether it let the job go on.
@@ -521,6 +525,7 @@ fn job_line(job: &JobRecords, state: &str) -> JobLine {
         cost_usd: job.spent_usd(),
         plan: plan_state(job).map(PlanState::text),
         priority: job.priority(),
+        hold: None,
     }
 }
 
@@ -623,15 +628,19 @@ impl Athena {
             }
             let state = self.state_name(job);
             *jobs_by_state.entry(state.clone()).or_default() += 1;
+            let mut line = job_line(job, &state);
+            if state == "proposed" {
+                line.hold = crate::disk::read_hold(&self.state, job.id()).map(|h| h.text());
+            }
             // Queued requests have not run; they show under open work.
             if recent.len() < 10 && state != "queued" {
-                recent.push(job_line(job, &state));
+                recent.push(line.clone());
             }
             if matches!(
                 state.as_str(),
                 "queued" | "proposed" | "declined" | "interrupted" | "running" | "blocked"
             ) {
-                open.push(job_line(job, &state));
+                open.push(line);
             }
         }
         let mut by_category: BTreeMap<String, usize> = BTreeMap::new();

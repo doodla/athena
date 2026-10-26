@@ -151,7 +151,8 @@ impl Fixture {
     }
 
     pub fn athena(&self, script: Script) -> Athena {
-        let state = StateDir::new(self.state.path().join("repo"));
+        let state = StateDir::new(self.state.path().join("repo"))
+            .with_free_space(athena_core::test_support::plenty_of_space);
         let driver = FakeAgentDriver::new(script).with_registry(state.registry());
         Athena {
             git: Git::at(self.dir.path()),

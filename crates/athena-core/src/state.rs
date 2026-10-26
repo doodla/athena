@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 pub struct StateDir {
     root: PathBuf,
     remover: Remover,
+    free_space: FreeSpace,
 }
 
 /// A held lock; released on drop.
@@ -28,6 +29,7 @@ impl StateDir {
         StateDir {
             root,
             remover: crate::pin::remove_tree,
+            free_space: crate::disk::df_free_bytes,
         }
     }
 
@@ -130,6 +132,53 @@ impl StateDir {
         self
     }
 
+    /// Replaces how free disk space is read. Tests use it to simulate a full or a recovered disk; the default
+    /// asks `df`.
+    pub fn with_free_space(mut self, free_space: FreeSpace) -> StateDir {
+        self.free_space = free_space;
+        self
+    }
+
+    /// Free bytes on the disk that holds the state directory, or `None` when they cannot be read. An unknown
+    /// amount never holds or fails a job.
+    pub fn free_bytes(&self) -> Option<u64> {
+        (self.free_space)(&self.root).ok()
+    }
+
+    /// The directories of the jobs that have one here, in name order.
+    pub fn job_ids(&self) -> Vec<JobId> {
+        let Ok(entries) = std::fs::read_dir(self.root.join("jobs")) else {
+            return Vec::new();
+        };
+        let mut ids: Vec<JobId> = entries
+            .flatten()
+            .filter(|e| e.path().is_dir())
+            .filter_map(|e| JobId::parse(&e.file_name().to_string_lossy()).ok())
+            .collect();
+        ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        ids
+    }
+
+    /// Removes only the build directory (`target/`) of `job`, keeping its source, snapshots and records.
+    /// Returns the allocated bytes it held, or the system's message when removal failed.
+    pub fn remove_target(&self, job: &JobId) -> std::result::Result<u64, String> {
+        let dir = self.job_dir(job).join("target");
+        if !dir.exists() {
+            return Ok(0);
+        }
+        let bytes = allocated_bytes(&dir);
+        (self.remover)(&dir)
+            .map(|()| bytes)
+            .map_err(|e| e.to_string())
+    }
+
+    /// The local marker that says dispatch of `job` was held for lack of disk space.
+    pub fn hold_file(&self, job: &JobId) -> PathBuf {
+        self.root
+            .join("holds")
+            .join(format!("{}.json", job.as_str()))
+    }
+
     /// Removes a closed job's snapshots and build directories, keeping nothing that matters. Call it only
     /// after the closing commit has succeeded. It measures the directory's allocated size just before
     /// removal and returns it with the error, if any; the caller reports both with [`report_clean`].
@@ -148,6 +197,9 @@ impl StateDir {
 
 /// How a job directory is removed.
 pub type Remover = fn(&Path) -> std::io::Result<()>;
+
+/// How free disk space, in bytes, is read for the disk that holds a path.
+pub type FreeSpace = fn(&Path) -> std::io::Result<u64>;
 
 /// What removing a closed job's directory freed, or why it could not.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -153,7 +153,8 @@ fn athena_with(
     seen: Seen,
     tweak: Tweak,
 ) -> Athena {
-    let state = StateDir::new(state.path().join("repo"));
+    let state = StateDir::new(state.path().join("repo"))
+        .with_free_space(crate::test_support::plenty_of_space);
     let script = Box::new(move |spec: &AgentInvocation| {
         let mount = spec.workdir.join(MOUNT_DIR);
         let mut turn = match spec.role {

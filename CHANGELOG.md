@@ -18,6 +18,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Free disk space is checked before a job is dispatched and before its checks. The new `[disk] min_free_gb`
+  setting in `athena.toml` (default 10, defined in `config.rs`, so `athena.toml` needs no change and the
+  setting does not move a reading's configuration digest) is the minimum. When space is below it, Athena first
+  removes the `target/` directory of closed and idle jobs (never one whose job lock is held, and never source
+  files or records). At dispatch, if space is still low the job is held: it stays queued, is not rejected, and
+  shows the status `environment: low disk` with the free and required amounts in `athena status`, in the
+  `athena go` error and in the `athena drain` report; `drain` does not count it as a failure and a later run
+  picks up the same job. Before the checks, space that is still low fails the job with the retryable reason
+  `environment: low disk` (use `athena retry`), and no hold is left. The user frees space and runs the job
+  again.
 - A producer that reaches its deadline no longer loses its work. The invocation now ends `timed_out` (new
   `InvocationOutcome::TimedOut`; the kill switch and a dead parent stay `killed`) and the job closes with the
   new outcome state `timed_out` (`OutcomeState::TimedOut`), not `failed`. The outcome reason and the invocation

@@ -1,0 +1,184 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261026-002911-8gp8",
+  "n": 1,
+  "at": "2026-10-26T00:29:28.869919375Z",
+  "invocation_seq": 1,
+  "base_commit": "e16afa8acef73b23c4ce8219978bfca47192cd96",
+  "config_sha256": "8fe89c4edaa823d770160390564d75d68be6850d0873a9f8f769511a6f40103c",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Hold jobs on low disk, resumable in place, default 10G minimum",
+  "summary": "Retry job 20261017-001109-qfax: add a min-free-disk check (default 10G in config.rs) before dispatch and before the checks; clean terminal and idle workspaces' target/, and if still low hold the job as 'environment: low disk' instead of rejecting it. A held job resumes as the same job on a later drain, with its marker cleared, never via `athena retry`. Audience: the user running drain.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "New tests for each hold and resume path; cargo test, clippy and fmt must be clean."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run the tests that show cleanup, hold, resume and marker clearing happening."
+    },
+    {
+      "id": "root-cause",
+      "how": "The resume route is designed for both stages instead of leaving it open."
+    },
+    {
+      "id": "strangers",
+      "how": "Docs and changelog describe the setting and the status for an outside reader."
+    },
+    {
+      "id": "mechanism",
+      "how": "The disk check is enforced in code at both stages, not by prose."
+    },
+    {
+      "id": "small",
+      "how": "One focused change on the disk guard and its resume paths."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Goal: keep jobs from failing when the disk fills; audience is the user running drain, who reads drain output and status.",
+    "The 10G default lives in config.rs and applies when the setting is absent; athena.toml stays untouched (per the user's earlier correction). The config digest is reset as needed.",
+    "Wording says 'the user', never 'the operator'.",
+    "Deleting a closed job's target/ already landed in 173d12e; only the idle sweep and the low-disk path are new.",
+    "Resume routes are settled in the plan: a dispatch-stage hold leaves the job Proposed and it runs on a later drain; a pre-checks hold leaves it Dispatched with a marker, and the next drain re-lists it through the interrupted-work listing, clears the marker and continues the same job. A held item ends its work in the current drain and is retried in the next drain, and the drain note says so.",
+    "state.rs and status.rs are in scope because the marker and the status label live there.",
+    "Re-running job 20261016-044847-hem1 stays a separate follow-up."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "With free disk simulated below the minimum, a test shows cleanup runs before dispatch and before the checks. Run `cargo test --locked`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test shows that when space is still low after cleanup at dispatch, the job is held with status 'environment: low disk', stays Proposed, is not rejected, and the user is told the free and required amounts. A later drain runs the same job once space is free. Run `cargo test --locked`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A drain test goes through the real RealSteps::run mapping with a constant-low fake and a real LowDisk error from `go`. It asserts held == true and no failure counted. Then, after space returns, the same job (no new job id) reaches checks and a verdict, its marker is cleared, and status no longer shows it held. Run `cargo test --locked`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test shows a verification-stage hold ends the item's work in that drain and the job is listed again as interrupted by the interrupted-work listing on the next drain. The drain note says it will be tried on the next drain. `athena retry` is not the resume route. Run `cargo test --locked`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test shows the idle-workspace sweep removes target/ from idle workspaces, leaves source files, and skips workspaces whose job lock is held. Run `cargo test --locked`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "config.rs defines a 10G minimum-free-disk default used when the setting is absent, a test shows it parses, and the config digest is reset. athena.toml is unchanged. README and CHANGELOG name the setting and the 'environment: low disk' status, and say 'the user' rather than 'the operator'.",
+      "kind": "content"
+    },
+    {
+      "text": "`cargo clippy --all-targets --locked -- -D warnings` is clean and `cargo fmt --all --check` passes.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "action": "create",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-core/src/state.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "README.md",
+      "action": "modify",
+      "p": 0.5
+    }
+  ],
+  "out_of_scope": [
+    "Editing athena.toml",
+    "Re-running job 20261016-044847-hem1",
+    "Deleting a closed job's target/ (already landed in 173d12e)",
+    "Changing the `athena retry` semantics"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.5,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.5,
+        "p90": 3.2
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 1800.0,
+        "p90": 3600.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7179661016949153,
+      "p_verification_passes": 0.641860465116279,
+      "p_user_intervenes": 0.06106194690265487,
+      "cost_usd": {
+        "p10": 0.45657504502197727,
+        "p50": 1.1057353,
+        "p90": 2.4230083878922737
+      },
+      "wall_time_s": {
+        "p10": 540.4818145636394,
+        "p50": 1444.973835072,
+        "p90": 2958.6111196330917
+      }
+    }
+  },
+  "departures": "Larger than the reference: the change touches drain, run, state and status with a new resume path and many tests, and the last attempt failed in planning."
+}

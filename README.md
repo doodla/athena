@@ -174,6 +174,19 @@ its cap. A job starts only when its reading and its run both fit, so no request 
 want of money. The source check is one call per study, so its reserve is the verifier's cap times the number of
 studies, and what it costs is added to the spend.
 
+**Free disk space.** Builds that run out of disk fail in ways that look like faults in the work, so Athena checks
+free space against `[disk] min_free_gb` in `athena.toml` (gigabytes; the default is 10 when the setting is
+absent, and the setting does not change a reading's configuration digest). The check runs at two places.
+Before a job is dispatched, if space is low Athena removes the `target/` directory of every closed or idle
+job under its state directory (source files and records stay, and a job whose lock is held by a running command
+is skipped) and reads the space again. If it is still low, the job is not dispatched and not rejected: it stays
+queued with the status `environment: low disk`, `athena status` and the drain report show the free and required
+amounts, `athena go` prints them and exits with an error, and `drain` does not count it as a failure. The user
+frees space and runs `athena go <job>` or `athena drain` again; the same job runs. Before a job's checks run, the
+same cleanup runs, and if space is still low the job fails with the reason `environment: low disk` instead of
+running the checks on a full disk. That failure is retryable with `athena retry <job>` once the user has freed
+space; no hold is left behind.
+
 ## Accepting v0 from a clean clone
 
 ```sh

@@ -33,6 +33,28 @@ pub struct Config {
     /// when absent and reset in [`Config::reading_inputs`], so it never changes a reading's config digest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_plan: Option<JobPlanConfig>,
+    /// Free-disk floor (`[disk]`). Absent means [`DEFAULT_MIN_FREE_GB`]. Like `job_plan`, it is left out of the
+    /// serialized form when absent and reset in [`Config::reading_inputs`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk: Option<DiskConfig>,
+}
+
+/// The free disk space, in gigabytes, below which a job is held at dispatch.
+pub const DEFAULT_MIN_FREE_GB: u64 = 10;
+
+/// `[disk]`: the minimum free disk space Athena wants before it starts a job or runs its checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiskConfig {
+    /// Gigabytes (10^9 bytes) that must be free. The default is [`DEFAULT_MIN_FREE_GB`].
+    #[serde(default = "DiskConfig::default_min_free_gb")]
+    pub min_free_gb: u64,
+}
+
+impl DiskConfig {
+    fn default_min_free_gb() -> u64 {
+        DEFAULT_MIN_FREE_GB
+    }
 }
 
 /// `[job_plan]`: the planner and critic that run before the producer. Nothing reads these settings yet.
@@ -379,6 +401,7 @@ impl Config {
         relevant.parallel = Parallel::default();
         relevant.landing = Landing::default();
         relevant.job_plan = None;
+        relevant.disk = None;
         serde_json::to_string(&relevant).expect("a parsed configuration serializes")
     }
 
@@ -481,6 +504,11 @@ impl Config {
             .unwrap_or(model)
     }
 
+    /// The minimum free disk space, in gigabytes: `[disk] min_free_gb`, or [`DEFAULT_MIN_FREE_GB`] when absent.
+    pub fn min_free_gb(&self) -> u64 {
+        self.disk.map_or(DEFAULT_MIN_FREE_GB, |d| d.min_free_gb)
+    }
+
     pub fn capability(&self, id: &str) -> Option<&CapabilityConfig> {
         self.capabilities.get(id)
     }
@@ -572,6 +600,20 @@ pub(crate) mod tests {
         // config without the section, not a pinned value, so a real config change does not break the test.
         assert_eq!(digest(&on), digest(&base));
         assert_eq!(on.reading_inputs(), base.reading_inputs());
+    }
+
+    #[test]
+    fn min_free_disk_defaults_to_ten_gigabytes_and_parses_when_set() {
+        let base = Config::parse(REPO_CONFIG).unwrap();
+        assert!(base.disk.is_none());
+        assert_eq!(base.min_free_gb(), 10);
+        let set = Config::parse(&format!("{REPO_CONFIG}\n[disk]\nmin_free_gb = 3\n")).unwrap();
+        assert_eq!(set.min_free_gb(), 3);
+        let empty = Config::parse(&format!("{REPO_CONFIG}\n[disk]\n")).unwrap();
+        assert_eq!(empty.min_free_gb(), 10);
+        // A reading records this digest; the section must not move it.
+        assert_eq!(set.reading_inputs(), base.reading_inputs());
+        assert_eq!(digest(&set), digest(&base));
     }
 
     #[test]
