@@ -9,6 +9,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- Added the Hestia design (`docs/design/hestia.md`), a continuity sweep with Hades's cleanup folded in, and
+  proposed decision D129 for it. Design only: no code, and the build jobs are not queued.
 - The producer self-check no longer sends a report back over a criterion the producer left to Athena's
   checks. A criterion that names `cargo fmt`, `cargo clippy` or the full `cargo test` (with no `-p`, `--lib`
   or similar scope) and whose evidence starts with "left to Athena's checks" is passed to the verifier, which

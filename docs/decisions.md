@@ -3229,3 +3229,33 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Reversal cost:** Low. Remove the second branch of the rule.
 - **Provenance:** stated: the request. Read: `reading.rs`, `verify.rs`, D117. Measured: `cargo test -p athena-core`
   for the tests above.
+
+## D129 · Hestia, the continuity role, runs a rules-first sweep with Hades's cleanup folded in (proposed)
+
+- **Status:** proposed. Not accepted; the build jobs are not queued. The design is
+  [`docs/design/hestia.md`](design/hestia.md).
+- **Case:** The BRIEF.md addendum of 2026-10-25 asks for something that sanity checks the system and keeps it
+  neat and clean. The request cites, as supplied by it and not checked here, eight things that went unnoticed:
+  queued requests already done or superseded; leftover branches, worktrees and build caches (a cache filled the
+  disk on 2026-10-23); checkpoints never pushed; an installed binary older than its source; prompt budgets
+  nearly full; a keep rule nobody evaluated; `athena propose` never run; docs that no longer match the code.
+- **Decision (proposed):** Hestia (BRIEF.md pantheon row "Continuity") runs a periodic sweep. Code checks the
+  six plain facts; a model only judges whether a queued request is done and whether a doc still means what the
+  code does, and its output is a report. Hestia fixes only through small jobs in the normal pipeline, and
+  deletes only what is provably Athena's own and merged; everything else is a work item. She does not gate work
+  (D127). Estimated budget: $0.50 and 10 minutes per model sweep, $2 and 1 hour per week; stop at the cap and
+  report what was skipped. Findings are measured by resolved problems, time to resolution and a weekly spot
+  check; an empty list is reported with the checks that ran. Hades's cleanup is a "retire" check group inside
+  Hestia, splitting out when rollback or deprecation work exists or cleanup exceeds half of findings over four
+  weeks. The build is ten one-producer jobs, deterministic checks first.
+- **Alternatives:** (a) Model-only sweeps: rejected, costly, not reproducible, weak on plain facts. (b) Rules
+  only: rejected, cannot tell if a request is done or a doc is wrong. (c) Separate Hades now: rejected, no
+  rollback workload. (d) Fold into the D127 scope guard: rejected, it blurs tidying with throttling work.
+  (e) Direct edits by the sweep: rejected, skips verification. (f) Report only: rejected, tidying piles up.
+- **Tradeoff:** A sweep adds some cost and a few small jobs, and a check can be wrong; the spot check, the cap on
+  open fix jobs and report-only for anything uncertain bound that. Every threshold is an estimate.
+- **Reversal cost:** Low before the build (this entry and the design). Low after, since the sweep only reports
+  and opens small jobs and can be switched off.
+- **Provenance:** stated: the request of this job and its figures. Read: BRIEF.md pantheon table and the
+  2026-10-25 addendum, D127 and `docs/design/scope-guard.md`. Not measured: every figure from `records/`, and
+  every threshold and budget.
