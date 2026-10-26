@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261025-001236-brde",
+  "round": 2,
+  "at": "2026-10-26T14:57:54.476023602Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "blocker",
+      "summary": "Status cannot be redirected unless status.rs is edited, and the plan forbids that.",
+      "evidence": "status.rs works out `head` itself and calls Records::load(&self.git,&head) and RecordSet::load(&self.git,&head) directly, so no caller in main.rs can change where status reads from. The plan leaves status.rs alone and says to 'redirect in callers', which cannot work. Criterion 2 (status works with no records/) and the status part of criterion 1 could then not be met. The request's Files line names whole crates (crates/athena-core, ...), so status.rs is in scope; the deliverables list is only what the reading expected. Fix: Edit status.rs (and forecast's source) so they use Records::load_current / RecordSet::load_current. Treat the request's crate list as the scope, not the expected-deliverables list.",
+      "location": "Decision 5; Open question 1; crates/athena-core/src/status.rs:605,612-613,818",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The plan invents a new audit reader instead of moving the real one in auditor.rs.",
+      "evidence": "No audit.rs exists in athena-gate. The audit reader is crates/athena-core/src/auditor.rs:300 (`Records::load(&athena.git, &head)`), and docs/design/records-history.md:502 lists it that way. A new reader in gate audit.rs would be tested while the real auditor still reads the main tree. Registering it also means editing gate lib.rs, which the plan's own 'deliverables only' rule does not allow. Fix: Drop the new gate audit.rs. Switch auditor.rs:300 to load_current and point the audit equivalence test at it.",
+      "location": "Decision 5 and Files: crates/athena-gate/src/audit.rs (create)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Many named readers live in files outside the deliverables, so the plan's own limit leaves them unmoved.",
+      "evidence": "Many live callers of Records::load are outside the deliverables: retry carry in reading.rs (carry at 1288, loads at 532-722 and 1727), run.rs 165/361/2392, manage.rs, scope_guard.rs (forecast_p90_dollars at 522), proposals.rs 557 (read_records(self.git.dir())), audience.rs, review.rs, hestia.rs, steward.rs, code_health.rs, work_decisions.rs, drain.rs 1463, and backtest.rs 510. Under the plan's self-imposed limit, retry carry, scoring, forecasting and proposals cannot be moved, so criterion 1 would not be shown for them. Fix: List the actual files that change, using the seam table in docs/design/records-history.md (~line 488-510) as the inventory. Allow edits anywhere in the named crates.",
+      "location": "Step 4 / Decision 3 (switch live callers to load_current)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The scan test for criterion 3 misses records/jobs paths and git-tree readers.",
+      "evidence": "The scan looks only for join(\"records\"). xtask/src/walltime.rs:83 uses root.join(\"records/jobs\"), and the git-tree readers pass `head` to Records::load, so neither kind of leftover reader would be caught. The scan proves less than criterion 3 asks. Fix: Match the records/ path prefix in any string literal (records/ and \"records\"). Also scan for Records::load / RecordSet::load in non-test code outside an allow-list (gate reconcile/history, store.rs internals).",
+      "location": "Demonstration for criterion 3 (scan test)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "repo_state_dir is in paths.rs, not in athena-data lib.rs.",
+      "evidence": "repo_state_dir is defined in crates/athena-data/src/paths.rs:43, not in lib.rs. Fix: Define records_worktree_path in paths.rs next to repo_state_dir.",
+      "location": "Decision 1 / Files: crates/athena-data/src/lib.rs",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The walltime reader is in xtask/src/walltime.rs, and the xtask dependency question is still open.",
+      "evidence": "The walltime reader is xtask/src/walltime.rs (line 83), not main.rs. The plan has not checked whether xtask can depend on athena-core or athena-data. Fix: Check xtask/Cargo.toml. If adding the dependency is not acceptable, have xtask resolve the worktree path through a small shared function, or take it as a --dir argument from the caller, and say so in the plan.",
+      "location": "Open question 3; xtask",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The design is sound: a single records_source helper, a detached worktree at one fixed path, a fallback when the branch has no records/, and exact-tree loads kept for gate checks. But in round 2 the plan restricted itself to the expected-deliverables list, and the request does not ask for that; its Files line names whole crates. Under that restriction status.rs cannot be changed, so status/forecast cannot be redirected and criterion 2 fails. Retry carry (reading.rs), forecasting (scope_guard/run), proposals and many other live callers would also stay on the main tree. The plan also invents an audit reader in a new gate audit.rs, when the real one is athena-core auditor.rs:300. The criterion 3 scan would miss join(\"records/jobs\") in walltime.rs and every git-tree reader. These issues can be fixed: widen the edit set to the real call sites in the named crates, use auditor.rs, and strengthen the scan."
+}
