@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- Tests no longer depend on the machine's real free disk space. The shared CLI test configuration (`test_config`)
+  sets `[disk] min_free_gb = 0`, and the guard's own tests set a minimum with `with_min_free_gb` and read their
+  free space from simulated values. The environment variable `ATHENA_FREE_BYTES`, when set to a whole number,
+  replaces the free-space reading in a spawned `athena` binary; a nested-run test uses it to show 9 GB free
+  and still pass, and a control with a 10 GB minimum shows the reading takes effect. The production default
+  of 10 GB is unchanged.
 - Added the Jev code-health design (`docs/design/jev-code-health.md`): five typed questions asked in one batched
   call per landing, in shadow, on the existing Jev client, fake and `athena score-jev` scorer, scored by later
   breakage and churn. Proposed decision D131. Design only: no code, and the build jobs are not queued.

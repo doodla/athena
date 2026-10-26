@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261026-083650-jhde",
+  "round": 1,
+  "at": "2026-10-26T08:39:35.168346379Z",
+  "invocation_seq": 3,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "The ATHENA_FREE_BYTES override is a silent production hook that could hide real low disk.",
+      "evidence": "df_free_bytes (disk.rs:57) is the default reader for every StateDir (state.rs:32). If the variable is set by accident, every gate passes with no trace. The plan's only mitigation is documentation. Fix: When the override is honored, have the gate say so in its 'disk' line (for example 'free space simulated by ATHENA_FREE_BYTES'), or add a line about it to the CHANGELOG and module docs. Keep invalid values falling through to df, and cover that in the pure-helper unit test.",
+      "location": "Plan decision 2 / crates/athena-core/src/disk.rs df_free_bytes",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The audit for tests that read real df is limited to athena-cli tests.",
+      "evidence": "StateDir::new appears in many athena-core files (gh.rs 13, pr.rs 3, reconcile.rs, steward.rs, etc.). Without with_free_space, each one defaults to df_free_bytes. Criterion 4 says no test in the suite may decide its result from real free disk. Fix: Add a step: grep every crate's tests for StateDir::new and for spawned `go`/`drain` calls that reach disk_gate without with_free_space or a min-0 config. Fix any found, or list them as checked in the change description.",
+      "location": "Plan open questions / criterion 4",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The criterion's named command does not run the hold and fail-fast tests.",
+      "evidence": "`cargo test -p athena-core disk` runs only the disk.rs unit tests. The hold and fail-fast tests are in crates/athena-cli/tests/drain.rs (lines 1206, 1251, 1328). Fix: Make the drain test commands the primary run for criterion 2 (for example `cargo test --locked -p athena-cli --test drain low_disk` and `... the_real_steps_hold`), so the verifier runs them.",
+      "location": "Plan demonstration for criterion 2",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read disk.rs, state.rs's use of the free-space hook, common/mod.rs, the drain.rs disk tests, the nested-run test in binary.rs, and the [disk] parsing in athena-data's config.rs. The plan matches the request and the reading. In-process fixtures already use plenty_of_space (common/mod.rs:155). The real fault is spawned binaries: they read real `df` and fall back to the 10 GB default, because athena.toml has no [disk] table. Adding `[disk] min_free_gb = 0` to test_config fixes this in the shared fixture. Appending that table is safe: no [disk] table exists in athena.toml or in any test, and without_job_plan stops skipping at the next table header. The drain disk tests (the four go_with_disk callers and the_real_steps_hold…) assert \"10.0 GB required\" and rely on the default, so pinning them to 10 is needed and the plan does it. The demonstrations would fail without the behavior. With minimum 0, the companion test alone would pass even if the override were ignored. The min-10 negative control under ATHENA_FREE_BYTES closes that gap. Criterion 2's `-p athena-core disk` command does not run the hold and fail-fast tests, which live in athena-cli/tests/drain.rs. The plan correctly adds the drain commands to cover them. The remaining points are minor: the production-side env hook should announce itself when honored, and the plan's audit for real-df reads should cover all test files and crates."
+}

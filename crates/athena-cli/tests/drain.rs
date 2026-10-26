@@ -1112,6 +1112,12 @@ fn simulated_free(state: &Path) -> std::io::Result<u64> {
     }
 }
 
+/// A fixture whose configuration asks for 10 GB free, as the guard's own tests need. The shared test
+/// configuration sets no minimum; these tests read their free space from `simulated_free`, never from the disk.
+fn disk_fixture() -> Fixture {
+    Fixture::with_config(&with_min_free_gb(&test_config(), 10))
+}
+
 /// Plants an idle job with a build directory and a source file, under the state directory `state`.
 fn plant_idle_job(state: &Path) {
     let dir = state.join("jobs").join(IDLE_JOB);
@@ -1154,7 +1160,7 @@ fn lines_of(lines: &Lines) -> Vec<String> {
 
 #[test]
 fn low_disk_at_dispatch_removes_idle_build_directories_first_and_then_dispatches() {
-    let fx = Fixture::new();
+    let fx = disk_fixture();
     let (athena, job, lines) = go_with_disk(&fx, || {});
     plant_idle_job(athena.state.root());
     athena.go(job.as_str(), AcceptedBy::User, &lines).unwrap();
@@ -1180,7 +1186,7 @@ fn low_disk_at_dispatch_removes_idle_build_directories_first_and_then_dispatches
 
 #[test]
 fn low_disk_after_the_producer_removes_idle_build_directories_before_the_checks_run() {
-    let fx = Fixture::new();
+    let fx = disk_fixture();
     let root = fx.state.path().join("repo");
     let (athena, job, lines) = go_with_disk(&fx, move || plant_idle_job(&root));
     athena.go(job.as_str(), AcceptedBy::User, &lines).unwrap();
@@ -1204,7 +1210,7 @@ fn low_disk_after_the_producer_removes_idle_build_directories_before_the_checks_
 
 #[test]
 fn low_disk_at_dispatch_that_cleanup_does_not_cure_holds_the_job_queued_and_not_rejected() {
-    let fx = Fixture::new();
+    let fx = disk_fixture();
     let (athena, job, lines) = go_with_disk(&fx, || {});
     set_free(&athena, 3_000_000_000);
     plant_idle_job(athena.state.root());
@@ -1249,7 +1255,7 @@ fn low_disk_at_dispatch_that_cleanup_does_not_cure_holds_the_job_queued_and_not_
 
 #[test]
 fn low_disk_before_the_checks_fails_the_job_retryably_and_a_retry_with_space_runs_the_checks() {
-    let fx = Fixture::new();
+    let fx = disk_fixture();
     let root = fx.state.path().join("repo");
     let flag = root.join("low_at_producer");
     let (low_flag, free_file) = (flag.clone(), root.join("simulated_free"));
@@ -1326,7 +1332,7 @@ fn set_free(athena: &Athena, bytes: u64) {
 
 #[test]
 fn the_real_steps_hold_a_job_on_low_disk_without_a_failure_and_a_later_drain_runs_the_same_job() {
-    let fx = Fixture::new();
+    let fx = disk_fixture();
     let scenario = rated_scenario();
     let mut athena = fx.athena(scenario.script());
     athena.state = athena.state.clone().with_free_space(simulated_free);
