@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261026-015419-4j37",
+  "round": 3,
+  "at": "2026-10-26T02:41:40.192774319Z",
+  "invocation_seq": 6,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/reading.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/reading.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The criterion 6 demonstration cannot work: go refuses a Dispatched job, and the registry check passes trivially.",
+      "evidence": "go_job on a job in JobState::Dispatched always bails ('job {id} is running' or 'was interrupted'). So 'runs go on a job already Dispatched on that line... reaches its terminal state' cannot happen. The other half, that the registry still shows the job running, passes trivially because the watcher never touches the registry. It shows nothing is called, not that a live process survives. Fix: Start a real child process (for example a sleep) and register it as the running job of a line. Drive the watcher to a Pause on that line, then assert the child process is still alive and its registry entry is unchanged. Or run go on job N with a scripted agent while the pause for N's line is written mid-run, and assert N still closes with its own outcome. Drop the 'go on a Dispatched job' step.",
+      "location": "Demonstrations, Criterion 6 (scope_guard_pause_never_kills); crates/athena-core/src/run.rs:189-196",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "With p90 passed as 0.0, T3 can never pause, so the criterion 5 T3 pause test cannot pass.",
+      "evidence": "t3_cost pauses only when forecast_p90_dollars > 0.0. With 0.0 it can at most flag (spend > $5). Decision 6 says p90 is 'not used by t3_cost', but t3_cost does use it. Forecast quantiles are already in job records (see the forecast fixture in run_pin_tests.rs:182). Fix: Read the job's forecast p90 dollars from its existing forecast or admission record and pass it in, and fix the Decision 6 text. Or, if p90 stays 0.0, change the criterion 5 test to a pause signal the watcher can actually reach (T4 or T5) and say T3 pauses are not reachable yet.",
+      "location": "Decision 6 and Demonstrations, Criterion 5; crates/athena-core/src/scope_guard.rs:215-229",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The criterion 1 test does not say how the third linked request is made, given that retry refuses; no control is shown.",
+      "evidence": "Decision 5 makes Athena::retry refuse a paused line, so the third request cannot come from retry. The behavior-evidence default also asks a denial test to first show the action succeeding without the protection. Fix: State that the third request is made with ask('try again on <id>') and not retry. In the criterion 1 test, assert the same setup dispatches when the pause file is absent (or point to the criterion 2 test as that control).",
+      "location": "Demonstrations, Criteria 1 and 2",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan does not say how dispatch finds the line head of a new request.",
+      "evidence": "The pause files are keyed by the line's first job id. A new 'try again on' job has no file of its own, so dispatch must work out which line it joins. Fix: State that refuse_if_paused rebuilds RequestRecords and calls group_lines for the job being dispatched, then looks up the pause file by the line's first id.",
+      "location": "Decision 4 and Step 5 (refuse_if_paused)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the code by reading it. The names it relies on exist: group_lines, RequestRecord and evaluate_before_attempt in scope_guard.rs, the Finished arm at run.rs:144, dispatch at run.rs:322 and Athena::retry at reading.rs:699. Hooking go and dispatch and making retry refuse is sound, and testing through the fixture for criteria 1-3 answers the earlier finding. The one-call edit to reading.rs is justified (Athena's own finding is weighed). Two demonstrations cannot work as written. The never-kills test for criterion 6 runs go on a Dispatched job, but go always refuses that state. The T3 pause test for criterion 5 cannot reach a pause, because the plan passes p90 = 0.0 and t3_cost only pauses when p90 > 0. Both are fixable, so the verdict is revise."
+}
