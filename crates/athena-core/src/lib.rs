@@ -90,6 +90,7 @@ pub mod routing;
 pub mod run;
 #[cfg(test)]
 mod run_pin_tests;
+pub mod scope_guard;
 pub mod scoring;
 pub mod state;
 pub mod status;

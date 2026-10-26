@@ -18,6 +18,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Scope guard job 1: `athena_core::scope_guard`, pure functions with no I/O that group job records into lines
+  of work and compute the thrash signals T1 to T5 of `docs/design/scope-guard.md` section 5, with replay tests
+  for the trailer, test-suite speedup, prompt-budget and cut A cases. D127 is now accepted, decided by the
+  brain under Sri's delegation, with two changes: escalations go to whoever holds Sri's delegation, and the
+  build order starts with jobs 1 and 5 (rules only) before value scoring and the model scorer.
 - A design for the scope guard, `docs/design/scope-guard.md`, and a proposed decision, D127 in
   `docs/decisions.md`. Artemis (boundaries) owns a role that weighs improvement work's value against expected
   cost before it is queued, and watches running lines of work for thrash, with Demeter supplying the cost
