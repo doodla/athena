@@ -45,6 +45,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A code-health check after every landing (`crates/athena-core/src/code_health.rs`, decision D132). It measures
+  each Rust source file's production lines (test modules excluded) and longest function with `syn`, counts landings
+  in the last 7 days and failure citations, and queues one structural-pass request for each file over a limit
+  (2000 lines, 200-line functions, or 1500 lines with 5 landings in a week) unless one is open. Every 10 landings
+  after a new `athena.code-health-baseline/1` record it queues a self-contained, high-priority design review.
+  The check runs in `Athena::land_pr` and `note_finished`, and `athena status` shows the table and the test suite's
+  run time.
 - The Hestia sweep skeleton (job 1 of `docs/design/hestia.md`) and the accepted decision D129. `athena hestia sweep`
   runs Hestia's checks and commits the report as an `athena.hestia-sweep/1` record at
   `records/hestia-sweeps/<YYYY-MM>/<id>.json`; `athena hestia last` prints the newest report, or says "no sweep

@@ -232,7 +232,8 @@ fn a_request_lands_a_traceable_commit() {
         "no warning line: {lines:?}"
     );
 
-    let head = fx.head();
+    // The code-health check commits a baseline record after the landing, so the landing is not the tip.
+    let head = f.landed_commit.clone().expect("the landing commit");
     let trailers = fx.git.trailers(&fx.git.message(&head).unwrap()).unwrap();
     let get = |key: &str| {
         trailers

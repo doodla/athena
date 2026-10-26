@@ -3324,3 +3324,42 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Reversal cost:** Low. The record and rows are additive; switch off `ATHENA_JEV_SHADOW`.
 - **Provenance:** Read: `jev.rs`, `labeled.rs`, `defaults-loop.md` price lines, D127, D129, D130. Not
   measured: landing counts, every threshold and total cost. 5p65 and zc0v are not in the snapshot.
+
+## D132 · Code health is measured after every landing; a structural pass per breach and a design review every ten landings
+
+- **Case:** Large files and long functions grew until a job failed on them. Nothing watched size, churn or the
+  failures that cite a file, and no regular look at the shape of the code existed.
+- **Decision:** `crates/athena-core/src/code_health.rs` measures every tracked Rust file under a `src/` directory
+  after each landing, in `Athena::land_pr` (after the branch resync and the Pages watch) and in `note_finished`
+  (for a landed job only; a nested run does it too, since it only queues requests).
+  - **Thresholds.** A file is over when it has more than 2000 production lines (lines outside `#[cfg(test)]`
+    modules), or a function of more than 200 lines, or more than 1500 production lines with 5 or more landings
+    in the last 7 days.
+  - **A landing** is a first-parent commit carrying both an `Athena-Job` and an `Athena-Verified-Content`
+    trailer. Records-only commits carry only the first, so they and direct pushes do not count. Churn per file and
+    the cadence below count landings this way.
+  - **Structural pass.** For each file over a threshold, one request starting `Structural pass: <path>` is queued
+    with the measured numbers. None is queued while a request with that first line is not closed.
+  - **Baseline record.** `athena.code-health-baseline/1`, at `records/code-health/<YYYY-MM>/<id>.json`, holds the
+    landing count when it was written. The first check writes one and queues no review. The latest baseline
+    wins. Because it is a record in git, it survives a fresh state directory.
+  - **Cadence.** When 10 landings stand beyond the latest baseline, a self-contained design-review request is
+    queued through `Athena::queue` with a `Priority: high` line, and a new baseline is written. It lists the
+    code-health table, the files most changed and most broken since the last review, the open structural-pass
+    requests, and the recent rejections and planning stops, and asks for a short design note as a design-only
+    job. No design-review role exists; running the pass is out of scope.
+  - **Status.** `athena status` shows the table (lines, longest function, landings in 7 days, citations, limits,
+    over) and the test suite's run time from the latest recorded test check, or `unknown`.
+- **Buy versus build:** Function length is measured with `syn` 2 (features `full`, `parsing`, `visit`) and
+  `proc-macro2` with `span-locations`, declared once in the root `[workspace.dependencies]`. Both were already in
+  `Cargo.lock` through other crates. Hand-written brace counting was rejected: it breaks on braces in strings,
+  comments and macros. A lint tool was rejected: it is an external program and cannot be reproduced in tests.
+- **Alternatives:** (a) Count every first-parent commit as a landing: rejected, direct pushes and records commits
+  would shift the cadence. (b) A counter file in the state directory: rejected, it double counts when both hooks
+  fire and is lost with the directory. (c) Count outcome records: rejected, `land_pr` has not written one when the
+  check runs. (d) Run the check at every status: not done; status measures but queues nothing.
+- **Tradeoff:** The first run on a repository with files already over a limit queues one request each. A failing
+  check is a warning, never a failed landing.
+- **Reversal cost:** Low. Remove the two hooks; the record type and the baseline files can stay.
+- **Provenance:** Read: `gh.rs`, `steward.rs`, `reading.rs`, `store.rs`, `records.rs`. Measured by the new tests.
+  The thresholds are chosen, not derived from measurement.

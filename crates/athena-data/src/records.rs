@@ -1814,6 +1814,32 @@ impl Audit {
     }
 }
 
+/// The schema tag of a code-health baseline.
+pub const CODE_HEALTH_BASELINE_SCHEMA: &str = "athena.code-health-baseline/1";
+
+/// `athena.code-health-baseline/1`: where the design-review cadence counts from. `landings` is how many
+/// landings the history held when the baseline was written; a review is due when the history holds ten
+/// more. Baselines are never edited; the latest is the newest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CodeHealthBaseline {
+    pub id: RecordId,
+    pub at: Timestamp,
+    /// Landings (first-parent commits with an `Athena-Job` trailer) counted at this moment.
+    pub landings: u32,
+    /// True when this baseline closed a design review that was queued; false for the first one.
+    pub review_queued: bool,
+}
+
+impl CodeHealthBaseline {
+    /// The most recent of `baselines`, by time and then id; None when there are none.
+    pub fn latest(baselines: &[CodeHealthBaseline]) -> Option<&CodeHealthBaseline> {
+        baselines
+            .iter()
+            .max_by(|a, b| (a.at, &a.id).cmp(&(b.at, &b.id)))
+    }
+}
+
 /// The schema tag of a Hestia sweep.
 pub const HESTIA_SWEEP_SCHEMA: &str = "athena.hestia-sweep/1";
 
@@ -2181,6 +2207,8 @@ pub enum AnyRecord {
     Critique(Box<Critique>),
     #[serde(rename = "athena.baseline/1")]
     Baseline(Box<Baseline>),
+    #[serde(rename = "athena.code-health-baseline/1")]
+    CodeHealthBaseline(CodeHealthBaseline),
 }
 
 /// Why a file under `records/` is not acceptable.
@@ -2364,6 +2392,9 @@ impl AnyRecord {
             AnyRecord::JobPlan(r) => format!("{}/job-plan-{}.json", r.job.dir(), r.round),
             AnyRecord::Critique(r) => format!("{}/critique-{}.json", r.job.dir(), r.round),
             AnyRecord::Baseline(r) => format!("{}/baseline.json", r.job.dir()),
+            AnyRecord::CodeHealthBaseline(r) => {
+                format!("records/code-health/{}/{}.json", r.id.month(), r.id)
+            }
         }
     }
 
@@ -2399,6 +2430,7 @@ impl AnyRecord {
             AnyRecord::JobPlan(_) => JOB_PLAN_SCHEMA,
             AnyRecord::Critique(_) => CRITIQUE_SCHEMA,
             AnyRecord::Baseline(_) => BASELINE_SCHEMA,
+            AnyRecord::CodeHealthBaseline(_) => CODE_HEALTH_BASELINE_SCHEMA,
         }
     }
 }
@@ -3218,6 +3250,31 @@ mod tests {
         };
         assert_eq!(*parsed, sweep);
         assert!(check_record_file(&record.canonical_path(), json.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn a_code_health_baseline_has_a_path_a_schema_and_round_trips() {
+        let baseline = CodeHealthBaseline {
+            id: RecordId::parse("20261026-090000-5abc").unwrap(),
+            at: ts(),
+            landings: 42,
+            review_queued: true,
+        };
+        let record = AnyRecord::CodeHealthBaseline(baseline.clone());
+        assert_eq!(record.schema(), "athena.code-health-baseline/1");
+        assert_eq!(
+            record.canonical_path(),
+            "records/code-health/2026-10/20261026-090000-5abc.json"
+        );
+        let json = record.to_json();
+        let parsed = AnyRecord::parse(&record.canonical_path(), json.as_bytes()).unwrap();
+        assert_eq!(parsed, record);
+        assert!(check_record_file(&record.canonical_path(), json.as_bytes()).is_ok());
+        assert_eq!(
+            CodeHealthBaseline::latest(std::slice::from_ref(&baseline)),
+            Some(&baseline)
+        );
+        assert!(CodeHealthBaseline::latest(&[]).is_none());
     }
 
     #[test]

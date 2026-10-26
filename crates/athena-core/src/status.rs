@@ -135,6 +135,9 @@ pub struct StatusView {
     pub audience: Option<AudienceView>,
     /// The latest audit of a job's outcome (`crate::auditor`), if one is recorded.
     pub audit: Option<AuditView>,
+    /// The code-health table (`crate::code_health`); absent when the sources could not be measured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code_health: Option<crate::code_health::CodeHealth>,
     /// Lines of work the scope guard flagged or paused, with their signals T1 to T5 (`crate::scope_guard`).
     /// Pauses first. Empty when no mark file exists.
     pub lines: Vec<crate::scope_guard::LineMark>,
@@ -773,6 +776,9 @@ impl Athena {
         if records.request_jobs().is_empty() {
             next.push("athena ask \"<a one- or two-line request>\"".into());
         }
+        let code_health = crate::code_health::compute(&self.git, &head, &records, crate::now())
+            .ok()
+            .map(|health| health.shown());
         Ok(StatusView {
             repository: self.git.dir().display().to_string(),
             branch: self.git.current_branch()?,
@@ -798,6 +804,7 @@ impl Athena {
             work_proposals,
             audience: audience_view(&records),
             audit: audit_view(&records),
+            code_health,
             lines,
             invalid_records: records.invalid.clone(),
             next,

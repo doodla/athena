@@ -54,6 +54,9 @@
 //! - [`hestia`]: `athena hestia sweep` and `athena hestia last`, the skeleton of Hestia's continuity sweep: a
 //!   list of checks run into one recorded report that lists every check with its count, where a failed check
 //!   becomes a finding; no checks ship yet;
+//! - [`code_health`]: file and function sizes of Athena's own sources, measured with `syn` after every landing;
+//!   a request is queued for each file over a threshold, and a design review every ten landings, counted from a
+//!   baseline record;
 //! - [`pin`]: a study's repository ref resolved to a commit by the core, and mounted read-only;
 //! - `test_support` (compiled for tests and the `test-support` feature only): the shared records-history
 //!   cutover fixture, a scratch repository with a bare remote and a history made through the real writers;
@@ -68,6 +71,7 @@ pub mod capability;
 pub mod chain;
 pub mod checks;
 pub mod ci_result;
+pub mod code_health;
 pub mod commits;
 pub mod disk;
 pub mod fake;
