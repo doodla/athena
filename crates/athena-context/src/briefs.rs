@@ -312,6 +312,10 @@ pub fn producer_brief(inputs: &ProducerInputs) -> String {
     out
 }
 
+/// The evidence prefix a producer uses for a criterion only Athena's recorded checks (fmt, clippy, the
+/// full test suite) can show. The producer self-check does not send such a criterion back.
+pub const LEFT_TO_ATHENA: &str = "left to Athena's checks";
+
 /// The producer's "criteria_check" section: each accepted criterion as a bare line to copy, then the
 /// instruction. Matching a report entry to a criterion needs the exact words, and a producer that retypes
 /// the criteria from memory drifts from them and is sent back.
@@ -323,7 +327,12 @@ fn criteria_check_section(out: &mut String, reading: &AcceptedReading) {
          criteria that were already satisfied before you began. For each entry copy the line below as the \
          entry's criterion text, character for character; do not retype, shorten, merge or reword it. Give \
          its status (met or unmet) and your evidence: what you read or ran. A criterion with no entry is \
-         sent back.\n"
+         sent back.\n\n\
+         A criterion that only Athena's own recorded checks can show (cargo fmt --check, cargo clippy, the \
+         full or workspace cargo test) is not yours to run: report it with evidence that starts with \
+         \"{LEFT_TO_ATHENA}\" and it is not sent back; the verifier judges it from the recorded checks. \
+         Targeted-test criteria and every other criterion must still be reported met with evidence of \
+         what you ran or read.\n"
     );
     for (text, _) in &reading.criteria {
         let _ = writeln!(out, "{text}");
@@ -1285,6 +1294,35 @@ mod tests {
             "evidence",
         ] {
             assert!(section.contains(needle), "missing instruction: {needle}");
+        }
+    }
+
+    #[test]
+    fn producer_brief_tells_how_to_leave_a_criterion_to_athenas_checks() {
+        let accepted = AcceptedReading::new(&reading(), &defaults(), |_| false);
+        let brief = producer_brief(&ProducerInputs {
+            job: "20261010-153012-k7q2".into(),
+            request: "add a changelog".into(),
+            reading: accepted,
+            checks: vec![],
+            commands: vec![],
+            pin: None,
+            retry_from: None,
+        });
+        let (_, section) = brief
+            .split_once("## criteria_check: copy the line\n")
+            .expect("the producer brief has a criteria_check section");
+        let section = section.split("\n## ").next().unwrap();
+        assert_eq!(LEFT_TO_ATHENA, "left to Athena's checks");
+        for needle in [
+            LEFT_TO_ATHENA,
+            "cargo fmt --check",
+            "cargo clippy",
+            "full or workspace cargo test",
+            "evidence that starts with",
+            "Targeted-test criteria and every other criterion must still be reported met with evidence",
+        ] {
+            assert!(section.contains(needle), "missing wording: {needle}");
         }
     }
 

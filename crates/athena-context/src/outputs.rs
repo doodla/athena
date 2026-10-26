@@ -175,7 +175,8 @@ pub struct CriterionCheckOutput {
     /// The criterion's text: copy the line from the brief's criteria_check section.
     pub criterion: String,
     pub status: CriterionStatusOutput,
-    /// What you read or ran to decide the status.
+    /// What you read or ran to decide the status. For a criterion only Athena's recorded checks (fmt,
+    /// clippy, the full test suite) can show, start it with "left to Athena's checks".
     pub evidence: String,
 }
 

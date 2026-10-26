@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261026-023720-62fj",
+  "round": 1,
+  "at": "2026-10-26T04:17:05.656315894Z",
+  "invocation_seq": 3,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "The criterion 3 test would pass even without the change, so it does not show the new code path keeps verifier failures intact.",
+      "evidence": "The test calls unmet_criteria and left_to_athena, then calls verify::judge directly with a failed CheckRun. judge is unchanged by the plan, and verify.rs:300 already pushes 'check {} failed'. The planned test never builds the verifier inputs the run loop builds, so it cannot catch a change that drops or alters the failed check in those inputs. Fix: Accept this as a regression guard. If it is cheap, also check that the inputs given to judge still contain the failed recorded check after the left-over entry is pushed, for example by building the checks list through the same helper the run loop uses.",
+      "location": "Demonstrations, Criterion 3",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "No test shows that criteria left to Athena's checks reach the verifier, though the reading requires it.",
+      "evidence": "The reading says left-over criteria 'are passed on to the verifier to judge from the recorded checks'. Step 5 pushes a CheckResultView inline in the run loop. No demonstration checks that the entry exists or names the criteria, so a regression there would go unnoticed. Fix: Build the left-over CheckResultView in a small pure function, for example left_to_athena_check(&[String]) -> Option<CheckResultView>. Unit-test that it names each criterion and has passed:true, and returns None for an empty list.",
+      "location": "Steps 4-5 (run.rs ~1536, ~1951)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The recognizer's list of targeted-scope flags is incomplete.",
+      "evidence": "The planned list is -p, --package, --test, --lib, --bin, --doc, --bench, --example. A criterion like 'cargo test foo_bar passes' (a test-name filter) or 'cargo test --manifest-path ...' would be recognized as full-suite. A producer could then mark it as left to Athena's checks and skip the send-back. The verifier still judges it, so the cost is limited. Fix: Treat 'cargo test' as full-suite only when nothing follows it except workspace words or flags (--workspace, --all, --locked, --all-targets), or when the criterion says 'workspace' or 'full suite'. Add a test for a test-name filter.",
+      "location": "Decision 1 / Step 3 (is_athena_check_criterion)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the snapshot, and the code it names is where it says. unmet_criteria is at run.rs:1340. It is called at run.rs:1604, just before redact_report moves the report on the next line. report_gaps is declared at run.rs:1536 and becomes a \"producer-report-gaps\" CheckResultView with passed:true at run.rs:1951. criteria_check_section at briefs.rs:318 prints its intro text before the criteria loop. verify::judge at verify.rs:278 pushes \"check {name} failed\" for a failed recorded check. The fix goes where the fault starts: the self-check's rule that counts criteria about Athena's own checks as unmet. The marker counts only when the criterion's own text is also recognized as one of those checks, which keeps targeted-test and content criteria going back. That matches the request and the accepted reading, and the work fits in one producer run. I have three minor findings and no blocker or major. The test for criterion 3 would pass even before the change. Nothing tests that criteria left to Athena's checks reach the verifier's inputs. The recognizer's flag list misses some targeted forms."
+}
