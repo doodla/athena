@@ -1,0 +1,30 @@
+{
+  "schema": "athena.introspection/1",
+  "id": "20261026-140204-9xvr",
+  "at": "2026-10-26T14:02:04.452956473Z",
+  "trigger": "failure",
+  "job": "20261025-033738-yz2d",
+  "intervention": null,
+  "class_of_work": "code",
+  "category": "failed",
+  "what_happened": "Job 20261025-033738-yz2d (\"Run defaults proposals automatically after introspection and at drain\") ended failed. The cause was the environment, not the work. Before the checks ran, the disk had 1.5 GB free and 10.0 GB was required. The message tells the operator to free disk space and run `athena retry 20261025-033738-yz2d`. The event lists no unmet acceptance criteria, no blocker or major findings, and no failed checks. The work was never judged.",
+  "failure_class": "20261026-140223-4xmw",
+  "new_class": true,
+  "earlier_cases": [],
+  "decisions_matched": [],
+  "cause": "Athena measures free disk only at the point just before the checks, after the producer has already run. It owns the space that fills up (job working copies, build output, state directories) but has no routine that reclaims it, such as clearing finished jobs' build output. Nothing measures or limits disk use across the drain either. The guard turns exhaustion into a failed job that needs a manual retry, not a held or deferred job that resumes once space is back. Lost work and operator effort are therefore a normal result of a long drain, not a rare event.",
+  "prevention_kind": "design-change",
+  "prevention": "Check free disk before dispatch, not only before the checks. If it is below the minimum, first run an automatic cleanup of space Athena owns: build output and working copies of finished, landed or closed jobs, and caches past a set age. If space is still short, put the job and the drain on hold in a resumable state, not \"failed\", and show the hold in status. The drain would then continue by itself on the next pass once space returns. A job stopped this way must never count as a work failure. It must not need a manual `athena retry`, and it must never lead to a verifier or producer verdict.",
+  "proposed_request": "Make Athena handle low disk without an operator. Outcome: a drain never ends a job as failed because the disk is full, and it frees its own space first.\n\nAcceptance:\n- Before dispatching any job, Athena checks free disk against the configured minimum (default 10 GB). The check does not wait until just before the checks.\n- If free space is below the minimum, Athena first deletes space it owns: build output and working copies of jobs that are finished, landed or closed, oldest first. It never touches a running job or any committed record.\n- If space is still below the minimum after cleanup, the job stays queued or held in a resumable state with a clear reason shown in `athena status`. It is not marked failed. The drain then resumes the job by itself on a later pass once space is back, with no `athena retry`.\n- A demonstration shows (a) cleanup freeing enough space so the job runs, (b) space that stays short producing a hold and not a failure, and (c) the held job resuming and finishing after space is added. Each must fail without the new behavior.\n- An environment hold never appears as a work failure in introspection or in the failure counts.\n- Update the changelog and docs as the repo defaults require. Then retry job 20261025-033738-yz2d (\"Run defaults proposals automatically after introspection and at drain\") on the fixed build.",
+  "evidence": {
+    "model": "claude-sonnet-5-5",
+    "cost_usd": 0.081256,
+    "input_tokens": 2,
+    "output_tokens": 1866
+  },
+  "status": "recorded",
+  "failure": null,
+  "flags": [],
+  "dropped_ids": [],
+  "from_jev": false
+}
