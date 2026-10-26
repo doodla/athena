@@ -73,6 +73,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- Job planning is turned off (`enabled = false` under `[job_plan]` in `athena.toml`) because the keep rule of
+  job-planning.md section 9 (D110) decided it: at 105 planned jobs, 58 landed (55%), at or below the 64%
+  baseline, with $3.43 a landed job against the $2.50 guard. The planning code, the resume-from-kept-plan path
+  and the status measures are kept, so planning can be turned on again for a new measured trial. See D135. The
+  repository-config test now expects planning off with the same caps.
 - Tests no longer depend on the machine's real free disk space. The shared CLI test configuration (`test_config`)
   sets `[disk] min_free_gb = 0`, and the guard's own tests set a minimum with `with_min_free_gb` and read their
   free space from simulated values. The environment variable `ATHENA_FREE_BYTES`, when set to a whole number,

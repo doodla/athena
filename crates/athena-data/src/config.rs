@@ -541,9 +541,9 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_repository_config_turns_job_planning_on_with_the_designs_caps() {
+    fn the_repository_config_turns_job_planning_off_with_the_designs_caps() {
         let plan = Config::parse(REPO_CONFIG).unwrap().job_plan.unwrap();
-        assert!(plan.enabled);
+        assert!(!plan.enabled);
         assert_eq!(plan.planner_usd, 0.75);
         assert_eq!(plan.critic_usd, 0.75);
         assert_eq!(plan.planner_timeout_s, 600);

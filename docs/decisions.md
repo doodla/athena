@@ -3455,3 +3455,29 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Provenance:** Read: `snapshot.rs`, `run.rs`, `briefs.rs`, `athena-git/src/lib.rs`. Measured by the tests in
   `athena-git` (`snapshot`), `athena-context` (`briefs`) and `athena-core` (`planning_grant_tests`). The cause is
   cited from the request, which names job 20261024-115923-02gf.
+
+## D135 · Job planning is turned off by the D110 keep rule
+
+- **Case:** D110 set a keep rule for job planning (job-planning.md section 9): at 100 planned jobs, keep planning
+  if the landed share is at least 72% and cost per landed job is at most $2.50; turn it off if the share is at or
+  below the 64% baseline. `athena status` now reports 58 of 105 planned jobs landed (55%), at or below the 64%
+  baseline at the 100-job point, with cost per landed job of $3.43 against the $2.50 guard.
+- **Decision:** Planning is off. `athena.toml` has `enabled = false` under `[job_plan]`; the caps, timeouts and
+  `max_rounds` are unchanged. The rule decided this, not a person: both the share (55% against 64%) and the cost
+  guard ($3.43 against $2.50) point to off. The brain applied the rule's result under Sri's delegation (BRIEF.md
+  addenda of 2026-10-23 to 2026-10-26). The earlier override that kept planning on (intervention
+  20261025-033755-b01h) was taken at 51 jobs, below the decision point, so it did not pre-empt the rule at 100.
+- **Kept:** the planning code, the resume-from-kept-plan path and the `athena status` measures stay in the tree.
+  With planning off a change job runs the reader, producer and verifier only, with no planner or critic call.
+- **Alternatives:**
+  - (a) Keep planning on and continue measuring. The rule's "inconclusive" branch applies only above 64%, so
+    this would set the rule aside.
+  - (b) Remove the planning code. It would lose the ability to run a new trial and the resume path.
+- **Tradeoff:** Jobs lose the planner's and critic's review, and with it whatever early catches planning made;
+  the measured landed share and cost say the catches did not pay for the extra stops and spend.
+- **Reversal cost:** Low. Set `enabled = true` under `[job_plan]` to start a new measured trial, with its own
+  baseline and a fresh count of planned jobs.
+- **Provenance:** The numbers are from `athena status` as given in the request; they were not re-measured in
+  this job. Read: job-planning.md section 9, D110, `athena.toml`. The off path is covered by the test
+  `with_planning_absent_or_off_the_invocations_are_the_producer_verifier_pair_only` in `athena-cli`, and the
+  config by `the_repository_config_turns_job_planning_off_with_the_designs_caps` in `athena-data`.
