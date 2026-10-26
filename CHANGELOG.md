@@ -108,6 +108,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- First job of the structure pass (G1 of `docs/design/structure-pass.md`): `crates/athena-core/src/gh.rs` is
+  renamed to `crates/athena-core/src/gh/mod.rs`, with no line of its code changed, so later jobs can move code
+  into files beside it. The decision headers of D87 and D88 in `introspect.rs` now list the directory
+  `crates/athena-core/src/gh/` instead of the file `gh.rs`, with a new test that a landing touching a file
+  under it selects both. The `WRAPPER` constant in `tests/external_calls_guard.rs` is now that directory prefix,
+  so the one place allowed to run `gh` is any file under `gh/`; an outside `gh` call still fails the guard.
+  Behavior is unchanged and every public path in `athena_core::gh` is the same. D138 is accepted: module names
+  and order approved, R0 approved, all jobs queued now with dependencies, and the guard constant may change to
+  the prefix.
 - Job planning is turned off (`enabled = false` under `[job_plan]` in `athena.toml`) because the keep rule of
   job-planning.md section 9 (D110) decided it: at 105 planned jobs, 58 landed (55%), at or below the 64%
   baseline, with $3.43 a landed job against the $2.50 guard. The planning code, the resume-from-kept-plan path

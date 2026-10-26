@@ -1,11 +1,11 @@
-//! Guard: every call to GitHub goes through the one wrapper in `crates/athena-core/src/gh.rs`. Code under
+//! Guard: every call to GitHub goes through the one wrapper in the directory `crates/athena-core/src/gh/`. Code under
 //! `crates/` that runs the `gh` program, or names an HTTP client, anywhere else fails this test.
 
 use regex::Regex;
 use std::path::{Path, PathBuf};
 
-/// The only file allowed to run `gh`.
-const WRAPPER: &str = "crates/athena-core/src/gh.rs";
+/// The only directory whose files may run `gh`: a path prefix.
+const WRAPPER: &str = "crates/athena-core/src/gh/";
 /// This file names the patterns it looks for, so it is not scanned.
 const SELF: &str = "crates/athena-core/tests/external_calls_guard.rs";
 
@@ -22,7 +22,7 @@ fn violations(files: &[(String, String)]) -> Vec<(String, usize, String)> {
     let pattern = forbidden();
     let mut found = Vec::new();
     for (path, text) in files {
-        if path == WRAPPER || path == SELF {
+        if path.starts_with(WRAPPER) || path == SELF {
             continue;
         }
         for (n, line) in text.lines().enumerate() {
@@ -62,8 +62,8 @@ fn only_the_wrapper_calls_gh_or_an_http_client() {
     let mut files = Vec::new();
     collect(&root.join("crates"), root, &mut files);
     assert!(
-        files.iter().any(|(p, _)| p == WRAPPER),
-        "the wrapper file was not found; the scan is looking in the wrong place"
+        files.iter().any(|(p, _)| p.starts_with(WRAPPER)),
+        "no wrapper file was found; the scan is looking in the wrong place"
     );
     let found = violations(&files);
     assert!(
@@ -81,8 +81,9 @@ fn the_scan_fails_on_a_fixture_outside_the_wrapper() {
         ("crates/other/src/http.rs".to_string(), http),
         ("crates/other/Cargo.toml".to_string(), "ureq = \"2\"".into()),
         ("crates/other/src/ok.rs".to_string(), "fn fine() {}".into()),
-        // The wrapper itself is allowed.
-        (WRAPPER.to_string(), gh),
+        // Any file under the wrapper directory is allowed.
+        (format!("{WRAPPER}mod.rs"), gh.clone()),
+        (format!("{WRAPPER}sub/part.rs"), gh),
     ];
     let found = violations(&files);
     let paths: Vec<&str> = found.iter().map(|(p, _, _)| p.as_str()).collect();

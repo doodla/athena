@@ -3567,16 +3567,19 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   `athena-core` (`evidence_labels`, `labeled`) and `athena-cli` (`labeled`). Not run: `athena score-jev
   --derive` on this repository's own records, which the job's snapshot does not hold.
 
-## D138 · `gh.rs` and `run.rs` are split by concern in single-purpose move jobs, with no behavior change (proposed)
+## D138 · `gh.rs` and `run.rs` are split by concern in single-purpose move jobs, with no behavior change
 
-- **Status:** proposed. Not accepted; no move job is queued. The design is
+- **Status:** accepted, decided by the brain under Sri's delegation (BRIEF.md addenda of 2026-10-23 to
+  2026-10-26). The module names and their order are approved; R0 (the optional ordering test) is approved; all
+  the jobs are queued now, each with its dependencies on earlier ones; and the `WRAPPER` constant in
+  `tests/external_calls_guard.rs` may change to the directory prefix `crates/athena-core/src/gh/`. The design is
   [`docs/design/structure-pass.md`](design/structure-pass.md). It follows D132's structural-pass rule and is part
   of the design review the owner asked for in job 20261017-205558-dn2e.
 - **Case:** `crates/athena-core/src/gh.rs` (5,478 lines, about 2,620 of production) mixes the host API, landing,
   the early pull request and CI wait, and records-branch writes; `crates/athena-core/src/run.rs` (3,164 lines)
   holds `produce_and_verify` at about 745 lines. Both changed in about 10 of the last week's landings (the
   request's count), and critics repeatedly found callers a change had missed.
-- **Decision (proposed):** `gh.rs` becomes `gh/` with `transport`, `host`, `remote`, `pages`, `records`, `early`
+- **Decision:** `gh.rs` becomes `gh/` with `transport`, `host`, `remote`, `pages`, `records`, `early`
   and `landing`; `run.rs` becomes `run/` with `planning`, `pin`, `send_back`, `producer`, `candidate`, `checks`,
   `verification` and `close`, and `produce_and_verify` becomes a driver over ten named stages. Each `mod.rs`
   re-exports every public and `pub(crate)` item at its old path. The work is 8 jobs for `gh` (G1-G8) and up to 10
