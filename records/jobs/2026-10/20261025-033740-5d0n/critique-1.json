@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261025-033740-5d0n",
+  "round": 1,
+  "at": "2026-10-26T19:07:58.366929171Z",
+  "invocation_seq": 3,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "Jobs that are running, blocked or interrupted count as planned and not landed, which lowers the share and could flag a breach that is not real.",
+      "evidence": "The predicate is 'plans non-empty and (job record present, or last plan state is stopped)'. A dispatched job that is still running has a job record and no Landed outcome (store.rs:112 JobRecords::state), so it counts in the denominator as a failure. Fix: Count only closed jobs (JobState::Closed(_)) plus jobs stopped in planning, or show the in-flight jobs separately. Add a fixture case where a running planned job is left out of the share.",
+      "location": "Decision 1 (planned-job predicate)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Both tests check the helpers, not the wiring the criteria name. The display test calls keep_rule_lines directly and the JSON test serializes KeepRule alone, so both would still pass if status() never called the helper or StatusView never held the field.",
+      "evidence": "Criterion 4 asks for 'The StatusView serialization (what athena status --json prints)'. Decision 4 tests KeepRule only. display.rs status() at line 798 is where the wiring would go. Fix: Add one assertion that covers the wiring. Options: serialize a StatusView that includes keep_rule; assert that display::status() output contains the breach line, reusing any existing StatusView fixture in display.rs tests; or assert in status.rs that status() fills the field. If none is cheap, say in the plan that the wiring is checked by review.",
+      "location": "Demonstrations for criteria 3 and 4",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The existing job() fixture creates no critiques and always attaches a job record (with dispatched_at set). The first-round rate and a stopped-in-planning job with no dispatch therefore need fixture code the plan does not describe.",
+      "evidence": "status.rs:1277-1332: job() pushes plans, invocations, a Job stub with dispatched_at, and an outcome, but no critiques. plan_state (status.rs:56) returns None when a job has no critiques. Fix: Name a critique helper (verdict, round, mismatch) and a way to build a job stopped in planning, both with and without a job record, so the criterion 1 and 5 assertions on the first-round rate and the denominator are real.",
+      "location": "Steps 5 and 1 (fixtures)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Section 9 measures dispatched change jobs. The plan counts every planned request job and does not say whether that matches §9.",
+      "evidence": "job-planning.md line 232: 'the landed share of dispatched change jobs'. Fix: State in the constant or function docs that every planned job is a change job, or filter by kind if that is not so.",
+      "location": "Decision 1 / §9 'dispatched change jobs'",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan matches the request and the accepted reading, and it is built on code that exists. I checked the snapshot: plan_state, FirstRoundCounts, the first-round loop in status() at status.rs:736-753, JobRecords::spent_usd (store.rs:165), JobState::Closed(OutcomeState::Landed), the planning_cost_tests helpers job(), records() and close(), and display.rs planning_cost_lines and status(). Its definitions follow job-planning.md §9 (lines 232-243): the denominator includes jobs stopped in planning, cost is all of a job's cost divided by landed jobs, and the thresholds are 30, 100, 64%, 72% and $2.50. The verdict table is correct, including the `<=` at 64% when 100 or more jobs are planned. The plan also handles the conflict between the job-planning.md deliverable and the out-of-scope list sensibly by leaving the file unedited. The remaining issues are small. Jobs still in flight count as not landed. The tests check the display helper and the KeepRule serialization but not that status() and StatusView include them. The job() fixture helper creates no critiques and always attaches a job record, so the first-round and stopped-in-planning cases need fixture work the plan does not name. None of these blocks the plan."
+}
