@@ -456,6 +456,14 @@ pub struct Reading {
     /// did not. An older reading has none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub urgent_reason: Option<String>,
+    /// Why the reader judged the job hard (it changes landing, the history check or records, say); None when
+    /// it did not. A hard job gets the producer setting `[models] hard_producer_*` names. An older reading has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hard_reason: Option<String>,
+    /// The producer effort this reading dispatches with, set when a hard job's escalation changed the
+    /// producer setting. None means `[models] producer_effort`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub producer_effort: Option<String>,
 }
 
 impl Reading {
@@ -630,6 +638,9 @@ pub struct Invocation {
     pub driver: DriverInfo,
     pub athena: Build,
     pub model: String,
+    /// The effort level the agent ran at (`--effort`). An older record has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
     pub context: InvocationContext,
     pub caps: InvocationCaps,
     pub started_at: Timestamp,
@@ -2625,7 +2636,27 @@ mod tests {
             },
             departures: None,
             urgent_reason: None,
+            hard_reason: None,
+            producer_effort: None,
         }
+    }
+
+    #[test]
+    fn records_without_effort_or_hard_fields_still_load() {
+        let record = AnyRecord::Reading(Box::new(sample_reading()));
+        let text = record.to_json();
+        assert!(!text.contains("hard_reason") && !text.contains("producer_effort"));
+        let back = AnyRecord::parse("x", text.as_bytes()).unwrap();
+        assert_eq!(back, record);
+        let mut hard = sample_reading();
+        hard.hard_reason = Some("changes landing".into());
+        hard.producer_effort = Some("high".into());
+        let text = AnyRecord::Reading(Box::new(hard.clone())).to_json();
+        assert!(text.contains("\"hard_reason\": \"changes landing\""));
+        assert_eq!(
+            AnyRecord::parse("x", text.as_bytes()).unwrap(),
+            AnyRecord::Reading(Box::new(hard))
+        );
     }
 
     #[test]

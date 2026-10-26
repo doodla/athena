@@ -9,6 +9,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The model and the effort level of every agent invocation are explicit. `athena.toml` `[models]` gains
+  `reader_effort`, `producer_effort` and `verifier_effort` (one of `low`, `medium`, `high`, `xhigh`, `max`;
+  anything else is refused when the file is read; a file without them reads as `medium`), and the hard-job
+  producer setting `hard_producer_model` and `hard_producer_effort`. The claude driver passes `--effort` next to
+  `--model`, and every invocation record carries `effort` beside `model` (optional, so older records still
+  load). The reader's output gains `hard_reason`: a one-sentence reason, or null. A reading that judges its job
+  hard (it changes landing, the history check or records, say) gets the hard producer setting; the reading
+  records `hard_reason` and the escalated `producer_effort`, and an ordinary reading records neither.
+  `athena status` shows, for each producer model and effort, the first-pass verification rate, the landed share
+  and the cost per landed job (`n/a` when nothing landed), as `producer_settings` in `--json`. This absorbs
+  request 20261013-042934-a1j8 (record each invocation's effort level). The planner and critic roles are
+  not configured, because job planning is off. See D136.
 - The producer brief now carries a "Recurring failure classes" section, built from the recorded introspections
   and the class registry. It lists the classes seen in at least 3 distinct jobs, each with its title, its case
   count and the prevention the newest case proposed, quoted as data and not instructions. It lists at most 5,

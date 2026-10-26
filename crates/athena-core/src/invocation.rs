@@ -28,6 +28,9 @@ pub struct PartialUsage {
     pub seq: u32,
     pub role: String,
     pub model: String,
+    /// The effort level. Empty in a file written before effort was recorded.
+    #[serde(default)]
+    pub effort: String,
     pub cap_usd: f64,
     pub timeout_s: u64,
     pub started_at: Option<jiff::Timestamp>,
@@ -196,6 +199,7 @@ impl Athena {
             driver: self.driver.info(),
             athena: self.build.clone(),
             model: spec.model.clone(),
+            effort: Some(spec.effort.clone()),
             context: InvocationContext {
                 components: facts.composed.components.clone(),
                 prompt_sha256: facts.composed.sha256(),
@@ -236,6 +240,7 @@ impl Athena {
                 seq: spec.seq,
                 role: spec.role.as_str().into(),
                 model: spec.model.clone(),
+                effort: spec.effort.clone(),
                 cap_usd: spec.max_budget_usd,
                 timeout_s: spec.timeout.as_secs(),
                 started_at: Some(crate::now()),
@@ -281,6 +286,7 @@ pub fn interrupted_record(
         driver: athena.driver.info(),
         athena: athena.build.clone(),
         model: partial.model.clone(),
+        effort: Some(partial.effort.clone()).filter(|e| !e.is_empty()),
         context: InvocationContext {
             components: Vec::new(),
             prompt_sha256: String::new(),
@@ -374,6 +380,7 @@ mod tests {
             seq: 1,
             role: Role::Producer,
             model: MODEL.into(),
+            effort: "high".into(),
             system_prompt: String::new(),
             user_prompt: String::new(),
             tools: vec![],
@@ -404,6 +411,13 @@ mod tests {
         athena
             .invocation_record(&facts, &output, &redactor)
             .unwrap()
+    }
+
+    #[test]
+    fn the_record_names_the_model_and_effort_the_invocation_ran_with() {
+        let record = record_from(AGREEING);
+        assert_eq!(record.model, MODEL);
+        assert_eq!(record.effort.as_deref(), Some("high"));
     }
 
     fn reconciliation(violations: &[Violation]) -> Vec<&Violation> {

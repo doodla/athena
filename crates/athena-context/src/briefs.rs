@@ -1418,6 +1418,8 @@ mod tests {
             },
             departures: None,
             urgent_reason: None,
+            hard_reason: None,
+            producer_effort: None,
         }
     }
 

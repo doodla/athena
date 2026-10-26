@@ -1621,7 +1621,7 @@ impl Athena {
         // The criteria the last report left to Athena's checks; the verifier judges them from the checks.
         let mut left_criteria: Vec<String>;
         let report = loop {
-            let spec = self.agent_spec(
+            let mut spec = self.agent_spec(
                 jc,
                 &id,
                 seq,
@@ -1637,6 +1637,10 @@ impl Athena {
                 jc.config.budget.producer_timeout_s,
                 producer_schema(),
             )?;
+            // A hard job's reading carries the escalated effort; an ordinary one keeps the configured one.
+            if let Some(effort) = &ctx.reading.producer_effort {
+                spec.effort = effort.clone();
+            }
             seq += 1;
             let facts = InvocationFacts {
                 job: &id,

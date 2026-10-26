@@ -3481,3 +3481,39 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   this job. Read: job-planning.md section 9, D110, `athena.toml`. The off path is covered by the test
   `with_planning_absent_or_off_the_invocations_are_the_producer_verifier_pair_only` in `athena-cli`, and the
   config by `the_repository_config_turns_job_planning_off_with_the_designs_caps` in `athena-data`.
+
+## D136 · Model and effort are explicit per role; a hard job gets a stronger producer setting
+
+- **Case:** Every agent ran at the Claude Code default effort, and nothing recorded which effort an invocation
+  used. BRIEF.md's addendum of 2026-10-25 asks Athena to manage and upgrade the intelligence it uses and to make
+  effort explicit. The request to record each invocation's effort level (20261013-042934-a1j8) asked for the same
+  record and is absorbed here.
+- **Decision:** `[models]` in `athena.toml` names an effort for the reader, producer and verifier, from the closed
+  list `low`, `medium`, `high`, `xhigh`, `max` (the levels of Claude Code's `--effort`). A value outside the list
+  is refused when the file is read; a file that names none reads as `medium`. The claude driver passes
+  `--effort` beside `--model`, and each invocation record gains an optional `effort`. The reader's output gains
+  `hard_reason` (null, or a sentence): a job is hard when it changes landing, the history check, records or the
+  gate that judges other jobs. For a hard job `build_reading` replaces the producer with `hard_producer_model`
+  and `hard_producer_effort` and the reading records `hard_reason` and `producer_effort`; the run applies that
+  effort to the producer. A blank reason is no reason. `athena status` groups dispatched jobs by the model and
+  effort of their first producer invocation and shows the first-pass verification rate (verified at the first
+  verifier run), the landed share and the cost per landed job, with `n/a` where nothing landed. The shipped
+  setting is the same model at a higher effort (`medium` to `high`), because the verifier's model may not
+  produce, so no stronger model is in `producer_allowed`.
+- **Alternatives:**
+  - (a) Configure the planner and critic too. Dropped: job planning is off (D135), so no invocation would use
+    them. They run at the verifier's setting if planning is turned on again.
+  - (b) One global effort. It cannot separate a cheap reading from a verdict that must catch mistakes.
+  - (c) Let the reader choose any model and effort. Free choice is hard to bound in cost and unmeasured; a
+    reason plus one configured setting keeps the choice small and the measures meaningful.
+  - (d) Escalate by a path list in code. It misses hard jobs that do not touch a listed path, and it hides the
+    rule from the configuration.
+- **Tradeoff:** Whether a job is hard is the reader's judgment, and a wrong call costs more spend or misses a
+  hard job. The status measures show whether the hard setting pays for itself. A producer invocation recorded
+  before this change shows effort `unrecorded` and has a bucket of its own. The claude version pin is
+  unchanged; that this version accepts `--effort` was not checked here, because no agent was run.
+- **Reversal cost:** Low. Remove the keys from `[models]` (defaults apply) and the `--effort` argument; the
+  optional record fields stay readable.
+- **Provenance:** Read: `config.rs`, `records.rs`, `claude.rs`, `reading.rs`, `run.rs`, `status.rs`,
+  `outputs.rs`. Covered by tests in `athena-data` (`config`, `records`), `athena-agent` (`claude`),
+  `athena-core` (`invocation`, `status`) and `athena-cli` (`drain`, `display`).

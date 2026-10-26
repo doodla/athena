@@ -95,6 +95,8 @@ fn reading(times: &Times) -> Reading {
         },
         departures: None,
         urgent_reason: None,
+        hard_reason: None,
+        producer_effort: None,
     }
 }
 
@@ -134,6 +136,7 @@ fn invocation(seq: u32, role: Role, model: &str, start: &str, end: &str) -> Invo
             dirty: false,
         },
         model: model.into(),
+        effort: None,
         context: InvocationContext {
             components: vec![],
             prompt_sha256: "0".repeat(64),

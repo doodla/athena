@@ -55,6 +55,8 @@ pub struct AgentInvocation {
     pub seq: u32,
     pub role: Role,
     pub model: String,
+    /// The effort level (`--effort`), one of `athena_data::config::EFFORT_LEVELS`.
+    pub effort: String,
     pub system_prompt: String,
     pub user_prompt: String,
     /// The tools the agent has (`--tools`).

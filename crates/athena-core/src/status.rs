@@ -296,6 +296,90 @@ pub fn planning_cost(records: &Records) -> Option<PlanningCost> {
     })
 }
 
+/// The effort shown for a producer invocation recorded before effort was kept.
+pub const EFFORT_UNRECORDED: &str = "unrecorded";
+
+/// How dispatched jobs fared under one producer model and effort.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ProducerSettingStats {
+    pub model: String,
+    pub effort: String,
+    /// Dispatched jobs whose first producer invocation ran with this model and effort.
+    pub jobs: usize,
+    /// Jobs with a verification record, and how many of them passed at their first verifier run.
+    pub verified: usize,
+    pub first_pass: usize,
+    /// `first_pass / verified`; none when no job was verified.
+    pub first_pass_rate: Option<f64>,
+    pub landed: usize,
+    /// `landed / jobs`.
+    pub landed_share: f64,
+    /// All invocation cost of the jobs, in USD.
+    pub total_cost_usd: f64,
+    /// `total_cost_usd / landed`; none when nothing landed, never a division by zero.
+    pub cost_per_landed_usd: Option<f64>,
+}
+
+/// First-pass verification, landed share and cost per landed job for each producer model and effort, measured
+/// from the records of dispatched request jobs. A job counts under the model and effort of its first producer
+/// invocation; a job that never ran a producer is left out. Sorted by model, then effort.
+pub fn producer_settings(records: &Records) -> Vec<ProducerSettingStats> {
+    use athena_data::records::Verdict;
+    let mut buckets: BTreeMap<(String, String), ProducerSettingStats> = BTreeMap::new();
+    for job in records.request_jobs() {
+        if job.job.is_none() {
+            continue;
+        }
+        let Some(producer) = job.invocations.iter().find(|i| i.role == Role::Producer) else {
+            continue;
+        };
+        let effort = producer
+            .effort
+            .clone()
+            .unwrap_or_else(|| EFFORT_UNRECORDED.to_string());
+        let key = (producer.model.clone(), effort);
+        let b = buckets
+            .entry(key.clone())
+            .or_insert_with(|| ProducerSettingStats {
+                model: key.0.clone(),
+                effort: key.1.clone(),
+                jobs: 0,
+                verified: 0,
+                first_pass: 0,
+                first_pass_rate: None,
+                landed: 0,
+                landed_share: 0.0,
+                total_cost_usd: 0.0,
+                cost_per_landed_usd: None,
+            });
+        b.jobs += 1;
+        b.total_cost_usd += job.spent_usd();
+        if let Some(v) = &job.verification {
+            b.verified += 1;
+            let verifier_runs = job
+                .invocations
+                .iter()
+                .filter(|i| i.role == Role::Verifier)
+                .count();
+            if v.final_verdict == Verdict::Pass && verifier_runs <= 1 {
+                b.first_pass += 1;
+            }
+        }
+        if matches!(job.state(), JobState::Closed(OutcomeState::Landed)) {
+            b.landed += 1;
+        }
+    }
+    buckets
+        .into_values()
+        .map(|mut b| {
+            b.first_pass_rate = (b.verified > 0).then(|| b.first_pass as f64 / b.verified as f64);
+            b.landed_share = b.landed as f64 / b.jobs as f64;
+            b.cost_per_landed_usd = (b.landed > 0).then(|| b.total_cost_usd / b.landed as f64);
+            b
+        })
+        .collect()
+}
+
 /// One class's forecast headline.
 #[derive(Debug, Clone, Serialize)]
 pub struct ClassHeadline {
@@ -347,6 +431,10 @@ pub struct StatusView {
     /// no job was planned and dispatched.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keep_rule: Option<KeepRule>,
+    /// First-pass verification rate, landed share and cost per landed job by producer model and effort; empty
+    /// when no dispatched job ran a producer.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub producer_settings: Vec<ProducerSettingStats>,
     pub interventions_by_category: BTreeMap<String, usize>,
     pub interventions_by_class: BTreeMap<String, usize>,
     /// Mistakes per class and per cause, with the prevention proposed. Apart from `interventions_by_category`,
@@ -1027,6 +1115,7 @@ impl Athena {
             planning: first_round,
             planning_cost: planning_cost(&records),
             keep_rule: keep_rule(&records),
+            producer_settings: producer_settings(&records),
             interventions_by_category: by_category,
             interventions_by_class: by_class,
             mistakes: mistake_report(&records),
@@ -1328,6 +1417,7 @@ mod planning_cost_tests {
                 dirty: false,
             },
             model: "m".into(),
+            effort: None,
             context: InvocationContext {
                 components: vec![],
                 prompt_sha256: "0".repeat(64),
@@ -1763,6 +1853,109 @@ mod planning_cost_tests {
         assert_eq!(verdict(64, 1.0), KeepVerdict::TurnOff);
         assert_eq!(verdict(65, 1.0), KeepVerdict::Inconclusive);
         assert_eq!(verdict(10, 1.0), KeepVerdict::TurnOff);
+    }
+
+    /// A dispatched job with no planning whose producer ran with `model` and `effort`, costing `usd`, with one
+    /// verifier run that gave `verdict`.
+    fn producer_job(
+        text: &str,
+        model: &str,
+        effort: Option<&str>,
+        state: OutcomeState,
+        verdict: athena_data::records::Verdict,
+        usd: f64,
+    ) -> JobRecords {
+        let mut j = job(text, "r", "2026-10-26T10:00:00Z", 0, None, state, usd);
+        let job_id = id(text);
+        j.invocations.clear();
+        let mut producer = invocation(&job_id, 1, Role::Producer, usd);
+        producer.model = model.into();
+        producer.effort = effort.map(str::to_string);
+        j.invocations.push(producer);
+        j.invocations
+            .push(invocation(&job_id, 2, Role::Verifier, 0.0));
+        j.verification = Some(athena_data::records::Verification {
+            job: job_id,
+            candidate_commit: "0".repeat(40),
+            verified_fingerprint: String::new(),
+            tool_config_from_base: vec![],
+            checks: vec![],
+            check_cleanup: vec![],
+            verifier_invocation: Some(2),
+            criteria: vec![],
+            findings: vec![],
+            request_reading_mismatch: None,
+            agent_verdict: Some(verdict),
+            final_verdict: verdict,
+            reasons: vec![],
+            inputs: vec![],
+            summary: None,
+        });
+        j
+    }
+
+    #[test]
+    fn producer_settings_split_first_pass_landed_share_and_cost_by_model_and_effort() {
+        use athena_data::records::Verdict::{Fail, Pass};
+        let landed = OutcomeState::Landed;
+        let failed = OutcomeState::Failed;
+        let stats = producer_settings(&records(vec![
+            producer_job(
+                "20261026-100000-aaaa",
+                "s",
+                Some("medium"),
+                landed,
+                Pass,
+                1.0,
+            ),
+            producer_job(
+                "20261026-100001-aaab",
+                "s",
+                Some("medium"),
+                failed,
+                Fail,
+                3.0,
+            ),
+            producer_job("20261026-100002-aaac", "s", Some("high"), failed, Fail, 2.0),
+            producer_job("20261026-100003-aaad", "s", None, landed, Pass, 0.5),
+        ]));
+        let get = |effort: &str| {
+            stats
+                .iter()
+                .find(|s| s.model == "s" && s.effort == effort)
+                .unwrap_or_else(|| panic!("no bucket for {effort}: {stats:?}"))
+        };
+        assert_eq!(stats.len(), 3);
+        let medium = get("medium");
+        assert_eq!((medium.jobs, medium.verified, medium.first_pass), (2, 2, 1));
+        assert_eq!(medium.first_pass_rate, Some(0.5));
+        assert_eq!(medium.landed, 1);
+        assert!(close(medium.landed_share, 0.5));
+        assert!(close(medium.cost_per_landed_usd.unwrap(), 4.0));
+        // A bucket with no landed job has a zero share and no cost per landed job, not a division by zero.
+        let high = get("high");
+        assert_eq!((high.jobs, high.landed), (1, 0));
+        assert_eq!(high.landed_share, 0.0);
+        assert_eq!(high.cost_per_landed_usd, None);
+        assert_eq!(high.first_pass_rate, Some(0.0));
+        // A producer invocation recorded before effort was kept gets its own bucket.
+        assert_eq!(get(EFFORT_UNRECORDED).landed, 1);
+    }
+
+    #[test]
+    fn producer_settings_are_empty_without_a_dispatched_producer() {
+        assert!(producer_settings(&Records::default()).is_empty());
+        let mut queued = job(
+            "20261026-100000-aaaa",
+            "r",
+            "2026-10-26T10:00:00Z",
+            0,
+            None,
+            OutcomeState::Landed,
+            1.0,
+        );
+        queued.invocations.clear();
+        assert!(producer_settings(&records(vec![queued])).is_empty());
     }
 
     #[test]

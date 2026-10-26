@@ -136,6 +136,8 @@ impl ClaudeCodeDriver {
         args.push(spec.json_schema.to_string().into());
         args.push("--model".into());
         args.push(spec.model.clone().into());
+        args.push("--effort".into());
+        args.push(spec.effort.clone().into());
         args
     }
 
@@ -446,12 +448,42 @@ mod tests {
     use athena_data::records::Role;
     use std::collections::BTreeMap;
 
+    #[test]
+    fn the_model_and_effort_of_an_invocation_reach_the_command_line() {
+        let mut invocation = spec();
+        let args = |s: &AgentInvocation| -> Vec<String> {
+            ClaudeCodeDriver::command_line(s, Path::new("p.md"), Path::new("s.json"))
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        let value_after = |args: &[String], flag: &str| -> String {
+            let at = args
+                .iter()
+                .position(|a| a == flag)
+                .unwrap_or_else(|| panic!("no {flag}: {args:?}"));
+            args[at + 1].clone()
+        };
+        for (model, effort) in [
+            ("claude-sonnet-5-5", "high"),
+            ("claude-haiku-5-5", "low"),
+            ("claude-opus-5-5", "xhigh"),
+        ] {
+            invocation.model = model.into();
+            invocation.effort = effort.into();
+            let args = args(&invocation);
+            assert_eq!(value_after(&args, "--model"), model);
+            assert_eq!(value_after(&args, "--effort"), effort);
+        }
+    }
+
     fn spec() -> AgentInvocation {
         AgentInvocation {
             job: "20261010-153012-k7q2".into(),
             seq: 3,
             role: Role::Producer,
             model: "claude-sonnet-5-5".into(),
+            effort: "high".into(),
             system_prompt: "contract".into(),
             user_prompt: "brief".into(),
             tools: vec![
@@ -579,6 +611,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"num_turns":2,"durat
             seq: 1,
             role: Role::Reader,
             model: "claude-haiku-5-5".into(),
+            effort: "medium".into(),
             system_prompt: "contract".into(),
             user_prompt: "brief".into(),
             tools: vec!["Read".into()],

@@ -18,7 +18,7 @@ use athena_core::commits::{Committer, message};
 use athena_core::plan::{PlanEntry, Priority};
 use athena_core::run::GoResult;
 use athena_core::steward::{ProposedChange, RequestQueue};
-use athena_core::store::{JobState, Records};
+use athena_core::store::{JobRecords, JobState, Records};
 use athena_core::{Athena, Quiet};
 use athena_data::RecordId;
 use athena_data::records::{
@@ -3174,6 +3174,113 @@ fn a_scripted_reading_with_an_urgent_reason_reaches_the_recorded_reading_and_nul
         };
         assert_eq!(job.priority(), expected);
     }
+}
+
+/// Asks for a reading with `hard_reason` as the scripted reader gives it, runs the job, and returns the
+/// recorded reading and the job's records.
+fn read_and_run_with_hard_reason(
+    hard_reason: serde_json::Value,
+) -> (athena_data::records::Reading, JobRecords) {
+    let fx = Fixture::new();
+    let mut scenario = Scenario::default();
+    scenario.reading["hard_reason"] = hard_reason;
+    let athena = fx.athena(scenario.script());
+    let proposal = athena.ask("Add a greeting to the README.", &Quiet).unwrap();
+    let reading = proposal.reading.clone().expect("the reading was recorded");
+    athena
+        .go(proposal.job.as_str(), AcceptedBy::User, &Quiet)
+        .unwrap();
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    (reading, records.jobs[proposal.job.as_str()].clone())
+}
+
+fn effort_of(job: &JobRecords, role: athena_data::records::Role) -> Option<String> {
+    job.invocations
+        .iter()
+        .find(|i| i.role == role)
+        .unwrap_or_else(|| panic!("no {role:?} invocation"))
+        .effort
+        .clone()
+}
+
+#[test]
+fn a_hard_reading_gets_the_stronger_producer_setting_with_its_reason_and_an_ordinary_one_keeps_the_default()
+ {
+    let config = athena_data::Config::parse(&common::test_config()).unwrap();
+    let (hard, hard_job) = read_and_run_with_hard_reason(json!(
+        "changes how a job lands and what the history check accepts"
+    ));
+    // The scripted reader asked for the cheaper allowed model; the hard setting replaces it and its effort.
+    assert_eq!(
+        Some(&hard.producer_model),
+        config.models.hard_producer_model.as_ref()
+    );
+    assert_eq!(
+        hard.producer_effort, config.models.hard_producer_effort,
+        "the reading carries the escalated effort"
+    );
+    assert_eq!(
+        hard.hard_reason.as_deref(),
+        Some("changes how a job lands and what the history check accepts")
+    );
+    // The escalated model and effort reach the producer's invocation record; the other roles keep theirs.
+    let producer = hard_job
+        .invocations
+        .iter()
+        .find(|i| i.role == athena_data::records::Role::Producer)
+        .unwrap();
+    assert_eq!(
+        Some(&producer.model),
+        config.models.hard_producer_model.as_ref()
+    );
+    assert_eq!(producer.effort, config.models.hard_producer_effort);
+    assert_ne!(
+        producer.effort.as_deref(),
+        Some(config.models.producer_effort.as_str())
+    );
+
+    for ordinary in [json!(null), json!("   ")] {
+        let (reading, job) = read_and_run_with_hard_reason(ordinary);
+        assert_eq!(reading.producer_model, "claude-haiku-5-5");
+        assert_eq!((reading.hard_reason, reading.producer_effort), (None, None));
+        let producer = job
+            .invocations
+            .iter()
+            .find(|i| i.role == athena_data::records::Role::Producer)
+            .unwrap();
+        assert_eq!(producer.model, "claude-haiku-5-5");
+        assert_eq!(
+            producer.effort.as_deref(),
+            Some(config.models.producer_effort.as_str())
+        );
+    }
+}
+
+#[test]
+fn every_role_runs_at_its_configured_model_and_effort_and_the_record_names_both() {
+    let config = athena_data::Config::parse(&common::test_config()).unwrap();
+    let (_, job) = read_and_run_with_hard_reason(json!(null));
+    use athena_data::records::Role;
+    for (role, model, effort) in [
+        (
+            Role::Reader,
+            &config.models.reader,
+            &config.models.reader_effort,
+        ),
+        (
+            Role::Verifier,
+            &config.models.verifier,
+            &config.models.verifier_effort,
+        ),
+    ] {
+        let record = job.invocations.iter().find(|i| i.role == role).unwrap();
+        assert_eq!(&record.model, model, "{role:?}");
+        assert_eq!(record.effort.as_deref(), Some(effort.as_str()), "{role:?}");
+    }
+    assert_eq!(
+        effort_of(&job, Role::Producer).as_deref(),
+        Some(config.models.producer_effort.as_str())
+    );
 }
 
 #[test]

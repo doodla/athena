@@ -256,6 +256,7 @@ mod tests {
                 dirty: false,
             },
             model: "claude-sonnet-5-5".into(),
+            effort: None,
             context: InvocationContext {
                 components: vec![],
                 prompt_sha256: "0".repeat(64),

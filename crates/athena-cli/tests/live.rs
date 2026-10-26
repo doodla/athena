@@ -86,6 +86,7 @@ fn spec(
         seq: 1,
         role: Role::Reader,
         model: "claude-haiku-5-5".into(),
+        effort: "medium".into(),
         system_prompt: system.into(),
         user_prompt: prompt.into(),
         tools: tools.iter().map(|t| t.to_string()).collect(),

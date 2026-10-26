@@ -4,7 +4,7 @@
 use athena_core::reading::Proposal;
 use athena_core::run::Finished;
 use athena_core::status::{
-    JobTrace, KeepRule, KeepVerdict, PlanningCost, PlanningGroup, StatusView,
+    JobTrace, KeepRule, KeepVerdict, PlanningCost, PlanningGroup, ProducerSettingStats, StatusView,
 };
 use athena_data::records::{
     CriterionKind, DeliverableAction, Forecast, OutcomeState, Quantiles, Reading, Score,
@@ -127,6 +127,33 @@ fn planning_cost_lines(p: &PlanningCost) -> String {
         None => {
             let _ = writeln!(out, "            after:  no planning has resumed yet");
         }
+    }
+    out
+}
+
+/// First-pass verification rate, landed share and cost per landed job for each producer model and effort. A
+/// figure with nothing to divide by reads "n/a", never a rate or a cost.
+fn producer_settings_lines(settings: &[ProducerSettingStats]) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "producers   by model and effort, measured from records (first-pass verification, landed share, cost per landed job)"
+    );
+    for s in settings {
+        let first_pass = s.first_pass_rate.map_or("n/a".to_string(), |r| {
+            format!("{} ({} of {})", pct(r), s.first_pass, s.verified)
+        });
+        let cost = s.cost_per_landed_usd.map_or("n/a".to_string(), usd);
+        let _ = writeln!(
+            out,
+            "            {} · {}: {} jobs · first-pass {first_pass} · landed {} ({} of {}) · cost per landed job {cost}",
+            s.model,
+            s.effort,
+            s.jobs,
+            pct(s.landed_share),
+            s.landed,
+            s.jobs
+        );
     }
     out
 }
@@ -917,6 +944,9 @@ pub fn status(v: &StatusView) -> String {
     if let Some(k) = &v.keep_rule {
         out.push_str(&keep_rule_lines(k));
     }
+    if !v.producer_settings.is_empty() {
+        out.push_str(&producer_settings_lines(&v.producer_settings));
+    }
     for (i, j) in v.open.iter().enumerate() {
         let label = if i == 0 { "open" } else { "" };
         let _ = writeln!(
@@ -1567,6 +1597,40 @@ mod tests {
             "{none}"
         );
         assert!(!none.contains("since the first"), "{none}");
+    }
+
+    #[test]
+    fn producer_settings_lines_list_the_three_measures_per_model_and_effort() {
+        let stats = |effort: &str, landed: usize, cost: Option<f64>| ProducerSettingStats {
+            model: "claude-sonnet-5-5".into(),
+            effort: effort.into(),
+            jobs: 4,
+            verified: 4,
+            first_pass: 3,
+            first_pass_rate: Some(0.75),
+            landed,
+            landed_share: landed as f64 / 4.0,
+            total_cost_usd: 6.0,
+            cost_per_landed_usd: cost,
+        };
+        let text =
+            producer_settings_lines(&[stats("medium", 2, Some(3.0)), stats("high", 0, None)]);
+        assert!(
+            text.contains("claude-sonnet-5-5 · medium: 4 jobs · first-pass 75% (3 of 4) · landed 50% (2 of 4) · cost per landed job $3.00"),
+            "{text}"
+        );
+        // Nothing landed: no cost per landed job, and a landed share of zero rather than a success.
+        let high = text.lines().find(|l| l.contains("· high:")).expect(&text);
+        assert!(
+            high.contains("landed 0% (0 of 4) · cost per landed job n/a"),
+            "{text}"
+        );
+        let mut unverified = stats("low", 0, None);
+        unverified.verified = 0;
+        unverified.first_pass = 0;
+        unverified.first_pass_rate = None;
+        let text = producer_settings_lines(&[unverified]);
+        assert!(text.contains("first-pass n/a"), "{text}");
     }
 
     fn keep_rule(landed: usize, planned: usize, verdict: KeepVerdict) -> KeepRule {

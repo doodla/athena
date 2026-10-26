@@ -211,6 +211,7 @@ pub fn deterministic_turn(spec: &AgentInvocation) -> FakeTurn {
                 .map(|w| format!("A fake reader: the request mentions \"{w}\", so it makes Athena faster or cuts wasted time."));
             FakeTurn::output(json!({
                 "urgent_reason": urgent_reason,
+                "hard_reason": null,
                 "title": format!("Record the request in {FAKE_DELIVERABLE}"),
                 "summary": format!("A fake reading made without a model call: write the request \"{short}\" to {FAKE_DELIVERABLE}."),
                 "class_of_work": first_enum(&spec.json_schema, "class_of_work", "other"),
@@ -338,6 +339,7 @@ mod tests {
             seq: 1,
             role,
             model: "claude-haiku-5-5".into(),
+            effort: "medium".into(),
             system_prompt: String::new(),
             user_prompt: prompt.into(),
             tools: vec![],

@@ -156,8 +156,46 @@ pub struct Models {
     pub producer_default: String,
     pub producer_allowed: Vec<String>,
     pub verifier: String,
+    /// The effort level each role runs at (`--effort`), one of [`EFFORT_LEVELS`].
+    #[serde(default = "default_effort")]
+    pub reader_effort: String,
+    #[serde(default = "default_effort")]
+    pub producer_effort: String,
+    #[serde(default = "default_effort")]
+    pub verifier_effort: String,
+    /// The producer model a reading that judges its job hard gets. Absent means the default model stays.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hard_producer_model: Option<String>,
+    /// The producer effort for a hard job. Absent means the producer effort stays.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hard_producer_effort: Option<String>,
     #[serde(default)]
     pub names: BTreeMap<String, String>,
+}
+
+/// The effort levels Claude Code's `--effort` flag accepts, weakest first.
+pub const EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
+fn default_effort() -> String {
+    "medium".into()
+}
+
+impl Models {
+    /// The producer model and effort for a job: the configured default, or the hard setting when the
+    /// reading judged the job hard.
+    pub fn producer_setting(&self, model: &str, hard: bool) -> (String, String) {
+        if !hard {
+            return (model.to_string(), self.producer_effort.clone());
+        }
+        (
+            self.hard_producer_model
+                .clone()
+                .unwrap_or_else(|| model.to_string()),
+            self.hard_producer_effort
+                .clone()
+                .unwrap_or_else(|| self.producer_effort.clone()),
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -380,6 +418,10 @@ pub enum ConfigError {
     Parallel(u32),
     #[error("[job_plan] {0} must be positive")]
     JobPlan(&'static str),
+    #[error("[models] {0} = {1:?} is not an effort level (one of low, medium, high, xhigh, max)")]
+    Effort(&'static str, String),
+    #[error("[models] hard_producer_model {0} is not in producer_allowed")]
+    HardProducerNotAllowed(String),
 }
 
 impl Config {
@@ -422,6 +464,24 @@ impl Config {
             return Err(ConfigError::DefaultProducerNotAllowed(
                 self.models.producer_default.clone(),
             ));
+        }
+        let m = &self.models;
+        for (name, value) in [
+            ("reader_effort", Some(&m.reader_effort)),
+            ("producer_effort", Some(&m.producer_effort)),
+            ("verifier_effort", Some(&m.verifier_effort)),
+            ("hard_producer_effort", m.hard_producer_effort.as_ref()),
+        ] {
+            if let Some(v) = value
+                && !EFFORT_LEVELS.contains(&v.as_str())
+            {
+                return Err(ConfigError::Effort(name, v.clone()));
+            }
+        }
+        if let Some(hard) = &m.hard_producer_model
+            && !m.producer_allowed.contains(hard)
+        {
+            return Err(ConfigError::HardProducerNotAllowed(hard.clone()));
         }
         if !self.classes.list.iter().any(|c| c == "other") {
             return Err(ConfigError::NoOtherClass);
@@ -513,6 +573,17 @@ impl Config {
         self.capabilities.get(id)
     }
 
+    /// The effort a role runs at by default. Roles with no setting of their own (the steward, the auditor)
+    /// run as the verifier does.
+    pub fn effort_for(&self, role: crate::records::Role) -> &str {
+        use crate::records::Role;
+        match role {
+            Role::Reader => &self.models.reader_effort,
+            Role::Producer => &self.models.producer_effort,
+            _ => &self.models.verifier_effort,
+        }
+    }
+
     pub fn is_class(&self, class: &str) -> bool {
         self.classes.list.iter().any(|c| c == class)
     }
@@ -552,6 +623,67 @@ pub(crate) mod tests {
         let stripped = unplanned(REPO_CONFIG);
         assert!(!stripped.contains("[job_plan]"));
         assert!(Config::parse(&stripped).unwrap().job_plan.is_none());
+    }
+
+    #[test]
+    fn the_repository_config_names_an_effort_per_role_and_a_hard_producer_setting() {
+        let m = Config::parse(REPO_CONFIG).unwrap().models;
+        assert!(EFFORT_LEVELS.contains(&m.reader_effort.as_str()));
+        assert!(EFFORT_LEVELS.contains(&m.producer_effort.as_str()));
+        assert!(EFFORT_LEVELS.contains(&m.verifier_effort.as_str()));
+        assert!(m.hard_producer_model.is_some());
+        assert!(m.hard_producer_effort.is_some());
+    }
+
+    #[test]
+    fn an_unknown_effort_value_is_rejected_and_a_known_one_is_accepted() {
+        for key in [
+            "reader_effort",
+            "producer_effort",
+            "verifier_effort",
+            "hard_producer_effort",
+        ] {
+            let line = format!("{key} = ");
+            let start = REPO_CONFIG.find(&line).expect("athena.toml sets the key");
+            let end = start + REPO_CONFIG[start..].find('\n').unwrap();
+            let bad = format!(
+                "{}{key} = \"turbo\"{}",
+                &REPO_CONFIG[..start],
+                &REPO_CONFIG[end..]
+            );
+            match Config::parse(&bad) {
+                Err(ConfigError::Effort(name, value)) => {
+                    assert_eq!((name, value.as_str()), (key, "turbo"));
+                }
+                other => panic!("{key}: expected an effort error, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_config_without_effort_keys_still_parses_with_the_default_effort() {
+        let stripped: String = REPO_CONFIG
+            .split_inclusive('\n')
+            .filter(|l| !l.contains("_effort") && !l.starts_with("hard_producer_model"))
+            .collect();
+        let m = Config::parse(&stripped).unwrap().models;
+        assert_eq!(m.producer_effort, "medium");
+        assert_eq!(m.hard_producer_model, None);
+    }
+
+    #[test]
+    fn producer_setting_escalates_only_a_hard_job() {
+        let m = Config::parse(REPO_CONFIG).unwrap().models;
+        let default = m.producer_default.clone();
+        let (model, effort) = m.producer_setting(&default, false);
+        assert_eq!(
+            (model, effort),
+            (default.clone(), m.producer_effort.clone())
+        );
+        let (model, effort) = m.producer_setting(&default, true);
+        assert_eq!(Some(&model), m.hard_producer_model.as_ref());
+        assert_eq!(Some(&effort), m.hard_producer_effort.as_ref());
+        assert_ne!(effort, m.producer_effort);
     }
 
     #[test]
