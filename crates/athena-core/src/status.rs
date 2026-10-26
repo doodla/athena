@@ -819,7 +819,7 @@ impl Athena {
         let id = records.resolve(job_ref)?;
         let job = records.jobs.get(id.as_str()).expect("resolved");
         let to_value = |v: &dyn erased::ToValue| v.to_value();
-        let commits = self
+        let mut commits: Vec<String> = self
             .git
             .run([
                 "log",
@@ -831,6 +831,31 @@ impl Athena {
             .lines()
             .map(str::to_string)
             .collect();
+        if crate::gh::cutover_job_for(&self.git, &head).is_some() {
+            // After C0 (D111) commits carry no trailers: list those that touch the job's records, then the
+            // host commit of the job's landing record, which is the squash commit on the default branch.
+            let mut more = self
+                .git
+                .run(["log", "--format=%h %s", &head, "--", &id.dir()])?
+                .lines()
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            if let Ok(Some(host)) = athena_gate::attribution::cutover_commit(&self.git, id.as_str())
+                && self.git.commit_exists(&host)?
+            {
+                let line = self
+                    .git
+                    .run(["log", "-1", "--format=%h %s", &host])?
+                    .trim()
+                    .to_string();
+                more.push(line);
+            }
+            for line in more {
+                if !commits.contains(&line) {
+                    commits.push(line);
+                }
+            }
+        }
         Ok(JobTrace {
             id: id.as_str().to_string(),
             state: self.state_name(job),

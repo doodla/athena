@@ -1,0 +1,218 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261025-033738-yz2d",
+  "round": 2,
+  "at": "2026-10-26T13:23:01.858531006Z",
+  "invocation_seq": 4,
+  "approach": "Add `Athena::propose_automatically(ui)` in proposals.rs: it wraps `propose`, never returns an error, prints one line on failure, and is silent when nothing is proposed. Inside `propose`, when proposals are written, also write one steward WorkItem per proposal in the same commit (kind Proposal, role `roles::STEWARD`, rung `Ladder::DefaultsConventions`, key `defaults-proposal:<class id>`, source and evidence citing the proposal record). That puts the proposal on drain's existing path, so `split_open` and `approve_all` approve it when the steward's recorded limit reaches defaults-conventions and list it as waiting when it does not. `generate` and its rules are untouched. Call the wrapper from introspect_job and introspect_intervention after a record is stored, and through a new `Steps::propose(&self)` at the start of `drain_with`. `athena status` already lists pending DefaultsProposal records and open work items.",
+  "decisions": [
+    {
+      "choice": "Criterion 4 option (a): propose also queues a steward WorkItem of kind Proposal on the defaults-conventions rung, citing the proposal record, in the same commit.",
+      "reason": "Drain approves only open steward WorkItems within their role's limit (RealSteps::queue uses work_decisions::split_open; approve goes through approve_in_limit). DefaultsProposal records never enter that path. A cited work item makes the auto-created proposal approved and worked in limit and listed as waiting above the limit, using unchanged drain logic. The brief does not ask for a revision of criterion 4.",
+      "rejected": [
+        {
+          "option": "Stop and ask the user to revise criterion 4 (option b)",
+          "why": "The brief says proposals are 'worked like other approved items' within the steward's limit; option (a) meets that with a small change."
+        },
+        {
+          "option": "Teach drain to approve DefaultsProposal records directly",
+          "why": "It adds a second approval path and bypasses the steward ladder, which is out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "Queue the work item from `propose` itself, so manual `athena propose` gets it as well.",
+      "reason": "One code path, with no divergence between manual and automatic runs. The item key is stable per class, so it is never duplicated, because generate skips classes that already have a pending proposal.",
+      "rejected": [
+        {
+          "option": "Queue it only in propose_automatically",
+          "why": "Manual proposals would sit unworked, and the two paths would differ."
+        }
+      ]
+    },
+    {
+      "choice": "Hook in introspect_job and introspect_intervention after a record is returned, not inside `introspect`.",
+      "reason": "These are the never-failing entry points used by every caller, and the introspection is committed before proposing runs.",
+      "rejected": [
+        {
+          "option": "Hook in each caller (run.rs, reading.rs, manage.rs)",
+          "why": "Several places, and a new caller could forget it."
+        },
+        {
+          "option": "Hook inside `introspect`",
+          "why": "A propose failure could then fail the introspection."
+        }
+      ]
+    },
+    {
+      "choice": "One signature: `fn propose(&self) {}` on Steps, with a no-op default. RealSteps implements it via `self.athena.propose_automatically(self.ui)`.",
+      "reason": "RealSteps already holds its ui. Existing test stubs keep compiling, and a counting stub can show propose runs before `queue()`.",
+      "rejected": [
+        {
+          "option": "Call Athena::propose in main.rs before drain",
+          "why": "It is not testable through drain() and misses other callers."
+        }
+      ]
+    },
+    {
+      "choice": "Inject failure in tests through proposing-only input, not damaged records.",
+      "reason": "Introspection loads records itself, so damaging them would fail the introspection first. Use an input that only `propose` reads, for example a malformed or missing defaults file that `JobConfig::at` or `base_defaults` reads at HEAD only in propose. If no such input exists, add a small test-only seam, such as a field or env switch read by propose_automatically, that forces Err.",
+      "rejected": [
+        {
+          "option": "Unreadable record for read_records",
+          "why": "May break the introspection before proposing is reached, so it would not show isolation."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/proposals.rs",
+      "action": "modify",
+      "purpose": "Add propose_automatically. Write a steward WorkItem per new proposal in the same commit. Suppress the 'no class has repeated' line on the automatic path. (The brief's propose.rs does not exist.)",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/introspect.rs",
+      "action": "modify",
+      "purpose": "Call propose_automatically after a record is stored in introspect_job and introspect_intervention. Update the module docs.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Add Steps::propose(&self) with a no-op default, a RealSteps implementation, and a call at the start of drain_with before queue(). Update the module docs.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased entry for automatic proposing and its steward work item.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/introspection.rs",
+      "action": "modify",
+      "purpose": "Tests for criteria 1 and 5 on the introspection side.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/proposals.rs",
+      "action": "modify",
+      "purpose": "Tests for no re-proposal, the rejected-class boundary, and the status listing (criteria 2 and 3).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Tests for propose at drain start, in-limit approval, above-limit waiting, and failure isolation (criteria 4 and 5).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "purpose": "Help text of drain and propose mentions the automatic run; only if the text describes propose.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "Only if the status test shows the proposal or work item is not listed; expected to need no change.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In proposals.rs, factor `propose` into a core with a quiet_when_empty flag. After building the DefaultsProposal files, also build one WorkItem per proposal: id from fresh_record_id, role STEWARD, kind Proposal, rung Ladder::DefaultsConventions, key `defaults-proposal:<failure_class>`, title naming the default id, source Reference::path of the proposal's canonical_path, evidence the proposal's source job references (non-empty, as WorkItem::validate requires). Commit them together with the proposals and add Athena-Record trailers.",
+    "Add `propose_automatically(&self, ui)` returning (): call the core quietly and turn Err into ui.line('automatic proposing failed: ...').",
+    "In introspect.rs, in introspect_job and introspect_intervention, call it when the settled result is Some, then return the record. Update the module docs.",
+    "In drain.rs, add `fn propose(&self) {}` to Steps, implement it in RealSteps via `self.athena.propose_automatically(self.ui)`, and call `steps.propose()` at the top of drain_with before `steps.queue()`. Update the module docs.",
+    "Add the tests listed in the demonstrations. Reuse existing seeding helpers: the work_item helper in tests/drain.rs near line 2263 and the steward role seeding used in tests/steward.rs. Read REPEAT_THRESHOLD from proposals.rs.",
+    "Add the CHANGELOG.md Unreleased entry. Touch main.rs help text only if it describes propose or drain start.",
+    "Run cargo fmt --all, cargo clippy --all-targets --locked -- -D warnings and cargo test --locked."
+  ],
+  "risks": [
+    {
+      "risk": "A propose failure or slow read_records blocks an introspection or drain.",
+      "mitigation": "The wrapper catches every error and prints one line. Tests cover introspect_job and drain with a proposing-only failure."
+    },
+    {
+      "risk": "Every introspection prints a no-op line.",
+      "mitigation": "The automatic path suppresses the 'no class has repeated' line and prints only when proposals were written or refused."
+    },
+    {
+      "risk": "Extra record commits during a running job conflict with the job's own record commits.",
+      "mitigation": "commit_records is the same call the manual propose uses. Commit only when proposals are non-empty. A drain test runs real steps against it."
+    },
+    {
+      "risk": "A rejected proposal's work item stays open, or a duplicate work item is queued.",
+      "mitigation": "The WorkItem key is stable per class. generate does not re-propose a class with a pending or accepted proposal, so no second item is created. Test criterion 2 also counts open work items."
+    },
+    {
+      "risk": "Adding a trait method breaks existing Steps impls.",
+      "mitigation": "The default method is a no-op, so existing stubs compile. Run the whole drain test file."
+    },
+    {
+      "risk": "The steward role has no recorded definition in some repositories.",
+      "mitigation": "Without a recorded steward role, in_limit is false, so the item waits for a person. Tests seed the role explicitly."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Test in tests/introspection.rs. Record introspections of one class on REPEAT_THRESHOLD-1 distinct jobs and assert no proposal. Record the threshold-reaching one through introspect_job. Never call propose.",
+      "command": "cargo test --locked -p athena-cli --test introspection automatic_proposal",
+      "observes": "The records then hold exactly one pending DefaultsProposal for the class, plus its open steward work item.",
+      "fails_without": "Without the hook in introspect_job, no DefaultsProposal exists after the threshold-reaching introspection, so the pending-proposal assertion fails."
+    },
+    {
+      "criterion": 2,
+      "method": "Tests in tests/proposals.rs. (i) After the automatic proposal exists, run another introspection of the class and a drain-start propose: proposal count stays 1. (ii) Accepted class: count stays 1. (iii) Rejected class: add fewer than REPEAT_THRESHOLD newer distinct jobs through automatic introspections and assert no new proposal. Then add the REPEAT_THRESHOLD-th newer job and assert exactly one new pending proposal.",
+      "command": "cargo test --locked -p athena-cli --test proposals automatic",
+      "observes": "No duplicate for pending, accepted, or rejected classes below the boundary. Exactly one new proposal once REPEAT_THRESHOLD newer distinct jobs exist.",
+      "fails_without": "If the hook bypassed generate's rules, a second proposal would appear for the pending or rejected class, or no new proposal would appear after the boundary."
+    },
+    {
+      "criterion": 3,
+      "method": "Create the proposal through introspect_job as in criterion 1, then build the status report and render it.",
+      "command": "cargo test --locked -p athena-cli --test proposals automatic_status",
+      "observes": "The proposals list and rendered text name the new proposal's id and class, and the open work item is listed.",
+      "fails_without": "Without automatic proposing, the status report and rendered text have no proposal entry for the class."
+    },
+    {
+      "criterion": 4,
+      "method": "Tests in tests/drain.rs. (a) A counting stub asserts propose is called once, before queue(). (b) Real steps: seed a class at threshold and a recorded steward role whose limit reaches defaults-conventions. Drain: the auto-created proposal's work item gets a WorkDecision Approved with a job, and the job is worked. (c) Same seed with a steward limit below defaults-conventions: the item is not approved and appears in the report's waiting list.",
+      "command": "cargo test --locked -p athena-cli --test drain drain_proposes",
+      "observes": "Propose runs before queue. The in-limit auto-created proposal is approved and worked. The above-limit one is listed as waiting with rung defaults-conventions.",
+      "fails_without": "If drain did not call Steps::propose at start, the counting stub records zero calls and the real-steps drain finds no proposal, no approval and no waiting entry."
+    },
+    {
+      "criterion": 5,
+      "method": "Force a failure only inside propose (a proposing-only input or test seam, not damaged records). Assert introspect_job returns Some(record), drain returns Ok, and the Ui output has the 'automatic proposing failed' line. Then run the three check commands.",
+      "command": "cargo test --locked && cargo clippy --all-targets --locked -- -D warnings && cargo fmt --all --check",
+      "observes": "The record is returned, the drain report is Ok, the failure line is printed, and all three commands exit 0.",
+      "fails_without": "If the error propagated, introspect_job would return None or drain would return Err where the tests expect the record or the Report."
+    },
+    {
+      "criterion": 6,
+      "method": "Inspect the diff and the docs.",
+      "command": "git diff --stat",
+      "observes": "CHANGELOG.md has an Unreleased entry on automatic proposing and its steward work item. The module docs of introspect.rs and drain.rs mention it. defaults.toml, athena.toml and the workflows are absent from the diff.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Which proposing-only input makes `propose` fail without breaking the introspection? Candidate: a defaults file at HEAD that only JobConfig::at or base_defaults reads. If none works, the producer adds a minimal test seam. This was not settled from the code.",
+    "Whether a work item approved by drain should have its request text refer to the DefaultsProposal. approve_request copies source and evidence by reference, so the cited proposal path should render. The producer should check that `render` handles a path to a records file.",
+    "Whether introspections that run concurrently during a drain race on commit_records. Its locking was not checked."
+  ],
+  "producer_section_sha256": "3029add8f723155b3492262479e11c3573c89c3d8fa08b47be3ae81a931f6e16"
+}

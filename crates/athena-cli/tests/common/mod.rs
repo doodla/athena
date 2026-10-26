@@ -35,7 +35,13 @@ pub fn without_job_plan(config: &str) -> String {
 /// - `test` fails without `README.md` or with a `.cargo/config.toml` in the tree, and otherwise reports
 ///   one test.
 pub fn test_config() -> String {
-    let base = &without_job_plan(include_str!("../../../../athena.toml"));
+    // The repository's own configuration names its cutover job, after which Athena writes no trailers
+    // (D111). These tests exercise the trailers, so the demo repository starts before the cutover; the
+    // cutover fixture and `tests/trailer_stop.rs` cover the other side.
+    let base = &athena_core::test_support::with_cutover_job(
+        &without_job_plan(include_str!("../../../../athena.toml")),
+        None,
+    );
     let start = base
         .find("[[capabilities.change.checks]]")
         .expect("the config has checks");

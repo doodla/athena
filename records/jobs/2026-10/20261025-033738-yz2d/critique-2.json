@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261025-033738-yz2d",
+  "round": 2,
+  "at": "2026-10-26T13:23:53.592603464Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "An approved defaults-proposal work item creates a generic job that does not apply the proposal and never marks it accepted",
+      "evidence": "`approve_work` builds the request with `approve_request(item, ...)`: the title, then the rendered source and evidence. A Path reference is rendered by `path_text(git, head, path)`, which looks for the path in `ls_tree(head)`. A records file may not be there, since records live on athena/records after the cutover; then the text is just 'This path is not in the repository at the current commit.' Even when the file is found, the request has no apply instructions. Those are what `accept_request` gives: deliverable defaults.toml only, the exact id and statement, the version from/to, and the candidate hash for `apply_check`. `approve_work` records only a WorkDecision. Only `accept_proposal` writes the `acceptance` record, so the DefaultsProposal stays Pending after drain has 'worked' it. The plan lists the rendering as an open question but has no fallback. Fix: When an approved work item is a defaults proposal, route it through the proposal's own acceptance. For example: in `approve_work`, or in a drain step, detect the `defaults-proposal:` key and call `accept_proposal`, which uses `accept_request` and records acceptance, then record the WorkDecision with that job. Alternatively, drop the WorkItem and have drain accept pending DefaultsProposals when `role_limit(steward)` permits `Ladder::DefaultsConventions`, using the same `may_change` rule; list the others as waiting. Either way, state in the plan which request text the job gets.",
+      "location": "Plan Decision 1 and Step 1; crates/athena-core/src/work_decisions.rs:272-337; crates/athena-core/src/proposals.rs:442-469, 638-660",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Deciding the proposal or its work item leaves the other one open, so drain can work a rejected proposal",
+      "evidence": "`reject_proposal` writes only a DefaultsProposal record. It does not decide the WorkItem, so `split_open` still lists the item as open, and an in-limit steward drain would approve and work a proposal the user rejected. `reject_work` leaves the proposal Pending. A pending proposal also blocks `generate` from proposing its class again. The plan's mitigation only covers duplicate items, not this. Fix: Keep the two in step. `reject_proposal` also records a rejection of the matching work item, `accept_proposal` records its approval, and approving or rejecting the work item records the proposal's acceptance or rejection. Or use the drain-side design above, which has no second record. Add a test: reject the auto-created proposal, run drain with an in-limit steward, and assert no job is created.",
+      "location": "Plan Risks ('A rejected proposal's work item stays open...'); proposals.rs:617-633 (`reject_proposal`); work_decisions.rs:356-372 (`reject_work`)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Criterion 4's demonstration would pass while the wrong job is worked",
+      "evidence": "(b) asserts only a WorkDecision Approved with a job, and that the job is worked. Under the current design both happen, yet the job's request does not apply the proposal and the proposal stays Pending. Fix: Also assert that the approved job's request contains `accept_request(proposal)`, or at least the proposal's id, statement and target version. Assert that the DefaultsProposal's latest status is Accepted with that job. Assert that status no longer lists it as pending.",
+      "location": "Demonstrations, Criterion 4 (b)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The failure seam for criterion 5 may also break the introspection",
+      "evidence": "`propose` reads `JobConfig::at` and `base_defaults` at HEAD (proposals.rs:553-558). Whether introspection also reads `JobConfig` or defaults.toml was not checked, so a missing defaults.toml could fail `introspect_job` first, the same problem as the rejected damaged-records option. Fix: Check this in the code first. If introspection reads either input, go straight to a small test seam in `propose_automatically`, and make the test assert that the introspection record was committed before the forced failure.",
+      "location": "Decision 5; Open question 1",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Open question 3 is already answered by the code",
+      "evidence": "`Committer::commit_records_in` takes `self.state.lock_repository()` and retries up to 3 times when the branch has moved (commits.rs:231-237). Fix: Drop the question, or cite the lock as the mitigation for the commit-conflict risk.",
+      "location": "Open questions, third item",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan reads the request correctly and the hook points are right. `propose` is at proposals.rs:552. `introspect_job` and `introspect_intervention` are at introspect.rs:1211 and 1220 and never fail. Adding a `Steps` method with a no-op default is low-risk. `generate` keeps the rules against proposing a class again. The open question about races in `commit_records` is already answered: it takes `lock_repository` and retries (commits.rs:231). The problem is how criterion 4 is met. Each proposal gets a generic steward WorkItem, and drain approves it through `approve_work`. That path builds the job request with `approve_request`, not with `accept_request`, and never writes an acceptance for the DefaultsProposal. So the job that drain \"works\" does not get the text that applies the proposal: the default's id, statement, version bump, candidate hash and apply check. The proposal also stays pending forever. The two records are never linked when one is decided: rejecting the proposal leaves its work item open for drain to approve, and approving or rejecting the work item leaves the proposal pending. Criterion 4's demonstration only checks that an approval and a job exist, so it would pass with this wrong behavior. This is fixable, so the verdict is revise."
+}

@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261025-033738-yz2d",
+  "round": 1,
+  "at": "2026-10-26T13:22:04.0925854Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "Criterion 4 (auto-created proposal approved and worked under the steward limit) is narrowed away and never demonstrated.",
+      "evidence": "Drain approves only open steward WorkItems whose rung is within their role's limit (RealSteps::queue builds `approvable` from WorkItems; approve goes through approve_in_limit, work_decisions.rs:341). DefaultsProposal records never enter that path. The plan admits this and says criterion 4 'cannot be met literally'. Its drain test seeds an unrelated in-limit work item, and that part of the test passes with or without the change. So 'an in-limit proposal is then approved and worked' is never shown for the auto-created proposal. Fix: Choose one option and write it into the plan. (a) When propose writes a DefaultsProposal automatically, also queue a steward-style WorkItem of kind proposal on the defaults-conventions rung (Ladder::DefaultsConventions exists in athena-data roles.rs) that cites the proposal. Drain's existing approve_all then approves it within the limit and lists it as waiting above the limit. Add a test where the auto-created proposal is approved and run in limit, and listed as waiting above limit. (b) Stop and get criterion 4 revised by the user. Do not quietly narrow it inside the plan.",
+      "location": "Plan: Open questions 1 and Demonstration for criterion 4; crates/athena-cli/src/drain.rs:93-101, 833-873, 1528-1579",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The failure-injection approach for criterion 5 may break the introspection itself, so it would not show isolation.",
+      "evidence": "The plan suggests making `read_records` fail with an unreadable record. Introspection itself loads records (event_of_job calls GitRecords::load), so the same damage may make the introspection fail first. The test would then show nothing about isolating a propose failure. Fix: Inject the failure only into proposing. For example, use a malformed defaults/start input that only `propose` reads, or a seam the test can force. Assert that introspect_job returns Some(record) and that the 'automatic proposing failed' line was printed.",
+      "location": "Plan: Demonstration for criterion 5 (introspection side)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The criterion 2 test does not cover the boundary case where a rejected class is proposed again.",
+      "evidence": "'Fails without the behavior' depends on a hypothetical hook that bypasses generate. The test is mainly a regression guard for the existing rule, which is acceptable, but it should also exercise the rejected-then-N-newer-jobs case so the rule boundary is really covered. Fix: Add a case where a rejected class gets REPEAT_THRESHOLD newer distinct jobs through automatic introspections, and assert that exactly one new proposal appears. This shows both sides of the rule.",
+      "location": "Plan: Demonstration for criterion 2",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The plan gives Steps::propose two different signatures.",
+      "evidence": "Decision 2 writes `Steps::propose(&self)` and Step 3 writes `fn propose(&self, _ui: &dyn Ui)`. RealSteps already holds `self.ui`. Fix: Use one signature throughout. `fn propose(&self) {}` is enough, because RealSteps has its own ui.",
+      "location": "Plan: Decision 2 vs Step 3",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the code. Its hook points are real and sound. `Athena::propose` is at proposals.rs:552 and `generate` at :265, with REPEAT_THRESHOLD = 3 at :36. introspect_job and introspect_intervention are the never-failing wrappers at introspect.rs:1211-1243. drain_with is at drain.rs:1159 and the Steps trait at :343. Status already lists DefaultsProposal records through proposal_views (status.rs:371). commit_records takes a repository lock and retries when the branch moves (commits.rs:225-246), which answers the plan's open question about concurrency. The main gap is criterion 4, which the user accepted. The request says proposals within the steward's limit \"are worked like other approved items\", and the criterion says the auto-created proposal is approved and worked under the steward limit. The plan states it will not do this, because DefaultsProposal is not a steward WorkItem. Its drain demonstration only re-shows existing work-item handling, which would pass without the change. The plan must either connect the two paths or get criterion 4 changed before a producer runs. Smaller problems: the failure-injection test for criterion 5 is vague, and the method signature is inconsistent."
+}

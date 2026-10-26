@@ -1,0 +1,218 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261025-031612-6239",
+  "round": 1,
+  "at": "2026-10-26T13:22:25.267885045Z",
+  "invocation_seq": 2,
+  "approach": "Gate trailers at the one place every Athena commit is built, `Committer::build_commit_in` (commits.rs): when `athena.toml` at the commit's parent names `[history] cutover_job` (`gh::cutover_job_for`), strip the `Athena-` trailer lines from the message before `commit_tree`. Every writer (intervention, records-only, landing, retry_landing, reading, proposals, auditor) is covered with no per-call-site edits. Then fix the readers that find commits by trailer: `retry_landing` (skips the trailer search post-C0 and writes no Athena-Verified-Content), `Athena::land_pr`/`landed_commit` (finds the landed commit through the job's landing outcome record when there are no trailers), `squash_text` (a relaxed variant allows zero Athena-Job trailers), `status::trace`, and the auditor's `read_changed_files`. Add tests on the k0tt fixture through the real entry points. With no cutover_job nothing changes: the gate returns the message as it is, and the trace, auditor and squash keep the old paths.",
+  "decisions": [
+    {
+      "choice": "Strip trailers inside `build_commit_in`, keyed on the config at the commit's parent.",
+      "reason": "It is the single choke point for all Athena commits, which is the root-cause fix. The config at the parent is the 'config at the relevant commit' the reading calls for. The cutover job's own landing has a parent without the setting, so it keeps trailers and C0 stays a legacy commit.",
+      "rejected": [
+        {
+          "option": "Change `message()` or each call site (run.rs, reading.rs, proposals.rs, watcher.rs and others) to drop trailers.",
+          "why": "`message()` has no repository access, and per-site edits miss writers and drift."
+        },
+        {
+          "option": "Gate on `attribution::cutover_state` being Shown (records branch shows C0).",
+          "why": "It needs the records branch for every commit write, and job branches built before the import runs would still write trailers. The config at the parent is local, cheap and matches how `cutover_job_for` is already used."
+        }
+      ]
+    },
+    {
+      "choice": "Find the landed commit post-C0 from the job's records: the commit that introduced the job's `outcome.json` or `outcome-landed.json`, using `introducing_commit`. Check that the commit exists on HEAD's history and that the job's verification fingerprint matches. Keep the trailer search for pre-C0.",
+      "reason": "`land_pr` pushes the job's local landing commit, which has no trailers after C0. The records are the content-based source the gate itself uses (invariant.rs: nothing is taken from trailers).",
+      "rejected": [
+        {
+          "option": "Keep `landed_commit` trailer-only.",
+          "why": "Post-C0 it would always fail with 'not landed' and the squash could never be made."
+        }
+      ]
+    },
+    {
+      "choice": "Add `Git::squash_text_relaxed` in athena-git, which accepts zero or one Athena-Job trailer and refuses more than one. `Athena::land_pr` and `test_support::land_through_pr` use it when the landed commit's parent config names a cutover job. `squash_text` stays strict.",
+      "reason": "A trailer-free landing commit makes the strict function refuse ('has 0 Athena-Job trailers'). Strict stays for pre-C0, so the old safety check is kept.",
+      "rejected": [
+        {
+          "option": "Loosen `squash_text` for everyone.",
+          "why": "It would drop the one-job-per-squash check pre-C0."
+        }
+      ]
+    },
+    {
+      "choice": "Read-side fixes apply only post-C0, and add to the old results instead of replacing them. The trace adds the commits that touch the job's records directory plus the landing record's host commit. The auditor, after the trailer grep, tries the job's landing host commit (`attribution::cutover_commit`).",
+      "reason": "Pre-C0 output stays identical, so existing tests and the 'no cutover_job' criterion hold.",
+      "rejected": [
+        {
+          "option": "Replace the trailer grep with a content search for all jobs.",
+          "why": "It changes pre-C0 output and adds risk to existing tests."
+        }
+      ]
+    },
+    {
+      "choice": "Put the fixture-based tests in athena-core, with a `test_support` helper that builds the k0tt `CutoverFixture` with a small in-core capability and fake-agent scripts, and add post-C0 jobs through `CutoverFixture::athena` and `land_through_pr`.",
+      "reason": "The criteria run `cargo test -p athena-core`, and test_support is in the deliverables. The cli `common::cutover_fixture` uses `athena-cli` wiring, which core cannot import.",
+      "rejected": [
+        {
+          "option": "Put the tests in athena-cli/tests using common::cutover_fixture.",
+          "why": "`cargo test -p athena-core` would not run them. This stays as a fallback if the core helper proves too heavy (see open questions)."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/commits.rs",
+      "action": "modify",
+      "purpose": "Add `strip_athena_trailers` and a `trailers_stopped(git, parent)` check (via `gh::cutover_job_for`). Apply them in `build_commit_in`. Unit tests for both.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-git/src/lib.rs",
+      "action": "modify",
+      "purpose": "Add `squash_text_relaxed` (0 or 1 Athena-Job trailer allowed) and a path-limited log helper for the trace and auditor. Tests next to the existing squash_text test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "action": "modify",
+      "purpose": "Add a trailer-free `landed_commit` path (outcome-record based) used by `Athena::land_pr` post-C0. Use the relaxed squash text post-C0. Tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "purpose": "`retry_landing`: post-C0, skip the trailer search and Athena-Verified-Content, and take `prediction_commit` from the reading record. Tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "`trace`: post-C0, add the commits touching the job's records directory and the landing record's host commit to `commits`. Test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/auditor.rs",
+      "action": "modify",
+      "purpose": "`read_changed_files`: post-C0 fallback to the job's landing host commit when no trailer commit holds the files. Test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/test_support.rs",
+      "action": "modify",
+      "purpose": "A helper that builds the `CutoverFixture` inside core (small capability and scripts), plus helpers to run a post-C0 job, block it and read the PR commits. `land_through_pr` uses the relaxed squash text post-C0.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Entry under Unreleased: trailers stop after C0, with the readers changed.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "D111 addendum: trailer-stop design, rejected alternatives, retry_landing post-C0 behavior. Remove the stale 'retry_landing has no test' statement.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read athena-cli/tests/common (Scenario, reading, test_config) and scope_guard's test rig. Add a core `test_support` helper that builds the CutoverFixture with a small in-core capability and scripts, then check it builds.",
+    "commits.rs: add `strip_athena_trailers(message)` and `trailers_stopped(git, parent)` (using `crate::gh::cutover_job_for`). Apply them in `build_commit_in` before `commit_tree`. Unit tests: no cutover_job keeps the message; with one, the Athena- lines are stripped and Co-Authored-By stays.",
+    "athena-git: add `squash_text_relaxed` and a path-limited `log` helper, with tests. `squash_text` stays strict.",
+    "gh.rs: add the outcome-record landed-commit lookup (post-C0) and make `Athena::land_pr` choose by `cutover_job_for` on the head (or the landed commit's parent). Use the relaxed squash text post-C0. Update `test_support::land_through_pr` to do the same.",
+    "run.rs `retry_landing`: when `cutover_job_for(head)` is Some, skip the `log_grep` and the bail, push no Athena-Verified-Content, and take `prediction_commit` from `introducing_commit` of the reading record (fall back to the base).",
+    "status.rs `trace` and auditor.rs `read_changed_files`: add the post-C0 additions (job-dir commits and landing host commit for the trace; landing host commit fallback for the auditor).",
+    "Write the tests: post-C0 landing through land_pr (squash and 3 PR commits have no Athena- lines; the landing record classifies them; history and attribution checks pass); retry_landing after C0 (blocked by a local edit, then landed) and the no-cutover_job counterpart; trace and auditor on the post-C0 job.",
+    "Run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Fix any failure in code that reads trailers.",
+    "CHANGELOG.md entry. docs/decisions.md D111 addendum; find and remove the stale 'retry_landing has no test' text."
+  ],
+  "risks": [
+    {
+      "risk": "Stripping trailers pre-C0 would break existing tests and gates that rely on them.",
+      "mitigation": "The gate condition is strictly `cutover_job_for(parent).is_some()`. A unit test with no cutover_job asserts the message is unchanged, and the whole existing suite runs."
+    },
+    {
+      "risk": "A badly formed message (a stray blank paragraph, or a body line starting `Athena-` removed by mistake).",
+      "mitigation": "Strip only lines of the last paragraph that start with `Athena-`, keep `Co-Authored-By`, and trim the trailing blank lines. Test the exact output."
+    },
+    {
+      "risk": "Gate or attribution code outside the listed files still requires trailers (for example an `Athena-Job` check on records-only commits).",
+      "mitigation": "Run criterion 1's test early. If a gate rejects trailer-free commits, report it with the exact finding and the athena-gate fix, rather than working around it."
+    },
+    {
+      "risk": "The outcome-record lookup picks the wrong commit for a retried (blocked then landed) job, where `outcome-landed.json` is the landing.",
+      "mitigation": "Post-C0 lookup requires the introducing commit to be on HEAD's history and the job's verification fingerprint to match the record. Tests cover a second job."
+    },
+    {
+      "risk": "The trace or auditor change alters pre-C0 output.",
+      "mitigation": "Read-side additions apply only post-C0 and append to the old results. Existing trace and auditor tests are unchanged."
+    },
+    {
+      "risk": "Building the fixture in core tests is slow or duplicates the cli scenario.",
+      "mitigation": "Reuse the existing script shape (scope_guard's rig and cli Scenario) and share one built fixture across tests with a `OnceCell`-style helper, since each build runs two whole jobs."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "A core test builds the k0tt fixture with its own capability (test_support helper). It adds a job via `CutoverFixture::athena`: an intervention commit, a records-only commit and the job landing on a job branch. It lands the job through `land_through_pr` (land_pr with the FakeHost squash). It reads the squash commit on the bare remote's main, and the three PR commits found from the landing record's commits on athena/records, with `git.message`. It then runs `athena_gate` history and attribution checks directly (the functions behind `athena check --history` and `--attribution`).",
+      "command": "cargo test -p athena-core post_c0_landing_through_land_pr",
+      "observes": "No line starting `Athena-` in the squash commit or in the three PR commits. The landing record classifies the three commits (intervention, records-only, landing). The history check and attribution check report no violations.",
+      "fails_without": "Without the writer gate the squash and PR commits carry Athena- lines and the assertions on them fail. Without the relaxed squash text and trailer-free landed-commit lookup, land_pr refuses before merging."
+    },
+    {
+      "criterion": 2,
+      "method": "On the fixture, run a post-C0 job whose landing is blocked by a local edit that conflicts with the change. Resolve the edit and call `Athena::go` on the blocked job, which runs `retry_landing`. Read the new commit's message.",
+      "command": "cargo test -p athena-core retry_landing",
+      "observes": "`go` returns Finished with state Landed and no 'not found' error. The landing commit's message has no Athena- line, in particular no Athena-Verified-Content. `outcome-landed.json` is in the commit. A second test with no cutover_job still gets the trailers.",
+      "fails_without": "Without the post-C0 branch, retry_landing bails 'the blocked closing commit of job … was not found' (no trailers to find), or writes Athena-Verified-Content."
+    },
+    {
+      "criterion": 3,
+      "method": "For the post-C0 job from criterion 1, call `Athena::trace` (the function behind `athena status <job>`'s trace) and `auditor::run` with a fake agent, with the job's candidate commit not present, so the fallback is exercised.",
+      "command": "cargo test -p athena-core post_c0_job_is_read_by",
+      "observes": "The trace lists the job's commits, including the host squash commit, with the job's state and outcome. The auditor reads the changed files from the squash commit and records an audit.",
+      "fails_without": "Without the read-side changes, the trace's `commits` is empty for the post-C0 job, and the auditor refuses 'cannot audit job … none could be read' when the candidate commit is not in the repository."
+    },
+    {
+      "criterion": 4,
+      "method": "Run the full existing suite plus a new unit test in commits.rs. It builds a commit through `build_commit` in a repository with no cutover_job and one with it, and compares the messages.",
+      "command": "cargo test && cargo clippy --all-targets --locked -- -D warnings && cargo fmt --all --check",
+      "observes": "With no cutover_job the commit keeps all the trailers (`message()` output unchanged). With it, the Athena- lines are gone and other lines such as Co-Authored-By stay. All tests pass, clippy is clean and fmt passes.",
+      "fails_without": "Without the cutover_job condition the gate would also strip trailers pre-C0, and the existing tests that read trailers (for example crates/athena-cli/tests/binary.rs, which expects Athena-Verified-Content) would fail."
+    },
+    {
+      "criterion": 5,
+      "method": "Read both files with git diff: the changelog entry under Unreleased, and the D111 section of docs/decisions.md.",
+      "command": "ls CHANGELOG.md docs/decisions.md",
+      "observes": "The changelog has an entry for the trailer stop. decisions.md has the design (gate at build_commit_in, keyed on config at the parent), the rejected alternatives and the retry_landing post-C0 behavior. The stale 'retry_landing has no test' text is gone (the producer finds it with a search).",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Inspect the diff of test_support.rs and the new tests.",
+      "command": "git diff crates/athena-core/src/test_support.rs",
+      "observes": "Tests build the fixture with `CutoverFixture::build` (old-way job and cutover job landed through the real writers and land_pr). Later jobs are added through `CutoverFixture::athena`, `go` and `land_through_pr`. No test writes records or commits by hand with `hash_object` or `commit_tree`, apart from the FakeHost squash already in test_support.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "I did not find the stale 'retry_landing has no test' text (searched decisions.md for retry_landing and found no match; CHANGELOG.md line 402 says 'no change'). The producer must search docs/ and CHANGELOG.md for it and remove it where it is.",
+    "The cli crate's Scenario fake scripts are in athena-cli/tests/common; I did not read the reading/verification script format. A core-side script may take more work. If it is too heavy, the tests can go in athena-cli/tests with common::cutover_fixture, but then `cargo test -p athena-core` will not run them.",
+    "I did not check that `athena_gate` history/attribution checks and the landing intent's 'commit without a verification' check accept trailer-free commits. The land.rs comment says pr_commits classifies by content, but this must be confirmed by running the test. A needed fix in athena-gate would be out of this job's file list and should be reported.",
+    "The cutover job's landing in the fixture is Pending until the import runs. A job built on the locally landed cutover commit drops trailers before C0 is on the host. I assume this is acceptable under 'config at the relevant commit'.",
+    "Whether `athena::attribution` / `cutover_commit` reads the local athena/records ref in the work repository after resync. The fixture doc says it exists there; the producer should confirm."
+  ],
+  "producer_section_sha256": "56b75bc179d07b3fc6669bd9a83a56de94ac94e9c93737662f2ff681d765e77d"
+}

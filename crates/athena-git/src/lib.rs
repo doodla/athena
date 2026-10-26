@@ -732,6 +732,39 @@ impl Git {
         })
     }
 
+    /// [`Git::squash_text`] for a commit made after C0 (D111), which carries no trailers: zero or one
+    /// `Athena-Job` trailer is accepted, more than one is refused.
+    pub fn squash_text_relaxed(&self, commit: &str) -> Result<CommitText> {
+        let message = self.message(commit)?;
+        let message = message.trim();
+        let (title, rest) = message.split_once('\n').unwrap_or((message, ""));
+        let jobs = self
+            .trailers(message)?
+            .iter()
+            .filter(|(key, _)| key == "Athena-Job")
+            .count();
+        if jobs > 1 {
+            return Err(GitError::Refused(format!(
+                "commit {commit} has {jobs} Athena-Job trailers in its last paragraph; a squash message allows at most one"
+            )));
+        }
+        let rest = rest.trim();
+        Ok(CommitText {
+            title: title.trim().to_string(),
+            body: if rest.is_empty() {
+                String::new()
+            } else {
+                format!("{rest}\n")
+            },
+        })
+    }
+
+    /// Commits reachable from `rev` that touch `path` (a file or directory), newest first.
+    pub fn log_path(&self, rev: &str, path: &str) -> Result<Vec<String>> {
+        let out = self.run(["log", "--format=%H", rev, "--", path])?;
+        Ok(out.lines().map(str::to_string).collect())
+    }
+
     /// Rebuilds the commits in `from..to` (first-parent chain, oldest first) on top of `onto`, one new commit
     /// per old commit that changes something, with the old message. Each change is carried by a three-way merge
     /// from the old commit's first parent, so a merge commit is rebuilt as the single change it made. Nothing
@@ -1283,6 +1316,40 @@ mod tests {
         write_files(dir.path(), &[("a.txt", "d\n")]);
         let two = commit_all(&git, "Two\n\nAthena-Job: j1\nAthena-Job: j2\n");
         assert!(git.squash_text(&two).is_err());
+    }
+
+    #[test]
+    fn a_relaxed_squash_text_accepts_no_job_trailer_and_refuses_two() {
+        let (dir, git) = repo_with(&[("a.txt", "a\n")]);
+        write_files(dir.path(), &[("a.txt", "b\n")]);
+        let none = commit_all(&git, "Change a\n\nWhy it changed.\n");
+        let text = git.squash_text_relaxed(&none).unwrap();
+        assert_eq!(text.title, "Change a");
+        assert_eq!(text.body, "Why it changed.\n");
+        write_files(dir.path(), &[("a.txt", "c\n")]);
+        let bare = commit_all(&git, "Only a title\n");
+        assert_eq!(git.squash_text_relaxed(&bare).unwrap().body, "");
+        write_files(dir.path(), &[("a.txt", "d\n")]);
+        let two = commit_all(&git, "Two\n\nAthena-Job: j1\nAthena-Job: j2\n");
+        assert!(git.squash_text_relaxed(&two).is_err());
+        assert_eq!(git.log_path("HEAD", "a.txt").unwrap().len(), 4);
+    }
+
+    #[test]
+    fn replay_keeps_a_message_without_trailers_verbatim() {
+        let (dir, git) = repo_with(&[("a.txt", "a\n")]);
+        let base = git.head().unwrap().unwrap();
+        write_files(dir.path(), &[("b.txt", "b\n")]);
+        let tip = commit_all(&git, "No trailers here\n\nJust a body.\n");
+        git.run(["checkout", "-q", "-b", "other", &base]).unwrap();
+        write_files(dir.path(), &[("c.txt", "c\n")]);
+        let onto = commit_all(&git, "Other\n");
+        let moved = git.replay(&onto, &base, &tip, false).unwrap();
+        assert_ne!(moved, tip);
+        assert_eq!(
+            git.message(&moved).unwrap().trim(),
+            "No trailers here\n\nJust a body."
+        );
     }
 
     #[test]

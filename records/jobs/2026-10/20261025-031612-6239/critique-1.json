@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261025-031612-6239",
+  "round": 1,
+  "at": "2026-10-26T13:24:01.615677218Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The plan does not name the writers that make the intervention commit and the records-only commit on the post-C0 job branch.",
+      "evidence": "The demonstration says only that it 'adds a job via CutoverFixture::athena: an intervention commit, a records-only commit and the job landing'. `ask`/`go` produce the job's landing (plus reading/record commits). The plan does not say how a commit that `classify_pre_merge` (invariant.rs:324) would class as DeclaredIntervention is made, nor which command makes the RecordsOnly commit. Criterion 6 forbids hand-building commits, and the test_support.rs header (lines 50-51) warns against it. Fix: Name the real entry point for each commit: the Athena command or method that records a declared intervention, and the one that makes a records-only commit (for example a reading or proposal record through `commit_records`). Assert that the landing record's `commits` holds exactly the kinds DeclaredIntervention, RecordsOnly and JobLanding, in order.",
+      "location": "Demonstrations, Criterion 1; Steps 1 and 7",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The auditor fallback depends on the candidate commit being absent, but the fixture's work repository holds it.",
+      "evidence": "run.rs:1807 writes the candidate commit with `self.git.commit_tree` into the work repository's object store. auditor.rs:190 returns early when `commit_exists(candidate)`. So with the fixture's own repository, the test would pass without any post-C0 change, and the 'fails without the behavior' claim would not hold. Fix: Say how the candidate is made absent while still going through `auditor::run`. For example, run it in a fresh clone of the bare remote, fetching `main` and `athena/records`, with the shared state. Assert that the files were read from the host squash commit, and show that the same call is refused ('none could be read') without the fallback.",
+      "location": "Demonstrations, Criterion 3 (auditor)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The read-side fallback needs a local `athena/records` ref. This is left as an open question, but it decides whether criterion 3 can pass in a clone.",
+      "evidence": "attribution.rs:83-87 returns None when `records_branch::resolve_tip` finds no records tip, so the trace and auditor additions would silently add nothing. Fix: Make the trace and auditor tests run where the records branch has been fetched, and have the fallback report clearly when there is no records tip, rather than returning an empty result with no explanation.",
+      "location": "Decision 4 / auditor.rs and status.rs fallback via attribution::cutover_commit",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan's outcome-record lookup also has to handle a retried job, whose landing introduces `outcome-landed.json` rather than `outcome.json`. Only the risk list says this; the land_pr test does not cover it.",
+      "evidence": "run.rs:2822-2836 writes the Landed outcome on retry. The Risks list says 'Tests cover a second job', but no demonstration lands a retried post-C0 job through land_pr. Fix: Either extend the criterion 2 test to land the retried job through `land_through_pr`, or add an assertion that `landed_commit` returns the retry's landing commit.",
+      "location": "Decision 2 (landed_commit post-C0)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The command `ls` only shows that the files exist.",
+      "evidence": "'Run: ls CHANGELOG.md docs/decisions.md'. A search of *.md for retry_landing found no 'retry_landing has no test' text. CHANGELOG.md:402 says only 'no change'. Fix: Use greps that check content: the D111 addendum names `build_commit_in` and the retry_landing post-C0 behavior, and the changelog Unreleased section names the trailer stop. If the stale statement is not found anywhere, say so in the change description rather than editing unrelated text.",
+      "location": "Demonstrations, Criterion 5",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The design fits the request and the code. I read the snapshot and confirmed the following. `Committer::build_commit_in` (commits.rs:150) is the shared writer for Athena's trailer-carrying commits. The other production `commit_tree` call I checked is the trailer-free candidate commit at run.rs:1807; the rest are in tests or are records-branch writes. The trailer readers the plan names are the only `log_grep`/`--grep` users: auditor.rs:202, run.rs:2788, gh.rs:1291 and status.rs:828. `squash_text` (athena-git lib.rs:715) refuses a message without exactly one Athena-Job trailer. `classify_pre_merge` (invariant.rs:305) classifies by content, so the landing record can classify commits with no trailers. `cutover_commit` works for any job's landing. Gating at the writer on the parent's config is a sound root-cause fix, and the pre-C0 path stays unchanged. Two demonstrations have gaps. Criterion 1 does not say which real writers produce the intervention commit and the records-only commit on the post-C0 job branch, which leaves room for hand-built commits (criterion 6). Criterion 3's auditor demonstration needs the job's candidate commit to be absent, but `go` writes that commit into the fixture's work repository, and the plan does not say how it is made absent. Both are fixable, so the verdict is revise."
+}

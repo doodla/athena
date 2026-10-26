@@ -549,7 +549,8 @@ pub fn land_through_pr(
 ) -> Result<PrReport> {
     let state = StateDir::new(state_root.to_path_buf());
     let branch = crate::gh::work_branch(job);
-    let squash = git.squash_text(landed)?;
+    // Strict before C0; after it (the base names a cutover job) the commit carries no trailers.
+    let squash = crate::gh::squash_text_for(git, base, landed)?;
     let remote = GitRemote {
         git,
         name: "origin",
@@ -596,7 +597,9 @@ pub fn plenty_of_space(_: &Path) -> std::io::Result<u64> {
     Ok(1_000_000_000_000_000)
 }
 
-fn make_athena(
+/// An [`Athena`] over any repository `git` (for example a fresh clone of the fixture's remote), with its own
+/// state directory `state_root`.
+pub fn make_athena(
     git: &Git,
     state_root: &Path,
     capabilities: Vec<Box<dyn Capability>>,

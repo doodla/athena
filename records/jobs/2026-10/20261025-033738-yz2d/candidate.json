@@ -1,0 +1,158 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261025-033738-yz2d",
+  "base_commit": "9ce5b41aeba5631eff4dcc63f5dc525cc3d95ec6",
+  "base_fingerprint": "sha256:a0b08c4c52d8cc007e5091bdf589079080813e45a7ee5d06e66a9215c154d238",
+  "previous_job": "20261026-124004-g1w0",
+  "candidate_commit": "42ff6bdd7d227109673f758a0d7a7baf75ac7625",
+  "candidate_tree": "3998e92e3cadd1f66367ae4ca4ece9dc56d777fa",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 156575
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 85522
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 56392
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 137200
+    },
+    {
+      "path": "crates/athena-cli/tests/introspection.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 46224
+    },
+    {
+      "path": "crates/athena-cli/tests/proposals.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 14133
+    },
+    {
+      "path": "crates/athena-core/src/introspect.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 77199
+    },
+    {
+      "path": "crates/athena-core/src/proposals.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 44747
+    }
+  ],
+  "fingerprint": "sha256:097e9307f24368f8a9017f4e1b22b527427f0e8534802ff436a75bbcaceecb2d",
+  "violations": [],
+  "producer_report": {
+    "summary": "Defaults proposals now run by themselves. A new `Athena::propose_automatically` runs the existing generator after each recorded introspection (`introspect_job` and `introspect_intervention`) and at the start of `athena drain`. It never returns an error: a failure prints one line, `automatic proposing failed: <error>`. It prints nothing when no class has repeated. The generator and its rules are unchanged, and `athena propose` stays. I also added `Athena::accept_proposal_in_limit`. It re-checks that the proposal is still pending and that the steward's newest recorded limit reaches the defaults-conventions rung, then calls the existing `accept_proposal`. Drain gets a `Steps::propose` method (default does nothing), called before the queue is read. `RealSteps::queue` lists each pending proposal as approvable (steward limit reaches the rung) or waiting (otherwise, or no recorded steward). `RealSteps::approve` routes a proposal id to `accept_proposal_in_limit`. Room, budget and job-limit checks are reused unchanged. Tests were added for criteria 1 to 5. Docs updated in introspect, proposals and drain; the `propose` and `drain` help text and CHANGELOG also mention it. `cargo fmt --check` and clippy pass with warnings denied; the full `cargo test --locked` run exited without error, but I could not read its output, so the pass count is unchecked.",
+    "files": [
+      "crates/athena-core/src/proposals.rs",
+      "crates/athena-core/src/introspect.rs",
+      "crates/athena-cli/src/drain.rs",
+      "crates/athena-cli/src/main.rs",
+      "CHANGELOG.md",
+      "crates/athena-cli/tests/introspection.rs",
+      "crates/athena-cli/tests/proposals.rs",
+      "crates/athena-cli/tests/drain.rs"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test --locked -p athena-cli --test introspection automatic",
+        "result": "pass",
+        "note": "Matches one test, the threshold-reaching introspection. The below-threshold test is run by the full suite."
+      },
+      {
+        "command": "cargo test --locked -p athena-cli --test proposals automatic",
+        "result": "pass",
+        "note": "4 tests."
+      },
+      {
+        "command": "cargo test --locked -p athena-cli --test drain drain_",
+        "result": "pass",
+        "note": "15 tests, including the 4 new ones."
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "The output was saved outside my working directory and I could not read it. I take the pass from the command exiting without an error, as the earlier failed run did show an exit code."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A test (run with cargo test) records an introspection that brings a failure class to the distinct-job threshold and then finds a pending defaults proposal, without calling `athena propose` separately.",
+        "status": "met",
+        "evidence": "tests/introspection.rs `automatic_proposal_is_written_by_the_introspection_that_reaches_the_threshold` seeds REPEAT_THRESHOLD-1 jobs of one class and checks there is no proposal. It then runs a rejected job, whose introspection goes through `introspect_job`, and finds exactly one pending proposal citing the new job. It never calls `propose`. The companion `an_introspection_below_the_threshold_writes_no_proposal` shows none one job short. The first test passes with `cargo test --locked -p athena-cli --test introspection automatic`."
+      },
+      {
+        "criterion": "A test (cargo test) shows a class that already has a pending/accepted proposal, or was rejected with no N newer distinct jobs, gets no new proposal after another introspection or drain start.",
+        "status": "met",
+        "evidence": "tests/proposals.rs: `automatic_proposing_creates_the_pending_proposal_and_never_a_second_for_a_pending_class`, `automatic_proposing_does_not_propose_an_accepted_class_again` and `automatic_proposing_proposes_a_rejected_class_again_only_after_enough_newer_jobs`. Each uses a real `intervene` (the introspection) plus `propose_automatically` (the drain-start call) and compares proposal record counts; the rejected-class test adds exactly one proposal on the third newer job. `drain_does_not_work_a_defaults_proposal_a_person_rejected` in tests/drain.rs shows a rejected proposal gets no job from a drain. All pass."
+      },
+      {
+        "criterion": "A test (cargo test) shows the status output lists the automatically created proposal.",
+        "status": "met",
+        "evidence": "tests/proposals.rs `automatic_status_lists_the_proposal_created_without_a_command`: status has no proposals, then `propose_automatically`, then `athena.status()` lists it, and the rendered `display::status` text contains the id, [add] and the accept-proposal hint. It passes under `cargo test --locked -p athena-cli --test proposals automatic`. The same assertion that drain leaves no pending proposal appears in the drain test below."
+      },
+      {
+        "criterion": "A drain test (cargo test) shows propose runs at drain start, and an in-limit proposal is then approved and worked under the existing steward limit; an above-limit one is listed as waiting.",
+        "status": "met",
+        "evidence": "tests/drain.rs: `drain_proposes_once_before_it_reads_the_queue` (stub logs [propose, queue]). `drain_proposes_and_works_an_in_limit_defaults_proposal` uses real steps with a steward limit of defaults-conventions and no proposal beforehand. It finds the proposal Accepted with a drain job whose request has the defaults.toml deliverable, statement, candidate hash and version line. `drain_lists_an_above_limit_defaults_proposal_as_waiting_and_makes_no_job` uses a steward limit of implementation and finds it Pending, waiting at rung defaults-conventions, with no job, and `approve` refusing it. These pass under `cargo test --locked -p athena-cli --test drain drain_`."
+      },
+      {
+        "criterion": "A failure inside automatic proposing only prints a line and never fails the introspection or the drain; cargo test, cargo clippy and cargo fmt --check pass.",
+        "status": "met",
+        "evidence": "The unit test `a_failure_in_automatic_proposing_is_one_line_and_not_an_error` in proposals.rs passes a failing closure to `propose_guarded` and checks it returns () and prints 'automatic proposing failed: ...'. `Steps::propose` returns (), so a drain has no path to fail on it. Both checks had a clean run, and the full `cargo test --locked` exited without error (see checks_run for the caveat). No integration test makes only proposing fail; see open_issues."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry describing automatic proposing; docs of the introspect/drain modules mention it. defaults.toml, athena.toml and workflows are unchanged.",
+        "status": "met",
+        "evidence": "CHANGELOG.md has a new first entry under [Unreleased] Added. The module docs of introspect.rs, drain.rs and proposals.rs have new paragraphs, and the `propose` and `drain` help text in main.rs mention it. I edited no defaults.toml, athena.toml or workflow file; my changes are only the eight files listed."
+      }
+    ],
+    "open_issues": [
+      "No integration test makes only automatic proposing fail while the introspection or drain still works. A broken defaults.toml also breaks the introspection and caps first, so I used the closure seam `propose_guarded` plus its unit test, as the plan allowed.",
+      "The brief's crates/athena-core/src/propose.rs does not exist; the logic is in proposals.rs, which I modified. I did not need status.rs: a proposal made automatically is listed by the existing status code.",
+      "A proposal accepted by drain is worked as an approved job with no plan entry, so it keeps its place ahead of planned items. It is not checked against the plan rules for goal, rung and acceptance.",
+      "Drain's accept step uses the proposal's default id (a slug) as the queue id. A work item id is a timestamped record id, so I do not expect a clash, but nothing enforces it."
+    ],
+    "mistakes": [
+      "My first introspection test asserted `check_history` has no violations; it failed because my own seed commit has no trailers. I removed that assertion."
+    ],
+    "learnings": [
+      "Introspection runs inside `athena go` (run.rs) and intervention/correction paths, always through `introspect_job` or `introspect_intervention`, so one hook in those two covers every caller.",
+      "The `commit_records` path takes the repository lock, so an automatic proposal commit cannot race an introspection commit.",
+      "`roles::steward` already has highest_rung DefaultsConventions, so a repository with the default steward recorded accepts proposals in drain.",
+      "A cases-without-job record does not count toward the threshold, so a threshold test needs introspections that name a job. A rejected job run through the fake does that.",
+      "`check_history` reports violations for fixture commits that lack Athena trailers, so tests that seed with plain git commits must not assert on it."
+    ],
+    "desires": [
+      "Read access to saved tool-output files, so I could confirm the full test run's per-test results.",
+      "A shared seeding helper for failure-class cases in tests/common, instead of a copy in each of three test files."
+    ]
+  }
+}

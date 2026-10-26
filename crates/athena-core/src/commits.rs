@@ -51,6 +51,35 @@ pub fn message(subject: &str, body: &str, trailers: &[(&str, String)]) -> String
     text
 }
 
+/// `text` without its `Athena-` trailer lines (those in the last paragraph); other trailers stay and
+/// trailing blank lines are trimmed.
+pub fn strip_athena_trailers(text: &str) -> String {
+    let trimmed = text.trim_end();
+    let (head, last) = match trimmed.rfind("\n\n") {
+        Some(i) => (&trimmed[..i], &trimmed[i + 2..]),
+        None => return format!("{trimmed}\n"),
+    };
+    let kept: Vec<&str> = last.lines().filter(|l| !l.starts_with("Athena-")).collect();
+    let mut out = head.to_string();
+    if !kept.is_empty() {
+        out.push_str("\n\n");
+        out.push_str(&kept.join("\n"));
+    }
+    out.push('\n');
+    out
+}
+
+/// The message a commit on `parent` carries. After C0 (`parent`'s `athena.toml` names a `[history]
+/// cutover_job`) Athena writes no `Athena-` trailers (D111); before it the message is unchanged. This is the
+/// one place the choice is made, for every commit Athena builds.
+pub fn message_for_parent(git: &Git, parent: &str, message: &str) -> String {
+    if crate::gh::cutover_job_for(git, parent).is_some() {
+        strip_athena_trailers(message)
+    } else {
+        message.to_string()
+    }
+}
+
 /// Why a fast-forward did not happen.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refusal {
@@ -168,7 +197,8 @@ impl Committer<'_> {
         index.apply(&edits)?;
         let new_tree = index.write_tree()?;
         let sign = self.git.signs_commits()?;
-        let commit = self.git.commit_tree(&new_tree, &[parent], message, sign)?;
+        let message = message_for_parent(self.git, parent, message);
+        let commit = self.git.commit_tree(&new_tree, &[parent], &message, sign)?;
         let violations = gate(self.git, &Change::of_commit(self.git, &commit)?, scope)?;
         if !violations.is_empty() {
             let list = violations
@@ -261,5 +291,25 @@ mod tests {
             text,
             "Add a changelog\n\nBody text.\n\nAthena-Job: x\nAthena-Class: docs\n"
         );
+    }
+
+    #[test]
+    fn stripping_removes_only_athena_trailers() {
+        let text = message(
+            "Subject",
+            "Body text.",
+            &[
+                ("Athena-Job", "x".into()),
+                ("Co-Authored-By", "A <a@example.org>".into()),
+            ],
+        );
+        assert_eq!(
+            strip_athena_trailers(&text),
+            "Subject\n\nBody text.\n\nCo-Authored-By: A <a@example.org>\n"
+        );
+        let only = message("Subject", "", &[("Athena-Job", "x".into())]);
+        assert_eq!(strip_athena_trailers(&only), "Subject\n");
+        let body = message("Subject", "Body text.", &[("Athena-Job", "x".into())]);
+        assert_eq!(strip_athena_trailers(&body), "Subject\n\nBody text.\n");
     }
 }

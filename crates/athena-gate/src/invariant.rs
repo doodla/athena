@@ -146,6 +146,10 @@ pub fn check(
         if only_owner {
             return Ok(Vec::new());
         }
+        if trailers_stopped(git, change) && touches_records(judged) {
+            // After C0 Athena writes no trailers (D111): the records the commit adds name its work.
+            return Ok(Vec::new());
+        }
         return Ok(names_existing_work(git, change, &trailers)?
             .map(|problem| {
                 fail(
@@ -162,7 +166,9 @@ pub fn check(
     if landing_result.is_ok() {
         return Ok(Vec::new());
     }
-    if intervention(judged, &trailers).is_ok() {
+    if intervention(judged, &trailers).is_ok()
+        || (trailers_stopped(git, change) && !added_interventions(judged).is_empty())
+    {
         return Ok(Vec::new());
     }
     let jobs = trailer_values(&trailers, JOB);
@@ -795,6 +801,29 @@ pub fn added_interventions(judged: &Judged) -> Vec<RecordId> {
     found
 }
 
+/// Whether the judged commit's parent configuration names a `[history] cutover_job`: from then on
+/// Athena writes no `Athena-` trailers (D111), so a commit is judged by the records it adds.
+/// Only the parent's own `athena.toml` counts: a parent without one is judged by the built-in configuration,
+/// which is no sign that the repository has crossed C0.
+pub fn trailers_stopped(git: &Git, change: &Change) -> bool {
+    let Some(parent) = change.parents.first() else {
+        return false;
+    };
+    git.show_file(parent, "athena.toml")
+        .ok()
+        .flatten()
+        .and_then(|bytes| athena_data::config::Config::parse(&String::from_utf8_lossy(&bytes)).ok())
+        .is_some_and(|config| config.history.cutover_job.is_some())
+}
+
+/// Whether `judged` adds or changes a file under `records/`.
+fn touches_records(judged: &Judged) -> bool {
+    judged
+        .diff
+        .iter()
+        .any(|d| d.path.starts_with("records/") && !judged.class(&d.path).is_owner())
+}
+
 /// `None` when a records-only commit names existing work; otherwise the problem.
 fn names_existing_work(
     git: &Git,
@@ -964,6 +993,58 @@ mod tests {
         write(dir.path(), &[(&path, &text)]);
         commit(&git, "record without a trailer\n");
         assert_eq!(judge(&git, "HEAD").len(), 1);
+    }
+
+    /// A repository whose `athena.toml` does or does not name a cutover job.
+    fn cutover_repo(with_cutover_job: bool) -> (tempfile::TempDir, Git) {
+        let config: String = crate::BUILTIN_CONFIG
+            .lines()
+            .filter(|l| with_cutover_job || !l.starts_with("cutover_job = "))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        assert_eq!(config.contains("cutover_job = "), with_cutover_job);
+        repo(&[
+            ("athena.toml", config.as_str()),
+            (".gitattributes", "/OWNER.md athena-exclude\n"),
+            ("src/lib.rs", "pub fn a() {}\n"),
+        ])
+    }
+
+    #[test]
+    fn after_the_cutover_trailer_free_records_and_intervention_commits_pass_by_content() {
+        for stopped in [false, true] {
+            // A records-only commit with no trailer: refused until the parent names a cutover job.
+            let (dir, git) = cutover_repo(stopped);
+            let (path, text) = intervention_record("20261010-170000-abcd");
+            write(dir.path(), &[(&path, &text)]);
+            commit(&git, "record without a trailer\n");
+            assert_eq!(
+                judge(&git, "HEAD").len(),
+                usize::from(!stopped),
+                "{stopped}"
+            );
+
+            // A hand change with its intervention record and no trailer: the same.
+            let (path, text) = intervention_record("20261010-170001-abcd");
+            write(
+                dir.path(),
+                &[
+                    ("src/lib.rs", "pub fn a() { /* by hand */ }\n"),
+                    (&path, &text),
+                ],
+            );
+            commit(&git, "hand change without a trailer\n");
+            assert_eq!(
+                judge(&git, "HEAD").len(),
+                usize::from(!stopped),
+                "{stopped}"
+            );
+
+            // A governed change with no record is refused either way.
+            write(dir.path(), &[("src/lib.rs", "pub fn a() { 2; }\n")]);
+            commit(&git, "sneaky change\n");
+            assert_eq!(judge(&git, "HEAD").len(), 1, "{stopped}");
+        }
     }
 
     #[test]

@@ -88,7 +88,11 @@ fn config(with_repo: bool) -> String {
             if key.starts_with('[') {
                 in_job_plan = key.trim_end() == "[job_plan]";
             }
-            !(in_job_plan || key.starts_with("repo_url") || key.starts_with("repo_ref"))
+            // No cutover job: these tests read the trailers that Athena writes before the cutover (D111).
+            !(in_job_plan
+                || key.starts_with("repo_url")
+                || key.starts_with("repo_ref")
+                || key.starts_with("cutover_job"))
         })
         .collect();
     let header = "[capabilities.study]\n";

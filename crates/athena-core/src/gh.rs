@@ -1306,6 +1306,50 @@ pub fn landed_commit(git: &Git, head: &str, job: &JobId, fingerprint: &str) -> R
     )
 }
 
+/// [`landed_commit`] for a job landed after C0 (D111), whose commits carry no trailers. The commit is found
+/// from the job's records: the one that introduced `outcome-landed.json` (a retried landing), else
+/// `outcome.json`, and only when it is reachable from `head` and its `verification.json` holds the
+/// verified fingerprint.
+pub fn landed_commit_from_records(
+    git: &Git,
+    head: &str,
+    job: &JobId,
+    fingerprint: &str,
+) -> Result<String> {
+    for name in ["outcome-landed.json", "outcome.json"] {
+        let path = format!("{}/{name}", job.dir());
+        let out = git.run(["log", "--format=%H", "--diff-filter=A", head, "--", &path])?;
+        let Some(commit) = out.lines().last() else {
+            continue;
+        };
+        let verification = git.show_file(commit, &format!("{}/verification.json", job.dir()))?;
+        if verification.is_some_and(|b| String::from_utf8_lossy(&b).contains(fingerprint)) {
+            return Ok(commit.to_string());
+        }
+    }
+    bail!(
+        "job {job} is not landed on this branch, so there is no landed commit to push; run `athena go {job}` first"
+    )
+}
+
+/// The landed commit of `job`: by trailers before C0, by the job's records after it.
+pub fn landed_commit_for(git: &Git, head: &str, job: &JobId, fingerprint: &str) -> Result<String> {
+    if cutover_job_for(git, head).is_some() {
+        landed_commit_from_records(git, head, job, fingerprint)
+    } else {
+        landed_commit(git, head, job, fingerprint)
+    }
+}
+
+/// The squash text of `commit`: strict before C0, relaxed after it (no trailers are written).
+pub fn squash_text_for(git: &Git, head: &str, commit: &str) -> Result<CommitText> {
+    Ok(if cutover_job_for(git, head).is_some() {
+        git.squash_text_relaxed(commit)?
+    } else {
+        git.squash_text(commit)?
+    })
+}
+
 /// How long to wait for the checks.
 pub struct Poll<'a> {
     /// How many times to ask, at least once.
@@ -2512,7 +2556,7 @@ impl Athena {
         // The records sink is built here, on the production path, and its error stops the landing: a
         // landing never goes ahead without somewhere to write its records (§5.2).
         let sink = GitLandingRecords::for_remote(&self.git, remote_name)?;
-        let landed = landed_commit(&self.git, &head, &id, &verification.verified_fingerprint);
+        let landed = landed_commit_for(&self.git, &head, &id, &verification.verified_fingerprint);
         let landed_id = landed.as_ref().ok().cloned();
         let attempt = || -> Result<PrReport> {
             match landed {
@@ -2527,7 +2571,7 @@ impl Athena {
                         body: &body,
                         head: &branch,
                     },
-                    squash: &self.git.squash_text(&landed)?,
+                    squash: &squash_text_for(&self.git, &head, &landed)?,
                     host_name: &host_name,
                     repository: &repository,
                     merge_via_rest: config.landing.merge_via_rest,
