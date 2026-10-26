@@ -1,0 +1,162 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261026-024220-94p9",
+  "base_commit": "6e136ba8fc0f84ee1ac6b9c96f1ed81618405ce8",
+  "base_fingerprint": "sha256:6b37aefa0b53d90718f50ca49df6281fb5eb3c91ce1b30c9529ddb23fee53e6b",
+  "previous_job": "20261026-015416-94rc",
+  "candidate_commit": "32ef4512b0f074a58fadab33e91c885a0e60d7ab",
+  "candidate_tree": "8b46cac77938929faf0cb1ce826772761477b3be",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 148621
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 51157
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 103353
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 118868
+    },
+    {
+      "path": "crates/athena-core/src/scope_guard.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 53596
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 40057
+    },
+    {
+      "path": "docs/design/scope-guard.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 24000
+    }
+  ],
+  "fingerprint": "sha256:e6f8a107ad8000ef2ede6b72cc8894ec1e56f8e6b3388274ec4c4771e25fbbd1",
+  "violations": [],
+  "producer_report": {
+    "summary": "Added the running-line watcher. After each `go` that reaches a final state, `Athena::watch_line` rebuilds RequestRecords from the committed records, runs `group_lines`, and evaluates T1–T5 with `evaluate_before_attempt`. It writes `<state root>/scope/<first id>.flag.json` or `.pause.json`. A pause record holds the signals with their levels, the numbers that tripped them, the reason, and what would lift it. For T4 the lift is a narrowed request or a measurement. For the other signals it is a measurement of cost or progress. Every lift text also names the file to delete. `dispatch` (run.rs) and `Athena::retry` (reading.rs) refuse a paused line through `Athena::line_pause`, which rebuilds RequestRecords, calls `group_lines`, and looks up the pause file by the line's first id. `ask` is unchanged, so a request can still be recorded, but `go` refuses to dispatch it. T3's p90 is `forecasts.reader.cost_usd.p90()` from the latest reading of the line's latest job. The watcher never touches the process registry, and a pause is lifted only by deleting its file. `athena status` has a new `lines` field and a Lines section with level, first id and signals. Paused lines also get a next-step hint. CHANGELOG.md and docs/design/scope-guard.md (new section 13.1) are updated. Seven new tests in scope_guard.rs drive `go` with the fake driver, plus one display test. The final `cargo test --locked` and `cargo clippy` runs exited 0. I could not read the saved output of the full test run.",
+    "files": [
+      "crates/athena-core/src/scope_guard.rs",
+      "crates/athena-core/src/run.rs",
+      "crates/athena-core/src/reading.rs",
+      "crates/athena-core/src/status.rs",
+      "crates/athena-cli/src/display.rs",
+      "CHANGELOG.md",
+      "docs/design/scope-guard.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo build --locked --all-targets",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test --locked -p athena-core scope_guard",
+        "result": "pass",
+        "note": "After one fix to the t3 test, all 18 scope_guard tests passed, including the 7 new ones."
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "Run after `cargo fmt --all`."
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "The command exited 0; Bash would have shown 'Exit code 101' on a failure. The saved output was outside the working directory, so I could not grep it for per-test results."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A test with two rejections on the same unmet criterion, with the third request made via ask('try again on <id>') (not retry), shows the third attempt is not dispatched and a pause record exists; a control with no pause file dispatches. Run cargo test.",
+        "status": "met",
+        "evidence": "`cargo test --locked -p athena-core scope_guard::watcher_tests::t4_pause_via_go_and_ask` passes. Two rejections come from `go`, with no direct watch_line call. The third request is made with `ask`. `go` returns Err containing 'paused' and 'T4', the third job has no Job record, and the pause file is still there. After the pause file is removed, `go` returns Landed."
+      },
+      {
+        "criterion": "A test with rejections on differing criteria records a flag only: no pause record, and the next attempt is dispatched. Run cargo test.",
+        "status": "met",
+        "evidence": "`scope_guard::watcher_tests::differing_criteria_flag_only` passes. It checks that a flag file with signal T1 exists and no pause file exists. The next ask and `go` returns Landed, and the flag is cleared once the line is accepted."
+      },
+      {
+        "criterion": "A test shows Athena::retry on a paused line refuses with the pause reason, and dispatch finds the line head by rebuilding RequestRecords and calling group_lines, then looking up the pause file by the line's first id. Run cargo test.",
+        "status": "met",
+        "evidence": "`scope_guard::watcher_tests::retry_refuses_paused_line` passes. The control retry succeeds. After the pause file for a's id is written, `retry(b)` returns Err containing T4 and the reason, and the records tip is unchanged. `line_pause` (request_records, then group_lines, then the file named by the first id) finds the pause for b and for a later job on the line, and returns None for an unrelated job. `dispatch` calls the same `line_pause`."
+      },
+      {
+        "criterion": "A T3 test passes a real positive forecast p90 dollars read from the job's reading forecasts, pauses the line, and fails if the pause is removed. Run cargo test.",
+        "status": "met",
+        "evidence": "`scope_guard::watcher_tests::t3_pause_from_reading_forecast` passes. The fake reader emits a cost_usd p90 of 1.0 and spend is 1.6, so the pause file names T3 with spend_usd 1.6 and p90 1.0. The next `go` is refused with the pause text. Removing the pause file lets that `go` land. A second run with reading p90 10.0 and the same spend writes no pause and no flag."
+      },
+      {
+        "criterion": "A test registers a real child process (e.g. sleep) as a line's running job, drives the watcher to a pause on that line, and asserts the child is still alive and its registry entry unchanged. Run cargo test.",
+        "status": "met",
+        "evidence": "`scope_guard::watcher_tests::pause_leaves_running_child_alone` passes. It spawns `sleep 60` in its own process group and registers its pgid under the line's first job. The second rejection goes through `go` and writes the pause. `try_wait` returns None, and `registry.entries()` equals the snapshot taken before. A Drop guard kills and reaps the child."
+      },
+      {
+        "criterion": "A test shows athena status output lists flagged and paused lines with their signal (T1–T5). Run cargo test.",
+        "status": "met",
+        "evidence": "`scope_guard::watcher_tests::status_lists_flagged_and_paused_lines` checks that `Athena::status().lines` holds the paused T4 line and the flagged T1 line, that the next steps mention the paused line, and that there is no Lines section when no marks exist. The display test `status_lists_flagged_and_paused_lines` in display.rs checks `lines_section` output for 'paused'/T4, 'flagged'/T1 and the lift text. `display::status` calls `lines_section`, but no test renders the whole status view."
+      },
+      {
+        "criterion": "A pause record names the signal, the numbers that tripped it, and what would lift it (a measurement, or a narrowed request for T4).",
+        "status": "met",
+        "evidence": "`scope_guard::watcher_tests::pause_record_content` reads the JSON pause files. For T4 it checks the signal, level, rejections 2, the matched criterion, and a lift containing 'narrow the request' and the pause file name. For T3 it checks spend_usd 1.6, p90 1.0 and a lift containing 'measurement'."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry for the watcher; docs/design/scope-guard.md reflects job 5 and states that p90 comes from the reading's forecasts and is used by t3_cost.",
+        "status": "met",
+        "evidence": "CHANGELOG.md has a new 'Scope guard job 5, the running-line watcher' item under Unreleased/Added. scope-guard.md has a new section 13.1, and section 13 now says job 5 is built. 13.1 states that the p90 passed to `t3_cost` is `forecasts.reader.cost_usd.p90()` of the latest reading."
+      },
+      {
+        "criterion": "cargo clippy is clean, cargo fmt --check passes, and cargo test passes.",
+        "status": "met",
+        "evidence": "`cargo clippy --all-targets --locked -- -D warnings`, `cargo fmt --all --check` and `cargo test --locked` all exited 0. For the full test run I judged success from the exit code only, because its saved output was unreadable."
+      }
+    ],
+    "open_issues": [
+      "Departure from the plan: the plan asked for a test showing that p90 of 0 gives no T3 pause. The fake reader's output with p90 0.0 did not produce a usable reading, and I did not investigate why. The test uses p90 10.0 instead. `forecast_p90_dollars` returns 0 for a non-positive value, but no test covers that branch.",
+      "Lines are keyed by the first request id. If the owner deletes a pause file and the next attempt is rejected again with the same criterion, the line is paused again. This is by design; the lift text says to narrow the request first.",
+      "The watcher runs only from `Athena::go`. A job closed by `athena close` or by another path does not trigger it.",
+      "The display test covers `lines_section` only, not the full `display::status` output, because building a `StatusView` literal in the CLI crate needs many fields.",
+      "Everything in the line watcher depends on `self.head()` showing the job's closing commit after `go` returns. The t4_pause_via_go_and_ask test passes through `go`, so this holds for rejected jobs; I did not test other final states."
+    ],
+    "mistakes": [
+      "My first t3 test used a reading with p90 0.0 as the 'no usable forecast' control. That reading failed in the reader step, so the test failed. I replaced the control with p90 10.0 and the same spend, which shows the pause follows the reading's p90."
+    ],
+    "learnings": [
+      "`Records::request_jobs()` returns jobs newest first; `request_records` reverses them so the first member of a line is the oldest request.",
+      "`Totals.cost_execution` (producer plus verifier) is the quantity the reading's `cost_usd` forecast covers, so it is the right spend for T3. The reader call's cost is excluded.",
+      "`registry().reap()` at the start of `go` removes only dead groups and groups whose owner died; a live child owned by the test process is left alone.",
+      "`run_pin_tests.rs` shows a way to drive `go` end to end with the fake driver: a custom Capability with `pins_repo` false, athena.toml with `[job_plan]` stripped, and a script closure keyed on Role. A verifier output of `fail` with `met: false` on a content criterion gives a Rejected outcome with no checks.",
+      "`Quantiles` exposes only `p90()` publicly; its fields are private."
+    ],
+    "desires": [
+      "Tools that can read saved tool-result files, so a long test run's per-test output can be checked.",
+      "A cheap way to find out why the fake reader rejected a p90 of 0.0."
+    ]
+  }
+}

@@ -738,6 +738,24 @@ fn plan_suffix(j: &athena_core::status::JobLine) -> String {
     format!("{priority}{plan}{hold}")
 }
 
+/// The lines of work the scope guard flagged or paused, one block each: level, first id and signals (T1 to
+/// T5), the numbers in words, and for a pause what lifts it. Empty text when there are none.
+fn lines_section(lines: &[athena_core::scope_guard::LineMark]) -> String {
+    let mut out = String::new();
+    for (i, l) in lines.iter().enumerate() {
+        let label = if i == 0 { "lines" } else { "" };
+        let level = if l.is_pause() { "paused" } else { "flagged" };
+        let _ = writeln!(out, "{label:<11} {level} {} · {}", l.line, l.signal_names());
+        for s in &l.signals {
+            let _ = writeln!(out, "{:<11}   {} {}: {}", "", s.signal, s.level, s.detail);
+        }
+        if l.is_pause() {
+            let _ = writeln!(out, "{:<11}   to lift: {}", "", l.lift);
+        }
+    }
+    out
+}
+
 /// `athena status`.
 pub fn status(v: &StatusView) -> String {
     let mut out = String::new();
@@ -814,6 +832,7 @@ pub fn status(v: &StatusView) -> String {
             plan_suffix(j)
         );
     }
+    out.push_str(&lines_section(&v.lines));
     for (i, n) in v.open_interventions.iter().enumerate() {
         let label = if i == 0 { "follow-up" } else { "" };
         let _ = writeln!(
@@ -1409,6 +1428,42 @@ mod tests {
             " · priority high · plan accepted r1"
         );
         assert_eq!(plan_suffix(&line(Priority::Normal)), " · plan accepted r1");
+    }
+
+    #[test]
+    fn status_lists_flagged_and_paused_lines() {
+        use athena_core::scope_guard::{LineMark, MarkNumbers, SignalFact};
+        let mark = |level: &str, line: &str, signal: &str| LineMark {
+            level: level.into(),
+            line: line.into(),
+            job: line.into(),
+            at: "2026-10-26T00:00:00Z".into(),
+            signals: vec![SignalFact {
+                signal: signal.into(),
+                level: level.into(),
+                detail: "two rejections".into(),
+            }],
+            numbers: MarkNumbers {
+                attempts: 2,
+                rejections: 2,
+                spend_usd: 0.5,
+                forecast_p90_usd: 0.0,
+                agent_minutes: 3,
+                matched_criterion: None,
+            },
+            reason: "r".into(),
+            lift: "narrow the request".into(),
+        };
+        assert_eq!(lines_section(&[]), "", "no marks, no section");
+        let text = lines_section(&[mark("pause", "line-p", "T4"), mark("flag", "line-f", "T1")]);
+        let paused = text.lines().find(|l| l.contains("line-p")).unwrap();
+        assert!(paused.contains("paused") && paused.contains("T4"), "{text}");
+        let flagged = text.lines().find(|l| l.contains("line-f")).unwrap();
+        assert!(
+            flagged.contains("flagged") && flagged.contains("T1"),
+            "{text}"
+        );
+        assert!(text.contains("to lift: narrow the request"), "{text}");
     }
 
     #[test]

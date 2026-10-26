@@ -135,6 +135,9 @@ pub struct StatusView {
     pub audience: Option<AudienceView>,
     /// The latest audit of a job's outcome (`crate::auditor`), if one is recorded.
     pub audit: Option<AuditView>,
+    /// Lines of work the scope guard flagged or paused, with their signals T1 to T5 (`crate::scope_guard`).
+    /// Pauses first. Empty when no mark file exists.
+    pub lines: Vec<crate::scope_guard::LineMark>,
     pub invalid_records: Vec<String>,
     pub next: Vec<String>,
     /// The reconciliation that ran before this view was built (`Athena::status_with_reconcile`); absent from
@@ -727,6 +730,15 @@ impl Athena {
                 _ => {}
             }
         }
+        let lines = crate::scope_guard::list_lines(&self.state);
+        for l in lines.iter().filter(|l| l.is_pause()) {
+            next.push(format!(
+                "line {} is paused ({})   # {}",
+                l.line,
+                l.signal_names(),
+                l.lift
+            ));
+        }
         let open_interventions = open_interventions(&records);
         for i in &open_interventions {
             next.push(format!(
@@ -786,6 +798,7 @@ impl Athena {
             work_proposals,
             audience: audience_view(&records),
             audit: audit_view(&records),
+            lines,
             invalid_records: records.invalid.clone(),
             next,
             reconcile: None,
