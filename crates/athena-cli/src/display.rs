@@ -3,7 +3,9 @@
 
 use athena_core::reading::Proposal;
 use athena_core::run::Finished;
-use athena_core::status::{JobTrace, PlanningCost, PlanningGroup, StatusView};
+use athena_core::status::{
+    JobTrace, KeepRule, KeepVerdict, PlanningCost, PlanningGroup, StatusView,
+};
 use athena_data::records::{
     CriterionKind, DeliverableAction, Forecast, OutcomeState, Quantiles, Reading, Score,
 };
@@ -125,6 +127,56 @@ fn planning_cost_lines(p: &PlanningCost) -> String {
         None => {
             let _ = writeln!(out, "            after:  no planning has resumed yet");
         }
+    }
+    out
+}
+
+/// The job-planning keep rule (job-planning.md section 9, D110): the measures, and a BREACH line with the
+/// numbers when planning is below the baseline or is to be turned off.
+fn keep_rule_lines(k: &KeepRule) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "keep rule   {} of {} planned jobs landed ({}) · baseline {}",
+        k.landed,
+        k.planned,
+        pct(k.share),
+        pct(k.baseline_share)
+    );
+    let cost = k.cost_per_landed_usd.map_or("n/a".to_string(), usd);
+    let rate = k.first_round_accept_rate.map_or("n/a".to_string(), |r| {
+        format!(
+            "{} ({} of {})",
+            pct(r),
+            k.first_round_accepted,
+            k.first_round_planned
+        )
+    });
+    let _ = writeln!(
+        out,
+        "            cost per landed job {cost} · first-round accept rate {rate}"
+    );
+    let numbers = format!(
+        "{} of {} planned jobs landed ({}), baseline {}, cost per landed job {cost}",
+        k.landed,
+        k.planned,
+        pct(k.share),
+        pct(k.baseline_share)
+    );
+    match k.verdict {
+        KeepVerdict::Breach => {
+            let _ = writeln!(
+                out,
+                "            BREACH: planning is below the keep rule: {numbers}"
+            );
+        }
+        KeepVerdict::TurnOff => {
+            let _ = writeln!(
+                out,
+                "            BREACH: the keep rule says turn planning off: {numbers}"
+            );
+        }
+        KeepVerdict::Keep | KeepVerdict::Inconclusive => {}
     }
     out
 }
@@ -862,6 +914,9 @@ pub fn status(v: &StatusView) -> String {
     if let Some(p) = &v.planning_cost {
         out.push_str(&planning_cost_lines(p));
     }
+    if let Some(k) = &v.keep_rule {
+        out.push_str(&keep_rule_lines(k));
+    }
     for (i, j) in v.open.iter().enumerate() {
         let label = if i == 0 { "open" } else { "" };
         let _ = writeln!(
@@ -1512,6 +1567,58 @@ mod tests {
             "{none}"
         );
         assert!(!none.contains("since the first"), "{none}");
+    }
+
+    fn keep_rule(landed: usize, planned: usize, verdict: KeepVerdict) -> KeepRule {
+        KeepRule {
+            planned,
+            landed,
+            share: landed as f64 / planned as f64,
+            baseline_share: 0.64,
+            total_cost_usd: 100.0,
+            cost_per_landed_usd: Some(100.0 / landed as f64),
+            first_round_accepted: 20,
+            first_round_planned: 40,
+            first_round_accept_rate: Some(0.5),
+            verdict,
+        }
+    }
+
+    #[test]
+    fn keep_rule_lines_show_the_measures_and_a_breach_line_only_when_breached() {
+        let text = keep_rule_lines(&keep_rule(28, 51, KeepVerdict::Breach));
+        for want in [
+            "28 of 51 planned jobs landed (55%)",
+            "baseline 64%",
+            "cost per landed job $3.57",
+            "first-round accept rate 50% (20 of 40)",
+        ] {
+            assert!(text.contains(want), "{want}: {text}");
+        }
+        let breach = text.lines().find(|l| l.contains("BREACH")).expect(&text);
+        assert!(breach.contains("28 of 51") && breach.contains("55%") && breach.contains("64%"));
+
+        let off = keep_rule_lines(&keep_rule(60, 100, KeepVerdict::TurnOff));
+        assert!(
+            off.contains("BREACH: the keep rule says turn planning off"),
+            "{off}"
+        );
+
+        let kept = keep_rule_lines(&keep_rule(40, 51, KeepVerdict::Keep));
+        assert!(
+            kept.contains("40 of 51 planned jobs landed (78%)"),
+            "{kept}"
+        );
+        assert!(!kept.contains("BREACH"), "{kept}");
+
+        let mut none = keep_rule(0, 5, KeepVerdict::Breach);
+        none.cost_per_landed_usd = None;
+        none.first_round_accept_rate = None;
+        let none = keep_rule_lines(&none);
+        assert!(
+            none.contains("cost per landed job n/a · first-round accept rate n/a"),
+            "{none}"
+        );
     }
 
     #[test]

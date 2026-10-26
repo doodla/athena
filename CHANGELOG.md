@@ -9,6 +9,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `athena status` evaluates the job-planning keep rule (job-planning.md section 9, D110) and shows it. Over
+  planned jobs that were dispatched (a job stopped in planning counts as not landed) it prints the landed share
+  against the 64% baseline, cost per landed job (all cost of those jobs over landed ones) and the first-round
+  accept rate, with a `BREACH` line carrying the numbers when the share is below the baseline. Below 100 planned
+  jobs a share under 64% is a breach (the rule states 30; the early rule continues to 100); at 100 or more the
+  rule reads keep (72% or more with at most $2.50 a landed job), turn off (64% or less) or inconclusive.
+  `athena status --json` carries the same measures and verdict as `keep_rule`. The rule only reports; it does
+  not change `athena.toml`.
 - The planner and the critic get a generated history file, `HISTORY.txt`, in their read-only snapshot: the last
   200 commits of the base commit's first-parent history, newest first, each with its short hash, date, subject and
   changed paths. Paths under `records/` and `athena-exclude` paths are left out, and so is a commit that changed

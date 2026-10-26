@@ -1,0 +1,116 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261025-033740-5d0n",
+  "base_commit": "5f8ec7635fb507327a46c9d52ab92a46ba50cf1c",
+  "base_fingerprint": "sha256:abe286e5f6f8170fc2bd29f7d0d4a426491e1c6a2812d1e950b6251be48676be",
+  "previous_job": "20261025-033733-80vv",
+  "candidate_commit": "9599052ca8f0381713cf2012bf9a1eda8ca65106",
+  "candidate_tree": "6fc715f027137a92ddb55f4322510c34bfd92ca6",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 158871
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 60780
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 68589
+    }
+  ],
+  "fingerprint": "sha256:9ebb912896cdf84571dfe71d1487154a2c498940cec122f7224d5cea232b3fc8",
+  "violations": [],
+  "producer_report": {
+    "summary": "athena status now evaluates the job-planning keep rule (section 9, D110). A new keep_rule() in status.rs counts planned jobs, landed jobs, the landed share, cost per landed job and the first-round accept rate, and gives a verdict of keep, breach, turn_off or inconclusive. It is in StatusView as keep_rule, so --json carries it. Status text prints the measures and a BREACH line with numbers when the verdict is breach or turn_off. Tests were added in both crates, and CHANGELOG.md has an entry. The first-round check was pulled into a shared helper so status and the rule agree. Planning is never turned off by this; it only reports.",
+    "files": [
+      "crates/athena-core/src/status.rs",
+      "crates/athena-cli/src/display.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-core keep_rule",
+        "result": "pass",
+        "note": "5 keep_rule tests pass after fixing my fixture ids and cost figures"
+      },
+      {
+        "command": "cargo test -p athena-core status",
+        "result": "pass",
+        "note": "16 pass"
+      },
+      {
+        "command": "cargo test -p athena-cli keep_rule",
+        "result": "pass",
+        "note": "1 test"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo fmt --all",
+        "result": "pass",
+        "note": "applied formatting"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A status.rs unit test builds fixture records with 51 planned dispatched jobs, 28 landed, and asserts the measures (landed 28, planned 51, share about 0.549, cost per landed job, first-round accept rate) and a breach verdict because the share is below 0.64. Run: cargo test -p athena-core.",
+        "status": "met",
+        "evidence": "keep_rule_flags_28_landed_of_51_planned_as_a_breach_with_the_measures passes; asserts 51/28, share, cost 51/28, first-round 20/51, Breach."
+      },
+      {
+        "criterion": "Fixture tests cover the rule's branches: at most 30 planned jobs with share at or above 0.64 reads keep; below 0.64 reads breach; at 100 or more planned jobs, share at least 0.72 with cost per landed job at most $2.50 reads keep, share at or below 0.64 reads turn off, otherwise inconclusive; zero landed gives no division by zero. Run: cargo test -p athena-core.",
+        "status": "met",
+        "evidence": "keep_rule_early_branches..., keep_rule_decision_branches_at_100_planned_jobs and keep_rule_with_nothing_landed_divides_by_nothing pass."
+      },
+      {
+        "criterion": "A display.rs test shows the rendered status text contains the measures with their numbers (28 of 51, 55%, baseline 64%, cost per landed job, first-round accept rate) and a breach line when breached, and no breach line when kept. Run: cargo test -p athena-cli.",
+        "status": "met",
+        "evidence": "cargo test -p athena-cli keep_rule: keep_rule_lines_show_the_measures_and_a_breach_line_only_when_breached passes. It tests keep_rule_lines, which status() calls, not a whole StatusView."
+      },
+      {
+        "criterion": "The StatusView serialization (what `athena status --json` prints) contains a keep-rule object with the measures and verdict; a test asserts the JSON keys and values. Run: cargo test.",
+        "status": "met",
+        "evidence": "StatusView.keep_rule is a serialized Option<KeepRule>; the 51-job test asserts the JSON keys planned, landed, baseline_share, verdict=breach, share, cost and rate. Key test is on KeepRule, the field's type."
+      },
+      {
+        "criterion": "The denominator counts planned dispatched jobs, a job stopped in planning counts as not landed, and cost per landed job divides all cost of those jobs by landed jobs, as section 9 defines it; the thresholds (30, 100, 64%, 72%, $2.50) are named constants citing job-planning.md section 9 and D110.",
+        "status": "met",
+        "evidence": "keep_rule() in status.rs and the KEEP_RULE_* constants with doc comments citing section 9 and D110; a test covers a stopped job with no dispatch record."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry for the keep-rule evaluation in status.",
+        "status": "met",
+        "evidence": "Entry added under Unreleased > Added."
+      },
+      {
+        "criterion": "cargo test, cargo clippy --all-targets and cargo fmt --check all pass.",
+        "status": "met",
+        "evidence": "left to Athena's checks for the full cargo test and fmt --check; I ran clippy with -D warnings (clean) and ran cargo fmt --all."
+      }
+    ],
+    "open_issues": [
+      "docs/design/job-planning.md is listed as a deliverable but out of scope forbids changing it; left unedited.",
+      "Between 31 and 99 planned jobs I apply the early rule (breach under 64%); section 9 is silent there.",
+      "The full cargo test was not run; left to Athena."
+    ],
+    "mistakes": [
+      "First fixture ids had an out-of-range time; first decision-branch costs hit a float edge at exactly $2.50. Both fixed."
+    ],
+    "learnings": [
+      "JobId time part is HHMMSS and validated, so fixture ids need valid times.",
+      "TurnOff is also shown as a BREACH line, since the rule says planning should go."
+    ],
+    "desires": []
+  }
+}

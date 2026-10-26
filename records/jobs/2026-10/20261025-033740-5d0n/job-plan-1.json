@@ -1,0 +1,170 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261025-033740-5d0n",
+  "round": 1,
+  "at": "2026-10-26T19:07:18.216261868Z",
+  "invocation_seq": 2,
+  "approach": "Add a pure `keep_rule(&Records) -> Option<KeepRule>` in status.rs. Over planned jobs (at least one job-plan record, and dispatched or stopped in planning) it counts landed, the landed share, cost per landed job (all invocation cost of those jobs divided by landed), and the first-round accept rate. It applies job-planning.md §9 through named constants and returns a verdict (keep, breach, turn_off, inconclusive). Add it to StatusView as `keep_rule` (skipped when absent), so `--json` carries it. Add `keep_rule_lines` in display.rs, wired into `status()` after the planning-cost lines. It prints the measures and a BREACH line with numbers when the verdict is breach or turn_off. Add fixture tests in both crates and a CHANGELOG entry. job-planning.md is not edited, because the brief puts changing it out of scope.",
+  "decisions": [
+    {
+      "choice": "Planned job = request job with plans non-empty and (job record present, or last plan state is stopped). Landed = JobState::Closed(OutcomeState::Landed). Cost = JobRecords::spent_usd (every invocation).",
+      "reason": "Matches §9: stopped-in-planning stays in the denominator as not landed, and cost covers every job's cost, as `totals.cost_all` does. It reuses plan_state and spent_usd.",
+      "rejected": [
+        {
+          "option": "Count only jobs with a dispatch record",
+          "why": "A job stopped in planning might lack one, so it would leave the denominator and flatter the share, which §9 forbids."
+        },
+        {
+          "option": "Hard-code 28 of 51",
+          "why": "The figure comes from the request; compute it from records."
+        }
+      ]
+    },
+    {
+      "choice": "Verdict rules. Planned below 100: breach if share < 0.64, else keep. Planned at 100 or more: keep if share >= 0.72 and cost per landed <= $2.50; turn_off if share <= 0.64; else inconclusive. Zero landed gives share 0.0 and cost per landed None (no division). Between 31 and 99 planned jobs the early rule continues.",
+      "reason": "§9 states the rule only at 30 and 100. Treating 31 to 99 as the early rule keeps the breach flag live and takes no firm decision before 100. Constants: KEEP_RULE_EARLY_JOBS=30, KEEP_RULE_DECISION_JOBS=100, KEEP_RULE_BASELINE_SHARE=0.64, KEEP_RULE_TARGET_SHARE=0.72, KEEP_RULE_COST_CEILING_USD=2.50, each citing job-planning.md §9 and D110.",
+      "rejected": [
+        {
+          "option": "Report no verdict between 30 and 100 jobs",
+          "why": "The 55% breach would go unflagged, which is the fault the request names."
+        },
+        {
+          "option": "Edit athena.toml to turn planning off",
+          "why": "Out of scope; the rule only reports."
+        }
+      ]
+    },
+    {
+      "choice": "First-round accept rate = jobs whose first critique accepted with no reading mismatch, divided by planned jobs that have a critique. Share the predicate with the existing FirstRoundCounts loop through a small helper.",
+      "reason": "It reuses the existing definition, so status and the rule cannot disagree.",
+      "rejected": [
+        {
+          "option": "accepted / (accepted + stopped)",
+          "why": "It drops round-1 revises from the denominator and overstates the rate."
+        }
+      ]
+    },
+    {
+      "choice": "display.rs gets a pure `keep_rule_lines(&KeepRule) -> String`, tested directly; the test of the JSON shape serializes KeepRule.",
+      "reason": "Building a full StatusView in tests is heavy, and the existing planning_cost_lines test uses the same pattern. The StatusView field is a plain Option<KeepRule>.",
+      "rejected": [
+        {
+          "option": "Test only through a whole rendered StatusView",
+          "why": "It needs about 30 fields of fixture for no added coverage."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "Add the constants, the KeepRule and KeepVerdict types, the pure keep_rule(), the StatusView.keep_rule field and its population in status(), and fixture tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "purpose": "Add keep_rule_lines (measures and BREACH line), call it in status(), and add a test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an Unreleased > Added entry for the keep-rule evaluation in status.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In status.rs add the named constants with doc comments citing job-planning.md §9 and D110. Add KeepVerdict (serde snake_case: keep, breach, turn_off, inconclusive) and KeepRule (planned, landed, share, total_cost_usd, cost_per_landed_usd as Option, first_round_accepted, first_round_planned, first_round_accept_rate as Option, baseline_share, verdict).",
+    "Extract the first-round accepted predicate from the status() loop into a helper, and use it in both places.",
+    "Write pub fn keep_rule(records: &Records) -> Option<KeepRule>: return None when there are no planned jobs, count landed, sum spent_usd, compute the measures with zero-guards, and apply the verdict rules.",
+    "Add `keep_rule: Option<KeepRule>` to StatusView with skip_serializing_if none, and fill it in status() with keep_rule(&records).",
+    "Add fixture tests to planning_cost_tests: a generator of N planned jobs with L landed and some critiques, the 51/28 breach case, the branch table, zero landed, and the serialization keys.",
+    "In display.rs add keep_rule_lines: a 'keep rule' header, the line '28 of 51 planned jobs landed (55%) · baseline 64%', the cost per landed job (usd(), or n/a), the first-round accept rate, and a 'BREACH ...' line with the numbers for breach or turn_off. Call it in status() after planning_cost_lines. Add tests for the breach and keep cases.",
+    "Add a CHANGELOG.md entry under [Unreleased] > Added.",
+    "Run cargo fmt, cargo clippy --all-targets and cargo test."
+  ],
+  "risks": [
+    {
+      "risk": "The verdict between 31 and 99 planned jobs is my reading, since the rule does not define it.",
+      "mitigation": "Document the choice in the code comment and the CHANGELOG, and cover it with a test at 31 or more planned jobs."
+    },
+    {
+      "risk": "The first-round accept rate could drift from the existing FirstRoundCounts logic.",
+      "mitigation": "Cover it with the 51-job fixture and a separate test of the first-round rate. Reuse a shared predicate with the FirstRoundCounts loop."
+    },
+    {
+      "risk": "Zero landed jobs gives a NaN or a panic.",
+      "mitigation": "Show cost per landed as 'n/a' and null in JSON; test it."
+    },
+    {
+      "risk": "The fixture helper adds a $50 producer invocation per job, which distorts expected costs.",
+      "mitigation": "The job() helper takes a cost argument. Add producer invocations there deliberately and assert the exact totals."
+    },
+    {
+      "risk": "status.rs is large; the new code could trip a code-health limit or clippy.",
+      "mitigation": "Keep the new tests in the existing planning_cost_tests module, reuse its job(), records() and close() helpers, and run clippy before finishing."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit test in the planning_cost_tests module of status.rs. It builds 51 planned jobs (28 Landed, 23 Failed or stopped in planning) with known costs and critiques, then calls keep_rule.",
+      "command": "cargo test -p athena-core keep_rule",
+      "observes": "planned 51, landed 28, share about 0.549, cost per landed equal to the total cost of the 51 jobs divided by 28, the expected first-round accept rate, and verdict Breach.",
+      "fails_without": "With no keep-rule evaluation the function does not exist. If stopped jobs were dropped from the denominator, planned would not be 51 and the share would not be 0.549."
+    },
+    {
+      "criterion": 2,
+      "method": "Table-style fixture tests, built with a small generator of N jobs with L landed. They cover 30 planned at 64% or more (keep), 30 planned below 64% (breach), 100 planned with share 0.72 or more and cost at most $2.50 (keep), 100 planned with share 0.72 or more and cost above $2.50 (inconclusive), 100 planned with share at most 0.64 (turn_off), 100 planned with share between 0.64 and 0.72 (inconclusive), and 0 landed (no panic, cost per landed None).",
+      "command": "cargo test -p athena-core keep_rule",
+      "observes": "The expected verdict for each branch, and no NaN or infinity in the zero-landed result.",
+      "fails_without": "A wrong threshold comparison, such as < instead of <= at 0.64, or an unguarded division would fail one of these cases."
+    },
+    {
+      "criterion": 3,
+      "method": "Unit test in display.rs tests. It renders keep_rule_lines for a breach KeepRule (28 of 51, 0.549, baseline 0.64) and for a keep KeepRule.",
+      "command": "cargo test -p athena-cli keep_rule",
+      "observes": "The breach text contains '28 of 51', '55%', '64%', 'cost per landed job', 'first-round accept rate' and a line starting 'BREACH'. The keep text contains the measures and no 'BREACH' line.",
+      "fails_without": "With no rendering the measures and the breach line are absent from the status text. If the line were always printed, the keep case would fail."
+    },
+    {
+      "criterion": 4,
+      "method": "A status.rs test serializes the KeepRule from the 51-job fixture with serde_json::to_value. The StatusView field is `keep_rule`, an Option<KeepRule> that serializes whenever there is a planned job.",
+      "command": "cargo test",
+      "observes": "The keys planned, landed, share, cost_per_landed_usd, first_round_accept_rate, baseline_share and verdict, with verdict equal to \"breach\" and planned equal to 51.",
+      "fails_without": "If the field were not serialized, or the keys differed, the key and value assertions would fail."
+    },
+    {
+      "criterion": 5,
+      "method": "The tests of criteria 1 and 2 include a stopped-in-planning job in the denominator. A review of the constants shows their doc comments cite job-planning.md §9 and D110.",
+      "command": "cargo test -p athena-core keep_rule",
+      "observes": "A job stopped in planning counts as planned and not landed, and cost per landed equals the total cost of all planned jobs divided by landed.",
+      "fails_without": "Excluding stopped jobs or dividing only landed jobs' cost changes the asserted numbers."
+    },
+    {
+      "criterion": 6,
+      "method": "Inspect the diff.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "An entry under Unreleased > Added describing the keep-rule evaluation, the breach line and the `keep_rule` key in `athena status --json`.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Run the three Athena checks (each as its own cargo command).",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0.",
+      "fails_without": "A format, lint or test failure would exit non-zero."
+    }
+  ],
+  "open_questions": [
+    "The expected deliverables list docs/design/job-planning.md, but out of scope says not to change it. I left it unedited. If the verifier needs it touched, a one-line note in §9 that status evaluates the rule would be harmless.",
+    "§9 does not say what to do between 31 and 99 planned jobs. I apply the early rule (breach if below 64%) there, and the producer should record that choice in the constant docs.",
+    "I did not check whether a job stopped in planning always has a job record, so the planned-job predicate accepts either a job record or a stopped last plan state."
+  ],
+  "producer_section_sha256": "904a552acc3c09e101495d8f5a198de42ca31174b54d93fd710e3e0d81a85d01"
+}

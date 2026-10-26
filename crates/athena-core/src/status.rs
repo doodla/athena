@@ -96,6 +96,118 @@ pub struct PlanningCost {
     pub first_resumed: Option<(String, String)>,
 }
 
+/// Whether the first planning round of `job` accepted without a reading mismatch; `None` for a job with no critique.
+fn first_round_accepted(job: &JobRecords) -> Option<bool> {
+    let first = job.critiques.first()?;
+    Some(first.final_verdict == CritiqueVerdict::Accept && first.request_reading_mismatch.is_none())
+}
+
+/// Planned jobs up to which the early keep rule applies (job-planning.md section 9, D110): the landed share is
+/// held at the baseline through the first 30 planned jobs.
+pub const KEEP_RULE_EARLY_JOBS: usize = 30;
+/// Planned jobs at which the keep / turn off / inconclusive decision is taken (job-planning.md section 9, D110).
+/// Between the two thresholds the early rule continues: the rule states nothing else, and this keeps a breach
+/// visible until the decision.
+pub const KEEP_RULE_DECISION_JOBS: usize = 100;
+/// The landed share planning is held to, and at or below which it is turned off at the decision
+/// (job-planning.md section 9, D110).
+pub const KEEP_RULE_BASELINE_SHARE: f64 = 0.64;
+/// The landed share needed at the decision to keep planning, with the cost ceiling met
+/// (job-planning.md section 9, D110).
+pub const KEEP_RULE_TARGET_SHARE: f64 = 0.72;
+/// The cost per landed job, in USD, that must not be exceeded to keep planning at the decision
+/// (job-planning.md section 9, D110).
+pub const KEEP_RULE_COST_CEILING_USD: f64 = 2.50;
+
+/// What the job-planning keep rule says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeepVerdict {
+    Keep,
+    Breach,
+    TurnOff,
+    Inconclusive,
+}
+
+/// The job-planning keep rule (job-planning.md section 9, D110) evaluated over the records.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct KeepRule {
+    /// Planned jobs that were dispatched; a job stopped in planning counts here and not as landed.
+    pub planned: usize,
+    pub landed: usize,
+    /// `landed / planned`.
+    pub share: f64,
+    pub baseline_share: f64,
+    /// All invocation cost of the planned jobs, in USD.
+    pub total_cost_usd: f64,
+    /// `total_cost_usd / landed`; none when nothing landed.
+    pub cost_per_landed_usd: Option<f64>,
+    pub first_round_accepted: usize,
+    /// Planned jobs with a critique.
+    pub first_round_planned: usize,
+    pub first_round_accept_rate: Option<f64>,
+    pub verdict: KeepVerdict,
+}
+
+/// The verdict of the keep rule for `planned` jobs with the given share and cost per landed job.
+fn keep_verdict(planned: usize, share: f64, cost_per_landed: Option<f64>) -> KeepVerdict {
+    if planned < KEEP_RULE_DECISION_JOBS {
+        return if share < KEEP_RULE_BASELINE_SHARE {
+            KeepVerdict::Breach
+        } else {
+            KeepVerdict::Keep
+        };
+    }
+    if share >= KEEP_RULE_TARGET_SHARE
+        && cost_per_landed.is_some_and(|c| c <= KEEP_RULE_COST_CEILING_USD)
+    {
+        KeepVerdict::Keep
+    } else if share <= KEEP_RULE_BASELINE_SHARE {
+        KeepVerdict::TurnOff
+    } else {
+        KeepVerdict::Inconclusive
+    }
+}
+
+/// Evaluates the keep rule over the planned, dispatched jobs. `None` when no job was planned and dispatched.
+pub fn keep_rule(records: &Records) -> Option<KeepRule> {
+    let planned: Vec<&JobRecords> = records
+        .request_jobs()
+        .into_iter()
+        .filter(|j| {
+            !j.plans.is_empty() && (j.job.is_some() || plan_state(j).is_some_and(|s| !s.accepted))
+        })
+        .collect();
+    if planned.is_empty() {
+        return None;
+    }
+    let landed = planned
+        .iter()
+        .filter(|j| matches!(j.state(), JobState::Closed(OutcomeState::Landed)))
+        .count();
+    let total_cost_usd: f64 = planned.iter().map(|j| j.spent_usd()).sum();
+    let share = landed as f64 / planned.len() as f64;
+    let cost_per_landed_usd = (landed > 0).then(|| total_cost_usd / landed as f64);
+    let rounds: Vec<bool> = planned
+        .iter()
+        .filter_map(|j| first_round_accepted(j))
+        .collect();
+    let first_round_accepted = rounds.iter().filter(|a| **a).count();
+    Some(KeepRule {
+        planned: planned.len(),
+        landed,
+        share,
+        baseline_share: KEEP_RULE_BASELINE_SHARE,
+        total_cost_usd,
+        cost_per_landed_usd,
+        first_round_accepted,
+        first_round_planned: rounds.len(),
+        first_round_accept_rate: (!rounds.is_empty())
+            .then(|| first_round_accepted as f64 / rounds.len() as f64),
+        verdict: keep_verdict(planned.len(), share, cost_per_landed_usd),
+    })
+}
+
 /// The most predecessors followed back from a landed job.
 const MAX_CHAIN: usize = 16;
 
@@ -231,6 +343,10 @@ pub struct StatusView {
     /// planned job landed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub planning_cost: Option<PlanningCost>,
+    /// The job-planning keep rule (job-planning.md section 9, D110) over planned dispatched jobs; absent when
+    /// no job was planned and dispatched.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keep_rule: Option<KeepRule>,
     pub interventions_by_category: BTreeMap<String, usize>,
     pub interventions_by_class: BTreeMap<String, usize>,
     /// Mistakes per class and per cause, with the prevention proposed. Apart from `interventions_by_category`,
@@ -735,15 +851,13 @@ impl Athena {
         let mut open = Vec::new();
         let mut first_round: Option<FirstRoundCounts> = None;
         for job in records.request_jobs() {
-            if let Some(first) = job.critiques.first()
+            if let Some(accepted) = first_round_accepted(job)
                 && let Some(state) = plan_state(job)
             {
                 let counts = first_round.get_or_insert(FirstRoundCounts {
                     accepted: 0,
                     stopped: 0,
                 });
-                let accepted = first.final_verdict == CritiqueVerdict::Accept
-                    && first.request_reading_mismatch.is_none();
                 // A round-1 revise sends the plan back; only a job whose planning ended in round 1 stopped there.
                 if accepted {
                     counts.accepted += 1;
@@ -912,6 +1026,7 @@ impl Athena {
             open,
             planning: first_round,
             planning_cost: planning_cost(&records),
+            keep_rule: keep_rule(&records),
             interventions_by_category: by_category,
             interventions_by_class: by_class,
             mistakes: mistake_report(&records),
@@ -1504,6 +1619,165 @@ mod planning_cost_tests {
         // Chains of 4 and 6 rounds, costing 1.0 and 1.2 USD.
         assert!(close(cost.before.mean_rounds, 5.0), "{cost:?}");
         assert!(close(cost.before.mean_cost_usd, 1.1), "{cost:?}");
+    }
+
+    fn critique(job: &str, round: u32, verdict: CritiqueVerdict) -> Critique {
+        Critique {
+            job: id(job),
+            round,
+            at: jiff::Timestamp::UNIX_EPOCH,
+            invocation_seq: None,
+            agent_verdict: Some(verdict),
+            final_verdict: verdict,
+            findings: vec![],
+            request_reading_mismatch: None,
+            summary: None,
+        }
+    }
+
+    /// A planned, dispatched job costing `usd` in all, closed as `state`, whose critiques give `verdicts` in turn.
+    fn planned(
+        i: usize,
+        state: OutcomeState,
+        usd: f64,
+        verdicts: &[CritiqueVerdict],
+    ) -> JobRecords {
+        let text = format!("20261001-00{:02}{:02}-abcd", i / 60, i % 60);
+        let mut j = job(
+            &text,
+            &format!("request {i}"),
+            "2026-10-01T10:00:00Z",
+            1,
+            None,
+            state,
+            0.0,
+        );
+        j.invocations = vec![invocation(&id(&text), 99, Role::Producer, usd)];
+        for (n, v) in verdicts.iter().enumerate() {
+            j.critiques.push(critique(&text, n as u32 + 1, *v));
+        }
+        j
+    }
+
+    /// `n` planned jobs of which `landed` landed (accepted in round 1); the rest were stopped in planning.
+    fn fleet(n: usize, landed: usize, usd: f64) -> Records {
+        records(
+            (0..n)
+                .map(|i| {
+                    if i < landed {
+                        planned(i, OutcomeState::Landed, usd, &[CritiqueVerdict::Accept])
+                    } else {
+                        planned(i, OutcomeState::Failed, usd, &[CritiqueVerdict::Reject])
+                    }
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn keep_rule_flags_28_landed_of_51_planned_as_a_breach_with_the_measures() {
+        use CritiqueVerdict::{Accept, Reject, Revise};
+        let jobs = (0..51)
+            .map(|i| match i {
+                // 20 landed after an accept in round 1, 8 after a revise first.
+                0..20 => planned(i, OutcomeState::Landed, 1.0, &[Accept]),
+                20..28 => planned(i, OutcomeState::Landed, 1.0, &[Revise, Accept]),
+                // 23 not landed; stopped in planning at round 1.
+                _ => planned(i, OutcomeState::Failed, 1.0, &[Reject]),
+            })
+            .collect();
+        let rule = keep_rule(&records(jobs)).expect("planned jobs");
+        assert_eq!((rule.planned, rule.landed), (51, 28));
+        assert!(close(rule.share, 28.0 / 51.0), "{rule:?}");
+        assert!(close(rule.total_cost_usd, 51.0), "{rule:?}");
+        assert!(
+            close(rule.cost_per_landed_usd.unwrap(), 51.0 / 28.0),
+            "{rule:?}"
+        );
+        assert_eq!(
+            (rule.first_round_accepted, rule.first_round_planned),
+            (20, 51)
+        );
+        assert!(
+            close(rule.first_round_accept_rate.unwrap(), 20.0 / 51.0),
+            "{rule:?}"
+        );
+        assert_eq!(rule.verdict, KeepVerdict::Breach);
+
+        let json = serde_json::to_value(&rule).unwrap();
+        assert_eq!(json["planned"], 51);
+        assert_eq!(json["landed"], 28);
+        assert_eq!(json["baseline_share"], 0.64);
+        assert_eq!(json["verdict"], "breach");
+        assert!((json["share"].as_f64().unwrap() - 0.549).abs() < 1e-3);
+        assert!(json["cost_per_landed_usd"].is_f64());
+        assert!(json["first_round_accept_rate"].is_f64());
+    }
+
+    #[test]
+    fn keep_rule_counts_a_job_stopped_in_planning_without_a_dispatch_as_planned_and_not_landed() {
+        let mut stopped = planned(1, OutcomeState::Failed, 0.5, &[CritiqueVerdict::Reject]);
+        stopped.job = None;
+        stopped.outcome = None;
+        let rule = keep_rule(&records(vec![
+            planned(0, OutcomeState::Landed, 1.5, &[CritiqueVerdict::Accept]),
+            stopped,
+        ]))
+        .unwrap();
+        assert_eq!((rule.planned, rule.landed), (2, 1));
+        // All cost of the planned jobs over the landed ones.
+        assert!(close(rule.cost_per_landed_usd.unwrap(), 2.0), "{rule:?}");
+    }
+
+    #[test]
+    fn keep_rule_early_branches_keep_at_the_baseline_and_breach_below_it() {
+        // 30 planned: 20 of 30 is 0.667 (keep); 19 of 30 is 0.633 (breach).
+        assert_eq!(
+            keep_rule(&fleet(30, 20, 1.0)).unwrap().verdict,
+            KeepVerdict::Keep
+        );
+        assert_eq!(
+            keep_rule(&fleet(30, 19, 1.0)).unwrap().verdict,
+            KeepVerdict::Breach
+        );
+        // Exactly the baseline: 16 of 25 is 0.64, kept.
+        assert_eq!(
+            keep_rule(&fleet(25, 16, 1.0)).unwrap().verdict,
+            KeepVerdict::Keep
+        );
+        // Between the thresholds the early rule continues.
+        assert_eq!(
+            keep_rule(&fleet(60, 30, 1.0)).unwrap().verdict,
+            KeepVerdict::Breach
+        );
+    }
+
+    #[test]
+    fn keep_rule_decision_branches_at_100_planned_jobs() {
+        let verdict = |landed, usd| keep_rule(&fleet(100, landed, usd)).unwrap().verdict;
+        // 72% landed at $1.39 a landed job ($100 in all): keep.
+        assert_eq!(verdict(72, 1.0), KeepVerdict::Keep);
+        // 72% landed but $2.78 a landed job ($200 in all): inconclusive.
+        assert_eq!(verdict(72, 2.0), KeepVerdict::Inconclusive);
+        // 64% landed: turn off. 65% landed: inconclusive.
+        assert_eq!(verdict(64, 1.0), KeepVerdict::TurnOff);
+        assert_eq!(verdict(65, 1.0), KeepVerdict::Inconclusive);
+        assert_eq!(verdict(10, 1.0), KeepVerdict::TurnOff);
+    }
+
+    #[test]
+    fn keep_rule_with_nothing_landed_divides_by_nothing() {
+        let rule = keep_rule(&fleet(5, 0, 1.0)).unwrap();
+        assert_eq!(rule.landed, 0);
+        assert_eq!(rule.share, 0.0);
+        assert_eq!(rule.cost_per_landed_usd, None);
+        assert_eq!(rule.verdict, KeepVerdict::Breach);
+        assert!(serde_json::to_value(&rule).unwrap()["cost_per_landed_usd"].is_null());
+        assert_eq!(
+            keep_rule(&fleet(100, 0, 1.0)).unwrap().verdict,
+            KeepVerdict::TurnOff
+        );
+        assert_eq!(keep_rule(&Records::default()), None);
     }
 }
 
