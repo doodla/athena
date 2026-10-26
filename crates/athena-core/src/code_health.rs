@@ -21,6 +21,7 @@
 //! result of the landing.
 
 use crate::commits::{NewFile, message};
+use crate::steward::StewardRequest;
 use crate::store::{JobRecords, JobState, Records};
 use crate::{Athena, Ui};
 use anyhow::{Context, Result};
@@ -480,9 +481,16 @@ pub fn compute(git: &Git, head: &str, records: &Records, now: Timestamp) -> Resu
 /// The request that asks for a structural pass on one file, with the measured numbers.
 pub fn structural_text(f: &FileHealth) -> String {
     let reasons: Vec<String> = f.breaches.iter().map(Breach::text).collect();
-    format!(
-        "{STRUCTURAL_MARKER}{path}\n\n\
-         Code health found {path} over a limit: {reasons}.\n\n\
+    let mut acceptance: Vec<String> = reasons
+        .iter()
+        .map(|r| {
+            format!("The file is under the limit it breached, as measured by code health: {r}")
+        })
+        .collect();
+    acceptance.push("No behavior change; the existing tests pass".to_string());
+    acceptance.push("fmt, clippy and test pass".to_string());
+    let body = format!(
+        "Code health found {path} over a limit: {reasons}.\n\n\
          Measured: {lines} production lines (test modules excluded); longest function {name} at {longest} \
          lines; {weekly} landings in the last {WINDOW_DAYS} days; {cited} failure or rejection citations.\n\
          {limits}.\n\n\
@@ -500,7 +508,16 @@ pub fn structural_text(f: &FileHealth) -> String {
         weekly = f.weekly_landings,
         cited = f.citations,
         limits = thresholds_line(),
+    );
+    StewardRequest::new(
+        None,
+        &format!("{STRUCTURAL_MARKER}{}", f.path),
+        &body,
+        &acceptance,
+        std::slice::from_ref(&f.path),
     )
+    .expect("a structural-pass request is well formed")
+    .render()
 }
 
 fn first_line(job: &JobRecords) -> &str {
@@ -511,7 +528,10 @@ fn first_line(job: &JobRecords) -> &str {
         .trim()
 }
 
-/// Whether a structural-pass request for `path` is still open (not closed with an outcome).
+/// Whether a structural-pass request for `path` is still open. A pass that was closed with any outcome
+/// (landed, rejected, failed or abandoned) is not open, so the next check queues a new one for a file that is
+/// still over its limits. A queued pass that `athena plan` refused is not closed and stays open until a person
+/// closes it.
 pub fn structural_pass_open(records: &Records, path: &str) -> bool {
     let marker = format!("{STRUCTURAL_MARKER}{path}");
     records
@@ -555,47 +575,46 @@ pub fn design_review_text(
             .then_with(|| a.path.cmp(&b.path))
     });
 
+    // No body line starts with a dash, a star or a number and a dot: `athena plan` would read it as
+    // acceptance, and the builder refuses a body that has one.
     let mut out = String::new();
-    out.push_str("Priority: high\n\n");
-    out.push_str(&format!(
-        "Design review after {} landings ({total_landings} in all)\n\n",
-        since_review.len()
-    ));
     out.push_str(
         "This request is self-contained. Athena queues it every ten landings so the shape of its own code \
          is looked at on a schedule, not only when a limit is crossed.\n\n",
     );
     out.push_str("What to review:\n\n");
-    out.push_str("1. The code-health table as it stands now:\n\n");
+    out.push_str("Item 1, the code-health table as it stands now:\n\n");
     out.push_str(&table_text(&health.shown()));
     out.push_str(&format!(
         "\n{}\n{}\n\n",
         thresholds_line(),
         suite_line(health.suite_seconds)
     ));
-    out.push_str("2. The files most changed since the last review (landings that touched each):\n");
+    out.push_str(
+        "Item 2, the files most changed since the last review (landings that touched each):\n",
+    );
     if changed.is_empty() {
         out.push_str("   none\n");
     }
     for (file, n) in changed.iter().take(8) {
-        out.push_str(&format!("   - {file}: {n}\n"));
+        out.push_str(&format!("   {file}: {n}\n"));
     }
-    out.push_str("\n3. The files most broken since the last review (failure, rejection and plan-stop citations):\n");
+    out.push_str("\nItem 3, the files most broken since the last review (failure, rejection and plan-stop citations):\n");
     if broken.is_empty() {
         out.push_str("   none\n");
     }
     for f in broken.iter().take(8) {
-        out.push_str(&format!("   - {}: {}\n", f.path, f.citations));
+        out.push_str(&format!("   {}: {}\n", f.path, f.citations));
     }
-    out.push_str("\n4. The open structural-pass requests:\n");
+    out.push_str("\nItem 4, the open structural-pass requests:\n");
     let open = open_structural_passes(records);
     if open.is_empty() {
         out.push_str("   none\n");
     }
     for (job, line) in &open {
-        out.push_str(&format!("   - {job}: {line}\n"));
+        out.push_str(&format!("   {job}: {line}\n"));
     }
-    out.push_str("\n5. The recent rejections and planning stops:\n");
+    out.push_str("\nItem 5, the recent rejections and planning stops:\n");
     let mut any = false;
     for job in records
         .request_jobs()
@@ -608,7 +627,7 @@ pub fn design_review_text(
             JobState::Closed(state) => state.as_str().to_string(),
             _ => crate::status::plan_state(job).map_or("stopped".to_string(), |p| p.text()),
         };
-        out.push_str(&format!("   - {} ({what}): {}\n", job.id(), job.title()));
+        out.push_str(&format!("   {} ({what}): {}\n", job.id(), job.title()));
     }
     if !any {
         out.push_str("   none\n");
@@ -619,7 +638,23 @@ pub fn design_review_text(
          and add only the note (under docs/design/). Each proposed change is something a later request can \
          carry out.\n",
     );
-    out
+    let acceptance = [
+        "A design note under docs/design/ proposes changes, each naming the file or module to split, merge or reshape and why, ordered by value".to_string(),
+        "No code and no tests are changed".to_string(),
+        "fmt, clippy and test pass".to_string(),
+    ];
+    StewardRequest::new(
+        Some(crate::plan::Priority::High),
+        &format!(
+            "Design review after {} landings ({total_landings} in all)",
+            since_review.len()
+        ),
+        &out,
+        &acceptance,
+        &["docs/design/".to_string()],
+    )
+    .expect("a design-review request is well formed")
+    .render()
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -1191,6 +1226,90 @@ pub(crate) mod tests {
         let report = athena.code_health_check(now).unwrap();
         assert!(report.structural.is_empty());
         assert_eq!(structural_requests(&athena).len(), 1);
+    }
+
+    #[test]
+    fn structural_pass_is_queued_again_after_the_old_one_is_closed() {
+        let (_dir, _state, athena) = set_up();
+        let now = crate::now();
+        land(
+            &athena,
+            &[("crates/x/src/big.rs", big_file())],
+            "j1",
+            now,
+            0,
+        );
+        let first = athena.code_health_check(now).unwrap();
+        assert_eq!(first.structural.len(), 1);
+        let old = first.structural[0].1.clone();
+        assert!(athena.code_health_check(now).unwrap().structural.is_empty());
+
+        close_job(&athena, &old, OutcomeState::Rejected, now);
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        assert!(!structural_pass_open(&records, "crates/x/src/big.rs"));
+
+        let again = athena.code_health_check(now).unwrap();
+        assert_eq!(
+            again.structural.len(),
+            1,
+            "the file is still over its limits"
+        );
+        assert_eq!(again.structural[0].0, "crates/x/src/big.rs");
+        assert_ne!(again.structural[0].1, old);
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        let open = open_structural_passes(&records);
+        assert_eq!(open.len(), 1, "only the new one is open: {open:?}");
+        assert_eq!(open[0].0, again.structural[0].1.as_str());
+    }
+
+    #[test]
+    fn structural_text_lists_acceptance_naming_the_breached_limits() {
+        let f = FileHealth {
+            path: "crates/x/src/huge.rs".into(),
+            lines: 2500,
+            longest_fn: 230,
+            longest_fn_name: "sprawl".into(),
+            weekly_landings: 6,
+            citations: 0,
+            limit_lines: BUSY_FILE_LINES,
+            limit_fn: MAX_FN_LINES,
+            breaches: vec![
+                Breach::FileLength { lines: 2500 },
+                Breach::FunctionLength {
+                    name: "sprawl".into(),
+                    lines: 230,
+                },
+                Breach::BusyFile {
+                    lines: 2500,
+                    landings: 6,
+                },
+            ],
+        };
+        let text = structural_text(&f);
+        assert!(
+            text.starts_with("Structural pass: crates/x/src/huge.rs\n"),
+            "{text}"
+        );
+        let acceptance = crate::reading::request_text_acceptance(&text);
+        let all = acceptance.join("\n");
+        for phrase in [
+            "2500 production lines, over the limit of 2000",
+            "function sprawl is 230 lines, over the limit of 200",
+            "6 landings in the last 7 days",
+            "over the limit of 1500 lines with 5 landings in a week",
+            "No behavior change; the existing tests pass",
+            "fmt, clippy and test pass",
+        ] {
+            assert!(all.contains(phrase), "missing {phrase:?} in {all}");
+        }
+        assert_eq!(acceptance.len(), 5, "{acceptance:?}");
+        assert!(acceptance.iter().all(|a| a.starts_with("- ")));
+        assert!(text.contains("\nAcceptance:\n- "), "{text}");
+        assert!(text.contains("\nFiles: crates/x/src/huge.rs\n"), "{text}");
+        assert_eq!(
+            crate::reading::request_text_touches(&text),
+            ["crates/x/src/huge.rs"]
+        );
     }
 
     #[test]

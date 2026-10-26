@@ -1,0 +1,184 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261026-124004-g1w0",
+  "round": 2,
+  "at": "2026-10-26T12:43:18.931550905Z",
+  "invocation_seq": 3,
+  "approach": "Add a `StewardRequest` builder in steward.rs with private fields and a validating constructor (needs at least one non-blank acceptance bullet and one path-like file). Route `structural_text`, `design_review_text` and `RequestQueue::apply` (introspection follow-ups, blind spots) through it. Extract the plan_entry request-text parse in reading.rs into two pub functions that plan_entry calls, so tests run the real parse. Parser behaviour is unchanged. Dedupe already ignores Closed jobs; add doc fix and reopen test. Reword design-review body lines that start with `1.` or `- ` so they are not read as acceptance.",
+  "decisions": [
+    {
+      "choice": "One builder type with private fields and a validating constructor in steward.rs",
+      "reason": "The constructor enforces the format, so a new writer cannot skip it; tests cover every writer.",
+      "rejected": [
+        {
+          "option": "Free function returning String",
+          "why": "Nothing stops a writer skipping it."
+        },
+        {
+          "option": "Loosen the plan parser",
+          "why": "Out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "Extract pub request_text_acceptance and request_text_touches in reading.rs, called by plan_entry",
+      "reason": "Tests use exactly the parse athena plan uses.",
+      "rejected": [
+        {
+          "option": "Re-implement the check in tests",
+          "why": "Could drift."
+        }
+      ]
+    },
+    {
+      "choice": "Derive acceptance and files for model-written requests in RequestQueue::apply via StewardRequest::from_change, with default bullets",
+      "reason": "Keeps ProposedChange shape, avoiding edits outside deliverables.",
+      "rejected": [
+        {
+          "option": "Add fields to ProposedChange",
+          "why": "Breaks constructors in tests and changes the model schema."
+        }
+      ]
+    },
+    {
+      "choice": "Leave structural_pass_open logic; prove with a test",
+      "reason": "It already treats JobState::Closed (rejected, failed, abandoned) as not open.",
+      "rejected": [
+        {
+          "option": "Treat plan-refused Queued jobs as not open",
+          "why": "Would queue duplicates every landing."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/steward.rs",
+      "action": "modify",
+      "purpose": "Add StewardRequest (new, from_change, priority, render); route RequestQueue::apply and blind_spot_change through it; validate_item rejects requests naming no file; add all-writers and builder tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/code_health.rs",
+      "action": "modify",
+      "purpose": "Build structural_text and design_review_text through the builder; reword review body lines; document and test closed-pass dedupe; add bullet and reopen tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Extract pub request_text_acceptance and request_text_touches from plan_entry's unread-request branch, behaviour unchanged; looks_like_path pub(crate).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/plan.rs",
+      "action": "modify",
+      "purpose": "At most a small test helper or doc touch; no parser change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/introspect.rs",
+      "action": "modify",
+      "purpose": "Only if needed; likely a doc line, since follow-ups reach the queue via ProposedChange.request.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased entry for the steward request format fix and the dedupe test.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read table_text in code_health.rs, source_names() in steward.rs and the steward prompt text.",
+    "In reading.rs extract request_text_acceptance and request_text_touches from plan_entry, call them there, make looks_like_path pub(crate).",
+    "In steward.rs add StewardRequest with private fields and validating new, from_change, priority, render; check results with request_text_*; route RequestQueue::apply and blind_spot_change through it; reject no-file requests in validate_item.",
+    "Rewrite structural_text: first line Structural pass: <path>; body with measured numbers; bullets per breach with limits, no behaviour change with existing tests passing, fmt/clippy/test pass; files = [path].",
+    "Rewrite design_review_text through the builder: priority high, bullets, files docs/design/; reword numbered and dashed body lines.",
+    "Update structural_pass_open doc; add reopen-after-close and structural-bullets tests.",
+    "Add all-writers and builder tests in steward.rs.",
+    "Add CHANGELOG.md entry; run fmt, clippy and test; fix fallout."
+  ],
+  "risks": [
+    {
+      "risk": "Existing tests queue steward requests like \"Make the change.\" with no file.",
+      "mitigation": "Run steward and drain tests; use default acceptance and the source path as fallback so only a request with no derivable file is rejected."
+    },
+    {
+      "risk": "Body lines starting with -, * or 1. are read as extra acceptance.",
+      "mitigation": "Test that parsed acceptance equals the builder's bullets for structural pass and design review."
+    },
+    {
+      "risk": "The plan_entry refactor changes plan behaviour.",
+      "mitigation": "Pure extraction; existing plan_entry tests must pass unchanged."
+    },
+    {
+      "risk": "looks_like_path misses a Files: word such as a directory without slash.",
+      "mitigation": "Use paths with a slash (docs/design/); tests use the real function."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "New test in steward.rs builds each writer's text (structural pass, design review, RequestQueue::apply with an introspection-style request and a blind-spot change) and runs it through reading::request_text_acceptance and request_text_touches, plus PlanEntry::missing().",
+      "command": "cargo test --locked steward_requests_from_every_writer_pass_the_plan_parse",
+      "observes": "Each text yields at least one acceptance bullet and a non-empty file list; missing() does not contain acceptance.",
+      "fails_without": "A writer omitting Acceptance bullets or files gives empty acceptance or touches, so missing() contains acceptance and the test fails."
+    },
+    {
+      "criterion": 2,
+      "method": "New test in code_health.rs builds a FileHealth fixture breaching lines, function length and weekly landings, calls structural_text.",
+      "command": "cargo test --locked structural_text_lists_acceptance_naming_the_breached_limits",
+      "observes": "An Acceptance: section whose bullets name each limit with its measured value, say no behaviour change with existing tests passing, and fmt, clippy and test pass; a Files: line names the path.",
+      "fails_without": "Without the bullets, limit numbers or Files line, the assertions fail."
+    },
+    {
+      "criterion": 3,
+      "method": "New test in code_health.rs runs the hook on a landed big file, closes the queued job with the close_job helper, runs the hook again.",
+      "command": "cargo test --locked structural_pass_is_queued_again_after_the_old_one_is_closed",
+      "observes": "The second run queues a new structural job for the same path, different from the first.",
+      "fails_without": "If closed passes counted as open, the second run queues nothing and the test fails."
+    },
+    {
+      "criterion": 4,
+      "method": "Builder unit tests in steward.rs: new returns Err for empty acceptance, blank bullets, empty files or multi-line title; render always contains Acceptance: and Files:. The all-writers test covers every caller.",
+      "command": "cargo test --locked steward_request",
+      "observes": "Constructor errors for each missing part; valid input renders both sections.",
+      "fails_without": "If the builder accepted empty acceptance or files the constructor tests fail; if a writer bypassed it the all-writers test fails."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the existing open-request dedupe test together with the new reopen test.",
+      "command": "cargo test --locked code_health",
+      "observes": "An open pass suppresses a duplicate and a closed pass does not.",
+      "fails_without": "If an open pass stopped suppressing, structural_pass_queues_nothing_for_a_file_with_an_open_request fails; if a closed pass counted as open, the reopen test fails."
+    },
+    {
+      "criterion": 6,
+      "method": "Run the three checks; the new tests are part of the suite.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All exit 0, including the new writer, bullet and reopen tests.",
+      "fails_without": "Unformatted code fails fmt; any warning fails clippy; a writer lacking acceptance or files, a missing bullet, or a dedupe that ignores closing fails the new tests under cargo test."
+    },
+    {
+      "criterion": 7,
+      "method": "Inspect the diff for a new Unreleased entry.",
+      "command": "git diff CHANGELOG.md",
+      "observes": "Entry says steward requests carry an Acceptance: section and Files: line via one shared builder, the structural-pass bullets, and the reopen-after-close dedupe.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Athena::queue in reading.rs writes channel \"cli\" though the brief says steward channel; the drain works both, so the channel is left as is.",
+    "source_names() in steward.rs must be checked: a non-path blind-spot source needs a fallback file such as records/.",
+    "The steward prompt may need a line asking for bullets and files; default bullets cover its absence.",
+    "Plan-refused passes stay Queued and count as open until a person closes them, as the brief assumes."
+  ],
+  "producer_section_sha256": "a4a446e0009854a203d8cdee48e69012b5f4ea23f103b2469fd52756f8cd4517"
+}
