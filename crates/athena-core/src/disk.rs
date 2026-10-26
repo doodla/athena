@@ -53,8 +53,21 @@ impl std::fmt::Display for LowDisk {
 
 impl std::error::Error for LowDisk {}
 
-/// Free bytes on the disk that holds `path` (or its nearest existing parent), read with `df -Pk`.
+/// Test hook: when this environment variable holds a whole number, [`df_free_bytes`] returns it instead of
+/// reading the disk. Tests set it on a spawned `athena` binary to show a run under simulated free space.
+pub const FREE_BYTES_ENV: &str = "ATHENA_FREE_BYTES";
+
+/// The simulated free bytes in `text` (the value of [`FREE_BYTES_ENV`]); anything else is ignored.
+fn simulated_bytes(text: Option<&str>) -> Option<u64> {
+    text?.trim().parse().ok()
+}
+
+/// Free bytes on the disk that holds `path` (or its nearest existing parent), read with `df -Pk`, unless
+/// [`FREE_BYTES_ENV`] gives a simulated reading.
 pub fn df_free_bytes(path: &Path) -> std::io::Result<u64> {
+    if let Some(bytes) = simulated_bytes(std::env::var(FREE_BYTES_ENV).ok().as_deref()) {
+        return Ok(bytes);
+    }
     let mut at = path;
     while !at.exists() {
         match at.parent() {
@@ -183,6 +196,15 @@ mod tests {
         assert_eq!(parse_df(text), Some(600 * 1024));
         assert_eq!(parse_df(""), None);
         assert_eq!(parse_df("header only\n/dev/x 1 2\n"), None);
+    }
+
+    #[test]
+    fn a_simulated_reading_is_used_only_when_it_is_a_whole_number() {
+        assert_eq!(simulated_bytes(Some("9000000000")), Some(9 * GB));
+        assert_eq!(simulated_bytes(Some(" 0\n")), Some(0));
+        assert_eq!(simulated_bytes(Some("lots")), None);
+        assert_eq!(simulated_bytes(Some("")), None);
+        assert_eq!(simulated_bytes(None), None);
     }
 
     #[test]

@@ -136,15 +136,78 @@ fn the_tool_hook_denies_escapes_and_stays_silent_otherwise() {
 
 #[test]
 fn a_nested_run_works_in_a_scratch_copy_with_fake_agents() {
-    // M25 (blocks): a nested `ask` leaves the repository it ran in at its commit. (allows): a nested `ask`
-    // and `go` run with fake agents in a scratch repository.
-    let fx = Fixture::new();
-    let before = fx.head();
+    nested_ask_and_go(&Fixture::new(), None);
+}
+
+#[test]
+fn a_nested_run_ignores_low_free_space_because_the_test_config_has_no_minimum() {
+    // 9 GB free is below the 10 GB default; the test config sets the minimum to 0, so the run still lands.
+    nested_ask_and_go(&Fixture::new(), Some("9000000000"));
+}
+
+#[test]
+fn the_simulated_free_space_reaches_the_nested_run_when_a_minimum_is_set() {
+    // Control for the test above: with the 10 GB minimum the same simulated reading holds the nested `ask`/`go`,
+    // so the simulation does take effect and the passing run above is due to the config.
+    let fx = Fixture::with_config(&with_min_free_gb(&test_config(), 10));
     let scratch = tempfile::tempdir().unwrap();
     let out = athena()
         .current_dir(fx.root())
         .env("ATHENA_NESTED", "20261010-153012-k7q2")
         .env("ATHENA_SCRATCH_DIR", scratch.path())
+        .env("ATHENA_FREE_BYTES", "9000000000")
+        .args(["ask", "write down a note"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let job = job_id_of(&String::from_utf8_lossy(&out.stdout));
+    let out = athena()
+        .current_dir(fx.root())
+        .env("ATHENA_NESTED", "20261010-153012-k7q2")
+        .env("ATHENA_SCRATCH_DIR", scratch.path())
+        .env("ATHENA_FREE_BYTES", "9000000000")
+        .args(["go", &job])
+        .output()
+        .unwrap();
+    let said = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert_ne!(out.status.code(), Some(0), "{said}");
+    assert!(
+        said.contains("environment: low disk: 9.0 GB free, 10.0 GB required"),
+        "{said}"
+    );
+}
+
+fn job_id_of(stdout: &str) -> String {
+    stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("athena · job "))
+        .and_then(|l| l.split(' ').next())
+        .expect("a job id")
+        .to_string()
+}
+
+/// A nested `ask` then `go` in `fx`, with `free_bytes` as the simulated free space when given. Asserts the
+/// run lands in the scratch copy and leaves `fx` untouched.
+fn nested_ask_and_go(fx: &Fixture, free_bytes: Option<&str>) {
+    // M25 (blocks): a nested `ask` leaves the repository it ran in at its commit. (allows): a nested `ask`
+    // and `go` run with fake agents in a scratch repository.
+    let before = fx.head();
+    let scratch = tempfile::tempdir().unwrap();
+    let nested = || {
+        let mut cmd = athena();
+        cmd.current_dir(fx.root())
+            .env("ATHENA_NESTED", "20261010-153012-k7q2")
+            .env("ATHENA_SCRATCH_DIR", scratch.path());
+        if let Some(bytes) = free_bytes {
+            cmd.env("ATHENA_FREE_BYTES", bytes);
+        }
+        cmd
+    };
+    let out = nested()
         .args(["ask", "write down a note"])
         .stdin(Stdio::null())
         .output()
@@ -153,19 +216,8 @@ fn a_nested_run_works_in_a_scratch_copy_with_fake_agents() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "{stderr}\n{stdout}");
     assert!(stderr.contains("scratch copy"), "{stderr}");
-    let job = stdout
-        .lines()
-        .find_map(|l| l.strip_prefix("athena · job "))
-        .and_then(|l| l.split(' ').next())
-        .expect("a job id")
-        .to_string();
-    let out = athena()
-        .current_dir(fx.root())
-        .env("ATHENA_NESTED", "20261010-153012-k7q2")
-        .env("ATHENA_SCRATCH_DIR", scratch.path())
-        .args(["go", &job])
-        .output()
-        .unwrap();
+    let job = job_id_of(&stdout);
+    let out = nested().args(["go", &job]).output().unwrap();
     assert_eq!(
         out.status.code(),
         Some(0),

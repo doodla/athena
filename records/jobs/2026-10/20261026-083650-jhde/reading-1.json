@@ -1,0 +1,139 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261026-083650-jhde",
+  "n": 1,
+  "at": "2026-10-26T08:37:20.432777568Z",
+  "invocation_seq": 1,
+  "base_commit": "a1973275dacea84f81305b99c691aa6599efb068",
+  "config_sha256": "8fe89c4edaa823d770160390564d75d68be6850d0873a9f8f769511a6f40103c",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Make tests independent of real free disk by setting the minimum to 0",
+  "summary": "The shared test config (test_config in tests/common/mod.rs) gets [disk] min_free_gb = 0, so CLI tests, including the nested-run test, no longer depend on the machine's free space. A new test makes the nested run see low free space (a minimum above any real free space is not simulated; the reading is injected or the guard is exercised with simulated values) and shows it still passes. The disk guard's own tests keep showing a hold and a fail-fast with simulated values. The audience is the maintainers and verifier running cargo test on small-disk sandboxes.",
+  "class_of_work": "tests",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "cargo test, clippy and fmt must pass; the guard stays tested with simulated values."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run the nested-run test and the disk tests rather than checking that config lines exist."
+    },
+    {
+      "id": "root-cause",
+      "how": "The shared test config is fixed, not just the one failing test."
+    },
+    {
+      "id": "verified",
+      "how": "Behavior criteria name the cargo commands the verifier runs."
+    },
+    {
+      "id": "small",
+      "how": "One focused change limited to the four listed files plus drain.rs only if needed."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Fixture::new writes test_config() as the fixture repo's athena.toml, and the nested scratch copy inherits it, so setting [disk] min_free_gb = 0 there reaches the nested run.",
+    "Drain tests that exercise the hold already set their own minimum explicitly; they must keep doing so after the default becomes 0 (drain.rs may need a small edit if they rely on the default 10).",
+    "Simulating low free space for the nested run is done by an injectable free-space reading in disk.rs (e.g. an env override read only when set) or equivalent; the production default of 10 GB is unchanged.",
+    "athena.toml is not changed: the minimum is set in the test config only."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Run `cargo test --locked -p athena-cli --test binary`: a_nested_run_works_in_a_scratch_copy_with_fake_agents passes, and a companion test simulates low free space (below 10 GB) in the nested run's environment and still passes because the test config sets min_free_gb to 0.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test --locked -p athena-core disk`: the disk guard's tests still show a hold (job stays queued, 'environment: low disk') and a fail-fast with simulated low free space.",
+      "kind": "behavior"
+    },
+    {
+      "text": "crates/athena-cli/tests/common/mod.rs test_config sets [disk] min_free_gb = 0 with a comment explaining why, and the production default (10 GB in athena-data config) is unchanged.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo test --locked`, `cargo clippy --locked --all-targets -- -D warnings` and `cargo fmt --check`: all pass, and no test in the suite reads the machine's real free disk to decide its result.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has an entry stating that tests no longer depend on real free disk space and how the minimum or free-space reading is set in tests.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-cli/tests/common/mod.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-cli/tests/binary.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "action": "modify",
+      "p": 0.55
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.2
+    }
+  ],
+  "out_of_scope": [
+    "Changing the production default minimum of 10 GB",
+    "The code-health findings from job 20261026-064950-38jx (hooks test file, baseline file, table header width)",
+    "Changing athena.toml or defaults.toml"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.75,
+      "p_verification_passes": 0.68,
+      "p_user_intervenes": 0.07,
+      "cost_usd": {
+        "p10": 0.3,
+        "p50": 0.8,
+        "p90": 2.0
+      },
+      "wall_time_s": {
+        "p10": 350.0,
+        "p50": 1200.0,
+        "p90": 2500.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.6666666666666666,
+      "p_user_intervenes": 0.08888888888888889,
+      "cost_usd": {
+        "p10": 0.4633906184070784,
+        "p50": 2.612047099999999,
+        "p90": 2.7994570818204894
+      },
+      "wall_time_s": {
+        "p10": 983.8980931899509,
+        "p50": 2686.337925704001,
+        "p90": 4591.314955643707
+      }
+    }
+  },
+  "departures": null,
+  "urgent_reason": "Disk-dependent tests cause failed and rejected jobs (such as 38jx) and redo-work retries on small sandboxes, so fixing them cuts wasted time."
+}

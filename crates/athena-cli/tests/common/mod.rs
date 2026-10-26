@@ -50,7 +50,21 @@ kind = "test"
 run = ["sh", "-c", "test -f README.md && ! test -f .cargo/config.toml && echo 'test result: ok. 1 passed; 0 failed; 0 ignored'"]
 
 "#;
-    format!("{}{}{}", &base[..start], checks, &base[end..])
+    // The disk guard compares against the machine's real free space. Tests must not depend on that, so they
+    // run with no minimum; tests of the guard itself set one with `with_min_free_gb`.
+    // It is the last table, so replacing the checks block (config_with_change_checks) keeps it.
+    let disk = "\n[disk]\nmin_free_gb = 0\n";
+    format!("{}{}{}{}", &base[..start], checks, &base[end..], disk)
+}
+
+/// `config` with `[disk] min_free_gb` set to `gb` (whatever it was).
+pub fn with_min_free_gb(config: &str, gb: u64) -> String {
+    let from = "min_free_gb = 0\n";
+    assert!(
+        config.contains(from),
+        "the configuration has a disk minimum"
+    );
+    config.replacen(from, &format!("min_free_gb = {gb}\n"), 1)
 }
 
 /// [`test_config`] with the change capability's checks replaced by `checks`: each is a name and the
