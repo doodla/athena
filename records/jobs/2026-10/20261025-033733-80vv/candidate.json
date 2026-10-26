@@ -1,0 +1,145 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261025-033733-80vv",
+  "base_commit": "5516a14ebe312400df3c95e51da1b53930ae043b",
+  "base_fingerprint": "sha256:8bb04d7bf54f9795471a22597af5528492a1979a217ceed453b540ed442ca36b",
+  "previous_job": "20261026-150803-c7d4",
+  "candidate_commit": "e8c30aa27a93b498d2fa6368b2a2c712a637a571",
+  "candidate_tree": "1521ad407d81dcb5aed61ec1c9ed7bbd333e77ea",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 158074
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 97168
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 130525
+    },
+    {
+      "path": "crates/athena-git/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 58353
+    },
+    {
+      "path": "crates/athena-git/src/snapshot.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 35703
+    },
+    {
+      "path": "docs/decisions.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 272559
+    }
+  ],
+  "fingerprint": "sha256:abe286e5f6f8170fc2bd29f7d0d4a426491e1c6a2812d1e950b6251be48676be",
+  "violations": [],
+  "producer_report": {
+    "summary": "The planner and critic snapshots now carry a generated HISTORY.txt: the newest 200 first-parent commits of the base commit, each with short hash, date, subject and changed paths. It is built from one read-only `git log` (new `Git::log_history`) and filtered with the same `classify` rules as the file copy. Paths under `records/` and athena-exclude paths never appear. A commit left with no visible path is omitted, so the 200 count is after exclusion. A commit that changed no path is listed as '(no paths)'. The scan is capped at 2000 commits. The snapshot has no .git, and the planner and critic snapshots in run.rs use the new `SnapshotRepo::PlainWithHistory`. The reader, producer and verifier snapshots are unchanged. Both briefs get a \"History file\" section built from HISTORY_FILE and HISTORY_LIMIT constants. They say what the file holds and that Read and Grep are the tools. The grant is now a named `planning_grant()` with a test pinning it (Read, Grep, Glob, no commands, no writes). CHANGELOG has an entry and docs/decisions.md has D134 with the alternatives, the choice, the citation of job 20261024-115923-02gf and the measurement. fmt, clippy -D warnings and the full `cargo test -q --locked` all passed.",
+    "files": [
+      "crates/athena-git/src/snapshot.rs",
+      "crates/athena-git/src/lib.rs",
+      "crates/athena-context/src/briefs.rs",
+      "crates/athena-core/src/run.rs",
+      "CHANGELOG.md",
+      "docs/decisions.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-git",
+        "result": "pass",
+        "note": "55 tests, including three new snapshot tests and log_history"
+      },
+      {
+        "command": "cargo test -q -p athena-git -p athena-context -p athena-core",
+        "result": "pass",
+        "note": "includes the briefs history test and the planning_grant tests"
+      },
+      {
+        "command": "cargo fmt --all",
+        "result": "pass",
+        "note": "applied formatting"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test -q --locked",
+        "result": "pass",
+        "note": "the full suite, run once; no failures"
+      },
+      {
+        "command": "cargo test -p athena-git tmp_timing -- --nocapture",
+        "result": "pass",
+        "note": "temporary timing test, removed afterwards"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A test in athena-git builds a planning snapshot of a fixture repository with several commits, including one touching records/ and one touching a private path. It checks that the history file exists with one entry per commit (subject, date, changed paths), is capped at 200 commits, and contains no records/ or private path. Run: cargo test -p athena-git snapshot.",
+        "status": "met",
+        "evidence": "In snapshot.rs, `a_history_snapshot_lists_visible_commits_without_hidden_paths_or_a_repository` builds a fixture with records-only, private-only, mixed and visible commits. It checks the subjects, a 10-character date, the visible paths, and that 'records', 'private' and FRONT.md appear nowhere in the text. `a_history_snapshot_is_capped_at_the_limit_counted_after_exclusion` makes 205 visible commits plus records commits and gets exactly 200 entries, newest first. Both passed under `cargo test -p athena-git`."
+      },
+      {
+        "criterion": "The snapshot contains no .git directory and the user's repository is unchanged by snapshotting. A test checks this. Run: cargo test -p athena-git snapshot.",
+        "status": "met",
+        "evidence": "The same first test asserts `!snap.dir().join(\".git\").exists()` and that the user repo's status, HEAD, for-each-ref and .git/config are equal before and after. It passed."
+      },
+      {
+        "criterion": "A briefs test shows planner_brief and critic_brief each name the history file's path and say what it holds (last 200 commits, subject, date, changed paths, records/ and private excluded) and that Read and Grep are used on it. Run: cargo test -p athena-context briefs.",
+        "status": "met",
+        "evidence": "`planner_and_critic_briefs_name_the_history_file_and_say_what_it_holds` in briefs.rs checks the History file section of both briefs for HISTORY_FILE, 'last 200 commits', 'short hash', 'date', 'subject', 'changed paths', '`records/`', 'private', 'Read and Grep' and 'no git command'. It passed in the athena-context run."
+      },
+      {
+        "criterion": "A test in athena-core asserts the planner and critic grants are unchanged: no Bash or git commands, writes false. Run: cargo test -p athena-core.",
+        "status": "met",
+        "evidence": "`planning_grant_tests::the_planner_and_critic_grant_has_no_bash_no_git_and_no_writes` in run.rs asserts the tools are exactly Read, Grep and Glob, no Bash, empty commands, writes false and permission mode dontAsk. A second test there checks the athena-context and athena-git constants are equal. Both passed in the athena-core run."
+      },
+      {
+        "criterion": "The time the history file adds to snapshotting is measured, and the figure (labeled as a measurement, with the repository and method) is recorded in docs/decisions.md.",
+        "status": "met",
+        "evidence": "D134 records a measurement: median of 9 `Snapshot::create` runs on a 501-commit temporary fixture, 47.1 ms plain against 132.4 ms with history, about 85 ms added. It gives the method, a temporary timing test with Instant. It also says this repository's own history was not available, so no figure for it is claimed."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry, and docs/decisions.md records the decision. It lists the alternatives (git repository in the snapshot, widened git grants, plain copy), the choice, and cites job 20261024-115923-02gf.",
+        "status": "met",
+        "evidence": "The CHANGELOG Unreleased/Added entry about HISTORY.txt exists. D134 in docs/decisions.md lists alternatives (a), (b) and (c), the decision, and cites job 20261024-115923-02gf."
+      },
+      {
+        "criterion": "cargo test, cargo clippy --all-targets and cargo fmt --check all pass.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I also ran `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test -q --locked`, and all three finished clean."
+      }
+    ],
+    "open_issues": [
+      "The 2000-commit scan cap is a judgment, not measured. A history where records/ commits dominate could give fewer than 200 entries.",
+      "The timing figure comes from a synthetic 501-commit fixture in a debug build, not from this repository's real history, which the job could not see. The decision text says so.",
+      "The step to measure on this repository was replaced by the fixture measurement for the reason above."
+    ],
+    "mistakes": [
+      "My first history test filtered out blank lines in the wrong place and panicked on unwrap; I fixed it before finishing."
+    ],
+    "learnings": [
+      "athena-git is a leaf crate and athena-context does not depend on it, so the history file name and limit are defined in both. A test in athena-core checks they are equal.",
+      "The -z option with --name-only and a custom format separates paths by NUL, and the parser tolerates a newline after the header.",
+      "Bash is restricted to cargo, git, ls, mv, rm and chmod, so tool output cannot be piped or searched with grep or tail."
+    ],
+    "desires": [
+      "This working copy has a one-commit history, so I could not time snapshotting on the real repository."
+    ]
+  }
+}

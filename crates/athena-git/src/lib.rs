@@ -899,6 +899,29 @@ impl Git {
         Ok(out.lines().map(str::to_string).collect())
     }
 
+    /// The newest `limit` commits on the first-parent chain of `rev`, newest first, each with its short hash,
+    /// committer date (`YYYY-MM-DD`), subject and changed paths (against the first parent; no rename
+    /// detection). Read-only: it runs one `git log`.
+    pub fn log_history(&self, rev: &str, limit: usize) -> Result<Vec<HistoryCommit>> {
+        let out = self.run_bytes(
+            [
+                "log".to_string(),
+                format!("-n{limit}"),
+                "--first-parent".into(),
+                "-m".into(),
+                "--no-renames".into(),
+                "--name-only".into(),
+                "-z".into(),
+                "--format=%x01%h%x02%cs%x02%s%x03".into(),
+                rev.to_string(),
+                "--".into(),
+            ],
+            None,
+            &[],
+        )?;
+        Ok(parse_history(&out))
+    }
+
     /// The paths a commit adds relative to its first parent (or to the empty tree for a root commit).
     pub fn added_paths(&self, commit: &str) -> Result<Vec<String>> {
         let base = match self.parents(commit)?.first() {
@@ -912,6 +935,45 @@ impl Git {
             .map(|d| d.path)
             .collect())
     }
+}
+
+/// One commit of [`Git::log_history`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryCommit {
+    pub hash: String,
+    pub date: String,
+    pub subject: String,
+    pub paths: Vec<String>,
+}
+
+/// Parses the output of `git log -z --name-only` with the format used by [`Git::log_history`].
+fn parse_history(out: &[u8]) -> Vec<HistoryCommit> {
+    let text = String::from_utf8_lossy(out);
+    let mut commits = Vec::new();
+    for chunk in text.split('\u{1}').filter(|c| !c.is_empty()) {
+        let Some((head, rest)) = chunk.split_once('\u{3}') else {
+            continue;
+        };
+        let mut fields = head.splitn(3, '\u{2}');
+        let hash = fields.next().unwrap_or_default().to_string();
+        let date = fields.next().unwrap_or_default().to_string();
+        let subject = fields.next().unwrap_or_default().to_string();
+        let mut paths: Vec<String> = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        for p in rest.split('\0') {
+            let p = p.trim_start_matches('\n');
+            if !p.is_empty() && seen.insert(p) {
+                paths.push(p.to_string());
+            }
+        }
+        commits.push(HistoryCommit {
+            hash,
+            date,
+            subject,
+            paths,
+        });
+    }
+    commits
 }
 
 fn parse_ls_tree(out: &[u8]) -> Result<Vec<TreeEntry>> {
@@ -1024,6 +1086,21 @@ mod tests {
         cmd.args(["-c", "exit 3"]);
         let output = output_with_stdin(&mut cmd, Some(&input)).unwrap();
         assert_eq!(output.status.code(), Some(3));
+    }
+
+    #[test]
+    fn log_history_reads_hash_date_subject_and_paths_newest_first() {
+        let (dir, git) = repo_with(&[("a.txt", "1"), ("d/b.txt", "1")]);
+        write_files(dir.path(), &[("a.txt", "2")]);
+        commit_all(&git, "second | with  odd chars");
+        let log = git.log_history("HEAD", 10).unwrap();
+        assert_eq!(log.len(), 2);
+        assert_eq!(log[0].subject, "second | with  odd chars");
+        assert_eq!(log[0].paths, ["a.txt"]);
+        assert_eq!(log[0].date.len(), 10);
+        assert_eq!(log[1].subject, "init");
+        assert_eq!(log[1].paths, ["a.txt", "d/b.txt"]);
+        assert_eq!(git.log_history("HEAD", 1).unwrap().len(), 1);
     }
 
     #[test]

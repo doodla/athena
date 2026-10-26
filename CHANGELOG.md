@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The planner and the critic get a generated history file, `HISTORY.txt`, in their read-only snapshot: the last
+  200 commits of the base commit's first-parent history, newest first, each with its short hash, date, subject and
+  changed paths. Paths under `records/` and `athena-exclude` paths are left out, and so is a commit that changed
+  only such paths. The snapshot still has no git repository, and their grants are unchanged (Read, Grep and Glob;
+  no Bash, no git command, no writes). Both briefs name the file and say what it holds. New
+  `SnapshotRepo::PlainWithHistory` and `Git::log_history`. See D134.
 - A planning stop at the round cap can be resumed. When a job fails because its plan still needed revising in
   the last planning round, its round-3 `job-plan` and `critique` records are the kept plan and findings, and
   `athena retry` of that job starts the planner from them: one revision round that answers every finding, then

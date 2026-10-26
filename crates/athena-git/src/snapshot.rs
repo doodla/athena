@@ -11,11 +11,24 @@ use crate::{DiffEntry, Git, Result, parse_raw_diff};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
+/// The history file's name, at the snapshot root (see [`SnapshotRepo::PlainWithHistory`]).
+pub const HISTORY_FILE: &str = "HISTORY.txt";
+
+/// How many commits the history file lists at most.
+pub const HISTORY_LIMIT: usize = 200;
+
+/// How many first-parent commits are scanned to find [`HISTORY_LIMIT`] visible ones; bounds the time on
+/// large histories.
+const HISTORY_SCAN_LIMIT: usize = 2000;
+
 /// What repository a snapshot gets.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SnapshotRepo {
     /// A plain directory (the reader, which has no Bash).
     None,
+    /// A plain directory, no `.git`, plus [`HISTORY_FILE`] at its root: the newest [`HISTORY_LIMIT`] commits
+    /// of the source commit's first-parent history (the planner and critic, which read with Read and Grep).
+    PlainWithHistory,
     /// One commit, "base" (the producer).
     Base,
     /// Two commits, "base" then "candidate" (the verifier); the work tree holds the candidate.
@@ -67,6 +80,11 @@ impl Snapshot {
         if repo == SnapshotRepo::None {
             return Ok(snapshot);
         }
+        if repo == SnapshotRepo::PlainWithHistory {
+            let text = history_text(user, source_commit, rules_commit)?;
+            std::fs::write(dir.join(HISTORY_FILE), text)?;
+            return Ok(snapshot);
+        }
         let git = snapshot.git();
         git.run(["init", "-q", "-b", "athena"])?;
         snapshot.base = Some(snapshot.commit_all("base")?);
@@ -86,7 +104,7 @@ impl Snapshot {
                 copy_files(&kept, dir)?;
                 snapshot.seed_tree = Some(snapshot.work_tree_tree()?);
             }
-            SnapshotRepo::None | SnapshotRepo::Base => {}
+            SnapshotRepo::None | SnapshotRepo::PlainWithHistory | SnapshotRepo::Base => {}
         }
         Ok(snapshot)
     }
@@ -264,6 +282,51 @@ pub fn materialize(
     index.apply(&removals)?;
     index.checkout_all(dir)?;
     Ok(visible)
+}
+
+/// The text of the history file: one block per commit, `<short hash> <date> <subject>` then one indented line
+/// per changed path. Paths hidden from agents (`records/`, `athena-exclude`) are dropped, with `rules_commit`'s
+/// rules; a commit left with no visible path is omitted, and one that changed no path at all is listed as
+/// `(no paths)`. The limit counts commits after that omission.
+fn history_text(user: &Git, source_commit: &str, rules_commit: &str) -> Result<String> {
+    let commits = user.log_history(source_commit, HISTORY_SCAN_LIMIT)?;
+    let mut all: Vec<String> = commits.iter().flat_map(|c| c.paths.clone()).collect();
+    all.sort();
+    all.dedup();
+    let classes = classify(user, rules_commit, &all)?;
+    let visible = |p: &String| {
+        classes
+            .get(p)
+            .copied()
+            .unwrap_or(PathClass::Governed)
+            .visible_to_agents()
+    };
+    let mut out = format!(
+        "# Last {HISTORY_LIMIT} commits (newest first): short hash, date, subject, changed paths.\n\
+         # Paths hidden from agents are left out; a commit that changed only such paths is not listed.\n\n"
+    );
+    let mut listed = 0;
+    for c in &commits {
+        let paths: Vec<&String> = c.paths.iter().filter(|p| visible(p)).collect();
+        if paths.is_empty() && !c.paths.is_empty() {
+            continue;
+        }
+        if listed == HISTORY_LIMIT {
+            break;
+        }
+        listed += 1;
+        out.push_str(&format!("{} {} {}\n", c.hash, c.date, c.subject));
+        if paths.is_empty() {
+            out.push_str("    (no paths)\n");
+        }
+        for p in paths {
+            out.push_str(&format!("    {p}\n"));
+        }
+    }
+    if listed == 0 {
+        out.push_str("(no commits)\n");
+    }
+    Ok(out)
 }
 
 fn clear_work_tree(dir: &Path) -> Result<()> {
@@ -750,6 +813,115 @@ mod tests {
         // A path that is already gone is nothing to do.
         assert!(set_tree_writable(&dir.path().join("a/one/x"), true).is_ok());
         unlock_dir(dir.path()).unwrap();
+    }
+
+    /// The user repository's observable state: status, HEAD, refs and configuration.
+    fn repo_state(dir: &Path, git: &Git) -> (String, Option<String>, String, Vec<u8>) {
+        (
+            git.run(["status", "--porcelain"]).unwrap(),
+            git.head().unwrap(),
+            git.run(["for-each-ref"]).unwrap(),
+            std::fs::read(dir.join(".git/config")).unwrap(),
+        )
+    }
+
+    #[test]
+    fn a_history_snapshot_lists_visible_commits_without_hidden_paths_or_a_repository() {
+        let (dir, git, _) = user_repo();
+        write_files(dir.path(), &[("records/jobs/y.json", "{}")]);
+        commit_all(&git, "records only");
+        write_files(dir.path(), &[("private/more.md", "x")]);
+        commit_all(&git, "private only");
+        write_files(
+            dir.path(),
+            &[("src/lib.rs", "// lib\n"), ("private/again.md", "y")],
+        );
+        commit_all(&git, "mixed");
+        write_files(dir.path(), &[("src/main.rs", "fn main() { 1; }\n")]);
+        let head = commit_all(&git, "visible");
+        let before = repo_state(dir.path(), &git);
+        let parent = tempfile::tempdir().unwrap();
+        let snap = Snapshot::create(
+            &git,
+            &head,
+            &head,
+            &parent.path().join("snap-history"),
+            SnapshotRepo::PlainWithHistory,
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(snap.dir().join(HISTORY_FILE)).unwrap();
+        let blocks: Vec<&str> = text
+            .lines()
+            .filter(|l| !l.is_empty() && !l.starts_with([' ', '#']))
+            .collect();
+        let subjects: Vec<&str> = blocks
+            .iter()
+            .map(|l| l.splitn(3, ' ').nth(2).unwrap())
+            .collect();
+        assert_eq!(
+            subjects,
+            ["visible", "mixed", "exec bit and symlink", "init"]
+        );
+        // Each entry has a short hash, a date, and the visible paths only.
+        let date = blocks[0].split(' ').nth(1).unwrap();
+        assert_eq!(date.len(), 10, "{date}");
+        assert!(text.contains("\n    src/main.rs\n"));
+        assert!(text.contains("\n    src/lib.rs\n"));
+        assert!(text.contains("\n    SPEC.md\n"));
+        assert!(!text.contains("records"), "{text}");
+        assert!(!text.contains("private"), "{text}");
+        assert!(!text.contains("FRONT.md"), "{text}");
+        assert!(!text.contains("again.md"), "{text}");
+        // No repository, and the user's repository is as it was.
+        assert!(!snap.dir().join(".git").exists());
+        assert!(snap.dir().join("src/main.rs").exists());
+        assert_eq!(repo_state(dir.path(), &git), before);
+    }
+
+    #[test]
+    fn a_history_snapshot_is_capped_at_the_limit_counted_after_exclusion() {
+        let (dir, git, _) = user_repo();
+        for i in 0..(HISTORY_LIMIT + 5) {
+            write_files(dir.path(), &[("src/n.txt", &format!("{i}\n"))]);
+            commit_all(&git, &format!("change {i}"));
+            if i % 50 == 0 {
+                write_files(dir.path(), &[("records/n.txt", &format!("{i}\n"))]);
+                commit_all(&git, &format!("records {i}"));
+            }
+        }
+        let head = git.head().unwrap().unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let snap = Snapshot::create(
+            &git,
+            &head,
+            &head,
+            &parent.path().join("snap-cap"),
+            SnapshotRepo::PlainWithHistory,
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(snap.dir().join(HISTORY_FILE)).unwrap();
+        let entries: Vec<&str> = text
+            .lines()
+            .filter(|l| !l.is_empty() && !l.starts_with([' ', '#']))
+            .collect();
+        assert_eq!(entries.len(), HISTORY_LIMIT);
+        assert!(entries[0].ends_with("change 204"), "{}", entries[0]);
+        assert!(!text.contains("records"));
+    }
+
+    #[test]
+    fn plain_snapshots_have_no_history_file() {
+        let (_dir, git, head) = user_repo();
+        let parent = tempfile::tempdir().unwrap();
+        let snap = Snapshot::create(
+            &git,
+            &head,
+            &head,
+            &parent.path().join("snap-plain"),
+            SnapshotRepo::None,
+        )
+        .unwrap();
+        assert!(!snap.dir().join(HISTORY_FILE).exists());
     }
 
     #[test]
