@@ -932,6 +932,9 @@ pub fn status(v: &StatusView) -> String {
             let _ = writeln!(out, "{:<11}   finding: {finding}", "");
         }
     }
+    if let Some(health) = &v.code_health {
+        out.push_str(&code_health_section(health));
+    }
     if !v.invalid_records.is_empty() {
         let _ = writeln!(
             out,
@@ -943,6 +946,24 @@ pub fn status(v: &StatusView) -> String {
         let label = if i == 0 { "next" } else { "" };
         let _ = writeln!(out, "{label:<11} {n}");
     }
+    out
+}
+
+/// The code-health block of `athena status`: a heading, the limits, the table with aligned columns (a file's
+/// lines, longest function, landings in the last week, citations, its limits, and whether it is over), and the
+/// test suite's run time.
+fn code_health_section(health: &athena_core::code_health::CodeHealth) -> String {
+    use athena_core::code_health::{suite_line, table_text, thresholds_line};
+    let mut out = format!("code health {}\n", thresholds_line());
+    for line in table_text(health).lines() {
+        let _ = writeln!(out, "  {line}");
+    }
+    let over = health.over().len();
+    let _ = writeln!(
+        out,
+        "  {over} file(s) over a limit; {}",
+        suite_line(health.suite_seconds)
+    );
     out
 }
 
@@ -1428,6 +1449,61 @@ mod tests {
             " · priority high · plan accepted r1"
         );
         assert_eq!(plan_suffix(&line(Priority::Normal)), " · plan accepted r1");
+    }
+
+    #[test]
+    fn status_renders_code_health_as_an_aligned_table_with_limits_and_suite_time() {
+        use athena_core::code_health::{Breach, CodeHealth, FileHealth};
+        let file = |path: &str, lines: u32, weekly: u32, over: bool| FileHealth {
+            path: path.into(),
+            lines,
+            longest_fn: 40,
+            longest_fn_name: "f".into(),
+            weekly_landings: weekly,
+            citations: 3,
+            limit_lines: 2000,
+            limit_fn: 200,
+            breaches: if over {
+                vec![Breach::FileLength { lines }]
+            } else {
+                vec![]
+            },
+        };
+        let health = CodeHealth {
+            files: vec![
+                file("crates/athena-core/src/run.rs", 2412, 6, true),
+                file("crates/athena-core/src/pr.rs", 310, 0, false),
+            ],
+            suite_seconds: Some(612.5),
+        };
+        let text = code_health_section(&health);
+        assert!(text.contains("2000 production lines per file"), "{text}");
+        assert!(text.contains("200 lines per function"), "{text}");
+        assert!(
+            text.contains("1500 lines with 5 or more landings"),
+            "{text}"
+        );
+        assert!(text.contains("test suite run time: 612.5s"), "{text}");
+        let header = text.lines().find(|l| l.contains("FILE")).unwrap();
+        for name in [
+            "LINES",
+            "LONGEST FN",
+            "LANDINGS 7D",
+            "CITED",
+            "LIMITS",
+            "OVER",
+        ] {
+            assert!(header.contains(name), "{header}");
+        }
+        let over = text.lines().find(|l| l.contains("run.rs")).unwrap();
+        let under = text.lines().find(|l| l.contains("pr.rs")).unwrap();
+        let col = |line: &str, needle: &str| line.find(needle).unwrap();
+        assert_eq!(col(header, "LINES"), col(over, "2412"));
+        assert_eq!(col(header, "LINES"), col(under, "310"));
+        assert_eq!(col(header, "LIMITS"), col(over, "2000 / 200"));
+        assert_eq!(col(header, "OVER"), col(over, "yes: file length"));
+        assert_eq!(col(header, "OVER"), col(under, "no"));
+        assert!(text.contains("1 file(s) over a limit"), "{text}");
     }
 
     #[test]

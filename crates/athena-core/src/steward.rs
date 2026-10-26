@@ -96,6 +96,11 @@ impl Athena {
     /// steward starts in the background when its count is reached. This never waits for the steward. A nested
     /// run never starts it: no model call happens outside a job's own records and budget.
     pub(crate) fn note_finished(&self, state: OutcomeState, ui: &dyn crate::Ui) {
+        // A landing is a moment to look at the code's health. This only queues requests, so a nested run
+        // does it too; a rejected or failed job is no landing.
+        if matches!(state, OutcomeState::Landed) {
+            self.code_health_after_landing(ui);
+        }
         if self.nested.is_some() || !matches!(state, OutcomeState::Landed | OutcomeState::Rejected)
         {
             return;
@@ -1111,6 +1116,59 @@ mod tests {
 
     fn at() -> Timestamp {
         "2026-10-14T12:00:00Z".parse().unwrap()
+    }
+
+    fn structural_requests(athena: &Athena) -> Vec<String> {
+        crate::code_health::tests::open_requests(athena)
+            .into_iter()
+            .filter(|t| t.starts_with(crate::code_health::STRUCTURAL_MARKER))
+            .collect()
+    }
+
+    #[derive(Default)]
+    struct Said(RefCell<Vec<String>>);
+
+    impl crate::Ui for Said {
+        fn line(&self, text: &str) {
+            self.0.borrow_mut().push(text.to_string());
+        }
+    }
+
+    #[test]
+    fn note_finished_checks_code_health_after_a_landing_and_only_then() {
+        use crate::code_health::tests::{big_file, land, set_up};
+        let (_dir, _state, mut athena) = set_up();
+        let now = crate::now();
+        land(
+            &athena,
+            &[("crates/x/src/big.rs", big_file())],
+            "j1",
+            now,
+            0,
+        );
+
+        // A rejected or failed job is no landing: nothing is checked or queued.
+        let ui = Said::default();
+        athena.note_finished(OutcomeState::Rejected, &ui);
+        athena.note_finished(OutcomeState::Failed, &ui);
+        assert!(ui.0.borrow().is_empty(), "{:?}", ui.0.borrow());
+        assert!(structural_requests(&athena).is_empty());
+
+        // A landed job is checked, and the file over its limit gets one request.
+        athena.note_finished(OutcomeState::Landed, &ui);
+        assert!(ui.0.borrow().iter().any(|l| l.starts_with("code health")));
+        let requests = structural_requests(&athena);
+        assert_eq!(requests.len(), 1, "{requests:?}");
+        assert!(requests[0].starts_with("Structural pass: crates/x/src/big.rs"));
+
+        // A nested run does it too: it only queues requests and calls no model.
+        athena.nested = Some("20261026-100000-aaaa".into());
+        athena.note_finished(OutcomeState::Landed, &ui);
+        assert_eq!(
+            structural_requests(&athena).len(),
+            1,
+            "the open request is not queued twice"
+        );
     }
 
     fn change(rung: Ladder) -> ProposedChange {

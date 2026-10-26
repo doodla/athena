@@ -244,6 +244,8 @@ pub struct Records {
     pub hestia_sweeps: Vec<athena_data::records::HestiaSweep>,
     /// The auditor's model invocations, oldest first, kept apart from `jobs` as the audience's are.
     pub auditor_runs: Vec<Invocation>,
+    /// Every code-health baseline (`crate::code_health`), oldest first; the last is the latest.
+    pub code_health_baselines: Vec<athena_data::records::CodeHealthBaseline>,
     /// Files that are not acceptable records, by path.
     pub invalid: Vec<String>,
 }
@@ -309,6 +311,7 @@ impl Records {
                 AnyRecord::AudienceRating(a) => records.audience_ratings.push(*a),
                 AnyRecord::Audit(a) => records.audits.push(*a),
                 AnyRecord::HestiaSweep(s) => records.hestia_sweeps.push(*s),
+                AnyRecord::CodeHealthBaseline(b) => records.code_health_baselines.push(b),
                 AnyRecord::Invocation(i) if i.role == Role::Auditor => {
                     records.auditor_runs.push(*i);
                 }
@@ -342,6 +345,9 @@ impl Records {
             .sort_by(|a, b| (a.at, &a.id).cmp(&(b.at, &b.id)));
         records
             .audience_ratings
+            .sort_by(|a, b| (a.at, &a.id).cmp(&(b.at, &b.id)));
+        records
+            .code_health_baselines
             .sort_by(|a, b| (a.at, &a.id).cmp(&(b.at, &b.id)));
         records.interventions.sort_by_key(|i| i.at);
         records.restarts.sort_by_key(|r| r.at);

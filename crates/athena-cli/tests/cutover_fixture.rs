@@ -111,9 +111,14 @@ fn c0_resolves_from_the_cutover_landing_and_the_import_and_exempt_record_are_on_
         fx.git.rev_parse("main").unwrap().as_deref(),
         Some(c0.as_str())
     );
-    assert_eq!(
-        fx.git.parents(&c0).unwrap(),
-        vec![fx.old_way_landing.clone()]
+    // The code-health check wrote its baseline record after the old-way landing, so C0 sits on that record
+    // commit, which sits on the old-way landing.
+    let parents = fx.git.parents(&c0).unwrap();
+    assert_eq!(parents.len(), 1);
+    assert!(
+        fx.git
+            .is_ancestor(&fx.old_way_landing, &parents[0])
+            .unwrap()
     );
 
     // The import is one commit on top of the landing record, whose second parent is the pull request's head.

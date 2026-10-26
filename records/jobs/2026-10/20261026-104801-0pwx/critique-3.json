@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261026-104801-0pwx",
+  "round": 3,
+  "at": "2026-10-26T10:52:25.84977563Z",
+  "invocation_seq": 6,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "Cargo.toml is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, Cargo.toml",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "\"High priority\" is never checked the way Athena actually reads it.",
+      "evidence": "`Athena::queue(&self, text)` (crates/athena-core/src/reading.rs:550) takes no priority argument; it stores only the request text. Priority comes from a `Priority:` line, which plan.rs reads (plan.rs:73). The plan's \"priority verified in Records\" is vague: the request record holds text only, so a check that the text contains \"Priority: high\" never exercises the code that turns it into a priority. Fix: In the cadence test, pass the queued request text through plan.rs's priority parser (the function documented at plan.rs:73) and assert `Priority::High`. Or assert on the `athena plan` entry for the job.",
+      "location": "Decision 5 / Demonstration for criterion 5",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "`athena plan` may refuse the queued requests because they have no acceptance bullets.",
+      "evidence": "System facts (Request format): without acceptance bullets or a reading's criteria, an item is refused for design or code. The plan says what the structural-pass and design-review texts contain, but neither includes acceptance bullets. Fix: Give both request texts acceptance bullets (lines starting with `-`). Have the criterion-6 test check that the design-review text produces a plan entry that `athena plan` does not refuse.",
+      "location": "Decisions 4 and 5 (request texts)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Other commits with an Athena-Job trailer on main can inflate the landing count.",
+      "evidence": "Many writers add an Athena-Job trailer: reading.rs:582/619/682, manage.rs:134/172, proposals.rs:659, work_decisions.rs:332, and the bootstrap commits (`Athena-Job: bootstrap`). Before the records cutover, records commits sit on main; land.rs:439 has a test fixture with \"Records\\n\\nAthena-Job: jb\". Counting every trailer commit would shift both the cadence and the 7-day churn. Fix: Count a landing only when the commit's trailers carry both Athena-Job and Athena-Verified-Content, which is how `landed_commit` at gh.rs:1287 identifies one. Or skip the `bootstrap` job and records-only commits. Add a test fixture with a records-only trailer commit and assert it is not counted.",
+      "location": "Decision 2 (landing = first-parent commit with an Athena-Job trailer)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "In one run both hooks may fire; the test should prove that queues nothing twice.",
+      "evidence": "run.rs:152 calls `note_finished` after a job finishes, and `Athena::land_pr` (gh.rs:2575-2590) runs its own hook after `resync_onto_merge` and the Pages watch. The plan argues the double firing is idempotent but does not test it. Fix: Add a test that runs both hooks for one landing and asserts that exactly one structural-pass request is queued and that no extra baseline or review is written.",
+      "location": "Steps 5 and 7 (note_finished hook)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan by reading the code; I did not run anything. Every location the plan names exists in the base. `Athena::land_pr` (gh.rs:2455) calls `resync_onto_merge` (gh.rs:2575) and then watches the Pages deploy (gh.rs:2577-2590), so a hook after both is well placed. `note_finished` (steward.rs:98) returns early for nested runs, so the plan's choice to put the hook before that return is correct. The trailer name Athena-Job is confirmed. Cargo.lock already pins syn 2.0.119 and proc-macro2 1.0.107, and the root Cargo.toml has `[workspace.dependencies]`. That makes the extra Cargo.toml edit necessary; I weighed Athena's own finding about it as justified. Each criterion has a demonstration that would fail without the behavior. The 9-versus-10 landing test, the reload into a fresh state directory and the hook-removal checks are all sound. There are four minor findings: (1) the high-priority check should go through the plan.rs priority parser; (2) the queued request texts need acceptance bullets or `athena plan` may refuse them; (3) counting every commit with an Athena-Job trailer can inflate the landing count; (4) one landing that fires both hooks should be tested to queue only once. None is a blocker or major, so I accept."
+}

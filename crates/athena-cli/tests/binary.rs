@@ -228,7 +228,9 @@ fn nested_ask_and_go(fx: &Fixture, free_bytes: Option<&str>) {
     let status = fx.git.run(["status", "--porcelain"]).unwrap();
     assert_eq!(status, "", "and has no stray files");
     let scratch_git = athena_git::Git::at(scratch.path().join("repo"));
-    let landed = scratch_git.run(["log", "-1", "--format=%B"]).unwrap();
+    // The code-health check runs after the landing, also in a nested run, and its baseline record is committed
+    // on top of the landing commit.
+    let landed = scratch_git.run(["log", "-3", "--format=%B"]).unwrap();
     assert!(
         landed.contains("Athena-Verified-Content"),
         "the scratch copy has the landing commit"
