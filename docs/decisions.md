@@ -3290,3 +3290,28 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   pantheon table and the addenda, `docs/design/hestia.md`, D127, D129, `introspect.rs`, `job-planning.md`.
   Measured: line counts and budget ratios at the base commit. Not measured: every figure from `records/`, the
   code-health check (5p65) and Jev checks (zc0v), which are not in the snapshot, and every threshold.
+
+## D131 · Jev answers five code-health questions in shadow, on the existing client and scorer (proposed)
+
+- **Status:** proposed. Not accepted; the build jobs are not queued. The design is
+  [`docs/design/jev-code-health.md`](design/jev-code-health.md).
+- **Case:** The request asks for typed Jev questions about code health. An earlier attempt was rejected for
+  building a client, a fake and a scorer that already exist in `crates/athena-core/src/jev.rs` and
+  `labeled.rs`. The deterministic measures (5p65) are not in the snapshot and are treated as assumed.
+- **Decision (proposed):** Five questions (one thing or several, added coupling, module placement, god-object
+  drift, duplicated logic) go to Jev in one batched call per landing, over a bounded state excerpt. Answers are
+  recorded in a new shadow record and never read to decide anything. They are scored by later evidence (a
+  flagged file breaks or churns; a recommended split lands and churn falls) through new rows in the existing
+  `labeled.rs` scorer. The build is five one-producer jobs, each marked reuse, extend or new; none adds a
+  client, fake or scorer. Per-call price range $0.000012 to about $0.00002; call counts and thresholds are
+  estimates.
+- **Alternatives:** (a) A new code-health client and scorer: rejected, duplicates tested code. (b) One call per
+  question: rejected, about five times the calls. (c) Let findings gate landing from the start: rejected,
+  contradicts shadow-only and D127. (d) Deterministic measures only: not rejected, they remain the base and the
+  scoring reference; Jev is asked what numbers cannot say. (e) Label by human review: rejected, later breakage
+  and churn are available without a person.
+- **Tradeoff:** Evidence arrives slowly (a floor of 4 weeks) and few splits will occur, so some questions may
+  never reach a verdict and are dropped at 12 weeks. Cost is small at the cited range.
+- **Reversal cost:** Low. The record and rows are additive; switch off `ATHENA_JEV_SHADOW`.
+- **Provenance:** Read: `jev.rs`, `labeled.rs`, `defaults-loop.md` price lines, D127, D129, D130. Not
+  measured: landing counts, every threshold and total cost. 5p65 and zc0v are not in the snapshot.

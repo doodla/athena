@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261026-064950-38jx",
+  "round": 2,
+  "at": "2026-10-26T06:54:52.985768958Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The run filter does not match the tests the plan describes, so the criterion can pass with zero tests run.",
+      "evidence": "The plan's Files section says the land_pr test goes in gh.rs and the note_finished test in steward.rs. Their test paths would be gh::tests::… and steward::tests::…, which the filter `code_health::hooks` does not match. cargo test exits 0 when no test matches a filter, so the demonstration would pass whether or not the hooks exist. That breaks the no-empty-success and behavior-evidence defaults. Fix: Fix the test names and the filter together. Either put both hook tests in a `code_health::hooks` test module, or give them a shared name fragment (for example `runs_code_health_hook`) and filter on that. Also state the expected count of tests run (2), so a run of 0 tests counts as a failure.",
+      "location": "Demonstrations, Criterion 7 (Run: `cargo test --locked -p athena-core code_health::hooks`)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "There is no existing core test that calls Athena::land_pr. The plan's open question asks only whether the fixture has Rust sources, not how to drive the method.",
+      "evidence": "Searching for `.land_pr(` finds only callers in athena-cli main.rs:945 and drain.rs:1298. test_support.rs drives the free function `land_pr` with a FakeHost, not the `Athena` method. The method calls `parse_remote` on the origin URL (gh.rs:2488), which supports only github.com URLs, and it needs a Runner. A precedent for faking that path is `PagesFake` in crates/athena-cli/tests/external_calls.rs:306. Fix: In Step 1, name the fixture approach: a github.com-style origin URL plus a fake Runner, following the `PagesFake` setup in external_calls.rs or the gh.rs test FakeRunner. Then the test exercises the real `Athena::land_pr` Landed branch rather than a helper.",
+      "location": "Open questions / Step 1 (land_pr fixture)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan does not say which tree the check measures: the working directory or a commit.",
+      "evidence": "In land_pr, `resync_onto_merge` runs at gh.rs:2575 after the host merge. Before that point, the local working tree may not contain the merged change. note_finished runs from run.rs and may see a different tree. Fix: State that measurement reads the repository root's committed tree (for example HEAD after the resync) or the working tree, and explain why. Use the same rule in both hooks.",
+      "location": "Approach: measure() walks crates/**/*.rs",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Put the hook where an earlier error cannot skip it, and do not let the hook itself return an error.",
+      "evidence": "gh.rs:2575 calls `self.resync_onto_merge(landed, merged, ui)?`. If the hook comes after this line, a failed resync returns early and the check is skipped for a job that did land. Fix: Call run_code_health in the Landed-only block next to watch_pages, after the resync. Either accept that a resync error skips the check and record that, or put the call before the resync. In both cases, report errors with ui.line and never propagate them.",
+      "location": "Files: gh.rs (Call the check after Landed in land_pr)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan matches the reading and the code. I read steward.rs, gh.rs, test_support.rs and Cargo.lock. `Athena::note_finished` is at steward.rs:98 and is called from run.rs:152. `Athena::land_pr` is at gh.rs:2455, and lines 2572–2591 already contain the Landed-only blocks where the hook would go. `StatusView` and `Athena::status` exist in status.rs, and syn is already in Cargo.lock. The design is sound: cadence and dedup come from records, a baseline file stops the first review firing on existing history, and the check never fails a landing. One demonstration needs fixing. Criterion 7's run command filters on `code_health::hooks`, but the plan puts those tests in gh.rs and steward.rs. That filter would match no tests, and `cargo test` passes when no tests match. So the hook criterion could pass without anything being shown. Smaller points: how to build an `Athena::land_pr` test fixture, which source tree the check measures, and where the hook sits next to the `?` call at line 2575."
+}
