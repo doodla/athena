@@ -19,7 +19,7 @@
 
 use crate::capability::JobConfig;
 use crate::commits::{NewFile, message};
-use crate::introspect::{CaseRow, Records, Starts, after_start, read_records};
+use crate::introspect::{CaseRow, Records, Starts, after_start, read_records_current};
 use crate::store::Records as GitRecords;
 use crate::{Athena, Ui};
 use anyhow::{Result, bail};
@@ -553,8 +553,8 @@ impl Athena {
         let head = self.head()?;
         let jc = JobConfig::at(&self.git, &head)?;
         let base = self.base_defaults(&head)?;
-        let known = GitRecords::load(&self.git, &head)?;
-        let records = read_records(self.git.dir())?;
+        let known = GitRecords::load_current(&self.git, &head)?;
+        let records = read_records_current(self.git.dir())?;
         let starts = self.defaults_start(&head, &jc.defaults)?;
         let mut used: Vec<RecordId> = Vec::new();
         let generated = generate(&base, &records, &starts, crate::now(), || {
@@ -616,7 +616,7 @@ impl Athena {
     /// [`REPEAT_THRESHOLD`] more distinct jobs have cases newer than this record.
     pub fn reject_proposal(&self, id: &str, reason: &str) -> Result<ProposalRecord> {
         let head = self.head()?;
-        let known = GitRecords::load(&self.git, &head)?;
+        let known = GitRecords::load_current(&self.git, &head)?;
         let pending = self.pending(&known, id)?;
         let next = rejection(&pending, reason, self.fresh_record_id(&known), crate::now())?;
         let record = AnyRecord::DefaultsProposal(Box::new(next.clone()));
@@ -637,10 +637,10 @@ impl Athena {
     /// the job edits it and lands like any other. Returns the reading.
     pub fn accept_proposal(&self, id: &str, ui: &dyn Ui) -> Result<crate::reading::Proposal> {
         let head = self.head()?;
-        let known = GitRecords::load(&self.git, &head)?;
+        let known = GitRecords::load_current(&self.git, &head)?;
         let pending = self.pending(&known, id)?;
         let reading = self.ask(&accept_request(&pending), ui)?;
-        let known = GitRecords::load(&self.git, &self.head()?)?;
+        let known = GitRecords::load_current(&self.git, &self.head()?)?;
         let next = acceptance(
             &pending,
             reading.job.clone(),
@@ -666,7 +666,7 @@ impl Athena {
     /// `athena check-proposal`: runs [`apply_check`] on `candidate` against `defaults.toml` at HEAD.
     pub fn check_proposal(&self, id: &str, candidate: &str) -> Result<Vec<String>> {
         let head = self.head()?;
-        let known = GitRecords::load(&self.git, &head)?;
+        let known = GitRecords::load_current(&self.git, &head)?;
         let proposal = current(&known.proposals)
             .into_iter()
             .find(|p| p.id == id)
@@ -683,6 +683,7 @@ impl Athena {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::introspect::read_records;
     use athena_data::records::{
         ClassStatus, FailureClass, IntrospectionRecord, IntrospectionStatus, IntrospectionTrigger,
         PreventionKind,

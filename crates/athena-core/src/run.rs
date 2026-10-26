@@ -2401,7 +2401,9 @@ impl Athena {
         let verification_record = closing.verification.clone();
         let wall_time = closing.happened.wall_time_execution_s;
         let score_on = |head: &str| -> Result<Score> {
-            let records = Records::load(&self.git, head)?;
+            // Scoring reads the records branch worktree whatever `head` is (D111); `head` only names the
+            // commit the closing commit is built on.
+            let records = Records::load_current(&self.git, head)?;
             Ok(score(
                 ctx.job,
                 &records,

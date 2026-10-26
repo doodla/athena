@@ -293,14 +293,148 @@ pub fn command(args: &[String], default_root: &Path) -> Result<()> {
             _ => bail!("{USAGE}"),
         }
     }
-    let found = read_jobs(&root, capability.as_deref())?;
+    let found = read_jobs(&current_root(&root), capability.as_deref())?;
     print!("{}", report(&found, n));
     Ok(())
+}
+
+/// The directory whose `records/` is current for the repository at `root`: its `athena/records` worktree when
+/// it has one (D111), else `root`. New wiring: this reader read only `<root>/records` before. The repository's
+/// common git directory is asked of git, so a linked checkout finds the same worktree as the main one.
+pub fn current_root(root: &Path) -> std::path::PathBuf {
+    athena_git::Git::at(root)
+        .common_dir()
+        .ok()
+        .and_then(|common| athena_data::paths::records_worktree(&common))
+        .unwrap_or_else(|| root.to_path_buf())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
+
+    const W: &str = "20260101-000000-wwww";
+    const T: &str = "20260101-000000-tttt";
+
+    fn git(dir: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    }
+
+    fn plant(root: &Path, id: &str) {
+        let dir = root.join("records/jobs/2026-01").join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("job.json"),
+            r#"{"dispatched_at":"2026-01-01T00:00:00Z","class_of_work":"x","capability":"c"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("outcome.json"),
+            r#"{"state":"landed","at":"2026-01-01T00:01:00Z"}"#,
+        )
+        .unwrap();
+    }
+
+    /// A repository with in-tree job `T`; when `with_worktree`, a records worktree under `state` holding `W`.
+    fn repo(base: &Path, with_worktree: bool) -> std::path::PathBuf {
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        plant(&repo, T);
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "init"]);
+        if with_worktree {
+            let common = athena_git::Git::at(&repo).common_dir().unwrap();
+            let wt = athena_data::paths::records_worktree_dir(&athena_data::paths::repo_state_dir(
+                &common,
+            ));
+            assert!(
+                wt.starts_with(base),
+                "the worktree is under the temp state dir"
+            );
+            git(
+                &repo,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    "athena/records",
+                    wt.to_str().unwrap(),
+                ],
+            );
+            std::fs::remove_dir_all(wt.join("records")).unwrap();
+            plant(&wt, W);
+        }
+        repo
+    }
+
+    fn ids(root: &Path) -> Vec<String> {
+        read_jobs(&current_root(root), None)
+            .unwrap()
+            .jobs
+            .into_iter()
+            .map(|j| j.id)
+            .collect()
+    }
+
+    #[test]
+    fn worktree_walltime() {
+        let base = tempfile::tempdir().unwrap();
+        let state = base.path().join("state");
+        athena_data::paths::with_state_root(&state, || {
+            let repo = repo(&state, true);
+            assert_eq!(ids(&repo), vec![W.to_string()], "only the worktree's job");
+        });
+    }
+
+    #[test]
+    fn fallback_walltime() {
+        let base = tempfile::tempdir().unwrap();
+        let state = base.path().join("state");
+        athena_data::paths::with_state_root(&state, || {
+            let repo = repo(&state, false);
+            assert_eq!(ids(&repo), vec![T.to_string()], "only the in-tree job");
+        });
+    }
+
+    #[test]
+    fn linked_worktree_walltime() {
+        let base = tempfile::tempdir().unwrap();
+        let state = base.path().join("state");
+        athena_data::paths::with_state_root(&state, || {
+            let repo = repo(&state, true);
+            let linked = base.path().join("linked");
+            git(
+                &repo,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    "other",
+                    linked.to_str().unwrap(),
+                ],
+            );
+            assert!(
+                linked.join(".git").is_file(),
+                ".git is a file in a linked checkout"
+            );
+            assert_eq!(
+                ids(&linked),
+                vec![W.to_string()],
+                "found via git's common dir"
+            );
+        });
+    }
 
     #[test]
     fn median_and_p90_use_middle_and_nearest_rank() {

@@ -553,8 +553,276 @@ fn ci() -> Result<()> {
         step(name);
         run(Command::new("cargo").args(&args).current_dir(&root))?;
     }
+    step("records readers");
+    let loose = records_reader_scan(&root);
+    if !loose.is_empty() {
+        bail!(
+            "reads of records/ at a named commit that are not on the allow-list (current reads call \
+             `load_current`): {loose:#?}"
+        );
+    }
     println!("\nci: fmt, clippy, and tests passed");
     Ok(())
+}
+
+/// One read of `records/` through a loader that takes a commit, found by [`records_reader_scan`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Hit {
+    /// The file, relative to the scanned root, with `/` separators.
+    file: String,
+    /// The innermost function the call is in.
+    function: String,
+    line: usize,
+}
+
+/// The loaders that read `records/` at a named commit. A current read calls `load_current` instead, which
+/// prefers the `athena/records` worktree (D111).
+const RECORD_LOADERS: [&str; 2] = ["Records::load(", "RecordSet::load("];
+
+/// Call sites that may still call a commit-taking loader, as (file, function, reason). An entry names one
+/// function, never a file, so a new read in the same file is reported.
+const READER_ALLOW: &[(&str, &str, &str)] = &[
+    // The loader and the loaders built on it.
+    (
+        "crates/athena-core/src/store.rs",
+        "load",
+        "the loader itself: Records::load reads a named commit",
+    ),
+    (
+        "crates/athena-gate/src/records.rs",
+        "load_current",
+        "the fallback of the current reader is the unchanged loader",
+    ),
+    // Reads of a named past commit: the gate checks a given tree or a given parent, never "now".
+    (
+        "crates/athena-gate/src/reconcile.rs",
+        "check_tree",
+        "reads a named past commit",
+    ),
+    (
+        "crates/athena-gate/src/reconcile.rs",
+        "committed_invocation_violations",
+        "reads a named past commit",
+    ),
+    (
+        "crates/athena-gate/src/reconcile.rs",
+        "check_tree_excusing_committed",
+        "reads a named past commit and its parent",
+    ),
+    (
+        "crates/athena-gate/src/history.rs",
+        "check_after_cutover",
+        "reads a named past commit",
+    ),
+    (
+        "crates/athena-gate/src/history.rs",
+        "check_history_with_exempt",
+        "reads a named past commit",
+    ),
+    // Reads that go with a writer: they stay on the commit the writer builds until writes move (D111).
+    (
+        "crates/athena-core/src/run.rs",
+        "go_job",
+        "D111 follow-up: resolves the job the run will write to, so it moves with the run's writes",
+    ),
+    (
+        "crates/athena-core/src/run.rs",
+        "dispatch",
+        "reads the commit that read-again just wrote, with its writer",
+    ),
+    // Current reads in files this job does not change: D111 follow-ups, one entry per call site.
+    (
+        "crates/athena-cli/src/drain.rs",
+        "records",
+        "D111 follow-up: not in this job's deliverables",
+    ),
+    (
+        "crates/athena-core/src/audience.rs",
+        "run",
+        "D111 follow-up: not in this job's deliverables",
+    ),
+    (
+        "crates/athena-core/src/code_health.rs",
+        "code_health_check",
+        "D111 follow-up: not in this job's deliverables",
+    ),
+    (
+        "crates/athena-core/src/hestia.rs",
+        "hestia_sweep",
+        "D111 follow-up: not in this job's deliverables",
+    ),
+    (
+        "crates/athena-core/src/hestia.rs",
+        "last_sweep",
+        "D111 follow-up: not in this job's deliverables",
+    ),
+    (
+        "crates/athena-core/src/review.rs",
+        "review",
+        "D111 follow-up: not in this job's deliverables",
+    ),
+    (
+        "crates/athena-core/src/scope_guard.rs",
+        "try_watch_line",
+        "D111 follow-up: not in this job's deliverables",
+    ),
+    (
+        "crates/athena-core/src/steward.rs",
+        "records",
+        "D111 follow-up: not in this job's deliverables",
+    ),
+    (
+        "crates/athena-core/src/steward.rs",
+        "workspace",
+        "D111 follow-up: not in this job's deliverables",
+    ),
+    (
+        "crates/athena-core/src/watcher.rs",
+        "watch_landing",
+        "D111 follow-up: not in this job's deliverables",
+    ),
+    (
+        "crates/athena-core/src/work_decisions.rs",
+        "approve_work",
+        "D111 follow-up: not in this job's deliverables",
+    ),
+    (
+        "crates/athena-core/src/work_decisions.rs",
+        "approve_in_limit",
+        "D111 follow-up: not in this job's deliverables",
+    ),
+    (
+        "crates/athena-core/src/work_decisions.rs",
+        "reject_work",
+        "D111 follow-up: not in this job's deliverables",
+    ),
+];
+
+/// Every call of a commit-taking loader in non-test code under `root/crates`, with allowed ones included.
+/// Comment lines, string literals and `#[cfg(test)]` items are not code and are skipped, as are the files that
+/// only hold test fixtures.
+fn records_reader_hits(root: &Path) -> Vec<Hit> {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut entries: Vec<_> = entries.filter_map(|e| e.ok()).map(|e| e.path()).collect();
+        entries.sort();
+        for path in entries {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if path.is_dir() {
+                if name != "tests" && name != "target" {
+                    walk(&path, out);
+                }
+            } else if name.ends_with(".rs") {
+                let stem = name.trim_end_matches(".rs");
+                if stem != "test_support" && !stem.ends_with("_tests") {
+                    out.push(path);
+                }
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(&root.join("crates"), &mut files);
+    let mut hits = Vec::new();
+    for path in files {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let file = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let lines: Vec<&str> = text.lines().collect();
+        let mut function = String::new();
+        let mut i = 0;
+        while i < lines.len() {
+            let line = lines[i];
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("#[cfg(test)]") {
+                // Skip the item the attribute is on: to its closing brace, or to its `;`.
+                let mut depth = 0i32;
+                let mut opened = false;
+                i += 1;
+                while i < lines.len() {
+                    // Braces inside string literals do not count; format strings hold many.
+                    let mut in_string = false;
+                    let mut escaped = false;
+                    for c in lines[i].chars() {
+                        if in_string {
+                            match (escaped, c) {
+                                (true, _) => escaped = false,
+                                (false, '\\') => escaped = true,
+                                (false, '"') => in_string = false,
+                                _ => {}
+                            }
+                            continue;
+                        }
+                        match c {
+                            '"' => in_string = true,
+                            '{' => {
+                                depth += 1;
+                                opened = true;
+                            }
+                            '}' => depth -= 1,
+                            _ => {}
+                        }
+                    }
+                    let done = if opened {
+                        depth <= 0
+                    } else {
+                        lines[i].trim_end().ends_with(';')
+                    };
+                    i += 1;
+                    if done {
+                        break;
+                    }
+                }
+                continue;
+            }
+            i += 1;
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            if let Some(at) = line.find("fn ") {
+                let name: String = line[at + 3..]
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                if !name.is_empty() && (at == 0 || line.as_bytes()[at - 1] == b' ') {
+                    function = name;
+                }
+            }
+            for loader in RECORD_LOADERS {
+                for (at, _) in line.match_indices(loader) {
+                    let quotes =
+                        line[..at].matches('"').count() - line[..at].matches("\\\"").count();
+                    if quotes.is_multiple_of(2) {
+                        hits.push(Hit {
+                            file: file.clone(),
+                            function: function.clone(),
+                            line: i,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    hits
+}
+
+/// The reads of `records/` at a named commit under `root/crates` that [`READER_ALLOW`] does not allow. A
+/// reader of the current records calls `load_current`, so none is expected.
+fn records_reader_scan(root: &Path) -> Vec<Hit> {
+    records_reader_hits(root)
+        .into_iter()
+        .filter(|hit| {
+            !READER_ALLOW
+                .iter()
+                .any(|(file, function, _)| *file == hit.file && *function == hit.function)
+        })
+        .collect()
 }
 
 #[cfg(unix)]
@@ -583,6 +851,80 @@ fn symlink(_target: &Path, _link: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn plant_source(root: &Path, file: &str, text: &str) {
+        let path = root.join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+
+    #[test]
+    fn records_reader_scan_reports_planted_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        plant_source(
+            dir.path(),
+            "crates/x/src/a.rs",
+            "fn status() {\n    let r = Records::load(&git, &head)?;\n}\n\
+             fn qualified() {\n    let r = crate::store::Records::load(&git, &head)?;\n}\n\
+             fn set() {\n    let s = athena_gate::records::RecordSet::load(&git, &head)?;\n}\n\
+             fn gitrecords() {\n    let g = GitRecords::load(&git, &head)?;\n}\n",
+        );
+        let hits = records_reader_scan(dir.path());
+        let functions: Vec<_> = hits.iter().map(|h| h.function.as_str()).collect();
+        assert_eq!(functions, ["status", "qualified", "set", "gitrecords"]);
+        assert!(hits.iter().all(|h| h.file == "crates/x/src/a.rs"));
+    }
+
+    #[test]
+    fn records_reader_scan_ignores_citations_tests_and_current_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        plant_source(
+            dir.path(),
+            "crates/x/src/steward.rs",
+            "// Records::load( in a comment\n\
+             /// RecordSet::load( in a doc comment\n\
+             fn cites() {\n    let t = \"see Records::load( for the loader\";\n}\n\
+             fn current() {\n    let r = Records::load_current(&git, &head)?;\n}\n\
+             #[cfg(test)]\nmod tests {\n    fn t() {\n        Records::load(&g, \"HEAD\");\n    }\n}\n",
+        );
+        plant_source(
+            dir.path(),
+            "crates/x/tests/it.rs",
+            "fn t() { Records::load(&g, \"HEAD\"); }\n",
+        );
+        assert_eq!(records_reader_scan(dir.path()), Vec::new());
+    }
+
+    #[test]
+    fn records_reader_scan_allows_one_function_not_the_whole_file() {
+        let dir = tempfile::tempdir().unwrap();
+        plant_source(
+            dir.path(),
+            "crates/athena-core/src/store.rs",
+            "impl Records {\n    pub fn load(git: &Git) {\n        RecordSet::load(git, t)?;\n    }\n    pub fn other(git: &Git) {\n        RecordSet::load(git, t)?;\n    }\n}\n",
+        );
+        let hits = records_reader_scan(dir.path());
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].function, "other");
+    }
+
+    #[test]
+    fn records_reader_scan_real_tree_is_clean_and_the_allow_list_is_all_used() {
+        let root = repo_root();
+        let left = records_reader_scan(&root);
+        assert!(
+            left.is_empty(),
+            "unallowed reads of a named commit: {left:#?}"
+        );
+        let all = records_reader_hits(&root);
+        for (file, function, _) in READER_ALLOW {
+            assert!(
+                all.iter()
+                    .any(|h| h.file == *file && h.function == *function),
+                "the allow-list names {file} {function}, which no longer reads a commit"
+            );
+        }
+    }
 
     #[test]
     fn setup_refuses_inside_a_job() {

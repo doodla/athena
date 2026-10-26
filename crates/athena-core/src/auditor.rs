@@ -297,7 +297,7 @@ pub fn run(
     }
     athena.refuse_if_stopped()?;
     let head = athena.head()?;
-    let records = Records::load(&athena.git, &head)?;
+    let records = Records::load_current(&athena.git, &head)?;
     let target = records.resolve(reference)?;
     let job = records
         .jobs

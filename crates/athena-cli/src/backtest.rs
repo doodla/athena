@@ -36,7 +36,8 @@ use anyhow::{Context, Result};
 pub use athena_core::introspect::{
     DecisionHeader, DerivedCite, Enforcement, Finding, InterventionMatch, InterventionRow,
     Introspection, Kind, Phase, Records, Signal, SignalRun, Starts, Status, decision_start,
-    headers, read_records, run_signals, starts_from_history, validate_citations,
+    headers, read_records, read_records_current, run_signals, starts_from_history,
+    validate_citations,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -507,7 +508,9 @@ pub fn run(root: &Path) -> Result<Report> {
     Ok(run_on_from(
         &text,
         &ConfirmedLinks::load(root)?,
-        &read_records(root)?,
+        // The records are the current ones (the `athena/records` worktree when the repository has one, D111);
+        // the decisions and their dates are in the checkout `root`.
+        &read_records_current(root)?,
         &starts_from_history(root)?,
     ))
 }

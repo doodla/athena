@@ -3414,3 +3414,53 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   `athena-gate/src/invariant.rs`, `athena-git/src/lib.rs`, `test_support.rs`. Measured by the new tests and the
   full suite run with `cargo test --locked`. No text with the words "retry_landing has no test" exists in
   `docs/` or `CHANGELOG.md`, so none was removed.
+
+## D134 · Readers of `records/` use the `athena/records` worktree when there is one (D111, job 7 part 2)
+
+- **Case:** After the cutover (D119) the full record history is the branch `athena/records`, checked out in a
+  worktree under the repository's state directory (`<state root>/<name>-<key>/records-worktree`). Readers still
+  loaded `records/` from the commit they were given or from the working tree, so on a checkout without
+  `records/` they saw nothing, and on one with a frozen copy they saw the copy.
+- **Decision:**
+  1. **One selector.** `athena_data::paths::records_worktree(common_git_dir)` returns the worktree path only when
+     it exists and its `HEAD` is `refs/heads/athena/records`; otherwise `None`. The path is derived from git's
+     common directory with the existing `repo_state_dir`, so a linked checkout finds the same worktree as the main
+     one. Asking git for the common directory (`Git::common_dir`) in `backtest.rs` and in `xtask`'s wall-time
+     reader is new wiring added with this move; those two readers had no such derivation, so it is not a repair.
+  2. **Current loaders.** `Records::load_current` and `RecordSet::load_current` read the tip of the worktree when
+     there is one and otherwise call the unchanged `load` at the given head. `load` keeps its meaning for readers
+     of a named past commit (the gate's reconciliation and history checks). `introspect::read_records_current`
+     does the same for the file walks (`records_root`).
+  3. **Scoring ignores the head it is passed.** The scoring closures (`run.rs` `close_dispatched`, `manage.rs`
+     `commit_records_in`) and every other `load_current` caller read the worktree's tip whatever `head` is
+     passed. After the cutover the branch tip is the only full history, and `head` names a main commit with
+     frozen records, so honouring it would score against stale records. Without a worktree the head is honoured
+     as before. Tested by `scoring_ignores_passed_head` and `fallback_scoring_honours_passed_head`.
+  4. **Callers moved:** `status.rs`, `proposals.rs`, `auditor.rs`, `run.rs` (scoring), `manage.rs`, `reading.rs`
+     (priority, queue, ask, retry, correct, `job_records`), `introspect.rs`, `gh.rs` `land_pr`, `backtest.rs`, and
+     `xtask` `walltime`.
+  5. **Not moved, listed.** `xtask/src/main.rs` `records_reader_scan` finds every call of `Records::load(` or
+     `RecordSet::load(` (also `crate::store::Records::load(`) in non-test code under `crates/`, ignoring comments,
+     string literals and `#[cfg(test)]` items, and fails on any not on a (file, function) allow-list. The list
+     holds: the loaders themselves; reads of a named past commit in `athena-gate` (`reconcile.rs`, `history.rs`);
+     `run.rs` `go_job` and `dispatch`, which resolve and re-read the job a run writes to and move with its
+     writes; and current reads in files this job does not change, each marked as a follow-up: `drain.rs`,
+     `audience.rs`, `code_health.rs`, `hestia.rs`, `review.rs`, `scope_guard.rs`, `steward.rs`, `watcher.rs`,
+     `work_decisions.rs`. A new read in an allowed file but another function is reported. `ci` runs the scan.
+  6. **Out of scope.** The study site generator `xtask/src/site.rs` reads `studies/`, not `records/`, and is
+     unchanged.
+- **Alternatives:** Always read `refs/heads/athena/records` (breaks repositories before the cutover and cannot
+  tell the worktree from a frozen copy). Change `Records::load` itself (historical callers need their commit).
+  Re-derive the common directory in `athena-data` (duplicates `athena-git` and adds a git dependency). A
+  whole-file allow-list (hides new reads).
+- **Tradeoff:** Reads and writes are on different sides for a repository with a worktree until the writers move:
+  a command such as `priority` reads the worktree and commits its record to the checkout. The follow-up readers
+  above still read the checkout. The worktree selector reads `HEAD` files rather than asking git, so a worktree
+  checked out by another tool at the right branch counts.
+- **Reversal cost:** Low: `load_current` is `load` when there is no worktree; removing the worktree restores the
+  old behaviour.
+- **Provenance:** Read: `records-history.md`, `paths.rs`, `store.rs`, `introspect.rs`, and every call found by
+  grep for `Records::load`, `RecordSet::load`, `read_records` and `read_jobs`. Measured by
+  `crates/athena-cli/tests/records_branch_readers.rs`, `worktree_walltime`, `fallback_walltime` and
+  `linked_worktree_walltime` (`xtask/src/walltime.rs`), `worktree_land_pr` and `fallback_land_pr` (`gh.rs`),
+  and the `records_reader_scan` tests.
