@@ -1081,3 +1081,7 @@ It should become demonstrably less likely to make the same kind of mistake again
 * All the changes that we're making, what's the codebase quality of Athena?
 * The question is I had to point it out
 * Relay note: the operator's measurement showed gh.rs at 5,276 lines and run.rs's produce_and_verify at 724 lines, the two files most changed and most broken this week, and nothing in Athena had flagged it; Sri's request of 2026-10-17 for Athena to reconsider its own design every few jobs had sat unrun in the queue. Athena should notice decline in its own code and design and act on it without the owner asking.
+
+### 2026-10-26: Jev checks for code health
+
+* Get Jev checks designed for code health
