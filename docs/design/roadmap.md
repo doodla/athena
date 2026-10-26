@@ -22,6 +22,9 @@ steps: RM-0 to RM-7 and RM-9 to RM-13). The earlier RM-8 no longer exists as a s
 moved into RM-0, and the other numbers did not change. The rows AD-12 to AD-15 were added to the map on
 2026-10-14: AD-12 to AD-14 sit in RM-4 and AD-15 in RM-13. Nothing here is implemented by this change.
 
+Continuity and tidiness work (stale queue entries, leftover branches and caches, doc drift) is designed in
+[Hestia](hestia.md), proposed in D129; it adds no row here.
+
 ## RM-0 Accelerate Athena: build cache, concurrent jobs, pull-request landing, timings
 
 - **Rows:** A4-3, A5-3, A5-4, A5-5, SD-6, AD-4, AD-5, AD-9, AD-11.
