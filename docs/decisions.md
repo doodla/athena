@@ -3566,3 +3566,38 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   `store.rs`, `proposals.rs`, `introspect.rs`, `records.rs`. Covered by tests in `athena-data` (`records`),
   `athena-core` (`evidence_labels`, `labeled`) and `athena-cli` (`labeled`). Not run: `athena score-jev
   --derive` on this repository's own records, which the job's snapshot does not hold.
+
+## D138 · `gh.rs` and `run.rs` are split by concern in single-purpose move jobs, with no behavior change (proposed)
+
+- **Status:** proposed. Not accepted; no move job is queued. The design is
+  [`docs/design/structure-pass.md`](design/structure-pass.md). It follows D132's structural-pass rule and is part
+  of the design review the owner asked for in job 20261017-205558-dn2e.
+- **Case:** `crates/athena-core/src/gh.rs` (5,478 lines, about 2,620 of production) mixes the host API, landing,
+  the early pull request and CI wait, and records-branch writes; `crates/athena-core/src/run.rs` (3,164 lines)
+  holds `produce_and_verify` at about 745 lines. Both changed in about 10 of the last week's landings (the
+  request's count), and critics repeatedly found callers a change had missed.
+- **Decision (proposed):** `gh.rs` becomes `gh/` with `transport`, `host`, `remote`, `pages`, `records`, `early`
+  and `landing`; `run.rs` becomes `run/` with `planning`, `pin`, `send_back`, `producer`, `candidate`, `checks`,
+  `verification` and `close`, and `produce_and_verify` becomes a driver over ten named stages. Each `mod.rs`
+  re-exports every public and `pub(crate)` item at its old path. The work is 8 jobs for `gh` (G1-G8) and up to 10
+  for `run` (R0-R9), each one move and one producer run, leaf modules first and the caller-heavy ones (host client,
+  landing, close and land, the stage split) last. A move is shown to change nothing by: the existing tests pass with
+  no line edited but `use` lines; the same `cargo test -- --list`; moved text matching under
+  `git diff --color-moved`; no file outside the two directories in the diff; clean fmt and clippy; and a grep of
+  every old path with equal counts before and after. G1 has two exceptions that need the owner's approval: the
+  path literals in `introspect.rs` (decision headers D87 and D88) and in `tests/external_calls_guard.rs`.
+- **Alternatives:** (a) Do nothing and rely on D132 requests: no boundaries are named, and the breakages continue.
+  (b) Split by type: a landing change still touches several files. (c) A new crate for the host client: changes the
+  dependency direction D20 checks. (d) Move tests with the code at once: changes test names, which is the cheapest
+  proof of no change. (e) Rewrite `produce_and_verify` as a state machine: a design change, not a structure pass.
+  (f) One job per file: too large for the producer deadline (D124) and one suite run.
+- **Tradeoff:** More files and `pub(super)` visibility on items that were private. Eighteen jobs of review for no
+  new behavior, and rebase pressure while both files keep changing. R5-R8 are not pure moves: early returns become
+  stage results, and the proof there is the existing tests plus a paired list of old and new returns (and an
+  optional new ordering test, R0).
+- **Reversal cost:** Low per job: each is one rename and re-export, so a revert restores the old file. After R8 the
+  old function shape is gone and a revert is a normal revert of four landings.
+- **Provenance:** Read: `gh.rs`, `run.rs`, `introspect.rs`, `tests/external_calls_guard.rs`, D20, D124, D132.
+  Measured: line numbers and counts in the design doc at the base commit of the job. Not measured: the landings
+  per file in the last week (taken from the request), production line counts (estimated from line ranges, not
+  `code_health.rs`), and the number of functions.
