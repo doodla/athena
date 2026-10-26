@@ -22,7 +22,7 @@ use athena_agent::policy::Policy;
 use athena_context::briefs::{
     AcceptedReading, CandidateView, CheckResultView, CheckView, CriticInputs, DeliverableFact,
     LEFT_TO_ATHENA, PlanRevision, PlannerInputs, ProducerInputs, RetryFindings, RetrySeed,
-    VerifierInputs, VerifierPlan, critic_brief, planner_brief, producer_brief,
+    VerifierInputs, VerifierPlan, class_summaries, critic_brief, planner_brief, producer_brief,
     producer_prompt_with_plan, render_plan_section, verifier_brief_with_plan,
 };
 use athena_context::outputs::{
@@ -457,6 +457,7 @@ impl Athena {
                 job: job.as_str().to_string(),
                 findings,
             }),
+            failure_classes: class_summaries(&records.introspections, &records.classes),
         });
         let dispatched_at = crate::now();
         let clock = Instant::now();
