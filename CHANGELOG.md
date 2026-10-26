@@ -9,6 +9,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- Added the context and knowledge engineer design (`docs/design/context-engineer.md`): Hermes owns the craft of
+  context efficiency in what Athena writes and gives agents, Hestia keeps it, and the post-mortem extends the
+  introspection record. Proposed decision D130. Design only: no code, and the build jobs are not queued.
 - Added the Hestia design (`docs/design/hestia.md`), a continuity sweep with Hades's cleanup folded in, and
   proposed decision D129 for it. Design only: no code, and the build jobs are not queued.
 - The producer self-check no longer sends a report back over a criterion the producer left to Athena's
