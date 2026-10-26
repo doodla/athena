@@ -150,6 +150,8 @@ impl Athena {
             }
             // The steward runs beside the main flow: this only counts the task and may start it.
             self.note_finished(finished.state, ui);
+            // The line watcher records a flag or a pause for the line; it never changes the result.
+            self.watch_line(&finished.job, ui);
         }
         Ok(result)
     }
@@ -329,6 +331,10 @@ impl Athena {
         ui: &dyn Ui,
     ) -> Result<GoResult> {
         let id = job.id().clone();
+        // A paused line gets no new attempt until the owner lifts the pause (`scope_guard`).
+        if let Some(pause) = self.line_pause(records, id.as_str()) {
+            bail!("{}", self.pause_refusal(&pause));
+        }
         let jc = JobConfig::at(&self.git, head)?;
         if reading.config_sha256 != jc.config_sha256
             || reading.defaults_sha256 != jc.defaults_sha256

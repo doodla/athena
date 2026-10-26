@@ -1,0 +1,235 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261026-015419-4j37",
+  "round": 3,
+  "at": "2026-10-26T02:40:45.280147596Z",
+  "invocation_seq": 5,
+  "approach": "Add a thin I/O layer in scope_guard.rs: build RequestRecords from Records (attempt = closed request job; unmet criterion = first criterion with met=false in the verification; cost = spent_usd(); agent minutes = sum of invocation wall time; plan size and round from the latest JobPlan; retry_of from the \"try again on <id>\" request; quotes = known job ids in request text), group with group_lines, and call evaluate_before_attempt. Persist per-line flags and any pause record {signal, numbers, lift, at} as one JSON file per line under the state dir (pattern of disk::write_hold). Athena::go runs the watcher after a job finishes (never touches the registry or any process). dispatch in run.rs and Athena::retry refuse a paused line with the pause reason. status() gains a scope_guard list; display.rs prints it. A pause lifts only when a new request is not linked to the paused line (a narrowed request starts a new line); no close-path cleanup. Criteria 1-3 are proved by tests that drive Athena::go through the test_support fixture, so removing a hook fails them.",
+  "decisions": [
+    {
+      "choice": "Store flags and pause records as JSON files in the state directory, keyed by the line's first job id, read and written only by scope_guard.rs.",
+      "reason": "No athena-data record type is on the deliverable list; a new type needs schema, validators and docs. The disk hold already uses this pattern. Overwriting by key avoids duplicate flags.",
+      "rejected": [
+        {
+          "option": "New athena.scope-pause record in athena-data and records/",
+          "why": "Touches the schema crate and docs outside the deliverables; too large for one run."
+        },
+        {
+          "option": "Derive the pause on every check with no stored record",
+          "why": "Criterion 1 needs a pause record to exist, and later threshold changes would silently lift old pauses."
+        }
+      ]
+    },
+    {
+      "choice": "The pause record names the strongest signal (Pause beats Flag; ties go to the lowest number) and lists the numbers of every signal at Pause.",
+      "reason": "One clear reason per refusal; status still shows every tripped signal.",
+      "rejected": [
+        {
+          "option": "One record per signal",
+          "why": "More files and a harder message with no extra information."
+        }
+      ]
+    },
+    {
+      "choice": "Lift text: T4 asks for a measurement of the target or a narrowed request (a new, unlinked ask); T3 and T5 a measurement of remaining cost or time; T2 a smaller plan. No resume command. A pause is lifted only by the narrowed request starting a new line; no pause file is deleted on close.",
+      "reason": "Matches section 5 and removes the unlisted close-path change (finding 5). A lift command is not requested.",
+      "rejected": [
+        {
+          "option": "Add athena resume",
+          "why": "Out of scope."
+        },
+        {
+          "option": "Delete the pause file when the paused job is closed",
+          "why": "Needs a change to the close path, which is not a listed file, and could hide a live pause."
+        }
+      ]
+    },
+    {
+      "choice": "Run the watcher in the Finished arm of Athena::go (run.rs:144) beside introspect_job; check the pause at the top of dispatch (run.rs:322) and in Athena::retry. Watcher errors are logged through ui and never returned.",
+      "reason": "The Finished arm already hosts non-blocking follow-ups. Nothing touches the registry kill path, so running jobs are never stopped. dispatch is where a job starts, so the check applies only to the next attempt.",
+      "rejected": [
+        {
+          "option": "Evaluate inside close_dispatched",
+          "why": "It holds the job lock and commits records; a watcher failure could affect the job outcome."
+        }
+      ]
+    },
+    {
+      "choice": "Keep one call to scope_guard::refuse_if_paused in Athena::retry in reading.rs, before ask, and list reading.rs as a file touched (finding 1). The logic stays in scope_guard.rs.",
+      "reason": "Athena::retry is defined at reading.rs:699 and commits a 'try again on' request through ask; criterion 3 needs retry itself to refuse, and no listed file contains it. The edit is one call plus a test-free import.",
+      "rejected": [
+        {
+          "option": "Refuse only in run.rs dispatch",
+          "why": "retry would still commit a new request, failing criterion 3."
+        }
+      ]
+    },
+    {
+      "choice": "T3 forecast p90 is passed as 0.0 (documented as not used by t3_cost) unless an existing per-class source is readable from records.",
+      "reason": "Rules only; no new estimator.",
+      "rejected": [
+        {
+          "option": "Build a p90 estimator",
+          "why": "Out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "Behavior tests for criteria 1-3 live in athena-core and use the test_support fixture (`athena(&self, capabilities, script)`, as run_pin_tests.rs does) to run go to Finished; the direct unit tests of watch_after_attempt and refuse_if_paused are kept as extras.",
+      "reason": "Calling the functions directly would pass even if the hooks in go and dispatch were removed (finding 2).",
+      "rejected": [
+        {
+          "option": "Direct calls only",
+          "why": "Cannot fail when a hook is missing."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/scope_guard.rs",
+      "action": "modify",
+      "purpose": "Watcher: build line records from Records, evaluate, write and read flag and pause files, refuse_if_paused, pause text builders, tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "purpose": "Call the watcher in go after Finished (errors logged only); call the pause check at the top of dispatch; end-to-end tests may sit beside run_pin_tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "One call to scope_guard::refuse_if_paused in Athena::retry before ask. retry is defined here, in none of the listed files; the edit is outside the listed deliverables and needed for criterion 3.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "Add LineSignalView and a scope_guard list to StatusView; fill it from the stored flags and pauses; test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "purpose": "Print flagged and paused lines with signal, numbers and lift; test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased entry for the running-line watcher.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/scope-guard.md",
+      "action": "modify",
+      "purpose": "Section 13: mark job 5 built; record where pauses live and how they lift.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read Records accessors: JobRecords::state, verification criteria, spent_usd, invocation wall_time, plans, and the retry request form in reading.rs; read run_pin_tests.rs and test_support.rs for the fixture.",
+    "In scope_guard.rs add request_records(records), line lookup, and LineState with serde.",
+    "Add PauseRecord {signal, numbers, lift, at} and text builders for T1-T5.",
+    "Add watch_after_attempt(state, records, job_id), writing <state>/scope-guard/<line-head>.json; no process or registry calls.",
+    "Add refuse_if_paused returning an error with signal, numbers and lift.",
+    "Call the watcher in go after Finished (errors logged only); call refuse_if_paused at the top of dispatch and in Athena::retry before ask.",
+    "Add LineSignalView and scope_guard to StatusView; fill it in status().",
+    "Render in display.rs.",
+    "Write the fixture-driven tests for criteria 1-3 and 6, the direct unit tests, the status test and the display test.",
+    "Update CHANGELOG.md and docs/design/scope-guard.md; run fmt, clippy and test."
+  ],
+  "risks": [
+    {
+      "risk": "Quote detection joins unrelated lines.",
+      "mitigation": "Match only full job ids that exist in Records; test with an unrelated id."
+    },
+    {
+      "risk": "A stale pause blocks a line with no way to lift.",
+      "mitigation": "The refusal names the lift; a narrowed request starts a new line. Say so in the docs; no automatic cleanup."
+    },
+    {
+      "risk": "Watcher I/O failure breaks go or hides the result.",
+      "mitigation": "Run after the result is computed; log errors via ui and never return them."
+    },
+    {
+      "risk": "Re-evaluation duplicates flags in status.",
+      "mitigation": "Key the file by the line's first job id and overwrite it on each evaluation."
+    },
+    {
+      "risk": "Thresholds pause good work.",
+      "mitigation": "Reuse the existing constants; the pause text states the numbers."
+    },
+    {
+      "risk": "End-to-end fixture tests are harder to script than direct calls.",
+      "mitigation": "Reuse the run_pin_tests fixture pattern; if scripting verifier rejections proves hard, a minimal Records-based helper is added in test_support."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Test in athena-core using the test_support fixture with a scripted capability and a verifier that rejects with the same unmet criterion (digits differing). Run go on job 1, retry-link job 2 ('try again on'), run go on it, then go on the third 'try again on' job.",
+      "command": "cargo test --locked scope_guard_pause_end_to_end",
+      "observes": "After the second go a pause file exists with signal T4; the third go returns Err containing the pause reason and records no new invocation.",
+      "fails_without": "Without the watcher call in go, no pause file is written after job 2; without the check in dispatch, the third go proceeds and records an invocation. Either removal fails the assertions."
+    },
+    {
+      "criterion": 2,
+      "method": "Same fixture; two linked rejections with differing unmet criteria; go on the third 'try again on' job.",
+      "command": "cargo test --locked scope_guard_flag_only_end_to_end",
+      "observes": "A T1 flag is stored, no pause file exists, and the third go dispatches and records an invocation.",
+      "fails_without": "If every flag were treated as a pause, the third go would be refused; if go did not run the watcher, the T1 flag file would be missing."
+    },
+    {
+      "criterion": 3,
+      "method": "Test in athena-core: with a pause stored from the end-to-end setup, call Athena::retry on a job in the paused line and on a rejected job in another line.",
+      "command": "cargo test --locked scope_guard_retry_refuses",
+      "observes": "The paused call returns Err containing the signal, the numbers and the lift text, and the record count is unchanged; the unpaused call returns Ok.",
+      "fails_without": "Without the refuse_if_paused call in Athena::retry, 'try again on <job>' is asked and committed, failing the Err and record-count assertions."
+    },
+    {
+      "criterion": 4,
+      "method": "Two named tests. status_scope_guard in crates/athena-core/src/status.rs writes one T1 flag and one T4 pause file and asserts status() fills StatusView.scope_guard with both, signal and job id included. display_scope_guard in crates/athena-cli (display.rs tests) renders a StatusView holding both entries.",
+      "command": "cargo test --locked status_scope_guard && cargo test --locked display_scope_guard",
+      "observes": "The rendered text contains T1 with 'flag', T4 with 'pause', and each line's job id; with no entries nothing extra is printed.",
+      "fails_without": "If status() did not read the stored files, the first test finds an empty list; if display.rs did not print them, the second finds no signal lines."
+    },
+    {
+      "criterion": 5,
+      "method": "Test builds pause records for a T4 pause and a T3 pause through the watcher and reads the stored JSON back.",
+      "command": "cargo test --locked scope_guard_pause_text",
+      "observes": "Signal, numbers (rejection count and criterion texts for T4; spend and p90 for T3) and lift text (mentions a narrowed request for T4, a measurement for T3) are non-empty and match the inputs.",
+      "fails_without": "An empty or generic pause record fails the field assertions."
+    },
+    {
+      "criterion": 6,
+      "method": "Test registers a running job on a paused line and runs the watcher to a Pause, asserting the job is still running. It also stores a pause, then runs go on a job already Dispatched on that line through the fixture. CHANGELOG.md is read for the entry (git diff).",
+      "command": "cargo test --locked scope_guard_pause_never_kills",
+      "observes": "The registry still shows the first job running and no signal is sent; the already dispatched job reaches its terminal state and its outcome is recorded; git diff shows an Unreleased CHANGELOG.md entry naming the running-line watcher.",
+      "fails_without": "If the pause path signalled or killed the running job, its registry state would change; if the pause check sat anywhere but at dispatch, the already dispatched job could not reach its terminal state through go."
+    },
+    {
+      "criterion": 7,
+      "method": "Run the lint and format checks over the whole change including the new tests.",
+      "command": "cargo clippy --all-targets --locked -- -D warnings && cargo fmt --all --check",
+      "observes": "Both commands exit zero with no warnings.",
+      "fails_without": "Any unformatted code, unused item or lint in the new watcher, status or display code makes a command exit non-zero."
+    }
+  ],
+  "open_questions": [
+    "reading.rs is not among the deliverables but holds Athena::retry; a one-call edit there is needed for criterion 3. Confirm this is acceptable.",
+    "Whether a measurement alone can lift a T4 pause without a new command is unsettled; the plan lifts only by a new unlinked narrowed request.",
+    "Where a per-kind forecast p90 can be read from existing records was not checked; fallback is 0.0.",
+    "The unit of invocation wall_time for agent minutes was not checked."
+  ],
+  "producer_section_sha256": "172d6f5fc4fa5f764e84bfc9b7076881d2debccd92257ecc415d631b97b2e908"
+}

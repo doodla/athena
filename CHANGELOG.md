@@ -18,6 +18,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Scope guard job 5, the running-line watcher. After each attempt of a line of work finishes, `athena go`
+  evaluates the signals T1 to T5 and records a flag or a pause under `<state root>/scope/`, keyed by the first
+  request id of the line. A pause names the signal, the numbers that tripped it and what would lift it (a
+  measurement, or a narrowed request for T4). `athena go` and `athena retry` refuse a new attempt on a paused
+  line, and `athena status` lists flagged and paused lines with their signals. The T3 forecast p90 is
+  `forecasts.reader.cost_usd.p90()` from the job's reading. Nothing running is stopped, and a pause is lifted
+  by deleting its file. See `docs/design/scope-guard.md` section 13.1.
 - Scope guard job 1: `athena_core::scope_guard`, pure functions with no I/O that group job records into lines
   of work and compute the thrash signals T1 to T5 of `docs/design/scope-guard.md` section 5, with replay tests
   for the trailer, test-suite speedup, prompt-budget and cut A cases. D127 is now accepted, decided by the

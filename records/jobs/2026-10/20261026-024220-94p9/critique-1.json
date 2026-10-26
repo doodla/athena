@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261026-024220-94p9",
+  "round": 1,
+  "at": "2026-10-26T02:46:06.15481091Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "No test checks that `Athena::go` runs the watcher after an attempt. Every demonstration calls `watch_line` directly.",
+      "evidence": "The reading says the watcher evaluates T1–T5 after each attempt of a line. The plan adds that hook to `go` (run.rs:142-155, next to `introspect_job` and `note_finished`). But the tests for criteria 1, 2, 4 and 5 each say 'Run `watch_line`' and then check the files. If the hook in `go` were left out or put in the wrong branch, every test would still pass and nothing in real use would ever write a pause. The 'fails without' text for criterion 1 says a missing `watch_line` would fail the test, but only because the test calls it itself. Fix: Have at least one test (criterion 1 is the natural one) produce the second rejection through `athena.go(..)` with the fake driver and no direct `watch_line` call. Assert the pause file exists after that `go` returns, and only then do the third `ask` and `go`. State that removing the `go` hook fails this test.",
+      "location": "Plan step 6 / Demonstrations for criteria 1, 2, 4, 5",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The retry refusal has no control showing `retry` succeeds on the same line when there is no pause file, which the behavior-evidence default asks for.",
+      "evidence": "The default requires that a denial test 'first shows the action succeeds without the protection'. The criterion 3 demonstration only checks for Err containing the pause reason. `ask` can refuse a retry for other reasons (reading.rs:705 comment: it refuses a job that is not rejected, failed or interrupted). Fix: Add a control: with the pause file absent, `athena.retry(\"<b>\")` on the same line returns Ok (with the reader scripted). Or run the same line with and without the file, and assert Ok and then Err.",
+      "location": "Demonstration for criterion 3",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The `sleep` child must be in its own process group, and that group's id is what gets registered. Otherwise registry cleanup could kill the test runner.",
+      "evidence": "`Registry::register(pgid, job, what)` keys entries by process group id. `reap` and `stop_all` call `kill_group` on that id (procs.rs:135-175). A child spawned with plain `Command::new(\"sleep\")` shares the test process's group. Fix: Spawn with `std::os::unix::process::CommandExt::process_group(0)` and register `child.id() as i32` as the pgid. Kill the child in a Drop guard, as the plan already says.",
+      "location": "Demonstration for criterion 5",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan chooses `forecasts.reader.cost_usd.p90()` without checking that this is the forecast of the job's cost, not of the reader's own cost.",
+      "evidence": "t3_cost compares the line's total attempt spend against `forecast_p90_dollars` (scope_guard.rs:215-221). If `forecasts.reader` forecasts only the reader call, T3 would pause almost every line. The plan's open questions admit the producer did not check which forecast is meant. Fix: Have step 1 read the Forecasts type in athena-data and pick the forecast for the whole job's cost (producer plus verifier). Record that choice in the scope-guard.md text that criterion 8 requires.",
+      "location": "Decision 4 / Open question on the reader vs reference forecast",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "`ls` only shows the files exist, not what they say.",
+      "evidence": "Run: `ls CHANGELOG.md docs/design/scope-guard.md`. Fix: Use `grep -n` for the watcher entry in CHANGELOG.md, and for the 'p90'/'t3_cost'/'forecast' statement in scope-guard.md.",
+      "location": "Demonstration for criterion 8",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the code by reading it; nothing was run. The functions the plan relies on exist: `evaluate_before_attempt`, `group_lines`, `t3_cost(attempts, p90)`, `Athena::go`/`go_job`/`dispatch` in run.rs, `Athena::retry` (calls `ask` at reading.rs:707), `retried_job`, and `Registry::register/entries`. `dispatch` is reached from a Proposed job, so the plan's sequence of `ask` then `go` is a state the code accepts. Storing pauses in state files, checking in `dispatch` and `retry`, and leaving the registry alone fit the criteria and the out-of-scope list. One major gap: no test runs the watcher through `go`, so the hook that writes pauses after each attempt is never shown, and leaving it out would pass every test. The other findings are minor: no Ok control for the retry refusal, the process-group detail for the `sleep` child, which forecast should feed T3, and an existence-only check for the docs. Revise."
+}

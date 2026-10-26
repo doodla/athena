@@ -701,6 +701,10 @@ impl Athena {
         let records = crate::store::Records::load(&self.git, &head)?;
         let id = records.resolve(job_ref)?;
         let job = records.jobs.get(id.as_str()).expect("resolved");
+        // A paused line is refused before any model is called (`scope_guard`).
+        if let Some(pause) = self.line_pause(&records, id.as_str()) {
+            bail!("{}", self.pause_refusal(&pause));
+        }
         let seeded = has_retry_introspection(&records, job);
         // `ask` refuses a job that is not rejected, failed or interrupted before any model is called.
         self.state.registry().reap();

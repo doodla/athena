@@ -1,13 +1,30 @@
-//! Scope guard, build job 1: line-of-work grouping and thrash signals T1 to T5.
+//! Scope guard: line-of-work grouping and thrash signals T1 to T5 (build job 1), and the running-line watcher
+//! (build job 5).
 //!
-//! This is the pure part of the design in `docs/design/scope-guard.md` (section 5 for the signals, section 13
-//! job 1 for the scope, decision D127). Everything here is a function over plain input values. There is no file,
-//! process, network or clock access: elapsed agent time, spend and the per-job-kind forecast p90 are all passed
-//! in by the caller (the later running-line watcher, job 5).
+//! This is the design in `docs/design/scope-guard.md` (section 5 for the signals, section 13 for the jobs,
+//! decision D127). The signal functions are pure functions over plain input values: elapsed agent time, spend
+//! and the forecast p90 are passed in by the caller.
+//!
+//! The watcher (job 5) is the caller. After each attempt of a line finishes, [`Athena::watch_line`] rebuilds
+//! the [`RequestRecord`]s from the committed records, groups them with [`group_lines`], evaluates T1 to T5 with
+//! [`evaluate_before_attempt`] and writes a mark under `<state root>/scope/`: `<first id>.flag.json` for a
+//! flag, `<first id>.pause.json` for a pause, named by the first request id of the line. The p90 passed to
+//! [`t3_cost`] is `forecasts.reader.cost_usd.p90()` of the latest reading of the line's latest job.
+//! `Athena::go` (dispatch) and `Athena::retry` refuse a paused line ([`Athena::line_pause`]). Nothing here
+//! stops or signals a running process, and nothing lifts a pause: the owner deletes the pause file.
 //!
 //! Every threshold is an **estimate, to be tuned** (section 5); the basis for each is in that section's table.
 
+use crate::reading::retried_job;
+use crate::state::StateDir;
+use crate::store::{JobRecords, JobState, Records};
+use crate::{Athena, Ui};
+use anyhow::{Context, Result};
+use athena_data::JobId;
+use athena_data::records::OutcomeState;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 /// T1 (section 5): flag when this attempt number on one line is about to be dispatched. Estimate; basis: the
 /// trailer job (3 rejections) and cut A (4 tries).
@@ -319,6 +336,904 @@ pub fn evaluate_before_attempt(attempts: &[AttemptRecord], forecast_p90_dollars:
         t3: t3_cost(attempts, forecast_p90_dollars),
         t4,
         t5: t5_wall_time(attempts),
+    }
+}
+
+/// One signal that holds, with the numbers that tripped it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SignalFact {
+    /// `T1` to `T5`.
+    pub signal: String,
+    /// `flag` or `pause`.
+    pub level: String,
+    /// The numbers, in words.
+    pub detail: String,
+}
+
+/// The numbers a mark was computed from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MarkNumbers {
+    /// Finished attempts on the line.
+    pub attempts: usize,
+    /// Rejected attempts on the line.
+    pub rejections: usize,
+    /// Spend on the line in dollars.
+    pub spend_usd: f64,
+    /// The forecast p90 in dollars given to T3; 0 when the reading has none.
+    pub forecast_p90_usd: f64,
+    /// Agent minutes on the line.
+    pub agent_minutes: u32,
+    /// The unmet criterion of the latest rejection, when recorded.
+    pub matched_criterion: Option<String>,
+}
+
+/// A flag or a pause on one line, as stored under `<state root>/scope/`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LineMark {
+    /// `flag` or `pause`.
+    pub level: String,
+    /// The first request id of the line: the key of the file.
+    pub line: String,
+    /// The job whose finish triggered the evaluation.
+    pub job: String,
+    /// When the mark was written.
+    pub at: String,
+    /// The signals that hold.
+    pub signals: Vec<SignalFact>,
+    /// The numbers behind them.
+    pub numbers: MarkNumbers,
+    /// Why, in one sentence.
+    pub reason: String,
+    /// What would lift it, and how.
+    pub lift: String,
+}
+
+impl LineMark {
+    /// The signal names, such as `T1, T4`.
+    pub fn signal_names(&self) -> String {
+        self.signals
+            .iter()
+            .map(|s| s.signal.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// Whether this is a pause.
+    pub fn is_pause(&self) -> bool {
+        self.level == "pause"
+    }
+}
+
+/// The directory of the marks of one repository.
+pub fn scope_dir(state: &StateDir) -> PathBuf {
+    state.root().join("scope")
+}
+
+/// The pause file of the line whose first request id is `first`.
+pub fn pause_path(state: &StateDir, first: &str) -> PathBuf {
+    scope_dir(state).join(format!("{first}.pause.json"))
+}
+
+/// The flag file of the line whose first request id is `first`.
+pub fn flag_path(state: &StateDir, first: &str) -> PathBuf {
+    scope_dir(state).join(format!("{first}.flag.json"))
+}
+
+fn read_mark(path: &std::path::Path) -> Option<LineMark> {
+    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+}
+
+fn write_mark(path: PathBuf, mark: &LineMark) -> Result<()> {
+    std::fs::create_dir_all(path.parent().expect("a mark file has a directory"))?;
+    let text = serde_json::to_string_pretty(mark)?;
+    std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))
+}
+
+/// Every mark in the state directory, pauses first. A flag is not listed for a line that is paused.
+pub fn list_lines(state: &StateDir) -> Vec<LineMark> {
+    let Ok(dir) = std::fs::read_dir(scope_dir(state)) else {
+        return Vec::new();
+    };
+    let mut pauses = Vec::new();
+    let mut flags = Vec::new();
+    for entry in dir.filter_map(Result::ok) {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if let Some(mark) = read_mark(&entry.path()) {
+            if name.ends_with(".pause.json") {
+                pauses.push(mark);
+            } else if name.ends_with(".flag.json") {
+                flags.push(mark);
+            }
+        }
+    }
+    flags.retain(|f| !pauses.iter().any(|p| p.line == f.line));
+    pauses.sort_by(|a, b| a.line.cmp(&b.line));
+    flags.sort_by(|a, b| a.line.cmp(&b.line));
+    pauses.extend(flags);
+    pauses
+}
+
+/// The finished attempt a request's job made, when it has one: it was dispatched and reached a final state.
+fn attempt_of(job: &JobRecords) -> Option<AttemptRecord> {
+    job.job.as_ref()?;
+    let verdict = match job.state() {
+        JobState::Closed(OutcomeState::Landed) => Verdict::Accepted,
+        JobState::Closed(OutcomeState::Rejected) => Verdict::Rejected,
+        JobState::Closed(_) => Verdict::Failed,
+        _ => return None,
+    };
+    let unmet_criterion = if verdict == Verdict::Rejected {
+        job.verification
+            .as_ref()
+            .and_then(|v| v.criteria.iter().find(|c| !c.met))
+            .map(|c| c.criterion.clone())
+    } else {
+        None
+    };
+    let totals = job.outcome.as_ref().and_then(|o| o.totals.as_ref());
+    // `cost_execution` is what the reading's `cost_usd` forecast covers (producer and verifier).
+    let cost_dollars = totals
+        .map(|t| t.cost_execution.best_lower())
+        .unwrap_or_else(|| job.spent_usd());
+    let agent_minutes = totals
+        .and_then(|t| t.wall_time_execution.as_ref())
+        .and_then(|q| q.value())
+        .map_or(0, |s| (s / 60.0).round().max(0.0) as u32);
+    let plan = job.plans.last();
+    Some(AttemptRecord {
+        verdict,
+        unmet_criterion,
+        cost_dollars,
+        agent_minutes,
+        plan_size: plan.map(|p| (p.files.len() + p.steps.len()) as u32),
+        planning_round: plan.map_or(1, |p| p.round),
+    })
+}
+
+/// Rebuilds the [`RequestRecord`]s of every request job, oldest first: the retry link from "try again on
+/// <job>", the quoted request ids, and the finished attempt read from the job's outcome and verification.
+pub fn request_records(records: &Records) -> Vec<RequestRecord> {
+    let mut jobs = records.request_jobs();
+    jobs.reverse();
+    let ids: Vec<String> = jobs.iter().map(|j| j.id().as_str().to_string()).collect();
+    jobs.iter()
+        .map(|job| {
+            let id = job.id().as_str().to_string();
+            let text = job.request.as_ref().map_or("", |r| r.text.as_str());
+            RequestRecord {
+                retry_of: retried_job(records, text)
+                    .map(|j| j.as_str().to_string())
+                    .filter(|t| *t != id),
+                quotes: ids
+                    .iter()
+                    .filter(|other| **other != id && text.contains(other.as_str()))
+                    .cloned()
+                    .collect(),
+                attempts: attempt_of(job).into_iter().collect(),
+                id,
+            }
+        })
+        .collect()
+}
+
+/// The forecast p90 in dollars for a job: the latest reading's `forecasts.reader.cost_usd.p90()`, which
+/// forecasts the job's producer and verifier cost. 0 when there is no reading or the value is not positive;
+/// [`t3_cost`] ignores a forecast of 0.
+fn forecast_p90_dollars(job: &JobRecords) -> f64 {
+    let p90 = job
+        .latest_reading()
+        .map_or(0.0, |r| r.forecasts.reader.cost_usd.p90());
+    if p90.is_finite() && p90 > 0.0 {
+        p90
+    } else {
+        0.0
+    }
+}
+
+fn facts(signals: &Signals, attempts: &[AttemptRecord], numbers: &MarkNumbers) -> Vec<SignalFact> {
+    let mut out = Vec::new();
+    let mut add = |signal: &str, level: Level, detail: String| {
+        if level != Level::None {
+            out.push(SignalFact {
+                signal: signal.to_string(),
+                level: if level == Level::Pause {
+                    "pause"
+                } else {
+                    "flag"
+                }
+                .to_string(),
+                detail,
+            });
+        }
+    };
+    add(
+        "T1",
+        signals.t1,
+        format!(
+            "{} attempts finished without an accepted candidate; the next would be attempt {} (flag from attempt {T1_ATTEMPT})",
+            numbers.attempts,
+            numbers.attempts + 1
+        ),
+    );
+    let sizes: Vec<u32> = attempts.iter().filter_map(|a| a.plan_size).collect();
+    add(
+        "T2",
+        signals.t2,
+        format!(
+            "plan size {} then {}, planning round {} (flag over {T2_RATIO} times the first plan or at round {T2_PLANNING_ROUND})",
+            sizes.first().map_or("?".to_string(), |s| s.to_string()),
+            sizes.last().map_or("?".to_string(), |s| s.to_string()),
+            attempts.iter().map(|a| a.planning_round).max().unwrap_or(1)
+        ),
+    );
+    add(
+        "T3",
+        signals.t3,
+        format!(
+            "spend ${:.2} against forecast p90 ${:.2} (flag at {T3_FLAG_RATIO} times, pause at {T3_PAUSE_RATIO} times; flag over ${T3_LINE_DOLLARS:.2} whatever the forecast)",
+            numbers.spend_usd, numbers.forecast_p90_usd
+        ),
+    );
+    add(
+        "T4",
+        signals.t4,
+        format!(
+            "{} rejections, the latest for criterion: {}",
+            numbers.rejections,
+            numbers
+                .matched_criterion
+                .as_deref()
+                .unwrap_or("(not recorded)")
+        ),
+    );
+    add(
+        "T5",
+        signals.t5,
+        format!(
+            "{} minutes of agent time with no accepted candidate (flag at {T5_FLAG_MINUTES}, pause at {T5_PAUSE_MINUTES})",
+            numbers.agent_minutes
+        ),
+    );
+    out
+}
+
+impl Athena {
+    /// The pause on the line that `job_id` belongs to, if there is one. Rebuilds the [`RequestRecord`]s from
+    /// `records`, groups them with [`group_lines`], and looks the pause file up by the line's first request id.
+    pub fn line_pause(&self, records: &Records, job_id: &str) -> Option<LineMark> {
+        let requests = request_records(records);
+        let at = requests.iter().position(|r| r.id == job_id)?;
+        let lines = group_lines(&requests);
+        let line = lines.iter().find(|l| l.contains(&at))?;
+        let first = &requests[line[0]].id;
+        read_mark(&pause_path(&self.state, first)).filter(LineMark::is_pause)
+    }
+
+    /// The refusal text for a paused line: the signal, the reason, what lifts it and which file to delete.
+    pub fn pause_refusal(&self, mark: &LineMark) -> String {
+        format!(
+            "line {} is paused ({}): {}. To lift it: {}. The pause is the file {}",
+            mark.line,
+            mark.signal_names(),
+            mark.reason,
+            mark.lift,
+            pause_path(&self.state, &mark.line).display()
+        )
+    }
+
+    /// After an attempt of a line finished: evaluates T1 to T5 for the line `job` belongs to and records a
+    /// flag or a pause. Never changes a job and never touches the process registry. An error is shown and
+    /// ignored: the watcher cannot change the result of `go`.
+    pub fn watch_line(&self, job: &JobId, ui: &dyn Ui) {
+        if let Err(e) = self.try_watch_line(job, ui) {
+            ui.line(&format!("scope      the line watcher could not run: {e:#}"));
+        }
+    }
+
+    fn try_watch_line(&self, job: &JobId, ui: &dyn Ui) -> Result<()> {
+        let head = self.head()?;
+        let records = Records::load(&self.git, &head)?;
+        let requests = request_records(&records);
+        let Some(at) = requests.iter().position(|r| r.id == job.as_str()) else {
+            return Ok(());
+        };
+        let lines = group_lines(&requests);
+        let Some(line) = lines.iter().find(|l| l.contains(&at)) else {
+            return Ok(());
+        };
+        let first = requests[line[0]].id.clone();
+        let attempts = line_attempts(&requests, line);
+        let latest = &requests[*line.last().expect("a line has a request")].id;
+        let p90 = records.jobs.get(latest).map_or(0.0, forecast_p90_dollars);
+        let signals = evaluate_before_attempt(&attempts, p90);
+        let rejected: Vec<&AttemptRecord> = attempts
+            .iter()
+            .filter(|a| a.verdict == Verdict::Rejected)
+            .collect();
+        let numbers = MarkNumbers {
+            attempts: attempts.len(),
+            rejections: rejected.len(),
+            spend_usd: attempts.iter().map(|a| a.cost_dollars).sum(),
+            forecast_p90_usd: p90,
+            agent_minutes: attempts.iter().map(|a| a.agent_minutes).sum(),
+            matched_criterion: rejected.last().and_then(|a| a.unmet_criterion.clone()),
+        };
+        let (flag_file, pause_file) = (
+            flag_path(&self.state, &first),
+            pause_path(&self.state, &first),
+        );
+        let level = signals.overall();
+        if level == Level::None {
+            let _ = std::fs::remove_file(&flag_file);
+            return Ok(());
+        }
+        let facts = facts(&signals, &attempts, &numbers);
+        let paused = level == Level::Pause;
+        let reason = facts
+            .iter()
+            .filter(|f| f.level == if paused { "pause" } else { "flag" })
+            .map(|f| format!("{}: {}", f.signal, f.detail))
+            .collect::<Vec<_>>()
+            .join("; ");
+        let lift = if paused && signals.t4 == Level::Pause {
+            "narrow the request so it asks for less than the criterion that was rejected twice, or add a measurement of what fails".to_string()
+        } else if paused {
+            "a measurement of cost or progress that shows the next attempt will not repeat the spend".to_string()
+        } else {
+            "no action needed; the line is still dispatched".to_string()
+        };
+        let mark = LineMark {
+            level: if paused { "pause" } else { "flag" }.to_string(),
+            line: first.clone(),
+            job: job.as_str().to_string(),
+            at: crate::now().to_string(),
+            signals: facts,
+            numbers,
+            reason,
+            lift: if paused {
+                format!("{lift}. Then delete {}", pause_file.display())
+            } else {
+                lift
+            },
+        };
+        let names = mark.signal_names();
+        if paused {
+            write_mark(pause_file, &mark)?;
+            let _ = std::fs::remove_file(&flag_file);
+            ui.line(&format!(
+                "scope      line {first} paused: {names}; {}",
+                mark.reason
+            ));
+        } else {
+            // A pause file stays until the owner deletes it; a flag does not replace it.
+            write_mark(flag_file, &mark)?;
+            ui.line(&format!("scope      line {first} flagged: {names}"));
+        }
+        Ok(())
+    }
+}
+
+/// Watcher tests: they drive `Athena::go` with the fake agent driver, as `run_pin_tests` does.
+#[cfg(test)]
+mod watcher_tests {
+    use super::*;
+    use crate::Quiet;
+    use crate::capability::{
+        Capability, CapabilityCard, ChangeList, CheckSpec, JobConfig, ToolGrant,
+    };
+    use crate::run::GoResult;
+    use athena_agent::fake::{FakeAgentDriver, FakeTurn};
+    use athena_agent::{AgentInvocation, Usage};
+    use athena_context::{PRODUCER_FRAME, PromptAsset, VERIFIER_FRAME};
+    use athena_data::records::{AcceptedBy, Build, PolicyViolation, Role};
+    use athena_git::Git;
+    use serde_json::json;
+    use std::collections::{BTreeMap, VecDeque};
+    use std::sync::{Arc, Mutex};
+
+    /// The criterion texts the fake reader gives; the verifier fails the one whose index the script names.
+    const CRITERIA: [&str; 2] = ["README.md describes the demo", "the file is plain text"];
+
+    /// A capability that edits files and runs no checks.
+    struct Docs;
+
+    impl Capability for Docs {
+        fn id(&self) -> &'static str {
+            "study"
+        }
+        fn card(&self) -> CapabilityCard {
+            CapabilityCard {
+                id: "study",
+                purpose: "describe a demo.",
+                when: "for a request to describe a demo.",
+                produces: "files describing the demo.",
+            }
+        }
+        fn producer_section(&self) -> PromptAsset {
+            PRODUCER_FRAME
+        }
+        fn verifier_section(&self) -> PromptAsset {
+            VERIFIER_FRAME
+        }
+        fn producer_grant(&self, _: &JobConfig) -> ToolGrant {
+            ToolGrant {
+                tools: vec!["Read".into()],
+                commands: BTreeMap::new(),
+                writes: true,
+                permission_mode: "acceptEdits".into(),
+            }
+        }
+        fn verifier_grant(&self, _: &JobConfig) -> ToolGrant {
+            ToolGrant {
+                tools: vec!["Read".into()],
+                commands: BTreeMap::new(),
+                writes: false,
+                permission_mode: "dontAsk".into(),
+            }
+        }
+        fn checks(&self, _: &JobConfig) -> Vec<CheckSpec> {
+            Vec::new()
+        }
+        fn env(&self, _: &JobConfig) -> BTreeMap<String, String> {
+            BTreeMap::new()
+        }
+        fn admit(&self, _: &ChangeList, _: &JobConfig) -> Vec<PolicyViolation> {
+            Vec::new()
+        }
+    }
+
+    /// What the fake agents do.
+    struct Plan {
+        /// The reading's forecast p90 for the job's cost.
+        p90: f64,
+        /// What each producer and each verifier call costs.
+        cost: f64,
+        /// One entry per verifier call: the index of the criterion to fail, or `None` to pass.
+        verdicts: Mutex<VecDeque<Option<usize>>>,
+    }
+
+    struct Rig {
+        _dir: tempfile::TempDir,
+        _state: tempfile::TempDir,
+        athena: Athena,
+    }
+
+    fn rig(p90: f64, cost: f64, verdicts: &[Option<usize>]) -> Rig {
+        let raw = include_str!("../../../athena.toml");
+        let mut in_job_plan = false;
+        let config: String = raw
+            .split_inclusive('\n')
+            .filter(|line| {
+                let key = line.trim_start();
+                if key.starts_with('[') {
+                    in_job_plan = key.trim_end() == "[job_plan]";
+                }
+                !(in_job_plan || key.starts_with("repo_url") || key.starts_with("repo_ref"))
+            })
+            .collect();
+        let dir = tempfile::tempdir().unwrap();
+        let git = Git::at(dir.path());
+        git.run(["init", "-q", "-b", "main"]).unwrap();
+        for (key, value) in [
+            ("user.name", "Test User"),
+            ("user.email", "noreply@example.com"),
+            ("commit.gpgsign", "false"),
+            ("core.hooksPath", "/dev/null"),
+        ] {
+            git.run(["config", key, value]).unwrap();
+        }
+        for (path, text) in [
+            ("athena.toml", config.as_str()),
+            ("defaults.toml", include_str!("../../../defaults.toml")),
+            ("README.md", "# Demo\n"),
+        ] {
+            std::fs::write(dir.path().join(path), text).unwrap();
+        }
+        git.run(["add", "-A"]).unwrap();
+        git.run([
+            "commit",
+            "-q",
+            "-m",
+            "Start a demo repository\n\nAthena-Job: bootstrap",
+        ])
+        .unwrap();
+        let state_dir = tempfile::tempdir().unwrap();
+        let state = StateDir::new(state_dir.path().join("repo"))
+            .with_free_space(crate::test_support::plenty_of_space);
+        let plan = Arc::new(Plan {
+            p90,
+            cost,
+            verdicts: Mutex::new(verdicts.iter().copied().collect()),
+        });
+        let script = Box::new(move |spec: &AgentInvocation| {
+            let mut turn = match spec.role {
+                Role::Reader => FakeTurn::output(json!({
+                    "title": "Describe the demo",
+                    "summary": "Describe the demo in README.md.",
+                    "class_of_work": "docs",
+                    "capability": "study",
+                    "decline_reason": null,
+                    "producer_model": "claude-haiku-5-5",
+                    "defaults_applied": [{ "id": "strangers", "how": "plain words" }],
+                    "assumptions": [],
+                    "question": null,
+                    "acceptance_criteria": [
+                        { "text": CRITERIA[0], "kind": "content" },
+                        { "text": CRITERIA[1], "kind": "content" }
+                    ],
+                    "deliverables": [{ "path": "README.md", "action": "modify", "p": 0.9 }],
+                    "out_of_scope": ["Other files"],
+                    "forecast": {
+                        "p_reading_accepted": 0.8,
+                        "p_verification_passes": 0.7,
+                        "p_user_intervenes": 0.1,
+                        "cost_usd": { "p10": plan.p90 / 4.0, "p50": plan.p90 / 2.0, "p90": plan.p90 },
+                        "wall_time_s": { "p10": 5.0, "p50": 30.0, "p90": 300.0 },
+                        "departures": null
+                    }
+                })),
+                Role::Producer => {
+                    let mut t = FakeTurn::output(json!({
+                        "summary": "Described the demo.",
+                        "files": ["README.md"],
+                        "checks_run": [],
+                        "criteria_check": [
+                            { "criterion": CRITERIA[0], "status": "met", "evidence": "read it" },
+                            { "criterion": CRITERIA[1], "status": "met", "evidence": "read it" }
+                        ],
+                        "open_issues": [], "mistakes": [], "learnings": [], "desires": []
+                    }));
+                    t.edits = vec![("README.md".into(), Some("# Demo\n\nA demo.\n".into()))];
+                    t
+                }
+                Role::Verifier => {
+                    let fail = plan.verdicts.lock().unwrap().pop_front().flatten();
+                    FakeTurn::output(json!({
+                        "verdict": if fail.is_some() { "fail" } else { "pass" },
+                        "criteria": [
+                            { "criterion": CRITERIA[0], "met": fail != Some(0), "evidence": "checked", "commands": [] },
+                            { "criterion": CRITERIA[1], "met": fail != Some(1), "evidence": "checked", "commands": [] }
+                        ],
+                        "findings": [],
+                        "request_reading_mismatch": null,
+                        "summary": "Checked."
+                    }))
+                }
+                Role::Planner | Role::Critic => unreachable!("planning is off in this repository"),
+                Role::Steward => FakeTurn::output(json!({ "items": [] })),
+                Role::Audience => FakeTurn::output(json!({ "rating": 3, "findings": [] })),
+                Role::Auditor => FakeTurn::output(json!({ "summary": "Fine.", "findings": [] })),
+            };
+            turn.cost_usd = if spec.role == Role::Reader {
+                0.01
+            } else {
+                plan.cost
+            };
+            turn.usage = Usage {
+                input: 1,
+                output: 1,
+                cache_read: 1,
+                cache_write: 1,
+            };
+            turn
+        });
+        let driver = FakeAgentDriver::new(script).with_registry(state.registry());
+        let athena = Athena {
+            git,
+            state,
+            driver: Arc::new(driver),
+            capabilities: vec![Box::new(Docs)],
+            build: Build {
+                version: "0.1.0".into(),
+                source_commit: "0".repeat(40),
+                dirty: false,
+            },
+            athena_bin: "/bin/false".into(),
+            nested: None,
+            pinner: Box::new(crate::fake::CountingPinner::new(&"a".repeat(40))),
+            jev: None,
+        };
+        Rig {
+            _dir: dir,
+            _state: state_dir,
+            athena,
+        }
+    }
+
+    impl Rig {
+        fn ask(&self, text: &str) -> JobId {
+            self.athena.ask(text, &Quiet).unwrap().job
+        }
+
+        fn go(&self, job: &JobId) -> Result<OutcomeState> {
+            match self.athena.go(job.as_str(), AcceptedBy::User, &Quiet)? {
+                GoResult::Finished(f) => Ok(f.state),
+                GoResult::Reread(_) => panic!("the job was read again"),
+            }
+        }
+
+        fn records(&self) -> Records {
+            Records::load(&self.athena.git, &self.athena.head().unwrap()).unwrap()
+        }
+
+        fn pause(&self, first: &JobId) -> PathBuf {
+            pause_path(&self.athena.state, first.as_str())
+        }
+
+        fn flag(&self, first: &JobId) -> PathBuf {
+            flag_path(&self.athena.state, first.as_str())
+        }
+
+        /// Two attempts rejected for the same criterion, through `ask` and `go`.
+        fn two_rejections(&self) -> (JobId, JobId) {
+            let a = self.ask("describe the demo in the readme");
+            assert_eq!(self.go(&a).unwrap(), OutcomeState::Rejected);
+            let b = self.ask(&format!("try again on {a}"));
+            assert_eq!(self.go(&b).unwrap(), OutcomeState::Rejected);
+            (a, b)
+        }
+    }
+
+    fn mark(level: &str, line: &str, signal: &str) -> LineMark {
+        LineMark {
+            level: level.into(),
+            line: line.into(),
+            job: line.into(),
+            at: "2026-10-26T00:00:00Z".into(),
+            signals: vec![SignalFact {
+                signal: signal.into(),
+                level: level.into(),
+                detail: "two rejections".into(),
+            }],
+            numbers: MarkNumbers {
+                attempts: 2,
+                rejections: 2,
+                spend_usd: 0.5,
+                forecast_p90_usd: 0.0,
+                agent_minutes: 1,
+                matched_criterion: None,
+            },
+            reason: format!("{signal}: two rejections"),
+            lift: "narrow the request".into(),
+        }
+    }
+
+    #[test]
+    fn t4_pause_via_go_and_ask() {
+        let r = rig(0.8, 0.01, &[Some(0), Some(0)]);
+        let a = r.ask("describe the demo in the readme");
+        assert_eq!(r.go(&a).unwrap(), OutcomeState::Rejected);
+        assert!(!r.pause(&a).exists(), "one rejection pauses nothing");
+        let b = r.ask(&format!("try again on {a}"));
+        assert_eq!(r.go(&b).unwrap(), OutcomeState::Rejected);
+        assert!(
+            r.pause(&a).exists(),
+            "two rejections of one criterion pause the line"
+        );
+
+        // The third request is made with `ask`, not `retry`; `go` refuses to dispatch it.
+        let c = r.ask(&format!("try again on {b}"));
+        let err = r.go(&c).unwrap_err().to_string();
+        assert!(err.contains("paused") && err.contains("T4"), "{err}");
+        assert!(
+            r.pause(&a).exists(),
+            "the refusal leaves the pause in place"
+        );
+        let records = r.records();
+        assert!(
+            records.jobs[c.as_str()].job.is_none(),
+            "the third attempt was not dispatched"
+        );
+
+        // Control: with no pause file the same request is dispatched.
+        std::fs::remove_file(r.pause(&a)).unwrap();
+        assert_eq!(r.go(&c).unwrap(), OutcomeState::Landed);
+        assert!(r.records().jobs[c.as_str()].job.is_some());
+    }
+
+    #[test]
+    fn differing_criteria_flag_only() {
+        let r = rig(0.8, 0.01, &[Some(0), Some(1)]);
+        let (a, b) = r.two_rejections();
+        assert!(!r.pause(&a).exists(), "differing criteria do not pause");
+        let flag = read_mark(&r.flag(&a)).expect("a flag is recorded");
+        assert_eq!(flag.level, "flag");
+        assert_eq!(flag.signal_names(), "T1");
+        let c = r.ask(&format!("try again on {b}"));
+        assert_eq!(
+            r.go(&c).unwrap(),
+            OutcomeState::Landed,
+            "the next attempt is dispatched"
+        );
+        assert!(
+            !r.flag(&a).exists(),
+            "an accepted line has no signal left, so its flag is cleared"
+        );
+    }
+
+    #[test]
+    fn retry_refuses_paused_line() {
+        let r = rig(0.8, 0.01, &[Some(0), Some(1)]);
+        let (a, b) = r.two_rejections();
+        // Control: no pause file, so retry reads the request again.
+        r.athena
+            .retry(b.as_str(), &Quiet)
+            .expect("retry without a pause");
+        let tip = r.athena.head().unwrap();
+
+        let paused = mark("pause", a.as_str(), "T4");
+        write_mark(r.pause(&a), &paused).unwrap();
+        let err = r.athena.retry(b.as_str(), &Quiet).unwrap_err().to_string();
+        assert!(
+            err.contains("T4") && err.contains("two rejections"),
+            "{err}"
+        );
+        assert_eq!(
+            r.athena.head().unwrap(),
+            tip,
+            "a refused retry commits nothing"
+        );
+
+        // The pause is found through RequestRecords and group_lines, keyed by the line's first id, for
+        // the retried job and for a later job on the line.
+        let records = r.records();
+        assert_eq!(
+            r.athena.line_pause(&records, b.as_str()),
+            Some(paused.clone())
+        );
+        let later = records
+            .request_jobs()
+            .into_iter()
+            .map(|j| j.id().as_str().to_string())
+            .find(|id| id != a.as_str() && id != b.as_str())
+            .expect("the control retry made a later job on the line");
+        assert_eq!(r.athena.line_pause(&records, &later), Some(paused));
+        let other = r.ask("something unrelated about the licence");
+        assert_eq!(r.athena.line_pause(&r.records(), other.as_str()), None);
+    }
+
+    #[test]
+    fn t3_pause_from_reading_forecast() {
+        // Spend is 1.6 dollars on one attempt: 1.6 is at least 1.5 times the reading's p90 of 1.0.
+        let r = rig(1.0, 0.8, &[Some(0)]);
+        let a = r.ask("describe the demo in the readme");
+        assert_eq!(r.go(&a).unwrap(), OutcomeState::Rejected);
+        let paused = read_mark(&r.pause(&a)).expect("T3 pauses the line");
+        assert_eq!(paused.signal_names(), "T3");
+        assert!((paused.numbers.spend_usd - 1.6).abs() < 1e-9, "{paused:?}");
+        assert!((paused.numbers.forecast_p90_usd - 1.0).abs() < 1e-12);
+        let b = r.ask(&format!("try again on {a}"));
+        let err = r.go(&b).unwrap_err().to_string();
+        assert!(
+            err.contains("T3") && err.contains("1.60") && err.contains("1.00"),
+            "{err}"
+        );
+        std::fs::remove_file(r.pause(&a)).unwrap();
+        assert_eq!(
+            r.go(&b).unwrap(),
+            OutcomeState::Landed,
+            "without the pause it dispatches"
+        );
+
+        // The same spend against a reading whose p90 is 10.0: the limit is 15.0, so no pause. Only the
+        // reading's forecast differs from the run above.
+        let r = rig(10.0, 0.8, &[Some(0)]);
+        let a = r.ask("describe the demo in the readme");
+        assert_eq!(r.go(&a).unwrap(), OutcomeState::Rejected);
+        assert!(!r.pause(&a).exists() && !r.flag(&a).exists());
+    }
+
+    /// Kills and reaps a child at the end of a test, even when an assertion fails.
+    struct Reaper(std::process::Child);
+
+    impl Drop for Reaper {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[test]
+    fn pause_leaves_running_child_alone() {
+        use std::os::unix::process::CommandExt;
+        let r = rig(0.8, 0.01, &[Some(0), Some(0)]);
+        let a = r.ask("describe the demo in the readme");
+        assert_eq!(r.go(&a).unwrap(), OutcomeState::Rejected);
+        let mut child = Reaper(
+            std::process::Command::new("sleep")
+                .arg("60")
+                .process_group(0)
+                .spawn()
+                .unwrap(),
+        );
+        let pgid = child.0.id() as i32;
+        let registry = r.athena.state.registry();
+        registry
+            .register(pgid, a.as_str(), "test child of the line")
+            .unwrap();
+        let before = registry.entries();
+        assert_eq!(before.len(), 1);
+
+        let b = r.ask(&format!("try again on {a}"));
+        assert_eq!(r.go(&b).unwrap(), OutcomeState::Rejected);
+        assert!(r.pause(&a).exists(), "the watcher paused the line");
+        assert!(
+            child.0.try_wait().unwrap().is_none(),
+            "the child is still alive"
+        );
+        assert_eq!(
+            registry.entries(),
+            before,
+            "the registry entry is unchanged"
+        );
+        registry.unregister(pgid);
+    }
+
+    #[test]
+    fn pause_record_content() {
+        let r = rig(0.8, 0.01, &[Some(1), Some(1)]);
+        let (a, _) = r.two_rejections();
+        let text = std::fs::read_to_string(r.pause(&a)).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["level"], "pause");
+        assert_eq!(v["line"], a.as_str());
+        assert_eq!(v["signals"][1]["signal"], "T4");
+        assert_eq!(v["signals"][1]["level"], "pause");
+        assert_eq!(v["numbers"]["rejections"], 2);
+        assert_eq!(v["numbers"]["matched_criterion"], CRITERIA[1]);
+        let lift = v["lift"].as_str().unwrap();
+        assert!(lift.contains("narrow the request"), "{lift}");
+        assert!(lift.contains(&format!("{a}.pause.json")), "{lift}");
+        assert!(v["reason"].as_str().unwrap().contains(CRITERIA[1]));
+
+        let r = rig(1.0, 0.8, &[Some(0)]);
+        let a = r.ask("describe the demo in the readme");
+        assert_eq!(r.go(&a).unwrap(), OutcomeState::Rejected);
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(r.pause(&a)).unwrap()).unwrap();
+        assert_eq!(v["signals"][0]["signal"], "T3");
+        assert!((v["numbers"]["spend_usd"].as_f64().unwrap() - 1.6).abs() < 1e-9);
+        assert_eq!(v["numbers"]["forecast_p90_usd"], 1.0);
+        assert!(v["lift"].as_str().unwrap().contains("measurement"));
+    }
+
+    #[test]
+    fn status_lists_flagged_and_paused_lines() {
+        let r = rig(0.8, 0.01, &[]);
+        assert!(
+            r.athena.status().unwrap().lines.is_empty(),
+            "no marks, no lines"
+        );
+        write_mark(
+            pause_path(&r.athena.state, "20261026-000001-aaaa"),
+            &mark("pause", "20261026-000001-aaaa", "T4"),
+        )
+        .unwrap();
+        write_mark(
+            flag_path(&r.athena.state, "20261026-000002-bbbb"),
+            &mark("flag", "20261026-000002-bbbb", "T1"),
+        )
+        .unwrap();
+        let view = r.athena.status().unwrap();
+        let shown: Vec<(String, String, String)> = view
+            .lines
+            .iter()
+            .map(|l| (l.level.clone(), l.line.clone(), l.signal_names()))
+            .collect();
+        assert_eq!(
+            shown,
+            vec![
+                ("pause".into(), "20261026-000001-aaaa".into(), "T4".into()),
+                ("flag".into(), "20261026-000002-bbbb".into(), "T1".into()),
+            ]
+        );
+        assert!(
+            view.next
+                .iter()
+                .any(|n| n.contains("20261026-000001-aaaa") && n.contains("T4")),
+            "{:?}",
+            view.next
+        );
     }
 }
 

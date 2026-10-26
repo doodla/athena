@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261026-015419-4j37",
+  "round": 2,
+  "at": "2026-10-26T02:40:09.054200517Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/reading.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/reading.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The tests skip the hooks in go and dispatch, so removing either hook would not fail them.",
+      "evidence": "Criterion 1's test is 'hand-built Records and a temp state dir ... run the watcher, then the dispatch check'. The behavior it must prove lives in run.rs: the watcher call in the Finished branch of Athena::go (run.rs:144) and the pause check at the top of dispatch (run.rs:322). Calling watch_after_attempt and refuse_if_paused directly passes even if neither hook is wired in. Yet the plan's 'fails without' text claims 'Without ... the dispatch check, the third attempt proceeds'. test_support.rs already provides a fixture with scripted capabilities (`fn athena(&self, capabilities, script)` at line 521), and run_pin_tests.rs uses it to drive go to a Finished result. Fix: Write criteria 1 and 2 as tests in athena-core (for example beside run_pin_tests or in a scope_guard test module) that use the test_support fixture. Run go on two jobs the verifier rejects, linked by retry. Assert that a pause file exists and that go on the third 'try again on' job returns an error with the pause reason and records no new invocation. For criterion 2, use differing unmet criteria and assert that the third go proceeds and the T1 flag is stored. Keep the direct unit tests as extras.",
+      "location": "Demonstrations, Criteria 1 and 2",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The no-kill test cannot fail, because the watcher never calls the registry in the first place.",
+      "evidence": "The plan says the watcher makes 'no process or registry calls', so asserting afterwards that the registered job is still running passes by construction. It does not show that dispatch stops only the next attempt while a job already dispatched on the line keeps going. Fix: Keep the test, but also assert that with a pause stored, a job already Dispatched on that line still reaches its terminal state through go, so its outcome is recorded and the pause check applies only at the point of dispatch.",
+      "location": "Demonstrations, Criterion 6",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The test command and the crate that holds the rendering test are not named.",
+      "evidence": "display.rs is in athena-cli and status.rs is in athena-core. One test cannot assert both the StatusView data and the rendered text unless it lives in athena-cli. The command `cargo test --locked status` runs tests from both crates by name filter, so it does not say which test covers which half. Fix: Name both tests: one in status.rs (or its test module) that checks status() fills scope_guard from the stored files, and one in athena-cli that checks the display text contains T1/flag, T4/pause and the job id.",
+      "location": "Demonstrations, Criterion 4",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Removing the pause file on close is not in the Steps.",
+      "evidence": "Steps 4-6 cover writing and checking the file only; the close path in Athena is not listed for change. Fix: Either add the close-path cleanup to the steps (and to the files list if it is outside them), or drop the mitigation and say that a narrowed request is the only way a pause lifts.",
+      "location": "Risks: 'closing the paused job drops its pause file'",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the snapshot to check what the plan relies on. The pieces it names exist: group_lines, RequestRecord, AttemptRecord, t3_cost and evaluate_before_attempt in scope_guard.rs, Athena::go and its Finished branch in run.rs (lines 142-155), dispatch in run.rs (line 322), Athena::retry in reading.rs (line 699) and disk::write_hold. The design is sound: the watcher runs only after a job finishes, it never touches the registry, pauses are stored as files in the state directory, and both dispatch and retry refuse a paused line. Putting the retry refusal in reading.rs is justified, because retry is defined there; Athena's own finding about reading.rs is minor and the plan already asks the user to confirm it. The main gap is in the demonstrations. The tests for criteria 1 and 2 use hand-built Records and call the watcher and the pause check directly. That never exercises the two hooks the plan adds in run.rs (the watcher call in go and the check at the top of dispatch). Deleting either hook would leave those tests passing, so 'the third attempt is not dispatched' goes unshown. The athena-core test fixture with scripted capabilities in test_support.rs, already used by run_pin_tests.rs, could drive go end to end. The test for criterion 6 also passes by construction."
+}

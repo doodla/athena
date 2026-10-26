@@ -265,7 +265,8 @@ otherwise record the result as inconclusive and keep measuring.
 Each job is sized for one producer run and ordered by dependency. D127 (accepted) changes the order: build
 jobs 1 and 5 (rules only) first, before the value scoring (jobs 2 to 4) and the model scorer (job 7). Job
 numbers are kept so other text still refers to them. Job 5 in its first form depends on job 1 only; its
-dependency on job 4 applies when queue-time decisions exist. Job 1 is built (`scope_guard.rs`).
+dependency on job 4 applies when queue-time decisions exist. Job 1 is built (`scope_guard.rs`). Job 5 is built
+in its first form, described in 13.1.
 
 1. **Line and signal types, pure functions.** Scope: a module with the "line of work" grouping (request plus
    retries and quoting requests) and functions computing T1 to T5 from job records, with no I/O. Files: a new
@@ -303,3 +304,28 @@ dependency on job 4 applies when queue-time decisions exist. Job 1 is built (`sc
 10. **Baseline and first review.** Scope: record the baseline wasted share from records and review the
     thresholds after 30 decisions. Files: `docs/decisions.md` follow-up entry. Depends on 9. Acceptance: the
     entry states measured figures and either keeps, tunes or turns off the guard by the rule in section 10.
+
+### 13.1 Job 5 as built: the running-line watcher
+
+- **When.** `Athena::go` calls `Athena::watch_line` after a job finishes (next to the introspection and the
+  steward count). The watcher reads the committed records, rebuilds the `RequestRecord`s
+  (`request_records`: the retry link from "try again on <job>", quoted request ids, and each job's finished
+  attempt from its outcome and verification), groups them with `group_lines`, and evaluates T1 to T5 with
+  `evaluate_before_attempt`. A failure of the watcher is shown and ignored; it cannot change what `go` returns.
+- **p90.** The p90 passed to `t3_cost` is `forecasts.reader.cost_usd.p90()` of the latest reading of the line's
+  latest job. That forecast is the job's producer and verifier cost, which is the same quantity as the
+  attempt spend the watcher sums (`Totals.cost_execution`). A missing or non-positive p90 is passed as 0, which
+  `t3_cost` ignores. It is not aggregated over past jobs of the class, and the reference forecaster is not used.
+- **Marks.** A flag is written to `<state root>/scope/<first id>.flag.json` and a pause to
+  `<first id>.pause.json`, where the first id is the first request id of the line. A mark holds the signals with
+  their level and numbers, the numbers they came from (attempts, rejections, spend, p90, agent minutes, the
+  rejected criterion), the reason, and what would lift it: a narrowed request or a measurement for T4, a
+  measurement of cost or progress for the others. A flag is removed when the line no longer raises a signal.
+- **Refusal.** `dispatch` (`athena go`) and `Athena::retry` look the line up the same way (`line_pause`:
+  rebuild the `RequestRecord`s, `group_lines`, then the pause file of the line's first id) and refuse a paused
+  line with the signal, reason, lift and file name. `ask` is not blocked, so a request can still be read and
+  proposed; only the attempt is refused.
+- **Lifting.** Manual: the owner deletes the pause file. Nothing lifts a pause automatically.
+- **Never a kill.** The watcher does not touch the process registry. A running job on a line that becomes
+  paused keeps running; the pause only stops the next dispatch.
+- **Status.** `athena status` lists flagged and paused lines with their signals, and a next step for each pause.
