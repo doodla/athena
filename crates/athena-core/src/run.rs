@@ -632,12 +632,7 @@ impl Athena {
             .map(|r| r.text.clone())
             .unwrap_or_default();
         let after = budget.producer_usd + budget.verifier_usd;
-        let grant = crate::capability::ToolGrant {
-            tools: vec!["Read".into(), "Grep".into(), "Glob".into()],
-            commands: std::collections::BTreeMap::new(),
-            writes: false,
-            permission_mode: "dontAsk".into(),
-        };
+        let grant = planning_grant();
         let snap_dir = self.state.job_dir(&id).join(format!("plan-{round}"));
         let no_env = std::collections::BTreeMap::new();
         let verifier_commands = ctx.capability.verifier_grant(jc).commands;
@@ -673,7 +668,7 @@ impl Athena {
         });
         let composed = compose(&[CONTRACT.into(), PLANNER_FRAME.into()]);
         crate::pin::remove_tree(&snap_dir)?;
-        Snapshot::create(&self.git, &p, &p, &snap_dir, SnapshotRepo::None)?;
+        Snapshot::create(&self.git, &p, &p, &snap_dir, SnapshotRepo::PlainWithHistory)?;
         let model = ctx.reading.producer_model.clone();
         let seq = ctx.next_seq(closing);
         let spec = self.agent_spec(
@@ -812,7 +807,7 @@ impl Athena {
             athena_findings: athena_findings.clone(),
         });
         let composed = compose(&[CONTRACT.into(), CRITIC_FRAME.into()]);
-        Snapshot::create(&self.git, &p, &p, &snap_dir, SnapshotRepo::None)?;
+        Snapshot::create(&self.git, &p, &p, &snap_dir, SnapshotRepo::PlainWithHistory)?;
         let model = ctx.reading.verifier_model.clone();
         let critic_seq = ctx.next_seq(closing);
         let spec = self.agent_spec(
@@ -2975,6 +2970,44 @@ pub fn build_text(build: &Build) -> String {
         short(&build.source_commit),
         if build.dirty { ", dirty" } else { "" }
     )
+}
+
+/// What the planner and the critic may do: read, search and list files in their snapshot. No Bash, no git
+/// command, no writes. The history they see is a generated file, not a repository.
+fn planning_grant() -> crate::capability::ToolGrant {
+    crate::capability::ToolGrant {
+        tools: vec!["Read".into(), "Grep".into(), "Glob".into()],
+        commands: std::collections::BTreeMap::new(),
+        writes: false,
+        permission_mode: "dontAsk".into(),
+    }
+}
+
+#[cfg(test)]
+mod planning_grant_tests {
+    use super::*;
+
+    #[test]
+    fn the_planner_and_critic_grant_has_no_bash_no_git_and_no_writes() {
+        let grant = planning_grant();
+        assert_eq!(grant.tools, ["Read", "Grep", "Glob"]);
+        assert!(!grant.tools.iter().any(|t| t == "Bash"));
+        assert!(grant.commands.is_empty(), "no command, so no git command");
+        assert!(!grant.writes);
+        assert_eq!(grant.permission_mode, "dontAsk");
+    }
+
+    #[test]
+    fn the_briefs_and_the_snapshot_agree_on_the_history_file() {
+        assert_eq!(
+            athena_context::briefs::HISTORY_FILE,
+            athena_git::snapshot::HISTORY_FILE
+        );
+        assert_eq!(
+            athena_context::briefs::HISTORY_LIMIT,
+            athena_git::snapshot::HISTORY_LIMIT
+        );
+    }
 }
 
 #[cfg(test)]

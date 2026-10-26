@@ -1,0 +1,185 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261025-033733-80vv",
+  "round": 1,
+  "at": "2026-10-26T18:05:33.196280736Z",
+  "invocation_seq": 3,
+  "approach": "Add a SnapshotRepo::PlainWithHistory variant. Snapshot::create handles it like None (plain files, no .git), then writes HISTORY.txt in the snapshot root. The file comes from one `git log` run on the user's repo at source_commit, read-only. Paths are filtered with the existing `classify` (records/ and athena-exclude dropped). It keeps the newest 200 commits that still have a visible path or had no paths at all. The planner and critic snapshots in run.rs switch to the new variant. The reader stays on None. The inline planner/critic grant becomes a named function with an unchanged value, so a test can pin it. Both briefs get one shared paragraph, built from the HISTORY_FILE constant and a HISTORY_LIMIT constant, saying what the file holds and that Read and Grep are the tools for it. CHANGELOG and decisions.md record the choice and a measured time.",
+  "decisions": [
+    {
+      "choice": "Generate a text file from `git log` in the user's repo; put no repository in the snapshot.",
+      "reason": "Gives the history facts (shape of real PR ranges) with grants unchanged and no .git, so nothing can write or reach hidden history.",
+      "rejected": [
+        {
+          "option": "Put a git repository with history in the snapshot",
+          "why": "Excluded by the request. It would need a history rewrite to hide records/ and private paths, and it opens git commands."
+        },
+        {
+          "option": "Widen the planner and critic grants to git log/show/diff",
+          "why": "Out of scope; the user dropped it. It also exposes records/ and private paths to the agents."
+        },
+        {
+          "option": "Keep the plain copy",
+          "why": "It leaves out the facts only history shows, which caused the stops and rejections."
+        }
+      ]
+    },
+    {
+      "choice": "The reader's SnapshotRepo::None stays; a new variant PlainWithHistory is used for the planner and critic only.",
+      "reason": "The reader, producer and verifier snapshots are out of scope and stay byte-identical. One enum match in `create` holds the logic.",
+      "rejected": [
+        {
+          "option": "A separate write_history call in run.rs after create",
+          "why": "It duplicates the rules-commit filter at two call sites and is easy to miss, as the two sites already show."
+        }
+      ]
+    },
+    {
+      "choice": "Filter with `classify(user, rules_commit, paths)` on all paths of the scanned commits in one batch. Omit a commit whose paths are all hidden. List a commit with no paths at all (an empty commit) as '(no paths)'. Scan at most 2000 commits before the 200 cap.",
+      "reason": "Same filter as the file copy. The 200 are counted after exclusion. The scan cap bounds time on huge histories. A records-only commit says nothing about the code.",
+      "rejected": [
+        {
+          "option": "List hidden-only commits with no paths",
+          "why": "It reveals that hidden work happened and spends the 200 slots."
+        }
+      ]
+    },
+    {
+      "choice": "Format: one block per commit, `<short hash> <YYYY-MM-DD> <subject>` then indented path lines. Use `git log --first-parent -m --name-only --no-renames --format=...`.",
+      "reason": "Easy for Read and Grep. It also gives paths for squash and merge commits, the shape of PR ranges.",
+      "rejected": []
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-git/src/snapshot.rs",
+      "action": "modify",
+      "purpose": "Add SnapshotRepo::PlainWithHistory, HISTORY_FILE and HISTORY_LIMIT constants, the history writer, and tests (filter, cap, no .git, user repo unchanged).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-git/src/lib.rs",
+      "action": "modify",
+      "purpose": "Add a Git helper that runs the bounded `git log` and returns parsed commits (hash, date, subject, paths). Update the module doc if it mentions plain copies.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "purpose": "Use PlainWithHistory for the planner and critic snapshots. Extract the grant into `planning_grant()` and add the unchanged-grant test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Add a shared history paragraph to planner_brief and critic_brief from the snapshot constants, with tests. Update the System facts mention of a plain copy only if it lives in this file.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased entry for the history file.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "New decision: alternatives, choice, citation of job 20261024-115923-02gf, measured snapshot-time figure.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read crates/athena-git/src/lib.rs around Git::run_bytes and the log helpers; add a helper that runs `git log -n 2000 --first-parent -m --no-renames --name-only -z` with a custom format and parses it. Add a parser unit test.",
+    "In snapshot.rs add the constants and the PlainWithHistory variant. In `create`, return early for it after writing HISTORY.txt: classify all paths in one call, drop hidden paths and all-hidden commits, take the first 200, and write the text.",
+    "Write the snapshot tests: fixture with records/, private/ and mixed commits; a 205-commit cap case; no .git; user repo unchanged (status, HEAD, config).",
+    "In run.rs extract `planning_grant()`, switch both Snapshot::create calls (lines ~676 and ~815) to PlainWithHistory, and add the grant test.",
+    "In briefs.rs add the history paragraph to both briefs. athena-context may not depend on athena-git, so check Cargo.toml: if not, define constants in athena-context and have run.rs pass them, or add the constant to a shared crate. Add the brief tests and fix existing exact-text tests.",
+    "Measure snapshot time with and without history on this repository (several runs, median). Write the decisions.md entry with the measurement label, method and repo, and the CHANGELOG entry.",
+    "Run cargo fmt, clippy -D warnings and cargo test --locked, and fix failures."
+  ],
+  "risks": [
+    {
+      "risk": "athena-context may not depend on athena-git, so briefs cannot cite the constant directly.",
+      "mitigation": "Check the Cargo.toml dependency graph first. Otherwise put the constants in athena-context and have the snapshot code take them as a parameter, or re-export from a crate both depend on, with a test that equates them."
+    },
+    {
+      "risk": "Commit subjects or paths could carry sensitive text from the history.",
+      "mitigation": "Only classified-visible paths are listed, and subjects of commits that touch visible paths are the same public history the repo already carries. Say so in the decision."
+    },
+    {
+      "risk": "Git log on a very large history is slow.",
+      "mitigation": "The -n 2000 scan cap is measured and documented. The fixture-based time figure is recorded."
+    },
+    {
+      "risk": "Exact-text tests of the briefs, or fake agents in the CLI tests, may break on the new paragraph or the new file.",
+      "mitigation": "Run the full cargo test and update the expectations. The fake planner ignores the snapshot contents."
+    },
+    {
+      "risk": "A shallow clone or a repository with no first-parent history yields an empty log.",
+      "mitigation": "Write the file with a header and '(no commits)' rather than failing the snapshot."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit test in snapshot.rs. It builds a fixture repo with .gitattributes marking private/ athena-exclude, and commits touching src/, records/, private/, plus a mixed commit. A second test makes 205 commits. It creates a PlainWithHistory snapshot and reads HISTORY.txt.",
+      "command": "cargo test -p athena-git snapshot",
+      "observes": "HISTORY.txt exists. It has one entry per visible commit with subject, date and paths. The records-only and private-only commits are absent. 'records/' and 'private' appear nowhere in the text. The mixed commit lists only its visible path. The 205-commit case has exactly 200 entries, the newest first.",
+      "fails_without": "Without the history writer no HISTORY.txt exists. Without the classify filter the records/ or private text appears. Without the cap the 205-commit test counts 205."
+    },
+    {
+      "criterion": 2,
+      "method": "Same test module. It snapshots the fixture and compares the user repo before and after.",
+      "command": "cargo test -p athena-git snapshot",
+      "observes": "snapshot dir has no .git. `git status --porcelain`, HEAD, refs and .git/config of the user repo are the same before and after. Writing the history changed no tracked file.",
+      "fails_without": "If the snapshot ran git init or copied .git, the .git-absence assertion fails."
+    },
+    {
+      "criterion": 3,
+      "method": "Unit tests in briefs.rs on planner_brief and critic_brief built from existing test inputs.",
+      "command": "cargo test -p athena-context briefs",
+      "observes": "Each brief contains HISTORY_FILE's path, '200', 'subject', 'date', 'changed paths', 'records/', 'private', and 'Read' and 'Grep' in the history paragraph. The constant is used, not a literal. Existing brief tests that assert exact text are updated.",
+      "fails_without": "Without the paragraph the brief has no mention of the file, so the assertions fail."
+    },
+    {
+      "criterion": 4,
+      "method": "Test in run.rs on the new named function `planning_grant()`, which both the planner and critic call. It asserts the full value.",
+      "command": "cargo test -p athena-core",
+      "observes": "tools are exactly Read, Grep and Glob; commands is empty (no Bash, no git); writes is false; permission_mode is dontAsk.",
+      "fails_without": "If a git command or Bash were added, the equality assertion on commands/tools fails."
+    },
+    {
+      "criterion": 5,
+      "method": "Measure by timing snapshot creation with and without the history on this repository, in a release or test build, over several runs. Record the median and spread, labelled as a measurement, with the repo, commit, and method, in docs/decisions.md. Use a temporary timing test or a one-off cargo run, not left in the tree.",
+      "command": "cargo test -p athena-git snapshot -- --nocapture",
+      "observes": "The decisions entry holds a figure in ms (plain copy vs plain copy plus history), the repo (this one), its commit count, and the run count. The figure is labelled measured.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Read the two files after the change.",
+      "command": "git diff -- CHANGELOG.md docs/decisions.md",
+      "observes": "CHANGELOG Unreleased has an entry. The decisions entry lists the alternatives (repository in snapshot, widened git grants, plain copy), the choice, and cites job 20261024-115923-02gf.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Run the three checks. The boundary and personal-data policy tests in xtask run inside cargo test.",
+      "command": "cargo test --locked",
+      "observes": "All pass. Also run `cargo clippy --all-targets --locked -- -D warnings` and `cargo fmt --all --check` with clean output. The system_facts_budgets_match_computed test is unaffected because briefs sit outside the budget sets.",
+      "fails_without": "A clippy or fmt violation, or a changed always-loaded prompt, would fail these."
+    }
+  ],
+  "open_questions": [
+    "Whether athena-context can depend on athena-git (not checked); the constants' home depends on it.",
+    "The records-only versus all-hidden commit behavior follows the assumption in the reading (omit); the decision should state it.",
+    "Whether the 2000-commit scan cap is enough to find 200 visible commits in repositories where records/ commits dominate; the cap is a judgment, not measured."
+  ],
+  "producer_section_sha256": "7d002f4aeec1ad8b002289869ca40a83345f07469ae7f565f9ea16a2335b6480"
+}

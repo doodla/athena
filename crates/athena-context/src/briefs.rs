@@ -780,6 +780,24 @@ fn system_facts_section(out: &mut String) {
     let _ = writeln!(out, "## System facts\n\n{}\n", SYSTEM_FACTS.trim_end());
 }
 
+/// The history file's name in the planner's and critic's snapshot. `athena-git` owns the file; a test in
+/// `athena-core` checks that these two constants equal its own.
+pub const HISTORY_FILE: &str = "HISTORY.txt";
+
+/// How many commits the history file lists at most (see [`HISTORY_FILE`]).
+pub const HISTORY_LIMIT: usize = 200;
+
+/// The planner's and critic's briefs both say what the history file holds and how to read it.
+fn history_section(out: &mut String) {
+    let _ = writeln!(
+        out,
+        "## History file\n\n`{HISTORY_FILE}` in the snapshot root holds the last {HISTORY_LIMIT} commits of the base commit's \
+         history, newest first: for each, the short hash, the date, the subject and the changed paths. Commits and paths under \
+         `records/` or marked private are left out. The snapshot has no git repository and you have no git command; use Read and \
+         Grep on `{HISTORY_FILE}` to see how real commits and pull-request ranges looked.\n"
+    );
+}
+
 /// What the planner is told about one deliverable's path in the base snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeliverableFact {
@@ -826,6 +844,7 @@ pub fn planner_brief(inputs: &PlannerInputs) -> String {
     let _ = writeln!(out, "## Request (verbatim)\n\n{}\n", quote(&inputs.request));
     reading_sections(&mut out, &inputs.reading);
     system_facts_section(&mut out);
+    history_section(&mut out);
     let _ = writeln!(out, "## Checks Athena will run on the result\n");
     for check in &inputs.checks {
         let _ = writeln!(out, "- {}: `{}`", check.name, check.command);
@@ -905,6 +924,7 @@ pub fn critic_brief(inputs: &CriticInputs) -> String {
     let _ = writeln!(out, "## Request (verbatim)\n\n{}\n", quote(&inputs.request));
     reading_sections(&mut out, &inputs.reading);
     system_facts_section(&mut out);
+    history_section(&mut out);
     let _ = writeln!(out, "## Plan under review (round {})\n", inputs.plan.round);
     plan_body(&mut out, &inputs.plan);
     let _ = writeln!(out, "\n## Athena's own findings on this plan\n");
@@ -1908,6 +1928,34 @@ mod tests {
             plan: plan(1),
             athena_findings: vec![],
         }
+    }
+
+    #[test]
+    fn planner_and_critic_briefs_name_the_history_file_and_say_what_it_holds() {
+        let planner = planner_brief(&planner_inputs(None));
+        let critic = critic_brief(&critic_inputs());
+        for (who, brief) in [("planner", &planner), ("critic", &critic)] {
+            let start = brief
+                .find("## History file")
+                .unwrap_or_else(|| panic!("the {who} brief has no history section"));
+            let section = &brief[start..];
+            let section = &section[..section.find("\n## ").map_or(section.len(), |i| i + 1)];
+            for needed in [
+                HISTORY_FILE,
+                &format!("last {HISTORY_LIMIT} commits"),
+                "short hash",
+                "date",
+                "subject",
+                "changed paths",
+                "`records/`",
+                "private",
+                "Read and Grep",
+                "no git command",
+            ] {
+                assert!(section.contains(needed), "{who}: missing {needed:?}");
+            }
+        }
+        assert_eq!(HISTORY_LIMIT, 200);
     }
 
     #[test]

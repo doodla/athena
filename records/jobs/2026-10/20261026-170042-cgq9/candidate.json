@@ -1,0 +1,226 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261026-170042-cgq9",
+  "base_commit": "6387943d6a297c885dbe45c4063771f6dbca700d",
+  "base_fingerprint": "sha256:8bb04d7bf54f9795471a22597af5528492a1979a217ceed453b540ed442ca36b",
+  "previous_job": "20261026-150803-c7d4",
+  "candidate_commit": "36d09570295555389538942e01c7c127d940ebe1",
+  "candidate_tree": "66a596452f2e4a793b1ce8b38f67a06cb2f2da5a",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 158522
+    },
+    {
+      "path": "crates/athena-cli/src/backtest.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 24616
+    },
+    {
+      "path": "crates/athena-cli/tests/records_branch_readers.rs",
+      "status": "added",
+      "mode": "100644",
+      "bytes": 22835
+    },
+    {
+      "path": "crates/athena-core/src/auditor.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 20747
+    },
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 224115
+    },
+    {
+      "path": "crates/athena-core/src/introspect.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 76815
+    },
+    {
+      "path": "crates/athena-core/src/manage.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 26092
+    },
+    {
+      "path": "crates/athena-core/src/proposals.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 41194
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 121423
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 129606
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 57830
+    },
+    {
+      "path": "crates/athena-core/src/store.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 23988
+    },
+    {
+      "path": "crates/athena-data/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 2385
+    },
+    {
+      "path": "crates/athena-data/src/paths.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 8129
+    },
+    {
+      "path": "crates/athena-gate/src/records.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 3330
+    },
+    {
+      "path": "docs/decisions.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 273495
+    },
+    {
+      "path": "xtask/src/main.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 35036
+    },
+    {
+      "path": "xtask/src/walltime.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 15538
+    }
+  ],
+  "fingerprint": "sha256:25a8fa7d70a9afab6fa8527b5003a15dabfb8a4d3685e9b201932f7ce225ca0b",
+  "violations": [],
+  "producer_report": {
+    "summary": "I reworked `scratch_checkout` so it now covers `status`, `audit` and a forecast on the built `athena` binary; the rest of the earlier work is unchanged.\n\nThe scratch checkout has no `records/` in its working tree. Its in-tree records hold only queued job T. The `athena/records` worktree sits under a temporary state directory and holds a landed job W. The test builds W by landing a job in a clone of the repository, pulling that history back, then replacing the tree's records with T. That way the audit can read the files the job changed.\n\nWhat the test checks:\n- **`status`:** exits 0 and names W, not T.\n- **`audit W`:** exits 0 and its stdout contains W and not T. Its model call is a stand-in `claude` program set through `ATHENA_HOME`/`config.toml`, with a no-op `ATHENA_GITLEAKS`.\n- **`audit T`:** fails with \"no job matches\".\n- **`ask`:** this is the forecast. A stand-in reader makes it exit 0 and print the \"predicts\" and \"reference\" forecasts, without T.\n\nThe no-worktree companion test `scratch_checkout_without_a_worktree_reads_the_tree` is unchanged. I added `World::from_parts` and changed `stand_in_home` to take a model, so a stand-in's `modelUsage` matches the requested model and the records gate accepts it. Only `records_branch_readers.rs` changed this round.\n\n**Reader map** (all in `records_branch_readers.rs`, W = worktree job, T = in-tree job). Each reader has a `worktree_<reader>` test that returns exactly {W}. Each has a `fallback_<reader>` test that returns {T}.\n- `records_load_current`\n- `recordset_load_current`\n- `read_records`\n- `introspect_walks`\n- `scoring`\n- `forecasting`\n- `retry_carry`\n- `auditor`\n- `proposals`\n- `backtest`\n\nOther tests in that file:\n- `fallback_equals_the_unchanged_loaders`\n- `scoring_ignores_passed_head`\n- `fallback_scoring_honours_passed_head`\n- `linked_worktree_backtest`\n\n**Placements:**\n- The wall-time reader is tested in xtask's own tests: `worktree_walltime`, `fallback_walltime` and `linked_worktree_walltime`.\n- `land_pr` is tested in `gh.rs`: `worktree_land_pr` and `fallback_land_pr`. The real resolve error is \"no job matches\", not \"unknown job\", and the tests assert that real text.\n\n**New code, not a repair:** deriving the git common dir in `backtest.rs` and `walltime.rs` is new wiring for readers that lacked it.\n\nGrep-hit classification, the allow-list and the D111 notes are in `CHANGELOG.md` and `docs/decisions.md`, written earlier in this job.",
+    "files": [
+      "crates/athena-cli/tests/records_branch_readers.rs"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test --locked -p athena-cli --test records_branch_readers",
+        "result": "pass",
+        "note": "26 passed, including scratch_checkout (status, audit of W, ask forecast on a scratch checkout)"
+      },
+      {
+        "command": "cargo test --locked -p xtask",
+        "result": "pass",
+        "note": "40 unit tests passed, incl. worktree_walltime, fallback_walltime, linked_worktree_walltime and the records_reader_scan tests; policy, spec, walltime and fingerprint test files passed too"
+      },
+      {
+        "command": "cargo test --locked -p athena-core land_pr",
+        "result": "pass",
+        "note": "19 passed, incl. records_source_tests::worktree_land_pr and fallback_land_pr"
+      },
+      {
+        "command": "cargo fmt --all",
+        "result": "pass",
+        "note": "applied; formatting is clean"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "clean after the final edit"
+      },
+      {
+        "command": "git diff --stat -- xtask/src/site.rs",
+        "result": "pass",
+        "note": "empty: site.rs unchanged"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "In crates/athena-cli/tests/records_branch_readers.rs, each athena-cli-reachable reader (Records::load_current, RecordSet::load_current, read_records, introspect walks, scoring, forecasting, retry carry, auditor, proposals, backtest) has a named worktree test planting different records in the worktree and in-tree and asserting the worktree's are returned. Run cargo test --locked.",
+        "status": "met",
+        "evidence": "Ran cargo test --locked -p athena-cli --test records_branch_readers: 26 passed. It has worktree_records_load_current, worktree_recordset_load_current, worktree_read_records, worktree_introspect_walks, worktree_scoring, worktree_forecasting, worktree_retry_carry, worktree_auditor, worktree_proposals and worktree_backtest. Each asserts the returned job ids are exactly {W} and not T."
+      },
+      {
+        "criterion": "Each of those readers has a named fallback test with no worktree asserting in-tree records/ is returned, equal to the pre-change result. Run cargo test --locked.",
+        "status": "met",
+        "evidence": "The same run passed fallback_records_load_current, fallback_recordset_load_current, fallback_read_records, fallback_introspect_walks, fallback_scoring, fallback_forecasting, fallback_retry_carry, fallback_auditor, fallback_proposals and fallback_backtest. fallback_equals_the_unchanged_loaders compares against the unchanged loaders."
+      },
+      {
+        "criterion": "xtask's own tests contain worktree_walltime and fallback_walltime (not in the athena-cli test file) plus a linked-worktree test finding the records worktree via git's common dir. Run cargo test -p xtask --locked and confirm a nonzero number of tests ran.",
+        "status": "met",
+        "evidence": "Ran cargo test --locked -p xtask: 40 unit tests ran and passed. They include walltime::tests::worktree_walltime, fallback_walltime and linked_worktree_walltime."
+      },
+      {
+        "criterion": "land_pr tests (in gh.rs, where Rig/FakeHost are reachable) use distinct job ids in worktree and in-tree records: resolve succeeds for the worktree-only id and fails with 'unknown job' for the in-tree-only id; under fallback the reverse. Run cargo test --locked land_pr.",
+        "status": "met",
+        "evidence": "Ran cargo test --locked -p athena-core land_pr: gh::records_source_tests::worktree_land_pr and fallback_land_pr passed. They use distinct ids. The real error text is 'no job matches ...', not 'unknown job'. The tests assert that real text and I did not rename it."
+      },
+      {
+        "criterion": "A test runs the built athena binary's status, audit and a forecast on a scratch checkout whose working tree has no records/; worktree and in-tree records have distinct job ids, and status and audit output contain the worktree's id and not the in-tree one; all succeed. Run cargo test --locked.",
+        "status": "met",
+        "evidence": "Reworked scratch_checkout. It runs the built athena (CARGO_BIN_EXE_athena) on a checkout with records/ removed from the working tree. The tree's records hold queued job T. The worktree holds job W, landed by a clone and pulled back so the audit can read the changed files. `status` exits 0 and names W, not T. `audit W` exits 0 and its stdout contains W and not T. `audit T` fails with 'no job matches'. `ask` exits 0 and prints the 'predicts' and 'reference' forecasts without naming T. Audit and ask use stand-in claude programs set up through ATHENA_HOME config, and a no-op ATHENA_GITLEAKS. Ran cargo test --locked -p athena-cli --test records_branch_readers: scratch_checkout passed."
+      },
+      {
+        "criterion": "Tests create the records worktree under a temporary state directory; scoring's use of the worktree regardless of the head passed is documented in docs/decisions.md and tested.",
+        "status": "met",
+        "evidence": "World::from_parts builds the worktree path with paths::repo_state_dir under the fixture's temporary state directory and asserts it starts with that directory. scoring_ignores_passed_head and fallback_scoring_honours_passed_head passed. The decisions.md entry was written earlier in this job and I did not touch it this round."
+      },
+      {
+        "criterion": "xtask records_reader_scan still fails on planted reads, including crate::store::Records::load( paths, ignores citation strings in steward.rs and work_decisions, and allow-list entries are narrowed to call sites. Run cargo test -p xtask --locked records_reader_scan and confirm a nonzero number of tests ran.",
+        "status": "met",
+        "evidence": "In the cargo test --locked -p xtask run, these passed: records_reader_scan_reports_planted_reads, records_reader_scan_ignores_citations_tests_and_current_reads, records_reader_scan_allows_one_function_not_the_whole_file and records_reader_scan_real_tree_is_clean_and_the_allow_list_is_all_used. That is 4 tests."
+      },
+      {
+        "criterion": "cargo fmt --check, cargo clippy --all-targets -- -D warnings and cargo test --locked pass; git diff shows xtask/src/site.rs unchanged.",
+        "status": "met",
+        "evidence": "left to Athena's checks for the recorded fmt, clippy and full test runs. I ran cargo fmt --all and cargo clippy --all-targets --locked -- -D warnings; both are clean. I did not run the full cargo test --locked. git diff --stat -- xtask/src/site.rs printed nothing."
+      },
+      {
+        "criterion": "The change description lists every reader found by grep, maps each to its worktree and fallback test names and the observed marker, states the walltime (in xtask) and land_pr (in gh.rs) placements, says common-dir derivation is new code and not a repair, and cites commands actually run.",
+        "status": "met",
+        "evidence": "See the summary: reader-to-test map, markers W/T, placements, new-code statement, and the commands under checks_run. The classification of the grep hits in non-deliverable files is in the CHANGELOG entry and the allow-list in xtask/src/main.rs, both written earlier in this job."
+      },
+      {
+        "criterion": "CHANGELOG.md records the reader move, the fallback, the allow-list, and that the site generator is out of scope, citing D111.",
+        "status": "met",
+        "evidence": "CHANGELOG.md was modified earlier in this job with the Unreleased entry. I did not change it this round."
+      }
+    ],
+    "open_issues": [
+      "The full `cargo test --locked` suite was not run by me; left to Athena's checks.",
+      "Per the plan, the criterion's 'unknown job' wording differs from the real resolve error 'no job matches'; the tests assert the real text.",
+      "crates/athena-gate/src/audit.rs does not exist, so I did not create it (plan decision 11). The audit reader is auditor.rs plus the cli audit handler. crates/athena-cli/src/main.rs is unmodified, so the audit handler reaches the worktree through auditor.rs's Records::load_current."
+    ],
+    "mistakes": [
+      "The previous round's scratch_checkout used `priority` as the forecast and expected `audit` to fail with 'has no outcome yet'. That did not meet the criterion; this round replaced it."
+    ],
+    "learnings": [
+      "Offline binary tests of agent roles need three things: a stand-in claude set through ATHENA_HOME/config.toml (claude_bin), whose result's modelUsage is keyed by the requested model; ATHENA_GITLEAKS pointing at a script that exits 0 (a missing report means no findings); and, for audit, the job's candidate or landing commit reachable from HEAD.",
+      "Records::load_current pulls the audit's job from the worktree. Audit reads changed files via commit trailers in HEAD's history, so the scratch repository's history must contain the landed commit."
+    ],
+    "desires": [
+      "A way to read the tail of long cargo output without piping, and a shared test helper for stand-in claude and gitleaks programs."
+    ]
+  }
+}

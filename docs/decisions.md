@@ -3414,3 +3414,44 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   `athena-gate/src/invariant.rs`, `athena-git/src/lib.rs`, `test_support.rs`. Measured by the new tests and the
   full suite run with `cargo test --locked`. No text with the words "retry_landing has no test" exists in
   `docs/` or `CHANGELOG.md`, so none was removed.
+
+## D134 · The planner and critic read a generated history file, not a repository
+
+- **Case:** The planner and critic worked from a plain copy of the base commit's files. Planning stops and
+  post-plan rejections came from facts only history shows, such as the shape of real pull-request ranges: job
+  20261024-115923-02gf broke `land` on every pull request, and the plan for it had no way to see how past
+  ranges looked.
+- **Decision:** The planner's and critic's snapshots (`SnapshotRepo::PlainWithHistory`) hold the plain copy and
+  one more file, `HISTORY.txt` at the root. It is text made by one read-only `git log` in the user's repository:
+  `--first-parent -m --no-renames --name-only`, at most 2000 commits scanned. Each entry is a short hash, a
+  date and a subject, then the changed paths, one per line. Paths are classified with the same rules as the file
+  copy (`classify` under the rules commit), so `records/` and `athena-exclude` paths never appear. A commit left
+  with no visible path is omitted, so a records-only or private-only commit is not listed; a commit that changed
+  no path at all is listed as `(no paths)`. The 200-commit cap counts after the omission. A history with no
+  listable commit gives a header and `(no commits)`. Both briefs name the file and say what it holds and that
+  Read and Grep are the tools for it. The grant is a named function, `planning_grant()`, with a test pinning it:
+  Read, Grep, Glob, no commands, no writes. The briefs and the snapshot each hold the file name and the limit;
+  a test in `athena-core` checks that the two copies are equal (`athena-context` does not depend on
+  `athena-git`). The reader, producer and verifier snapshots are unchanged.
+- **Alternatives:**
+  - (a) A git repository with history in the snapshot. It would need a history rewrite to hide `records/` and
+    private paths, and it opens git commands to agents.
+  - (b) Widen the grants to `git log`, `git show` and `git diff`. They would see `records/` and private paths
+    in the user's history, and the user dropped this.
+  - (c) Keep the plain copy. It leaves out the facts that caused the stops and rejections.
+- **Tradeoff:** The agents see a summary, not diffs or bodies: they cannot run `git show`. Commit subjects of
+  commits that touch visible paths are shown; they are the history the repository already carries in public. A
+  history in which `records/` commits dominate may yield fewer than 200 entries inside the 2000-commit scan; the
+  scan cap is a judgment, not measured.
+- **Time added (measurement):** Median of 9 runs of `Snapshot::create`, in a debug test build, on a fixture
+  repository built in a temporary directory (a handful of files, 500 commits each changing two visible paths and
+  one `records/` path, so 501 first-parent commits in all): 47.1 ms for the plain copy (min 42.8, max 53.0) and
+  132.4 ms with the history file (min 122.5, max 155.2), so the history file adds about 85 ms. The method was a
+  temporary timing test using `std::time::Instant` around each call, not kept in the tree. This repository's own
+  history was not available to the job (its working copy has one commit), so no figure for it is claimed; real
+  repositories with longer paths lists may differ.
+- **Reversal cost:** Low. Switch the two `Snapshot::create` calls back to `SnapshotRepo::None` and drop the
+  brief paragraph; nothing else reads the file.
+- **Provenance:** Read: `snapshot.rs`, `run.rs`, `briefs.rs`, `athena-git/src/lib.rs`. Measured by the tests in
+  `athena-git` (`snapshot`), `athena-context` (`briefs`) and `athena-core` (`planning_grant_tests`). The cause is
+  cited from the request, which names job 20261024-115923-02gf.
