@@ -7,7 +7,7 @@ use crate::store::{JobRecords, JobState, Records};
 use anyhow::Result;
 use athena_data::records::{
     Build, Critique, CritiqueVerdict, InterventionSource, Invocation, JobPlan, OutcomeState,
-    Reading,
+    Reading, Role,
 };
 use athena_gate::invariant::{BOOTSTRAP_OUTCOME, BootstrapRange, bootstrap_range};
 use serde::Serialize;
@@ -69,6 +69,121 @@ pub struct FirstRoundCounts {
     pub stopped: usize,
 }
 
+/// Planning spent per landed job over a group of landed jobs: the whole retry chain that led to each landing
+/// (its own planning plus that of every job it retried), and the landed job's own planning beside it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
+pub struct PlanningGroup {
+    /// Landed, planned jobs in the group; each retry chain is counted once, at its landed job.
+    pub jobs: usize,
+    /// Mean planning rounds (job-plan records) over the chain.
+    pub mean_rounds: f64,
+    /// Mean planner and critic cost in USD over the chain.
+    pub mean_cost_usd: f64,
+    /// Mean planning rounds of the landed job alone.
+    pub own_mean_rounds: f64,
+    /// Mean planner and critic cost in USD of the landed job alone.
+    pub own_mean_cost_usd: f64,
+}
+
+/// Planning rounds and cost per landed job, measured from the records and split at the first resumed plan.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PlanningCost {
+    /// Landed jobs dispatched before the first resumed planning, or all of them when none resumed.
+    pub before: PlanningGroup,
+    /// Landed jobs dispatched at or after the first resumed planning; empty when none resumed.
+    pub after: PlanningGroup,
+    /// The first job whose plan resumed from a kept plan, with its dispatch time; the cutover.
+    pub first_resumed: Option<(String, String)>,
+}
+
+/// The most predecessors followed back from a landed job.
+const MAX_CHAIN: usize = 16;
+
+/// Planner and critic cost of the invocations of `job`, in USD.
+fn planning_usd(job: &JobRecords) -> f64 {
+    job.invocations
+        .iter()
+        .filter(|i| matches!(i.role, Role::Planner | Role::Critic))
+        .map(|i| i.cost.best_lower())
+        .sum()
+}
+
+/// When `job` was dispatched, from its job record; the time of its first resumed plan if that is missing.
+fn dispatched_at(job: &JobRecords) -> Option<jiff::Timestamp> {
+    job.job.as_ref().and_then(|j| j.dispatched_at).or_else(|| {
+        job.plans
+            .iter()
+            .find(|p| p.resumed_from.is_some())
+            .map(|p| p.at)
+    })
+}
+
+/// Planning rounds and cost per landed job, with chain totals over the jobs each landing retried. `None` when
+/// no landed job was planned. The split is at the dispatch of the first job with a resumed plan, so that
+/// 'after' reads 'since the first resumed planning'. A landed job with no recorded dispatch time counts as before.
+pub fn planning_cost(records: &Records) -> Option<PlanningCost> {
+    let cutover = records
+        .request_jobs()
+        .into_iter()
+        .filter(|j| j.plans.iter().any(|p| p.resumed_from.is_some()))
+        .filter_map(|j| dispatched_at(j).map(|at| (at, j.id().as_str().to_string())))
+        .min();
+    let mut sums = [PlanningGroup::default(); 2];
+    for job in records.request_jobs() {
+        if job.plans.is_empty() || !matches!(job.state(), JobState::Closed(OutcomeState::Landed)) {
+            continue;
+        }
+        let mut rounds = job.plans.len();
+        let mut cost = planning_usd(job);
+        let own = (rounds as f64, cost);
+        let mut seen = vec![job.id().as_str().to_string()];
+        let mut current = job;
+        for _ in 0..MAX_CHAIN {
+            let Some(text) = current.request.as_ref().map(|r| r.text.as_str()) else {
+                break;
+            };
+            let Some(earlier) = crate::reading::retried_job(records, text)
+                .filter(|id| !seen.iter().any(|s| s == id.as_str()))
+                .and_then(|id| records.jobs.get(id.as_str()))
+            else {
+                break;
+            };
+            seen.push(earlier.id().as_str().to_string());
+            rounds += earlier.plans.len();
+            cost += planning_usd(earlier);
+            current = earlier;
+        }
+        let after = match (&cutover, dispatched_at(job)) {
+            (Some((cut, _)), Some(at)) => at >= *cut,
+            _ => false,
+        };
+        let group = &mut sums[usize::from(after)];
+        group.jobs += 1;
+        group.mean_rounds += rounds as f64;
+        group.mean_cost_usd += cost;
+        group.own_mean_rounds += own.0;
+        group.own_mean_cost_usd += own.1;
+    }
+    if sums[0].jobs + sums[1].jobs == 0 {
+        return None;
+    }
+    for group in &mut sums {
+        if group.jobs > 0 {
+            let n = group.jobs as f64;
+            group.mean_rounds /= n;
+            group.mean_cost_usd /= n;
+            group.own_mean_rounds /= n;
+            group.own_mean_cost_usd /= n;
+        }
+    }
+    let [before, after] = sums;
+    Some(PlanningCost {
+        before,
+        after,
+        first_resumed: cutover.map(|(at, id)| (id, at.to_string())),
+    })
+}
+
 /// One class's forecast headline.
 #[derive(Debug, Clone, Serialize)]
 pub struct ClassHeadline {
@@ -112,6 +227,10 @@ pub struct StatusView {
     /// First-round accept and stop counts over planned jobs; absent when no job was planned.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub planning: Option<FirstRoundCounts>,
+    /// Planning rounds and cost per landed job, before and after the first resumed planning; absent when no
+    /// planned job landed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub planning_cost: Option<PlanningCost>,
     pub interventions_by_category: BTreeMap<String, usize>,
     pub interventions_by_class: BTreeMap<String, usize>,
     /// Mistakes per class and per cause, with the prevention proposed. Apart from `interventions_by_category`,
@@ -792,6 +911,7 @@ impl Athena {
             recent,
             open,
             planning: first_round,
+            planning_cost: planning_cost(&records),
             interventions_by_category: by_category,
             interventions_by_class: by_class,
             mistakes: mistake_report(&records),
@@ -1061,6 +1181,329 @@ mod mistake_tests {
     #[test]
     fn the_report_is_empty_with_no_mistakes() {
         assert_eq!(mistake_report(&Records::default()).total, 0);
+    }
+}
+
+#[cfg(test)]
+mod planning_cost_tests {
+    use super::*;
+    use athena_data::records::{
+        DriverInfo, InvocationCaps, InvocationContext, InvocationOutcome, ModelUsage, Request,
+        Tokens,
+    };
+    use athena_data::{JobId, Quantity, Unit};
+
+    fn id(text: &str) -> JobId {
+        JobId::parse(text).unwrap()
+    }
+
+    fn invocation(job: &JobId, seq: u32, role: Role, usd: f64) -> Invocation {
+        let tokens = |v: f64| Quantity::measured(v, Unit::Tokens, "result.usage");
+        Invocation {
+            job: job.clone(),
+            seq,
+            role,
+            driver: DriverInfo {
+                name: "claude-code".into(),
+                version: "2.1.299".into(),
+            },
+            athena: Build {
+                version: "0.1.0".into(),
+                source_commit: "0".repeat(40),
+                dirty: false,
+            },
+            model: "m".into(),
+            context: InvocationContext {
+                components: vec![],
+                prompt_sha256: "0".repeat(64),
+                prompt_tokens: Quantity::estimated(Some(1.0), Unit::Tokens, "estimate", None, None)
+                    .unwrap(),
+                host_baseline: Quantity::estimated(Some(600.0), Unit::Tokens, "E3", None, None)
+                    .unwrap(),
+                tools: vec![],
+            },
+            caps: InvocationCaps {
+                max_budget_usd: 3.0,
+                timeout_s: 1800,
+            },
+            started_at: jiff::Timestamp::UNIX_EPOCH,
+            ended_at: jiff::Timestamp::UNIX_EPOCH,
+            wall_time: Quantity::measured(60.0, Unit::Seconds, "athena clock"),
+            tokens: Tokens {
+                input: tokens(1.0),
+                output: tokens(1.0),
+                cache_read: tokens(1.0),
+                cache_write: tokens(1.0),
+            },
+            models_used: BTreeMap::from([(
+                "m".to_string(),
+                ModelUsage {
+                    input: 1,
+                    output: 1,
+                    cache_read: 1,
+                    cache_write: 1,
+                    cost_usd: usd,
+                },
+            )]),
+            cost: Quantity::reported(usd, Unit::Usd, "Claude Code total_cost_usd"),
+            outcome: InvocationOutcome::Success,
+            detail: None,
+            turns: None,
+            commands_run: vec![],
+            policy_denials: vec![],
+        }
+    }
+
+    fn plan(job: &JobId, round: u32, resumed_from: Option<JobId>) -> JobPlan {
+        JobPlan {
+            job: job.clone(),
+            round,
+            at: jiff::Timestamp::UNIX_EPOCH,
+            invocation_seq: 1,
+            approach: "Approach.".into(),
+            decisions: vec![],
+            files: vec![],
+            steps: vec![],
+            risks: vec![],
+            demonstrations: vec![],
+            open_questions: vec![],
+            producer_section_sha256: "0".repeat(64),
+            resumed_from,
+        }
+    }
+
+    /// A job with `rounds` plans, each costing `usd` for the planner and the same for the critic, a producer
+    /// invocation that must not count, a request text, and the outcome.
+    fn job(
+        text: &str,
+        request: &str,
+        dispatched: &str,
+        rounds: u32,
+        resumed_from: Option<&str>,
+        state: OutcomeState,
+        usd: f64,
+    ) -> JobRecords {
+        let job_id = id(text);
+        let mut j = JobRecords {
+            id: Some(job_id.clone()),
+            request: Some(Request {
+                job: job_id.clone(),
+                text: request.into(),
+                received_at: jiff::Timestamp::UNIX_EPOCH,
+                channel: "cli".into(),
+            }),
+            ..JobRecords::default()
+        };
+        let mut stub: athena_data::records::Job = serde_json::from_value(serde_json::json!({
+            "id": text, "kind": "request", "title": "t", "class_of_work": null,
+            "capability": null, "accepted_reading": null, "accepted_by": null,
+            "owner": { "role": "producer", "capability": null, "model": null, "note": null },
+            "verifier_model": null, "caps": null, "base_commit": null, "config_sha256": null,
+            "defaults_sha256": null, "athena": null, "driver": null, "brief_sha256": null,
+            "dispatched_at": null, "request_path": null, "request_sha256": null, "cost": null,
+            "tokens": null, "note": null, "pin": null
+        }))
+        .unwrap();
+        stub.dispatched_at = Some(dispatched.parse().unwrap());
+        j.job = Some(stub);
+        for round in 1..=rounds {
+            let from = (round == 1).then(|| resumed_from.map(id)).flatten();
+            j.plans.push(plan(&job_id, round, from));
+            j.invocations
+                .push(invocation(&job_id, 2 * round, Role::Planner, usd));
+            j.invocations
+                .push(invocation(&job_id, 2 * round + 1, Role::Critic, usd));
+        }
+        j.invocations
+            .push(invocation(&job_id, 99, Role::Producer, 50.0));
+        j.outcome = Some(athena_data::records::Outcome {
+            job: job_id,
+            state,
+            reason: "r".into(),
+            at: jiff::Timestamp::UNIX_EPOCH,
+            totals: None,
+            branch: None,
+            base_commit: None,
+            candidate_commit: None,
+            after_blocked: false,
+            through_commit: None,
+        });
+        j
+    }
+
+    fn records(jobs: Vec<JobRecords>) -> Records {
+        let mut records = Records::default();
+        for j in jobs {
+            records.jobs.insert(j.id().as_str().to_string(), j);
+        }
+        records
+    }
+
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-9
+    }
+
+    const OLD_STOP: &str = "20261020-100000-aaaa";
+    const OLD_LANDED: &str = "20261021-100000-bbbb";
+    const NEW_STOP: &str = "20261026-100000-cccc";
+    const NEW_LANDED: &str = "20261026-110000-dddd";
+
+    fn fixture(resumed: bool) -> Records {
+        let landed = OutcomeState::Landed;
+        let failed = OutcomeState::Failed;
+        records(vec![
+            // Before: a cap stop of three rounds at 0.2 USD a round, then a fresh plan that landed.
+            job(
+                OLD_STOP,
+                "add x",
+                "2026-10-20T10:00:00Z",
+                3,
+                None,
+                failed,
+                0.1,
+            ),
+            job(
+                OLD_LANDED,
+                &format!("try again on {OLD_STOP}"),
+                "2026-10-21T10:00:00Z",
+                1,
+                None,
+                landed,
+                0.2,
+            ),
+            // After: a cap stop, then a retry that resumed from it with one round of revision.
+            job(
+                NEW_STOP,
+                "add y",
+                "2026-10-26T10:00:00Z",
+                3,
+                None,
+                failed,
+                0.1,
+            ),
+            job(
+                NEW_LANDED,
+                &format!("try again on {NEW_STOP}"),
+                "2026-10-26T11:00:00Z",
+                if resumed { 2 } else { 3 },
+                resumed.then_some(NEW_STOP),
+                landed,
+                if resumed { 0.05 } else { 0.1 },
+            ),
+            // Excluded: landed without planning, and planned without landing.
+            job(
+                "20261022-100000-eeee",
+                "add z",
+                "2026-10-22T10:00:00Z",
+                0,
+                None,
+                landed,
+                0.0,
+            ),
+            job(
+                "20261022-110000-ffff",
+                "add w",
+                "2026-10-22T11:00:00Z",
+                2,
+                None,
+                failed,
+                9.0,
+            ),
+        ])
+    }
+
+    #[test]
+    fn planning_cost_sums_each_chain_at_its_landed_job_and_splits_at_the_first_resumed_plan() {
+        let cost = planning_cost(&fixture(true)).expect("landed planned jobs");
+        assert_eq!(
+            cost.first_resumed,
+            Some((NEW_LANDED.to_string(), "2026-10-26T11:00:00Z".to_string()))
+        );
+        // Before: one landed planned job (the unplanned landed job and the unlanded one are left out). Its
+        // chain is 3 + 1 rounds and 0.6 + 0.4 USD of planner and critic; its own are 1 round and 0.4 USD.
+        let before = cost.before;
+        assert_eq!(before.jobs, 1);
+        assert!(close(before.mean_rounds, 4.0), "{before:?}");
+        assert!(close(before.mean_cost_usd, 1.0), "{before:?}");
+        assert!(close(before.own_mean_rounds, 1.0), "{before:?}");
+        assert!(close(before.own_mean_cost_usd, 0.4), "{before:?}");
+        // After: the resumed retry. Its chain is 3 + 2 rounds and 0.6 + 0.2 USD; its own are 2 and 0.2.
+        let after = cost.after;
+        assert_eq!(after.jobs, 1);
+        assert!(close(after.mean_rounds, 5.0), "{after:?}");
+        assert!(close(after.mean_cost_usd, 0.8), "{after:?}");
+        assert!(close(after.own_mean_rounds, 2.0), "{after:?}");
+        assert!(close(after.own_mean_cost_usd, 0.2), "{after:?}");
+    }
+
+    #[test]
+    fn planning_cost_follows_a_three_job_chain_once_and_stops_at_a_cycle() {
+        let landed = OutcomeState::Landed;
+        let failed = OutcomeState::Failed;
+        let a = "20261020-100000-aaaa";
+        let b = "20261021-100000-bbbb";
+        let c = "20261022-100000-cccc";
+        let chain = records(vec![
+            job(
+                a,
+                &format!("try again on {c}"),
+                "2026-10-20T10:00:00Z",
+                1,
+                None,
+                failed,
+                0.1,
+            ),
+            job(
+                b,
+                &format!("try again on {a}"),
+                "2026-10-21T10:00:00Z",
+                2,
+                None,
+                failed,
+                0.1,
+            ),
+            job(
+                c,
+                &format!("try again on {b}"),
+                "2026-10-22T10:00:00Z",
+                3,
+                None,
+                landed,
+                0.1,
+            ),
+        ]);
+        let cost = planning_cost(&chain).expect("a landed planned job");
+        assert_eq!(
+            cost.before.jobs, 1,
+            "the chain counts once, at its landed job"
+        );
+        assert!(close(cost.before.mean_rounds, 6.0), "{cost:?}");
+        assert!(close(cost.before.mean_cost_usd, 1.2), "{cost:?}");
+    }
+
+    #[test]
+    fn planning_cost_is_absent_when_no_planned_job_landed() {
+        let none = records(vec![job(
+            OLD_STOP,
+            "add x",
+            "2026-10-20T10:00:00Z",
+            3,
+            None,
+            OutcomeState::Failed,
+            0.1,
+        )]);
+        assert_eq!(planning_cost(&none), None);
+    }
+
+    #[test]
+    fn planning_cost_has_no_after_group_when_no_plan_was_resumed() {
+        let cost = planning_cost(&fixture(false)).expect("landed planned jobs");
+        assert_eq!(cost.first_resumed, None);
+        assert_eq!(cost.after, PlanningGroup::default());
+        assert_eq!(cost.before.jobs, 2);
+        // Chains of 4 and 6 rounds, costing 1.0 and 1.2 USD.
+        assert!(close(cost.before.mean_rounds, 5.0), "{cost:?}");
+        assert!(close(cost.before.mean_cost_usd, 1.1), "{cost:?}");
     }
 }
 

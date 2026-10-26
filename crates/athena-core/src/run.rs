@@ -9,7 +9,8 @@ use crate::invocation::InvocationFacts;
 use crate::land::{Plan, plan};
 use crate::pin::{is_full_sha, mount};
 use crate::reading::{
-    Proposal, TreeRetrySeed, retried_job, retry_findings, same_scope, tree_retry_seed,
+    Proposal, TreeRetrySeed, planning_resume_seed, retried_job, retry_findings, same_scope,
+    tree_retry_seed,
 };
 use crate::scoring::{self, Happened, score, totals};
 use crate::store::{JobRecords, JobState, Records};
@@ -539,7 +540,13 @@ impl Athena {
         let planned =
             jc.config.job_plan.as_ref().is_some_and(|p| p.enabled) && !ctx.capability.pins_repo();
         if planned {
-            let Some(section) = self.plan_round(&ctx, &accepted, &check_views, &mut closing)?
+            let seed = planning_resume_seed(records, request_text).map(|s| PlanRevision {
+                previous: s.plan,
+                findings: s.findings,
+                resumed_from: Some(s.job),
+            });
+            let Some(section) =
+                self.plan_round(&ctx, &accepted, &check_views, &mut closing, seed)?
             else {
                 return self.close_dispatched(&ctx, closing);
             };
@@ -581,13 +588,14 @@ impl Athena {
         accepted: &AcceptedReading,
         checks: &[CheckView],
         closing: &mut Closing,
+        seed: Option<PlanRevision>,
     ) -> Result<Option<String>> {
         let cfg = ctx
             .jc
             .config
             .job_plan
             .expect("planning runs only with [job_plan]");
-        let mut revision: Option<PlanRevision> = None;
+        let mut revision: Option<PlanRevision> = seed;
         for round in 1..=cfg.max_rounds {
             match self.planning_round(ctx, accepted, checks, closing, round, revision.take())? {
                 RoundEnd::Accepted(section) => return Ok(Some(section)),
@@ -653,6 +661,7 @@ impl Athena {
                 bytes,
             });
         }
+        let resumed_from = revision.as_ref().and_then(|r| r.resumed_from.clone());
         let planner_brief_text = planner_brief(&PlannerInputs {
             job: id.as_str().to_string(),
             request: request.clone(),
@@ -730,6 +739,7 @@ impl Athena {
         let mut plan = plan_record(&id, round, seq, plan_output, &|path| {
             Ok(self.git.show_file(&p, path)?.is_some())
         })?;
+        plan.resumed_from = resumed_from;
         let section = render_plan_section(&plan);
         plan.producer_section_sha256 = sha256_hex(section.as_bytes());
         if let Err(e) = plan.validate() {
@@ -956,11 +966,12 @@ impl Athena {
             CritiqueVerdict::Accept => Ok(RoundEnd::Accepted(section)),
             CritiqueVerdict::Reject => stop("the critic rejected the plan".into()),
             CritiqueVerdict::Revise if last_round => {
-                stop("the plan still needed revising in the last round".into())
+                stop(athena_data::records::PLANNING_CAP_REASON.into())
             }
             CritiqueVerdict::Revise => Ok(RoundEnd::Revise(Box::new(PlanRevision {
                 previous: plan,
                 findings: findings.clone(),
+                resumed_from: None,
             }))),
         }
     }
@@ -1308,6 +1319,7 @@ fn plan_record(
             .collect(),
         open_questions: out.open_questions,
         producer_section_sha256: "0".repeat(64),
+        resumed_from: None,
     })
 }
 

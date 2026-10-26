@@ -1,0 +1,270 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261026-150803-c7d4",
+  "round": 2,
+  "at": "2026-10-26T16:03:11.234215304Z",
+  "invocation_seq": 4,
+  "approach": "Reuse the committed round-3 job-plan and critique records as the kept plan and findings. Add one optional marker, `resumed_from: Option<JobId>`, on the retry job's round-1 JobPlan. `reading.rs` gets `planning_resume_seed`, which qualifies only a cap-stopped job. `run.rs` seeds round 1 of the retry's planning loop with it, so round 1 is the revision round and the critic sees the revised plan. `status.rs` computes planning rounds and cost per landed job over the whole retry chain (the landed job plus every predecessor it retried), split at the first resumed plan. `display.rs` prints it. All new tests go in files already on the deliverable list (lifecycle.rs, reading.rs, status.rs, display.rs, records.rs, briefs.rs), using the `Scenario` fixture from tests/common.",
+  "decisions": [
+    {
+      "choice": "Keep the existing job-plan and critique records as the kept plan and findings; add only the optional `resumed_from` marker on JobPlan (serde default, skipped when none).",
+      "reason": "The closing already commits the round-3 plan and critique. The marker lets status split before and after from records alone.",
+      "rejected": [
+        {
+          "option": "A new typed 'kept plan' record",
+          "why": "It duplicates stored data and is a bigger schema change."
+        },
+        {
+          "option": "Infer 'resumed' from the retry's outcome text",
+          "why": "Retries before this change also retried cap stops but planned fresh, so the split would be wrong."
+        },
+        {
+          "option": "Marker in Job.note",
+          "why": "Free text, not checkable."
+        }
+      ]
+    },
+    {
+      "choice": "Seed round 1 of the retry's own loop with the kept revision, then continue the normal loop under the same cap.",
+      "reason": "This gives exactly one revision round and then the critic. The cap and critic grading are unchanged.",
+      "rejected": [
+        {
+          "option": "Send the kept plan straight to the critic",
+          "why": "The findings would be unaddressed and simply repeated."
+        }
+      ]
+    },
+    {
+      "choice": "Qualify by structure plus `PLANNING_CAP_REASON` matched with `contains`. Add a unit test using an outcome string copied verbatim from a pre-change cap stop, such as the one for 20261026-145955-s7e2, built by the same format as run.rs.",
+      "reason": "Old records hold only the literal text plus round, summary and findings. The verbatim test shows the named old jobs still qualify, and the shared const keeps the stop and the check together (answers finding 7).",
+      "rejected": [
+        {
+          "option": "Resume any planning-stopped job",
+          "why": "The request covers only the cap stop; reject and misread plans are not worth keeping."
+        },
+        {
+          "option": "Add a typed stop reason to the outcome record",
+          "why": "A larger schema change, and old jobs would not carry it."
+        }
+      ]
+    },
+    {
+      "choice": "status.rs reports planning rounds and planning cost per landed job as chain totals. For each planned landed job, follow `retried_job` back through every predecessor and add each one's plan count and planner and critic invocation cost (`best_lower`). A chain is counted once, at its landed job. Also show the landed job's own figures beside the totals.",
+      "reason": "The spend the request is about sits on the failed predecessor. A per-job-only measure would miss the saving (answers finding 4).",
+      "rejected": [
+        {
+          "option": "Count only the landed job's own rounds and cost",
+          "why": "It omits the wasted rounds, so before and after would not show the saving."
+        }
+      ]
+    },
+    {
+      "choice": "Cutover is the earliest dispatch time of a job whose plan has `resumed_from`. A landed chain is 'after' if its landed job was dispatched at or after the cutover. Print the cutover job id and time, and label 'after' as 'since the first resumed planning'. Say the same in display.rs and CHANGELOG.",
+      "reason": "It is derived from records, with no clock or version heuristic. The label stops the operator reading 'after' as 'since the code shipped' (answers finding 5).",
+      "rejected": [
+        {
+          "option": "Compare resumed jobs only with non-resumed ones",
+          "why": "That is not before and after, and resumed landed jobs are few."
+        }
+      ]
+    },
+    {
+      "choice": "Put the new integration tests in crates/athena-cli/tests/lifecycle.rs, which is a listed deliverable and already imports `common::*` (Scenario, deadline_script), and not in job_plan.rs.",
+      "reason": "It keeps the change inside the listed files (answers finding 1).",
+      "rejected": [
+        {
+          "option": "Add the tests to job_plan.rs",
+          "why": "The file is not on the deliverable list."
+        }
+      ]
+    },
+    {
+      "choice": "Make the one-line test-fixture edits to the JobPlan literals in store.rs and admission.rs only if the build needs them. Avoid them by giving `resumed_from` a default through `..` where a literal can use it. Otherwise add `resumed_from: None` mechanically.",
+      "reason": "A new struct field breaks those literals at compile time. These edits are purely mechanical, not a behavior change, so I name them in the plan and not as deliverables (answers findings 2 and 3).",
+      "rejected": [
+        {
+          "option": "Put the marker on a type with no literals elsewhere",
+          "why": "I found no such place that stays typed and checkable."
+        }
+      ]
+    },
+    {
+      "choice": "Document `resumed_from` in docs/records.md with one line.",
+      "reason": "That file describes the job-plan fields, so the new field should be documented there (answers finding 6).",
+      "rejected": [
+        {
+          "option": "Update the doc only if a test fails",
+          "why": "The field should be documented in any case."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "purpose": "Add `PLANNING_CAP_REASON` and the optional `resumed_from` on JobPlan. Update `sample_plan` and add a round-trip test, including an old record without the field.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Add `resumed_from` to `PlanRevision`. The planner brief's revision section says planning stopped at the cap, quotes the kept plan and all findings, and asks for one revision. Add a test and fix literals.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Add `planning_resume_seed` beside `retry_findings`. Unit tests cover cap, a verbatim pre-change cap outcome, reject, misread, timeout and non-retry requests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "purpose": "The cap stop uses `PLANNING_CAP_REASON`. `dispatch` computes the seed and passes it to `plan_round` as the round-1 revision. `planning_round` copies `resumed_from` onto the plan record.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "Add `planning_cost(&Records)` with chain totals over `retried_job` predecessors, the before/after split at the first resumed plan, and a `StatusView` field. Add unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "purpose": "Print planning rounds and cost per landed job, before and after, with counts, the cutover job and time, and the label 'since the first resumed planning'. Add a render test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "purpose": "Add the cap-resume integration test and the fresh-plan tests (reject, timeout, verification failure) using the `Scenario` fixture from tests/common.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased entry for resumable planning stops and the status measure.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/records.md",
+      "action": "modify",
+      "purpose": "One line describing `JobPlan.resumed_from`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/store.rs",
+      "action": "modify",
+      "purpose": "Mechanical: add the new field to the test fixture `plan()` only if it does not compile without it.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/admission.rs",
+      "action": "modify",
+      "purpose": "Mechanical: add the new field to the test JobPlan literal only if it does not compile without it.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "records.rs: add `PLANNING_CAP_REASON` and `JobPlan.resumed_from`. Fix `sample_plan` and add the round-trip and old-record tests.",
+    "briefs.rs: add `resumed_from` to `PlanRevision`. Branch the revision heading and text in `planner_brief`. Fix literals and add the resumed-wording test.",
+    "run.rs: use the const in the cap stop. Set `resumed_from: None` in `plan_record`. Copy it from the revision in `planning_round`. Fix the `PlanRevision` literal in `end_round`.",
+    "reading.rs: write `planning_resume_seed` and its unit tests, including the verbatim old-outcome case.",
+    "run.rs `dispatch`: for a planned job, compute the seed from `records` and the request text and pass it to `plan_round` as the round-1 revision.",
+    "Fix test fixture literals in store.rs and admission.rs only as the compiler requires.",
+    "status.rs: add the `PlanningCost` types and `planning_cost` with chain totals and the cutover split. Add the `StatusView` field and unit tests with predecessors in both groups.",
+    "display.rs: render the lines near the existing planning line, with counts, cutover and label. Add a render test.",
+    "lifecycle.rs: add the cap-resume test and the fresh-plan tests for reject, timeout and verification failure.",
+    "CHANGELOG.md and docs/records.md: add the entry and the field description.",
+    "Run `cargo fmt --all`, then the three checks."
+  ],
+  "risks": [
+    {
+      "risk": "The new JobPlan field breaks struct literals in several test modules, or a schema or gate check.",
+      "mitigation": "The field is optional and skipped when none, so old records parse. Fix the literals as the compiler reports them and run the full suite."
+    },
+    {
+      "risk": "A retry resumes after the base or config changed, or the old plan names files that no longer exist.",
+      "mitigation": "The reading allows it. Athena's existing plan checks still run on the revised plan and send it back if it is wrong."
+    },
+    {
+      "risk": "Round 1 of a resumed job is a revision, which changes what `FirstRoundCounts` means for it.",
+      "mitigation": "Leave `FirstRoundCounts` as is and note it in the CHANGELOG."
+    },
+    {
+      "risk": "A small 'after' group makes the mean misleading, and 'after' may be misread as 'since shipped'.",
+      "mitigation": "Print job counts, the cutover job and time, and the 'since the first resumed planning' label."
+    },
+    {
+      "risk": "The cap-stop wording changes and the reason match breaks.",
+      "mitigation": "A shared const used by both the stop and the check, a verbatim old-outcome unit test, and an end-to-end stop-then-resume test."
+    },
+    {
+      "risk": "Chain walking double-counts a predecessor, or loops on bad records.",
+      "mitigation": "Count each chain once at its landed job and guard the walk with a visited set. Test a three-job chain."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Integration test in lifecycle.rs with a Scenario whose critic returns Revise in all three rounds. Run `go` so the job stops at the cap. Then run `athena.retry` and `go` on the new job, with the script wrapped to record each spec's role and prompt.",
+      "command": "cargo test --locked --test lifecycle a_retry_of_a_job_stopped_at_the_planning_cap_resumes_from_the_kept_plan",
+      "observes": "The first retry planner prompt contains the kept round-3 plan approach and every round-3 finding. The call order after the retry's reader is exactly Planner then Critic. The first retry critic prompt contains the revised plan approach and not the kept one. The retry's job-plan-1.json has `resumed_from` equal to the old job.",
+      "fails_without": "Without the seed the retry's first planner prompt is a fresh brief with no kept approach or findings, so the contains assertions fail. The call order would also differ."
+    },
+    {
+      "criterion": 2,
+      "method": "Integration tests in lifecycle.rs retry a job whose planning stopped on a reject, a job that stopped on a producer timeout (`deadline_script`), and a job that failed verification. A reading.rs unit test also checks `planning_resume_seed` returns None for these jobs and for a non-retry request.",
+      "command": "cargo test --locked a_retry_of_a_job_that_stopped_for_any_other_reason_plans_fresh",
+      "observes": "Each retry's first planner prompt has no revision section, no kept-plan text and no findings. Its job-plan-1.json has no `resumed_from`.",
+      "fails_without": "If resume applied to every retry or to any planning stop, the reject case would show the kept plan in the prompt and fail the absence assertions."
+    },
+    {
+      "criterion": 3,
+      "method": "A status.rs unit test with hand-built Records has these jobs. Group 1 is a cap-stopped predecessor plus the landed retry that planned fresh (before the cutover). Group 2 is a cap-stopped predecessor plus a landed resumed retry whose round-1 plan has `resumed_from` (after the cutover). It also has an unlanded job and an unplanned landed job that must be excluded. A second test renders status text via display.rs. A third checks that with no resumed plan the 'after' group is empty.",
+      "command": "cargo test --locked planning_cost",
+      "observes": "Chain-total mean rounds and mean USD match the fixture, with each predecessor's rounds and cost included. Own figures are shown beside them. Group counts and the cutover job id and time are right. The text shows both groups and the label 'since the first resumed planning'.",
+      "fails_without": "With no planning-cost computation there are no such lines and the numeric assertions fail. A per-job-only computation fails the predecessor-included totals."
+    },
+    {
+      "criterion": 4,
+      "method": "In the same test, load the retry's committed records. The kept plan and findings are the old job's job-plan-3 and critique-3 records. The retry's job-plan-1 carries only a job id in `resumed_from`. Run the existing history check. A records.rs round-trip test checks that old records without the field still parse.",
+      "command": "cargo test --locked a_retry_of_a_job_stopped_at_the_planning_cap_resumes_from_the_kept_plan",
+      "observes": "Records load, `athena.check_history()` reports no violations, and `resumed_from` holds only a job id. Fixture text contains no secrets or personal data.",
+      "fails_without": "Not a behavior test: without the marker the `resumed_from` assertion fails."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the three Athena checks.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Read the Unreleased section.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "A new entry describes the resumable planning stop (kept plan and findings, retry runs one revision round then the critic). It also describes the chain-total planning rounds and cost per landed job in status, with 'after' meaning 'since the first resumed planning'.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Whether a doc-sync test checks docs/records.md field lists; the full suite will show.",
+    "A job dispatched with no recorded time counts as 'before' (assumption).",
+    "Whether Scenario in tests/common/mod.rs can record prompts and call order as the tests need; if not, wrap the script in the test itself."
+  ],
+  "producer_section_sha256": "fd4c11eddd7cbcfe1893fd2b33e83a51c8d0075468a2deb3c1421865b9a295fb"
+}

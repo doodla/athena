@@ -1223,6 +1223,51 @@ pub fn retry_findings(
     Ok(Some((id, texts)))
 }
 
+/// The kept plan of a job that stopped at the planning round cap, and the critic's findings on it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlanningResumeSeed {
+    /// The job that stopped at the cap.
+    pub job: JobId,
+    /// Its last plan, from its `job-plan-<round>.json`.
+    pub plan: athena_data::records::JobPlan,
+    /// Every finding of the critique of that plan, from its `critique-<round>.json`.
+    pub findings: Vec<Finding>,
+}
+
+/// The seed for a request of the form "try again on <job>" when that job failed in planning because its plan
+/// still needed revising in the last round; `None` for any other request, or a job that stopped for any other
+/// reason (a reject, a misread reading, a timeout, a failed verification, an agent failure). The plan and
+/// findings were redacted when they were recorded.
+pub fn planning_resume_seed(records: &Records, request: &str) -> Option<PlanningResumeSeed> {
+    let id = retried_job(records, request)?;
+    let job = records.jobs.get(id.as_str())?;
+    let outcome = job.outcome.as_ref()?;
+    if outcome.state != OutcomeState::Failed {
+        return None;
+    }
+    let why = outcome
+        .reason
+        .strip_prefix(athena_data::records::PLANNING_STOPPED_PREFIX)?;
+    if !why
+        .trim_start()
+        .starts_with(athena_data::records::PLANNING_CAP_REASON)
+    {
+        return None;
+    }
+    let plan = job.plans.iter().max_by_key(|p| p.round)?;
+    let critique = job.critiques.iter().find(|c| c.round == plan.round)?;
+    if critique.final_verdict != CritiqueVerdict::Revise
+        || critique.request_reading_mismatch.is_some()
+    {
+        return None;
+    }
+    Some(PlanningResumeSeed {
+        job: id,
+        plan: plan.clone(),
+        findings: critique.findings.clone(),
+    })
+}
+
 /// The reference after "try again on " at the start of `request`; `None` when it is not that form.
 fn retry_reference(request: &str) -> Result<Option<&str>> {
     let text = request.trim();
@@ -1868,6 +1913,104 @@ mod tests {
         let mut records = Records::default();
         records.jobs.insert(job.id().as_str().to_string(), job);
         records
+    }
+
+    fn kept_plan(job: &JobRecords, round: u32) -> athena_data::records::JobPlan {
+        athena_data::records::JobPlan {
+            job: job.id().clone(),
+            round,
+            at: jiff::Timestamp::UNIX_EPOCH,
+            invocation_seq: 1,
+            approach: format!("KEPT-APPROACH-{round}"),
+            decisions: vec![],
+            files: vec![],
+            steps: vec![],
+            risks: vec![],
+            demonstrations: vec![],
+            open_questions: vec![],
+            producer_section_sha256: "0".repeat(64),
+            resumed_from: None,
+        }
+    }
+
+    fn kept_critique(
+        job: &JobRecords,
+        round: u32,
+        verdict: CritiqueVerdict,
+    ) -> athena_data::records::Critique {
+        athena_data::records::Critique {
+            job: job.id().clone(),
+            round,
+            at: jiff::Timestamp::UNIX_EPOCH,
+            invocation_seq: Some(2),
+            agent_verdict: Some(verdict),
+            final_verdict: verdict,
+            findings: vec![Finding {
+                severity: athena_data::records::Severity::Major,
+                summary: "SMALL-FIX".into(),
+                evidence: "step 3".into(),
+                location: None,
+                source: athena_data::records::FindingSource::Critic,
+            }],
+            request_reading_mismatch: None,
+            summary: None,
+        }
+    }
+
+    /// A job closed as failed in planning with `reason` after `rounds` rounds whose last verdict is `verdict`.
+    fn planning_stopped(reason: &str, verdict: CritiqueVerdict) -> (Records, String) {
+        let mut job = job_with_checks(vec![]);
+        job.verification = None;
+        for round in 1..=3 {
+            job.plans.push(kept_plan(&job, round));
+            job.critiques.push(kept_critique(&job, round, verdict));
+        }
+        job.outcome = Some(outcome(&job, OutcomeState::Failed, reason));
+        let id = job.id().as_str().to_string();
+        (records_with(job), format!("try again on {id}"))
+    }
+
+    #[test]
+    fn a_planning_cap_stop_gives_its_round_three_plan_and_findings() {
+        // The reason is copied from the stop of job 20261026-145955-s7e2, recorded before the change.
+        let old = "planning stopped before any code was written: the plan still needed revising in the last round \
+                   (round 3 of 3). The plan is close. Findings: major: SMALL-FIX";
+        let (records, request) = planning_stopped(old, CritiqueVerdict::Revise);
+        let seed = planning_resume_seed(&records, &request).expect("a seed");
+        assert_eq!(seed.plan.round, 3);
+        assert_eq!(seed.plan.approach, "KEPT-APPROACH-3");
+        assert_eq!(seed.findings.len(), 1);
+        assert_eq!(seed.findings[0].summary, "SMALL-FIX");
+        assert_eq!(
+            seed.job.as_str(),
+            request.trim_start_matches("try again on ")
+        );
+    }
+
+    #[test]
+    fn a_stop_for_any_other_reason_or_a_new_request_gives_no_seed() {
+        let prefix = athena_data::records::PLANNING_STOPPED_PREFIX;
+        for reason in [
+            format!("{prefix} the critic rejected the plan (round 3 of 3). Findings: none"),
+            format!("{prefix} the critic judged that the reading misread the request: x"),
+            format!("{prefix} the planner could not run: boom"),
+            "the producer reached its deadline".to_string(),
+            "verification failed: a check failed".to_string(),
+        ] {
+            let (records, request) = planning_stopped(&reason, CritiqueVerdict::Revise);
+            assert_eq!(planning_resume_seed(&records, &request), None, "{reason}");
+        }
+        let cap = format!(
+            "{prefix} {} (round 3 of 3).",
+            athena_data::records::PLANNING_CAP_REASON
+        );
+        let (records, request) = planning_stopped(&cap, CritiqueVerdict::Revise);
+        assert!(planning_resume_seed(&records, &request).is_some());
+        // Not a retry request.
+        assert_eq!(planning_resume_seed(&records, "add a greeting"), None);
+        // A kept critique that is not a revise.
+        let (records, request) = planning_stopped(&cap, CritiqueVerdict::Reject);
+        assert_eq!(planning_resume_seed(&records, &request), None);
     }
 
     #[test]
