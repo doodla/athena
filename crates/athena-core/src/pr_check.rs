@@ -252,6 +252,8 @@ mod tests {
             },
             departures: None,
             urgent_reason: None,
+            hard_reason: None,
+            producer_effort: None,
         })))
     }
 
@@ -278,6 +280,7 @@ mod tests {
                 dirty: false,
             },
             model: "m".into(),
+            effort: None,
             context: InvocationContext {
                 components: vec![],
                 prompt_sha256: "0".repeat(64),

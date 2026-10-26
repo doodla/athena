@@ -106,6 +106,7 @@ An abridged invocation record:
   "role": "producer",
   "driver": { "name": "claude-code", "version": "2.1.299" },
   "model": "claude-sonnet-5-5",
+  "effort": "medium",
   "wall_time": { "value": 192.4, "unit": "seconds", "provenance": "measured", "basis": "athena monotonic clock" },
   "tokens": {
     "output": { "value": 5120, "unit": "tokens", "provenance": "measured", "basis": "Claude Code result.usage" }
@@ -114,6 +115,10 @@ An abridged invocation record:
   "outcome": "success"
 }
 ```
+
+`effort` is the level the agent ran at (`low`, `medium`, `high`, `xhigh` or `max`); a record written before it
+was kept has none. A reading of a job judged hard also carries `hard_reason` and `producer_effort`, which an
+ordinary reading leaves out.
 
 A killed invocation records bounds instead: tokens `estimated` with the basis "lower bound: usage before
 termination", and a cost with `value` null, `lower` 0, and `upper` the invocation's cap.

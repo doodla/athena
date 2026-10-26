@@ -186,6 +186,7 @@ impl Athena {
             seq,
             role,
             model: model.to_string(),
+            effort: jc.config.effort_for(role).to_string(),
             system_prompt: composed.text.clone(),
             user_prompt,
             tools: grant.tools.clone(),
@@ -426,6 +427,7 @@ impl Athena {
             out.decline_reason.clone().unwrap_or_default(),
             out.question.clone().unwrap_or_default(),
             f.departures.clone().unwrap_or_default(),
+            out.hard_reason.clone().unwrap_or_default(),
         ];
         let fixed = text.len();
         text.extend(out.assumptions.iter().cloned());
@@ -460,6 +462,12 @@ impl Athena {
             });
         }
         let title = reading_title(&text[0]);
+        // A blank reason is no reason, so the job is not hard. A hard job gets the configured hard producer
+        // setting, and the reason stays on the reading.
+        let hard_reason = Some(text[5].trim().to_string()).filter(|r| !r.is_empty());
+        let (producer_model, producer_effort) = config
+            .models
+            .producer_setting(&out.producer_model, hard_reason.is_some());
         let reading = Reading {
             job: job.clone(),
             n,
@@ -474,7 +482,7 @@ impl Athena {
             class_of_work: out.class_of_work.clone(),
             capability: out.capability.clone(),
             decline_reason: opt(&text[2]),
-            producer_model: out.producer_model.clone(),
+            producer_model,
             verifier_model: config.models.verifier.clone(),
             defaults_applied: out
                 .defaults_applied
@@ -510,6 +518,8 @@ impl Athena {
                 .map(str::trim)
                 .filter(|r| !r.is_empty())
                 .map(str::to_string),
+            producer_effort: hard_reason.is_some().then_some(producer_effort),
+            hard_reason,
         };
         let mut reading = reading;
         ensure_changelog(&mut reading);
@@ -2133,6 +2143,8 @@ mod tests {
             },
             departures: None,
             urgent_reason: None,
+            hard_reason: None,
+            producer_effort: None,
         }
     }
 

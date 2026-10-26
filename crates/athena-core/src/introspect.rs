@@ -1569,6 +1569,7 @@ impl Athena {
             seq: 0,
             role: Role::Reader,
             model: config.models.reader.clone(),
+            effort: config.models.reader_effort.clone(),
             system_prompt: SYSTEM_PROMPT.to_string(),
             user_prompt: prompt,
             tools: Vec::new(),
