@@ -1,0 +1,195 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261026-002911-8gp8",
+  "base_commit": "bb8e22037bb008d46eb4c7dc940ca5792e9e4832",
+  "base_fingerprint": "sha256:deb0239c33982bdda18a7ad707ad9b4e391ec1ffa3637cc10e9852437af15a47",
+  "previous_job": "20261025-230352-ph40",
+  "candidate_commit": "1925575e651a4e1a659076bdb8edce17a3733afa",
+  "candidate_tree": "0c866d0a26e27b20a228a7f819b70f2dece13c1b",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 147005
+    },
+    {
+      "path": "README.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 24211
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 48826
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 82973
+    },
+    {
+      "path": "crates/athena-cli/tests/common/mod.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 24675
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 128834
+    },
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "status": "added",
+      "mode": "100644",
+      "bytes": 9345
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 11860
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 118493
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 41364
+    },
+    {
+      "path": "crates/athena-core/src/state.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 14454
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 39516
+    },
+    {
+      "path": "crates/athena-core/src/test_support.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 24251
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 33376
+    }
+  ],
+  "fingerprint": "sha256:01da3d7a1b0269071f34165f529fc0269874f9c308d7110f8eb67a91e34e8d95",
+  "violations": [],
+  "producer_report": {
+    "summary": "Low free disk now holds a job at dispatch and fails it cleanly before the checks. A new `[disk] min_free_gb` setting (default 10) sets the minimum; it is defined in `config.rs`, left out of the config digest, and `athena.toml` is unchanged. Below the minimum, Athena removes only `jobs/<id>/target` of jobs whose lock is free. It skips the asking job and any locked job, and keeps source and records.\n\n- **At dispatch:** if space is still low after cleanup, `go` returns a `LowDisk` error. The job stays Proposed, nothing is committed, and a local marker `<state>/holds/<job>.json` records the amounts. Status shows 'environment: low disk: X free, Y required'.\n- **In drain:** `RealSteps::run` downcasts the error into `Run.held`. The hold is not a failure, is not retried and stops nothing. A later drain runs the same job id.\n- **Before the checks:** if space is still low after cleanup, the job closes Failed with a reason starting 'environment: low disk' that names `athena retry <job>`. No marker is left. This check runs before `early_pr`, so no pull request is opened first.\n- **Free space reader:** `StateDir::with_free_space` takes a plain fn; the real one runs `df -Pk`. An unreadable amount never holds or fails a job.\n\nI ran `cargo fmt --all`, clippy with warnings denied, and the full `cargo test --locked`. All finished without error. I could not read the saved test output, so I judged the full run by exit status only.",
+    "files": [
+      "crates/athena-data/src/config.rs",
+      "crates/athena-core/src/disk.rs",
+      "crates/athena-core/src/lib.rs",
+      "crates/athena-core/src/state.rs",
+      "crates/athena-core/src/run.rs",
+      "crates/athena-core/src/status.rs",
+      "crates/athena-core/src/test_support.rs",
+      "crates/athena-core/src/run_pin_tests.rs",
+      "crates/athena-cli/src/display.rs",
+      "crates/athena-cli/src/drain.rs",
+      "crates/athena-cli/tests/drain.rs",
+      "crates/athena-cli/tests/common/mod.rs",
+      "CHANGELOG.md",
+      "README.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test --locked -p athena-cli --test drain low_disk",
+        "result": "pass",
+        "note": "5 tests: the real-steps drain test and the four core-flow tests."
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "Clean on the second run, after fixing a doc-comment lint."
+      },
+      {
+        "command": "cargo fmt --all",
+        "result": "pass",
+        "note": "Applied formatting; this is not the same as running `--check` afterwards."
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "Ran once, full suite. The exit status was success (no 'Exit code' error). I could not read the saved output file to count results."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "With free disk simulated below the minimum, a test shows cleanup of closed and idle workspaces' target/ runs before dispatch and before the checks. Run `cargo test --locked`.",
+        "status": "met",
+        "evidence": "In crates/athena-cli/tests/drain.rs, `low_disk_at_dispatch_removes_idle_build_directories_first_and_then_dispatches` plants an idle job's target/ and a source file. The fake reports 3 GB while that target/ exists. It asserts the 'disk       removed build directory of job ...' line comes before 'dispatched ' and before 'checks     ', that target/ is gone and that the source file is kept. `low_disk_after_the_producer_removes_idle_build_directories_before_the_checks_run` plants the target/ from the producer step and asserts dispatched < sweep < checks. Both passed in `cargo test --locked -p athena-cli --test drain low_disk` and in the full run."
+      },
+      {
+        "criterion": "A test shows that when space is still low after cleanup at dispatch, the job is not dispatched, stays queued (not rejected) with status 'environment: low disk', and the free and required amounts appear in status and drain output. Run `cargo test --locked`.",
+        "status": "met",
+        "evidence": "`low_disk_at_dispatch_that_cleanup_does_not_cure_holds_the_job_queued_and_not_rejected` shows `go` returns an Err that downcasts to LowDisk(3e9 free, 10e9 required) after the sweep ran. No 'dispatched ' line appears. The records show the job Proposed with no job record and no outcome. `JobLine.hold` and `display::status` contain 'environment: low disk: 3.0 GB free, 10.0 GB required'. The drain output assertion ('environment: low disk', '3.0 GB', '10.0 GB' in `display::drain`) is in the real-steps test below. All passed."
+      },
+      {
+        "criterion": "A drain test through the real step mapping, not only a stub, shows a low-disk hold is not counted as a failure. Once the fake reports enough space, a later drain runs the same job (same id) to a verdict. Run `cargo test --locked`.",
+        "status": "met",
+        "evidence": "`the_real_steps_hold_a_job_on_low_disk_without_a_failure_and_a_later_drain_runs_the_same_job` in tests/drain.rs uses `RealSteps` and `drain::drain`. First drain: stop != RepeatedFailure, failed_item is None, landed 0, one job line with outcome 'environment: low disk' and the same job id. The text contains the amounts, the lander was not called, the job is Proposed and was never dispatched. After `set_free` to 500 GB, the second drain runs the same job id to 'passed', landed 1, the job has an outcome and the marker is gone. It passed."
+      },
+      {
+        "criterion": "A test shows that when space is low before the checks and still low after cleanup, the job fails with a clear retryable environment reason, is not rejected, and no hold marker is left. When space is freed, verification goes ahead. Run `cargo test --locked`.",
+        "status": "met",
+        "evidence": "`low_disk_before_the_checks_fails_the_job_retryably_and_a_retry_with_space_runs_the_checks`: the producer step drops free space to 3 GB. The job closes Failed (not Rejected) with a reason containing 'environment: low disk: 3.0 GB free, 10.0 GB required' and 'athena retry <job>'. No 'checks     ' line appears and `hold_file` does not exist. After freeing space, `athena.retry` then `go` on the new job lands, and the 'checks     ' line appears. `low_disk_after_the_producer_removes_idle_build_directories_before_the_checks_run` also shows that space freed by the sweep lets the checks run. Both passed."
+      },
+      {
+        "criterion": "A test shows the idle-workspace sweep removes target/, leaves source files, and skips workspaces whose job lock is held. Run `cargo test --locked`.",
+        "status": "met",
+        "evidence": "Unit test `disk::tests::the_sweep_removes_target_keeps_source_and_skips_locked_jobs` in crates/athena-core/src/disk.rs. It builds an idle job, a job locked via `try_lock_job`, a job with no target/ and the asking job. The idle target/ is removed and its work/main.rs is kept. The locked job's and the asking job's target/ stay, and the sweep output names the idle job but not the locked one. Passed in the full run."
+      },
+      {
+        "criterion": "config.rs defines a 10G minimum-free-disk default used when the setting is absent, and a test shows it parses. athena.toml is unchanged. README and CHANGELOG name the setting and the 'environment: low disk' status and say 'the user', never 'operator'.",
+        "status": "met",
+        "evidence": "config.rs has `DEFAULT_MIN_FREE_GB = 10`, `DiskConfig`, `Config.disk: Option<DiskConfig>` skipped when None and reset in `reading_inputs`, and `min_free_gb()`. Test `min_free_disk_defaults_to_ten_gigabytes_and_parses_when_set` checks the default of 10, a parsed `[disk] min_free_gb = 3`, an empty `[disk]` giving 10, and equal reading_inputs and digest with and without the section. `git status` lists no athena.toml change. README ('Free disk space' paragraph) and CHANGELOG (Unreleased > Added) name `[disk] min_free_gb` and 'environment: low disk' and say 'the user'. A Grep for the banned words over the touched files found none."
+      },
+      {
+        "criterion": "`cargo clippy --all-targets --locked -- -D warnings` is clean and `cargo fmt --all --check` passes.",
+        "status": "met",
+        "evidence": "I ran `cargo clippy --all-targets --locked -- -D warnings` and it finished clean after I fixed one empty-line-after-doc-comment error in tests/drain.rs. I ran `cargo fmt --all` last, which changed files but printed no errors. I did not run `cargo fmt --all --check` separately."
+      }
+    ],
+    "open_issues": [
+      "Departures from the plan, beyond the listed deliverables, are test-only edits: `test_support.rs` (added `plenty_of_space` and installed it in `make_athena`), `tests/common/mod.rs` (Fixture::athena installs it) and `run_pin_tests.rs` (same). `external_calls.rs` and `lifecycle.rs` needed no change: they never call `go` with a real `StateDir::new`, or they use `Fixture`.",
+      "The criterion 1, 2 and 4 tests live in crates/athena-cli/tests/drain.rs, not in run.rs core tests as the plan said. They need the CLI Fixture and Scenario scripts. The sweep unit test is in disk.rs.",
+      "The real free-space reader shells out to `df -Pk` because athena-core has no statvfs dependency. A libc or fs2 dependency would need Cargo.toml and Cargo.lock edits, which were not deliverables.",
+      "`cargo fmt --all --check` was not run separately; I ran `cargo fmt --all` as my last step, so the formatting should be clean, but Athena's own run is the real check.",
+      "I did not read the full `cargo test --locked` output, so I did not check the pass counts or look for ignored tests."
+    ],
+    "mistakes": [
+      "The first full-suite and clippy path hit an empty-line-after-doc-comment lint. Two edits to tests/drain.rs used the same anchor line, so a stray doc comment sat above `set_free`. I fixed it and re-ran clippy.",
+      "The first draft of the tests used the job id suffix 'idle', which is not valid Crockford base32. The sweep silently found no jobs until I changed it to 'abcd'."
+    ],
+    "learnings": [
+      "`JobId` suffixes must be four lowercase Crockford base32 characters, so i, l, o and u are invalid. A planted job directory named with them is silently skipped by `job_ids()`.",
+      "`StateDir::try_lock_job` uses flock on a per-job `job.lock`. A second open of the same file in the same process conflicts, so the sweep skips the asking job even without an explicit check.",
+      "Failed jobs print their 'failed ...' line twice (once from `failure()`, once from closing). This is existing behavior.",
+      "Fake free-space readers are plain fn pointers, so the tests key them on files under the state root passed to them."
+    ],
+    "desires": [
+      "A way to read the saved output of a long test run, or a quiet flag that prints only the failure summary."
+    ]
+  }
+}

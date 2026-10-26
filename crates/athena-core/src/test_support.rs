@@ -590,13 +590,19 @@ pub fn land_through_pr(
     })
 }
 
+/// A free-space reader that reports a very large disk, so a test does not depend on the host's free space.
+/// Install it with [`StateDir::with_free_space`].
+pub fn plenty_of_space(_: &Path) -> std::io::Result<u64> {
+    Ok(1_000_000_000_000_000)
+}
+
 fn make_athena(
     git: &Git,
     state_root: &Path,
     capabilities: Vec<Box<dyn Capability>>,
     script: Script,
 ) -> Athena {
-    let state = StateDir::new(state_root.to_path_buf());
+    let state = StateDir::new(state_root.to_path_buf()).with_free_space(plenty_of_space);
     let driver = FakeAgentDriver::new(script).with_registry(state.registry());
     Athena {
         git: git.clone(),

@@ -16,6 +16,7 @@ use athena_cli::drain::{
 use athena_core::audience::Page;
 use athena_core::commits::{Committer, message};
 use athena_core::plan::{PlanEntry, Priority};
+use athena_core::run::GoResult;
 use athena_core::steward::{ProposedChange, RequestQueue};
 use athena_core::store::{JobState, Records};
 use athena_core::{Athena, Quiet};
@@ -805,6 +806,7 @@ fn a_run_that_needs_accepting_leaves_the_item_queued_without_a_failure() {
                 reason: "the reading needs accepting".into(),
                 cost: 0.1,
                 needs_accepting: job == "a",
+                held: false,
             }
         }
         fn land(&self, job: &str) -> Landing {
@@ -1092,6 +1094,298 @@ fn the_real_steps_work_a_queued_request_land_it_and_only_then_rate_the_page() {
             .lock()
             .unwrap()
             .contains(&athena_data::records::Role::Audience)
+    );
+}
+
+/// An idle job whose build directory the tests plant.
+const IDLE_JOB: &str = "20260101-000000-abcd";
+
+/// Free space as the test sets it: the bytes in `<state>/simulated_free`, or plenty when the file is absent.
+/// While the planted idle job still has a `target/`, only 3 GB are free, so removing it frees the space.
+fn simulated_free(state: &Path) -> std::io::Result<u64> {
+    if state.join("jobs").join(IDLE_JOB).join("target").exists() {
+        return Ok(3_000_000_000);
+    }
+    match std::fs::read_to_string(state.join("simulated_free")) {
+        Ok(text) => text.trim().parse().map_err(std::io::Error::other),
+        Err(_) => Ok(500_000_000_000),
+    }
+}
+
+/// Plants an idle job with a build directory and a source file, under the state directory `state`.
+fn plant_idle_job(state: &Path) {
+    let dir = state.join("jobs").join(IDLE_JOB);
+    std::fs::create_dir_all(dir.join("target/debug")).unwrap();
+    std::fs::write(dir.join("target/debug/big"), vec![7u8; 100_000]).unwrap();
+    std::fs::create_dir_all(dir.join("work")).unwrap();
+    std::fs::write(dir.join("work/main.rs"), b"fn main() {}").unwrap();
+}
+
+fn position(lines: &[String], prefix: &str) -> usize {
+    lines
+        .iter()
+        .position(|l| l.starts_with(prefix))
+        .unwrap_or_else(|| panic!("no line starts with {prefix:?}: {lines:#?}"))
+}
+
+/// Reads and then runs one job under `simulated_free`, wrapping the script with `at_producer`, which runs when
+/// the producer is called (after dispatch, before the checks). Returns the athena, the job and the lines.
+fn go_with_disk(
+    fx: &Fixture,
+    at_producer: impl Fn() + Send + Sync + 'static,
+) -> (Athena, athena_data::JobId, Lines) {
+    let inner = Scenario::default().script();
+    let script: Script = Box::new(move |spec| {
+        if spec.role == Role::Producer {
+            at_producer();
+        }
+        inner(spec)
+    });
+    let mut athena = fx.athena(script);
+    athena.state = athena.state.clone().with_free_space(simulated_free);
+    let lines = Lines::default();
+    let proposal = athena.ask("add a greeting to the readme", &lines).unwrap();
+    (athena, proposal.job, lines)
+}
+
+fn lines_of(lines: &Lines) -> Vec<String> {
+    lines.0.lock().unwrap().clone()
+}
+
+#[test]
+fn low_disk_at_dispatch_removes_idle_build_directories_first_and_then_dispatches() {
+    let fx = Fixture::new();
+    let (athena, job, lines) = go_with_disk(&fx, || {});
+    plant_idle_job(athena.state.root());
+    athena.go(job.as_str(), AcceptedBy::User, &lines).unwrap();
+
+    let said = lines_of(&lines);
+    let swept = position(
+        &said,
+        &format!("disk       removed build directory of job {IDLE_JOB}"),
+    );
+    let dispatched = position(&said, "dispatched ");
+    let checks = position(&said, "checks     ");
+    assert!(
+        swept < dispatched,
+        "cleanup comes before dispatch: {said:#?}"
+    );
+    assert!(dispatched < checks, "{said:#?}");
+    let idle = athena
+        .state
+        .job_dir(&athena_data::JobId::parse(IDLE_JOB).unwrap());
+    assert!(!idle.join("target").exists());
+    assert!(idle.join("work/main.rs").exists(), "source is kept");
+}
+
+#[test]
+fn low_disk_after_the_producer_removes_idle_build_directories_before_the_checks_run() {
+    let fx = Fixture::new();
+    let root = fx.state.path().join("repo");
+    let (athena, job, lines) = go_with_disk(&fx, move || plant_idle_job(&root));
+    athena.go(job.as_str(), AcceptedBy::User, &lines).unwrap();
+
+    let said = lines_of(&lines);
+    let dispatched = position(&said, "dispatched ");
+    let swept = position(
+        &said,
+        &format!("disk       removed build directory of job {IDLE_JOB}"),
+    );
+    let checks = position(&said, "checks     ");
+    assert!(dispatched < swept && swept < checks, "{said:#?}");
+    assert!(
+        !athena
+            .state
+            .job_dir(&athena_data::JobId::parse(IDLE_JOB).unwrap())
+            .join("target")
+            .exists()
+    );
+}
+
+#[test]
+fn low_disk_at_dispatch_that_cleanup_does_not_cure_holds_the_job_queued_and_not_rejected() {
+    let fx = Fixture::new();
+    let (athena, job, lines) = go_with_disk(&fx, || {});
+    set_free(&athena, 3_000_000_000);
+    plant_idle_job(athena.state.root());
+
+    let error = athena
+        .go(job.as_str(), AcceptedBy::User, &lines)
+        .expect_err("held");
+    let low = error
+        .downcast_ref::<athena_core::disk::LowDisk>()
+        .expect("a low-disk hold, not another error");
+    assert_eq!((low.free, low.required), (3_000_000_000, 10_000_000_000));
+    assert!(
+        format!("{error}").contains("environment: low disk: 3.0 GB free, 10.0 GB required"),
+        "{error}"
+    );
+    let said = lines_of(&lines);
+    // The idle build directory was removed first; nothing was dispatched.
+    position(
+        &said,
+        &format!("disk       removed build directory of job {IDLE_JOB}"),
+    );
+    assert!(
+        !said.iter().any(|l| l.starts_with("dispatched ")),
+        "{said:#?}"
+    );
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    let held = &records.jobs[job.as_str()];
+    assert_eq!(held.state(), JobState::Proposed, "queued, not rejected");
+    assert!(held.job.is_none() && held.outcome.is_none());
+    let status = athena.status().unwrap();
+    let line = status.open.iter().find(|j| j.id == job.as_str()).unwrap();
+    assert_eq!(
+        line.hold.as_deref(),
+        Some("environment: low disk: 3.0 GB free, 10.0 GB required")
+    );
+    let shown = display::status(&status);
+    assert!(
+        shown.contains("environment: low disk: 3.0 GB free, 10.0 GB required"),
+        "{shown}"
+    );
+}
+
+#[test]
+fn low_disk_before_the_checks_fails_the_job_retryably_and_a_retry_with_space_runs_the_checks() {
+    let fx = Fixture::new();
+    let root = fx.state.path().join("repo");
+    let flag = root.join("low_at_producer");
+    let (low_flag, free_file) = (flag.clone(), root.join("simulated_free"));
+    let (athena, job, lines) = go_with_disk(&fx, move || {
+        if low_flag.exists() {
+            std::fs::write(&free_file, "3000000000").unwrap();
+        }
+    });
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(&flag, "").unwrap();
+
+    let result = athena.go(job.as_str(), AcceptedBy::User, &lines).unwrap();
+    let GoResult::Finished(finished) = result else {
+        panic!("expected the job to finish");
+    };
+    assert_eq!(finished.state, OutcomeState::Failed, "not rejected");
+    assert!(
+        finished
+            .reason
+            .contains("environment: low disk: 3.0 GB free, 10.0 GB required"),
+        "{}",
+        finished.reason
+    );
+    assert!(
+        finished.reason.contains(&format!("athena retry {job}")),
+        "{}",
+        finished.reason
+    );
+    let said = lines_of(&lines);
+    assert!(
+        !said.iter().any(|l| l.starts_with("checks     ")),
+        "no check ran: {said:#?}"
+    );
+    assert!(
+        !athena.state.hold_file(&job).exists(),
+        "no hold marker is left"
+    );
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    assert_eq!(
+        records.jobs[job.as_str()].state(),
+        JobState::Closed(OutcomeState::Failed)
+    );
+
+    // Space is freed: `athena retry` reads the job again and its run goes on to the checks.
+    std::fs::remove_file(&flag).unwrap();
+    std::fs::remove_file(root.join("simulated_free")).unwrap();
+    let retry_lines = Lines::default();
+    let (proposal, _) = athena.retry(job.as_str(), &retry_lines).unwrap();
+    assert_ne!(proposal.job, job);
+    let result = athena
+        .go(proposal.job.as_str(), AcceptedBy::User, &retry_lines)
+        .unwrap();
+    let GoResult::Finished(finished) = result else {
+        panic!("expected the retried job to finish");
+    };
+    assert_eq!(finished.state, OutcomeState::Landed, "{}", finished.reason);
+    assert!(
+        lines_of(&retry_lines)
+            .iter()
+            .any(|l| l.starts_with("checks     ")),
+        "the checks ran"
+    );
+}
+
+/// Sets the simulated free space to `bytes`.
+fn set_free(athena: &Athena, bytes: u64) {
+    std::fs::create_dir_all(athena.state.root()).unwrap();
+    std::fs::write(
+        athena.state.root().join("simulated_free"),
+        bytes.to_string(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn the_real_steps_hold_a_job_on_low_disk_without_a_failure_and_a_later_drain_runs_the_same_job() {
+    let fx = Fixture::new();
+    let scenario = rated_scenario();
+    let mut athena = fx.athena(scenario.script());
+    athena.state = athena.state.clone().with_free_space(simulated_free);
+    let job = queue_steward_request(&athena, "Add a greeting to the README.");
+    set_free(&athena, 3_000_000_000);
+
+    let lander = RecordingLander::default();
+    let steps = real_steps(&athena, &lander);
+    let lines = Lines::default();
+    let steps = RealSteps {
+        ui: &lines,
+        ..steps
+    };
+
+    // First drain: the disk is low, so the job is held. It is not a failure, not rejected, not dispatched.
+    let first = drain::drain(&steps, work_everything(), &Quiet).unwrap();
+    let text = display::drain(&first);
+    assert_ne!(first.stop, Stop::RepeatedFailure, "{text}");
+    assert_eq!(first.failed_item, None);
+    assert_eq!(first.landed, 0);
+    assert_eq!(first.jobs.len(), 1, "{text}");
+    assert_eq!(first.jobs[0].outcome, "environment: low disk");
+    assert_eq!(first.jobs[0].job, job, "attempted once, not retried");
+    for needle in ["environment: low disk", "3.0 GB", "10.0 GB"] {
+        assert!(text.contains(needle), "{needle}: {text}");
+    }
+    assert!(lander.0.lock().unwrap().is_empty());
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    assert_eq!(
+        records.jobs[&job].state(),
+        JobState::Proposed,
+        "still queued"
+    );
+    assert!(records.jobs[&job].outcome.is_none());
+    assert!(records.jobs[&job].job.is_none(), "never dispatched");
+    // Status shows the hold and both amounts.
+    let status = display::status(&athena.status().unwrap());
+    for needle in ["environment: low disk", "3.0 GB free", "10.0 GB required"] {
+        assert!(status.contains(needle), "{needle}: {status}");
+    }
+
+    // Space is free again: a later drain runs the same job to a verdict.
+    set_free(&athena, 500_000_000_000);
+    let second = drain::drain(&steps, work_everything(), &Quiet).unwrap();
+    assert_eq!(second.jobs.len(), 1, "{}", display::drain(&second));
+    assert_eq!(second.jobs[0].job, job, "the same job, not a new one");
+    assert_eq!(second.jobs[0].outcome, "passed");
+    assert_eq!(second.landed, 1);
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    assert!(
+        records.jobs[&job].outcome.is_some(),
+        "the job has a verdict"
+    );
+    assert!(
+        !athena
+            .state
+            .hold_file(&records.jobs[&job].id().clone())
+            .exists(),
+        "the hold marker is gone"
     );
 }
 

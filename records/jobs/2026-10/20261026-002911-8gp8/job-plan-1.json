@@ -1,0 +1,262 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261026-002911-8gp8",
+  "round": 1,
+  "at": "2026-10-26T00:32:24.202482104Z",
+  "invocation_seq": 3,
+  "approach": "Add a `[disk] min_free_gb` setting (an Option, default 10 when absent, left out of the config digest) and a small `disk` module in athena-core. The free-space reader is a plain `fn` held in `StateDir`, beside the existing `remover`, so tests swap it with `with_free_space` and no `Athena { .. }` literal changes. `dispatch` calls a `disk_gate` before any commit. If free space is below the minimum, it sweeps idle workspaces' `target/` (any `jobs/<id>/` whose job lock can be taken, which skips locked ones and the job being dispatched). It re-reads free space. If still low, it writes a small hold marker `<state>/holds/<job>.json` (free and required bytes) and returns a new `GoResult::Held`, so the job stays Proposed. The same gate runs in the verification step before `verifier_snapshot`. If still low there, the job closes `Failed` through the existing `failure()`, with a reason starting `environment: low disk`, and no marker is written. `athena retry` then applies unchanged. In drain, `Run` gains `held`, which maps through `RunStep::Held` and `ItemEnd::Held` exactly as `needs_accepting` does: not a failure, the item stays queued, and a later drain runs the same job id. Status and drain output show 'environment: low disk' with the free and required amounts. A successful dispatch clears the marker.",
+  "decisions": [
+    {
+      "choice": "The check runs at two places in the core: the top of `dispatch` (before the prediction commit, pin and any agent) and in the verification step before `verifier_snapshot`. A dispatch hold returns a new `GoResult::Held`. A pre-checks shortfall closes the job `Failed` through the existing `failure()`.",
+      "reason": "This is the user's decision: a hold only at dispatch, and a retryable environment failure before the checks. `Failed` is already what `athena retry` accepts and what drain retries. Nothing is left Dispatched with a marker.",
+      "rejected": [
+        {
+          "option": "A mid-run hold and a resume route",
+          "why": "Out of scope by the user's decision."
+        },
+        {
+          "option": "Rejecting the job on low disk",
+          "why": "Rejection means the work was refused. Low disk is the environment, so it must stay retryable and not count as a rejection."
+        }
+      ]
+    },
+    {
+      "choice": "Keep the free-space reader as a `fn(&Path) -> io::Result<u64>` field on `StateDir` (`with_free_space`). The real one runs `df -Pk <path>`.",
+      "reason": "It follows the existing `with_remover` pattern, changes no `Athena` struct literals, and keeps the type `Clone` and `Debug`. athena-core has no libc or statvfs dependency, and adding one would touch Cargo.toml and Cargo.lock, which are not deliverables.",
+      "rejected": [
+        {
+          "option": "A new `Athena` field or trait object",
+          "why": "Every `Athena { .. }` construction would have to change."
+        },
+        {
+          "option": "A `libc` or `fs2` dependency",
+          "why": "It edits manifests that are not deliverables."
+        }
+      ]
+    },
+    {
+      "choice": "Make `Config.disk` an `Option<DiskConfig>` with `skip_serializing_if = \"Option::is_none\"`, reset to None in `reading_inputs`, with an accessor `min_free_gb()` that returns the default 10.",
+      "reason": "This copies how `job_plan` is handled. The serialized config, and so every stored config digest, stays byte-identical, so no reading is invalidated and athena.toml stays untouched.",
+      "rejected": [
+        {
+          "option": "A plain `#[serde(default)] disk: Disk`",
+          "why": "It adds a key to the serialized config, which moves every digest and forces rereads."
+        }
+      ]
+    },
+    {
+      "choice": "Persist a hold as a marker file `<state>/holds/<job>.json`, written on a dispatch hold and removed when the job dispatches, closes or is held no more. Status reads it and shows `environment: low disk (free X, required Y)` through a new optional `hold` on `JobLine`. The job's state name stays `proposed`.",
+      "reason": "A hold is local to this machine and needs no record or commit. Keeping the state name stops the open-work filter and the 'next' hints from changing.",
+      "rejected": [
+        {
+          "option": "Committing a hold record",
+          "why": "It writes to the history on every held drain and adds a record type."
+        },
+        {
+          "option": "Computing the hold live in status",
+          "why": "Status would then probe the disk. It could not show the amounts that blocked the dispatch."
+        }
+      ]
+    },
+    {
+      "choice": "The idle sweep removes only `jobs/<id>/target` and tries `try_lock_job` first. A locked job is skipped, and so is the job being dispatched, whose own lock is held. Closed jobs are covered because their directories are already removed at close (173d12e). A leftover closed directory is unlocked and is swept too.",
+      "reason": "This reuses the existing remover and job-lock helpers, and leaves source, snapshots and live records alone.",
+      "rejected": [
+        {
+          "option": "Removing whole idle job directories",
+          "why": "It would destroy kept snapshots and live records of interrupted jobs."
+        }
+      ]
+    },
+    {
+      "choice": "Drain mirrors `needs_accepting`: `Run.held`, `RunStep::Held`, `ItemEnd::Held`. Outcome text is 'environment: low disk' and the reason carries the free and required amounts. Drain adds a note line, and `finish` treats Held like Idle/NeedsAccepting.",
+      "reason": "It is the proven pattern for 'left queued, not a failure', and a later drain re-reads the queue and picks up the same job id.",
+      "rejected": [
+        {
+          "option": "Counting a hold as a failed attempt",
+          "why": "It would trigger a retry and the RepeatedFailure stop."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "purpose": "Add `DiskConfig { min_free_gb }`, `Config.disk: Option<DiskConfig>` (skip_serializing_if none), `DEFAULT_MIN_FREE_GB = 10`, `min_free_gb()`, reset in `reading_inputs`, and tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "action": "create",
+      "purpose": "The `df -Pk` free-space reader, `Low { free, required }` text, the idle `target/` sweep, hold marker read, write and clear, and `Athena::disk_gate`, with unit tests.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "purpose": "Declare `pub mod disk;`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/state.rs",
+      "action": "modify",
+      "purpose": "Add the `free_space` fn field, `with_free_space`, `free_bytes`, `remove_target(job)`, `jobs_dir` listing and `hold_file(job)`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "purpose": "Add `GoResult::Held(Box<Held>)`. Call `disk_gate` at the top of `dispatch` after the config check and clear the marker once dispatched. Call it before `verifier_snapshot` and fail with the environment reason.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "Add `JobLine.hold: Option<String>` from the marker, with 'environment: low disk' and the amounts.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "purpose": "Render the hold text on the status job lines and in the `athena go` output for a Held result.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Add `Run.held`, `RunStep::Held`, `ItemEnd::Held`, the outcome and reason text and a note; map `GoResult::Held` in `RealSteps::run` and `read`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "purpose": "Handle the new `GoResult::Held` arm in `go_and_report` (message and exit code 2, JSON included). Not on the brief's list, but the match must be exhaustive.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Add the real-steps hold-then-run test, the status and drain text test and the failure-not-counted test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Record the setting, the dispatch hold and the pre-checks failure under Unreleased, saying 'the user'.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "README.md",
+      "action": "modify",
+      "purpose": "Document `[disk] min_free_gb` (default 10), the 'environment: low disk' status and what the user does.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "config.rs: add DiskConfig, the Option field with skip_serializing_if, DEFAULT_MIN_FREE_GB, the accessor, the reset in reading_inputs, and tests (default 10, parse, digest unchanged).",
+    "state.rs: add the `free_space` fn field (default the real reader), `with_free_space`, `free_bytes(path)`, `remove_target(job)` through the remover, a listing of job ids under `jobs/`, and `hold_file(job)`.",
+    "disk.rs: write the `df -Pk` reader. Write `Low` with Display ('free X, required Y' via `format_bytes`). Write `sweep_idle_targets` (try_lock_job, skip on None, remove `target/`, return the bytes reclaimed). Write hold marker write, read and clear. Write `Athena::disk_gate(jc, job, ui) -> Option<Low>`: probe, then sweep and re-probe if low. Unit-test the sweep with a held lock.",
+    "run.rs: add `GoResult::Held`. In `dispatch`, call the gate after the config digest check and before pin_repo or any commit; on Low write the marker, print an 'environment: low disk' line and return Held; on success clear the marker. In the verification step, call the gate before `verifier_snapshot`; on Low set `closing.happened = self.failure(ctx, \"environment: low disk before the checks: free X, required Y; free space, then `athena retry <job>`\")` and return Ok(closing). Update match sites in core tests (`test_support.rs` `landed`).",
+    "status.rs and display.rs: add `JobLine.hold` filled for proposed jobs that have a marker; render it. main.rs: add the Held arm.",
+    "drain.rs: add the held plumbing mirroring needs_accepting, including the doc comment at the top of the module and the Held arm in `RealSteps::read`/`run`.",
+    "Write core tests (criteria 1, 2, 4, 5) with a static-atomic fake free-space fn, and the drain tests (criterion 3) with the real steps in tests/drain.rs.",
+    "Update CHANGELOG.md and README.md. Check that neither says 'operator'.",
+    "Run cargo fmt --all, then cargo clippy --all-targets --locked -- -D warnings, then cargo test --locked."
+  ],
+  "risks": [
+    {
+      "risk": "`df` is missing or its output differs, so the real reader fails.",
+      "mitigation": "On a read error, treat free space as unknown and carry on, printing one warning line. Never hold or fail on an error. Parse `df -Pk` (POSIX format), which is stable. Tests use the injected fn."
+    },
+    {
+      "risk": "Adding a `GoResult` variant breaks matches in other crates' tests (lifecycle, retry, steward, job_plan, history_pr_head, run_pin_tests).",
+      "mitigation": "The existing arms are `Finished`/`Reread` with a wildcard or panic arm; compile and add an arm only where the match is exhaustive. Most are `let ... else` patterns and keep working."
+    },
+    {
+      "risk": "The sweep deletes the `target/` of a job that is about to run in another process.",
+      "mitigation": "It takes the job lock with `try_lock_job` and skips on contention. The job being dispatched holds its own lock (flock is per open file), so it is skipped too."
+    },
+    {
+      "risk": "A stale hold marker lingers after the job is closed or dispatched.",
+      "mitigation": "Clear it on dispatch and when the job closes. Status shows a hold only for a job still in the Proposed state."
+    },
+    {
+      "risk": "Parallel drain workers all sweep at once.",
+      "mitigation": "A sweep that cannot take a lock skips it, and removing a missing `target/` is a no-op."
+    },
+    {
+      "risk": "The config digest changes and forces rereads.",
+      "mitigation": "`disk` is an Option left out when None and reset in `reading_inputs`; a test compares the digest with and without the section."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "A core/CLI test plants an idle job directory with `target/` and a source file. It sets `with_free_space` to a fake reporting 3 GB until the planted `target/` is gone, then 50 GB. It runs `go` on a queued, read job with a UI that records lines, and asserts the sweep line and removal come before the 'dispatched' line. A second test does the same before the checks: the sweep line comes before the first check line, and the planted `target/` is gone by then.",
+      "command": "cargo test --locked",
+      "observes": "The sweep line and the removal of `target/` come before 'dispatched' and before the first check line, with the fake reporting low only until the sweep.",
+      "fails_without": "If `dispatch` or the pre-checks gate did not sweep first, `target/` would still exist and no sweep line would appear before dispatch or the checks."
+    },
+    {
+      "criterion": 2,
+      "method": "A test uses a fake that stays at 3 GB, plants an idle `target/` and runs `go` and then status. It asserts `GoResult::Held` is returned and no 'dispatched' line or prediction commit exists. The job state is still proposed and not closed or rejected. The StatusView `JobLine.hold` and the status text contain 'environment: low disk', the free amount and the 10.0 GB required. The drain report line has the same outcome and amounts.",
+      "command": "cargo test --locked",
+      "observes": "Held, not rejected, no dispatch commit, and the text with both amounts in status and drain output.",
+      "fails_without": "Without the hold, the job would be dispatched or rejected, and status would show plain 'proposed' with no amounts."
+    },
+    {
+      "criterion": 3,
+      "method": "A drain test in crates/athena-cli/tests/drain.rs uses the real steps (`RealSteps::live`, like the existing real-steps test around line 1050) with a fake free-space function backed by a static atomic. First drain at low disk: the report has outcome 'environment: low disk', failed count 0, stop is not RepeatedFailure, and the job is still queued. Then set the atomic high and drain again: the same job id runs to a verdict (landed or passed).",
+      "command": "cargo test --locked",
+      "observes": "No failure counted on the first drain, and the second drain's JobLine carries the same job id with a verdict.",
+      "fails_without": "If the hold were mapped as a failure or created a new job, the first drain would report a failure or the second would run a different id."
+    },
+    {
+      "criterion": 4,
+      "method": "A core test fakes free space low at the pre-checks gate (high at dispatch) and stays low after the sweep. It asserts the closed state is Failed (not Rejected), the reason starts with 'environment: low disk' and names retry, `holds/<job>.json` does not exist, and no check ran. A second case frees the space after the first probe and asserts verification proceeds and the checks run.",
+      "command": "cargo test --locked",
+      "observes": "Failed with a retryable environment reason, no marker, and verification going ahead once space is free.",
+      "fails_without": "Without the gate, the checks would run on a full disk and the job would fail later with an opaque build error, or the state would be Rejected."
+    },
+    {
+      "criterion": 5,
+      "method": "A unit test in disk.rs builds a StateDir in a tempdir with three job directories: one unlocked with `target/` and a source file, one with `target/` whose `job.lock` is held through `try_lock_job`, and one with no `target/`. It runs the sweep. It asserts the first `target/` is gone and its source file remains, and the locked job's `target/` is intact.",
+      "command": "cargo test --locked",
+      "observes": "`target/` removed, source kept, locked workspace untouched.",
+      "fails_without": "A sweep that ignored the lock would remove the locked job's `target/`, and one that removed the whole directory would lose the source file."
+    },
+    {
+      "criterion": 6,
+      "method": "A config.rs unit test parses `athena.toml` and a toml with `[disk] min_free_gb = 3` and checks `min_free_gb()` is 10 and 3. A second test checks `reading_inputs` is equal with and without a `[disk]` section. `git diff` shows athena.toml unchanged. README and CHANGELOG are read to confirm they name `[disk] min_free_gb` and 'environment: low disk' and say 'the user'.",
+      "command": "cargo test --locked",
+      "observes": "The default is 10, the digest is unmoved, and `git diff` names no athena.toml. The docs name the setting and status and contain no 'operator'.",
+      "fails_without": "Without the default in config.rs, the absent-setting test would not find 10, and a plain serialized field would change the digest."
+    },
+    {
+      "criterion": 7,
+      "method": "Run clippy and fmt.",
+      "command": "cargo clippy --all-targets --locked -- -D warnings",
+      "observes": "No warnings. `cargo fmt --all --check` passes.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "main.rs is not in the brief's deliverables, but the exhaustive match in `go_and_report` needs a Held arm, so the plan touches it. The producer should report this.",
+    "The real free-space reader shells out to `df -Pk` because athena-core has no libc or statvfs dependency. Say if a dependency is acceptable instead.",
+    "Whether `athena retry` accepts a job closed Failed with this reason was read from the drain mapping (Failed maps to retry) but its own checks in the retry route were not read; the producer should confirm with a test that retries it."
+  ],
+  "producer_section_sha256": "93663d7949eb1a2eb35cdd7b44ff530079346a9a1c41399f81c18cd52d08b047"
+}

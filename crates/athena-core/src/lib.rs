@@ -66,6 +66,7 @@ pub mod chain;
 pub mod checks;
 pub mod ci_result;
 pub mod commits;
+pub mod disk;
 pub mod fake;
 pub mod gh;
 pub mod host_rules;
