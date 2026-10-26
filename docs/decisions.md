@@ -3290,3 +3290,47 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   pantheon table and the addenda, `docs/design/hestia.md`, D127, D129, `introspect.rs`, `job-planning.md`.
   Measured: line counts and budget ratios at the base commit. Not measured: every figure from `records/`, the
   code-health check (5p65) and Jev checks (zc0v), which are not in the snapshot, and every threshold.
+
+## D131 · A code-health check measures file and function size, queues structural passes, and queues a design review every 10 landings
+
+- **Case:** Files grow past what an agent can hold (`gh.rs` is over 5,000 lines with its tests) and nothing
+  noticed until a job failed on it. D130 (proposed) asks for size conventions; this decision is the measuring
+  and queueing part, so a breach is acted on without anyone pointing it out.
+- **Decision:** `code_health.rs` measures every `.rs` file under `crates/` in the checkout: production lines
+  (not blank, not a whole-line comment, not inside a `#[cfg(test)]` item), the longest function (signature to
+  closing brace, from a parsed syntax tree), landings in the last 7 days that changed the file, and failure
+  citations (rejected or failed jobs whose findings, reasons or outcome text name the path). Thresholds are
+  constants, not `athena.toml` fields: a file over 2000 production lines; a function over 200 lines; a file
+  over 1500 lines with 5 or more landings in the week. They are shown in the table of `athena status`, with
+  the test suite's run time from the latest landed verification (unknown when none has one). A breach queues
+  one request, `Structural pass: <path>`, with the measured numbers and its own acceptance criteria; no second
+  request is queued while an open one carries that marker. Every 10th landed job since the last design review
+  queues a self-contained high-priority design-review request (review the table, the files most changed and
+  most broken since the last review, the open structural passes, the recent rejections and planning stops;
+  produce a short design note with proposed changes, as a design-only job). The cadence counts landed
+  request jobs after the last review request, never a counter, and a landed design review is not counted. With
+  no earlier review the first check stores the current landing count in the state directory (`code-health-baseline`)
+  and counts from there, so existing history does not fire a review at once. The check runs after a finished
+  job (`note_finished`, beside the steward's count, which it does not touch) and after a landed pull request
+  (`land_pr`, after the checkout is moved onto the merge). Both read the same records, so running both for one
+  job queues nothing twice. The check never fails its caller: a problem is a `code health:` line. A check
+  that measures no file says so and is not shown as healthy. If the checkout cannot be moved onto the merge in
+  `land_pr`, the check is skipped for that landing and the next landing or finished job runs it again.
+- **Buy versus build (function length):** `syn` 2 with `proc-macro2`'s `span-locations` was weighed against a
+  line scan that counts braces. `syn` is maintained, already in the build graph, and gets nested functions,
+  braces in strings, comments and char literals right; a scan miscounts those, and these numbers queue work
+  by themselves. tree-sitter was rejected as too heavy for line spans. Cost: a direct dependency on `syn`
+  (parsing, full, visit, printing and clone-impls features) and `proc-macro2`.
+- **Alternatives:** (a) `athena.toml` fields for the thresholds: rejected, out of scope for this job and a
+  governed file. (b) A per-landing counter for the cadence: rejected, two hooks for one job would count it
+  twice. (c) Fire only when the count equals 10: rejected, a missed run would lose the review. (d) A
+  design-review role: rejected, the queued request carries its whole text. (e) Measure a commit through git:
+  rejected, extra plumbing; the checkout holds the merged change after the resync.
+- **Tradeoff:** The numbers read the checkout, so local edits show in them. A file that fails to parse is
+  listed as not measured. Thresholds are estimates (not measured against `records/`): 2000 and 200 are the
+  figures the request gave; 1500 with 5 landings is the same.
+- **Reversal cost:** Low. Remove the two calls to `run_code_health` and the status field.
+- **Provenance:** stated: the request of job 20261026-064950-38jx and the thresholds in it. Read: `steward.rs`,
+  `gh.rs`, `status.rs`, `reading.rs` (`queue`), `store.rs`. Measured: `cargo test -p athena-core code_health` and
+  `cargo test -p athena-cli --test code_health_hooks`. Not measured: how often the thresholds fire on the real
+  history.

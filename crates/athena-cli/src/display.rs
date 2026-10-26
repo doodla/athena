@@ -932,6 +932,7 @@ pub fn status(v: &StatusView) -> String {
             let _ = writeln!(out, "{:<11}   finding: {finding}", "");
         }
     }
+    out.push_str(&code_health_section(&v.code_health));
     if !v.invalid_records.is_empty() {
         let _ = writeln!(
             out,
@@ -942,6 +943,16 @@ pub fn status(v: &StatusView) -> String {
     for (i, n) in v.next.iter().enumerate() {
         let label = if i == 0 { "next" } else { "" };
         let _ = writeln!(out, "{label:<11} {n}");
+    }
+    out
+}
+
+/// The code-health table of `athena status`: the limits, each file's numbers, and the test suite's run time.
+fn code_health_section(health: &athena_core::code_health::CodeHealth) -> String {
+    let mut out = String::new();
+    for (i, line) in health.table_text().lines().enumerate() {
+        let label = if i == 0 { "code health" } else { "" };
+        let _ = writeln!(out, "{label:<11} {line}");
     }
     out
 }
@@ -1428,6 +1439,106 @@ mod tests {
             " · priority high · plan accepted r1"
         );
         assert_eq!(plan_suffix(&line(Priority::Normal)), " · plan accepted r1");
+    }
+
+    #[test]
+    fn status_renders_the_code_health_table() {
+        use athena_core::code_health::{CodeHealth, FileHealth, Thresholds};
+        use athena_core::status::{Bootstrap, MistakeReport};
+        let file = |path: &str, lines, longest_fn, weekly, citations, breach: &[&str]| FileHealth {
+            path: path.into(),
+            lines,
+            longest_fn,
+            longest_fn_name: "f".into(),
+            weekly_landings: weekly,
+            citations,
+            breaches: breach.iter().map(|b| b.to_string()).collect(),
+        };
+        let health = |files: Vec<FileHealth>, secs| CodeHealth {
+            files,
+            unmeasured: Vec::new(),
+            test_run_secs: secs,
+            thresholds: Thresholds::CURRENT,
+        };
+        let view = |code_health| StatusView {
+            repository: "/repo".into(),
+            branch: Some("main".into()),
+            head: "0123456789abcdef".into(),
+            athena: athena_data::records::Build {
+                version: "0.1.0".into(),
+                source_commit: "0".repeat(40),
+                dirty: false,
+            },
+            driver: "fake 1".into(),
+            kill_switch_on: false,
+            nested: None,
+            bootstrap: Bootstrap {
+                range_open: false,
+                through_commit: None,
+                note: "closed".into(),
+            },
+            jobs_by_state: Default::default(),
+            recent: Vec::new(),
+            open: Vec::new(),
+            planning: None,
+            interventions_by_category: Default::default(),
+            interventions_by_class: Default::default(),
+            mistakes: MistakeReport::default(),
+            open_interventions: Vec::new(),
+            restarts: 0,
+            forecasts: Vec::new(),
+            pending: Vec::new(),
+            unreviewed_introspections: 0,
+            proposals: Vec::new(),
+            work_proposals: Vec::new(),
+            audience: None,
+            audit: None,
+            lines: Vec::new(),
+            code_health,
+            invalid_records: Vec::new(),
+            next: Vec::new(),
+            reconcile: None,
+        };
+        let text = status(&view(health(
+            vec![
+                file("crates/a/src/small.rs", 120, 30, 1, 0, &[]),
+                file(
+                    "crates/a/src/big.rs",
+                    2101,
+                    250,
+                    3,
+                    4,
+                    &["2101 production lines is over 2000"],
+                ),
+            ],
+            Some(542.0),
+        )));
+        for wanted in [
+            "code health",
+            "a file over 2000 lines",
+            "a function over 200 lines",
+            "a file over 1500 lines with 5+ landings in 7 days",
+            "crates/a/src/big.rs",
+            "2101",
+            "250",
+            "OVER",
+            "2101 production lines is over 2000",
+            "crates/a/src/small.rs",
+            "test suite run time: 542 s",
+        ] {
+            assert!(text.contains(wanted), "{wanted:?} missing from:\n{text}");
+        }
+        let big = text.lines().find(|l| l.contains("big.rs")).unwrap();
+        assert!(
+            big.contains('3') && big.contains('4') && big.contains("OVER"),
+            "{big}"
+        );
+        let small = text.lines().find(|l| l.contains("small.rs")).unwrap();
+        assert!(small.contains(" no "), "{small}");
+        // A check that measured nothing is not shown as healthy.
+        let empty = status(&view(health(Vec::new(), None)));
+        assert!(empty.contains("no files measured"), "{empty}");
+        assert!(empty.contains("test suite run time: unknown"), "{empty}");
     }
 
     #[test]

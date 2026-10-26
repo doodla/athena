@@ -51,6 +51,9 @@
 //!   goals, never against the job's own acceptance criteria, and records findings that each cite their
 //!   evidence; the prompt is a fixed constant, protected from jobs by nothing else until the warden request
 //!   (prose-only);
+//! - [`code_health`]: per-file production lines, longest function, weekly landings and failure citations,
+//!   with thresholds; a breach queues one structural-pass request, and every tenth landing queues a
+//!   design-review request; run after each landing and each finished job, and shown by `athena status`;
 //! - [`pin`]: a study's repository ref resolved to a commit by the core, and mounted read-only;
 //! - `test_support` (compiled for tests and the `test-support` feature only): the shared records-history
 //!   cutover fixture, a scratch repository with a bare remote and a history made through the real writers;
@@ -65,6 +68,7 @@ pub mod capability;
 pub mod chain;
 pub mod checks;
 pub mod ci_result;
+pub mod code_health;
 pub mod commits;
 pub mod disk;
 pub mod fake;
