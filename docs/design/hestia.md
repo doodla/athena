@@ -134,6 +134,9 @@ Until then a second role would add a prompt set and a budget for one group of mo
   Artemis's duplicate view; Hestia's report does not feed a gate, and Artemis does not run Hestia's checks.
   Hestia records what the guard stopped and why (`scope-guard.md` line 219). Hestia's own spend is reported to
   Demeter's view like any other.
+- Hermes ("Orchestration", `BRIEF.md:597`) owns the craft of context efficiency; Hestia runs its recurring doc
+  and prompt-headroom checks as part of her sweep and stays non-gating. See
+  [`context-engineer.md`](context-engineer.md) section 10 and D130.
 - This design changes nothing in the scope guard.
 
 ## 9. Build plan

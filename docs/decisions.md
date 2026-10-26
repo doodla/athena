@@ -3259,3 +3259,34 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Provenance:** stated: the request of this job and its figures. Read: BRIEF.md pantheon table and the
   2026-10-25 addendum, D127 and `docs/design/scope-guard.md`. Not measured: every figure from `records/`, and
   every threshold and budget.
+
+## D130 · Hermes owns the craft of context efficiency, with Hestia keeping it (proposed)
+
+- **Status:** proposed. Not accepted; the build jobs are not queued. The design is
+  [`docs/design/context-engineer.md`](design/context-engineer.md).
+- **Case:** The BRIEF.md addenda of 2026-10-25 and 2026-10-26 ask that the context given to agents be sufficient
+  and good, and that Athena write for agents, with a role that owns the craft. The request cites, as stated and
+  not checked here: critics kept finding missed callers in `gh.rs` and `produce_and_verify`; 7 retries lost an
+  earlier verifier's findings; planning stopped on facts no file stated. Measured at the base commit: `gh.rs`
+  is 5,276 lines, `produce_and_verify` spans 737 lines (the request says 724), this file was 3,261 lines
+  (the request says 3,231), and the reader prompt is at 1997 of 2000.
+- **Decision (proposed):** Hermes owns the craft: conventions for file and function size, one concern per
+  module, short indexed docs with one fact in one place and a question-to-file map, and what agents are given.
+  Hestia keeps it through her sweep, which stays non-gating (D127). The post-mortem is an extension of the
+  existing introspection record, not a second record: it covers rejected, failed and planning-stopped jobs, and
+  adds the question "what context would have prevented it?" with a fixed outcome list. Additions to a prompt set
+  above 95% of its budget must name what they displace. Restructuring is queued as ordinary requests, capped
+  at 3 open (estimate), and the role edits nothing. The build is six one-producer jobs.
+- **Alternatives:** (a) Hestia owns everything: rejected, she is a non-gating sweep. (b) A new named role:
+  rejected, no evidence needs one. (c) Hermes owns part 2 only: rejected, file shape makes context cheap.
+  (d) A separate post-mortem record: rejected, it duplicates introspection triggers and storage. (e) A free-form
+  lessons file: rejected, it grows unread. (f) Direct edits by the role: rejected, skips verification.
+  (g) Block jobs that touch oversized files: rejected, gating belongs elsewhere and would stall urgent work.
+- **Tradeoff:** More checks and a few restructure jobs, and a prompt addition now costs a removal. Every
+  threshold is an estimate; the cap, the report-only post-mortem and the first measurement job bound the cost.
+- **Reversal cost:** Low before the build (this entry and the design). Low after, since the checks only report
+  and queue requests, and can be switched off.
+- **Provenance:** stated: the request of job 20261026-043431-kgrm and the figures marked above. Read: BRIEF.md
+  pantheon table and the addenda, `docs/design/hestia.md`, D127, D129, `introspect.rs`, `job-planning.md`.
+  Measured: line counts and budget ratios at the base commit. Not measured: every figure from `records/`, the
+  code-health check (5p65) and Jev checks (zc0v), which are not in the snapshot, and every threshold.
