@@ -145,7 +145,7 @@ pub fn headers() -> Vec<DecisionHeader> {
             id: "D87",
             kind: Kind::Process,
             classes: vec!["*"],
-            paths: vec!["crates/athena-core/src/gh.rs"],
+            paths: vec!["crates/athena-core/src/gh/"],
             phases: vec![Phase::Landing],
             status: Status::Active,
             superseded_by: None,
@@ -188,7 +188,7 @@ pub fn headers() -> Vec<DecisionHeader> {
             id: "D88",
             kind: Kind::Process,
             classes: vec!["*"],
-            paths: vec!["crates/athena-core/src/gh.rs"],
+            paths: vec!["crates/athena-core/src/gh/"],
             phases: vec![Phase::Landing],
             status: Status::Active,
             superseded_by: None,
@@ -1598,6 +1598,47 @@ mod tests {
     use athena_git::Git;
 
     const JOB: &str = "20261014-170031-2r9b";
+
+    /// The ids of the headers whose `paths` cover `file`: an entry ending in `/` covers every file under that
+    /// directory, any other entry covers exactly that file. Nothing in the program matches `paths` yet (the
+    /// field is data; `decision-sets.md` section 3 only says they "match a deliverable"), so this states the
+    /// match the entries are written for, and keeps them checked.
+    fn selected_by_path(headers: &[DecisionHeader], file: &str) -> Vec<&'static str> {
+        headers
+            .iter()
+            .filter(|h| {
+                h.paths.iter().any(|p| {
+                    if p.ends_with('/') {
+                        file.starts_with(p)
+                    } else {
+                        file == *p
+                    }
+                })
+            })
+            .map(|h| h.id)
+            .collect()
+    }
+
+    #[test]
+    fn a_landing_touching_a_file_under_gh_selects_d87_and_d88() {
+        let headers = headers();
+        // The wrapper's module file and files later moved under it all select both decisions.
+        for file in [
+            "crates/athena-core/src/gh/mod.rs",
+            "crates/athena-core/src/gh/pages.rs",
+            "crates/athena-core/src/gh/land/poll.rs",
+        ] {
+            assert_eq!(selected_by_path(&headers, file), ["D87", "D88"], "{file}");
+        }
+        // Other files, and a sibling that only shares the name prefix, select neither.
+        for file in [
+            "crates/athena-core/src/gh.rs",
+            "crates/athena-core/src/ghost/mod.rs",
+            "crates/athena-core/src/run.rs",
+        ] {
+            assert!(selected_by_path(&headers, file).is_empty(), "{file}");
+        }
+    }
 
     fn verification(
         criteria: Vec<CriterionResult>,
