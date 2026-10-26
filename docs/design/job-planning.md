@@ -242,6 +242,13 @@ decide anything (F18 to F20); this replaces it.
   taken there. The landed-share target governs; the cost ceiling is a guard, not a second test of the same
   effect.
 
+**Outcome.** The rule has decided: planning is turned off. `athena status` reported 58 of 105 planned jobs
+landed (55%), at or below the 64% baseline at the 100-job point, and cost per landed job of $3.43 against the
+$2.50 guard. The rule, not a person, made the call (D135); `athena.toml` now has `enabled = false` under
+`[job_plan]`. Kept: the planning code, the resume-from-kept-plan path and the status measures, so planning can be
+turned back on for a new measured trial. The earlier decision to keep planning on was taken at 51 jobs, below
+the decision point.
+
 ## 10. Risks
 
 - Cost: about $0.30 to $0.70 per round (**estimate**), 40 to 70% on today's mean job. It pays only if rejections
