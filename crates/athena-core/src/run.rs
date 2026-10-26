@@ -8,7 +8,9 @@ use crate::commits::{NewFile, Refusal, message};
 use crate::invocation::InvocationFacts;
 use crate::land::{Plan, plan};
 use crate::pin::{is_full_sha, mount};
-use crate::reading::{Proposal, TreeRetrySeed, retried_job, same_scope, tree_retry_seed};
+use crate::reading::{
+    Proposal, TreeRetrySeed, retried_job, retry_findings, same_scope, tree_retry_seed,
+};
 use crate::scoring::{self, Happened, score, totals};
 use crate::store::{JobRecords, JobState, Records};
 use crate::verify::{MAP_PATH, VerdictInputs, Verified, judge, mark_pre_existing, verified};
@@ -18,9 +20,9 @@ use athena_agent::env::{EnvSpec, Side};
 use athena_agent::policy::Policy;
 use athena_context::briefs::{
     AcceptedReading, CandidateView, CheckResultView, CheckView, CriticInputs, DeliverableFact,
-    LEFT_TO_ATHENA, PlanRevision, PlannerInputs, ProducerInputs, RetrySeed, VerifierInputs,
-    VerifierPlan, critic_brief, planner_brief, producer_brief, producer_prompt_with_plan,
-    render_plan_section, verifier_brief_with_plan,
+    LEFT_TO_ATHENA, PlanRevision, PlannerInputs, ProducerInputs, RetryFindings, RetrySeed,
+    VerifierInputs, VerifierPlan, critic_brief, planner_brief, producer_brief,
+    producer_prompt_with_plan, render_plan_section, verifier_brief_with_plan,
 };
 use athena_context::outputs::{
     CriterionCheckOutput, CriterionStatusOutput, CriticOutput, CritiqueVerdictOutput,
@@ -404,6 +406,12 @@ impl Athena {
         } else {
             None
         };
+        // A retry that starts from the base still carries the blocker and major findings of the job it retries.
+        let earlier_findings = if retry_seed.is_none() && resume.is_none() {
+            retry_findings(records, request_text, &redactor)?
+        } else {
+            None
+        };
 
         // The prediction commit: the accepted reading's job record and the producer brief, before any work.
         let producer_grant = capability.producer_grant(&jc);
@@ -432,16 +440,22 @@ impl Athena {
                     job: s.job.as_str().to_string(),
                     unmet: s.unmet.clone(),
                     findings: s.findings.clone(),
+                    must_address: s.must_address.clone(),
                     progress_note: None,
                 }),
                 (None, Some(r)) => Some(RetrySeed {
                     job: r.job.as_str().to_string(),
                     unmet: Vec::new(),
                     findings: Vec::new(),
+                    must_address: Vec::new(),
                     progress_note: Some(r.note.clone()),
                 }),
                 (None, None) => None,
             },
+            retry_findings: earlier_findings.map(|(job, findings)| RetryFindings {
+                job: job.as_str().to_string(),
+                findings,
+            }),
         });
         let dispatched_at = crate::now();
         let clock = Instant::now();
@@ -550,7 +564,7 @@ impl Athena {
     fn stop_planning(&self, ctx: &RunContext<'_>, closing: &mut Closing, reason: &str) {
         closing.happened = self.failure(
             ctx,
-            &format!("planning stopped before any code was written: {reason}"),
+            &format!("{} {reason}", athena_data::records::PLANNING_STOPPED_PREFIX),
         );
         closing.happened.verification_passed = None;
     }

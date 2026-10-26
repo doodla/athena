@@ -116,6 +116,7 @@ fn introspection(i: u32, class: Option<&str>, jev: Option<IntrospectionJev>) -> 
         failure: (!recorded).then(|| "the model could not run".to_string()),
         flags: vec![],
         dropped_ids: vec![],
+        planning_stopped: false,
         from_jev: false,
         jev,
     }))

@@ -135,6 +135,23 @@ or lost producer). A provisional quantity still records its forecasts and their 
 does not count in aggregates and is not part of the history the reference forecast learns from. The field
 is omitted when false, and a score written before the field existed reads as not provisional.
 
+An introspection record has two post-mortem additions, both read as absent on older records:
+
+- `planning_stopped` is `true` when the job failed in planning, before any code was written (its outcome
+  reason starts with "planning stopped before any code was written:"). It is omitted when false. The record's
+  `category` stays `failed`.
+- `jev.context_prevention` holds Jev's answer to "What one piece of context, if the agent had read it, would
+  have prevented this?": an `outcome` from the fixed list `system-facts-line`, `failure-class`,
+  `brief-assembly`, `vocabulary-term`, `spec-fix`, `structure`, `none`, or an `error` when the answer was not a
+  choice on that list. It is omitted when Jev gave no answer to this question or the whole call failed. Like
+  the rest of `jev`, it is recorded in shadow and decides nothing. The question is optional in the Jev reply
+  parser, so a reply without it still returns the failure-class and is-repeat answers.
+
+A retry brief carries every blocker and major finding of the retried job's final verification, in a "Findings
+you must address" block: in the seeded retry (which also lists all findings) and in a retry that starts from
+the base. Findings have no resolved state, so none is left out for having been fixed in a later round; the
+producer sees all of them and checks each against the code.
+
 ## Following a job from a commit
 
 Every commit Athena makes carries an `Athena-Job` trailer. A landing commit also carries:

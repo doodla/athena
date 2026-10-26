@@ -99,6 +99,7 @@ fn introspection(i: u32, jev: Option<IntrospectionJev>) -> AnyRecord {
         failure: None,
         flags: vec![],
         dropped_ids: vec![],
+        planning_stopped: false,
         from_jev: false,
         jev,
     }))

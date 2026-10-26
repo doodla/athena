@@ -944,6 +944,7 @@ mod mistake_tests {
             failure: None,
             flags: Vec::new(),
             dropped_ids: Vec::new(),
+            planning_stopped: false,
             from_jev: false,
             jev: None,
         }

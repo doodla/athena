@@ -1291,6 +1291,30 @@ pub struct JevClassAnswer {
     pub confidence: f64,
 }
 
+/// The fixed outcomes of the "context that would have prevented it" question, in the order Jev is shown them.
+pub const CONTEXT_PREVENTION_OUTCOMES: [&str; 7] = [
+    "system-facts-line",
+    "failure-class",
+    "brief-assembly",
+    "vocabulary-term",
+    "spec-fix",
+    "structure",
+    "none",
+];
+
+/// The start of the outcome reason of a job that failed in planning, before any code was written.
+pub const PLANNING_STOPPED_PREFIX: &str = "planning stopped before any code was written:";
+
+/// Jev's answer to the post-mortem question. Exactly one of the two fields is set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JevContextAnswer {
+    /// One of [`CONTEXT_PREVENTION_OUTCOMES`].
+    pub outcome: Option<String>,
+    /// Why there is no outcome: the answer was malformed or not on the list.
+    pub error: Option<String>,
+}
+
 /// What Jev said about an event, recorded in shadow so that it can be scored later (`defaults-loop.md`
 /// sections 3.3 and 12). Nothing here decides anything: the recorded class, status and outcome come from the
 /// language model and from code. A call that failed is recorded with `error` and no answers.
@@ -1303,6 +1327,11 @@ pub struct IntrospectionJev {
     pub class: Option<JevClassAnswer>,
     /// The is-repeat question: the probability that the event is a repeat of an earlier one.
     pub repeat_probability: Option<f64>,
+    /// The post-mortem question: what one piece of context would have prevented the event. Absent when Jev
+    /// gave no answer to it or the whole call failed; an answer that is not on the fixed list is kept as an
+    /// error and blocks nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_prevention: Option<JevContextAnswer>,
     pub input_tokens: u64,
     pub output_tokens: u64,
     /// The gateway's cost for the call, when it reported one.
@@ -1346,6 +1375,10 @@ pub struct IntrospectionRecord {
     pub flags: Vec<String>,
     /// Ids the model returned that were not on the list code passed in; dropped, not repaired.
     pub dropped_ids: Vec<String>,
+    /// True when the job failed in planning, before any code was written. Absent (false) otherwise and on
+    /// records written before the marker existed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub planning_stopped: bool,
     /// Always false: the class and prevention kind came from a language model, not from Jev. Jev runs in shadow.
     pub from_jev: bool,
     /// Jev's shadow answers to the two introspection questions. Absent on records written before step 5 and
@@ -1390,6 +1423,23 @@ impl IntrospectionRecord {
                         && (jev.class.is_some() || jev.repeat_probability.is_some()) =>
                 {
                     Err("a Jev record with an error holds no answers".into())
+                }
+                Some(jev) if jev.error.is_some() && jev.context_prevention.is_some() => {
+                    Err("a Jev record with an error holds no answers".into())
+                }
+                Some(IntrospectionJev {
+                    context_prevention: Some(answer),
+                    ..
+                }) if answer.outcome.is_some() == answer.error.is_some()
+                    || answer
+                        .outcome
+                        .as_deref()
+                        .is_some_and(|o| !CONTEXT_PREVENTION_OUTCOMES.contains(&o)) =>
+                {
+                    Err(
+                        "a context-prevention answer holds one outcome from the list, or an error"
+                            .into(),
+                    )
                 }
                 _ => Ok(()),
             },

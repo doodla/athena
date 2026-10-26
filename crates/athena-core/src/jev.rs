@@ -142,8 +142,13 @@ struct WireGateway {
     cost: Option<String>,
 }
 
+/// Questions whose answer may be missing or of the wrong type without spoiling the reply. The caller checks
+/// such an answer itself, so a reply that leaves one out still returns the other answers.
+pub const OPTIONAL_QUESTIONS: [&str; 1] = [crate::introspect::JEV_CONTEXT_KEY];
+
 /// Reads a reply body and checks it against the questions that were asked: each key has an answer of the
-/// matching type, and the cost, if present, is a decimal number.
+/// matching type, except the [`OPTIONAL_QUESTIONS`], which may be missing or of another type; and the cost, if
+/// present, is a decimal number.
 pub fn parse_response(
     body: &str,
     questions: &BTreeMap<String, Question>,
@@ -152,6 +157,9 @@ pub fn parse_response(
         JevError::Malformed(format!("the reply does not have the expected shape: {e}"))
     })?;
     for (key, question) in questions {
+        if OPTIONAL_QUESTIONS.contains(&key.as_str()) {
+            continue;
+        }
         match wire.answers.get(key) {
             None => {
                 return Err(JevError::Malformed(format!(
@@ -637,6 +645,44 @@ mod tests {
             Err(JevError::Malformed(_))
         ));
         assert!(parse_response("not json", &questions()).is_err());
+    }
+
+    #[test]
+    fn the_real_parser_keeps_the_required_answers_when_the_context_answer_is_missing_or_wrong() {
+        use crate::introspect::{JEV_CLASS_KEY, JEV_CONTEXT_KEY, JEV_REPEAT_KEY, jev_questions};
+        let asked = jev_questions(&[]);
+        assert!(asked.contains_key(JEV_CONTEXT_KEY), "the question is asked");
+        let body = |context: Option<Value>| {
+            let mut answers = json!({
+                JEV_CLASS_KEY: { "type": "choice", "choice": "new",
+                                 "probabilities": { "new": 1.0 }, "confidence": 0.9 },
+                JEV_REPEAT_KEY: { "type": "boolean", "probability": 0.1 }
+            });
+            if let Some(context) = context {
+                answers[JEV_CONTEXT_KEY] = context;
+            }
+            json!({ "answers": answers, "usage": { "inputTokens": 1, "outputTokens": 1 } })
+                .to_string()
+        };
+        // No answer to the context question: the class and repeat answers still come back.
+        let got = parse_response(&body(None), &asked).expect("a missing optional answer is fine");
+        assert!(got.answers.contains_key(JEV_CLASS_KEY));
+        assert!(got.answers.contains_key(JEV_REPEAT_KEY));
+        assert!(!got.answers.contains_key(JEV_CONTEXT_KEY));
+        // A wrong-typed answer is passed on for the caller to check.
+        let wrong = json!({ "type": "boolean", "probability": 0.5 });
+        let got = parse_response(&body(Some(wrong)), &asked).expect("a wrong type is passed on");
+        assert!(got.answers.contains_key(JEV_CONTEXT_KEY));
+        // A required question still fails the reply when it is missing.
+        let mut missing: Value = serde_json::from_str(&body(None)).unwrap();
+        missing["answers"]
+            .as_object_mut()
+            .unwrap()
+            .remove(JEV_REPEAT_KEY);
+        assert!(matches!(
+            parse_response(&missing.to_string(), &asked),
+            Err(JevError::Malformed(_))
+        ));
     }
 
     #[test]

@@ -43,10 +43,10 @@ use anyhow::{Context, Result};
 use athena_agent::env::{EnvSpec, Side};
 use athena_agent::{AgentInvocation, NoSink};
 use athena_data::records::{
-    AnyRecord, ClassStatus, FailureClass, HostError, INTROSPECTION_PROSE_FIELDS,
-    INTROSPECTION_SCHEMA, InterventionCategory, IntrospectionEvidence, IntrospectionJev,
-    IntrospectionRecord, IntrospectionStatus, IntrospectionTrigger, JevClassAnswer, OutcomeState,
-    PreventionKind, ProposalRecord, Role,
+    AnyRecord, CONTEXT_PREVENTION_OUTCOMES, ClassStatus, FailureClass, HostError,
+    INTROSPECTION_PROSE_FIELDS, INTROSPECTION_SCHEMA, InterventionCategory, IntrospectionEvidence,
+    IntrospectionJev, IntrospectionRecord, IntrospectionStatus, IntrospectionTrigger,
+    JevClassAnswer, JevContextAnswer, OutcomeState, PreventionKind, ProposalRecord, Role,
 };
 use athena_data::records::{
     CheckRun, CriterionResult, Finding as VerificationFinding, Severity, Verdict, Verification,
@@ -804,6 +804,8 @@ pub struct Event {
     pub what: String,
     pub why: String,
     pub at: Timestamp,
+    /// True for a job that failed in planning, before any code was written.
+    pub planning_stopped: bool,
 }
 
 /// Decisions whose fired, valid signal cites the intervention `intervention`. The citation must be later than
@@ -1069,8 +1071,25 @@ fn user_prompt(
 pub const JEV_CLASS_KEY: &str = "failure_class";
 /// The key of the is-repeat question in the call to Jev.
 pub const JEV_REPEAT_KEY: &str = "is_repeat";
+/// The key of the post-mortem question in the call to Jev. Its answer is optional ([`crate::jev::OPTIONAL_QUESTIONS`]).
+pub const JEV_CONTEXT_KEY: &str = "context_prevention";
 /// The option of the failure-class question that means no registry class fits.
 pub const JEV_NEW_OPTION: &str = "new";
+/// The text of the post-mortem question.
+pub const JEV_CONTEXT_QUESTION: &str =
+    "What one piece of context, if the agent had read it, would have prevented this?";
+
+/// What each outcome of the post-mortem question means, in the order of
+/// [`CONTEXT_PREVENTION_OUTCOMES`].
+const CONTEXT_OUTCOME_MEANINGS: [&str; 7] = [
+    "A line in the system facts that every agent reads.",
+    "A failure class, or a change to how classes are described.",
+    "A change to how a brief is assembled or what it contains.",
+    "A term defined in the shared vocabulary.",
+    "A correction or addition to a design or specification document.",
+    "A change to how the code or the documents are organised.",
+    "No piece of context would have prevented it.",
+];
 
 /// The two introspection questions: the failure class (a choice over the registry ids, plus `new`) and whether
 /// the event repeats an earlier case (a boolean).
@@ -1083,7 +1102,19 @@ pub fn jev_questions(classes: &[ClassRow]) -> BTreeMap<String, Question> {
         JEV_NEW_OPTION.to_string(),
         "None of the registry classes fits this event; it is a new class.".to_string(),
     );
+    let outcomes: BTreeMap<String, String> = CONTEXT_PREVENTION_OUTCOMES
+        .iter()
+        .zip(CONTEXT_OUTCOME_MEANINGS)
+        .map(|(outcome, meaning)| (outcome.to_string(), meaning.to_string()))
+        .collect();
     BTreeMap::from([
+        (
+            JEV_CONTEXT_KEY.to_string(),
+            Question::Choice {
+                instructions: JEV_CONTEXT_QUESTION.to_string(),
+                criteria: outcomes,
+            },
+        ),
         (
             JEV_CLASS_KEY.to_string(),
             Question::Choice {
@@ -1113,6 +1144,7 @@ pub fn ask_jev(jev: &dyn Evaluate, state: &str, classes: &[ClassRow]) -> Introsp
         model: crate::jev::MODEL.to_string(),
         class: None,
         repeat_probability: None,
+        context_prevention: None,
         input_tokens: 0,
         output_tokens: 0,
         cost_usd: None,
@@ -1144,6 +1176,29 @@ pub fn ask_jev(jev: &dyn Evaluate, state: &str, classes: &[ClassRow]) -> Introsp
                     stored.repeat_probability = Some(*probability);
                 }
                 _ => stored.error = Some("Jev did not answer both questions".to_string()),
+            }
+            // The post-mortem answer is optional: a missing one leaves the field empty, and a bad one is kept
+            // as an error in the field. Neither touches the class and repeat answers.
+            if stored.error.is_none() {
+                stored.context_prevention = match evaluation.answers.get(JEV_CONTEXT_KEY) {
+                    None => None,
+                    Some(JevAnswer::Choice { choice, .. })
+                        if CONTEXT_PREVENTION_OUTCOMES.contains(&choice.as_str()) =>
+                    {
+                        Some(JevContextAnswer {
+                            outcome: Some(choice.clone()),
+                            error: None,
+                        })
+                    }
+                    Some(JevAnswer::Choice { choice, .. }) => Some(JevContextAnswer {
+                        outcome: None,
+                        error: Some(format!("{choice:?} is not on the list of outcomes")),
+                    }),
+                    Some(_) => Some(JevContextAnswer {
+                        outcome: None,
+                        error: Some("the answer is not a choice".to_string()),
+                    }),
+                };
             }
         }
     }
@@ -1218,6 +1273,9 @@ impl Athena {
             ),
             why: format!("the job ended {category}"),
             at: outcome.at,
+            planning_stopped: outcome
+                .reason
+                .starts_with(athena_data::records::PLANNING_STOPPED_PREFIX),
         }))
     }
 
@@ -1243,6 +1301,7 @@ impl Athena {
             what: i.what.clone(),
             why: i.why.clone(),
             at: i.at,
+            planning_stopped: false,
         })
     }
 
@@ -1290,6 +1349,7 @@ impl Athena {
             failure: None,
             flags: Vec::new(),
             dropped_ids: Vec::new(),
+            planning_stopped: event.planning_stopped,
             from_jev: false,
             jev: None,
         };
