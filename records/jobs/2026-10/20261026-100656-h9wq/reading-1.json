@@ -1,0 +1,220 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261026-100656-h9wq",
+  "n": 1,
+  "at": "2026-10-26T10:07:20.425220755Z",
+  "invocation_seq": 1,
+  "base_commit": "21abca233643ae05c3116e8105aaf5c17d5e0a36",
+  "config_sha256": "8fe89c4edaa823d770160390564d75d68be6850d0873a9f8f769511a6f40103c",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Add code-health check, status table and 10-landing design-review cadence",
+  "summary": "Retry for Sri and the verifier: add code_health.rs (syn-measured lines and function lengths, 7-day churn, failure citations, test run time), show it in athena status, queue one deduplicated structural-pass request per breach after each landing, and queue a self-contained high-priority design review every 10 landings. The cadence is anchored by a new typed baseline record in athena-data, so it does not fire on existing history.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "buy-first",
+      "how": "Use syn for function lengths and record the call in docs/decisions.md."
+    },
+    {
+      "id": "tested",
+      "how": "New module and record variant have tests; fmt, clippy and test run."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run cargo test for observed behavior, not file existence."
+    },
+    {
+      "id": "verified",
+      "how": "Status output is checked by a rendering test."
+    },
+    {
+      "id": "strangers",
+      "how": "Docs and the self-contained review text are written for an outside reader."
+    },
+    {
+      "id": "outcome-check",
+      "how": "Criteria check queued requests and rendered output."
+    },
+    {
+      "id": "root-cause",
+      "how": "The baseline gets a real typed record rather than a side file."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Goal: Athena watches code health itself; audience is Sri reading athena status and the verifier running cargo checks.",
+    "The earlier design stands; the prior failure was in planning, from a baseline marker with no record type.",
+    "Baseline is stored as a new athena-data AnyRecord variant (option 1 from the critic), with a field or accessor on Records in athena-core store.rs.",
+    "High priority comes from a 'Priority: high' line in the request text, queued via Athena::queue.",
+    "Test run time is read from a recorded value, never by running the suite inside status.",
+    "Tests set the disk minimum to 0 (fix 3947eb3)."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Run cargo test: a code_health test with fixture source files and landing records asserts per-file production line count (excluding #[cfg(test)] modules), longest function length, landings in the last 7 days, and failure/rejection citations.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run cargo test: tests show each threshold breach (file over 2000 lines, function over 200 lines, over 1500 lines with 5 or more landings in a week) is reported, and a file under the thresholds is not flagged.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run cargo test: on a breach exactly one structural-pass request is queued for that file, citing the measured numbers; a second run, or an open structural-pass request for the file, queues none.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run cargo test: a baseline record (new AnyRecord variant in crates/athena-data/src/records.rs, with a schema round-trip test) is written, and a test reloads Records from git into a fresh state directory and shows the baseline survives. The first landing sets the baseline and fires no review.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run cargo test: the design-review request is queued through Athena::queue at high priority (asserted through the same function status/plan use to resolve priority) on the 10th landing after the baseline, and not on the 9th.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run cargo test: the queued design-review text names what to review (code-health table, files most changed and most broken since the last review, open structural-pass requests, recent rejections and planning stops) and what to produce (a short design note with proposed changes, as a design-only job).",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run cargo test: tests show the check runs after a landing in both Athena::land_pr (hook placed after resync_onto_merge and the Pages watch, with a skipped run caught up by the idempotent next call) and note_finished in steward.rs, and each test fails without its hook.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run cargo test: the rendered athena status output contains the code-health table with each file's lines, longest function, weekly landings, citations, thresholds, whether over, and test suite run time, with header columns aligned to labels.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked: all three exit 0, and the evidence cites them as run.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has an entry, and docs/decisions.md records the thresholds, the buy-versus-build call on measuring function length (syn), the baseline record, and the 10-landing cadence.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/code_health.rs",
+      "action": "create",
+      "p": 0.99
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/steward.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-core/src/store.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/Cargo.toml",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "Cargo.lock",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-cli/tests/code_health_hooks.rs",
+      "action": "create",
+      "p": 0.6
+    }
+  ],
+  "out_of_scope": [
+    "Creating a design-review role or agent",
+    "Running the design review itself",
+    "Changing disk-guard behavior",
+    "Automatically refactoring flagged files"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.72,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.5,
+        "p90": 3.2
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 1800.0,
+        "p90": 3600.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7187096774193549,
+      "p_verification_passes": 0.6486486486486487,
+      "p_user_intervenes": 0.05822784810126583,
+      "cost_usd": {
+        "p10": 0.47214562025163387,
+        "p50": 1.104166136589852,
+        "p90": 2.4986185964088197
+      },
+      "wall_time_s": {
+        "p10": 495.11724487869526,
+        "p50": 1456.4012412418892,
+        "p90": 2957.722060040494
+      }
+    }
+  },
+  "departures": "Larger than the reference: it spans two crates, two landing hooks, a new record type and a status table. A prior attempt failed in planning.",
+  "urgent_reason": "Retrying a job that failed planning in round 3 cuts redo work and planning stops, by closing the critic's findings (record type, queue path, hook placement, gate commands) up front."
+}
