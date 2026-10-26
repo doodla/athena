@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261026-065228-02zf",
+  "round": 1,
+  "at": "2026-10-26T09:21:08.174017482Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/reading.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/reading.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/introspection.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/introspection.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The claim that the class and repeat answers are read independently of the new question is false for the real Jev client.",
+      "evidence": "`parse_response` loops over every question and returns `JevError::Malformed(\"no answer to question ...\")` when any one is missing. The real client returns that result directly (jev.rs:342). Only FakeJev skips this check (jev.rs:448-460), so the plan's tests would pass while a real reply without `context_prevention` throws away the class and repeat answers too. That changes the existing introspection result, although the reading says the field stays in shadow. Fix: Choose one approach and test it. Either (a) call Jev a second time for the context question, so a failure there stores an error only in `post_mortem`; or (b) let `parse_response` accept a missing answer to an optional question, which needs a jev.rs change. Then add a test that runs the real `parse_response` on a reply with no context answer and shows the class and repeat answers survive. Alternatively, state plainly that a missing answer fails the whole call, and show that the existing IntrospectionJev error path handles it.",
+      "location": "Decision 4 and Risks (FakeJev answers); crates/athena-core/src/jev.rs:147-170",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "No stored finding has a resolved state. The plan adds a `resolved` flag that nothing ever sets, so 'resolved ones left out' is shown only on hand-made data and never happens in a real run.",
+      "evidence": "A Grep over crates/ finds no resolved state on findings (records.rs:750 Finding; introspect.rs:666). The reading assumed one exists ('stored verifier findings with a severity and a resolved state'). That assumption is false, and the plan's own open question admits every finding stays unresolved. The design (context-engineer.md:168-170, 318) speaks of findings 'not resolved' of the previous attempt without defining the term. Fix: Define what 'resolved' means using data the records already hold, and test that. Example: in a retry chain, a finding of an older attempt counts as resolved when a later attempt was verified with that criterion met. If no definition is possible, drop the dead field: treat every blocker and major finding of the previous attempt's final verification as unresolved, state that in the CHANGELOG and the change description, and raise criterion 1's 'resolved' clause with the user rather than meeting it with a flag that is never set.",
+      "location": "Decision 1 and Open question 1; Demonstration for criterion 1",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A seeded retry's Retry section lists every finding, minor ones included, while the new section lists only blocker and major findings. The two paths describe 'the previous attempt's findings' differently.",
+      "evidence": "`tree_retry_seed` maps all `verification.findings` without filtering by severity (reading.rs:1154-1167). The plan filters only on `resolved` there. Fix: Say in the plan that the seeded section keeps its full list on purpose, or label the blocker and major findings in it, so the brief tells the producer which findings it must address.",
+      "location": "Decision 2 (seeded case)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": "The reading assumes stored verifier findings already have a resolved state. They do not (records.rs:750 Finding has severity, summary, evidence, location and source only), so the 'unresolved' half of the request has no defined meaning in the current data.",
+  "summary": "I checked the plan against the snapshot with Read and Grep; I ran nothing. The plan is well placed: the retry findings go into the producer brief at the point where unseeded retries lose them today; the post-mortem part extends the existing introspection record; and the D130, CHANGELOG and records.md edits match the request. Two design problems remain. First, it claims the third Jev question can fail on its own. In fact the real client's `parse_response` rejects the whole reply when any answer is missing, so the new question can wipe out the class and repeat answers in production. The FakeJev-based tests would not catch this. Second, the 'resolved' state the plan filters on does not exist and nothing would ever set it, so 'resolved findings are left out' is shown only on hand-made data. The planner can fix both, so the verdict is revise."
+}

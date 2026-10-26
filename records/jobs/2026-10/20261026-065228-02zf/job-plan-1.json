@@ -1,0 +1,238 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261026-065228-02zf",
+  "round": 1,
+  "at": "2026-10-26T09:20:05.529628124Z",
+  "invocation_seq": 2,
+  "approach": "Fix the root cause of \"a retry loses the earlier verifier's findings\" at the point where the producer brief is built. Add `resolved` to a stored verification finding. Add a function that returns every unresolved blocker and major finding of the retried job's verification. Pass its output to the producer brief through a new `ProducerInputs` field for every retry, including retries that start from the base, which today get no findings at all. Separately, add a `post_mortem` part to the introspection record: a `planning_stopped` marker (set from the existing reason prefix, now one shared constant) and the 'context that would have prevented it' outcome. A third Jev question, asked only for rejection and failure events, supplies the outcome. An outcome off the fixed list, a failed Jev call, or an unanswered question becomes an error in the field. Nothing reads the field to decide anything. Mark D130 accepted, add a CHANGELOG entry, and update docs/records.md.",
+  "decisions": [
+    {
+      "choice": "Add `resolved: bool` to the stored Finding (athena-data), with `#[serde(default, skip_serializing_if = \"is_false\")]`, default false. Add the unresolved-blocking-findings function next to `tree_retry_seed` in reading.rs. Filter resolved findings there as well, so the seeded and unseeded paths agree.",
+      "reason": "Finding has no resolved state today (fields: severity, summary, evidence, location, source), and the brief needs one to leave resolved findings out. Existing records still parse and old bytes stay unchanged. `finding_blocks` already defines blocker or major, so the new function reuses it.",
+      "rejected": [
+        {
+          "option": "Infer resolved from a later verification of a retry",
+          "why": "There is no key that links a finding to its fix, so an inferred result would be a guess."
+        },
+        {
+          "option": "Compute resolution only inside briefs.rs",
+          "why": "briefs.rs gets strings, not records, so it cannot know the state."
+        }
+      ]
+    },
+    {
+      "choice": "Add `prior_findings: Option<PriorFindings{job, findings: Vec<String>}>` to ProducerInputs. Render a section 'Unresolved blocker and major findings of the previous attempt' whenever it is non-empty. In the seeded case, where the Retry section already lists the findings, render the new section only if the seed's findings are empty.",
+      "reason": "The fault is that an unseeded retry (code findings, so it starts from the base) gets no findings in its producer brief. Fixing only the seeded path would leave 'reading-omits-prior-verifier-finding' open.",
+      "rejected": [
+        {
+          "option": "Extend RetrySeed.findings only",
+          "why": "RetrySeed exists only for tree and timeout retries, so most retries stay uncovered."
+        },
+        {
+          "option": "Put the findings in the reading brief only",
+          "why": "The producer works from the producer brief; the reading is already accepted by then."
+        }
+      ]
+    },
+    {
+      "choice": "Store the post-mortem as one new optional record part `post_mortem: Option<PostMortem{planning_stopped: bool, context_outcome: Option<String>, error: Option<String>}>` on IntrospectionRecord. Put the fixed list in a `CONTEXT_OUTCOMES` const in records.rs. Set the part for Rejection and Failure triggers, and leave it None for corrections and interventions.",
+      "reason": "The design (D130 alternative d) wants an extension of the existing record, not a second record or event. One new field keeps the churn small (each struct literal adds one line). `error` follows IntrospectionJev's convention of recording a failed call with an error.",
+      "rejected": [
+        {
+          "option": "Put the outcome inside IntrospectionJev",
+          "why": "The planning-stopped marker is record level, and the outcome should exist even when Jev is not configured, which then reads as an error."
+        },
+        {
+          "option": "Ask the reader-role model through the existing Answer schema",
+          "why": "The request puts the question in Jev's call, and the model's schema would also have to change."
+        }
+      ]
+    },
+    {
+      "choice": "Ask the question as a third Jev Choice question, key `context_prevention`, only for job events (Rejection/Failure). Its instructions are the exact text 'What one piece of context, if the agent had read it, would have prevented this?', and its criteria hold the seven outcome ids with one-line descriptions. If the context answer is missing or its choice is off the list, store an error in `post_mortem`; the class and repeat answers are read independently of it.",
+      "reason": "The parser (`parse_response`) already checks types per question. Because the class and repeat answers are read independently, existing scripted FakeJev evaluations that omit the new key still work. Interventions keep their two-question call unchanged.",
+      "rejected": [
+        {
+          "option": "Add the question to every introspection call",
+          "why": "The field is defined for jobs only, and intervention calls and their tests would change for nothing."
+        },
+        {
+          "option": "Detect planning-stopped with a new Event field only from a string match in introspect.rs",
+          "why": "Two copies of the string would drift. One `pub(crate) const PLANNING_STOPPED_PREFIX` in run.rs is used by `stop_planning` and by `event_of_job`."
+        }
+      ]
+    },
+    {
+      "choice": "Mark D130 accepted in docs/decisions.md. Change the heading and Status line. State the decider: the brain, under Sri's delegation (BRIEF.md addenda of 2026-10-23 to 2026-10-26). Add a note that job 1 (size and touch report) is covered by the code-health check (request 20261026-042558-5p65 and its retry), so the build is five jobs not six. Keep the 'Decision (proposed)' text but retitle it 'Decision'.",
+      "reason": "This is what the request and criterion 5 ask. It is written for an outside reader.",
+      "rejected": [
+        {
+          "option": "Also edit docs/design/context-engineer.md",
+          "why": "It is not a deliverable and the request does not ask for it."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "purpose": "Add `resolved` to Finding. Add `CONTEXT_OUTCOMES` and the PostMortem struct. Add `post_mortem: Option<PostMortem>` to IntrospectionRecord (serde default, skipped when None). Extend `validate` so that exactly one of outcome and error is set, and the outcome is on the list. Fix the struct literals in this file and its tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/introspect.rs",
+      "action": "modify",
+      "purpose": "Add `planning_stopped` to Event. Set it in `event_of_job` from the reason prefix. Add the third Jev question (job events only) and parse its answer into PostMortem. Set `post_mortem` on the record for Rejection and Failure. Keep ask_jev's class and repeat parsing independent. Add unit tests for the question text.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/jev.rs",
+      "action": "modify",
+      "purpose": "Only if needed: export a helper or const for the context question key. Otherwise no change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "purpose": "Define `pub(crate) const PLANNING_STOPPED_PREFIX` and use it in `stop_planning`. In `dispatch`, call the reading.rs function to get the prior attempt's unresolved blocker and major findings, redacted, and pass them to ProducerInputs.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Add `prior_blocking_findings(records, request, redactor)` next to `tree_retry_seed`, using `finding_blocks` and skipping resolved. Have `tree_retry_seed` skip resolved findings. Add the unit test with two major findings, one resolved and one minor.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Add `PriorFindings` and `ProducerInputs.prior_findings`. Add the 'Unresolved blocker and major findings of the previous attempt' section (quoted data), shown when non-empty and not already listed by the Retry section. Fix the existing ProducerInputs literals in tests and add the test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/introspection.rs",
+      "action": "modify",
+      "purpose": "Integration tests for criteria 2 and 3. Add `planning_stopped: false` to the existing `Event` literal at line 847 if the compiler requires it.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Mark D130 accepted, state the decider, and note job 1 is covered by the code-health check (5p65 and its retry).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased entry for the post-mortem field, the planning-stopped marker, the Jev question and the retry-findings fix.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/records.md",
+      "action": "modify",
+      "purpose": "Describe the `post_mortem` part, with its fixed outcome list and the marker, where the introspection record is described (lines 91 and 95). Keep any doc test passing.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read the struct literals of Finding, IntrospectionRecord and Event with Grep. In records.rs add `resolved` to Finding, `CONTEXT_OUTCOMES`, PostMortem and `post_mortem` on IntrospectionRecord, and the extended `validate`. Add records tests, including that an old finding parses without `resolved`.",
+    "In reading.rs add `prior_blocking_findings` (blocker or major via `finding_blocks`, not resolved, redacted). Make `tree_retry_seed` skip resolved findings. Add the unit test for the two major findings, the resolved one and the minor one.",
+    "In briefs.rs add `PriorFindings`, `ProducerInputs.prior_findings` and the section to `producer_brief`. Update the existing ProducerInputs literals. Add the brief tests, seeded and unseeded.",
+    "In run.rs add `PLANNING_STOPPED_PREFIX`, use it in `stop_planning`, and in `dispatch` compute and pass `prior_findings`.",
+    "In introspect.rs add `planning_stopped` to Event and set it in `event_of_job`. Add the context question (instructions text exactly 'What one piece of context, if the agent had read it, would have prevented this?', criteria are the seven outcomes). Parse its answer into PostMortem, with an error for a missing answer, an off-list choice, a failed call, or Jev not configured. Set `post_mortem` for Rejection and Failure only. Leave intervention calls unchanged. Add the unit test on the call text.",
+    "Fix all other struct literals the compiler reports.",
+    "Add the integration tests to crates/athena-cli/tests/introspection.rs: planning-stopped, rejected, ordinary failure, landed (no record), off-list outcome, failed Jev call.",
+    "Edit docs/decisions.md D130, CHANGELOG.md and docs/records.md.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`."
+  ],
+  "risks": [
+    {
+      "risk": "Adding a required field to IntrospectionRecord, Finding or Event breaks many struct literals in crates and tests outside the listed files.",
+      "mitigation": "Use serde defaults so stored records parse as before. Let the compiler list every site and add one line to each. Make no behavior change in those files."
+    },
+    {
+      "risk": "Existing FakeJev scripted evaluations carry only two answers, so a third question could fail them.",
+      "mitigation": "The context answer is read separately and its absence is an error in `post_mortem`. The class and repeat answers are parsed as before, and interventions do not ask the new question."
+    },
+    {
+      "risk": "The seeded Retry section and the new section could list the same finding twice, or leave a seeded retry with none.",
+      "mitigation": "Show the new section only when the seed lists no findings. A test covers both the seeded and the unseeded retry."
+    },
+    {
+      "risk": "Finding text reaches the producer brief without redaction.",
+      "mitigation": "Build the strings in reading.rs through the same `redact_all` call as `tree_retry_seed`, and quote them with `quote` in briefs.rs."
+    },
+    {
+      "risk": "docs/records.md or a budget test fails after the change.",
+      "mitigation": "Add no always-loaded prompt text. Run `cargo test --locked`, which includes the doc and budget tests."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Three unit tests. (a) reading.rs: records hold a rejected job whose verification has two major findings, one major finding marked resolved, and a minor one. The new function runs on `try again on <job>`. (b) briefs.rs: `producer_brief` with `prior_findings` and `retry_from: None`. (c) records.rs: a Finding round trip, and an old finding JSON without `resolved` parses as unresolved.",
+      "command": "cargo test --locked -p athena-core -p athena-data -p athena-context",
+      "observes": "The returned list and the producer brief text contain both unresolved major findings, quoted. The resolved one and the minor one are absent. The unseeded retry brief has the findings section, and the seeded one shows each finding once.",
+      "fails_without": "If the builder keeps only the first finding, or drops blockers or majors, or ignores `resolved`, the assertions for the second finding or for the absence of the resolved one fail. Before this change an unseeded retry's producer brief has no findings at all, so the test fails."
+    },
+    {
+      "criterion": 2,
+      "method": "A new integration test in crates/athena-cli/tests/introspection.rs, using the existing fixture, FakeJev and `introspect_job`. The job ends `failed` with the reason 'planning stopped before any code was written: ...'. FakeJev answers the context question with `brief-assembly`, and the committed record is read back.",
+      "command": "cargo test --locked -p athena-cli --test introspection",
+      "observes": "The stored record has `post_mortem.planning_stopped == true` and `context_outcome == Some(\"brief-assembly\")`, which is on the fixed list. An ordinary failure has `planning_stopped == false`.",
+      "fails_without": "Without the marker detection or the third question, `post_mortem` is None or `planning_stopped` is false, and the assertions fail."
+    },
+    {
+      "criterion": 3,
+      "method": "Integration tests, one scenario each. (1) A rejected job yields `post_mortem` with an outcome. (2) A job failed for another reason yields it. (3) A landed job yields no record (`introspect_job` returns None). (4) FakeJev answers a choice not on the list, such as 'bogus': `error` is set, `context_outcome` is None, the record status is unchanged and nothing errors. (5) FakeJev returns `Err(JevError::Refused{..})`: `post_mortem.error` is set, and the introspection record and job outcome are unchanged.",
+      "command": "cargo test --locked -p athena-cli --test introspection",
+      "observes": "The listed values appear in the stored records. The outcome state of the job is read back unchanged in (4) and (5).",
+      "fails_without": "If the off-list outcome were stored as an outcome, or a Jev failure aborted or changed the job, tests (4) and (5) fail."
+    },
+    {
+      "criterion": 4,
+      "method": "A unit test in introspect.rs calls the question builder for a job event, and a FakeJev call log from an `ask_jev` run is also inspected. It serializes the questions with `crate::jev::request_body`. A second assertion checks that an intervention event's call does not carry the question.",
+      "command": "cargo test --locked -p athena-core introspect",
+      "observes": "The request text contains 'What one piece of context, if the agent had read it, would have prevented this?' and all seven ids: system-facts-line, failure-class, brief-assembly, vocabulary-term, spec-fix, structure, none.",
+      "fails_without": "If the question is not added to the call, the contains-assertions on the call text fail."
+    },
+    {
+      "criterion": 5,
+      "method": "Inspect the diff of D130.",
+      "command": "git diff -- docs/decisions.md",
+      "observes": "The heading and Status read accepted. The text names the brain as decider under Sri's delegation (BRIEF.md addenda of 2026-10-23 to 2026-10-26). The text notes that job 1 (size and touch report) is covered by the code-health check (request 20261026-042558-5p65 and its retry).",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Inspect the diff.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "An Unreleased entry names the post-mortem field, the planning-stopped marker, the Jev question and the retry-findings change (every unresolved blocker and major finding). docs/records.md describes the new introspection part.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Run `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. The workspace includes the struct-literal sites for Finding, IntrospectionRecord and Event, and the doc tests on docs/records.md and the budget tests.",
+      "command": "cargo test --locked",
+      "observes": "All three pass. The producer-prompt budget test is unaffected, because the changes add no always-loaded prompt text.",
+      "fails_without": "A missed `resolved`, `post_mortem` or Event field in a struct literal fails the build. A prompt-set budget change fails `system_facts_budgets_match_computed`."
+    }
+  ],
+  "open_questions": [
+    "Nothing in the code sets `resolved` today. The plan adds the field and the filter, so every stored finding stays unresolved until a later job sets it. Is that acceptable for job 4, or should some step mark findings resolved?",
+    "The status and review screens (status.rs IntrospectionView, display.rs) do not show the new part. The plan leaves them unchanged. A producer can add a display line if the request should cover it.",
+    "Several struct-literal sites outside the listed files (status.rs, labeled.rs, proposals.rs, the athena-cli tests, verify.rs, admission.rs, store.rs) will need the new fields to compile. I counted 8 Finding sites and 18 IntrospectionRecord or IntrospectionJev sites; the compiler will list the exact ones. The brief lists only 7 files and records.md."
+  ],
+  "producer_section_sha256": "657323ce2044d7d91bda8468f1f9c5018c30061f625071fad9c36e321130774a"
+}
