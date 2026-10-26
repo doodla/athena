@@ -1460,7 +1460,7 @@ impl<'a> RealSteps<'a> {
     }
 
     fn records(&self) -> anyhow::Result<Records> {
-        Records::load(&self.athena.git, &self.athena.head()?)
+        Records::load_current(&self.athena.git, &self.athena.head()?)
     }
 
     fn job_cost(&self, job: &str) -> f64 {

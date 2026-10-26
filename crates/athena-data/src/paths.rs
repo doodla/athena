@@ -54,6 +54,28 @@ pub fn repo_state_dir(common_git_dir: &Path) -> PathBuf {
     state_root().join(format!("{name}-{key}"))
 }
 
+/// The worktree of the `athena/records` branch for one repository (D111). It lives beside the other
+/// per-repository state and holds `records/` at the same relative paths as the branch.
+pub fn records_worktree(common_git_dir: &Path) -> PathBuf {
+    repo_state_dir(common_git_dir).join("records-worktree")
+}
+
+/// The `records/` directory inside a root (a repository checkout or the records worktree).
+pub fn records_dir(root: &Path) -> PathBuf {
+    root.join("records")
+}
+
+/// Where live readers find `records/`: the records worktree when it holds a `records/` directory, otherwise
+/// `fallback_root` (the checkout, where `records/` lives until the cutover).
+pub fn records_root(common_git_dir: &Path, fallback_root: &Path) -> PathBuf {
+    let worktree = records_worktree(common_git_dir);
+    if records_dir(&worktree).is_dir() {
+        worktree
+    } else {
+        fallback_root.to_path_buf()
+    }
+}
+
 /// The path of a pinned tool's binary inside the install directory.
 pub fn tool_path(tool: &str, version: &str) -> PathBuf {
     athena_home()
@@ -111,6 +133,25 @@ mod tests {
         // The binary lies under the install root that `cargo install --root` receives.
         assert!(binary.starts_with(sccache_root(home, "0.10.0")));
         assert_ne!(binary, sccache_binary_in(home, "0.11.0"));
+    }
+
+    #[test]
+    fn records_root_prefers_a_worktree_that_holds_records() {
+        let tmp = std::env::temp_dir().join(format!("athena-paths-{}", std::process::id()));
+        let common = tmp.join("repo/.git");
+        let fallback = tmp.join("repo");
+        std::fs::create_dir_all(&common).unwrap();
+        // No worktree: the fallback root stands.
+        assert_eq!(records_root(&common, &fallback), fallback);
+        let worktree = records_worktree(&common);
+        // A worktree without records/ does not count.
+        std::fs::create_dir_all(&worktree).unwrap();
+        assert_eq!(records_root(&common, &fallback), fallback);
+        std::fs::create_dir_all(records_dir(&worktree)).unwrap();
+        assert_eq!(records_root(&common, &fallback), worktree);
+        assert!(records_dir(&worktree).ends_with("records"));
+        std::fs::remove_dir_all(&worktree).unwrap();
+        std::fs::remove_dir_all(&tmp).unwrap();
     }
 
     #[test]

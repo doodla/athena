@@ -709,7 +709,7 @@ impl Athena {
     /// open, and keeps the design-review cadence.
     pub fn code_health_check(&self, now: Timestamp) -> Result<CheckReport> {
         let head = self.head()?;
-        let records = Records::load(&self.git, &head)?;
+        let records = Records::load_current(&self.git, &head)?;
         let health = compute(&self.git, &head, &records, now)?;
         let landed = landings(&self.git, &head)?;
         let total = landed.len() as u32;
@@ -732,7 +732,7 @@ impl Athena {
             }
             Some(baseline) if total >= baseline.landings + REVIEW_EVERY => {
                 // The queued structural passes are open work the review should list.
-                let records = Records::load(&self.git, &self.head()?)?;
+                let records = Records::load_current(&self.git, &self.head()?)?;
                 let since = &landed[..(total - baseline.landings) as usize];
                 let (job, _) = self.queue(&design_review_text(&health, &records, since, total))?;
                 report.review = Some(job);

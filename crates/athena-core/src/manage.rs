@@ -91,7 +91,7 @@ impl Athena {
         }
         self.state.registry().reap();
         let head = self.head()?;
-        let records = Records::load(&self.git, &head)?;
+        let records = Records::load_current(&self.git, &head)?;
         let id = records.resolve(job_ref)?;
         let Some(_lock) = self.state.try_lock_job(&id)? else {
             bail!("job {id} is running in another athena process; `athena stop` terminates it");
@@ -191,7 +191,7 @@ impl Athena {
         };
         let commit = self.commit_records_in(
             &|head: &str| {
-                let records = Records::load(&self.git, head)?;
+                let records = Records::load_current(&self.git, head)?;
                 let score = score(
                     &job,
                     &records,
@@ -310,7 +310,7 @@ impl Athena {
     /// `athena intervene`: records an intervention, with the user's staged changes when asked.
     pub fn intervene(&self, args: &InterveneArgs, ui: &dyn Ui) -> Result<Intervened> {
         let head = self.head()?;
-        let records = Records::load(&self.git, &head)?;
+        let records = Records::load_current(&self.git, &head)?;
         let config = JobConfig::at(&self.git, &head)?.config;
         if !config.is_class(&args.class) {
             bail!(
@@ -444,7 +444,7 @@ impl Athena {
             bail!("say what the restart cost with --cost");
         }
         let head = self.head()?;
-        let records = Records::load(&self.git, &head)?;
+        let records = Records::load_current(&self.git, &head)?;
         let config = JobConfig::at(&self.git, &head)?.config;
         let redactor = self.redactor(&config, None)?;
         let mut text = vec![args.cost.trim().to_string()];
@@ -508,7 +508,7 @@ impl Athena {
     pub fn check_working(&self) -> Result<CheckReport> {
         let head = self.head()?;
         let mut report = CheckReport::default();
-        let set = athena_gate::records::RecordSet::load(&self.git, &head)?;
+        let set = athena_gate::records::RecordSet::load_current(&self.git, &head)?;
         report.records = set.files.len();
         for error in set.errors() {
             report
@@ -531,7 +531,7 @@ impl Athena {
     pub fn check_history(&self) -> Result<CheckReport> {
         let head = self.head()?;
         let history = check_history(&self.git, &head)?;
-        let set = athena_gate::records::RecordSet::load(&self.git, &head)?;
+        let set = athena_gate::records::RecordSet::load_current(&self.git, &head)?;
         let mut violations = history.violations;
         violations.extend(check_resolutions(&set));
         Ok(CheckReport {

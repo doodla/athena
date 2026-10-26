@@ -272,7 +272,16 @@ fn job_of(record: &AnyRecord) -> Option<&JobId> {
 impl Records {
     /// Loads every record in `treeish`.
     pub fn load(git: &Git, treeish: &str) -> Result<Records> {
-        let set = RecordSet::load(git, treeish)?;
+        Self::from_set(RecordSet::load(git, treeish)?)
+    }
+
+    /// Loads the live records: the records worktree when present, else `treeish` (D111). Live readers use
+    /// this; `load` stays for judges of a given ref.
+    pub fn load_current(git: &Git, treeish: &str) -> Result<Records> {
+        Self::from_set(RecordSet::load_current(git, treeish)?)
+    }
+
+    fn from_set(set: RecordSet) -> Result<Records> {
         let mut records = Records::default();
         for file in &set.files {
             if file.error.is_some() {

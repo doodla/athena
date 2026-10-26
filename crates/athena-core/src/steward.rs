@@ -241,7 +241,7 @@ impl GitView<'_> {
 
 impl View for GitView<'_> {
     fn records(&self) -> Result<Records> {
-        Records::load(self.git, &self.head()?)
+        Records::load_current(self.git, &self.head()?)
     }
 
     /// The workspace holds the visible files of the commit as a one-commit repository of its own (what the
@@ -254,7 +254,7 @@ impl View for GitView<'_> {
             unreadable.push("code");
             std::fs::create_dir_all(dir)?;
         }
-        match RecordSet::load(self.git, &head) {
+        match RecordSet::load_current(self.git, &head) {
             Ok(set) => {
                 for file in &set.files {
                     let full = dir.join(&file.path);

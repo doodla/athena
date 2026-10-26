@@ -105,7 +105,7 @@ impl Athena {
     /// Runs `checks`, commits the report as a record, and returns it.
     pub fn hestia_sweep(&self, checks: &[Box<dyn Check>]) -> Result<Sweep> {
         let known = match self.git.head()? {
-            Some(head) => Records::load(&self.git, &head)?,
+            Some(head) => Records::load_current(&self.git, &head)?,
             None => bail!(
                 "the repository has no commits yet; commit athena.toml and defaults.toml first"
             ),
@@ -139,7 +139,7 @@ impl Athena {
         let Some(head) = self.git.head()? else {
             return Ok(None);
         };
-        let records = Records::load(&self.git, &head)?;
+        let records = Records::load_current(&self.git, &head)?;
         Ok(Sweep::latest(&records.hestia_sweeps).cloned())
     }
 }

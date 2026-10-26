@@ -226,7 +226,7 @@ pub fn run(
     }
     athena.refuse_if_stopped()?;
     let head = athena.head()?;
-    let records = Records::load(&athena.git, &head)?;
+    let records = Records::load_current(&athena.git, &head)?;
     let text = page.fetch(&target.url)?;
     let text: String = text.chars().take(MAX_PAGE_CHARS).collect();
     if text.trim().is_empty() {

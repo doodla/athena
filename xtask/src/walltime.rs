@@ -80,7 +80,7 @@ fn time(value: &Value, key: &str) -> Option<Timestamp> {
 /// capability equals it.
 pub fn read_jobs(root: &Path, capability: Option<&str>) -> Result<Found> {
     let mut found = Found::default();
-    for month in children(&root.join("records/jobs")) {
+    for month in children(&athena_data::paths::records_dir(root).join("jobs")) {
         for dir in children(&month).into_iter().filter(|d| d.is_dir()) {
             let job_file = dir.join("job.json");
             if !job_file.is_file() {
@@ -274,7 +274,8 @@ pub fn report(found: &Found, n: usize) -> String {
 
 /// `walltime [--root <dir>] [--last <N>] [--capability <name>]`.
 pub fn command(args: &[String], default_root: &Path) -> Result<()> {
-    let mut root = default_root.to_path_buf();
+    // The records worktree stands in for the checkout once it exists (D111).
+    let mut root = athena_data::paths::records_root(&default_root.join(".git"), default_root);
     let mut n = DEFAULT_N;
     let mut capability = None;
     let mut it = args.iter();
@@ -311,5 +312,43 @@ mod tests {
         assert_eq!(p90(&ten), Some(9.0));
         assert_eq!(p90(&[7.0]), Some(7.0));
         assert_eq!(p90(&[]), None);
+    }
+
+    fn write_job(root: &Path, id: &str) {
+        let dir = root.join(format!("records/jobs/2026-10/{id}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("job.json"),
+            r#"{"dispatched_at":"2026-10-11T10:00:00Z","class_of_work":"change"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("outcome-landed.json"),
+            r#"{"state":"landed","at":"2026-10-11T10:05:00Z"}"#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn the_reader_root_is_the_records_worktree_when_it_has_records() {
+        let checkout = tempfile::tempdir().unwrap();
+        std::fs::create_dir(checkout.path().join(".git")).unwrap();
+        let common = checkout.path().join(".git");
+        write_job(checkout.path(), "20261010-100000-aaaa");
+        // No worktree: the checkout's own records/ is read.
+        let root = athena_data::paths::records_root(&common, checkout.path());
+        assert_eq!(root, checkout.path());
+        let found = read_jobs(&root, None).unwrap();
+        assert_eq!(found.jobs[0].id, "20261010-100000-aaaa");
+        // A worktree with different records wins.
+        let worktree = athena_data::paths::records_worktree(&common);
+        write_job(&worktree, "20261011-100000-bbbb");
+        let root = athena_data::paths::records_root(&common, checkout.path());
+        let found = read_jobs(&root, None);
+        let _ = std::fs::remove_dir_all(&worktree);
+        let found = found.unwrap();
+        assert_eq!(root, worktree);
+        assert_eq!(found.jobs.len(), 1);
+        assert_eq!(found.jobs[0].id, "20261011-100000-bbbb");
     }
 }

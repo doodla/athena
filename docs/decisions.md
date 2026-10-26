@@ -3414,3 +3414,41 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   `athena-gate/src/invariant.rs`, `athena-git/src/lib.rs`, `test_support.rs`. Measured by the new tests and the
   full suite run with `cargo test --locked`. No text with the words "retry_landing has no test" exists in
   `docs/` or `CHANGELOG.md`, so none was removed.
+
+## D134 · Live readers read the `athena/records` worktree, and fall back to `records/` only when it is absent (D111)
+
+- **Case:** After the D111 cutover, main's HEAD has no `records/`. Every reader that loaded records from HEAD
+  (`Records::load(git, head)`, `RecordSet::load(git, head)`) or joined `records/` onto the checkout
+  (`read_records`, the introspection walks, the wall-time reader) would then see an empty history, and
+  `athena land --pr` would stop with an unknown job.
+- **Decision:**
+  1. **One path, defined once.** `athena_data::paths` gains `records_worktree` (the worktree of the
+     `athena/records` branch, `records-worktree` under `repo_state_dir`), `records_dir` (the one place that joins
+     `records/` onto a root) and `records_root` (the worktree when its `records/` exists, else the given
+     checkout root).
+  2. **Two loaders.** `RecordSet::load_current` and `Records::load_current` read the worktree when it holds
+     `records/`, and otherwise call the old `load(git, treeish)`. With no worktree the result is identical to
+     before. Every live reader moved to them, including `gh.rs` `land_pr`. `read_records`, the introspection
+     walks and the xtask wall-time reader keep their signatures and take their root from `records_root` and
+     their directory from `records_dir`.
+  3. **Allow-list.** Readers that judge a given ref keep reading that ref, because they must judge that commit
+     and not the live tip: the gate's `reconcile.rs`, `history.rs` and `attribution.rs`. `store.rs` holds the
+     old `load` that `load_current` falls back to, and `paths.rs` holds the join. The xtask test
+     `records_reader_scan` fails on any other non-test `join("records")`, `read_records(<repo dir>)`,
+     `Records::load(` or `RecordSet::load(` (qualified or not), and each allow-list entry carries a reason.
+     Citation strings (`steward.rs`, `work_decisions.rs`) and the gate invariant's `BOOTSTRAP_OUTCOME` path are
+     text, not reads, and are not scanned.
+  4. **Out of scope.** The site generator (`xtask/src/site.rs`) reads `studies/`, not `records/`, and is
+     unchanged; a test builds the site with `records/` present and absent and compares the output. Creating and
+     refreshing the worktree, and the writers of `records/`, belong to the cutover job.
+- **Alternatives:** Resolve the `athena/records` tip and call `load` on it (the tip may be absent locally, and
+  file readers need the worktree anyway). Make `load_current` take no ref (changes behaviour for callers that
+  load another ref). Change `read_records` to take a `Git` (breaks existing tests). Move the gate judges too
+  (they would judge the wrong state).
+- **Tradeoff:** A worktree that is present but stale hides newer in-tree records; keeping it current is the
+  cutover job's work. The worktree counts as present only when its `records/` directory exists.
+- **Reversal cost:** Low: point the two loaders and `records_root` back at HEAD and the checkout.
+- **Provenance:** Read: every non-test hit of the scan on the unmodified tree (about 25 call sites in
+  `athena-core`, `athena-cli` and `xtask`, plus the gate judges). Measured by `records_branch_readers.rs`
+  (worktree against in-tree records, a HEAD with no `records/`, `land_pr`, `athena status`) and by
+  `records_reader_scan` in `xtask`.

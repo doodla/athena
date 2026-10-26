@@ -297,7 +297,7 @@ fn is_json(path: &Path) -> bool {
 /// The parsed records of the files in `records/<kind>/<month>/`, oldest path first.
 pub(crate) fn month_files(root: &Path, kind: &str) -> Result<Vec<(String, Vec<u8>)>> {
     let mut files = Vec::new();
-    for month in children(&root.join("records").join(kind))? {
+    for month in children(&athena_data::paths::records_dir(root).join(kind))? {
         for file in children(&month)? {
             if !is_json(&file) {
                 continue;
@@ -315,7 +315,7 @@ pub(crate) fn month_files(root: &Path, kind: &str) -> Result<Vec<(String, Vec<u8
 /// `records/` reads as empty.
 pub fn read_records(root: &Path) -> Result<Records> {
     let mut records = Records::default();
-    for month in children(&root.join("records/jobs"))? {
+    for month in children(&athena_data::paths::records_dir(root).join("jobs"))? {
         for job_dir in children(&month)? {
             if !job_dir.is_dir() {
                 continue;
@@ -336,7 +336,7 @@ pub fn read_records(root: &Path) -> Result<Records> {
             }
         }
     }
-    for month in children(&root.join("records/interventions"))? {
+    for month in children(&athena_data::paths::records_dir(root).join("interventions"))? {
         for file in children(&month)? {
             if !is_json(&file) {
                 continue;
@@ -357,7 +357,7 @@ pub fn read_records(root: &Path) -> Result<Records> {
     records
         .interventions
         .sort_by(|a, b| (&a.at, &a.id).cmp(&(&b.at, &b.id)));
-    for month in children(&root.join("records/host-errors"))? {
+    for month in children(&athena_data::paths::records_dir(root).join("host-errors"))? {
         for file in children(&month)? {
             if !is_json(&file) {
                 continue;
@@ -1243,7 +1243,7 @@ impl Athena {
     }
 
     fn event_of_job(&self, job: &JobId) -> Result<Option<Event>> {
-        let records = GitRecords::load(&self.git, &self.head()?)?;
+        let records = GitRecords::load_current(&self.git, &self.head()?)?;
         let Some(job_records) = records.jobs.get(job.as_str()) else {
             return Ok(None);
         };
@@ -1280,7 +1280,7 @@ impl Athena {
     }
 
     fn event_of_intervention(&self, id: &RecordId) -> Result<Event> {
-        let records = GitRecords::load(&self.git, &self.head()?)?;
+        let records = GitRecords::load_current(&self.git, &self.head()?)?;
         let i = records
             .interventions
             .iter()
@@ -1311,8 +1311,11 @@ impl Athena {
     pub fn introspect(&self, event: Event, ui: &dyn Ui) -> Result<IntrospectionRecord> {
         let head = self.head()?;
         let root = self.git.dir().to_path_buf();
-        let known = GitRecords::load(&self.git, &head)?;
-        let past = read_records(&root)?;
+        let known = GitRecords::load_current(&self.git, &head)?;
+        let past = read_records(&athena_data::paths::records_root(
+            &self.git.common_dir()?,
+            &root,
+        ))?;
         let cases = narrow_cases(&past, &event);
         let candidates = match &event.intervention {
             Some(id) => match starts_from_history(&root) {
