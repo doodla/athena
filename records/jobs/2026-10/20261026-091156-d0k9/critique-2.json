@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261026-091156-d0k9",
+  "round": 2,
+  "at": "2026-10-26T09:15:12.693568754Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "With no earlier review request, the baseline is recomputed as the current landed count on every call, so the design review never fires.",
+      "evidence": "The plan says the baseline is the 'latest design-review-marked request, else current landed count'. Until a first review request exists, landings since the baseline are always 0, so nothing is ever queued and no first review request can appear. The criterion 4 test only checks that 25 landings with no prior review queue nothing. It never checks that a review fires after 10 further landings, so this bug would pass the test. Fix: Anchor the first baseline to something durable in the records. For example, count landings after the landing that introduced code_health, found from the records or git history. Alternatively, write a baseline marker into the records the first time the hook runs. Add a test step: 25 landings with no prior review queue nothing, then after 10 more the review is queued (and not after 9).",
+      "location": "Plan Decision 2 / Step 5 / Criterion 4 demonstration",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The finished-job hook cannot be driven directly from an athena-cli integration test.",
+      "evidence": "note_finished is pub(crate) and is only called from run.rs:152. It also returns early when self.nested is set, or when the state is not Landed or Rejected. The plan puts the test in crates/athena-cli/tests/code_health_hooks.rs but does not say how that external test reaches this path. Fix: Either test the finished-job hook in a crate-internal module (code_health::hooks, which the reading allows) by calling note_finished with OutcomeState::Landed and nested None, or say which public run path the integration test drives. Put the hook call after the Landed check but before the steward tick, so it does not depend on the cadence.",
+      "location": "Criterion 6 demonstration; crates/athena-core/src/steward.rs:98",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The land_pr test does not say how GitHub is faked.",
+      "evidence": "Athena::land_pr (gh.rs:2455) reads the origin remote and talks to the host. The existing tests in crates/athena-cli/tests/external_calls.rs (around lines 495-509) use a fake host. The plan names only the disk-minimum setting. Fix: Name the fake-host harness reused from external_calls.rs or the gh.rs tests, and assert the structural-pass request exists only after a Landed outcome.",
+      "location": "Criterion 6 demonstration (land_pr)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "A test cannot remove the hook call, so this control is really a mutation argument.",
+      "evidence": "The plan says 'control without the hook call shows none'. Fix: Use as the control the state just before land_pr (no request queued), or a non-Landed outcome that queues none.",
+      "location": "Criterion 6 'control without the hook call'",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read steward.rs, gh.rs and the call sites; I ran no commands. The plan fits the request and reading, and the code it names exists: Athena::land_pr at gh.rs:2455, note_finished at steward.rs:98 (called only from run.rs:152), StatusView in status.rs and Committer::commit_records in commits.rs. syn is already in Cargo.lock. Hooking both paths with an idempotent function is sound. One design flaw needs a revision: when no earlier review request exists, the baseline is recomputed as the current landed count on every call, so the 10-landing cadence can never start. The criterion 4 test would not catch this. Smaller gaps: the finished-job hook test cannot reach the pub(crate) note_finished from athena-cli, and the land_pr test does not say how GitHub is faked."
+}

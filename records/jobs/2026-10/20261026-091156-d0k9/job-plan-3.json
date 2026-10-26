@@ -1,0 +1,273 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261026-091156-d0k9",
+  "round": 3,
+  "at": "2026-10-26T09:15:41.37815323Z",
+  "invocation_seq": 6,
+  "approach": "Add a pure code_health module in athena-core: measure tracked .rs files (production lines cut at the #[cfg(test)] mod, longest fn via syn, 7-day landings and failure/rejection citations from records, suite time from the latest passing test CheckRun). Thresholds are constants. StatusView gets a code_health field and display::status renders an aligned table. An idempotent Athena::after_landing queues one structural-pass request per breaching file (marker-line dedupe) and a high-priority self-contained design-review request every 10 landings. The review baseline is anchored durably: the latest design-review-marked request if one exists; otherwise the first run of the hook commits a design-review baseline request-less marker record (a records file \"code-health baseline\" carrying the landed count) and later calls count from it. Hook is called at the end of land_pr (Landed) and in note_finished right after the Landed check, before the steward tick. Hook failures only warn.",
+  "decisions": [
+    {
+      "choice": "Anchor the first review baseline with a records-committed baseline marker written the first time the hook runs (landed count at that time), via Committer::commit_records; the baseline is the later of the latest design-review request and this marker.",
+      "reason": "Survives state loss (lives in records), never fires on pre-existing history, and unlike a recomputed 'current count' it persists so landings after it accumulate to 10 (answers finding 1).",
+      "rejected": [
+        {
+          "option": "Baseline = current landed count recomputed each call",
+          "why": "Landings since baseline is always 0; review never fires."
+        },
+        {
+          "option": "Counter file in state dir",
+          "why": "Lost with state."
+        },
+        {
+          "option": "Count from zero",
+          "why": "Fires at once on history, forbidden by criterion 4."
+        }
+      ]
+    },
+    {
+      "choice": "Measure function length with syn (full) and proc-macro2 span-locations; record the call in docs/decisions.md.",
+      "reason": "buy-first; exact spans, handles nested fns and impl methods.",
+      "rejected": [
+        {
+          "option": "Hand-rolled brace counting",
+          "why": "Breaks on braces in strings, comments, raw strings."
+        },
+        {
+          "option": "clippy::too_many_lines",
+          "why": "Pass/fail only; no numbers for table or queue."
+        }
+      ]
+    },
+    {
+      "choice": "One idempotent after_landing function called from land_pr (Landed) and from note_finished immediately after its Landed/Rejected check and before the steward tick.",
+      "reason": "Both landing paths covered; dedupe makes double calls harmless; independent of steward cadence (finding 2).",
+      "rejected": [
+        {
+          "option": "Only note_finished",
+          "why": "land_pr route never reaches it."
+        }
+      ]
+    },
+    {
+      "choice": "Test the finished-job hook in a crate-internal module code_health::hooks (in code_health.rs or a sibling test file) calling note_finished with OutcomeState::Landed and nested None; also assert a nested run and a Rejected state do not queue. code_health_hooks.rs drives only the public land_pr path.",
+      "reason": "note_finished is pub(crate), unreachable from athena-cli tests.",
+      "rejected": [
+        {
+          "option": "Drive note_finished from the CLI integration test",
+          "why": "Not reachable."
+        }
+      ]
+    },
+    {
+      "choice": "Hook errors become ui warnings, never failures.",
+      "reason": "The landing is already merged.",
+      "rejected": [
+        {
+          "option": "Propagate with ?",
+          "why": "Would report a done landing as failed."
+        }
+      ]
+    },
+    {
+      "choice": "Table header built from the same width constants as rows.",
+      "reason": "Aligns columns to labels; testable by offset.",
+      "rejected": [
+        {
+          "option": "Hand-typed header",
+          "why": "Drifts from rows."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/code_health.rs",
+      "action": "create",
+      "purpose": "Measurement, thresholds, queueing, baseline marker, after_landing, unit and hooks tests.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "purpose": "Declare pub mod code_health.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "Add code_health field to StatusView.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "action": "modify",
+      "purpose": "Call after_landing at end of land_pr when Landed; warn only.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/steward.rs",
+      "action": "modify",
+      "purpose": "Call hook in note_finished after the Landed check, before steward tick.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "purpose": "Only if needed to pass the finished job to the hook.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/Cargo.toml",
+      "action": "modify",
+      "purpose": "Add syn (full) and proc-macro2 (span-locations).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "Cargo.lock",
+      "action": "modify",
+      "purpose": "Lock added dependencies.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "purpose": "Aligned code-health table with thresholds and suite time; render test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/code_health_hooks.rs",
+      "action": "create",
+      "purpose": "Integration test of the land_pr path.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased entry.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Record thresholds, syn call, 10-landing cadence.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Add syn (full) and proc-macro2 (span-locations) to athena-core Cargo.toml; update Cargo.lock via cargo build.",
+    "Write code_health.rs constants, FileHealth, production-line count and syn longest-fn.",
+    "Add record-derived inputs: landings in window with changed files, citations, suite time.",
+    "Add queue_structural_passes with marker dedupe via Committer::commit_records.",
+    "Add design-review logic: baseline marker record, latest-review lookup, 10-landing check, self-contained High-priority text.",
+    "Add Athena::after_landing; call from land_pr (Landed) and note_finished (after Landed check, before steward tick); warn on error.",
+    "Add StatusView field and aligned table in display.rs from shared width constants.",
+    "Write unit tests, code_health::hooks tests, display test and code_health_hooks.rs.",
+    "Write CHANGELOG.md and docs/decisions.md entries.",
+    "Run cargo fmt --all --check, cargo clippy --all-targets --locked -- -D warnings, cargo test --locked."
+  ],
+  "risks": [
+    {
+      "risk": "Records may not list changed files per job.",
+      "mitigation": "Use git diff-tree on the candidate commit; count nothing if absent, with a test."
+    },
+    {
+      "risk": "Hook's records commit races with landing's own writes.",
+      "mitigation": "Run after merge and records are done, via Committer; errors only warn."
+    },
+    {
+      "risk": "syn fails to parse a file or is slow.",
+      "mitigation": "Parse once; list unparseable files as unmeasured."
+    },
+    {
+      "risk": "Baseline marker write fails, so review never fires.",
+      "mitigation": "Warn; next call retries; test covers marker persistence."
+    },
+    {
+      "risk": "Low-disk guard fails landing tests.",
+      "mitigation": "Set disk minimum to 0 in new tests as 3947eb3 does."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit test builds a temp tree with a fixture .rs file (production code, a #[cfg(test)] mod, one long fn) and fixture records (landed jobs inside/outside 7 days, a rejected and a failed job citing the file); asserts exact numbers.",
+      "command": "cargo test --locked -p athena-core code_health",
+      "observes": "Production lines exclude the test module; longest fn equals fixture length; weekly landings count only in-window jobs; citations count failed and rejected jobs.",
+      "fails_without": "No cfg(test) cutoff gives a too-high count; no 7-day filter counts the old landing."
+    },
+    {
+      "criterion": 2,
+      "method": "Table-driven: 2001-line file, 201-line fn, 1501 lines with 5 weekly landings, 1501 lines with 4, a small file.",
+      "command": "cargo test --locked -p athena-core code_health::tests::thresholds",
+      "observes": "First three reported with reason; the 4-landing and small files not flagged.",
+      "fails_without": "A removed threshold leaves its case unreported; an over-eager rule flags the clean file."
+    },
+    {
+      "criterion": 3,
+      "method": "Temp git repo with records: queue after a breach; call again; call with an open request carrying the marker (control: zero requests before the first call).",
+      "command": "cargo test --locked -p athena-core code_health::tests::structural_pass",
+      "observes": "Exactly one athena.request/1 citing path, lines, longest fn, weekly landings; zero added on second call and when an open request exists.",
+      "fails_without": "Without dedupe the second call adds a request."
+    },
+    {
+      "criterion": 4,
+      "method": "Case A: 25 landed jobs, no review request: hook queues nothing but writes the baseline marker; add 9 landings: nothing; 10th: one High-priority request; then 9 more: nothing. Case B: review request then 9 landings nothing, 10th queues.",
+      "command": "cargo test --locked -p athena-core code_health::tests::design_review_cadence",
+      "observes": "No fire on history; fires at exactly 10 after baseline, not 9; a rerun at 10 does not double-queue.",
+      "fails_without": "Recomputed-each-call baseline never fires (case A fails at 10th); off-by-one fails 9/10 asserts; from-zero fires at once."
+    },
+    {
+      "criterion": 5,
+      "method": "Read queued review text and assert each required phrase.",
+      "command": "cargo test --locked -p athena-core code_health::tests::design_review_text",
+      "observes": "Names code-health table, files most changed and most broken since last review, open structural-pass requests, recent rejections and planning stops; asks for a short design note with proposed changes as a design-only job.",
+      "fails_without": "Any missing item fails its phrase assert."
+    },
+    {
+      "criterion": 6,
+      "method": "CLI integration test drives Athena::land_pr with the fake host/runner pattern already used in crates/athena-cli/tests/external_calls.rs and the gh.rs tests (disk minimum 0 as in 3947eb3) over a repo with an over-threshold file. Control: before land_pr no structural-pass request exists, and a non-Landed outcome queues none. Internal hooks test calls note_finished(Landed, nested None) and asserts a request; Rejected and nested queue none.",
+      "command": "cargo test --locked -p athena-cli --test code_health_hooks && cargo test --locked -p athena-core code_health::hooks",
+      "observes": "Request appears only after a Landed outcome, from each path.",
+      "fails_without": "Removing the hook call from land_pr or note_finished leaves no request, so the post-landing assertion fails."
+    },
+    {
+      "criterion": 7,
+      "method": "Render display::status with a StatusView holding code-health rows and suite time; assert contents and that each header label starts at the same column as its values.",
+      "command": "cargo test --locked -p athena-cli display",
+      "observes": "Lines, longest fn, weekly landings, citations, thresholds, over flag and suite run time present; header offsets match.",
+      "fails_without": "Missing section or misaligned header fails the asserts."
+    },
+    {
+      "criterion": 8,
+      "method": "Run cargo fmt --all --check, cargo clippy --all-targets --locked -- -D warnings, cargo test --locked; cite as run.",
+      "command": "cargo fmt --all --check",
+      "observes": "All three exit 0.",
+      "fails_without": "Unformatted code, a clippy warning, or any broken behavior in criteria 1-7 fails a gate."
+    },
+    {
+      "criterion": 9,
+      "method": "Inspect the diff.",
+      "command": "git diff -- CHANGELOG.md docs/decisions.md",
+      "observes": "CHANGELOG Unreleased has a code-health entry; decisions.md records the three thresholds, the syn-versus-hand-rolled call, and the 10-landing cadence with the baseline marker.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Whether Candidate/Verification records list changed files directly (else git diff-tree on the candidate commit).",
+    "Whether the workspace Cargo.toml lists syn/proc-macro2 under workspace dependencies.",
+    "Exact fake-host harness shape in gh.rs tests versus external_calls.rs (PagesFake is a Runner fake there)."
+  ],
+  "producer_section_sha256": "fe7762443e04e2aa46a0f1ba138980d6549d65a7728605984882abe5dd00c5ab"
+}
