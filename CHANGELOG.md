@@ -7,6 +7,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- The full `cargo test --locked` runs faster with no change in behavior. The secret scanner
+  (`Gitleaks::scan_text`) remembers its findings for identical text within one process, keyed by the
+  gitleaks binary, the generated configuration and the exact text (at most 256 entries, texts up to 64 KiB,
+  successful scans only), so the same text is no longer scanned again. `run_check` polls a running check
+  after 5 ms at first, doubling up to the old 200 ms, so a short check is noticed sooner. Completion,
+  deadline and kill-switch handling are unchanged. `docs/decisions.md` (D126) records the reasoning and the measured test times (about 651 s before, about 392 s after).
+
 ### Added
 
 - A producer that reaches its deadline no longer loses its work. The invocation now ends `timed_out` (new

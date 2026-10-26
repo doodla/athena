@@ -1,0 +1,160 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261025-230352-ph40",
+  "round": 1,
+  "at": "2026-10-25T23:04:55.867957862Z",
+  "invocation_seq": 2,
+  "approach": "In secrets.rs, add a process-wide bounded memo (static Mutex<HashMap>) used by Gitleaks::scan_text. The key is (binary path, generated config text, exact text), so a different allow-list or binary never shares results. Only Ok results are stored, and oversized texts are not cached. The existing scan becomes a private uncached method so tests can compare against it. In checks.rs, replace the fixed 200 ms sleep with a delay that starts at 5 ms, doubles each poll and caps at 200 ms. The deadline, kill-switch and try_wait logic stay as they are. Add tests. Then measure cargo test --locked on the base (stash the two code changes, or run the timing first) and again on the final tree. Record both in a new decisions.md entry, and add a CHANGELOG entry.",
+  "decisions": [
+    {
+      "choice": "Key the memo by binary path, generated config text and exact text, and store the findings Vec.",
+      "reason": "The findings depend on the allow-list config, so a text-only key could return stale results after a config change. Exact keys cannot collide, so different text can never return another text's findings.",
+      "rejected": [
+        {
+          "option": "Key by a 64-bit hash of the text",
+          "why": "A collision could return the wrong findings, and the criterion says never."
+        },
+        {
+          "option": "Memo field inside Gitleaks",
+          "why": "Callers may construct a new Gitleaks per scan, so it may not give the hit rate; it is also per instance, not per process. The producer should check callers of scan_text."
+        }
+      ]
+    },
+    {
+      "choice": "Cache only Ok results; skip texts over 64 KiB; cap at 256 entries and clear the map when full.",
+      "reason": "A transient gitleaks error must not stick. The caps keep memory bounded and the logic simple.",
+      "rejected": [
+        {
+          "option": "LRU crate",
+          "why": "A new dependency for a small need; this would also change Cargo.lock, which is outside the four files."
+        }
+      ]
+    },
+    {
+      "choice": "Exponential poll backoff from 5 ms to a 200 ms cap, never sleeping past the deadline.",
+      "reason": "Short checks finish with small latency. Long checks poll at the same rate as before. Completion and timeout semantics are unchanged.",
+      "rejected": [
+        {
+          "option": "A fixed 10 ms poll",
+          "why": "It adds needless wakeups on long checks."
+        },
+        {
+          "option": "Blocking wait on a thread",
+          "why": "A larger change to the kill-switch handling."
+        }
+      ]
+    },
+    {
+      "choice": "Cite nextest (584 s vs 673 s) as a prior measurement, rejected because the gain is smaller and it adds a tool and a different runner. State the method and machine of this job's own timings.",
+      "reason": "The request asks for this. Prior numbers must be labelled as prior, not as this job's.",
+      "rejected": [
+        {
+          "option": "Adopt nextest",
+          "why": "Out of scope and a governance change."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-gate/src/secrets.rs",
+      "action": "modify",
+      "purpose": "Add the bounded memo, split out scan_text_uncached, and add the memo test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/checks.rs",
+      "action": "modify",
+      "purpose": "Add the backoff poll schedule and the completion and timeout tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "New decision with the measured before and after times and nextest as a rejected alternative.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased entry for both changes.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read the callers of scan_text and the testutil helpers (fake_token).",
+    "Run cargo test --locked on the untouched tree, timing it (for example with the shell's time), and note the machine and date.",
+    "Edit secrets.rs: add the static memo, make scan_text consult it, and add the private scan_text_uncached, with the memo test.",
+    "Edit checks.rs: add the backoff delay, capped at the remaining time and 200 ms, plus the three tests.",
+    "Run cargo fmt, clippy -D warnings and cargo test -p athena-gate and -p athena-core checks.",
+    "Run the full cargo test --locked, timed, on the final tree.",
+    "Add the decisions.md entry (next free D number) with both timings, the method, the prior figures labelled, and nextest rejected.",
+    "Add the CHANGELOG.md Unreleased entry.",
+    "Check git diff: only added tests, only the four files."
+  ],
+  "risks": [
+    {
+      "risk": "Cross-test interference through the shared static memo, for example tests that count gitleaks runs.",
+      "mitigation": "The key includes the config and binary. The new test uses its own distinct texts. The memo changes no results."
+    },
+    {
+      "risk": "Before and after timings are noisy.",
+      "mitigation": "State the method and the number of runs. Report the measured values as they are, and note the variance."
+    },
+    {
+      "risk": "Shorter polling adds CPU wakeups.",
+      "mitigation": "The backoff reaches the old 200 ms cadence after about 6 polls."
+    },
+    {
+      "risk": "The memo holds findings, which include secrets.",
+      "mitigation": "The findings stay in process memory only and are never written out. The cache is bounded."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "A new unit test in secrets.rs clears the memo. It calls scan_text twice on a token text (fake_token) and compares both results to scan_text_uncached. It then scans clean text, which must be empty, and scans the token text again, which must match again. It also checks that a different config does not share entries.",
+      "command": "cargo test -p athena-gate",
+      "observes": "The memoized and fresh findings are equal, and the clean text returns no findings after the secret-bearing text.",
+      "fails_without": "If the key ignored the text or the config, the clean text would return the token findings and the test would fail."
+    },
+    {
+      "criterion": 2,
+      "method": "Three new tests in checks.rs use run_check. They run 'exit 0' (fast completion, passed, no deadline note). They run 'sleep 1' with a 30 s timeout (slow completion, passed). They run 'sleep 30' with a 300 ms timeout (exit_code None, not passed, note contains 'deadline', and elapsed is well under 30 s).",
+      "command": "cargo test -p athena-core checks",
+      "observes": "Status, exit code and note are correct for each case.",
+      "fails_without": "If the backoff skipped try_wait or the deadline check, the completion or timeout assertions would fail or hang."
+    },
+    {
+      "criterion": 3,
+      "method": "Time cargo test --locked on the base tree before editing code, then on the final tree, on the same machine. Record the wall times, command, and the machine and date in the new decisions.md entry. Cite the earlier jobs' figures and nextest as labelled prior measurements. Read the entry with git diff.",
+      "command": "git diff docs/decisions.md",
+      "observes": "The entry has before and after wall times labelled measured, a stated method, and nextest 584 s vs 673 s as a prior measurement under rejected alternatives with its reason.",
+      "fails_without": null
+    },
+    {
+      "criterion": 4,
+      "method": "Run the full checks and inspect the diff for removed or altered test lines.",
+      "command": "cargo test --locked",
+      "observes": "All tests pass. cargo clippy --all-targets --locked -- -D warnings and cargo fmt --all --check are clean. git diff shows only added test lines.",
+      "fails_without": "If the memo or the poll changed behavior, existing tests such as the baseline timeout test or the gate tests would fail."
+    },
+    {
+      "criterion": 5,
+      "method": "Check the changed file list and the CHANGELOG diff.",
+      "command": "git status",
+      "observes": "Only the four listed files are modified, and CHANGELOG.md has an Unreleased entry for both changes.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Whether the producer's environment can run the full cargo test --locked, and how long it takes. If not, the decision must say so and give no invented numbers.",
+    "Whether callers create one Gitleaks per scan. A process-wide static handles that either way.",
+    "The gitleaks binary is needed for the secrets tests. The existing tests already depend on it."
+  ],
+  "producer_section_sha256": "63edb9a7c2e7bbae434b504a7acbbb572cae7cd4a7eb05c4d73a712691245548"
+}
