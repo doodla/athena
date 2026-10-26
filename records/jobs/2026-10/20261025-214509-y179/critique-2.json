@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261025-214509-y179",
+  "round": 2,
+  "at": "2026-10-25T21:49:06.5231569Z",
+  "invocation_seq": 6,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "A global cfg(test) hit counter makes the memo tests flaky when tests run in parallel.",
+      "evidence": "A process-wide cfg(test) hit counter is shared by every test in the athena-gate unit-test binary. Those tests run in parallel by default, and other secrets tests also call scan_log or scan_staged. So 'counter rises' and 'counter stays flat' assertions can pass or fail depending on timing. Fix: Count hits per key, or give the tests a way to read hits for their own repo and range (for example, filter by git dir). Assert on that count, not on a global total.",
+      "location": "Plan Decision 1 / Demonstration for criterion 4 (b),(c); crates/athena-gate/src/secrets.rs",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The memo key does not say what happens when log_opts contains flags rather than revs.",
+      "evidence": "scan_log passes log_opts straight through as --log-opts=... (secrets.rs:194). log_opts can hold git-log flags such as --all or --since, whose meaning depends on refs or time and has no rev to resolve. Fix: State that the memo caches only when log_opts is made up entirely of rev or range tokens (A, A..B, ^A) that all resolve to full ids. Anything else, including any token starting with '-', skips the cache. Add one test with a flag-bearing log_opts that shows no hit.",
+      "location": "Plan Decision 1 (key: log_opts with each rev resolved)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Swapping a binary spawn for a library call can quietly drop CLI coverage.",
+      "evidence": "These are CLI integration tests that run the real binary (common/mod.rs:257). Swapping a spawn for a library call keeps the assertions but drops coverage of argument parsing, environment handling and process exit codes. Criterion 3 forbids weakening tests. Fix: Allow this only where another test still covers the same command through the binary. List each such swap and what still covers it in the decision, or drop this candidate.",
+      "location": "Plan Decision 3 (test-side candidate: calling the library directly instead of spawning)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Nothing confirms the temporary failing test was removed.",
+      "evidence": "The temporary failing test is added and then removed. Nothing checks that the removal happened, apart from the final diff. Fix: After removing it, check that `git diff --stat` shows no stray test file and that the final passed count equals the count measured before the temporary test was added.",
+      "location": "Plan Step 6 / Demonstration for criterion 5",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the code at the places the plan names. Gitleaks::command is at secrets.rs:118. It runs from an empty `ignore` dir, passes --config and --gitleaks-ignore-path, and removes the GIT_* and GITLEAKS_CONFIG variables. scan_log (secrets.rs:191) is a thin wrapper. run_check (checks.rs:204) sleeps a fixed 200 ms each poll. common/mod.rs:257 starts the athena binary as a separate process. So the plan's main premises hold: the memo key inputs, the 200 ms poll, and its own warning that a memo inside one process may save little. The plan matches the request and the accepted reading. It keeps the decided approach (no nextest), measures before cutting, and limits production edits to secrets.rs and checks.rs (run.rs only in its tests module). It sets a 420 s budget rule for test-side changes. Every criterion has a demonstration that runs something and would fail without the behavior. There are no athena.toml changes. The remaining issues are minor: a global hit counter that tests running in parallel can disturb, log_opts that are flags rather than revs, and the \"call the library instead of spawning\" option, which could quietly drop CLI coverage."
+}

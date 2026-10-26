@@ -3134,3 +3134,38 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   the pull_request run satisfies the required check). Read: `.github/workflows/ci.yml`,
   `crates/athena-core/src/gh.rs` (`early_run_wait`, `wait_for_early_run`, `EARLY_RUN_JOB`). Not measured: the
   timings, and the outcome above.
+
+## D126 · Secret scans of identical text are remembered, and a running check is polled sooner
+
+- **Case:** The test suite scans the same text with gitleaks many times, and `run_check` slept a fixed 200 ms
+  between polls, so every short check waited up to 200 ms after it had finished. Three earlier attempts (jobs
+  20261025-190606-eebk, 20261025-202447-xgk9, 20261025-214509-y179) made these two changes and were rejected
+  only for missing a fixed time target.
+- **Decision:** (1) `Gitleaks::scan_text` keeps a process-wide memo of its successful results. The key is the
+  gitleaks binary path, the generated configuration text and the exact scanned text, so different text or a
+  different allow-list never shares an entry. Texts over 64 KiB are not remembered, the memo is cleared at 256
+  entries, and a failed scan is never stored. (2) `run_check` polls after 5 ms, doubling each time up to the
+  old 200 ms, and never sleeps past the deadline. Completion, deadline and kill-switch handling are unchanged.
+  Tests: `the_text_memo_returns_what_a_fresh_scan_returns_and_never_another_texts` and
+  `the_poll_schedule_detects_fast_and_slow_completion_and_a_timeout`. No existing test was changed.
+- **Timings (measured on this job's machine, 2026-10-25):** Method: `cargo test --locked --quiet` run once
+  per variant on an already built tree, and the `finished in` times that cargo test prints for each test
+  binary were added up. This sums test execution time per binary and leaves out build time and the gaps between
+  binaries; there is no stopwatch in this job's tools, so it is not a wall clock reading. The "before" variant
+  was the same tree with the two changes switched off (the memo bypassed, the first poll delay set back to
+  200 ms), restored afterwards. Result: **about 651 s before, about 392 s after** (all tests passed in both
+  runs, none removed, ignored or filtered). One run each, so there is run-to-run noise; the largest gains are
+  in the binaries that run many checks and scans (for example 172.5 s to 87.6 s, and 78.3 s to 35.9 s).
+  Prior measurements from the earlier attempts, not this job's: Athena's test check took 444 to 466 s after
+  the changes against about 720 s before.
+- **Alternatives:** (a) Adopt `cargo nextest`: rejected. A prior measurement (not this job's) was 584 s against
+  673 s for `cargo test`, a smaller gain than these two changes, and it adds a tool and a different runner to
+  the governed checks. (b) Key the memo by a hash of the text: rejected, a collision could return the wrong
+  findings. (c) A fixed 10 ms poll: rejected, it adds wakeups on long checks.
+- **Tradeoff:** The memo holds findings, which may contain secrets, in process memory for the life of the
+  process; they are never written out, and the memo is bounded. More wakeups happen in the first second of a
+  check. The timings are single runs summed per binary, so treat the gain as approximate.
+- **Reversal cost:** Low. Remove the memo and restore the fixed sleep.
+- **Provenance:** stated: the request. Measured: `cargo test -p athena-gate secrets` and
+  `cargo test -p athena-core checks` pass; the before and after times above (summed per-binary times, one run
+  each). Not measured: true wall-clock time including build.

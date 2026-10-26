@@ -1,0 +1,222 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261025-214509-y179",
+  "round": 1,
+  "at": "2026-10-25T21:46:49.472244765Z",
+  "invocation_seq": 3,
+  "approach": "Measure first, then cut. Run each slow binary (lifecycle, job_plan, drain, retry, steward) with `cargo test --locked --test <name>` for before times, and find per-binary causes from per-test timings (`-- --report-time` is unstable, so use the harness's finished line plus temporary timing in a scratch run). Likely causes, to be confirmed: repeated gitleaks process launches over identical git ranges (check_history, check_commit, redaction) and the 200 ms run_check poll sleep. Add (1) a process-wide memo in secrets.rs `Gitleaks::scan_log`, keyed by generated config text, binary path, git dir and the range resolved to full object ids, storing only Ok results; (2) a shorter poll schedule in run_check (start at 5 ms, double to a 200 ms cap) so quick checks return fast while long checks poll as before; deadline and kill-switch checks stay on every iteration. Then fix any remaining test-side fixture cost found by measurement in tests/common/mod.rs and the five binaries without removing or weakening tests. Record before/after in docs/decisions.md, add a CHANGELOG entry, and run the full suite, clippy, fmt.",
+  "decisions": [
+    {
+      "choice": "Memoize scan_log results only when the range resolves to immutable object ids (full SHAs, via git rev-parse of each side), keyed with config text, binary path and git dir.",
+      "reason": "Commits are content-addressed, so the same ids under the same config always give the same findings; branch names like HEAD are resolved first so a moved ref misses. This keeps results equal to uncached scanning.",
+      "rejected": [
+        {
+          "option": "Key on the raw log_opts string",
+          "why": "HEAD or a branch name changes meaning over time; a stale hit would hide a secret."
+        },
+        {
+          "option": "Memoize scan_text too",
+          "why": "Texts are unbounded and mostly unique, so hits are rare and memory grows; add only if measurement shows hits."
+        },
+        {
+          "option": "Skip gitleaks in tests via an env switch",
+          "why": "Weakens the secrets path the tests exercise."
+        }
+      ]
+    },
+    {
+      "choice": "Poll schedule: 5 ms doubling to a 200 ms cap, deadline and kill switch checked each iteration; sleep never exceeds the time left to the deadline.",
+      "reason": "Fast checks (most test checks are `sh -c` exits) finish in ms instead of waiting up to 200 ms; long checks cost the same as before.",
+      "rejected": [
+        {
+          "option": "Fixed shorter interval (e.g. 20 ms)",
+          "why": "Constant wakeups on hour-long real test checks."
+        },
+        {
+          "option": "Blocking wait on a thread",
+          "why": "Larger change, and risks kill-switch behavior."
+        }
+      ]
+    },
+    {
+      "choice": "Do not adopt nextest or sccache; record them in the decision as rejected/considered with the brain's numbers (compile 67 s vs run 673 s; nextest 0.9.148 584 s vs 673 s, about 13%; sccache D79; shared target dir).",
+      "reason": "Brief puts them out of scope; compile is only 67 s so run time is the target.",
+      "rejected": [
+        {
+          "option": "cargo-nextest",
+          "why": "Only about 13% (brain-measured), misses the 7-minute goal alone and adds a tool pin."
+        },
+        {
+          "option": "sccache / shared target dir",
+          "why": "Compile is 67 s of the total; little to gain."
+        }
+      ]
+    },
+    {
+      "choice": "Touch run.rs and test files only if measurement names them as a cause; otherwise leave them unchanged.",
+      "reason": "Small-change default; the deliverable list is a ceiling, and production changes are limited to two files.",
+      "rejected": [
+        {
+          "option": "Edit all listed files regardless",
+          "why": "Changes without a measured cause."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-gate/src/secrets.rs",
+      "action": "modify",
+      "purpose": "Process-wide memo for scan_log over resolved immutable ranges, plus tests that it equals uncached scanning.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/checks.rs",
+      "action": "modify",
+      "purpose": "Shorter, capped-doubling poll schedule in run_check, plus tests for completion, failure, timeout and fast return.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "New decision with measured per-binary times, causes, rejected/considered options.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Entry under Unreleased.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/common/mod.rs",
+      "action": "modify",
+      "purpose": "Only if measurement shows shared fixture cost; no test weakened.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "purpose": "Only if measured cause is test-side (e.g. redundant repeated history checks reorganized without dropping assertions).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/job_plan.rs",
+      "action": "modify",
+      "purpose": "Same, only if measured.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Same, only if measured.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/retry.rs",
+      "action": "modify",
+      "purpose": "Same, only if measured.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/steward.rs",
+      "action": "modify",
+      "purpose": "Same, only if measured.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "purpose": "Only if measurement shows a cause there; production changes are otherwise limited to two files.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Record base times: run `cargo test --locked --test <name>` for lifecycle, job_plan, drain, retry, steward and the full `cargo test --locked`; note passed counts. Find each binary's cause (e.g. count gitleaks launches and run_check sleeps).",
+    "Implement the scan memo in secrets.rs (resolve range ends to ids, static Mutex<HashMap<key, Vec<Finding>>>, hit counter for tests) and its tests.",
+    "Implement the poll schedule in checks.rs and its tests (completion, failure, timeout, fast return).",
+    "Re-measure; apply test-side or run.rs fixes only where a measured cause remains, with no test removed or weakened.",
+    "Write the decision in docs/decisions.md (next free D number) with measured before/after, causes, total, and the brain's figures with rejected/considered options; add the CHANGELOG entry.",
+    "Run cargo fmt --all --check, cargo clippy --all-targets --locked -- -D warnings, and cargo test --locked; confirm test count not lower and total under 7 minutes."
+  ],
+  "risks": [
+    {
+      "risk": "A stale memo hides a secret.",
+      "mitigation": "Cache only when both range ends resolve to full object ids; key includes config text and git dir; never cache Err; tests cover a moved ref and a later token."
+    },
+    {
+      "risk": "Parallel tests share the process-wide memo and contend or poison the lock.",
+      "mitigation": "Use a Mutex<HashMap> and compute outside the lock or accept duplicate work; tests use unique temp git dirs."
+    },
+    {
+      "risk": "Faster polling raises CPU use or changes timeout timing.",
+      "mitigation": "Cap at 200 ms as before and keep the deadline check every iteration; clamp sleeps to the time remaining."
+    },
+    {
+      "risk": "The two changes alone miss the 7-minute goal.",
+      "mitigation": "Measure at the end; if over, apply measured test-side fixes without removing tests, and report the result honestly."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Producer runs each binary at base and after the change under the same conditions and writes the 'finished in' times into the decision, labeled measured, with the cause for each and the total. Inspect docs/decisions.md with git diff.",
+      "command": "cargo test --locked --test lifecycle; cargo test --locked --test job_plan; cargo test --locked --test drain; cargo test --locked --test retry; cargo test --locked --test steward; cargo test --locked",
+      "observes": "The new decision lists five binaries with before/after seconds, a cause each, and the total suite time, matching the logged test output.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Read the added decision text.",
+      "command": "git diff docs/decisions.md",
+      "observes": "It states compile 67 s vs run 673 s (brain-measured, 4 cores), lists nextest 0.9.148 (584 s vs 673 s, about 13%) as rejected, lists sccache (D79) and a shared target dir as considered, and every other number is one the job measured and labeled.",
+      "fails_without": null
+    },
+    {
+      "criterion": 3,
+      "method": "Check the diff has no removed #[test], no #[ignore], no filter, no weaker asserts; compare the 'N passed' totals from cargo test --locked before and after (not lower); confirm athena.toml, ci.yml and tool pins are absent from the diff and CHANGELOG.md has an entry.",
+      "command": "git diff --stat",
+      "observes": "Diff touches only deliverables; test count after is at least before plus the new tests.",
+      "fails_without": null
+    },
+    {
+      "criterion": 4,
+      "method": "New unit tests in secrets.rs (memo result equals uncached result for clean and token commits, hit count increments on repeat, a moved ref misses, errors are not cached) and in checks.rs (completion, failure, timeout still detected, and a quick check returns in well under 200 ms). git diff --stat shows production changes only in those two files.",
+      "command": "cargo test --locked -p athena-gate secrets; cargo test --locked -p athena-core checks",
+      "observes": "The new tests pass; the production diff is limited to secrets.rs and checks.rs.",
+      "fails_without": "Memo test: a scan of the same range compared with a fresh uncached scan (new Gitleaks instance / cache bypass) would differ or the second call would not hit the memo; a token added in a later commit must still be found at the new tip. Poll test: with a spec that exits 0, exits 3, and sleeps past a short timeout, a poll that missed completion, failure or timeout would fail these assertions."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the full suite on the job's machine and read total wall time and per-binary results.",
+      "command": "cargo test --locked",
+      "observes": "Exit 0, no ignored or filtered tests, test count not lower than base, total wall time under 7 minutes.",
+      "fails_without": "If the memo or poll change broke checks, or a test were skipped, the run would fail or the 'N passed' count would drop; a deliberately failing test (temporary, not committed) makes the run exit non-zero."
+    },
+    {
+      "criterion": 6,
+      "method": "Run both commands.",
+      "command": "cargo clippy --all-targets --locked -- -D warnings; cargo fmt --all --check",
+      "observes": "Both exit 0 with no output of warnings or diffs.",
+      "fails_without": "A warning or unformatted code would make either command exit non-zero."
+    }
+  ],
+  "open_questions": [
+    "The causes of slowness in each binary are not yet measured; I read only secrets.rs, checks.rs and common/mod.rs, not the five test binaries. The producer must measure before choosing test-side edits.",
+    "Whether Git exposes a rev-parse helper returning output (used to resolve ranges to ids); the producer must check athena_git::Git.",
+    "Whether the job's machine total reaches under 7 minutes with only these two changes; if not, test-side parallelism or fixture sharing is needed, which this plan leaves to measurement.",
+    "run.rs is a listed deliverable but the criteria limit production changes to two files; I assume it is touched only for tests."
+  ],
+  "producer_section_sha256": "05e3c65f82a7f5135e9a780eb501adbad41b586b568e9613b13e79347b9a54e5"
+}

@@ -1,0 +1,32 @@
+{
+  "schema": "athena.introspection/1",
+  "id": "20261025-214446-90aw",
+  "at": "2026-10-25T21:44:46.757289555Z",
+  "trigger": "intervention",
+  "job": null,
+  "intervention": "20261025-214444-69eb",
+  "class_of_work": "build",
+  "category": "fixed-environment",
+  "what_happened": "The disk reached 100% at 21:41 on 2026-10-25 while job 20261025-202447-xgk9 was writing its verdict. That job's state held a 16 GB target directory. The repository's own target/debug held another 12 GB left by the brain's timing runs. The verifier's failing verdict was lost. An operator freed 28 GB by deleting the repository's target/debug, the job's target, and two stale scratch worktrees. The operator also made the disk-space guard request (qfax) urgent.",
+  "failure_class": "20261016-051427-3r97",
+  "new_class": false,
+  "earlier_cases": [
+    "20261016-053016-cr33"
+  ],
+  "decisions_matched": [],
+  "cause": "Nothing in Athena owns disk lifecycle or budget. One job's build can need about 16 GB against a session allowance of about 39 GB. Build caches, scratch worktrees and timing-run output are never cleaned or counted against that allowance. No pre-flight free-space check runs before a job or verification, and no guard stops a second consumer from taking the remaining space. A full disk can therefore hit at any step, including the final write of a verdict, and that verdict is lost. The earlier incident on 2026-10-16 showed the same gap, but the fix stayed a queued request and was not treated as urgent.",
+  "prevention_kind": "code-check",
+  "prevention": "Add a disk-space guard in code with three parts. (1) Before a job starts, and before verification and verdict writing, require a minimum free-space margin. If the margin is missing, pause the job as 'environment unusable', not as a rejection. (2) Clean regenerable build artifacts (target directories, scratch worktrees) of finished jobs, and cap the total across concurrent jobs and the repository's own target. (3) Write the verdict first, or reserve space for it, so a full disk cannot lose it. Mark a job interrupted by low disk as retryable.",
+  "proposed_request": "Build a disk-space guard for Athena. Outcome: a full disk never loses a verdict or wrongly rejects a job. (1) Before a job starts, before verification starts, and before a verdict is written, check free space against a configurable minimum (default about 20 GB). If it is below the minimum, hold the job as environment-blocked (retryable, not rejected) and report the reason. (2) Remove regenerable build artifacts (cargo target directories and scratch worktrees) of finished or closed jobs, and of stale scratch worktrees, automatically. Keep the total across concurrent jobs and the repository's own target/debug within the session allowance (about 39 GB). (3) Reserve space for, or write first, the verdict file, so the verdict survives a full disk. Acceptance: a test with a simulated low-space reading shows the job held as retryable and not rejected; a test shows finished-job target directories are removed; a test shows the verdict is persisted when free space is near zero. Run this ahead of other queued work (it is urgent: qfax).",
+  "evidence": {
+    "model": "claude-sonnet-5-5",
+    "cost_usd": 0.063006,
+    "input_tokens": 2,
+    "output_tokens": 1147
+  },
+  "status": "recorded",
+  "failure": null,
+  "flags": [],
+  "dropped_ids": [],
+  "from_jev": false
+}

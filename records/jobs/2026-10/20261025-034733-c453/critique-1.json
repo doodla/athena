@@ -1,0 +1,62 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261025-034733-c453",
+  "round": 1,
+  "at": "2026-10-25T18:32:14.668640698Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-data/src/config.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-data/src/config.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "blocker",
+      "summary": "A `kind = \"test\"` check running nextest will always fail: Athena counts tests only from libtest's `test result:` lines, and nextest does not print them.",
+      "evidence": "checks.rs `count_tests` matches only `test result: \\w+\\. (\\d+) passed; (\\d+) failed`. Line 209 sets tests_ran to count_tests(..).unwrap_or(0), and line 211 fails a Test-kind check when tests_ran == 0 (M12). nextest prints a `Summary [..] N tests run: N passed` line, not libtest's lines. gh.rs `failing_test_name` (around line 3304) also reads libtest output. The plan does not name checks.rs or gh.rs, and it says run.rs needs no change. Fix: Extend count_tests to read nextest's summary line too, and failing_test_name to read nextest's failure lines, with unit tests that use real nextest output. Add crates/athena-core/src/checks.rs and gh.rs to Files. Add a demonstration: a CheckKind::Test check whose output is nextest-style reports N tests, and one with zero tests fails.",
+      "location": "Plan step 5 / athena.toml test check (kind = \"test\"); crates/athena-core/src/checks.rs:27-41, 209-211",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "CI routing hard-codes the check names fmt, clippy and test. The plan does not consider what a fourth `doctest` check does to CI result reuse or to xtask ci's result output.",
+      "evidence": "ci_result.rs:22 `STEPS = [\"fmt\", \"clippy\", \"test\"]`. routing.rs reuses CI results by check name (line 207 `reused.iter().find(|r| r.name == item.spec.name)`), and ci_result.rs:503-511 treats `test` specially. A `doctest` check gets no CI step. Depending on that path, it either always runs locally or blocks reuse. The plan's claim that 'no new code path is needed' was not checked against this. Fix: Choose one way and say how it is shown. (a) Keep a single check named `test` that runs nextest and then doctests through a wrapper: an xtask subcommand, already allow-listed as `cargo run`/xtask. (b) Add `doctest` to STEPS and to xtask ci's step reporting, and update the routing and ci_result tests. Add ci_result.rs and routing.rs to Files if (b).",
+      "location": "Decision 2 (separate doctest check entry); crates/athena-core/src/ci_result.rs:22, routing.rs:83-103, 150-215",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The demonstration does not show that a failing test fails the new check. It only shows that the config text has the expected strings, and that `cargo test` (not the new command) passes.",
+      "evidence": "The plan's evidence is that the policy test asserts the check list. Nothing runs the nextest-based check through Athena's check runner, so the count_tests problem above would go unseen. Fix: Add a checks.rs unit test that runs a CheckKind::Test spec over nextest-style output. With a failure the check fails, and with a pass of N tests tests_ran = N. Also run `cargo nextest run --locked` and `cargo test --doc --locked` once and record their test counts. Together they should be about 1190.",
+      "location": "Demonstration for criterion 5",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Writing into ~/.cargo/bin goes outside the repo's tools/ layout, and it is not shown that checks resolve it from PATH.",
+      "evidence": "The plan's own open question says PATH for checks is unverified. Gitleaks installs under tools/. Fix: Resolve this in the producer step. Read env_pass and the check runner, then either put tools/nextest on PATH for checks or call the binary by path (cargo-nextest nextest run). Cover it with a test.",
+      "location": "Plan approach: nextest installed 'onto cargo's bin dir'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Adding `doc` to the verifier allow-list is not needed, because `cargo test --doc` is the `test` subcommand. It also widens what the verifier may run.",
+      "evidence": "athena.toml:63 already allows `test`. The allow-list keys on the cargo subcommand. Fix: Add only `nextest` to the verifier's list.",
+      "location": "athena.toml verifier_commands change",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "nextest's release archive names and platforms differ from gitleaks' (for example a universal darwin build, gnu or musl linux), so ToolPin's four keys may not map one-to-one.",
+      "evidence": "athena.toml:131-133 has the gitleaks per-platform keys. The plan reuses ToolPin unchanged. Fix: Say which archive each key maps to, and how the installer builds the URL for nextest.",
+      "location": "[tools.nextest] pin via ToolPin",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The direction is sound: nextest cuts the larger, run side, a separate doctest run keeps doctests running, and nextest is pinned like gitleaks. But the plan would not work as written. Athena's Test-kind check counts tests only from libtest `test result:` lines (checks.rs count_tests), and nextest does not print those lines. The new `test` check would therefore report zero tests and fail every job. The plan names neither checks.rs nor gh.rs (failing_test_name), and says no new code path is needed. It also adds a separate `doctest` check without considering that CI routing and result reuse hard-code fmt, clippy and test (ci_result.rs STEPS, routing.rs). The demonstration for criterion 5 only checks config strings, so neither problem would be caught. I agree with Athena's finding about config.rs and judge the change necessary; it is not repeated here. Revise: teach the check runner nextest's output, settle the doctest check's routing, and demonstrate both through the check runner."
+}

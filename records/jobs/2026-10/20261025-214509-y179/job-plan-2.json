@@ -1,0 +1,234 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261025-214509-y179",
+  "round": 2,
+  "at": "2026-10-25T21:48:25.377111003Z",
+  "invocation_seq": 5,
+  "approach": "Measure first, then cut in the order of measured cost. Step 1 times each of the five binaries and counts, per test and per process, gitleaks launches and run_check polls. The user asked for the secrets.rs memo and the shorter poll schedule, so both are built as behavior-preserving changes, each with a test. Because every `athena` command in a CLI test is a separate process (common/mod.rs:257), a process-wide memo helps only repeats inside one process. The decision therefore records the measured hit count and does not assume a saving. A fixed budget decides the rest: if the projected total after the two production changes is over 7 minutes (420 s), the producer applies test-side changes in the five binaries, common/mod.rs and run.rs (tests only) that keep every assertion. The measurement in step 1 picks which changes.",
+  "decisions": [
+    {
+      "choice": "Memoize Gitleaks::scan_log inside the process. Key: the config.toml text, the binary path, the common git dir, and the log_opts with each rev resolved to a full object id. Cache only Ok results, and only when every rev resolves to an id.",
+      "reason": "A commit id is content-addressed, so the same ids under the same config always give the same findings. Gitleaks::command runs from an empty cwd with --gitleaks-ignore-path pointing at an empty dir, --config set and GITLEAKS_CONFIG env removed. So the only inputs besides the scanned history are the config text, the binary and the git dir; a code comment will say so (finding 4). The producer re-checks `command` for any other input file. A hit counter exposed under cfg(test) lets tests show the memo works.",
+      "rejected": [
+        {
+          "option": "Key on the raw log_opts string",
+          "why": "HEAD or a branch name changes meaning, so a stale hit could hide a secret."
+        },
+        {
+          "option": "Memoize scan_text",
+          "why": "Texts are mostly unique, so hits are rare and memory grows. Add it only if step 1 counts repeats."
+        },
+        {
+          "option": "Skip gitleaks in tests through an env switch",
+          "why": "It weakens the secrets path the tests exercise."
+        },
+        {
+          "option": "Persist the memo on disk across processes",
+          "why": "It adds a stale-state and security surface to production for a test saving, and is more than the user asked for."
+        }
+      ]
+    },
+    {
+      "choice": "Poll schedule in run_check: a small pure function gives sleeps of 5, 10, 20 ... ms, capped at 200 ms and clamped to the time left before the deadline. The deadline and kill-switch checks stay on every iteration.",
+      "reason": "Quick checks return in milliseconds instead of waiting up to 200 ms, and long checks poll as before. A pure function is testable without wall-clock thresholds (finding 5).",
+      "rejected": [
+        {
+          "option": "Fixed 20 ms interval",
+          "why": "Constant wakeups on long real checks."
+        },
+        {
+          "option": "Blocking wait on a thread",
+          "why": "A larger change that risks kill-switch behavior."
+        }
+      ]
+    },
+    {
+      "choice": "Hold a time budget. After step 1, project the total as base minus the measured saving of the memo and poll changes. If the projection is over 420 s, apply test-side changes, chosen by the largest per-test and per-binary cost in the step 1 table. Candidates are sharing a built fixture repo or template copy in common/mod.rs, fewer redundant athena launches that repeat identical setup, calling the library directly instead of spawning where the test does not check the binary, and run.rs test helpers. Each candidate keeps every assertion and every test.",
+      "reason": "Criterion 5 is the goal, and the two production changes may save only seconds (finding 2). The brain measured compile at 67 s against run at 673 s, so run time is where the saving must come from.",
+      "rejected": [
+        {
+          "option": "Leave test-side work open-ended",
+          "why": "The goal could go unmet with no rule for what to do next."
+        },
+        {
+          "option": "cargo-nextest 0.9.148",
+          "why": "Brain-measured 584 s against 673 s, about 13%. It is out of scope and adds a tool pin."
+        },
+        {
+          "option": "sccache (D79) or a shared target dir",
+          "why": "Considered only. Compile is 67 s of the total, and the brief puts them out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "Production changes only in secrets.rs and checks.rs. run.rs is edited only inside its tests module.",
+      "reason": "Criterion 4 limits production code to those two files.",
+      "rejected": [
+        {
+          "option": "Production edits in run.rs",
+          "why": "The criterion forbids them."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-gate/src/secrets.rs",
+      "action": "modify",
+      "purpose": "Process-wide memo in scan_log over ranges resolved to object ids, with a comment on the key inputs, plus tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/checks.rs",
+      "action": "modify",
+      "purpose": "Capped-doubling poll schedule function used by run_check, plus tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "New decision with measured per-binary before and after times, causes, memo hit count, total, and the rejected and considered options.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased entry.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/common/mod.rs",
+      "action": "modify",
+      "purpose": "Shared fixture or setup cost cuts where step 1 measures a cause; no assertion weakened.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "purpose": "Test-side cuts where measured; every test and assertion kept.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/job_plan.rs",
+      "action": "modify",
+      "purpose": "Test-side cuts where measured; every test and assertion kept.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Test-side cuts where measured; every test and assertion kept.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/retry.rs",
+      "action": "modify",
+      "purpose": "Test-side cuts where measured; every test and assertion kept.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/steward.rs",
+      "action": "modify",
+      "purpose": "Test-side cuts where measured; every test and assertion kept.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "purpose": "Test-module changes only, if measurement names a cause there; no production edit.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Record base times: `cargo test --locked --test <name>` for lifecycle, job_plan, drain, retry and steward, then the full `cargo test --locked`, with the passed counts. Add temporary counters or timing in a scratch run to get, per test and per process, the gitleaks launches (and the repeats inside one process) and the run_check poll sleeps. Build a table of the costliest tests. Remove the scratch code afterwards.",
+    "Implement the scan_log memo in secrets.rs: resolve each rev in log_opts to a full id (check athena_git::Git for a rev-parse helper), key as described, store only Ok, add a cfg(test) hit counter, and write the comment on the inputs gitleaks reads. Add the tests listed for criterion 4.",
+    "Implement the poll schedule function in checks.rs, use it in run_check, and add the completion, failure, timeout and schedule tests.",
+    "Re-measure each binary. Project the total. If the projection is over 420 s, apply the test-side changes chosen from the step 1 table in common/mod.rs and the five binaries (and run.rs tests if named), keeping every test and assertion, and re-measure until under 420 s or no measured cause remains.",
+    "Write the new decision in docs/decisions.md (next free D number) with before and after per binary, causes, the memo hit count, the total, and the brain figures with the rejected and considered options. Add the CHANGELOG.md entry.",
+    "Run `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Confirm the count is not lower and the total is under 7 minutes. Run once with a temporary failing test, record the non-zero exit code in the report, then remove it."
+  ],
+  "risks": [
+    {
+      "risk": "A stale memo hides a secret.",
+      "mitigation": "Cache only when every rev resolves to a full object id. The key includes the config text, the binary path and the git dir. Err is never cached. Tests cover a moved ref and a later token."
+    },
+    {
+      "risk": "Parallel tests contend on or poison the shared memo lock.",
+      "mitigation": "Hold the Mutex only for lookup and insert, never across the gitleaks run. Recover from poisoning with into_inner. Tests use their own temp repos."
+    },
+    {
+      "risk": "Faster polling raises CPU use or changes timeout timing.",
+      "mitigation": "Cap at 200 ms as before, check the deadline every iteration, and clamp sleeps to the time left."
+    },
+    {
+      "risk": "The two production changes leave the suite over 420 s.",
+      "mitigation": "The step 1 budget forces measured test-side changes that keep every test and assertion. The final report states the honest total even if the goal is missed."
+    },
+    {
+      "risk": "Test-side sharing of fixtures makes tests depend on each other.",
+      "mitigation": "Copy a prebuilt template per test and share nothing mutable. Run the suite twice to catch order dependence."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "At the base, run each binary alone and the full suite, and note each 'finished in' time and 'N passed' count. Then do the same after the change under the same conditions. Per test, add temporary timing and gitleaks and poll counters in a scratch run, and remove them before finishing. Write the table and causes into the new decision, labeled measured, together with the measured memo hit count per binary.",
+      "command": "cargo test --locked --test lifecycle",
+      "observes": "The decision lists lifecycle, job_plan, drain, retry and steward with before and after seconds, a cause for each, and the total suite time. The numbers match the logged outputs of `cargo test --locked --test job_plan`, `--test drain`, `--test retry`, `--test steward` and the full `cargo test --locked`.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Read the added decision text in the diff.",
+      "command": "git diff docs/decisions.md",
+      "observes": "It states compile 67 s vs run 673 s (brain-measured, 4 cores). It lists cargo-nextest 0.9.148 (584 s vs 673 s, about 13%) as rejected. It lists sccache (D79) and a shared target dir as considered. Every other number is one this job measured and labeled.",
+      "fails_without": null
+    },
+    {
+      "criterion": 3,
+      "method": "Inspect the diff for removed #[test], added #[ignore] or filters, weakened asserts, and changes to athena.toml, ci.yml or tool pins. Compare the sum of 'N passed' before and after; it must be at least as high. Confirm a CHANGELOG.md entry.",
+      "command": "git diff --stat",
+      "observes": "The diff touches only the listed deliverables. The test count is not lower. CHANGELOG.md has an Unreleased entry.",
+      "fails_without": null
+    },
+    {
+      "criterion": 4,
+      "method": "New unit tests. In secrets.rs: (a) a clean range and a token range give results equal to a fresh uncached scan; (b) the hit counter rises on a repeat of an immutable range; (c) the counter stays flat for a moved ref (HEAD advanced) and after an Err result; (d) a later commit that adds a token is found at the new tip. In checks.rs: run_check with a spec that exits 0, one that exits 3, and one that sleeps past a short timeout still reports completion, failure and the deadline kill; the schedule function is tested directly (5, 10, 20 ... capped at 200, clamped to the time left), with no wall-clock threshold. Check that the production diff is limited to the two files.",
+      "command": "cargo test --locked -p athena-gate secrets",
+      "observes": "The memo tests pass, including the hit-count assertions. `cargo test --locked -p athena-core checks` passes the completion, failure, timeout and schedule tests. `git diff --stat` shows production changes only in secrets.rs and checks.rs.",
+      "fails_without": "A memo that does nothing fails the hit-count-rises assertion. A memo keyed on the raw ref fails the moved-ref and later-token assertions. A poll that missed completion, failure or timeout fails the exit-0, exit-3 and timeout assertions, and a wrong schedule fails the schedule function test."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the full suite on the job's machine, read total wall time and the 'N passed' lines, and confirm no ignored or filtered tests. Separately, add a temporary failing test, run the suite, record the exit code in the report, then remove the test.",
+      "command": "cargo test --locked",
+      "observes": "Exit 0, the passed count is not lower than at base, and total time is under 7 minutes. The run with the temporary failing test exits non-zero, and that exit code is recorded in the producer report.",
+      "fails_without": "If the memo or poll change broke a check, or a test were skipped or removed, the run would fail or the passed count would drop. If the time were over 420 s the goal would be unmet. The temporary failing test makes the run exit non-zero."
+    },
+    {
+      "criterion": 6,
+      "method": "Run both commands.",
+      "command": "cargo clippy --all-targets --locked -- -D warnings",
+      "observes": "Clippy exits 0 with no warnings. `cargo fmt --all --check` exits 0 with no diff.",
+      "fails_without": "A warning or unformatted code makes the command exit non-zero."
+    }
+  ],
+  "open_questions": [
+    "Where the time goes inside the five binaries is unmeasured; this plan did not read them. Step 1 decides.",
+    "Whether athena_git::Git offers a helper that returns rev-parse output. If not, scan_log must fall back to not caching, or use a small existing Git method.",
+    "Whether the memo gets any hit inside one CLI process. Each athena command is a new process, so the saving may be small, and the decision will record the measured count.",
+    "Whether the 7-minute goal needs the test-side changes. The step 1 projection decides."
+  ],
+  "producer_section_sha256": "ffd44f16d3d5c2b455397d5cca6333af7f9b86dff73dd968b6d852f2198734af"
+}

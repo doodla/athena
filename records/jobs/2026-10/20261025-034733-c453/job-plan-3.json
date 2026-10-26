@@ -1,0 +1,270 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261025-034733-c453",
+  "round": 3,
+  "at": "2026-10-25T18:34:56.719876382Z",
+  "invocation_seq": 7,
+  "approach": "Adopt a pinned prebuilt cargo-nextest behind ONE check named `test`, whose command is the xtask wrapper `cargo run --locked -q -p xtask -- test`. The wrapper runs the pinned nextest binary by absolute path (`cargo-nextest nextest run --locked`), then `cargo test --doc --locked`. It runs both halves and exits nonzero if either fails. If the pinned binary is not installed (a machine not yet re-setup), it prints a clear warning and falls back to `cargo test --locked`, so no check breaks at rollout and every test still runs. Athena's test counter and failing-test reader learn nextest's output. Producers, verifiers and demonstrations use the wrapper, which `cargo run` already permits. The pin values are not knowable inside this job (no network), so the plan marks them unverified until someone with network access supplies them; CI on the pull request is the first real check.",
+  "decisions": [
+    {
+      "choice": "One `test` check backed by an xtask `test` wrapper (nextest, then doctests); no separate doctest check.",
+      "reason": "CI STEPS is fmt/clippy/test and routing reuses CI results by check name, so one check leaves them unchanged. A nonzero exit from either half fails the wrapper and so the check.",
+      "rejected": [
+        {
+          "option": "Separate `doctest` check entry",
+          "why": "Needs STEPS, xtask ci, routing and ci_result changes; wider scope."
+        },
+        {
+          "option": "Shell chain in athena.toml",
+          "why": "Check commands are argv lists; exit handling would be hidden."
+        }
+      ]
+    },
+    {
+      "choice": "Rollout by graceful fallback: if tools/nextest/<ver>/cargo-nextest is absent, the wrapper warns on stderr and runs `cargo test --locked` instead. The CHANGELOG and decision also tell the user to run ./setup.sh after landing to get the speedup. A unit test covers the missing-binary branch and the present-binary path resolution.",
+      "reason": "Checks run from the base commit's athena.toml and setup refuses to run inside a job (ATHENA_NESTED), so a check cannot install the tool. Failing every later job until setup is run is worse than a slow-but-correct run. Nothing is filtered: the fallback runs the whole suite.",
+      "rejected": [
+        {
+          "option": "Fail loudly when the binary is missing",
+          "why": "Every later job's test check would fail until a manual setup; no way to self-heal."
+        },
+        {
+          "option": "Put the pinned binary on agents' PATH",
+          "why": "Changes env passing for governance-sensitive sandboxes; wrapper by absolute path needs none."
+        }
+      ]
+    },
+    {
+      "choice": "Producers, verifiers and demonstrations run `cargo run --locked -q -p xtask -- test` (already allowed). Do NOT add `nextest` to the cargo allow-lists.",
+      "reason": "`cargo nextest` needs cargo-nextest on PATH, which the tools directory is not; an allow-list entry would permit a command that fails with 'no such command'.",
+      "rejected": [
+        {
+          "option": "Add `nextest` to producer and verifier cargo subcommands",
+          "why": "The command would not resolve on PATH."
+        }
+      ]
+    },
+    {
+      "choice": "Producer guidance: add one sentence to the producer brief guidance in crates/athena-core/src/run.rs (or the briefs source if the guidance text lives in athena-context; locate by grep for `cargo test` first): 'run the full suite with `cargo run --locked -q -p xtask -- test`; for one test use `cargo test -p <crate> <name>`'. The sentence is short and system_facts budgets are recomputed and the budget lines updated if the test system_facts_budgets_match_computed reports a difference.",
+      "reason": "The request names producer time as a cost, and a producer must learn the faster loop. This is unconditional, not 'if grep finds'.",
+      "rejected": [
+        {
+          "option": "Leave guidance unchanged",
+          "why": "Producers would never use the faster loop."
+        }
+      ]
+    },
+    {
+      "choice": "Cut run time (673 s) not compile time (67 s) with cargo-nextest; nextest skips doctests so `cargo test --doc` runs them and every test still runs.",
+      "reason": "Measured by the brain on 4 cores: compile 67 s via cargo test --no-run, run 673 s warm.",
+      "rejected": [
+        {
+          "option": "sccache per D79 for checks, producers and CI",
+          "why": "Cuts only the 67 s compile side; out of scope."
+        },
+        {
+          "option": "Shared target directory for Athena's checks",
+          "why": "Compile side only; weakens per-job isolation (D46); out of scope."
+        },
+        {
+          "option": "Splitting the slowest integration test binaries",
+          "why": "Restructures tests (out of scope); fallback only if nextest cannot be installed."
+        }
+      ]
+    },
+    {
+      "choice": "Pin via a new optional `nextest: Option<ToolPin>` in Tools (crates/athena-data/src/config.rs), version and sha256 per platform key, with a nextest-specific URL builder in xtask (linux gnu tar.gz; darwin universal tar.gz, same checksum for both darwin keys). The values are written by someone with network access from the release's published checksums; if unavailable, the producer records the pin as UNVERIFIED in the decision and CHANGELOG, and the PR's CI setup (which refuses a mismatch) is the first check. No value is guessed silently.",
+      "reason": "deny_unknown_fields on Tools rejects an unknown [tools.nextest], so config.rs must change. checks.rs, gh.rs and config.rs are outside the brief's list but required: Tools has deny_unknown_fields (config.rs ~266-273); count_tests counts only libtest `test result:` lines and a Test-kind check with zero tests fails (checks.rs ~29-41, ~209-211). The decision entry states this justification so the verifier sees it.",
+      "rejected": [
+        {
+          "option": "cargo install --locked cargo-nextest",
+          "why": "No checksum and minutes of compile."
+        },
+        {
+          "option": "Pin outside athena.toml",
+          "why": "Breaks the pinned-tool pattern and the policy test over [tools]."
+        }
+      ]
+    },
+    {
+      "choice": "Keep the substring `cargo fmt --check` and `id: checks` in the ci.yml checks step; change only comments and add the nextest install via setup. Update policy tests only if they must change.",
+      "reason": "xtask/tests/policy.rs ~537, 571, 575 find that step by name and id.",
+      "rejected": [
+        {
+          "option": "Rename the step freely",
+          "why": "Breaks those policy tests."
+        }
+      ]
+    },
+    {
+      "choice": "Extend count_tests to read nextest `Summary [..] N tests run: N passed` and sum with libtest doctest lines; failing_test_name reads nextest `FAIL [..] name`. Unit tests use sample output supplied with the pin by someone with network access; if none is supplied, they use the format documented by nextest and the decision says the format is unverified against a real run.",
+      "reason": "Without it every nextest check counts zero tests and fails (M12); keeping the zero guard preserves detection of an empty run.",
+      "rejected": [
+        {
+          "option": "Make the check non-Test kind",
+          "why": "Drops the zero-tests guard."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "New decision: measured split, choice, alternatives, before medians, after-measurement plan, rollout, pin status, justification for out-of-list files.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "athena.toml",
+      "action": "modify",
+      "purpose": "[tools.nextest] pin; change and study `test` checks run the wrapper. No allow-list entry for `nextest`.",
+      "governance": true,
+      "exists": true
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "action": "modify",
+      "purpose": "Install pinned nextest through setup; comments say nextest plus doctests; keep `cargo fmt --check` and `id: checks`.",
+      "governance": true,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased entry with the measured split and the run-./setup.sh note.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "xtask/src/main.rs",
+      "action": "modify",
+      "purpose": "Shared download/verify/unpack helper, install_nextest with URL builder, `test` subcommand with fallback, `ci` uses it.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "xtask/tests/policy.rs",
+      "action": "modify",
+      "purpose": "Policy test: nextest pinned, test checks use the wrapper with no filters; adjust existing step tests only if needed.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "purpose": "Producer guidance: run the full suite with the wrapper (if the guidance text lives elsewhere, edit that file instead and say so); update system_facts budget lines if the budget test requires.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/checks.rs",
+      "action": "modify",
+      "purpose": "count_tests reads nextest summary (outside brief list; required, see decision).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "action": "modify",
+      "purpose": "failing_test_name reads nextest FAIL lines (outside brief list; required).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "purpose": "Add nextest: Option<ToolPin> to Tools with parse test (outside brief list; required by deny_unknown_fields).",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Grep for readers of the athena.toml check list, `cargo test --locked`, count_tests and failing_test_name callers, producer guidance text, and the PATH/env handling in the check runner.",
+    "Add `nextest: Option<ToolPin>` to Tools in config.rs with a parse test.",
+    "In xtask/src/main.rs factor the download/sha256/unpack out of install_gitleaks; add install_nextest with a URL builder for the four platform keys installing under tools/nextest/<ver>/.",
+    "Add the xtask `test` subcommand: resolve the binary path; if present run `cargo-nextest nextest run --locked`, else warn and run `cargo test --locked`; then run `cargo test --doc --locked` (skip the doc run in the fallback since it is covered); run both halves even if the first fails; exit nonzero if any failed. Point `ci` at it. Unit-test the exit logic, path resolution and fallback.",
+    "Extend count_tests and failing_test_name for nextest output with unit tests (pass of N, a failure, zero tests).",
+    "Edit athena.toml: [tools.nextest] pin and both `test` checks using the wrapper. Do not touch the allow-lists.",
+    "Update ci.yml comments, keeping the step name substring and id; add the policy test in xtask/tests/policy.rs.",
+    "Add the producer guidance sentence; run the budget test and update system_facts lines if required.",
+    "Write the docs/decisions.md decision and the CHANGELOG entry (split, alternatives, before medians, rollout, pin status, no after number).",
+    "Run cargo fmt, clippy and `cargo test --locked`; do not run `cargo nextest` (not on PATH)."
+  ],
+  "risks": [
+    {
+      "risk": "Wrong pin breaks setup and CI.",
+      "mitigation": "Pin supplied from published checksums by someone with network access, or marked UNVERIFIED in decision and CHANGELOG; installer refuses mismatch so it fails visibly on the PR, not silently."
+    },
+    {
+      "risk": "Machines not re-setup lack the binary after landing.",
+      "mitigation": "Wrapper warns and falls back to cargo test --locked; tested; CHANGELOG and decision say run ./setup.sh."
+    },
+    {
+      "risk": "Doctests skipped by nextest.",
+      "mitigation": "Wrapper always runs cargo test --doc --locked; policy test enforces it."
+    },
+    {
+      "risk": "count_tests misparses nextest output.",
+      "mitigation": "Keep libtest path and tests, sum both formats; samples from real output if supplied, otherwise flagged unverified."
+    },
+    {
+      "risk": "Tests relying on shared process state fail under nextest.",
+      "mitigation": "Cannot run here; CI on the PR reveals it; never filter a test, record any problem in the decision."
+    },
+    {
+      "risk": "Guidance sentence overruns the producer prompt budget.",
+      "mitigation": "Keep it one line; update the system_facts budget line if the computed test says so."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the new decision entry in the diff.",
+      "command": "git diff docs/decisions.md",
+      "observes": "Compile 67 s (cargo test --no-run), run 673 s (warm, 4 cores, measured by the brain), slowest binaries listed, choice (cargo-nextest plus cargo test --doc, via the wrapper), alternatives sccache (D79), shared target dir, splitting slow tests, each with a reason, plus the out-of-list file justification.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Read the same entry.",
+      "command": "git diff docs/decisions.md",
+      "observes": "Before medians 9.7 min checks and 17.6 min producers over 29 jobs; after median to be taken from check durations of jobs run after the change (stated method); no after number; rollout note (run ./setup.sh; fallback warns and runs cargo test); pin verification status.",
+      "fails_without": null
+    },
+    {
+      "criterion": 3,
+      "method": "Read athena.toml and the xtask source; the policy test asserts them and runs in cargo test.",
+      "command": "git diff athena.toml xtask/src/main.rs xtask/tests/policy.rs",
+      "observes": "[tools.nextest] has version and sha256 per key; change and study `test` checks run the wrapper with no filter, skip or ignore flags; the wrapper source runs nextest then `cargo test --doc --locked`; the policy test asserts these.",
+      "fails_without": null
+    },
+    {
+      "criterion": 4,
+      "method": "Read ci.yml (nextest installed via setup, xtask ci runs the wrapper so nextest and cargo test --doc both run) and CHANGELOG.",
+      "command": "git diff .github/workflows/ci.yml CHANGELOG.md",
+      "observes": "CI installs the pinned nextest and runs nextest plus doctests; `cargo fmt --check` and `id: checks` retained; CHANGELOG Unreleased entry with the measured split and the setup note.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "Run the suite. New unit tests cover: count_tests over nextest-style output (N passed gives tests_ran N; a failure fails the check; zero tests fails); gh.rs reading FAIL lines; wrapper exit logic (either half nonzero gives nonzero, missing binary falls back to cargo test with a warning). Also read athena.toml and CI to confirm the single check fails on any nonzero exit.",
+      "command": "cargo test --locked",
+      "observes": "Passes clean with about 1190 tests plus the new ones; a failing test exits nonzero.",
+      "fails_without": "Without nextest support in count_tests, the Test-kind unit test gets tests_ran 0 and fails; without exit propagation the wrapper test fails; without the fallback test, a missing-binary path would be unchecked; without the policy test, a filtered or dropped check goes unnoticed."
+    },
+    {
+      "criterion": 6,
+      "method": "Run clippy, then fmt check.",
+      "command": "cargo clippy --all-targets --locked -- -D warnings",
+      "observes": "Exit 0 with no warnings; `cargo fmt --all --check` also exits 0 with no diff.",
+      "fails_without": "Unformatted or warning-producing new code exits nonzero."
+    }
+  ],
+  "open_questions": [
+    "The nextest version, per-archive sha256 values and a real sample of its pass/fail/summary output cannot be obtained in this job (no network, no download tool, setup refuses inside a job); someone with network access must supply them, else the pin is marked unverified and the PR's CI is the first check.",
+    "Whether any test depends on shared process state that nextest's per-test processes would break; the producer cannot run nextest, so the PR's CI is the first measurement.",
+    "Where the producer guidance text lives (run.rs versus athena-context briefs.rs); grep first."
+  ],
+  "producer_section_sha256": "27ec2776c6b674c87d0b4d1c0778773c2c1326a34ac7b8412fd9027ca793084b"
+}

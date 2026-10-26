@@ -19,8 +19,10 @@ use athena_data::Config;
 use athena_data::config::SecretAllow;
 use athena_git::Git;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Mutex;
 
 /// One finding, as gitleaks reports it (only the fields Athena uses; author and email are never read).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -196,9 +198,68 @@ impl Gitleaks {
     }
 
     /// Scans text, such as an agent's free-text output before it is recorded.
+    ///
+    /// The result for identical text is remembered for the life of the process (see [`MEMO`]); the key holds
+    /// the gitleaks binary and the generated configuration too, so a different allow-list never shares an
+    /// entry. Only successful scans are remembered.
     pub fn scan_text(&self, text: &str) -> Result<Vec<Finding>> {
+        if text.len() > MEMO_MAX_TEXT {
+            return self.scan_text_uncached(text);
+        }
+        let key = self.memo_key(text);
+        if let Some(found) = memo().get(&key) {
+            return Ok(found.clone());
+        }
+        let found = self.scan_text_uncached(text)?;
+        let mut map = memo();
+        if map.len() >= MEMO_MAX_ENTRIES {
+            map.clear();
+        }
+        map.insert(key, found.clone());
+        Ok(found)
+    }
+
+    fn scan_text_uncached(&self, text: &str) -> Result<Vec<Finding>> {
         let cmd = self.command("stdin");
         self.run(cmd, Some(text.as_bytes()))
+    }
+
+    fn memo_key(&self, text: &str) -> (PathBuf, String, String) {
+        let config =
+            std::fs::read_to_string(self.dir.path().join("config.toml")).unwrap_or_default();
+        (self.bin.clone(), config, text.to_string())
+    }
+}
+
+/// Texts longer than this are scanned every time, so the memo stays small.
+const MEMO_MAX_TEXT: usize = 64 * 1024;
+/// The memo is cleared when it reaches this many entries.
+const MEMO_MAX_ENTRIES: usize = 256;
+
+type MemoMap = HashMap<(PathBuf, String, String), Vec<Finding>>;
+
+static MEMO: Mutex<Option<MemoMap>> = Mutex::new(None);
+
+/// The process-wide memo of text scans, keyed by (binary, generated configuration, exact text). The findings
+/// stay in process memory and are never written out.
+fn memo() -> MemoGuard {
+    let mut guard = MEMO.lock().unwrap_or_else(|e| e.into_inner());
+    guard.get_or_insert_with(HashMap::new);
+    MemoGuard(guard)
+}
+
+struct MemoGuard(std::sync::MutexGuard<'static, Option<MemoMap>>);
+
+impl std::ops::Deref for MemoGuard {
+    type Target = MemoMap;
+    fn deref(&self) -> &MemoMap {
+        self.0.as_ref().expect("the memo is initialised")
+    }
+}
+
+impl std::ops::DerefMut for MemoGuard {
+    fn deref_mut(&mut self) -> &mut MemoMap {
+        self.0.as_mut().expect("the memo is initialised")
     }
 }
 
@@ -389,6 +450,34 @@ mod tests {
         std::fs::remove_file(dir.path().join("old.txt")).unwrap();
         commit(&git, "remove\n\nAthena-Job: bootstrap\n");
         assert!(!check_history(&git, &config(), "HEAD").unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_text_memo_returns_what_a_fresh_scan_returns_and_never_another_texts() {
+        let gitleaks = Gitleaks::new(&config()).unwrap();
+        let secret_text = format!("memo test: auth = \"{}\"\n", fake_token());
+        let clean_text = "memo test: nothing to see here\n";
+        let fresh = gitleaks.scan_text_uncached(&secret_text).unwrap();
+        assert!(!fresh.is_empty(), "the token must be found");
+
+        // Identical text twice: both equal the fresh scan (the second comes from the memo).
+        assert_eq!(gitleaks.scan_text(&secret_text).unwrap(), fresh);
+        assert_eq!(gitleaks.scan_text(&secret_text).unwrap(), fresh);
+        // Clean text after secret-bearing text finds nothing, and the secret text still matches.
+        assert!(gitleaks.scan_text(clean_text).unwrap().is_empty());
+        assert_eq!(gitleaks.scan_text(&secret_text).unwrap(), fresh);
+
+        // A different allow-list (another Gitleaks) does not share entries.
+        let mut allowing = config();
+        allowing.secrets.allowlist.push(SecretAllow {
+            description: "memo test".into(),
+            paths: vec![],
+            regexes: vec![".*".into()],
+        });
+        let allowing = Gitleaks::new(&allowing).unwrap();
+        let expected = allowing.scan_text_uncached(&secret_text).unwrap();
+        assert_eq!(allowing.scan_text(&secret_text).unwrap(), expected);
+        assert_eq!(gitleaks.scan_text(&secret_text).unwrap(), fresh);
     }
 
     #[test]

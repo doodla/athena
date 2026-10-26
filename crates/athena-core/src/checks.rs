@@ -139,6 +139,11 @@ pub struct CheckContext<'a> {
     pub redactor: &'a Redactor,
 }
 
+/// The first wait between polls of a running check.
+const POLL_START: Duration = Duration::from_millis(5);
+/// The longest wait between polls.
+const POLL_CAP: Duration = Duration::from_millis(200);
+
 /// Runs one check.
 pub fn run_check(spec: &CheckSpec, ctx: &CheckContext<'_>) -> Result<CheckRun> {
     let started = Instant::now();
@@ -184,6 +189,8 @@ pub fn run_check(spec: &CheckSpec, ctx: &CheckContext<'_>) -> Result<CheckRun> {
         .register(pgid, ctx.job, &format!("check {}", spec.name))?;
     let deadline = started + ctx.timeout;
     let mut note = None;
+    // Poll after 5 ms at first, doubling up to the old 200 ms, so a short check is noticed sooner.
+    let mut delay = POLL_START;
     let status = loop {
         if let Some(status) = child.try_wait()? {
             break Some(status);
@@ -201,7 +208,9 @@ pub fn run_check(spec: &CheckSpec, ctx: &CheckContext<'_>) -> Result<CheckRun> {
             let _ = child.wait();
             break None;
         }
-        std::thread::sleep(Duration::from_millis(200));
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        std::thread::sleep(delay.min(remaining));
+        delay = (delay * 2).min(POLL_CAP);
     };
     ctx.registry.unregister(pgid);
     let output = String::from_utf8_lossy(&std::fs::read(output_file.path())?).into_owned();
@@ -438,6 +447,40 @@ mod tests {
         let run = run_check(&slow, &ctx).unwrap();
         assert!(!run.passed);
         assert!(run.note.unwrap().contains("deadline"));
+    }
+
+    #[test]
+    fn the_poll_schedule_detects_fast_and_slow_completion_and_a_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let registry = Registry::new(state.path());
+        let redactor = Redactor::new(&athena_gate::builtin_config()).unwrap();
+        let env = BTreeMap::from([("PATH".to_string(), std::env::var("PATH").unwrap())]);
+        let ctx = |timeout| CheckContext {
+            dir: dir.path(),
+            env: &env,
+            timeout,
+            registry: &registry,
+            job: "j",
+            redactor: &redactor,
+        };
+        let long = Duration::from_secs(30);
+
+        let fast = run_check(&sh_spec("fast", "exit 0"), &ctx(long)).unwrap();
+        assert!(fast.passed && fast.exit_code == Some(0) && fast.note.is_none());
+
+        let slow = run_check(&sh_spec("slow", "sleep 1"), &ctx(long)).unwrap();
+        assert!(slow.passed && slow.exit_code == Some(0) && slow.note.is_none());
+
+        let started = Instant::now();
+        let hung = run_check(
+            &sh_spec("hung", "sleep 30"),
+            &ctx(Duration::from_millis(300)),
+        )
+        .unwrap();
+        assert!(!hung.passed && hung.exit_code.is_none());
+        assert!(hung.note.unwrap().contains("deadline"));
+        assert!(started.elapsed() < Duration::from_secs(20));
     }
 
     #[test]
