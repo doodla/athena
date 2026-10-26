@@ -3170,9 +3170,14 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   `cargo test -p athena-core checks` pass; the before and after times above (summed per-binary times, one run
   each). Not measured: true wall-clock time including build.
 
-## D127 · A scope guard (Artemis, with Demeter's cost view) weighs improvement work and watches for thrash (proposed)
+## D127 · A scope guard (Artemis, with Demeter's cost view) weighs improvement work and watches for thrash (accepted)
 
-- **Status:** proposed. Nothing is built; the design is [`docs/design/scope-guard.md`](design/scope-guard.md).
+- **Status:** accepted, decided by the brain under Sri's delegation (BRIEF.md addenda of 2026-10-23 and
+  2026-10-25), with two changes to the proposal: (1) escalations in design section 8 ("Goes to Sri") go to
+  whoever holds Sri's delegation, and to Sri only for what the brief reserves to Sri; (2) the build order
+  starts with jobs 1 and 5 (rules only), before the value scoring and the model scorer. Job 1 (line grouping
+  and signals T1 to T5, `crates/athena-core/src/scope_guard.rs`) is built; the design is
+  [`docs/design/scope-guard.md`](design/scope-guard.md).
 - **Case:** The BRIEF.md addendum of 2026-10-25 asks for a role responsible for ensuring Athena does not
   rabbit-hole into unnecessary work, while learnings still go back into the system. The request cites, as
   supplied by it and not checked here: the trailer job (three rejected attempts, about $11 before the split),

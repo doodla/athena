@@ -1,0 +1,184 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261026-015416-94rc",
+  "round": 2,
+  "at": "2026-10-26T01:56:07.484667525Z",
+  "invocation_seq": 3,
+  "approach": "Add a pure module crates/athena-core/src/scope_guard.rs with input structs (AttemptRecord, RequestRecord), line grouping by union-find over retry_of and quotes links, named threshold constants, one function per signal T1..T5, and evaluate_before_attempt(line, forecast_p90) returning all five results. Tests replay the four section 5.1 cases from hand-built records. Then flip D127 to accepted in decisions.md, update scope-guard.md status, section 8 and section 13, and add a CHANGELOG entry. No I/O, no clock, no wiring.",
+  "decisions": [
+    {
+      "choice": "Signal results use enums: Level {None, Flag, Pause} for T1, T2, T3, T5; T4 returns Match {No, Maybe, Yes}, mapped to None, Flag, Pause.",
+      "reason": "Section 5 gives flag and pause effects, and T4 maybe must flag without pausing.",
+      "rejected": [
+        {
+          "option": "Booleans per signal",
+          "why": "Cannot express flag versus pause or the T4 maybe."
+        }
+      ]
+    },
+    {
+      "choice": "T4 compares normalised unmet-criterion text (lower case, ASCII digits removed, whitespace collapsed) of the last two rejections. Equal gives Yes; containment or majority word overlap, or a missing criterion, gives Maybe; else No.",
+      "reason": "Section 5 rule, with unclear matches flagged not paused; the Maybe rule is simple and documented.",
+      "rejected": [
+        {
+          "option": "Count any two rejections",
+          "why": "That is T1; the same-criterion rule would not exist to remove."
+        },
+        {
+          "option": "Fuzzy edit-distance scoring",
+          "why": "More code and tuning, a model's job (section 6)."
+        }
+      ]
+    },
+    {
+      "choice": "Time, spend and forecast p90 are struct fields or arguments; no clock, fs or process.",
+      "reason": "Criterion 4; the later watcher supplies values from records.",
+      "rejected": [
+        {
+          "option": "Reuse store record types",
+          "why": "Couples the pure module to I/O types."
+        }
+      ]
+    },
+    {
+      "choice": "Evaluate before attempt n from finished attempts only; T1 fires when finished attempts >= 2.",
+      "reason": "Matches 'fires before attempt 3'.",
+      "rejected": [
+        {
+          "option": "Include the pending attempt in the input",
+          "why": "Invents a record that does not exist yet."
+        }
+      ]
+    },
+    {
+      "choice": "Docs: D127 accepted by the brain under Sri's delegation (BRIEF.md addenda of 2026-10-23 and 2026-10-25) with the two changes; section 8 and 13 reworded; job numbers kept with an order note.",
+      "reason": "Exactly what the request asks.",
+      "rejected": [
+        {
+          "option": "Renumber jobs in section 13",
+          "why": "Other text refers to job numbers."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/scope_guard.rs",
+      "action": "create",
+      "purpose": "Pure line grouping, constants, T1 to T5, evaluate function and replay tests.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "purpose": "Add pub mod scope_guard; after scoring.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "D127 accepted, decider, two changes.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/scope-guard.md",
+      "action": "modify",
+      "purpose": "Status line, section 8, section 13.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased Added entry for module and decision.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Create scope_guard.rs: constants, Verdict, AttemptRecord, RequestRecord, group_lines (union-find), Level, T4Match.",
+    "Implement t1 to t5, normalise_criterion and evaluate_before_attempt returning a Signals struct; cite section 5 in doc comments.",
+    "Write replay tests for trailer, speedup, prompt-budget and cut A, plus grouping, normalisation, maybe and T4 different-criterion tests.",
+    "Add pub mod scope_guard; to lib.rs.",
+    "Edit D127, then scope-guard.md status, section 8 and 13, then CHANGELOG.",
+    "Run cargo fmt, clippy -D warnings, cargo test --locked."
+  ],
+  "risks": [
+    {
+      "risk": "Boundary or budget doc tests fail on edited docs.",
+      "mitigation": "Avoid banned words and email-like text; run cargo test --locked."
+    },
+    {
+      "risk": "A T4 test passes with the rule removed.",
+      "mitigation": "Include different-criteria and same-criterion-differing-numbers cases."
+    },
+    {
+      "risk": "Float threshold edge at 1.5x p90.",
+      "mitigation": "Use integer cents or >= with boundary tests."
+    },
+    {
+      "risk": "decisions.md is large.",
+      "mitigation": "Edit only the D127 block, short additions."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Run unit tests trailer_*, speedup_*, prompt_budget_*, cut_a_* that build records and assert levels per evaluation point.",
+      "command": "cargo test -p athena-core scope_guard",
+      "observes": "All pass; speedup T4 Pause after 2nd rejection; cut A T1 Flag, no Pause; prompt-budget T5 Flag at 60 min, none at 59.",
+      "fails_without": "Without the signal functions, no T4 Pause after the 2nd speedup rejection and the asserted levels would not hold."
+    },
+    {
+      "criterion": 2,
+      "method": "A different-criteria test asserts T4 not Pause; the speedup test asserts Pause on same criterion with differing numbers.",
+      "command": "cargo test -p athena-core scope_guard::tests::t4",
+      "observes": "Both pass; always-true comparison fails the different-criteria test, always-false fails the speedup test.",
+      "fails_without": "The different-criteria test fails if the same-criterion comparison is removed or always true."
+    },
+    {
+      "criterion": 3,
+      "method": "Grouping, normalisation and maybe tests, plus reading the named constants in source.",
+      "command": "cargo test -p athena-core scope_guard",
+      "observes": "Request, retry and quoting request form one line, unrelated does not; 'Under 7 minutes' equals 'under 12 MINUTES'; Maybe flags without pausing; constants T1_ATTEMPT=3, T2_RATIO=1.5, T2_PLANNING_ROUND=3, T3_FLAG_RATIO=1.0, T3_PAUSE_RATIO=1.5, T3_LINE_DOLLARS=5.0, T4_REJECTIONS=2, T5_FLAG_MINUTES=60, T5_PAUSE_MINUTES=120 exist.",
+      "fails_without": "Grouping test fails if links are ignored; maybe test fails if a maybe paused."
+    },
+    {
+      "criterion": 4,
+      "method": "Compile with the export line, and read the source for forbidden APIs.",
+      "command": "cargo check -p athena-core",
+      "observes": "Compiles with pub mod scope_guard; in lib.rs; no std::fs, process, net, SystemTime or Instant in the file.",
+      "fails_without": "Without the export the module is unreachable from the crate and the later watcher cannot call it; an I/O call would show in the source read."
+    },
+    {
+      "criterion": 5,
+      "method": "Read the D127 diff.",
+      "command": "git diff docs/decisions.md",
+      "observes": "Status accepted, decider the brain under Sri's delegation (BRIEF.md addenda of 2026-10-23 and 2026-10-25), both changes recorded.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Read both diffs.",
+      "command": "git diff docs/design/scope-guard.md CHANGELOG.md",
+      "observes": "Status line accepted; section 8 says whoever holds Sri's delegation; section 13 starts with jobs 1 and 5 (rules only); CHANGELOG Unreleased Added has an entry.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Run clippy, then cargo fmt --all --check and cargo test --locked across the workspace.",
+      "command": "cargo clippy --all-targets --locked -- -D warnings",
+      "observes": "Clippy and fmt report nothing; every workspace test passes, including the boundary scan and budget tests over the edited docs and the new scope_guard tests.",
+      "fails_without": "Clippy exits non-zero on any warning in the new module, fmt --check fails on unformatted code, and cargo test --locked fails if a scope_guard test, the boundary scan or a budget test fails."
+    }
+  ],
+  "open_questions": [
+    "The T4 maybe rule (containment or majority-word overlap) is a producer choice; the design says only 'unclear'.",
+    "A rejected attempt with no recorded unmet criterion is assumed Maybe; the design does not say.",
+    "Cut A and trailer per-attempt figures are even splits; cut A criteria text is invented for tests."
+  ],
+  "producer_section_sha256": "6ace09c0e909c63f81eaff31035113e6d7219dc18d9c6e132a387c4f2564564e"
+}

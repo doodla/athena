@@ -1,6 +1,8 @@
 # The scope guard: Artemis, with Demeter's view of cost
 
-Status: proposed design (D127 in `docs/decisions.md`). No code is written by this document. Audience: the owner
+Status: accepted (D127 in `docs/decisions.md`), decided by the brain under Sri's delegation (BRIEF.md addenda of
+2026-10-23 and 2026-10-25), with two changes: section 8 escalations go to whoever holds Sri's delegation, and
+the build order (section 13) starts with jobs 1 and 5 (rules only). Job 1 is built; this document writes no code. Audience: the owner
 and design reviewers.
 
 ## 1. Purpose
@@ -197,7 +199,8 @@ The addendum says learnings must go back into the system. The guard must therefo
 - Merge of similar but not identical requests; marking a request done or superseded; the value score; a
   suggested narrowing of a request.
 
-**Goes to Sri:**
+**Goes to Sri (D127, accepted):** these escalations go to whoever holds Sri's delegation (the brain, under the
+BRIEF.md addenda of 2026-10-23 and 2026-10-25). They go to Sri himself only for what the brief reserves to Sri.
 
 - Dropping or closing any request (the 49 open requests are not touched by this design).
 - Re-scoping a request, or changing an acceptance criterion.
@@ -259,7 +262,10 @@ otherwise record the result as inconclusive and keep measuring.
 
 ## 13. Build plan
 
-Each job is sized for one producer run and ordered by dependency. None is started by this document.
+Each job is sized for one producer run and ordered by dependency. D127 (accepted) changes the order: build
+jobs 1 and 5 (rules only) first, before the value scoring (jobs 2 to 4) and the model scorer (job 7). Job
+numbers are kept so other text still refers to them. Job 5 in its first form depends on job 1 only; its
+dependency on job 4 applies when queue-time decisions exist. Job 1 is built (`scope_guard.rs`).
 
 1. **Line and signal types, pure functions.** Scope: a module with the "line of work" grouping (request plus
    retries and quoting requests) and functions computing T1 to T5 from job records, with no I/O. Files: a new
