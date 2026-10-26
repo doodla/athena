@@ -1,0 +1,62 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261026-150803-c7d4",
+  "round": 1,
+  "at": "2026-10-26T16:02:27.819022114Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/job_plan.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/job_plan.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/store.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/store.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/admission.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/admission.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The planning cost per landed job leaves out the spend of earlier attempts that the job retried, so the before/after split cannot show the saving the request asks to measure.",
+      "evidence": "The plan computes, for each planned landed job, 'the job's plan count' and that job's own planner and critic invocations. Before the change, a cap-stopped job spends 3 rounds and then a fresh retry lands with N rounds; the 3 wasted rounds are on the failed job and are not counted. After the change, the resumed retry lands with 1 or more rounds, and again the 3 rounds on the predecessor are not counted. Either way the measure leaves out exactly the spend the request is about ('throws away the whole planning spend'). The before and after numbers would therefore reflect differences between retries, not the saving. Fix: For each landed job, follow its 'try again on' chain back (`retried_job`) and add the planning rounds and planner/critic cost of every predecessor to the landed job's totals. Report these chain totals, optionally next to the job's own figures. Extend the status.rs fixture with a cap-stopped predecessor in each group, and assert that its rounds and cost are included.",
+      "location": "Approach (5) / Decision 4 / Criterion 3 demonstration: status.rs `planning_cost`",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The 'after' group depends on whether a resume has happened yet, not on when the change shipped.",
+      "evidence": "With no resumed plan, everything is 'before'. Landed jobs that ran on the new code but never needed a resume count as 'before' until some job does resume. The cutover then jumps to that job's dispatch time. Fix: Keep the marker-based cutover, but print the cutover job id and time next to the split (the plan partly does this already). Also state in display.rs and the CHANGELOG that 'after' means 'since the first resumed planning', so the operator reads it correctly.",
+      "location": "Approach (5) / Decision 4: cutover at the first resumed job's dispatch time",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "docs/records.md documents the job-plan fields; a new `resumed_from` field should be documented there, not only if a test forces it.",
+      "evidence": "A grep for `producer_section_sha256` shows that docs/records.md and docs/design/job-planning.md describe JobPlan's fields. Fix: Add docs/records.md (modify) to the files, with a one-line description of `resumed_from`.",
+      "location": "Open questions: docs/records.md",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Matching on outcome-reason text is fragile even with a shared constant.",
+      "evidence": "run.rs:959 builds the reason with format!, adding the round, summary and findings. Old records only contain the literal text, which is why matching uses 'contains'. Fix: Keep the constant, and add a unit test that matches an outcome string copied verbatim from a pre-change cap stop, so the old jobs named in the request (for example 20261026-145955-s7e2) still qualify.",
+      "location": "Approach (2): `planning_resume_seed` qualification",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the plan against the snapshot. It works in the places that matter. `end_round` in run.rs (lines 922–966) already pushes the round-3 plan and critique into `closing` before it stops at the cap, using the literal \"the plan still needed revising in the last round\". `plan_round` starts with `revision = None` (line 590), so the retry can seed round 1 there. `PlanRevision` (briefs.rs:793), `retried_job`/`retry_findings` (reading.rs) and `PLANNING_STOPPED_PREFIX` (records.rs:1306) all exist. `JobPlan` is `deny_unknown_fields` (records.rs:2052), so adding an optional, serde-defaulted field is sound. The tests for criteria 1 and 2 check what the planner and critic are actually given and the order they run in, and both would fail without the change. My one major finding is about the status measure. It counts only each landed job's own planning rounds and cost. The waste this request targets is the three rounds spent on the cap-stopped predecessor, and that sits on a different job. Neither the before nor the after group would include it, so the split cannot show the effect the request asks to measure. The cutover and documentation points are minor. Athena's own out-of-list-file findings are fair, and the plan explains why it touches those files."
+}

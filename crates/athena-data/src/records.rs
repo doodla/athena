@@ -1305,6 +1305,10 @@ pub const CONTEXT_PREVENTION_OUTCOMES: [&str; 7] = [
 /// The start of the outcome reason of a job that failed in planning, before any code was written.
 pub const PLANNING_STOPPED_PREFIX: &str = "planning stopped before any code was written:";
 
+/// The words of the outcome reason of a job whose plan still needed revising in the last planning round. A
+/// retry resumes planning from the kept plan only for a planning stop whose reason holds this text.
+pub const PLANNING_CAP_REASON: &str = "the plan still needed revising in the last round";
+
 /// Jev's answer to the post-mortem question. Exactly one of the two fields is set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2066,6 +2070,10 @@ pub struct JobPlan {
     pub open_questions: Vec<String>,
     /// The SHA-256 of the section of the producer's prompt that code renders from this plan.
     pub producer_section_sha256: String,
+    /// Set on the first plan of a job that resumed planning from the kept plan of this earlier job, which
+    /// stopped at the planning round cap. Absent on every other plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resumed_from: Option<JobId>,
 }
 
 impl JobPlan {
@@ -3413,7 +3421,24 @@ mod tests {
             }],
             open_questions: vec![],
             producer_section_sha256: "c".repeat(64),
+            resumed_from: None,
         }
+    }
+
+    #[test]
+    fn a_plan_records_where_it_resumed_from_and_an_old_plan_without_it_still_parses() {
+        let old = AnyRecord::JobPlan(Box::new(sample_plan(1)));
+        let old_json = old.to_json();
+        assert!(!old_json.contains("resumed_from"), "none is not written");
+        // A record written before the field existed is the same text.
+        assert_eq!(AnyRecord::parse("x", old_json.as_bytes()).unwrap(), old);
+
+        let mut plan = sample_plan(1);
+        plan.resumed_from = Some(job());
+        let resumed = AnyRecord::JobPlan(Box::new(plan));
+        let json = resumed.to_json();
+        assert!(json.contains("resumed_from"));
+        assert_eq!(AnyRecord::parse("x", json.as_bytes()).unwrap(), resumed);
     }
 
     fn sample_critique(round: u32) -> Critique {

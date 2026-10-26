@@ -6,6 +6,7 @@
 //! criteria, not toward a forecast, and the verifier judges the artifact, not anyone's expectations.
 
 use athena_data::DefaultsModel;
+use athena_data::JobId;
 use athena_data::records::{
     CriterionKind, DeliverableAction, Demonstration, Finding, FindingSource, Forecast, JobPlan,
     PinnedRepo, Reading, Severity,
@@ -793,6 +794,9 @@ pub struct DeliverableFact {
 pub struct PlanRevision {
     pub previous: JobPlan,
     pub findings: Vec<Finding>,
+    /// Set when the plan is the one kept by an earlier job that stopped at the round cap: the revision is then
+    /// the first round of a retry, not a later round of this job.
+    pub resumed_from: Option<JobId>,
 }
 
 /// Everything the planner's brief is built from.
@@ -850,11 +854,21 @@ pub fn planner_brief(inputs: &PlannerInputs) -> String {
         }
     }
     if let Some(rev) = &inputs.revision {
-        let _ = writeln!(
-            out,
-            "\n## Revision: your plan for round {} was not accepted\n\nYour previous plan, in full:\n",
-            rev.previous.round
-        );
+        if let Some(earlier) = &rev.resumed_from {
+            let _ = writeln!(
+                out,
+                "\n## Revision: planning for job {earlier} stopped at the round cap\n\nA plan for this request was kept when planning stopped. \
+                 Make one revision of it that answers every finding, and keep what the critic did not fault. The critic reviews your revision next.\n\n\
+                 The kept plan (round {}), in full:\n",
+                rev.previous.round
+            );
+        } else {
+            let _ = writeln!(
+                out,
+                "\n## Revision: your plan for round {} was not accepted\n\nYour previous plan, in full:\n",
+                rev.previous.round
+            );
+        }
         plan_body(&mut out, &rev.previous);
         let _ = writeln!(
             out,
@@ -1710,6 +1724,7 @@ mod tests {
             ],
             open_questions: vec!["QUESTION-MARK which format".into()],
             producer_section_sha256: "0".repeat(64),
+            resumed_from: None,
         }
     }
 
@@ -1803,6 +1818,7 @@ mod tests {
         let brief = planner_brief(&planner_inputs(Some(PlanRevision {
             previous: plan(1),
             findings,
+            resumed_from: None,
         })));
         assert!(brief.contains("## Revision: your plan for round 1 was not accepted"));
         for text in [
@@ -1822,6 +1838,25 @@ mod tests {
         ] {
             assert!(brief.contains(text), "the revision brief omits {text}");
         }
+    }
+
+    #[test]
+    fn a_resumed_planning_brief_says_planning_stopped_at_the_cap_and_asks_for_one_revision() {
+        let brief = planner_brief(&planner_inputs(Some(PlanRevision {
+            previous: plan(3),
+            findings: vec![finding(
+                Severity::Major,
+                FindingSource::Critic,
+                "SMALL-FIX-TEXT",
+            )],
+            resumed_from: Some(JobId::parse("20261026-145955-s7e2").unwrap()),
+        })));
+        assert!(brief.contains("## Revision: planning for job 20261026-145955-s7e2 stopped"));
+        assert!(brief.contains("one revision"));
+        for text in ["APPROACH-MARK", "STEP-MARK", "SMALL-FIX-TEXT"] {
+            assert!(brief.contains(text), "the resumed brief omits {text}");
+        }
+        assert!(!brief.contains("was not accepted"));
     }
 
     #[test]

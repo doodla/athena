@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261026-145955-s7e2",
+  "round": 3,
+  "at": "2026-10-26T15:05:33.007129416Z",
+  "invocation_seq": 7,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "A live reader in gh.rs is not classified, moved, or on the allow-list, so either the scan fails on the real tree or `athena land` misses the records after the cutover.",
+      "evidence": "Read: gh.rs:2512 `let head = self.head()?;` and :2513 `let records = crate::store::Records::load(&self.git, &head)?;`. The code then calls records.resolve(job_ref) to find the job's verification and candidate. This reads current state from the live HEAD; it does not judge a given treeish. Decision 3 mentions 'landing code' as a treeish judge, but gh.rs is not in the Decision 4 allow-list or in the Files/deliverables. The scan matches two-argument Records::load(, so on the real tree it flags this line and records_reader_scan fails (criterion 4). If it is allow-listed, the reason would be wrong: after the cutover, main's HEAD has no records, so `athena land` could not find the job. Fix: Add gh.rs:2513 to the classification as a live reader and move it to Records::load_current. Add crates/athena-core/src/gh.rs to the Files list, flagged as outside the expected deliverables with the reason. Add `athena land` resolving a job from the worktree to the criterion 1 demonstration, or name it in the test header as covered only by the scan. Re-grep with `crate::store::Records::load(` path-qualified forms too, not only bare `Records::load(`.",
+      "location": "crates/athena-core/src/gh.rs:2512-2513 (land_pr); plan Decision 3, Decision 4 allow-list and Files list",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The grep and scan patterns should also catch fully qualified paths such as `crate::store::Records::load(`.",
+      "evidence": "Read: gh.rs:2513 uses the qualified form `crate::store::Records::load(`. The plan lists aliases (Records, RecordSet, GitRecords) but does not say whether the matcher anchors on the bare type name. Fix: State that the matcher matches the `Records::load(` / `RecordSet::load(` suffix whatever the path prefix is. Add a planted case with `crate::store::Records::load(git, head)`.",
+      "location": "Plan Decision 4 / Risks: 'Missed call sites, including aliased ones'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The introspect sites are left to the producer to decide, but they look like live directory walks, so they should move to records_root rather than go on the allow-list.",
+      "evidence": "Grep: introspect.rs:300 `children(&root.join(\"records\").join(kind))`, :318 `root.join(\"records/jobs\")`, :339 interventions, :360 host-errors. These are directory walks of the same shape as walltime.rs:83, which the plan moves. Fix: Decide now that they move to records_root, unless a caller passes a fixture root. Drop the conditional allow-list entry.",
+      "location": "crates/athena-core/src/introspect.rs:300/318/339/360; Decision 4",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan defines the worktree path once in paths.rs beside repo_state_dir (which exists at paths.rs:43). It adds load_current forms to RecordSet::load (gate records.rs:27) and Records::load (store.rs:274). xtask already depends on athena-data, and walltime.rs:83 is where the plan says. The real-git fixture with a HEAD that has no records/, plus its negative control, is a sound demonstration that fails on the old code. The scan design with an explicit allow-list fits criterion 4. One live reader is missing: gh.rs:2513 (land_pr) loads Records at the live HEAD to resolve a job. It is not classified, not on the allow-list, and not in the Files list. So the scan test would fail on the real tree, or `athena land` would stop finding jobs after the cutover. The fix is small (move it, list the file and cover it in the tests), so the verdict is revise."
+}

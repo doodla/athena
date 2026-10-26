@@ -9,6 +9,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A planning stop at the round cap can be resumed. When a job fails because its plan still needed revising in
+  the last planning round, its round-3 `job-plan` and `critique` records are the kept plan and findings, and
+  `athena retry` of that job starts the planner from them: one revision round that answers every finding, then
+  the critic, instead of a fresh plan. The retry's first `job-plan` record carries `resumed_from`, the job it
+  resumed from (an optional field; older records parse as before). A retry of a job that stopped for any other
+  reason (a reject, a misread reading, a timeout, a failed verification) still plans fresh. The round cap and
+  the critic's grading are unchanged. For a resumed job, round 1 is the revision, so its first-round counts in
+  `athena status` read that round as a revision of the kept plan.
+- `athena status` shows planning rounds and planning cost per landed job, before and after, measured from
+  the records. Each figure is a mean over the whole retry chain behind a landed job (the rounds and the planner
+  and critic cost of every job it retried, counted once at the landed job), with the landed job's own figures
+  beside it. "After" means since the first resumed planning, named by its job and dispatch time; it is empty
+  until a plan resumes.
 - Athena writes no `Athena-` commit trailers after C0 (D111 job 7 part 1b). When `athena.toml` at a commit's
   parent names `[history] cutover_job`, the commit writer (`Committer::build_commit_in`, and the staged
   intervention commit) strips them; the per-commit gate accepts such commits by the records they add; the

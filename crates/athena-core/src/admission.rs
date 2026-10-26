@@ -504,6 +504,7 @@ mod tests {
             demonstrations: vec![],
             open_questions: vec![],
             producer_section_sha256: "0".repeat(64),
+            resumed_from: None,
         };
         let verifier = Policy {
             role: Role::Verifier,

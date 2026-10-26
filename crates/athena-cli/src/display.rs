@@ -3,7 +3,7 @@
 
 use athena_core::reading::Proposal;
 use athena_core::run::Finished;
-use athena_core::status::{JobTrace, StatusView};
+use athena_core::status::{JobTrace, PlanningCost, PlanningGroup, StatusView};
 use athena_data::records::{
     CriterionKind, DeliverableAction, Forecast, OutcomeState, Quantiles, Reading, Score,
 };
@@ -89,6 +89,44 @@ fn usd(x: f64) -> String {
     } else {
         format!("${x:.2}")
     }
+}
+
+/// Planning rounds and cost per landed job, before and after the first resumed planning. Each figure is a mean
+/// over the retry chain behind a landed job, with the landed job's own beside it; all measured from records.
+fn planning_cost_lines(p: &PlanningCost) -> String {
+    let group = |g: &PlanningGroup| {
+        if g.jobs == 0 {
+            "no landed jobs".to_string()
+        } else {
+            format!(
+                "{} landed · {:.1} rounds, {} per job (own {:.1}, {})",
+                g.jobs,
+                g.mean_rounds,
+                usd(g.mean_cost_usd),
+                g.own_mean_rounds,
+                usd(g.own_mean_cost_usd)
+            )
+        }
+    };
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "planning    per landed job, measured from records (the whole retry chain, planner and critic)"
+    );
+    let _ = writeln!(out, "            before: {}", group(&p.before));
+    match &p.first_resumed {
+        Some((job, at)) => {
+            let _ = writeln!(
+                out,
+                "            after:  {} · since the first resumed planning ({job}, {at})",
+                group(&p.after)
+            );
+        }
+        None => {
+            let _ = writeln!(out, "            after:  no planning has resumed yet");
+        }
+    }
+    out
 }
 
 /// A duration in seconds, written for people.
@@ -821,6 +859,9 @@ pub fn status(v: &StatusView) -> String {
             p.accepted, p.stopped
         );
     }
+    if let Some(p) = &v.planning_cost {
+        out.push_str(&planning_cost_lines(p));
+    }
     for (i, j) in v.open.iter().enumerate() {
         let label = if i == 0 { "open" } else { "" };
         let _ = writeln!(
@@ -1429,6 +1470,48 @@ mod tests {
             failing_test: test.map(str::to_string),
             warnings: Vec::new(),
         }
+    }
+
+    #[test]
+    fn planning_cost_lines_show_both_groups_the_cutover_and_the_measured_numbers() {
+        let group = |jobs, rounds, cost, own_rounds, own_cost| PlanningGroup {
+            jobs,
+            mean_rounds: rounds,
+            mean_cost_usd: cost,
+            own_mean_rounds: own_rounds,
+            own_mean_cost_usd: own_cost,
+        };
+        let text = planning_cost_lines(&PlanningCost {
+            before: group(4, 5.5, 1.25, 3.0, 0.75),
+            after: group(1, 2.0, 0.4, 2.0, 0.4),
+            first_resumed: Some(("20261026-150803-c7d4".into(), "2026-10-26T15:08:03Z".into())),
+        });
+        assert!(text.contains("measured from records"), "{text}");
+        assert!(
+            text.contains("before: 4 landed · 5.5 rounds, $1.25 per job (own 3.0, $0.75)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("after:  1 landed · 2.0 rounds, $0.40 per job (own 2.0, $0.40)"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "since the first resumed planning (20261026-150803-c7d4, 2026-10-26T15:08:03Z)"
+            ),
+            "{text}"
+        );
+
+        let none = planning_cost_lines(&PlanningCost {
+            before: group(2, 3.0, 0.5, 3.0, 0.5),
+            after: PlanningGroup::default(),
+            first_resumed: None,
+        });
+        assert!(
+            none.contains("after:  no planning has resumed yet"),
+            "{none}"
+        );
+        assert!(!none.contains("since the first"), "{none}");
     }
 
     #[test]

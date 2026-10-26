@@ -490,6 +490,7 @@ mod tests {
             }],
             open_questions: vec![],
             producer_section_sha256: "d".repeat(64),
+            resumed_from: None,
         }
     }
 

@@ -1,0 +1,295 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261026-155343-tvfc",
+  "round": 1,
+  "at": "2026-10-26T15:55:34.892434756Z",
+  "invocation_seq": 2,
+  "approach": "The repository has no worktree-reading code today (no load_current, no records_reader_scan; I grepped both). Records::load and RecordSet::load read `records/` from a git tree at HEAD, and introspect::read_records and xtask walltime::read_jobs read `<root>/records/...` as files (docs/design/records-history.md section 13, seams A and B). Plan: (1) add one helper in athena-data paths.rs that names the worktree `<state dir>/records-worktree` and derives the state dir from `git rev-parse --git-common-dir`, plus a selector that returns the worktree when it holds a checkout of athena/records, else the in-tree root. (2) Add `Records::load_current` and `RecordSet::load_current`, which take a treeish from the worktree's own HEAD when it exists and otherwise the passed head, and switch every Records::load/RecordSet::load production caller and the two file readers to them. (3) Replace `<root>/.git` and root-derived state dirs in backtest.rs and walltime.rs with git's common dir. (4) Create the xtask records_reader_scan test with a narrowed allow-list of call sites. (5) Add records_branch_readers.rs with a worktree test and a fallback test per reader. (6) Record decisions and the changelog. The site generator is not touched. The producer's snapshot has no git history, so tests build their own repositories and worktrees under a tempdir with ATHENA_STATE_DIR set to a tempdir.",
+  "decisions": [
+    {
+      "choice": "Gate the move on the worktree's presence: when `<state>/records-worktree` is a checkout of athena/records, readers use it; otherwise they use in-tree records/ at the passed head, with the same code path as today.",
+      "reason": "Matches the accepted reading and section 13. Fallback keeps every pre-cutover and scratch checkout working and gives the 'same result as before' criterion.",
+      "rejected": [
+        {
+          "option": "Always read refs/heads/athena/records",
+          "why": "Breaks repositories before cutover and the scratch-checkout case, and does not let tests tell worktree from in-tree records."
+        },
+        {
+          "option": "Change Records::load itself",
+          "why": "Existing tests and callers that pass an explicit treeish (for example historical commits in reconcile and gate history) must keep their meaning. Out of scope: changing existing tests."
+        }
+      ]
+    },
+    {
+      "choice": "One shared helper in athena-data::paths derives the common dir with `git rev-parse --path-format=absolute --git-common-dir` (the athena_git::Git::common_dir pattern); backtest.rs and walltime.rs call it instead of `<root>/.git`.",
+      "reason": "Root cause of the linked-worktree fault is each reader deriving the git dir itself. One derivation fixed in all readers (root-cause default).",
+      "rejected": [
+        {
+          "option": "Patch only backtest.rs and walltime.rs",
+          "why": "Other readers would keep the same latent fault."
+        }
+      ]
+    },
+    {
+      "choice": "Scoring and forecasting closures that receive a head still use the worktree when present; document it in docs/decisions.md and test it with a head that differs from the worktree tip.",
+      "reason": "After cutover the branch tip is the only complete history; a main head has frozen records. Criterion 6 requires it documented and tested.",
+      "rejected": [
+        {
+          "option": "Honour the passed head",
+          "why": "Would score against frozen main records after cutover."
+        }
+      ]
+    },
+    {
+      "choice": "Put the records_reader_scan test in xtask/src/main.rs's test module, with the allow-list keyed by file plus function name rather than whole file.",
+      "reason": "xtask/tests is not among the deliverables; call-site entries narrow the exception. A planted-read fixture proves the scan still fails.",
+      "rejected": [
+        {
+          "option": "Whole-file allow-list",
+          "why": "Hides new reads in an allowed file."
+        }
+      ]
+    },
+    {
+      "choice": "Do not touch xtask/src/site.rs.",
+      "reason": "Out of scope; section 13 found that it does not read records/.",
+      "rejected": []
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-cli/tests/records_branch_readers.rs",
+      "action": "create",
+      "purpose": "worktree_, fallback_, scratch_checkout and linked_worktree tests for all readers",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-data/src/paths.rs",
+      "action": "modify",
+      "purpose": "records_worktree_dir, common-dir state derivation and records root selector, with unit tests",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/lib.rs",
+      "action": "modify",
+      "purpose": "re-export or document the new helper",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/store.rs",
+      "action": "modify",
+      "purpose": "Records::load_current",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-gate/src/records.rs",
+      "action": "modify",
+      "purpose": "RecordSet::load_current",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/introspect.rs",
+      "action": "modify",
+      "purpose": "read_records and month_files take the selected root; walks use load_current",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "status uses load_current",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "purpose": "scoring closures and other loads use load_current; document use of the worktree regardless of head",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/manage.rs",
+      "action": "modify",
+      "purpose": "load callers switched",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "forecasting and retry carry load callers switched",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/proposals.rs",
+      "action": "modify",
+      "purpose": "proposals loads and read_records caller switched",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/auditor.rs",
+      "action": "modify",
+      "purpose": "auditor load switched",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh.rs",
+      "action": "modify",
+      "purpose": "land_pr loads switched",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/backtest.rs",
+      "action": "modify",
+      "purpose": "find git dir through common dir, read worktree",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "purpose": "pass the state dir and resolved root to readers",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "xtask/src/walltime.rs",
+      "action": "modify",
+      "purpose": "common-dir lookup, worktree root, linked-worktree test",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "xtask/src/main.rs",
+      "action": "modify",
+      "purpose": "records_reader_scan with call-site allow-list, and its tests",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "new decision on the reader move, the fallback and scoring ignoring the passed head, citing D111",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased entry for the move, fallback, allow-list and site generator out of scope, D111",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Grep Records::load, RecordSet::load, read_records, read_jobs, `join(\"records` over crates and xtask; keep the list for the change description.",
+    "Add the paths.rs helpers (records worktree dir, common-dir state derivation, root selector) with unit tests.",
+    "Add RecordSet::load_current and Records::load_current, falling back to the passed head.",
+    "Switch production callers (status, run, manage, reading, proposals, auditor, gh, introspect, scoring closures, watchers) and thread the state dir through Athena where needed; leave the site generator alone.",
+    "Switch introspect::read_records, backtest.rs and xtask walltime.rs to the selected root and git's common dir.",
+    "Add records_reader_scan to xtask with a call-site allow-list and its tests, including a planted read.",
+    "Write crates/athena-cli/tests/records_branch_readers.rs: worktree_ and fallback_ tests per reader, scratch_checkout test for status and forecast, linked_worktree tests, and the scoring-ignores-head test; all state under tempdirs.",
+    "Add the decisions.md entry and the CHANGELOG.md entry citing D111.",
+    "Run cargo fmt --all --check, clippy and cargo test --locked; confirm git diff does not list xtask/src/site.rs; write the change description with the reader-to-test map and the commands run."
+  ],
+  "risks": [
+    {
+      "risk": "Switching ~60 Records::load callers breaks existing tests that pass explicit historical treeishes.",
+      "mitigation": "Switch only production callers that mean 'current'; the load_current fallback is identical when no worktree exists, and existing tests have none. Run the full cargo test --locked."
+    },
+    {
+      "risk": "Tests write to the real state root through the default ATHENA_STATE_DIR.",
+      "mitigation": "Every test sets ATHENA_STATE_DIR to a tempdir and asserts the worktree path lies under it; mutate env only through a shared lock or child processes."
+    },
+    {
+      "risk": "The producer's snapshot lacks git history, so git worktree fixtures could fail there.",
+      "mitigation": "Tests init their own repos in a tempdir, so they need no outer history."
+    },
+    {
+      "risk": "The scan's allow-list is too broad or too narrow.",
+      "mitigation": "Key entries by file and function; a planted-read test shows failure and a clean-tree test shows the real code passes."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Integration test per reader. Build a tempdir git repo with in-tree records/ holding record A, create the records worktree under a tempdir ATHENA_STATE_DIR holding record B, call the reader and assert it returns B. Names like `worktree_records_load_current`, `worktree_status`, `worktree_forecasting`, `worktree_land_pr`, one for each of the 14 readers.",
+      "command": "cargo test --locked --test records_branch_readers worktree_",
+      "observes": "All worktree_* tests pass, one per reader in the brief, each asserting B and not A.",
+      "fails_without": "A reader still reading in-tree records/ or HEAD returns A and its worktree_ test fails."
+    },
+    {
+      "criterion": 2,
+      "method": "Same readers, no worktree directory; assert the result equals the in-tree records/ result, compared with the pre-change loaders (Records::load at head, read_records(root)). Names `fallback_<reader>`.",
+      "command": "cargo test --locked --test records_branch_readers fallback_",
+      "observes": "All fallback_* tests pass with results equal to the old-path results.",
+      "fails_without": "A reader that errors or returns empty when the worktree is missing fails its fallback_ test."
+    },
+    {
+      "criterion": 3,
+      "method": "Run the built athena binary (env!(CARGO_BIN_EXE_athena)) with `status` and the forecasting entry (the reading step that calls scoring::reference, run offline with the fixture driver as in existing cli tests) on a scratch clone whose working tree has no records/ and whose worktree holds the records; compare stdout with the run on a checkout that has records/.",
+      "command": "cargo test --locked --test records_branch_readers scratch_checkout",
+      "observes": "Both commands exit 0 and their output equals the records/ run.",
+      "fails_without": "A reader still needing working-tree records/ fails or prints empty history on the scratch checkout."
+    },
+    {
+      "criterion": 4,
+      "method": "Inspect the producer's change description for the grep command (for example `Grep \"Records::load|RecordSet::load|read_records|records/jobs\"` over crates and xtask) and a table of reader to test names. Check by comparing it with the test names in the new file.",
+      "command": "cargo test --locked --test records_branch_readers -- --list",
+      "observes": "Every test name in the description appears in the list, and every grep hit is mapped or explained.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "Test creates a repo, adds a linked worktree with `git worktree add`, sets ATHENA_STATE_DIR to a tempdir, creates the records worktree for the main repo's common dir, and calls backtest::run and walltime::read_jobs from the linked checkout; asserts the records worktree's records are found (the `<root>/.git` path is a file there).",
+      "command": "cargo test --locked linked_worktree",
+      "observes": "Tests in the cli test file and the xtask test module pass, finding worktree records from the linked checkout.",
+      "fails_without": "Deriving the git dir as <root>/.git fails from a linked checkout, where .git is a file, so the tests fail."
+    },
+    {
+      "criterion": 6,
+      "method": "Every test sets ATHENA_STATE_DIR to a tempdir and asserts the worktree path starts with it. A test passes a head that differs from the worktree tip to the scoring and forecast closures and asserts worktree results. Read docs/decisions.md for the new entry.",
+      "command": "cargo test --locked --test records_branch_readers scoring_ignores_passed_head",
+      "observes": "The test passes, and no path under the real state_root is created.",
+      "fails_without": "A closure honouring the passed head returns main's records and the test fails."
+    },
+    {
+      "criterion": 7,
+      "method": "The scan test plants a read of `records/` in a non-allowed fixture file and asserts the scan reports it; another asserts the real tree is clean with function-level allow entries. Confirm the output shows 'test result: ok. N passed' with N>0.",
+      "command": "cargo test -p xtask --locked records_reader_scan",
+      "observes": "N is at least 2 and all pass.",
+      "fails_without": "A scan that ignores planted reads fails the planted-read test."
+    },
+    {
+      "criterion": 8,
+      "method": "Run the three checks, then `git diff --stat` to confirm xtask/src/site.rs is absent.",
+      "command": "cargo clippy --all-targets --locked -- -D warnings",
+      "observes": "fmt, clippy and the full cargo test --locked pass; git diff lists no site.rs.",
+      "fails_without": null
+    },
+    {
+      "criterion": 9,
+      "method": "Read the CHANGELOG.md Unreleased entry with `git diff CHANGELOG.md`.",
+      "command": "git diff CHANGELOG.md",
+      "observes": "The entry names the reader move, the fallback, the allow-list, that the site generator is out of scope, and D111.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "crates/athena-gate/src/audit.rs does not exist in the base snapshot though the brief lists it as a modify deliverable. The auditor reader is in athena-core auditor.rs; the producer should create audit.rs only if the audit reader needs a gate-level seam, and otherwise leave it and say so.",
+    "I found no `athena forecast` subcommand in athena-cli main.rs. Forecasting runs in reading.rs via scoring::reference. Criterion 3's 'a forecast' must go through whichever binary command reaches it offline (such as plan or run with the fixture driver); the producer must confirm which.",
+    "The worktree location (`<state>/records-worktree`) is from docs/design/records-history.md section 13 ('for example'). No code creates it yet, so the tests create it with `git worktree add`.",
+    "The brief lists 14 readers; I did not exhaustively map every Records::load caller (code_health, hestia, watcher, steward, scope_guard, work_decisions, review). The producer must grep and either switch them or justify leaving each, in the change description (criterion 4)."
+  ],
+  "producer_section_sha256": "01ba2a5f4137499152f64fefbe974e61e08da4acba7fbf22ed8d570ccdab3724"
+}

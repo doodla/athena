@@ -2299,6 +2299,288 @@ fn retrying_a_timed_out_job_whose_base_moved_starts_clean() {
     assert!(!seen[0].1.contains("## Resume"));
 }
 
+fn planned_config() -> String {
+    format!("{}\n[job_plan]\nenabled = true\n", test_config())
+}
+
+/// A plan for the default reading (two criteria, README.md to modify) with this approach.
+fn plan_with(approach: &str) -> serde_json::Value {
+    let demo = |n: u32| {
+        serde_json::json!({
+            "criterion": n,
+            "method": "run the tests",
+            "command": "cargo test --locked",
+            "observes": format!("criterion {n} holds"),
+            "fails_without": "the suite fails"
+        })
+    };
+    serde_json::json!({
+        "approach": approach,
+        "decisions": [],
+        "files": [{ "path": "README.md", "action": "modify", "purpose": "Hold the greeting." }],
+        "steps": ["Edit README.md."],
+        "risks": [],
+        "demonstrations": [demo(1), demo(2)],
+        "open_questions": []
+    })
+}
+
+/// A critique with these `(severity, summary)` findings.
+fn critique_json(verdict: &str, findings: &[(&str, &str)]) -> serde_json::Value {
+    serde_json::json!({
+        "verdict": verdict,
+        "findings": findings.iter().map(|(severity, summary)| serde_json::json!({
+            "severity": severity,
+            "summary": summary,
+            "location": "demonstrations",
+            "evidence": "the second demonstration repeats the first",
+            "fix": "name a test that fails without the greeting"
+        })).collect::<Vec<_>>(),
+        "request_reading_mismatch": null,
+        "summary": format!("The critic says {verdict}.")
+    })
+}
+
+/// The briefs one role was given, in order.
+type Briefs = Arc<Mutex<Vec<String>>>;
+
+/// A script that also keeps the brief of every planner call and of every critic call.
+fn recording_planning(
+    inner: athena_agent::fake::Script,
+) -> (athena_agent::fake::Script, Briefs, Briefs) {
+    let planners: Arc<Mutex<Vec<String>>> = Arc::default();
+    let critics: Arc<Mutex<Vec<String>>> = Arc::default();
+    let (p, c) = (planners.clone(), critics.clone());
+    let script: athena_agent::fake::Script = Box::new(move |spec| {
+        match spec.role {
+            Role::Planner => p.lock().unwrap().push(spec.user_prompt.clone()),
+            Role::Critic => c.lock().unwrap().push(spec.user_prompt.clone()),
+            _ => {}
+        }
+        inner(spec)
+    });
+    (script, planners, critics)
+}
+
+fn plan_record_of(
+    fx: &Fixture,
+    job: &athena_data::JobId,
+    round: u32,
+) -> athena_data::records::JobPlan {
+    match record_at(fx, "HEAD", &format!("{}/job-plan-{round}.json", job.dir())) {
+        Some(AnyRecord::JobPlan(plan)) => *plan,
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[test]
+fn a_retry_of_a_job_stopped_at_the_planning_cap_resumes_from_the_kept_plan() {
+    const KEPT: &str = "KEPT-ROUND-THREE-APPROACH";
+    const REVISED: &str = "REVISED-APPROACH-AFTER-THE-FINDINGS";
+    let fx = Fixture::with_config(&planned_config());
+    let mut scenario = Scenario::default();
+    scenario.plans = vec![
+        plan_with("ROUND-ONE-APPROACH"),
+        plan_with("ROUND-TWO-APPROACH"),
+        plan_with(KEPT),
+        plan_with(REVISED),
+    ];
+    scenario.critiques = vec![
+        critique_json("revise", &[("major", "ROUND-ONE-FINDING")]),
+        critique_json("revise", &[("major", "ROUND-TWO-FINDING")]),
+        critique_json(
+            "revise",
+            &[
+                ("major", "ROUND-THREE-SMALL-FIX"),
+                ("minor", "ROUND-THREE-MINOR"),
+            ],
+        ),
+        critique_json("accept", &[]),
+    ];
+    let calls = scenario.invocations.clone();
+    let (script, planners, critics) = recording_planning(scenario.script());
+    let athena = fx.athena(script);
+    let first = athena.ask("tidy the readme", &Lines::default()).unwrap();
+    let stopped = finished(
+        athena
+            .go(first.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(stopped.state, OutcomeState::Failed);
+    assert!(
+        stopped
+            .reason
+            .contains(athena_data::records::PLANNING_CAP_REASON),
+        "{}",
+        stopped.reason
+    );
+    assert_eq!(planners.lock().unwrap().len(), 3);
+
+    let (second, _) = athena.retry(first.job.as_str(), &Lines::default()).unwrap();
+    let mark = calls.lock().unwrap().len();
+    let f = finished(
+        athena
+            .go(second.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(f.state, OutcomeState::Landed, "{}", f.reason);
+
+    // One revision round, then the critic, then the producer: no fresh plan, no second revision.
+    assert_eq!(
+        calls.lock().unwrap()[mark..mark + 3],
+        [Role::Planner, Role::Critic, Role::Producer]
+    );
+    let planners = planners.lock().unwrap().clone();
+    let critics = critics.lock().unwrap().clone();
+    assert_eq!(planners.len(), 4, "one planner call for the retry");
+    assert_eq!(critics.len(), 4, "one critic call for the retry");
+
+    // The planner is given the kept round-3 plan and every round-3 finding, and not the earlier rounds'.
+    let planner = &planners[3];
+    assert!(planner.contains("## Revision"), "{planner}");
+    assert!(planner.contains(first.job.as_str()), "{planner}");
+    for kept in [KEPT, "ROUND-THREE-SMALL-FIX", "ROUND-THREE-MINOR"] {
+        assert!(planner.contains(kept), "{kept} missing from {planner}");
+    }
+    for old in ["ROUND-ONE", "ROUND-TWO"] {
+        assert!(!planner.contains(old), "{old} found in {planner}");
+    }
+    // The first critic round of the retry reviews the revised plan.
+    let critic = &critics[3];
+    assert!(critic.contains(REVISED), "{critic}");
+    assert!(!critic.contains(KEPT), "{critic}");
+
+    // The kept plan and findings are the old job's round-3 records; the retry's first plan names only the job.
+    let kept = plan_record_of(&fx, &first.job, 3);
+    assert_eq!(kept.approach, KEPT);
+    assert_eq!(kept.resumed_from, None);
+    match record_at(&fx, "HEAD", &format!("{}/critique-3.json", first.job.dir())) {
+        Some(AnyRecord::Critique(c)) => {
+            assert_eq!(c.findings.len(), 2);
+            assert!(
+                c.findings
+                    .iter()
+                    .any(|f| f.summary == "ROUND-THREE-SMALL-FIX")
+            );
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+    let revised = plan_record_of(&fx, &second.job, 1);
+    assert_eq!(revised.approach, REVISED);
+    assert_eq!(revised.resumed_from.as_ref(), Some(&first.job));
+    assert!(
+        !fx.git
+            .path_exists("HEAD", &format!("{}/job-plan-2.json", second.job.dir()))
+            .unwrap()
+    );
+    assert!(athena.check_history().unwrap().violations.is_empty());
+}
+
+/// Retries `first` and runs the retry; returns the retry's planner brief and the retry's first plan record.
+fn retry_and_plan(
+    fx: &Fixture,
+    athena: &athena_core::Athena,
+    planners: &Arc<Mutex<Vec<String>>>,
+    first: &athena_data::JobId,
+) -> (String, athena_data::records::JobPlan) {
+    let before = planners.lock().unwrap().len();
+    let (second, _) = athena.retry(first.as_str(), &Lines::default()).unwrap();
+    athena
+        .go(second.job.as_str(), AcceptedBy::User, &Lines::default())
+        .unwrap();
+    let prompts = planners.lock().unwrap().clone();
+    assert_eq!(prompts.len(), before + 1, "the retry plans once");
+    (prompts[before].clone(), plan_record_of(fx, &second.job, 1))
+}
+
+#[test]
+fn a_retry_of_a_job_that_stopped_for_any_other_reason_plans_fresh() {
+    const KEPT: &str = "KEPT-APPROACH-OF-THE-FIRST-JOB";
+    const FINDING: &str = "FINDING-OF-THE-FIRST-JOB";
+
+    // A plan the critic rejects.
+    {
+        let fx = Fixture::with_config(&planned_config());
+        let mut scenario = Scenario::default();
+        scenario.plans = vec![plan_with(KEPT)];
+        scenario.critiques = vec![critique_json("reject", &[("blocker", FINDING)])];
+        let (script, planners, _) = recording_planning(scenario.script());
+        let athena = fx.athena(script);
+        let first = athena.ask("tidy the readme", &Lines::default()).unwrap();
+        let f = finished(
+            athena
+                .go(first.job.as_str(), AcceptedBy::User, &Lines::default())
+                .unwrap(),
+        );
+        assert_eq!(f.state, OutcomeState::Failed);
+        assert!(
+            f.reason.contains("the critic rejected the plan"),
+            "{}",
+            f.reason
+        );
+        let (brief, plan) = retry_and_plan(&fx, &athena, &planners, &first.job);
+        assert!(!brief.contains("## Revision"), "{brief}");
+        assert!(!brief.contains(KEPT) && !brief.contains(FINDING), "{brief}");
+        assert_eq!(plan.resumed_from, None);
+    }
+
+    // A producer that hits its deadline after an accepted plan.
+    {
+        let fx = Fixture::with_config(&planned_config());
+        let base = deadline_script(
+            Seen::default(),
+            athena_data::records::InvocationOutcome::TimedOut,
+        );
+        let planned = Arc::new(Mutex::new(0u32));
+        let script: athena_agent::fake::Script = Box::new(move |spec| {
+            let mut turn = base(spec);
+            if spec.role == Role::Planner {
+                let mut n = planned.lock().unwrap();
+                *n += 1;
+                if *n == 1 {
+                    turn.structured = Some(plan_with(KEPT));
+                }
+            }
+            turn
+        });
+        let (script, planners, _) = recording_planning(script);
+        let athena = fx.athena(script);
+        let first = athena.ask("tidy the readme", &Lines::default()).unwrap();
+        let f = finished(
+            athena
+                .go(first.job.as_str(), AcceptedBy::User, &Lines::default())
+                .unwrap(),
+        );
+        assert_eq!(f.state, OutcomeState::TimedOut, "{}", f.reason);
+        assert_eq!(plan_record_of(&fx, &first.job, 1).approach, KEPT);
+        let (brief, plan) = retry_and_plan(&fx, &athena, &planners, &first.job);
+        assert!(!brief.contains("## Revision"), "{brief}");
+        assert!(!brief.contains(KEPT), "{brief}");
+        assert_eq!(plan.resumed_from, None);
+    }
+
+    // A plan that was accepted and a change that failed verification.
+    {
+        let fx = Fixture::with_config(&planned_config());
+        let mut scenario = Scenario::default();
+        scenario.plans = vec![plan_with(KEPT)];
+        scenario.verdict = failing_verdict(FINDING);
+        let (script, planners, _) = recording_planning(scenario.script());
+        let athena = fx.athena(script);
+        let first = athena.ask("tidy the readme", &Lines::default()).unwrap();
+        let f = finished(
+            athena
+                .go(first.job.as_str(), AcceptedBy::User, &Lines::default())
+                .unwrap(),
+        );
+        assert_eq!(f.state, OutcomeState::Rejected, "{}", f.reason);
+        let (brief, plan) = retry_and_plan(&fx, &athena, &planners, &first.job);
+        assert!(!brief.contains("## Revision"), "{brief}");
+        assert!(!brief.contains(KEPT) && !brief.contains(FINDING), "{brief}");
+        assert_eq!(plan.resumed_from, None);
+    }
+}
+
 #[test]
 fn status_shows_timed_out_apart_from_failed() {
     let fx = Fixture::new();

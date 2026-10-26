@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261026-150607-85mv",
+  "round": 2,
+  "at": "2026-10-26T15:11:24.60662053Z",
+  "invocation_seq": 5,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "load_current(git, treeish) has no explicit path argument, so in-process tests cannot be pointed at a temporary state directory as Decision 5 intends.",
+      "evidence": "paths.rs:35 resolves the state directory from the ATHENA_STATE_DIR / XDG_STATE_HOME environment. Decision 5 says in-process tests use a per-test temporary state dir 'via an explicit path argument where the API allows', but the planned load_current signature takes only (git, treeish). In-process tests of library readers (auditor, forecasting, scoring, retry carry) would therefore write worktrees into the real state directory or have to change the process environment. Fix: Add an explicit form, for example Records::load_from(git, treeish, records_root: Option<&Path>) and RecordSet::load_dir. Make load_current a thin wrapper that resolves the path through paths.rs. In-process tests use the explicit form; binary tests set ATHENA_STATE_DIR through Command env.",
+      "location": "Decision 5 / Criterion 1 demonstration",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The scan must also catch the GitRecords alias, and must tell attribution.rs's unrelated read_records(git, tip, ...) apart from the reader in introspect.rs.",
+      "evidence": "introspect.rs:1246/1283/1314 and proposals.rs:556-669 call GitRecords::load(. attribution.rs:250 defines its own read_records(git, tip, dir, report). Fix: Match the suffix Records::load( so GitRecords::load( is caught, and include a GitRecords case in the planted tests. Allow-list attribution.rs's read_records with a reason ('reads a given records tip'), or match only the single-argument form.",
+      "location": "Step 1 / Criterion 6 scan",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan does not map the readers criterion 1 names (forecasting, scoring, retry carry) to call sites, so the verifier cannot check that each one is covered.",
+      "evidence": "The plan's Files section lists files by module but never names which file holds forecasting, scoring or retry carry. The demonstration says only 'one per moved reader or family'. Fix: In step 1's inventory, record each named reader against its file and line (for example run.rs:2392 for retry carry, if that is what it is). Name one test in records_branch_readers.rs per entry.",
+      "location": "Criterion 1 demonstration",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "If a worktree exists before writers move, every reader silently reads it while writes still land on HEAD.",
+      "evidence": "run.rs:360-366 reloads at new_head right after a reread is committed. With a worktree present, load_current ignores new_head and could fail with 'the job vanished'. Fix: State in docs/decisions.md that the worktree must not exist until the cutover moves the writers. The cutover job (20261025-001232-vesh) owns that ordering.",
+      "location": "Risks / Decision 1",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan fits the accepted reading. It defines the worktree path once in paths.rs beside repo_state_dir (confirmed at paths.rs:43). It adds load_current forms that fall back to the old treeish load, moves gh.rs land_pr (confirmed at gh.rs:2513, written as crate::store::Records::load) and the introspect walks (introspect.rs:300/316), and leaves the gate treeish judges allow-listed. I confirmed those judges are treeish readers: reconcile.rs:187-217, history.rs:188/263, and attribution.rs's own read_records(git, tip, ...). The scan is built first to produce the inventory. Each demonstration has a negative condition, and site.rs stays untouched. The plan correctly notes that crates/athena-gate/src/audit.rs does not exist; the audit reader is auditor.rs:300. What remains is minor: how in-process tests point load_current at a temporary worktree, the scan's handling of the GitRecords alias and of attribution's same-named read_records, and mapping the readers named in criterion 1 to files. None of these blocks the plan."
+}
