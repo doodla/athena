@@ -1276,6 +1276,36 @@ pub fn jev_score(r: &athena_core::labeled::Report) -> String {
             e.labels_without_introspection
         );
     }
+    let s = &r.sources;
+    let kinds = if s.evidence_by_kind.is_empty() {
+        "none".to_string()
+    } else {
+        s.evidence_by_kind
+            .iter()
+            .map(|(kind, n)| format!("{kind} {n}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let _ = writeln!(
+        out,
+        "  labels derived from evidence  {} (by kind: {kinds}); labeled by a person or stronger model  {}; evidence labels overridden by a review  {}",
+        s.evidence, s.reviewed, s.evidence_overridden
+    );
+    if let Some(d) = &r.derivation {
+        let _ = writeln!(
+            out,
+            "  derivation just run      {} new labels written ({} already derived, {} reviewed and skipped, {} with no evidence left unlabeled, {} with conflicting evidence left unlabeled) of {} recorded introspections that name a class{}",
+            d.derived,
+            d.already_derived,
+            d.reviewed,
+            d.no_evidence,
+            d.conflicting,
+            d.recorded,
+            d.commit
+                .as_ref()
+                .map_or(String::new(), |c| format!("; commit {c}"))
+        );
+    }
     let _ = writeln!(
         out,
         "  split by time            {} calibration, {} test (cut {})",

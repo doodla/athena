@@ -57,14 +57,21 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Read-only: build the labeled set from introspections a reviewer labeled, score Jev's recorded shadow
-    /// answers against it (Brier skill over two references, sample size, interval) and give the promotion
-    /// verdict of defaults-loop section 10.4. With too few labeled cases it says so and gives no verdict.
+    /// Build the labeled set from introspections that have a class label (a person's, or one derived from
+    /// evidence), score Jev's recorded shadow answers against it (Brier skill over two references, sample
+    /// size, interval) and give the promotion verdict of defaults-loop section 10.4. With too few labeled
+    /// cases it says so and gives no verdict. Read-only unless --derive is given.
     ScoreJev {
         /// Cases recorded before this time (RFC 3339) calibrate and later ones test. Default: the earliest
         /// two thirds by time calibrate.
         #[arg(long)]
         cut: Option<String>,
+        /// First derive class labels from what happened after each introspection (the retry that followed,
+        /// recurrence after a prevention landed, findings on the same job) and commit them as new
+        /// class-label records, each citing the records it rests on. Existing records are never edited, a
+        /// person's label always wins, and a rerun adds nothing.
+        #[arg(long)]
+        derive: bool,
         #[arg(long)]
         json: bool,
     },
@@ -787,7 +794,7 @@ fn run(cli: Cli) -> Result<u8> {
             }
             Ok(0)
         }
-        Command::ScoreJev { cut, json } => {
+        Command::ScoreJev { cut, derive, json } => {
             let cut = cut
                 .map(|text| {
                     text.parse::<jiff::Timestamp>().map_err(|e| {
@@ -795,8 +802,10 @@ fn run(cli: Cli) -> Result<u8> {
                     })
                 })
                 .transpose()?;
-            let athena = open(false)?;
-            let report = athena.score_jev(cut)?;
+            let athena = open(derive)?;
+            let derivation = derive.then(|| athena.derive_labels()).transpose()?;
+            let mut report = athena.score_jev(cut)?;
+            report.derivation = derivation;
             if json {
                 print_json(&report)?;
             } else {

@@ -10,9 +10,10 @@ use athena_core::jev::{Answer, Evaluation, FakeJev, JevError, Usage};
 use athena_core::labeled::MIN_TEST_CASES;
 use athena_data::records::{
     AnyRecord, ClassLabel, ClassStatus, FailureClass, IntrospectionJev, IntrospectionRecord,
-    IntrospectionStatus, IntrospectionTrigger, Labeler, PreventionKind,
+    IntrospectionStatus, IntrospectionTrigger, Labeler, Outcome, OutcomeState, PreventionKind,
+    Request, Totals,
 };
-use athena_data::{JobId, RecordId};
+use athena_data::{JobId, Quantity, RecordId, Unit};
 use common::*;
 use std::collections::BTreeMap;
 use std::process::Command;
@@ -114,6 +115,7 @@ fn label(i: u32, class: Option<&str>, by: Labeler) -> AnyRecord {
         labeled_by: by,
         is_repeat: None,
         note: None,
+        basis: vec![],
     })
 }
 
@@ -294,6 +296,169 @@ fn a_few_reviewed_cases_give_no_score_and_no_verdict() {
     );
     assert!(report["score"].is_null() && report["verdict"].is_null());
     assert_eq!(report["excluded"]["labeled"], 5);
+}
+
+/// A rejected case whose proposed request is `Add the reader {i}.`.
+fn rejected_case(i: u32, jev: Option<IntrospectionJev>) -> AnyRecord {
+    let AnyRecord::Introspection(mut record) = introspection(i, jev) else {
+        unreachable!("introspection() builds an introspection");
+    };
+    record.proposed_request = Some(format!("Add the reader {i}."));
+    AnyRecord::Introspection(record)
+}
+
+/// The retry of case `i`: a job whose request is the proposed request, closed as landed.
+fn landed_retry(i: u32) -> [AnyRecord; 2] {
+    let job = JobId::parse(&format!("20261001-000000-r{i:03}")).unwrap();
+    let zero = || Quantity::reported(0.0, Unit::Usd, "sum");
+    [
+        AnyRecord::Request(Request {
+            job: job.clone(),
+            text: format!("Add the reader {i}."),
+            received_at: at(i),
+            channel: "cli".into(),
+        }),
+        AnyRecord::Outcome(Box::new(Outcome {
+            job,
+            state: OutcomeState::Landed,
+            reason: "landed".into(),
+            at: at(i),
+            totals: Some(Totals {
+                cost_all: zero(),
+                cost_execution: zero(),
+                wall_time_execution: None,
+                tokens: BTreeMap::new(),
+                invocations: 0,
+            }),
+            branch: None,
+            base_commit: None,
+            candidate_commit: None,
+            after_blocked: false,
+            through_commit: None,
+        })),
+    ]
+}
+
+fn athena(fx: &Fixture, args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_athena"))
+        .current_dir(fx.root())
+        .env("ATHENA_STATE_DIR", fx.state.path())
+        .env_remove("ATHENA_NESTED")
+        .env_remove("ATHENA_JEV_SHADOW")
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn derive_writes_evidence_labels_with_their_basis_once_and_scores_them() {
+    let fx = Fixture::new();
+    let mut records = vec![class_record()];
+    // Thirty-two cases whose proposed request was sent and landed: evidence for each.
+    for i in 1..=32 {
+        records.push(rejected_case(i, Some(jev_says(CLASS, 0.9))));
+        records.extend(landed_retry(i));
+    }
+    // A case with no evidence, and a case a person labeled `none` although its retry landed.
+    records.push(rejected_case(200, Some(jev_says(CLASS, 0.9))));
+    records.push(rejected_case(40, Some(jev_says(CLASS, 0.9))));
+    records.extend(landed_retry(40));
+    records.push(label(40, None, Labeler::Person));
+    commit(&fx, &records);
+    let head = fx.head();
+
+    let first = json(&score_jev(&fx, &["--derive", "--json"]));
+    let derivation = &first["derivation"];
+    assert_eq!(derivation["recorded"], 34);
+    assert_eq!(derivation["derived"], 32);
+    assert_eq!(derivation["by_kind"]["retry-outcome"], 32);
+    assert_eq!(derivation["reviewed"], 1);
+    assert_eq!(derivation["no_evidence"], 1);
+    assert_eq!(first["sources"]["evidence"], 32);
+    assert_eq!(first["sources"]["reviewed"], 1);
+    // The unlabeled case is still unreviewed; the others are scored.
+    assert_eq!(first["excluded"]["unreviewed"], 1);
+    assert_eq!(first["excluded"]["labeled"], 33);
+    assert!(first["test"].as_u64().unwrap() >= MIN_TEST_CASES as u64);
+    assert!(first["score"].is_object() && first["verdict"].is_object());
+
+    // One new commit that only adds class-label records; no existing file changed or went away.
+    let after = fx.head();
+    assert_ne!(after, head);
+    let changes = fx
+        .git
+        .run(["diff", "--name-status", &head, &after])
+        .unwrap();
+    let lines: Vec<&str> = changes.lines().collect();
+    assert_eq!(lines.len(), 32);
+    assert!(
+        lines
+            .iter()
+            .all(|l| l.starts_with("A\trecords/class-labels/")),
+        "{changes}"
+    );
+    assert_eq!(fx.git.run(["status", "--porcelain"]).unwrap().trim(), "");
+    let labels = athena_core::labeled::read_inputs(fx.root()).unwrap().labels;
+    let derived: Vec<&ClassLabel> = labels
+        .iter()
+        .filter(|l| l.labeled_by == Labeler::Evidence)
+        .collect();
+    assert_eq!(derived.len(), 32);
+    for l in derived {
+        let [basis] = l.basis.as_slice() else {
+            panic!("one piece of evidence: {l:?}");
+        };
+        assert_eq!(basis.kind.as_str(), "retry-outcome");
+        assert!(basis.records.contains(&l.introspection.to_string()));
+        assert!(basis.records.iter().any(|r| r.contains("-r0")));
+        assert_eq!(l.class.as_ref().map(|c| c.as_str()), Some(CLASS));
+    }
+
+    // A second run finds them already derived and commits nothing.
+    let second = json(&score_jev(&fx, &["--derive", "--json"]));
+    assert_eq!(second["derivation"]["derived"], 0);
+    assert_eq!(second["derivation"]["already_derived"], 32);
+    assert!(second["derivation"]["commit"].is_null());
+    assert_eq!(fx.head(), after);
+
+    // A person's review of a derived case wins and is reported as overriding the evidence label.
+    let reviewed = athena(&fx, &["review", &rid(2, 1).to_string(), "--right"]);
+    assert!(reviewed.status.success());
+    let third = json(&score_jev(&fx, &["--json"]));
+    assert_eq!(third["sources"]["evidence"], 31);
+    assert_eq!(third["sources"]["reviewed"], 2);
+    assert_eq!(third["sources"]["evidence_overridden"], 1);
+    let text = String::from_utf8_lossy(&score_jev(&fx, &[]).stdout).into_owned();
+    assert!(
+        text.contains("labels derived from evidence  31 (by kind: retry-outcome 31)"),
+        "{text}"
+    );
+}
+
+#[test]
+fn derive_with_no_evidence_reports_zero_labels_and_no_verdict_and_commits_nothing() {
+    let fx = Fixture::new();
+    let mut records = vec![class_record()];
+    for i in 1..=3 {
+        records.push(rejected_case(i, Some(jev_says(CLASS, 0.9))));
+    }
+    commit(&fx, &records);
+    let head = fx.head();
+    let report = json(&score_jev(&fx, &["--derive", "--json"]));
+    assert_eq!(report["derivation"]["derived"], 0);
+    assert_eq!(report["derivation"]["no_evidence"], 3);
+    assert_eq!(report["sources"]["evidence"], 0);
+    assert!(report["score"].is_null() && report["verdict"].is_null());
+    assert!(
+        report["insufficient"]
+            .as_str()
+            .unwrap()
+            .contains("at least 10 test cases are needed")
+    );
+    assert_eq!(fx.head(), head);
+    let text = String::from_utf8_lossy(&score_jev(&fx, &["--derive"]).stdout).into_owned();
+    assert!(text.contains("0 new labels written"), "{text}");
+    assert!(text.contains("labels derived from evidence  0"), "{text}");
 }
 
 #[test]

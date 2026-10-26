@@ -940,7 +940,7 @@ pub fn earlier_attempt_with(
 
 /// The job's own introspection of its rejection or failure that can seed a retry: the latest recorded
 /// one with a proposed request.
-fn retry_introspection<'a>(
+pub(crate) fn retry_introspection<'a>(
     records: &'a Records,
     job: &JobRecords,
 ) -> Option<&'a IntrospectionRecord> {

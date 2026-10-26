@@ -5,7 +5,9 @@
 //! the same call, commits an `athena.class-label/1` record with the verdict: the recorded class is right, the
 //! right class is another registry class, or it is a new class (written as an `athena.failure-class/1` record in
 //! the same commit). A review is a record: the introspection is never edited. Reviewing an introspection again
-//! adds a newer label, which replaces the earlier one under the rule in [`crate::labeled`].
+//! adds a newer label, which replaces the earlier one under the rule in [`crate::labeled`]. A person's label
+//! also beats any label derived from evidence ([`crate::evidence_labels`]), whichever is newer, and the
+//! `replaces` field names an earlier label of a person or an evidence label alike.
 //!
 //! Nothing is written unless every check passes: the introspection id must name exactly one introspection, a
 //! named class must be in the registry, exactly one verdict must be given, and a note or description must be a
@@ -302,6 +304,7 @@ impl Athena {
             labeled_by: Labeler::Person,
             is_repeat: None,
             note,
+            basis: vec![],
         };
         let replaces = newest_labels(&records.class_labels)
             .get(introspection.id.as_str())

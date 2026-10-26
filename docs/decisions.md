@@ -3517,3 +3517,52 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Provenance:** Read: `config.rs`, `records.rs`, `claude.rs`, `reading.rs`, `run.rs`, `status.rs`,
   `outputs.rs`. Covered by tests in `athena-data` (`config`, `records`), `athena-agent` (`claude`),
   `athena-core` (`invocation`, `status`) and `athena-cli` (`drain`, `display`).
+
+## D137 · Class labels for Jev's scoring are derived from what happened afterwards, and a review still wins
+
+- **Case:** `athena score-jev` needs introspections with a class label, and at least 10 of them in its test part,
+  but the only way to get a label was a person running `athena review`, one introspection at a time. 187
+  introspections carried a recorded Jev answer and none was labeled. BRIEF.md's addendum of 2026-10-25 says
+  evidence should label Jev, not opinion.
+- **Decision:** `athena score-jev --derive` reads the records at the branch tip and appends
+  `athena.class-label/1` records with `labeled_by: evidence` and a required `basis`: a list of
+  `{kind, records, detail}` that cites the ids it rests on. Three kinds count. (1) `retry-outcome`: a later job
+  whose request is the introspection's proposed request (or `athena retry` of its job, when the introspection
+  seeds that retry) closed as landed, or was rejected or failed and has its own introspection in the same
+  class. (2) `recurrence-after-prevention`: an accepted defaults proposal for the class was applied by a job that
+  landed after the introspection, and then a later introspection in the class exists (the class kept
+  recurring) or none does over at least 5 jobs that closed after the landing (it stopped). (3)
+  `same-cause-findings`: a finding of the job's critic, or of its verifier, shares at least 3 words of five
+  letters or more, and a quarter of the cause's such words, with the cause text. The label names the class the
+  introspection recorded; no kind names another class, and none says `none`. Kinds that disagree on the class
+  would leave the case unlabeled, as does a case with no evidence. An introspection with a person's or stronger
+  model's label is skipped, and `newest_labels` ranks any such label above an evidence label whichever is newer,
+  so `athena review` always overrides. An introspection that already has an evidence label with the same class
+  and basis is skipped, so a rerun writes nothing; if the evidence changed, a newer evidence label is appended.
+  Nothing is edited or deleted. `score-jev` reports the counting labels from evidence, per kind, the number a
+  review overrode and, with `--derive`, what the run wrote and left out; the 10-case threshold and the scoring
+  are unchanged.
+- **Alternatives:**
+  - (a) Keep `athena review` as the only labeler. It is the opinion the addendum rejects, and it has produced no
+    labels.
+  - (b) Have a stronger model label the introspections. That is also an opinion, only cheaper; the
+    `stronger-model` labeler stays for a model a person spot-checked.
+  - (c) Derive labels automatically on every `score-jev`. A read command that writes is a surprise; the flag
+    keeps the default read-only and the writing visible in the command line.
+  - (d) Write the evidence as a field on the introspection. Introspections are never edited (D06); a label is
+    a new record, as a review's is.
+  - (e) Let evidence label `none` or another class when it contradicts the recorded class. The three kinds
+    cannot say which class is right, only that the recorded one is borne out, and guessing a class from word
+    overlap would make the overlap reference win by construction.
+- **Tradeoff:** Every evidence label agrees with the recorded class, so the labeled set measures whether Jev
+  agrees with the introspecting model where later events bore that model out. It cannot show Jev's false-match
+  rate on `none` cases (verdict item 3 stays "not established" unless a person labels some `none`). The
+  recurrence kind rests on the class assignments of the same model, and the findings kind is a plain word
+  overlap; the basis quotes the finding so a reader can judge it. The minimum of 5 jobs, the 3-word minimum and
+  the quarter share are estimates. A retry can land for a reason unrelated to the introspection's cause.
+- **Reversal cost:** Low. Stop passing `--derive`; the evidence labels are ordinary records and any review
+  overrides them. The optional `basis` field stays readable.
+- **Provenance:** Read: `labeled.rs`, `review.rs`, `reading.rs` (`retried_job`, `retry_introspection`),
+  `store.rs`, `proposals.rs`, `introspect.rs`, `records.rs`. Covered by tests in `athena-data` (`records`),
+  `athena-core` (`evidence_labels`, `labeled`) and `athena-cli` (`labeled`). Not run: `athena score-jev
+  --derive` on this repository's own records, which the job's snapshot does not hold.
