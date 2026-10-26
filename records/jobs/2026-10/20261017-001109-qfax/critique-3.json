@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261017-001109-qfax",
+  "round": 3,
+  "at": "2026-10-26T00:28:26.901306251Z",
+  "invocation_seq": 9,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/state.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/state.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/status.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/status.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The plan leaves open how a verification-stage hold is resumed, and that is where this change matters most. The retry route it points to makes a new job and leaves the held job Dispatched with its marker forever.",
+      "evidence": "drain.rs:753-786: an interrupted item's first attempt is `ReadOf::Retry`. drain.rs:32-35 says retry 'reads the request again as a new job… The interrupted job is left as it is'. run.rs:189-195 refuses to run a Dispatched job. status.rs:586 labels it 'interrupted'. The plan clears the marker only 'when dispatch proceeds', which is the new job's dispatch, so the old job's marker is never cleared. That contradicts demonstration 3's 'marker is cleared and status no longer shows it held'. Open question 1 hands this design decision to the producer. Fix: Settle the route in the plan. Option A: the held branch in drain sets the item's retry so the next attempt uses `ReadOf::Retry`. `retry` (or the new job's dispatch) then clears the parent's marker, and status shows the old job as superseded, not held. Criterion 3(b) then asserts that the new job reaches 'checks' and a verdict, that the old job no longer shows 'environment: low disk', and that drain counted no failure. Option B: move the second check to before the producer starts, after the prediction commit, and state plainly that a hold there is resumed by retry. Either way, add a drain test with a real `RealSteps`-like path, not only a `Run { held: true }` stub, so the resume route is exercised.",
+      "location": "Decision 1 / Open questions 1 / Criterion 3 demonstration (b)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The drain tests only stub `Run { held: true }`. Nothing shows that `RealSteps::run` maps a real `LowDisk` error from `go` to `held`.",
+      "evidence": "Demonstration 2 says 'A drain test uses a Steps stub returning Run { held: true }'. The downcast in RealSteps::run is the wiring that keeps a hold from being counted as a failure, and no test covers it. Fix: Add a test that runs `go` through the real step mapping with the constant-low fake, and asserts `held == true` and no failure counted.",
+      "location": "Decision 9 / Criterion 2 drain test",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "`NeedsAccepting` ends the item's `work` (drain.rs:772). For a verification-stage hold, the job is listed again as interrupted only on a later drain, via `steward::interrupted_work`. The plan's 'stays queued' does not say this.",
+      "evidence": "drain.rs:772 `RunStep::NeedsAccepting => return ItemEnd::NeedsAccepting`; drain.rs:1531-1538 lists interrupted work when the drain starts. Fix: Say whether a held item is tried again in the same drain or the next one, and make the drain note say which.",
+      "location": "Decision 9: 'treated like needs-accepting'",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read run.rs, drain.rs, status.rs and state.rs in the snapshot. The functions the plan names exist: `dispatch` and `produce_and_verify` in run.rs, `early_pr` in gh.rs, and `Remover`, `with_remover`, `clean_job` and `try_lock_job` in state.rs. The plan covers most criteria with demonstrations that would fail without the behavior: the tree-derived fake, the dispatch hold that leaves the job Proposed, the idle-sweep lock and source checks, and the config default with the digest reset. The state.rs and status.rs additions are justified and small; Athena already flagged them as scope, and I do not repeat that. One major gap remains. A hold just before the checks leaves the job Dispatched, and the plan leaves its resume route as an open question for the producer. The existing code resumes such a job only by `athena retry`, which makes a new job and leaves the held job as it is. Under the plan as written, the held job's marker is never cleared, and criterion 3(b) cannot be shown for 'the held job'. The plan should settle this route and test it through the real drain step mapping. That is fixable by the planner, so the verdict is revise."
+}

@@ -1,0 +1,306 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261017-001109-qfax",
+  "round": 3,
+  "at": "2026-10-26T00:27:49.693842748Z",
+  "invocation_seq": 8,
+  "approach": "Add `[disk] min_free` (serde default \"10G\" in config.rs; athena.toml untouched; section reset in `reading_inputs` so reading digests do not move). New disk.rs holds the `FreeSpace` fn type (real impl runs `df -Pk`; no unsafe, no new dependency), `idle_sweep`, the `LowDisk` error (with a stage: dispatch or verification), a hold marker, and `Athena::ensure_disk`. The check runs at two points, and both can hold. (1) In `dispatch`, before the prediction commit: a hold leaves the job Proposed, and `go` or drain resumes it as it is, so the producer and the checks both start only with space. (2) In `produce_and_verify` just before `early_pr`, which is before the checks: if space is still low after cleanup and sweep, the job stops as a held, non-failed outcome with the marker written. The job is already Dispatched there, and resuming re-runs the producer. The docs and the hold message say so plainly. A hold is a typed `LowDisk` error from `go`, downcast by drain into `Run { held: true }`. Neither hold records the job as rejected or closed. Terminal-job cleanup (`clean_job`, 173d12e) is reused.",
+  "decisions": [
+    {
+      "choice": "Hold at both points: dispatch (job stays Proposed) and before the checks (job stays Dispatched, marker written, no failure). This answers finding 3 by closing the gap, so the request's 'before a verification starts … hold the job' is met and the reading is not narrowed.",
+      "reason": "The full-disk failures during checks are the root cause, so the check before the checks must be able to hold. run.rs:189-195 bails on a Dispatched job as interrupted, so a verification-stage hold resumes by re-running the producer (retry). That is stated in the hold message, README and CHANGELOG. A Proposed hold resumes without re-production.",
+      "rejected": [
+        {
+          "option": "Sweep-and-warn only before the checks (previous plan)",
+          "why": "Narrows the accepted reading and lets checks run on a full disk."
+        },
+        {
+          "option": "Add a verification-only resume that rebuilds the candidate record from run.rs internals",
+          "why": "Much larger than one focused change and risks wrong records; named as a possible follow-up."
+        },
+        {
+          "option": "Wait in place until space frees",
+          "why": "Blocks a drain worker indefinitely."
+        }
+      ]
+    },
+    {
+      "choice": "Typed `LowDisk` error from `go`, not a new `GoResult` variant or OutcomeState.",
+      "reason": "GoResult is matched exhaustively in files outside the deliverables, and an error can never record the job as rejected or closed. A hold is not terminal.",
+      "rejected": [
+        {
+          "option": "New GoResult::Held",
+          "why": "Forces edits across main.rs, test_support.rs and many tests."
+        },
+        {
+          "option": "New OutcomeState",
+          "why": "A hold is not terminal."
+        }
+      ]
+    },
+    {
+      "choice": "Free-space seam mirrors the existing `Remover` exactly: `type FreeSpace = fn(&Path) -> io::Result<u64>` on `StateDir`, with `with_free_space`, `free_bytes` and `hold_file`. This answers finding 4.",
+      "reason": "StateDir derives Debug and Clone, and a fn pointer keeps both. The tree-derived fake inspects `<path>/jobs`; a constant-low fake is a plain fn; the low-to-plenty swap calls `with_free_space` again. The required minimum comes from config, so fakes need no state.",
+      "rejected": [
+        {
+          "option": "Arc<dyn FreeSpace>",
+          "why": "Breaks the Debug derive unless extra bounds or a hand-written Debug are added."
+        },
+        {
+          "option": "Process-global static in disk.rs",
+          "why": "Races between parallel tests."
+        },
+        {
+          "option": "libc statvfs",
+          "why": "Needs unsafe (denied) and a new dependency."
+        }
+      ]
+    },
+    {
+      "choice": "Keep the small edits to state.rs (the seam) and status.rs (the label) and name them in the CHANGELOG entry and change description as necessary additions to the listed deliverables. This answers findings 1, 2 and 5.",
+      "reason": "The injection pattern lives in state.rs and status labels are produced in status.rs; display.rs only renders a StatusView. Both edits are a few lines and change no other behavior.",
+      "rejected": [
+        {
+          "option": "Compute the status label in display.rs",
+          "why": "display.rs has no state-dir access and the logic would split across two files."
+        }
+      ]
+    },
+    {
+      "choice": "If `df` fails or its output cannot be parsed, fail open, but print a warning on every run that includes the df error text and says the disk check is off. This answers finding 6.",
+      "reason": "A broken df must not block every job, and it must not silently disable the protection.",
+      "rejected": [
+        {
+          "option": "Fail closed",
+          "why": "Would hold every job on a host without df."
+        },
+        {
+          "option": "Warn once only",
+          "why": "A silent off switch after the first run."
+        }
+      ]
+    },
+    {
+      "choice": "Tests use a tree-derived fake (low while any `jobs/*/**/target` exists) and a constant-low fake.",
+      "reason": "Proves the sweep frees what the check measures.",
+      "rejected": [
+        {
+          "option": "Counter-flip fake",
+          "why": "Passes even if nothing was deleted."
+        }
+      ]
+    },
+    {
+      "choice": "Idle sweep probes only job directories that already exist under jobs/, takes `try_lock_job`, removes `target` in the job dir, its direct subdirectories and `kept/*/work`, and drops the lock at once.",
+      "reason": "The lock marks a running job. Nothing is created for absent jobs, and sources stay.",
+      "rejected": [
+        {
+          "option": "Remove whole idle job dirs",
+          "why": "Destroys records and kept work."
+        },
+        {
+          "option": "Probe jobs/<id> for every id in records",
+          "why": "Creates directories and lock files."
+        }
+      ]
+    },
+    {
+      "choice": "Config is `[disk] min_free = \"10G\"` with a decimal K/M/G/T suffix, parsed by `min_free_bytes()` and checked in `validate`; the section is reset in `reading_inputs`.",
+      "reason": "The default lives in config.rs only and digests do not move.",
+      "rejected": [
+        {
+          "option": "Add the section to athena.toml",
+          "why": "Out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "In drain, a held run is a `Run.held` flag treated like needs-accepting: the item stays queued, outcome 'environment: low disk', no failure counted, no retry burned, and a note with free, required and the resume route (plain re-run for a dispatch hold, re-produce for a verification hold).",
+      "reason": "A hold is not a failure and must not stop the drain as a repeated failure.",
+      "rejected": [
+        {
+          "option": "Report it as a failed run",
+          "why": "Burns the retry and can stop the drain."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "action": "create",
+      "purpose": "FreeSpace fn type and df impl, idle_sweep, LowDisk error (with stage), hold marker write/clear/read, Athena::ensure_disk, unit tests.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "purpose": "Declare `pub mod disk;`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "purpose": "Call ensure_disk in dispatch before the prediction commit, and before early_pr (before the checks); both can hold. Clear the marker when dispatch proceeds.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/state.rs",
+      "action": "modify",
+      "purpose": "Necessary addition to the listed deliverables: `FreeSpace` fn-pointer seam mirroring Remover, `with_free_space`, `free_bytes`, `hold_file`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "Necessary addition to the listed deliverables: a job with a marker gets the label 'environment: low disk' with free and required amounts.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "purpose": "`Disk { min_free }` default 10G, `min_free_bytes()`, validation, `reading_inputs` reset, tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Run.held; downcast LowDisk; the held branch keeps the item queued with outcome 'environment: low disk', a note, no failure, no retry.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "purpose": "Render the held line and status label, wording 'the user'.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Held, resume-without-failure and display tests; update Run literals.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased entry with the root cause; names the state.rs and status.rs additions.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "README.md",
+      "action": "modify",
+      "purpose": "Document `[disk] min_free`, the 10G default, the 'environment: low disk' status, and how the user resumes at each stage.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "config.rs: add `Disk { min_free }` with default \"10G\", `min_free_bytes()`, a ConfigError variant, validation, the `reading_inputs` reset, and tests.",
+    "state.rs: add `type FreeSpace = fn(&Path) -> io::Result<u64>` with `with_free_space`, `free_bytes` and `hold_file`, mirroring Remover.",
+    "disk.rs: write the df impl and parser, `idle_sweep`, the LowDisk error (stage, free, required, 'the user'), marker write/clear/read, and `ensure_disk(stage, ui)` (measure, cleanup line, clean terminal jobs, idle sweep, re-measure, then hold with marker). Add the lib.rs line.",
+    "run.rs: call ensure_disk in `dispatch` after the reread branch and before `check_budget` and the prediction commit; call it again just before `early_pr`, before the checks; clear the marker once dispatch proceeds.",
+    "status.rs: read the marker and label the job 'environment: low disk' with amounts.",
+    "drain.rs: add `Run.held`; map LowDisk to a held Run in `RealSteps::run`; handle it like needs-accepting with outcome 'environment: low disk', a note with free, required and the resume route, no failure and no retry. Check how the next pass re-runs a Dispatched hold.",
+    "display.rs: render the held line and the status label.",
+    "Write the tests: disk.rs core tests (cleanup order, both holds, both resumes, idle_sweep), config tests, drain tests (held, resume with no failure, display, 'operator' scan).",
+    "CHANGELOG.md and README.md: document the setting, the status, the root cause and the stage-specific resume, in 'the user' wording.",
+    "Run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Confirm with `git status` that athena.toml is unchanged."
+  ],
+  "risks": [
+    {
+      "risk": "`df` is missing or unparseable, which would block every job or silently disable the check.",
+      "mitigation": "Fail open with a warning on every run that includes the df error text and says the check is off. A unit test covers the parser and the failure branch."
+    },
+    {
+      "risk": "The sweep deletes a build in use by another drain worker.",
+      "mitigation": "Sweep only when `try_lock_job` succeeds, remove only directories named `target`, and test with a held lock."
+    },
+    {
+      "risk": "A verification-stage hold leaves the job Dispatched, which the existing path reports as interrupted.",
+      "mitigation": "The verification-stage hold writes the marker and returns a non-failure outcome. The message, README and CHANGELOG say resuming re-runs the producer. Tests cover that path, and the open question flags the drain re-run route to confirm."
+    },
+    {
+      "risk": "A dispatch-stage hold leaves records behind.",
+      "mitigation": "ensure_disk runs before the prediction commit (run.rs:392 onward). A test asserts the job is Proposed, no outcome record exists, and the second `go` succeeds."
+    },
+    {
+      "risk": "A new config section changes every reading's digest.",
+      "mitigation": "Reset `disk` in `reading_inputs` and assert equality in a test."
+    },
+    {
+      "risk": "Adding `held` to `Run` breaks existing literals.",
+      "mitigation": "Update the literals in tests/drain.rs and use `..Default::default()` where possible."
+    },
+    {
+      "risk": "The word 'operator' slips into new text.",
+      "mitigation": "Use 'the user' only; a test scans the new strings."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Core tests in disk.rs with the tree-derived fake. Plant `jobs/<other>/work/target/x`, run `go` on a proposed job and record the Ui lines. A second test makes the disk low only once verification is reached.",
+      "command": "cargo test --locked disk",
+      "observes": "The planted target/ is gone. The cleanup line precedes the dispatch, producer and 'checks' lines. In the second test the cleanup line precedes 'checks'.",
+      "fails_without": "With no ensure_disk calls, no cleanup line appears and the planted target/ remains, so the ordering and removal assertions fail."
+    },
+    {
+      "criterion": 2,
+      "method": "Core tests with the constant-low fake for both stages. (a) Dispatch stage: `go` on a proposed job. (b) Verification stage: disk is plenty at dispatch and constant-low before the checks. A drain test uses a Steps stub returning `Run { held: true }`.",
+      "command": "cargo test --locked low_disk",
+      "observes": "The error downcasts to LowDisk with free, required and stage. In (a) the job is still Proposed. In (b) it is Dispatched, not Closed or rejected, and the checks did not run. In both there is no rejected record, the marker exists, and the Ui text and drain note contain 'environment: low disk' with both amounts. In (b) the text says resuming re-runs the producer. The drain item stays queued, no failure is counted, and the stop reason is not repeated-failure.",
+      "fails_without": "If a hold became a rejection or a failed run, the state assertion would see Closed(Rejected) or drain would stop with repeated failure."
+    },
+    {
+      "criterion": 3,
+      "method": "Core tests. (a) The constant-low fake holds at dispatch; swap to plenty with `with_free_space`; call `go` on the same job. (b) A verification-stage hold, then swap to plenty and re-run via retry. A drain test has pass 1 held and pass 2 with space.",
+      "command": "cargo test --locked held_job_verifies",
+      "observes": "The second run reaches the producer, then 'checks' and a verifier verdict (Finished). The marker is cleared and status no longer shows it held. In the drain test the job finishes on pass 2 with no failure counted.",
+      "fails_without": "If the hold left the job unrunnable or the marker stuck, the second run would error or status would still show it held."
+    },
+    {
+      "criterion": 4,
+      "method": "Test on `idle_sweep`. Idle job A has `work/target/debug/a`, `work/src/lib.rs`, `target/x`, `kept/<id>/work/target/y` and `kept/<id>/work/src/main.rs`. Job B holds a job lock and has a target. An absent job id is also covered.",
+      "command": "cargo test --locked idle_sweep",
+      "observes": "A's target dirs are removed and its source files are byte-identical. B's target remains. No directory or lock file is created for jobs that did not exist.",
+      "fails_without": "A sweep that removed the whole job dir fails the source assertions; one that ignored the lock fails the job B assertion."
+    },
+    {
+      "criterion": 5,
+      "method": "Config tests in config.rs, then `git status` and a read of README.md and CHANGELOG.md.",
+      "command": "cargo test --locked -p athena-data disk",
+      "observes": "No `[disk]` section parses and min_free_bytes is 10_000_000_000. '512M' parses and 'ten' is rejected. `reading_inputs` is equal with and without the section. The repo's athena.toml still parses, and `git status` shows it unchanged. README.md and CHANGELOG.md name `[disk] min_free` and 'environment: low disk'.",
+      "fails_without": "Without the serde default, a config with no section fails to parse or yields 0 bytes."
+    },
+    {
+      "criterion": 6,
+      "method": "Display tests (drain JobLine and notes, status view) for a held Proposed job and a held Dispatched job with a marker. A scan test checks the new strings for 'operator'.",
+      "command": "cargo test --locked held_display",
+      "observes": "Drain output and status show 'environment: low disk' (not 'interrupted') with free and required amounts formatted by format_bytes, and say 'the user'. The word 'operator' is absent.",
+      "fails_without": "Without the display and status additions the rendered text lacks the reason and amounts, and the contains assertions fail."
+    },
+    {
+      "criterion": 7,
+      "method": "Run the required checks, then `cargo fmt --all --check`.",
+      "command": "cargo clippy --all-targets --locked -- -D warnings",
+      "observes": "Clippy reports no warnings and the fmt check exits clean.",
+      "fails_without": "Unformatted code or any lint fails these commands."
+    }
+  ],
+  "open_questions": [
+    "How drain should re-run a verification-stage hold (job left Dispatched): whether the next pass reaches the retry path or bails as interrupted was not confirmed in drain.rs. The producer must check this first and, if needed, make the held branch call the retry route.",
+    "Whether `df -Pk` on the state directory measures the same mount the jobs use was not confirmed.",
+    "The lone `athena go` path in main.rs prints the error text (status and amounts); its exit code is not changed because main.rs is outside the deliverables."
+  ],
+  "producer_section_sha256": "31c898ca56b95766805a4253b93f1133f338c6923129728b0e88e65896260f9e"
+}

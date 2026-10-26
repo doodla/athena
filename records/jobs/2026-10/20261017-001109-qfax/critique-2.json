@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261017-001109-qfax",
+  "round": 2,
+  "at": "2026-10-26T00:27:05.550021623Z",
+  "invocation_seq": 7,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/state.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/state.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/status.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/status.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "Before verification the plan only sweeps and warns, never holds, which narrows the request and the accepted reading",
+      "evidence": "The request says: 'Before a job or a verification starts, check free disk space … If space is still low, hold the job'. The accepted reading also puts the hold before the checks. In the plan, the call before the checks (just before early_pr) only sweeps and warns, then lets the checks run on a disk that is still full. Those full-disk failures during checks are what the root-cause default names as the fault. The plan's reason is real: run.rs:189-195 bails on a Dispatched job as interrupted, so a hold after dispatch cannot resume. But the plan treats a narrowing of the accepted reading as an implementation choice, and lists it only as an open question. Fix: Either get the user's consent to the narrowing before production (state it as a deviation from the reading, not an open question), or close the gap. One small option: before the checks, if space is still low after the sweep, stop the job as a held, non-failed outcome and write the marker, so drain neither counts a failure nor burns a retry. Then say plainly that resuming re-runs the producer. Whichever you choose, criterion 2 must test that path too, or its demonstration must state that the path is not held.",
+      "location": "Decisions 1 and Risks 3; crates/athena-core/src/run.rs:1450 (produce_and_verify)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "An Arc<dyn FreeSpace> field breaks StateDir's derived Debug",
+      "evidence": "StateDir is `#[derive(Debug, Clone)]` and its existing seam is a plain fn pointer (`Remover = fn(&Path) -> io::Result<()>`). An `Arc<dyn FreeSpace>` field breaks the Debug derive unless FreeSpace: Debug or Debug is implemented by hand. Fix: Mirror Remover exactly with `type FreeSpace = fn(&Path) -> io::Result<u64>`. The tree-derived fake can inspect `<path>/jobs`, and the swap from low to plenty calls `with_free_space` again. Otherwise require `FreeSpace: Debug + Send + Sync`.",
+      "location": "Decision 3; crates/athena-core/src/state.rs:14-18",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The state.rs and status.rs edits are justified; name them in the change description",
+      "evidence": "Both edits are justified in the plan: the seam pattern lives in state.rs, and the state labels are produced in status.rs. Weighed with Athena's findings, they are small and necessary, not scope creep. Fix: Keep both edits. Name them in the change description as necessary additions to the listed deliverables.",
+      "location": "Files: state.rs and status.rs (Athena's findings 1-2)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Failing open on a df error can silently disable the protection",
+      "evidence": "If df fails, the check fails open, so a broken df silently disables the protection on every run. Fix: Print the warning on each run (not once only), and include the df error text so the user can see the check is off.",
+      "location": "Risks 1 (fail open when df fails)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "This round-2 plan is well grounded. dispatch (run.rs:322) has a clear point after the reread branch and before check_budget and the prediction commit. clean_job, try_lock_job and the with_remover injection pattern exist in state.rs. drain's Run derives Default and already has a needs_accepting precedent for a not-failed, still-queued job. The demonstrations exercise real behavior: the tree-derived fake means the test only passes if files are really deleted, and the tests check job state, the marker and that no failure is counted. They would fail without the change. One major gap remains. The request and the accepted reading ask for a hold before verification, but the plan only sweeps and warns there, so the checks still run on a full disk. That narrows the reading without the user's consent and leaves the original failure mode in place. It needs the user's explicit consent or a small held-outcome path before the checks. Other points are minor: the Arc field breaks StateDir's Debug derive, the state.rs/status.rs additions are fine to keep, and the df fail-open warning should be visible."
+}
