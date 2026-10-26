@@ -251,7 +251,7 @@ impl Athena {
     pub fn review(&self, reference: &str, verdict: &Verdict, note: Option<&str>) -> Result<Review> {
         let note = note.map(|n| one_line("the note", n)).transpose()?;
         let head = self.head()?;
-        let records = Records::load(&self.git, &head)?;
+        let records = Records::load_current(&self.git, &head)?;
         let introspection = find(&records, reference)?;
         let mut new_class = None;
         let class = match verdict {

@@ -162,7 +162,7 @@ impl Athena {
         self.refuse_if_stopped()?;
         self.state.registry().reap();
         let head = self.head()?;
-        let records = Records::load(&self.git, &head)?;
+        let records = Records::load_current(&self.git, &head)?;
         let id = records.resolve(job_ref)?;
         let Some(_job_lock) = self.state.try_lock_job(&id)? else {
             bail!("job {id} is already running in another athena process");
@@ -358,7 +358,7 @@ impl Athena {
                 "reading    the new reading has the same scope as the one it replaces; accepted",
             );
             let new_head = self.head()?;
-            let new_records = Records::load(&self.git, &new_head)?;
+            let new_records = Records::load_current(&self.git, &new_head)?;
             let new_job = new_records
                 .jobs
                 .get(id.as_str())
@@ -2389,7 +2389,7 @@ impl Athena {
         let verification_record = closing.verification.clone();
         let wall_time = closing.happened.wall_time_execution_s;
         let score_on = |head: &str| -> Result<Score> {
-            let records = Records::load(&self.git, head)?;
+            let records = Records::load_current(&self.git, head)?;
             Ok(score(
                 ctx.job,
                 &records,

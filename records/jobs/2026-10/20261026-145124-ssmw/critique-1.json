@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261026-145124-ssmw",
+  "round": 1,
+  "at": "2026-10-26T14:53:56.16219294Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "Defaults proposals never reach drain's approve path, so the stub-based criterion 4 test proves nothing about the real behavior.",
+      "evidence": "`RealSteps::queue` builds `approvable`/`waiting` from `work_decisions::split_open(&records)`, which partitions `open_proposals` over `records.work_items` (kind Proposal). `Athena::propose` commits `AnyRecord::DefaultsProposal` records (proposals.rs:579-601), and no code turns these into WorkItems (WorkItem constructors exist only in work_decisions.rs, steward.rs and audience.rs). In the plan's Stub, `queue()` adds a hand-made `released` list after `propose()` is called. The test would pass even if the real `propose` created nothing that drain can see. Fix: Pick one and say so in the plan: (a) add a real bridge, e.g. drain approving an in-limit defaults proposal through `accept_proposal` or a work item, and demonstrate it with `RealSteps` on a fixture repository where the proposal ends up approved or waiting; or (b) record as an open question that criterion 4 cannot be met by this change as scoped, and ask the user to narrow it to 'propose runs at drain start and the new proposal is listed'. Do not keep a stub-only demonstration for this criterion.",
+      "location": "Plan Decision 2 / Demonstration for criterion 4; crates/athena-cli/src/drain.rs:1528-1581, crates/athena-core/src/work_decisions.rs:41-75",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "\"The drain stub's propose also adds nothing\" is vacuous, because the stub's propose never generates anything.",
+      "evidence": "The Stub's `propose` only logs a call and sets a flag. Dedupe lives in `generate`, which a stub never runs, so this part of the test cannot fail. Fix: Show the drain-start case of criterion 2 through `RealSteps::propose` (or `auto_propose`) against a fixture that already has a pending, accepted, or recently rejected proposal, and assert that no new DefaultsProposal record or commit appears.",
+      "location": "Demonstration for criterion 2 (drain part)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "`auto_propose` would print \"no class has repeated across enough distinct jobs\" after every introspection and at every drain start.",
+      "evidence": "`propose` calls `ui.line(\"no class has repeated across enough distinct jobs\")` whenever nothing was generated. It also prints refusals. On the automatic path this becomes noise in every job run. Fix: Let `auto_propose` stay quiet when nothing is proposed (for example, split out an inner function that does not print, or pass a quiet flag), and print only created proposals and errors. Add an assertion on the captured lines.",
+      "location": "crates/athena-core/src/proposals.rs:575-578; Plan Files entry for proposals.rs",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Making propose fail by deleting defaults.toml at HEAD may also break the introspection itself or JobConfig loading.",
+      "evidence": "`propose` reads `JobConfig::at` and `base_defaults(&head)`. The introspection path may read config at the same head, so the test could fail for an unrelated reason. Fix: Have the producer confirm that the introspection succeeds in that fixture before relying on it, or inject the failure in a way that affects only `propose`.",
+      "location": "Demonstration for criterion 5",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": "The reading assumes that automatically created defaults proposals that are within the limit \"go through drain's existing steward path\". In the code no such path exists. `propose` writes `DefaultsProposal` records (`proposals.rs:579-601`). Drain's approval path only works on steward `WorkItem`s of kind Proposal: `RealSteps::queue` → `work_decisions::split_open` → `open_proposals(records)`, which reads `records.work_items` (`drain.rs:1540`, `work_decisions.rs:41-75`). No code turns a defaults proposal into a work item. Criterion 4, as written, therefore describes behavior that this change cannot cause without new bridging logic. The planner should state this gap rather than paper over it.",
+  "summary": "I read introspect.rs (`settle`, `introspect_job`, `introspect_intervention`), proposals.rs (`propose`), drain.rs (the `Steps` trait, `drain_with`, `approve_all`, `RealSteps::queue`), work_decisions.rs and status.rs. The introspection hook is sound. `settle` is the shared exit point that never fails, and a defaulted `Steps` method keeps the existing stubs compiling. `athena status` already lists open defaults proposals (`status.rs:129,372`), so criteria 1, 3 and 5 are well covered. Criterion 4 is the problem. Defaults proposals are `DefaultsProposal` records. Drain approves only steward `WorkItem` proposals from `split_open`. Calling `propose` before `queue()` therefore never puts a defaults proposal into `approvable` or `waiting`. The plan's criterion 4 test stubs `queue()` to \"release\" fake `Waiting` items after `propose` is called. That test passes whether or not any real proposal reaches drain, so it shows the stub, not the behavior. The plan needs to either add a real bridge from defaults proposals to drain's approval path, demonstrated with `RealSteps`, or raise the gap with the user. There are also smaller issues: noise from the auto path, and the drain half of criterion 2 relying on a stub."
+}

@@ -529,7 +529,7 @@ impl Athena {
         }
         let head = self.head()?;
         let jc = JobConfig::at(&self.git, &head)?;
-        let records = crate::store::Records::load(&self.git, &head)?;
+        let records = crate::store::Records::load_current(&self.git, &head)?;
         let mut id = RecordId::generate(crate::now());
         while records.jobs.contains_key(id.as_str()) {
             id = RecordId::generate(crate::now());
@@ -553,7 +553,7 @@ impl Athena {
         }
         let head = self.head()?;
         let jc = JobConfig::at(&self.git, &head)?;
-        let records = crate::store::Records::load(&self.git, &head)?;
+        let records = crate::store::Records::load_current(&self.git, &head)?;
         let mut id = RecordId::generate(crate::now());
         while records.jobs.contains_key(id.as_str()) {
             id = RecordId::generate(crate::now());
@@ -596,7 +596,7 @@ impl Athena {
             );
         };
         let head = self.head()?;
-        let records = crate::store::Records::load(&self.git, &head)?;
+        let records = crate::store::Records::load_current(&self.git, &head)?;
         let job_id = records.resolve(job_ref)?;
         let job = records.jobs.get(job_id.as_str()).expect("resolved");
         if job.state() != JobState::Queued {
@@ -627,7 +627,7 @@ impl Athena {
         self.refuse_if_stopped()?;
         let head = self.head()?;
         let jc = JobConfig::at(&self.git, &head)?;
-        let records = crate::store::Records::load(&self.git, &head)?;
+        let records = crate::store::Records::load_current(&self.git, &head)?;
         let request = job
             .request
             .clone()
@@ -698,7 +698,7 @@ impl Athena {
     /// record seeded the reading (false: the plain "try again on" behavior).
     pub fn retry(&self, job_ref: &str, ui: &dyn Ui) -> Result<(Proposal, bool)> {
         let head = self.head()?;
-        let records = crate::store::Records::load(&self.git, &head)?;
+        let records = crate::store::Records::load_current(&self.git, &head)?;
         let id = records.resolve(job_ref)?;
         let job = records.jobs.get(id.as_str()).expect("resolved");
         // A paused line is refused before any model is called (`scope_guard`).
@@ -719,7 +719,7 @@ impl Athena {
             bail!("the correction is empty");
         }
         let head = self.head()?;
-        let records = crate::store::Records::load(&self.git, &head)?;
+        let records = crate::store::Records::load_current(&self.git, &head)?;
         let job_id = records.resolve(job_ref)?;
         let job = records.jobs.get(job_id.as_str()).expect("resolved").clone();
         match job.state() {
@@ -1724,7 +1724,7 @@ pub fn referenced_jobs(
 /// The records of a job at the current commit.
 pub fn job_records(athena: &Athena, job_ref: &str) -> Result<(Records, JobRecords)> {
     let head = athena.head()?;
-    let records = Records::load(&athena.git, &head)?;
+    let records = Records::load_current(&athena.git, &head)?;
     let id = records.resolve(job_ref)?;
     let job = records.jobs.get(id.as_str()).expect("resolved").clone();
     Ok((records, job))

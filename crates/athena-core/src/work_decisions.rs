@@ -308,11 +308,11 @@ impl Athena {
     /// reading, and then records the work item as approved by that job. Returns the reading.
     pub fn approve_work(&self, id: &str, ui: &dyn Ui) -> Result<crate::reading::Proposal> {
         let head = self.head()?;
-        let known = Records::load(&self.git, &head)?;
+        let known = Records::load_current(&self.git, &head)?;
         let item = find_open(&known, id)?.clone();
         let request = approve_request(&item, &known, &self.git, &head);
         let reading = self.ask(&request, ui)?;
-        let known = Records::load(&self.git, &self.head()?)?;
+        let known = Records::load_current(&self.git, &self.head()?)?;
         let next = approval(
             &item,
             reading.job.clone(),
@@ -339,7 +339,7 @@ impl Athena {
     /// Approves an open proposal like [`Athena::approve_work`], but only when the role that raised it may
     /// change its rung itself; any other proposal is refused and stays open for a person.
     pub fn approve_in_limit(&self, id: &str, ui: &dyn Ui) -> Result<crate::reading::Proposal> {
-        let known = Records::load(&self.git, &self.head()?)?;
+        let known = Records::load_current(&self.git, &self.head()?)?;
         let item = find_open(&known, id)?;
         if !in_limit(&known, item) {
             bail!(
@@ -355,7 +355,7 @@ impl Athena {
     /// `athena reject-work`: appends a rejection record with the reason.
     pub fn reject_work(&self, id: &str, reason: &str) -> Result<WorkDecision> {
         let head = self.head()?;
-        let known = Records::load(&self.git, &head)?;
+        let known = Records::load_current(&self.git, &head)?;
         let item = find_open(&known, id)?;
         let next = rejection(item, reason, self.fresh_decision_id(&known), crate::now())?;
         let record = AnyRecord::WorkDecision(next.clone());

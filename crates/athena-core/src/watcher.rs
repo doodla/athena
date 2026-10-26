@@ -343,7 +343,7 @@ impl Athena {
         }
         let signals = host_error_signals().map_err(anyhow::Error::msg)?;
         let head = self.head()?;
-        let records = Records::load(&self.git, &head)?;
+        let records = Records::load_current(&self.git, &head)?;
         let firings = evaluate(&signals, &records.host_errors, &records.decision_states);
         let mut written = Vec::new();
         for firing in firings {

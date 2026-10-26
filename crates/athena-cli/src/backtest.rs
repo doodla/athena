@@ -507,7 +507,7 @@ pub fn run(root: &Path) -> Result<Report> {
     Ok(run_on_from(
         &text,
         &ConfirmedLinks::load(root)?,
-        &read_records(root)?,
+        &read_records(&athena_data::paths::records_root(&root.join(".git"), root))?,
         &starts_from_history(root)?,
     ))
 }

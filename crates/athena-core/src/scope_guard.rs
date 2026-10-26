@@ -632,7 +632,7 @@ impl Athena {
 
     fn try_watch_line(&self, job: &JobId, ui: &dyn Ui) -> Result<()> {
         let head = self.head()?;
-        let records = Records::load(&self.git, &head)?;
+        let records = Records::load_current(&self.git, &head)?;
         let requests = request_records(&records);
         let Some(at) = requests.iter().position(|r| r.id == job.as_str()) else {
             return Ok(());

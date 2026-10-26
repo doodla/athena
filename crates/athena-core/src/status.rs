@@ -602,15 +602,15 @@ impl Athena {
     /// The mistakes in the records at `HEAD`, per class and per cause, with the prevention proposed.
     pub fn mistakes(&self) -> Result<MistakeReport> {
         let head = self.head()?;
-        Ok(mistake_report(&Records::load(&self.git, &head)?))
+        Ok(mistake_report(&Records::load_current(&self.git, &head)?))
     }
 
     /// The state of the work.
     pub fn status(&self) -> Result<StatusView> {
         self.state.registry().reap();
         let head = self.head()?;
-        let records = Records::load(&self.git, &head)?;
-        let set = athena_gate::records::RecordSet::load(&self.git, &head)?;
+        let records = Records::load_current(&self.git, &head)?;
+        let set = athena_gate::records::RecordSet::load_current(&self.git, &head)?;
         let mut jobs_by_state: BTreeMap<String, usize> = BTreeMap::new();
         let mut recent = Vec::new();
         let mut open = Vec::new();
@@ -815,7 +815,7 @@ impl Athena {
     /// A job's full trace.
     pub fn trace(&self, job_ref: &str) -> Result<JobTrace> {
         let head = self.head()?;
-        let records = Records::load(&self.git, &head)?;
+        let records = Records::load_current(&self.git, &head)?;
         let id = records.resolve(job_ref)?;
         let job = records.jobs.get(id.as_str()).expect("resolved");
         let to_value = |v: &dyn erased::ToValue| v.to_value();

@@ -584,6 +584,172 @@ fn symlink(_target: &Path, _link: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// Files whose reads of `records/` are on purpose, each with the reason a stranger can check. D111
+    /// moves every live reader to the records worktree; these read a named ref or define the path.
+    const RECORDS_READER_ALLOW: &[(&str, &str)] = &[
+        (
+            "crates/athena-data/src/paths.rs",
+            "defines records_dir, the one place that joins records/ onto a root",
+        ),
+        (
+            "crates/athena-core/src/store.rs",
+            "Records::load reads a given ref; load_current falls back to it only when no worktree exists",
+        ),
+        (
+            "crates/athena-gate/src/reconcile.rs",
+            "judges a given commit or its parent, so it must read that ref, not the live worktree tip",
+        ),
+        (
+            "crates/athena-gate/src/history.rs",
+            "judges a landing's records at a given tip, so it must read that ref, not the live worktree tip",
+        ),
+        (
+            "crates/athena-gate/src/attribution.rs",
+            "its own read_records reads intent and landing records at a given records tip, not live state",
+        ),
+    ];
+
+    /// One finding per live (non-test) read of `records/` that does not go through the shared seams.
+    /// `files` are (path, text) pairs. Test files, comment lines and text after `#[cfg(test)]` are skipped.
+    fn records_reader_findings(files: &[(String, String)], allow: &[(&str, &str)]) -> Vec<String> {
+        let mut found = Vec::new();
+        for (path, text) in files {
+            let is_test_file = path.contains("/tests/")
+                || path.ends_with("_tests.rs")
+                || path.ends_with("test_support.rs");
+            if is_test_file || allow.iter().any(|(p, _)| path.ends_with(p)) {
+                continue;
+            }
+            let live = text.split("#[cfg(test)]").next().unwrap_or("");
+            for (n, line) in live.lines().enumerate() {
+                if line.trim_start().starts_with("//") {
+                    continue;
+                }
+                let joins = line.contains("join(\"records");
+                let git_load = line.contains("Records::load(") || line.contains("RecordSet::load(");
+                let file_read = line.contains("read_records(")
+                    && !line.contains("fn read_records(")
+                    && !line.contains("records_root(");
+                if joins || git_load || file_read {
+                    found.push(format!("{path}:{}: {}", n + 1, line.trim()));
+                }
+            }
+        }
+        found
+    }
+
+    fn source_files() -> Vec<(String, String)> {
+        fn walk(dir: &Path, root: &Path, out: &mut Vec<(String, String)>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, root, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let rel = path
+                        .strip_prefix(root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned();
+                    out.push((rel, std::fs::read_to_string(&path).unwrap()));
+                }
+            }
+        }
+        let root = repo_root();
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(root.join("crates")).unwrap() {
+            let src = entry.unwrap().path().join("src");
+            if src.is_dir() {
+                walk(&src, &root, &mut out);
+            }
+        }
+        walk(&root.join("xtask/src"), &root, &mut out);
+        out
+    }
+
+    #[test]
+    fn records_reader_scan_passes_on_the_real_tree() {
+        let files = source_files();
+        assert!(files.len() > 50, "the scan must see the source tree");
+        for (path, reason) in RECORDS_READER_ALLOW {
+            assert!(!reason.trim().is_empty(), "{path} needs a reason");
+            assert!(
+                files.iter().any(|(p, _)| p.ends_with(path)),
+                "allow-listed {path} does not exist"
+            );
+        }
+        let found = records_reader_findings(&files, RECORDS_READER_ALLOW);
+        assert!(found.is_empty(), "live readers left: {found:#?}");
+    }
+
+    #[test]
+    fn records_reader_scan_flags_planted_reads() {
+        for planted in [
+            "let p = root.join(\"records\").join(kind);",
+            "let r = read_records(self.git.dir())?;",
+            "let r = Records::load(git, head)?;",
+            "let r = crate::store::Records::load(git, head)?;",
+            "let r = RecordSet::load(git, head)?;",
+        ] {
+            let files = vec![(
+                "crates/x/src/live.rs".to_string(),
+                format!("fn f() {{\n    {planted}\n}}\n"),
+            )];
+            assert_eq!(
+                records_reader_findings(&files, &[]).len(),
+                1,
+                "not flagged: {planted}"
+            );
+        }
+    }
+
+    #[test]
+    fn records_reader_scan_accepts_the_seams_tests_and_allowed_files() {
+        let ok = "let r = Records::load_current(git, head)?;\nlet s = read_records(&records_root(c, d))?;\n";
+        let planted = "#[cfg(test)]\nmod t { fn f() { Records::load(git, head); } }\n";
+        let files = vec![
+            ("crates/x/src/a.rs".to_string(), format!("{ok}{planted}")),
+            (
+                "crates/x/tests/b.rs".to_string(),
+                "Records::load(git, head);".to_string(),
+            ),
+            (
+                "crates/x/src/judge.rs".to_string(),
+                "Records::load(git, head);".to_string(),
+            ),
+        ];
+        assert!(
+            records_reader_findings(&files, &[("src/judge.rs", "judges a given ref")]).is_empty()
+        );
+        assert_eq!(records_reader_findings(&files, &[]).len(), 1);
+    }
+
+    #[test]
+    fn the_site_is_identical_with_records_present_and_absent() {
+        let study = repo_root().join(site::STUDY_DIR);
+        let build = |with_records: bool| {
+            let root = tempfile::tempdir().unwrap();
+            let dest = root.path().join(site::STUDY_DIR);
+            std::fs::create_dir_all(&dest).unwrap();
+            for entry in std::fs::read_dir(&study).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_file() {
+                    std::fs::copy(&path, dest.join(path.file_name().unwrap())).unwrap();
+                }
+            }
+            if with_records {
+                let jobs = root.path().join("records/jobs/2026-10");
+                std::fs::create_dir_all(&jobs).unwrap();
+                std::fs::write(jobs.join("x.json"), "{}").unwrap();
+            }
+            let out = root.path().join("out");
+            site::build(root.path(), &out).unwrap();
+            std::fs::read_to_string(out.join("index.html")).unwrap()
+        };
+        let without = build(false);
+        assert!(!without.is_empty());
+        assert_eq!(build(true), without);
+    }
+
     #[test]
     fn setup_refuses_inside_a_job() {
         assert!(refuse_inside_a_job(Some("20261010-153012-k7q2".into())).is_err());

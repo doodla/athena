@@ -9,6 +9,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Live readers read the worktree of the `athena/records` branch, and fall back to the in-tree `records/` only
+  when the worktree is absent (D111, decision D134). `athena_data::paths` defines `records_worktree`,
+  `records_dir` and `records_root` once; `RecordSet::load_current` and `Records::load_current` read the worktree
+  or else the given ref. Every live reader moved, including `athena land --pr`, status, forecasting, scoring,
+  the auditor and the introspection walks, so they work when main's HEAD has no `records/`. Gate judges of a
+  given ref (`reconcile`, `history`, `attribution`) stay on that ref by an allow-list with reasons, enforced by
+  the xtask test `records_reader_scan`. The site generator reads `studies/` and is unchanged.
 - Athena writes no `Athena-` commit trailers after C0 (D111 job 7 part 1b). When `athena.toml` at a commit's
   parent names `[history] cutover_job`, the commit writer (`Committer::build_commit_in`, and the staged
   intervention commit) strips them; the per-commit gate accepts such commits by the records they add; the

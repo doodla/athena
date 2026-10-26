@@ -2510,7 +2510,7 @@ impl Athena {
             ui.line(&line);
         }
         let head = self.head()?;
-        let records = crate::store::Records::load(&self.git, &head)?;
+        let records = crate::store::Records::load_current(&self.git, &head)?;
         let id = records.resolve(job_ref)?;
         let Some(_lock) = self.state.try_lock_job(&id)? else {
             bail!("job {id} is busy in another athena process");
