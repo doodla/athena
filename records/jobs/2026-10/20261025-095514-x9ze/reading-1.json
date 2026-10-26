@@ -1,0 +1,155 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261025-095514-x9ze",
+  "n": 1,
+  "at": "2026-10-26T03:30:12.533576121Z",
+  "invocation_seq": 1,
+  "base_commit": "0cce7c3bed81d5d04c003793cc97b6f4f0d88b9e",
+  "config_sha256": "8fe89c4edaa823d770160390564d75d68be6850d0873a9f8f769511a6f40103c",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Retry from candidate when only docs findings block a passing rejection",
+  "summary": "Extend qualifies_for_tree_retry so a rejected job whose checks all passed, with no behavior-criterion trouble and no reading mismatch, also qualifies when no criterion is unmet but every blocking (blocker/major) finding cites only non-code paths (Markdown, CHANGELOG, docs/). A new content-only classifier on findings lives in verify.rs. Audience: the operator running `athena retry`, who stops losing ~30 minutes to a redo like job wqp8's.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "Unit tests for the classifier and the qualifying rule; cargo test and clippy clean."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check the rule's decisions on constructed rejections, not only that a function exists."
+    },
+    {
+      "id": "strangers",
+      "how": "Doc comment on the rule updated; CHANGELOG entry written for outside readers."
+    },
+    {
+      "id": "root-cause",
+      "how": "Generalizes the rule to all content-only blocking findings rather than special-casing D122."
+    },
+    {
+      "id": "verified",
+      "how": "Behavior criteria name cargo test runs the verifier can execute."
+    },
+    {
+      "id": "small",
+      "how": "One focused change to the retry qualification rule."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "The qualifying rule lives in reading.rs (qualifies_for_tree_retry, line ~1059) though the request lists run.rs and verify.rs; reading.rs must change with its tests, and run.rs only if its doc comment or seed wiring needs it.",
+    "A finding's paths come from Finding.location (e.g. 'docs/decisions.md:3005-3053', possibly several paths) and, if location is None, from paths named in summary/evidence; a finding with no recognizable path is NOT content-only (conservative: retry from base).",
+    "Blocking means severity blocker or major; minor/nit findings do not block and are ignored by the rule.",
+    "Non-code means extension .md/.markdown/.txt, a file named CHANGELOG*, or a path under docs/; Cargo.toml, athena.toml, prompts, .rs and workflow files count as code/config, so they retry from base.",
+    "The existing rule (unmet content criteria only) stays; the new branch applies when there are no unmet criteria and at least one blocking finding, all content-only. A rejection with no unmet criterion and no blocking finding still has unknown cause and does not qualify.",
+    "The tree-retry seed's findings text already carries the findings, so the retry producer is told the docs fix needed; no new record schema."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A test in athena-core (run with `cargo test -p athena-core`) builds a rejected job with candidate, all checks passed, no unmet criterion, and one major finding whose location is docs/decisions.md:3005-3053; qualifies_for_tree_retry returns true for it.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Tests show retry still starts from the base (qualifies_for_tree_retry false) when: a major finding cites a .rs file; a finding cites both a docs path and a code path; a check failed; a behavior criterion is unmet; the verifier reported a request/reading mismatch; the candidate has admission violations; or no finding and no unmet criterion exists.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test of the content-only classifier (in verify.rs) shows docs/…, *.md, and CHANGELOG.md locations classify as content-only, and src files, Cargo.toml, a missing location with no path, and mixed paths do not; minor findings do not block qualification.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test through tree_retry_seed shows a docs-only-finding rejection yields a seed whose findings list includes the docs finding text; `cargo test` and `cargo clippy --all-targets` pass and `cargo fmt --check` is clean.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The doc comment on qualifies_for_tree_retry states the new condition (no unmet criterion, all blocking findings cite only non-code files) and that the unknown-cause exclusion still applies otherwise.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has an entry under the unreleased section describing that docs-only rejections now retry from the candidate, and that code-file findings or failed checks still retry from the base.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.15
+    }
+  ],
+  "out_of_scope": [
+    "Fixing D122/D121 in docs/decisions.md or re-running job wqp8.",
+    "Changing which verifier findings are raised or their severities.",
+    "Changing the base-commit-unchanged check or the seeding mechanics of a tree retry.",
+    "Adding a new record field or schema version."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.72,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.07,
+      "cost_usd": {
+        "p10": 0.4,
+        "p50": 1.0,
+        "p90": 2.4
+      },
+      "wall_time_s": {
+        "p10": 420.0,
+        "p50": 1350.0,
+        "p90": 2800.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7169435215946844,
+      "p_verification_passes": 0.6467889908256881,
+      "p_user_intervenes": 0.060000000000000005,
+      "cost_usd": {
+        "p10": 0.45749734938881464,
+        "p50": 1.1082699,
+        "p90": 2.4581502239729427
+      },
+      "wall_time_s": {
+        "p10": 536.6753604381123,
+        "p50": 1455.5001337370002,
+        "p90": 2955.0564839105573
+      }
+    }
+  },
+  "departures": "The qualifying rule is in reading.rs, not in the files the request lists, which adds a path-mismatch risk; otherwise close to the reference.",
+  "urgent_reason": "Cuts wasted time: it stops retries from redoing ~30 minutes of passing code work after a docs-only rejection."
+}

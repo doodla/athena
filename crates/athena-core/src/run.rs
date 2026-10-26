@@ -202,7 +202,8 @@ impl Athena {
 
     /// The seed for a producer retry that starts from a rejected candidate, or `None` when the retry starts
     /// from the base. The request must be "try again on <job>" for a job that
-    /// [`qualifies_for_tree_retry`](crate::reading::qualifies_for_tree_retry); the rejected candidate must
+    /// [`qualifies_for_tree_retry`](crate::reading::qualifies_for_tree_retry) (unmet content criteria, or
+    /// blocking findings that cite only documentation files); the rejected candidate must
     /// still be in the repository; and the files agents see at `head` must be those the rejected job's base
     /// had (only `records/` differs), so that starting from the old candidate cannot undo later work.
     fn tree_seed(

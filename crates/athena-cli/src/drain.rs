@@ -74,7 +74,8 @@
 //!   stops as "budget spent", and what the calls cost is added to the spend ([`Check::cost`]).
 //! - **Retry.** An item gets two attempts (an interrupted job's first attempt is its retry, see above). After a rejected or failed run the second attempt reads the job
 //!   again with `athena retry`, then runs it. The retry's producer starts from the base, except after a
-//!   rejection with every check passed and only content criteria unmet, when it starts from the rejected
+//!   rejection with every check passed and either only content criteria unmet or no unmet criterion and only
+//!   documentation findings blocking, when it starts from the rejected
 //!   candidate (`athena_core::reading::qualifies_for_tree_retry`). A run that ended any other way (no outcome, blocked) leaves
 //!   the job proposed or blocked, which `athena retry` refuses, so the second attempt runs the same reading
 //!   again. After a run that passed but did not land, it lands again. Two failures stop the loop, naming the
