@@ -9,6 +9,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A design for a no-behavior-change structure pass on `gh.rs` and `run.rs`: `docs/design/structure-pass.md`
+  names the modules each file would split into, what moves into each with measured line counts, the order of
+  move jobs (each sized for one producer run, caller-heavy ones last), the named stages `produce_and_verify`
+  would split into, and how each move is shown to change nothing. D138 records it as proposed. Design only; no
+  code moved.
 - Class labels derived from evidence, so `athena score-jev` has labeled cases without anyone's opinion (BRIEF.md
   addendum of 2026-10-25: the labels come from what happened afterwards). `athena score-jev --derive` reads the
   records and appends `athena.class-label/1` records with `labeled_by: evidence` and a `basis` that cites the
