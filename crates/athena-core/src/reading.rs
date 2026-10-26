@@ -2989,6 +2989,7 @@ mod tests {
                 pin: None,
                 retry_from: None,
                 retry_findings: None,
+                failure_classes: Vec::new(),
             };
             if seeded {
                 inputs.retry_from = Some(RetrySeed {

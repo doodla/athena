@@ -9,6 +9,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The producer brief now carries a "Recurring failure classes" section, built from the recorded introspections
+  and the class registry. It lists the classes seen in at least 3 distinct jobs, each with its title, its case
+  count and the prevention the newest case proposed, quoted as data and not instructions. It lists at most 5,
+  most cases first, cuts each text to 300 characters and says how many qualifying classes were left out. With
+  none qualifying, or without records, the section is absent. The planner, critic and reader briefs are unchanged.
 - `athena status` evaluates the job-planning keep rule (job-planning.md section 9, D110) and shows it. Over
   planned jobs that were dispatched (a job stopped in planning counts as not landed) it prints the landed share
   against the 64% baseline, cost per landed job (all cost of those jobs over landed ones) and the first-round
