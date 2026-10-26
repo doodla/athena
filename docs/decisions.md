@@ -3366,3 +3366,51 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Reversal cost:** Low. Remove the two hooks; the record type and the baseline files can stay.
 - **Provenance:** Read: `gh.rs`, `steward.rs`, `reading.rs`, `store.rs`, `records.rs`. Measured by the new tests.
   The thresholds are chosen, not derived from measurement.
+
+## D133 · Athena writes no `Athena-` commit trailers after C0 (D111, job 7 part 1b)
+
+- **Case:** D111 attributes every main commit from records, not trailers, and Sri said not to depend on them.
+  After the cutover job lands, new commits (an intervention, a records-only commit, a job landing, the squash and
+  the pull request's commits) should carry no `Athena-` lines. Every reader that finds a job's commits by
+  trailer then has to find them another way, and the per-commit gate, which asks for a trailer on a records-only
+  or intervention commit, has to accept the trailer-free commit that ships.
+- **Decision:** Done at the commit writers, not at call sites. `Committer::build_commit_in` (`commits.rs`) calls
+  `message_for_parent`, which removes the `Athena-` lines from the last paragraph (other trailers such as
+  `Co-Authored-By` stay) when `athena.toml` at the commit's parent names `[history] cutover_job`; the one commit
+  Athena makes with git itself (`intervene --with-staged`) goes through the same function. The cutover job's own
+  landing has a parent without the setting, so it keeps its trailers and C0 stays a legacy commit. With no
+  `cutover_job` every writer is unchanged.
+  - **Gate.** The gate judges the commit that ships, so `athena_gate::invariant::check` changed in the same job.
+    When the parent's own `athena.toml` names `cutover_job` (a parent with no file is judged by the built-in
+    configuration and does not count), a commit that adds an intervention record is accepted as a declared
+    intervention without the `Athena-Intervention` trailer, and a commit that changes nothing governed but
+    touches `records/` is accepted as naming existing work without an `Athena-Job`, `Athena-Intervention` or
+    `Athena-Record` trailer. A governed change with no record is refused as before, with or without the setting.
+  - **Readers.** `gh::landed_commit_for` finds a post-C0 job's landed commit from its records (the commit that
+    added `outcome-landed.json`, else `outcome.json`, on the history of HEAD, whose `verification.json` holds the
+    verified fingerprint); `Git::squash_text_relaxed` takes a squash message with no `Athena-Job` trailer (more
+    than one is still refused); `Athena::trace` adds the commits that touch the job's records and the host commit
+    of its landing record; the auditor's `read_changed_files` falls back, when no commit carries the trailer,
+    to the host commit of the job's landing record on `athena/records`, and says so when that branch has no tip.
+  - **`retry_landing` after C0.** It does not search for the blocked closing commit by trailer and never stops
+    with "closing commit not found"; it writes no `Athena-Verified-Content`; the prediction it reports is the
+    commit that recorded the accepted reading. Before C0 it is unchanged. Tests: `retry_landing_after_c0_...` and
+    a counterpart with no cutover job that still writes the trailers, in `athena-cli/tests/trailer_stop.rs`.
+  - **Replay.** `Git::replay` keeps original messages and is unchanged. It copies commits of a job branch; one
+    built after the setting was on its parent is already trailer-free, and one built before it keeps its trailers,
+    because rewriting pre-C0 messages is history rewriting.
+- **Alternatives:** Edit `message()` or each call site (no repository access there; sites drift). Run the gate
+  before the strip (it would judge a commit other than the one that ships). Gate on the cutover state of the
+  records branch (needs the branch for every write; branches built before the import would still write
+  trailers). Loosen `squash_text` for every job (drops the one-job check before C0). Search by content instead of
+  trailer for all jobs (changes pre-C0 output). Strip in `replay` (rewrites pre-C0 messages).
+- **Tradeoff:** The gate now accepts a records-only commit after C0 on content alone, so the trailer no longer
+  ties it to a named job. Code that counts landings by trailer (`code_health.rs`) sees none after C0 and still
+  needs its own change. The repository's own `athena.toml` names a cutover job, so the CLI tests' demo
+  configuration and `run_pin_tests.rs` drop it: they read the trailers written before C0.
+- **Reversal cost:** Low: remove the `message_for_parent` call and the gate's content rule; commits already
+  written stay valid, as the gate accepts commits with trailers too.
+- **Provenance:** Read: `commits.rs`, `gh.rs`, `run.rs`, `status.rs`, `auditor.rs`, `manage.rs`,
+  `athena-gate/src/invariant.rs`, `athena-git/src/lib.rs`, `test_support.rs`. Measured by the new tests and the
+  full suite run with `cargo test --locked`. No text with the words "retry_landing has no test" exists in
+  `docs/` or `CHANGELOG.md`, so none was removed.

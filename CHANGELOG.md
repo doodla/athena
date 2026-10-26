@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Athena writes no `Athena-` commit trailers after C0 (D111 job 7 part 1b). When `athena.toml` at a commit's
+  parent names `[history] cutover_job`, the commit writer (`Committer::build_commit_in`, and the staged
+  intervention commit) strips them; the per-commit gate accepts such commits by the records they add; the
+  landed-commit lookup, the squash text, `retry_landing` (no trailer search, no `Athena-Verified-Content`),
+  the status trace and the auditor read a post-C0 job from its records and landing record. With no
+  `cutover_job` nothing changes.
 - Introspection records gain a post-mortem field and a planning-stopped marker. Jev's call has a third
   question, "What one piece of context, if the agent had read it, would have prevented this?", answered from a
   fixed list (`system-facts-line`, `failure-class`, `brief-assembly`, `vocabulary-term`, `spec-fix`,

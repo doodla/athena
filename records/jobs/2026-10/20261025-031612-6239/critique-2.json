@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261025-031612-6239",
+  "round": 2,
+  "at": "2026-10-26T13:26:15.783126761Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "blocker",
+      "summary": "Removing the trailers before the per-commit gate makes the gate refuse Athena's own records-only and intervention commits after C0.",
+      "evidence": "build_commit_in builds the commit and then calls gate(..., Scope::Commit) on it (commits.rs:171-172). Scope::Commit runs invariant::check (gate lib.rs:347). In that check, a commit that leaves the fingerprint unchanged and touches more than owner paths passes only if names_existing_work finds an Athena-Job, Athena-Intervention or Athena-Record trailer (invariant.rs:149-157, 799-829). A commit that changes governed content passes as an intervention only if it has an Athena-Intervention trailer whose record it adds (invariant.rs:760-774). invariant.rs never reads the cutover. So after C0 the reading commit from ask, Athena::intervene with and without staged changes, and other records commits would fail with 'the gate refused Athena's own commit'. The plan's open question ('Not confirmed: that athena_gate ... accept trailer-free commits') is settled by the code: it does not accept them. athena-gate is not in the file list. Fix: Plan the gate change as part of this job. After C0 (cutover_job set in the parent's config), invariant::check should accept trailer-free commits by content: (b) through added_interventions (invariant.rs:778), and records-only commits through the records they add or the job directory they touch. Add crates/athena-gate/src/invariant.rs to the deliverables, with tests that show a trailer-free records-only commit and a trailer-free intervention commit refused when no cutover_job is set and accepted when it is. Another option is to run the gate before stripping the trailers, but then the gate judges a different commit object from the one that ships, so prefer the content rule. Either way, explain why in the D111 addendum.",
+      "location": "Decision 1 / Step 2 (commits.rs build_commit_in); crates/athena-gate/src/invariant.rs:143-157, 760-829; crates/athena-gate/src/lib.rs:335-348",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The plan's fallback for a gate refusal is to stop and report, which would leave every behavior criterion unshown.",
+      "evidence": "The gate refusal is certain (see the blocker). Under this plan the producer would reach step 7, fail on the first intervene, and stop. Criteria 1, 2 and 3 would not be delivered. Fix: Move the gate change into the plan (files, steps and demonstrations) instead of treating it as a contingency.",
+      "location": "Step 10 / Risks ('Gate or attribution code outside the listed files still requires trailers')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Commits rebuilt by Git::replay keep their original messages and do not pass through build_commit_in.",
+      "evidence": "replay calls commit_tree(&tree, &[&tip], &self.message(commit)?, sign) (lib.rs:764). land.rs:109 uses it to rebuild a branch onto the merged squash. If any pre-C0 commit with trailers is rebuilt on top of a commit after C0, the new commit keeps its Athena- lines. That breaks the claim that every Athena commit is covered at one point. Fix: Either state that replay only copies commits that are already trailer-free after C0 and cite why, or apply the same strip in replay when the onto commit's config names cutover_job. Add a test either way.",
+      "location": "Decision 1; crates/athena-git/src/lib.rs:740-764 (replay), crates/athena-core/src/land.rs:109",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The 'refused without the fallback' proof depends on a temporary manual edit that is reverted, so the verifier cannot reproduce it.",
+      "evidence": "'The producer does this by running the test once with the fallback disabled by a temporary local edit, then reverting it, and records that in the change description.' Fix: Make the paired assertion run as code: in the same fresh clone, call the trailer-only lookup that read_changed_files used before (or the pre-C0 path, by passing a commit whose config has no cutover_job) and assert 'none could be read'. Then call auditor::run and assert success.",
+      "location": "Decision 5 / Criterion 3 demonstration",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The wording suggests adding a helper that builds CutoverFixture, but CutoverFixture::build already exists in core. Only a CutoverSpec (capability and scripts) is missing.",
+      "evidence": "test_support.rs:41-42: 'From athena-core tests: build a CutoverSpec with your own capability and scripts and call CutoverFixture::build.' Fix: Say that the plan adds a core CutoverSpec and scripts that call the existing CutoverFixture::build, so the producer does not write a second builder.",
+      "location": "Step 1 / Decision 6",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan's main idea fits the request and the root-cause default: one gate in Committer::build_commit_in, keyed on [history] cutover_job in the config at the parent commit. The code it names exists: build_commit_in is at commits.rs:150, cutover_job_for at gh.rs:1680, CutoverFixture in test_support.rs, Athena::intervene at manage.rs:311, retry_landing at run.rs:2759, read_changed_files at auditor.rs:168, attribution::cutover_commit at attribution.rs:83, and squash_text at athena-git lib.rs:715. But the plan cannot work as designed. build_commit_in runs the gate on the finished commit (commits.rs:171-172), and the gate's Scope::Commit runs invariant::check (athena-gate/src/lib.rs:347). That check gets its permission from the trailers: a records-only commit must carry an Athena-Job, Athena-Intervention or Athena-Record trailer (invariant.rs:143-157, names_existing_work at 799-829), and a declared intervention must carry Athena-Intervention (invariant.rs:760-774). invariant.rs has no post-cutover path; only history.rs, legacy.rs and attribution.rs mention the cutover. Once the plan strips the trailers before the gate runs, the gate refuses Athena's own commits after C0: the reading commit from ask, both intervene commits, and records commits generally. The plan lists this as \"not confirmed\" and says it would stop if it happened, but reading the code confirms it, and the needed athena-gate change is outside the plan's file list. So criteria 1-3 cannot be shown. The plan needs to add a content-based post-C0 rule to the gate invariant, or reorder the gate, and list that file. Smaller issues: commits rebuilt by Git::replay copy old messages unchanged, and the auditor's \"without the fallback\" proof is a manual edit that is then reverted."
+}

@@ -2782,35 +2782,44 @@ impl Athena {
             .outcome
             .clone()
             .context("a blocked job has an outcome")?;
-        let mut trailers_found = Vec::new();
-        for commit in self
-            .git
-            .log_grep("HEAD", &format!("^Athena-Job: {}$", id.as_str()))?
-        {
-            let found = self.git.trailers(&self.git.message(&commit)?)?;
-            if found.iter().any(|(k, _)| k == "Athena-Prediction") {
-                trailers_found = found;
-                break;
-            }
-        }
-        if trailers_found.is_empty() {
-            bail!("the blocked closing commit of job {id} was not found");
-        }
+        // After C0 (D111) no commit carries trailers: nothing is searched for, and no
+        // Athena-Verified-Content is written. The prediction is the commit that recorded the reading.
+        let stopped = crate::gh::cutover_job_for(&self.git, "HEAD").is_some();
         let mut trailers: Vec<(&str, String)> = Vec::new();
-        for (k, v) in &trailers_found {
-            let key: &str = match k.as_str() {
-                "Athena-Job" => "Athena-Job",
-                "Athena-Prediction" => "Athena-Prediction",
-                "Athena-Class" => "Athena-Class",
-                "Athena-Capability" => "Athena-Capability",
-                "Athena-Producer" => "Athena-Producer",
-                "Athena-Verifier" => "Athena-Verifier",
-                "Athena-Cost-USD" => "Athena-Cost-USD",
-                _ => continue,
-            };
-            trailers.push((key, v.clone()));
+        let mut post_c0_prediction = None;
+        if stopped {
+            let reading_path = AnyRecord::Reading(Box::new(reading.clone())).canonical_path();
+            post_c0_prediction = introducing_commit(self, "HEAD", &reading_path)?;
+        } else {
+            let mut trailers_found = Vec::new();
+            for commit in self
+                .git
+                .log_grep("HEAD", &format!("^Athena-Job: {}$", id.as_str()))?
+            {
+                let found = self.git.trailers(&self.git.message(&commit)?)?;
+                if found.iter().any(|(k, _)| k == "Athena-Prediction") {
+                    trailers_found = found;
+                    break;
+                }
+            }
+            if trailers_found.is_empty() {
+                bail!("the blocked closing commit of job {id} was not found");
+            }
+            for (k, v) in &trailers_found {
+                let key: &str = match k.as_str() {
+                    "Athena-Job" => "Athena-Job",
+                    "Athena-Prediction" => "Athena-Prediction",
+                    "Athena-Class" => "Athena-Class",
+                    "Athena-Capability" => "Athena-Capability",
+                    "Athena-Producer" => "Athena-Producer",
+                    "Athena-Verifier" => "Athena-Verifier",
+                    "Athena-Cost-USD" => "Athena-Cost-USD",
+                    _ => continue,
+                };
+                trailers.push((key, v.clone()));
+            }
+            trailers.push(("Athena-Verified-Content", v.fingerprint().to_string()));
         }
-        trailers.push(("Athena-Verified-Content", v.fingerprint().to_string()));
         let config = athena_gate::config_at(&self.git, Some(&base))?;
         trailers.push((
             "Co-Authored-By",
@@ -2862,7 +2871,8 @@ impl Athena {
                                 prediction_commit: trailers
                                     .iter()
                                     .find(|(k, _)| *k == "Athena-Prediction")
-                                    .map(|(_, v)| v.clone()),
+                                    .map(|(_, v)| v.clone())
+                                    .or(post_c0_prediction),
                                 closing_commit: commit.clone(),
                                 landed_commit: Some(commit),
                                 totals: outcome.totals,

@@ -406,6 +406,9 @@ impl Athena {
     /// Commits the user's staged changes together with `files`, through git itself, after gating it.
     fn commit_with_staged(&self, files: &[NewFile], msg: &str) -> Result<String> {
         let _lock = self.state.lock_repository()?;
+        // After C0 (D111) Athena writes no trailers; the message is judged as it ships.
+        let msg = crate::commits::message_for_parent(&self.git, &self.head()?, msg);
+        let msg = msg.as_str();
         let root = self.git.dir().to_path_buf();
         for file in files {
             let full = root.join(&file.path);

@@ -197,17 +197,81 @@ fn read_changed_files(
         Some(c) => tried.push(format!("{c} (candidate, not in this repository)")),
         None => tried.push("no candidate commit recorded".to_string()),
     }
+    let trailer_tried = read_from_trailers(athena, head, job, &read_from)?;
+    match trailer_tried {
+        Ok(files) => return Ok(files),
+        Err(more) => tried.extend(more),
+    }
+    // After C0 (D111) commits carry no trailers: the landing record names the host commit instead.
+    if crate::gh::cutover_job_for(&athena.git, head).is_some() {
+        match athena_gate::attribution::cutover_commit(&athena.git, job.as_str()) {
+            Ok(Some(host)) if athena.git.commit_exists(&host)? => {
+                let files = read_from(&host)?;
+                if !files.is_empty() {
+                    return Ok(files);
+                }
+                tried.push(format!("{host} (landing record)"));
+            }
+            Ok(Some(host)) => {
+                tried.push(format!("{host} (landing record, not in this repository)"))
+            }
+            Ok(None) => tried.push(
+                "no landing record for the job on the athena/records branch (is its tip fetched?)"
+                    .to_string(),
+            ),
+            Err(e) => tried.push(format!("landing record unreadable: {e}")),
+        }
+    }
+    bail!("{}", refusal(job, &tried))
+}
+
+/// Changed files read from a commit, as (path, bytes).
+type ChangedFiles = Vec<(String, Vec<u8>)>;
+
+/// The trailer-only lookup of a job's changed files: the files of the first commit with the job's
+/// `Athena-Job` trailer that holds any, or the commits tried.
+fn read_from_trailers(
+    athena: &Athena,
+    head: &str,
+    job: &JobId,
+    read_from: &dyn Fn(&str) -> Result<ChangedFiles>,
+) -> Result<std::result::Result<ChangedFiles, Vec<String>>> {
+    let mut tried = Vec::new();
     for squash in athena
         .git
         .log_grep(head, &format!("^Athena-Job: {}$", job.as_str()))?
     {
         let files = read_from(&squash)?;
         if !files.is_empty() {
-            return Ok(files);
+            return Ok(Ok(files));
         }
         tried.push(format!("{squash} (Athena-Job trailer)"));
     }
-    bail!("{}", refusal(job, &tried))
+    Ok(Err(tried))
+}
+
+/// The trailer-only lookup, as `read_changed_files` did before C0 was handled: it fails when no commit
+/// carries the job's trailer. Tests use it to show what the landing-record fallback replaces.
+pub fn read_changed_files_by_trailers(
+    athena: &Athena,
+    head: &str,
+    job: &JobId,
+    changed: &[String],
+) -> Result<Vec<(String, Vec<u8>)>> {
+    let wanted: Vec<&String> = changed.iter().take(MAX_FILES).collect();
+    let read_from = |commit: &str| -> Result<Vec<(String, Vec<u8>)>> {
+        let mut files = Vec::new();
+        for path in &wanted {
+            if let Some(bytes) = athena.git.show_file(commit, path)? {
+                files.push(((*path).clone(), bytes));
+            }
+        }
+        Ok(files)
+    };
+    match read_from_trailers(athena, head, job, &read_from)? {
+        Ok(files) => Ok(files),
+        Err(tried) => bail!("{}", refusal(job, &tried)),
+    }
 }
 
 /// The refusal for a job whose changed files cannot be read.
