@@ -1,0 +1,168 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261025-095514-x9ze",
+  "round": 1,
+  "at": "2026-10-26T03:31:43.503231575Z",
+  "invocation_seq": 2,
+  "approach": "Add `Finding::is_content_only()` and `blocks()` in verify.rs (as free functions `finding_is_content_only` and `finding_blocks`, since Finding lives in athena-data). Extend `qualifies_for_tree_retry` in reading.rs. It keeps every gate: rejected, candidate with commit and tree, no violations, checks non-empty and all passed, no reading mismatch, no behavior trouble. Then it qualifies in one of two ways. Either there are unmet criteria and all are content (the existing rule). Or there are no unmet criteria, at least one blocker/major finding, and every blocker/major finding is content-only. Minor and nit findings are ignored. Update the doc comments, add tests and a CHANGELOG entry. Docs-only mentions in run.rs and drain.rs doc comments are kept in line with the new rule.",
+  "decisions": [
+    {
+      "choice": "Classifier is `finding_is_content_only(&Finding) -> bool` in verify.rs. It splits `location` on whitespace, commas and semicolons. Each token has a trailing `:line[-line]` stripped, and every token must be a non-code path. Non-code means: starts with `docs/`, extension md/markdown/txt, or file name starts with CHANGELOG. If location is None, it scans summary and evidence for path-like tokens (containing `/` or a `.ext`) and applies the same rule; no recognizable path means false.",
+      "reason": "Matches the accepted reading. One rule for all docs findings, not a D122 special case. Conservative: unknown means retry from base.",
+      "rejected": [
+        {
+          "option": "Add a path-kind field to Finding",
+          "why": "Out of scope: no new record field or schema version."
+        },
+        {
+          "option": "Match only `docs/` prefix",
+          "why": "Misses CHANGELOG.md and README.md findings."
+        },
+        {
+          "option": "Treat a missing location as content-only",
+          "why": "Could resume from a candidate with a code defect."
+        }
+      ]
+    },
+    {
+      "choice": "Fall back to summary/evidence path scanning only when location is None, and require at least one recognized path token and all recognized tokens non-code.",
+      "reason": "Verifiers sometimes omit location; still avoids guessing from prose when a location exists.",
+      "rejected": [
+        {
+          "option": "Always scan prose too",
+          "why": "Prose often mentions code files incidentally and would flip a docs finding to code, or the reverse."
+        }
+      ]
+    },
+    {
+      "choice": "Keep `qualifies_for_tree_retry` signature and put the blocking-severity filter in verify.rs next to the classifier.",
+      "reason": "tree_retry_seed, drain.rs and run.rs callers need no change; seed text already lists all findings.",
+      "rejected": [
+        {
+          "option": "Pass findings as a new parameter",
+          "why": "Verification already carries findings; the signature change would touch every caller."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "action": "modify",
+      "purpose": "Add `finding_blocks` (blocker/major) and `finding_is_content_only` with path extraction, plus unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Extend `qualifies_for_tree_retry`, update its doc comment, add and adjust tests, including the tree_retry_seed test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add the Unreleased entry.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run.rs",
+      "action": "modify",
+      "purpose": "Doc comment near line 205 only: say a docs-only rejection also qualifies.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Module doc near line 78 only: describe the broadened qualifying rule.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append a short decision recording the content-only rule and the rejected alternatives, using the next free D number at the end of the file.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read verify.rs tests module and the Finding/Severity types in athena-data records.rs (already seen: Finding has severity, summary, evidence, location, source).",
+    "In verify.rs add `pub fn finding_blocks(&Finding) -> bool` and `pub fn finding_is_content_only(&Finding) -> bool`, with a private `is_non_code_path(&str)` and `paths_of(&Finding)`; add unit tests for criterion 3.",
+    "In reading.rs, restructure the tail of `qualifies_for_tree_retry`: compute behavior_trouble; if any criterion unmet, return true when all unmet are Content (and no behavior trouble); otherwise gather blocking findings and return true when non-empty and all are content-only. Update its doc comment.",
+    "Fix the 'no criterion is unmet' case in the existing table test; add a new table test for criteria 1 and 2 and a seed test for criterion 4.",
+    "Update doc comments in run.rs (~line 205) and drain.rs (~line 78).",
+    "Add the CHANGELOG.md entry under `## [Unreleased]` / `### Changed`, and append the decision in docs/decisions.md.",
+    "Run cargo fmt --all, cargo clippy --all-targets --locked -- -D warnings, cargo test --locked."
+  ],
+  "risks": [
+    {
+      "risk": "Existing test case 'no criterion is unmet' now qualifies because its fixture finding is at CHANGELOG.md.",
+      "mitigation": "Clear the findings in that case (or point them at a .rs file) and say so in the test."
+    },
+    {
+      "risk": "Misclassifying a code path as docs (e.g. `docs/` that holds code, or a `.txt` prompt).",
+      "mitigation": "Treat only docs/, .md/.markdown/.txt and CHANGELOG* as non-code; prompts and config in other extensions stay code. The new candidate is fully verified either way."
+    },
+    {
+      "risk": "Prose scanning picks up URLs or version numbers like `1.2` as paths.",
+      "mitigation": "Only used when location is None; a token counts as a path only if it contains `/` or has an alphabetic extension; if nothing is recognized the finding is not content-only."
+    },
+    {
+      "risk": "Editing governance or large files (decisions.md, CHANGELOG.md) accidentally.",
+      "mitigation": "Make append-only or single-entry edits; leave athena.toml and workflows untouched."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit test in reading.rs tests: take `content_only_rejection()`, set all criteria met, set findings to one Major with location `docs/decisions.md:3005-3053`, assert `qualifies(&job)`.",
+      "command": "cargo test -p athena-core docs_only_blocking_finding",
+      "observes": "qualifies_for_tree_retry returns true for a passing-check rejection with no unmet criterion and only a docs major finding.",
+      "fails_without": "Without the new branch, no unmet criterion means false and the assertion fails."
+    },
+    {
+      "criterion": 2,
+      "method": "Table test over constructed docs-only rejections, each with one change, asserting false: major finding at `crates/athena-core/src/run.rs:10`; one finding with location `docs/a.md crates/x/src/lib.rs`; a check failed; a behavior criterion unmet; request_reading_mismatch set; a candidate violation; no findings and no unmet criterion. Also update the existing case 'no criterion is unmet' in `only_a_rejection_with_every_check_passed_and_content_criteria_unmet_qualifies`, because its fixture has a CHANGELOG.md major finding and would now qualify; clear findings in that case.",
+      "command": "cargo test -p athena-core docs_only_blocking_finding",
+      "observes": "Every case returns false, so the retry starts from the base.",
+      "fails_without": "If the rule ignored the finding paths or the other gates, one of these cases would return true."
+    },
+    {
+      "criterion": 3,
+      "method": "Unit tests in verify.rs: locations `docs/x.md:3-9`, `notes.md`, `CHANGELOG.md` are content-only; `src/lib.rs`, `Cargo.toml`, `athena.toml`, None with prose naming no path, and `docs/a.md src/b.rs` are not. A test that a Minor code finding is excluded by `finding_blocks` and a Minor finding alongside a docs Major still qualifies (in reading.rs).",
+      "command": "cargo test -p athena-core finding_is_content_only",
+      "observes": "Classifier returns the stated booleans; minor findings do not block.",
+      "fails_without": "A classifier that accepted any location or ignored severity would fail the mixed, code and minor cases."
+    },
+    {
+      "criterion": 4,
+      "method": "Test in reading.rs: records_with a docs-only-finding rejection, call tree_retry_seed with 'try again on <id>', assert Some, unmet empty, and findings[0] contains `major (docs/decisions.md:3005-3053):` and the summary. Then run the full checks.",
+      "command": "cargo test -p athena-core tree_retry_seed_docs_only && cargo test --locked && cargo clippy --all-targets --locked -- -D warnings && cargo fmt --all --check",
+      "observes": "The seed carries the docs finding text; all tests pass, clippy and fmt are clean.",
+      "fails_without": "Without the rule extension, tree_retry_seed returns None and the expect fails."
+    },
+    {
+      "criterion": 5,
+      "method": "Inspect the doc comment on qualifies_for_tree_retry in the diff.",
+      "command": "git diff crates/athena-core/src/reading.rs",
+      "observes": "It says: with no unmet criterion, the rule holds when at least one blocker/major finding exists and all blocking findings cite only non-code files; otherwise a rejection with no unmet criterion has an unknown cause and does not qualify.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Inspect the diff under `## [Unreleased]`.",
+      "command": "git diff CHANGELOG.md",
+      "observes": "An entry (under Changed) says a rejection whose checks passed and whose only blocking findings cite documentation or other non-code files now retries from the candidate; findings that cite code files, or a failed check, still retry from the base. It is written for outside readers.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "The next free decision number in docs/decisions.md was not checked; the producer should read the file's tail and also avoid editing D121/D122.",
+    "Whether verifiers write line suffixes in forms other than `:N` or `:N-M` (such as `#L10`) is unknown; the classifier should also strip `#...` and parentheses."
+  ],
+  "producer_section_sha256": "3d1e949f2eacee9221e3fdb4719d06f612959ba153ba88712087c1ff6aa6889c"
+}

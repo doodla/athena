@@ -3204,3 +3204,28 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Provenance:** stated: the request of 2026-10-25 and its figures. Read: BRIEF.md pantheon table and relay note,
   `docs/design/job-planning.md` section 9, `docs/design/roles-and-ladder.md`, D125 and D126. Not measured: every
   figure from `records/`, and every threshold.
+
+## D128 · A retry also starts from the rejected candidate when only documentation findings blocked it
+
+- **Case:** Job 20261025-034452-wqp8 passed every check and was rejected for one major finding: a decision
+  inserted inside another in `docs/decisions.md`. No criterion was unmet, so D117's rule did not apply and the
+  retry redid about 30 minutes of code from the base.
+- **Decision:** `qualifies_for_tree_retry` keeps every D117 gate (rejected, candidate with commit and tree, no
+  violations, every check passed, no reading mismatch, no behavior criterion unmet or unseen). Past those, it
+  qualifies either on D117's rule (unmet criteria, all content) or, with no unmet criterion, when at least one
+  blocker or major finding exists and every one of them is content-only. `finding_is_content_only` (in
+  `verify.rs`) reads the paths in `location` (tokens split on whitespace, commas and semicolons, with
+  `:line-line` and `#anchor` removed), and only when `location` is absent the paths named in the summary and
+  evidence. Content-only means every path is under `docs/`, ends in `.md`, `.markdown` or `.txt`, or is named
+  CHANGELOG*. No recognizable path, or any code or configuration path, is not content-only. Minor and nit
+  findings are ignored. No record field changed. Tests: `docs_only_blocking_finding_retries_from_the_candidate_and_anything_else_from_the_base`,
+  `tree_retry_seed_docs_only_carries_the_docs_finding` and `finding_is_content_only_when_every_cited_path_is_non_code`.
+- **Alternatives:** (a) A path-kind field on findings: rejected, it changes the record schema. (b) Match only
+  `docs/`: rejected, it misses CHANGELOG and README findings. (c) Treat a missing location as content-only:
+  rejected, it could resume from a candidate with a code defect. (d) Always scan prose as well as `location`:
+  rejected, prose names code files in passing.
+- **Tradeoff:** A path-based guess can call a finding docs-only when the real fix needs code (a docs finding that
+  says a described behavior is wrong). The new candidate is verified in full, so the cost is one more retry.
+- **Reversal cost:** Low. Remove the second branch of the rule.
+- **Provenance:** stated: the request. Read: `reading.rs`, `verify.rs`, D117. Measured: `cargo test -p athena-core`
+  for the tests above.

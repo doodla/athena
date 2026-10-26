@@ -463,11 +463,145 @@ pub fn verified(
     })
 }
 
+/// Whether a finding blocks a pass: severity blocker or major. Minor and nit findings do not.
+pub fn finding_blocks(finding: &Finding) -> bool {
+    matches!(finding.severity, Severity::Blocker | Severity::Major)
+}
+
+/// Whether every path a finding cites is a non-code file (Markdown or text, a CHANGELOG, or anything under
+/// `docs/`), so that fixing it cannot need a code change.
+///
+/// The paths come from `location` (tokens split on whitespace, commas and semicolons, each with a trailing
+/// `:line[-line]` or `#anchor` removed). Only when `location` is absent are they read from `summary` and
+/// `evidence`. A finding that cites no recognizable path is not content-only, and neither is one that cites
+/// any code or configuration file (`.rs`, `Cargo.toml`, `athena.toml`, workflows, prompts).
+pub fn finding_is_content_only(finding: &Finding) -> bool {
+    let paths: Vec<String> = match finding.location.as_deref() {
+        Some(location) => location_tokens(location)
+            .into_iter()
+            .map(path_of_token)
+            .collect(),
+        None => {
+            let prose = format!("{} {}", finding.summary, finding.evidence);
+            location_tokens(&prose)
+                .into_iter()
+                .map(path_of_token)
+                .filter(|p| looks_like_path(p))
+                .collect()
+        }
+    };
+    !paths.is_empty() && paths.iter().all(|p| is_non_code_path(p))
+}
+
+fn location_tokens(text: &str) -> Vec<&str> {
+    text.split(|c: char| c.is_whitespace() || c == ',' || c == ';')
+        .map(|t| t.trim_matches(|c: char| matches!(c, '(' | ')' | '`' | '\'' | '"' | '.')))
+        .filter(|t| !t.is_empty())
+        .collect()
+}
+
+/// The token without a trailing `#anchor` or `:line[-line]`.
+fn path_of_token(token: &str) -> String {
+    let token = token.split('#').next().unwrap_or(token);
+    let mut path = token;
+    if let Some((head, tail)) = token.rsplit_once(':')
+        && !tail.is_empty()
+        && tail.chars().all(|c| c.is_ascii_digit() || c == '-')
+    {
+        path = head;
+    }
+    path.trim_start_matches("./").to_string()
+}
+
+/// A prose token counts as a path when it has a directory separator or an alphabetic extension.
+fn looks_like_path(token: &str) -> bool {
+    if token.contains("://") {
+        return false;
+    }
+    if token.contains('/') {
+        return true;
+    }
+    let name = token.rsplit('/').next().unwrap_or(token);
+    name.rsplit_once('.').is_some_and(|(stem, ext)| {
+        !stem.is_empty() && !ext.is_empty() && ext.chars().all(|c| c.is_ascii_alphabetic())
+    }) || name.starts_with("CHANGELOG")
+}
+
+fn is_non_code_path(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    if path.starts_with("docs/") || name.starts_with("CHANGELOG") {
+        return true;
+    }
+    name.rsplit_once('.').is_some_and(|(_, ext)| {
+        ["md", "markdown", "txt"]
+            .iter()
+            .any(|e| ext.eq_ignore_ascii_case(e))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use athena_context::outputs::{CriterionVerdictOutput, FindingOutput};
     use athena_data::{Quantity, Unit};
+
+    fn finding_at(severity: Severity, location: Option<&str>, summary: &str) -> Finding {
+        Finding {
+            severity,
+            summary: summary.into(),
+            evidence: String::new(),
+            location: location.map(String::from),
+            source: FindingSource::Verifier,
+        }
+    }
+
+    #[test]
+    fn finding_is_content_only_when_every_cited_path_is_non_code() {
+        let content =
+            |loc: &str| finding_is_content_only(&finding_at(Severity::Major, Some(loc), "s"));
+        for loc in [
+            "docs/decisions.md:3005-3053",
+            "docs/x.md:3-9",
+            "docs/design/diagram.png",
+            "notes.md",
+            "README.markdown:2",
+            "CHANGELOG.md",
+            "docs/a.md, CHANGELOG.md:4",
+            "docs/a.md#heading",
+        ] {
+            assert!(content(loc), "{loc} is content-only");
+        }
+        for loc in [
+            "src/lib.rs",
+            "crates/athena-core/src/run.rs:10",
+            "Cargo.toml",
+            "athena.toml",
+            ".github/workflows/ci.yml",
+            "docs/a.md src/b.rs",
+            "docs/a.md;Cargo.toml:3",
+            "",
+        ] {
+            assert!(!content(loc), "{loc:?} is not content-only");
+        }
+        // No location: paths are read from the prose, and no path means not content-only.
+        let prose = |s: &str| finding_is_content_only(&finding_at(Severity::Major, None, s));
+        assert!(prose("D122 sits inside D121 in docs/decisions.md"));
+        assert!(!prose("the entry is out of order"));
+        assert!(!prose("see docs/a.md and fix src/lib.rs"));
+        assert!(!prose("version 1.2 is wrong"));
+        // A location wins over prose that names code.
+        let located = finding_at(Severity::Major, Some("docs/a.md"), "mentions src/lib.rs");
+        assert!(finding_is_content_only(&located));
+    }
+
+    #[test]
+    fn only_blocker_and_major_findings_block() {
+        let blocks = |s| finding_blocks(&finding_at(s, Some("src/lib.rs"), "s"));
+        assert!(blocks(Severity::Blocker));
+        assert!(blocks(Severity::Major));
+        assert!(!blocks(Severity::Minor));
+        assert!(!blocks(Severity::Nit));
+    }
 
     #[test]
     fn the_reuse_statement_names_the_run_and_exists_only_for_the_same_sha() {

@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- `athena retry` now starts the producer from the rejected candidate, not the base, when a job was rejected
+  although every check passed, no criterion was unmet, and every blocking (blocker or major) finding cites
+  only documentation or other non-code files (Markdown, a CHANGELOG, or anything under `docs/`). Before, such
+  a rejection redid all the code. A finding that cites a code or configuration file (or no recognizable
+  path), a failed check, an unmet behavior criterion, a request/reading mismatch, or a rejection with no
+  blocking finding at all still retries from the base. Minor and nit findings are ignored.
 - The full `cargo test --locked` runs faster with no change in behavior. The secret scanner
   (`Gitleaks::scan_text`) remembers its findings for identical text within one process, keyed by the
   gitleaks binary, the generated configuration and the exact text (at most 256 entries, texts up to 64 KiB,

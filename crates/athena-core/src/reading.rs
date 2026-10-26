@@ -1051,11 +1051,15 @@ pub fn retried_job(records: &Records, request: &str) -> Option<JobId> {
 /// - it has a candidate with a commit and a tree and no admission violations;
 /// - its verification recorded at least one check, every check passed, and the verifier found no mismatch
 ///   between the request and the reading;
-/// - at least one criterion is unmet, every unmet criterion is of kind content, and no behavior criterion is
-///   unmet or cites a command that was not seen running.
+/// - no behavior criterion is unmet or cites a command that was not seen running; and
+/// - either at least one criterion is unmet and every unmet criterion is of kind content, or no criterion is
+///   unmet, at least one finding is a blocker or major, and every such blocking finding cites only non-code
+///   files (Markdown, a CHANGELOG, or anything under `docs/`; see
+///   [`finding_is_content_only`](crate::verify::finding_is_content_only)). Minor and nit findings are ignored.
 ///
-/// A rejection that names no unmet criterion has an unknown cause, so it does not qualify. The new
-/// candidate is verified in full either way.
+/// Otherwise a rejection that names no unmet criterion and no blocking finding has an unknown cause, so it
+/// does not qualify, and a blocking finding that cites a code file (or no recognizable path) restarts from
+/// the base. The new candidate is verified in full either way.
 pub fn qualifies_for_tree_retry(
     state: JobState,
     candidate: Option<&athena_data::records::Candidate>,
@@ -1083,8 +1087,19 @@ pub fn qualifies_for_tree_retry(
         .criteria
         .iter()
         .any(|c| c.kind == CriterionKind::Behavior && (!c.met || !c.commands_verified));
+    if behavior_trouble {
+        return false;
+    }
     let mut unmet = verification.criteria.iter().filter(|c| !c.met).peekable();
-    !behavior_trouble && unmet.peek().is_some() && unmet.all(|c| c.kind == CriterionKind::Content)
+    if unmet.peek().is_some() {
+        return unmet.all(|c| c.kind == CriterionKind::Content);
+    }
+    let mut blocking = verification
+        .findings
+        .iter()
+        .filter(|f| crate::verify::finding_blocks(f))
+        .peekable();
+    blocking.peek().is_some() && blocking.all(crate::verify::finding_is_content_only)
 }
 
 /// What a producer retry seeded from a rejected candidate starts from and is told.
@@ -2567,8 +2582,12 @@ mod tests {
                 j.outcome.as_mut().unwrap().state = OutcomeState::Failed
             }),
             ("the job was interrupted", |j| j.outcome = None),
-            ("no criterion is unmet", |j| {
-                j.verification.as_mut().unwrap().criteria[0].met = true
+            // The fixture's finding sits in CHANGELOG.md and would now qualify, so clear it: with no
+            // unmet criterion and no finding the cause is unknown.
+            ("no criterion is unmet and no finding", |j| {
+                let v = j.verification.as_mut().unwrap();
+                v.criteria[0].met = true;
+                v.findings.clear();
             }),
             ("no check was recorded", |j| {
                 j.verification.as_mut().unwrap().checks.clear()
@@ -2596,6 +2615,122 @@ mod tests {
         assert!(
             !qualifies(&mismatch),
             "a reading mismatch restarts from the base"
+        );
+    }
+
+    fn finding(
+        severity: athena_data::records::Severity,
+        location: Option<&str>,
+    ) -> athena_data::records::Finding {
+        athena_data::records::Finding {
+            severity,
+            summary: "decision D122 is inserted inside D121".into(),
+            evidence: "the entry splits D121".into(),
+            location: location.map(String::from),
+            source: athena_data::records::FindingSource::Verifier,
+        }
+    }
+
+    /// A rejected job whose checks all passed, with no unmet criterion and one blocking docs finding.
+    fn docs_only_rejection() -> JobRecords {
+        use athena_data::records::Severity;
+        let mut job = content_only_rejection();
+        let verification = job.verification.as_mut().unwrap();
+        verification.criteria = vec![criterion_result(CriterionKind::Behavior, true, true)];
+        verification.findings = vec![finding(
+            Severity::Major,
+            Some("docs/decisions.md:3005-3053"),
+        )];
+        job
+    }
+
+    #[test]
+    fn docs_only_blocking_finding_retries_from_the_candidate_and_anything_else_from_the_base() {
+        use athena_data::records::Severity;
+        assert!(qualifies(&docs_only_rejection()));
+
+        // A minor code finding does not block; a minor finding beside a docs major still qualifies.
+        let mut job = docs_only_rejection();
+        job.verification
+            .as_mut()
+            .unwrap()
+            .findings
+            .push(finding(Severity::Minor, Some("src/lib.rs:1")));
+        assert!(qualifies(&job), "minor findings are ignored");
+
+        // Only minor findings: nothing blocks, so the cause is unknown.
+        let mut job = docs_only_rejection();
+        job.verification.as_mut().unwrap().findings =
+            vec![finding(Severity::Minor, Some("docs/a.md"))];
+        assert!(!qualifies(&job), "no blocking finding");
+
+        type Change = fn(&mut JobRecords);
+        let cases: [(&str, Change); 7] = [
+            ("a major finding cites a .rs file", |j| {
+                j.verification.as_mut().unwrap().findings = vec![finding(
+                    Severity::Major,
+                    Some("crates/athena-core/src/run.rs:10"),
+                )]
+            }),
+            ("one finding cites a docs path and a code path", |j| {
+                j.verification.as_mut().unwrap().findings = vec![finding(
+                    Severity::Major,
+                    Some("docs/a.md crates/x/src/lib.rs"),
+                )]
+            }),
+            ("a docs major beside a code blocker", |j| {
+                j.verification
+                    .as_mut()
+                    .unwrap()
+                    .findings
+                    .push(finding(Severity::Blocker, Some("Cargo.toml")))
+            }),
+            ("a check failed", |j| {
+                j.verification.as_mut().unwrap().checks[0].passed = false
+            }),
+            ("a behavior criterion is unmet", |j| {
+                j.verification.as_mut().unwrap().criteria[0].met = false
+            }),
+            ("the verifier reported a mismatch", |j| {
+                j.verification.as_mut().unwrap().request_reading_mismatch = Some("misread".into())
+            }),
+            ("the candidate has admission violations", |j| {
+                j.candidate.as_mut().unwrap().violations =
+                    vec![athena_data::records::PolicyViolation {
+                        rule: "governance".into(),
+                        path: None,
+                        detail: "x".into(),
+                    }]
+            }),
+        ];
+        for (name, change) in cases {
+            let mut job = docs_only_rejection();
+            change(&mut job);
+            assert!(!qualifies(&job), "{name}: must restart from the base");
+        }
+
+        let mut job = docs_only_rejection();
+        job.verification.as_mut().unwrap().findings.clear();
+        assert!(!qualifies(&job), "no finding and no unmet criterion");
+    }
+
+    #[test]
+    fn tree_retry_seed_docs_only_carries_the_docs_finding() {
+        let redactor = Redactor::new(&athena_gate::builtin_config()).unwrap();
+        let job = docs_only_rejection();
+        let id = job.id().as_str().to_string();
+        let records = records_with(job);
+        let seed = tree_retry_seed(&records, &format!("try again on {id}"), &redactor)
+            .unwrap()
+            .expect("a seed");
+        assert!(seed.unmet.is_empty());
+        assert_eq!(seed.findings.len(), 1);
+        assert!(
+            seed.findings[0].contains(
+                "major (docs/decisions.md:3005-3053): decision D122 is inserted inside D121"
+            ),
+            "{:?}",
+            seed.findings
         );
     }
 
