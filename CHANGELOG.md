@@ -19,6 +19,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- Every request Athena writes for itself on the steward channel can now be scheduled by `athena plan`. The
+  structural-pass, design-review, introspection follow-up and blind-spot writers had no `Acceptance:` bullets,
+  so `athena plan` refused them ("the plan lacks acceptance"). They are now built by one shared builder,
+  `StewardRequest` in `steward.rs`, which cannot be built without at least one `- ` acceptance bullet and a
+  `Files:` line, and which checks its text with the same parse `athena plan` uses
+  (`request_text_acceptance` and `request_text_touches` in `reading.rs`, extracted from `plan_entry` with no
+  change in behavior). A structural pass lists one bullet per breached limit with the measured numbers, no
+  behavior change with the existing tests passing, and fmt, clippy and test passing. The design review no
+  longer uses dash or numbered body lines, which would have been read as acceptance. A test runs every writer
+  through the plan parse.
+- The code-health hook's dedupe is tested to treat a closed structural pass (rejected, failed, abandoned or
+  landed) as not open: after a pass is closed, the next landing queues a new one for a file still over its
+  limits. A pass that is still open continues to suppress a duplicate.
 - A retry now carries the previous attempt's blocker and major findings in both paths. The unseeded retry (one
   that starts from the base) had no findings at all in its producer brief, and the seeded one listed them
   unlabelled. Both now show a "Findings you must address" block, built from one shared formatter, holding every

@@ -1407,7 +1407,7 @@ pub fn job_ids_in(text: &str) -> Vec<RecordId> {
 }
 
 /// Whether a word of a request looks like a repository path: it has a directory part or a file extension.
-fn looks_like_path(word: &str) -> bool {
+pub(crate) fn looks_like_path(word: &str) -> bool {
     let w = word.trim_matches(|c: char| !(c.is_ascii_alphanumeric() || "/._-".contains(c)));
     !w.is_empty()
         && !w.starts_with('/')
@@ -1589,6 +1589,31 @@ fn is_bullet(line: &str) -> bool {
             .is_some_and(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
 }
 
+/// The acceptance of a request that has not been read: its lines that start with `-`, `*` or a number and a
+/// dot. This is the parse `athena plan` uses.
+pub fn request_text_acceptance(text: &str) -> Vec<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|l| is_bullet(l))
+        .map(String::from)
+        .collect()
+}
+
+/// What a request that has not been read touches: its path-like words, without repeats. This is the parse
+/// `athena plan` uses.
+pub fn request_text_touches(text: &str) -> Vec<String> {
+    let mut touches: Vec<String> = Vec::new();
+    for word in text.split_whitespace().filter(|w| looks_like_path(w)) {
+        let path = word
+            .trim_matches(|c: char| !(c.is_ascii_alphanumeric() || "/._-".contains(c)))
+            .to_string();
+        if !touches.contains(&path) {
+            touches.push(path);
+        }
+    }
+    touches
+}
+
 /// Planning, the first stage: fleshes out one open request into a plan entry (design: planning first).
 /// Deterministic code; it calls no model and fills nothing in by default.
 ///
@@ -1647,20 +1672,8 @@ pub fn plan_entry(
         }
         None => {
             entry.goal = first.trim().to_string();
-            entry.acceptance = text
-                .lines()
-                .map(str::trim)
-                .filter(|l| is_bullet(l))
-                .map(String::from)
-                .collect();
-            for word in text.split_whitespace().filter(|w| looks_like_path(w)) {
-                let path = word
-                    .trim_matches(|c: char| !(c.is_ascii_alphanumeric() || "/._-".contains(c)))
-                    .to_string();
-                if !entry.touches.contains(&path) {
-                    entry.touches.push(path);
-                }
-            }
+            entry.acceptance = request_text_acceptance(text);
+            entry.touches = request_text_touches(text);
         }
     }
     entry.rung =

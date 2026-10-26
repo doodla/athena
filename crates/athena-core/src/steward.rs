@@ -441,6 +441,131 @@ pub fn approved_work(records: &Records) -> Vec<QueuedWork> {
     found.into_iter().map(|(_, work)| work).collect()
 }
 
+/// A request Athena writes for itself on the steward channel. It is the only way to build the text of one:
+/// the fields are private and [`StewardRequest::new`] checks the finished text against the parse `athena plan`
+/// uses for a request that has not been read ([`crate::reading::request_text_acceptance`] and
+/// [`crate::reading::request_text_touches`]). A request with no acceptance bullet, with no path, or whose body
+/// would be read as extra acceptance cannot be built, so `athena plan` never refuses it for lacking acceptance.
+///
+/// The text is: an optional `Priority:` line, the title, the body, an `Acceptance:` section of `- ` bullets
+/// and a `Files:` line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StewardRequest {
+    text: String,
+}
+
+impl StewardRequest {
+    /// Builds the request. `title` is one line. `body` is free text, and none of its lines may start like a
+    /// bullet (`-`, `*` or a number and a dot), because `athena plan` would read them as acceptance.
+    /// `acceptance` is at least one non-blank single line, and `files` at least one path (a directory ends
+    /// with `/`).
+    pub fn new(
+        priority: Option<crate::plan::Priority>,
+        title: &str,
+        body: &str,
+        acceptance: &[String],
+        files: &[String],
+    ) -> Result<Self, String> {
+        let title = title.trim();
+        if title.is_empty() || title.contains('\n') {
+            return Err("a steward request has a one-line title".into());
+        }
+        let acceptance: Vec<&str> = acceptance.iter().map(|a| a.trim()).collect();
+        if acceptance.is_empty() || acceptance.iter().any(|a| a.is_empty() || a.contains('\n')) {
+            return Err(
+                "a steward request has at least one acceptance bullet, each one line".into(),
+            );
+        }
+        if files.is_empty() || !files.iter().all(|f| crate::reading::looks_like_path(f)) {
+            return Err("a steward request names at least one file, each a path".into());
+        }
+        let mut text = String::new();
+        if let Some(p) = priority {
+            text.push_str(&format!("Priority: {}\n\n", p.as_str()));
+        }
+        text.push_str(title);
+        text.push_str("\n\n");
+        if !body.trim().is_empty() {
+            text.push_str(body.trim_end());
+            text.push_str("\n\n");
+        }
+        text.push_str("Acceptance:\n");
+        for bullet in &acceptance {
+            text.push_str(&format!("- {bullet}\n"));
+        }
+        text.push_str(&format!("\nFiles: {}\n", files.join(", ")));
+        let wanted: Vec<String> = acceptance.iter().map(|a| format!("- {a}")).collect();
+        if crate::reading::request_text_acceptance(&text) != wanted {
+            return Err("the body has lines that start like acceptance bullets".into());
+        }
+        let touched = crate::reading::request_text_touches(&text);
+        if let Some(missing) = files.iter().find(|f| !touched.contains(f)) {
+            return Err(format!("{missing:?} would not be read as a file"));
+        }
+        Ok(StewardRequest { text })
+    }
+
+    /// The request for a change the steward proposed, from the words the model gave. Bullets in the words
+    /// become the acceptance and paths in them the files; where the words have none, the acceptance is that
+    /// the change is made with fmt, clippy and test passing, and the file is the change's source.
+    pub fn from_change(change: &ProposedChange) -> Result<Self, String> {
+        let text = change.request.trim();
+        let mut lines = text.lines();
+        let first = lines.next().unwrap_or("").trim();
+        let title = bullet_text(first).unwrap_or(first).to_string();
+        let mut body: Vec<&str> = Vec::new();
+        let mut acceptance: Vec<String> = Vec::new();
+        for line in lines {
+            let line = line.trim();
+            let lower = line.to_lowercase();
+            if lower == "acceptance:" || lower.starts_with("files:") {
+                continue;
+            }
+            if let Some(bullet) = bullet_text(line) {
+                acceptance.push(bullet.to_string());
+            } else {
+                body.push(line);
+            }
+        }
+        if acceptance.is_empty() {
+            acceptance = vec![
+                format!("The change is made as described: {}", change.title.trim()),
+                "No unrelated behavior changes; the existing tests pass".into(),
+                "fmt, clippy and test pass".into(),
+            ];
+        }
+        let mut files = crate::reading::request_text_touches(text);
+        if files.is_empty() {
+            let source = change.source.value.trim();
+            files.push(if crate::reading::looks_like_path(source) {
+                source.to_string()
+            } else {
+                "records/".to_string()
+            });
+        }
+        Self::new(None, &title, &body.join("\n"), &acceptance, &files)
+    }
+
+    /// The text to record as the request.
+    pub fn render(&self) -> String {
+        self.text.clone()
+    }
+}
+
+/// The words of a bullet line (`- x`, `* x` or `1. x`), without its marker.
+fn bullet_text(line: &str) -> Option<&str> {
+    let rest = line
+        .strip_prefix("- ")
+        .or_else(|| line.strip_prefix("* "))
+        .or_else(|| {
+            line.split_once(". ")
+                .filter(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+                .map(|(_, rest)| rest)
+        })?;
+    let rest = rest.trim();
+    (!rest.is_empty()).then_some(rest)
+}
+
 /// The real applier: a queued request, as `athena ask --later` writes one.
 #[derive(Debug)]
 pub struct RequestQueue;
@@ -452,9 +577,12 @@ impl Applier for RequestQueue {
             id = RecordId::generate(crate::now());
         }
         let job = JobId::Id(id);
+        let text = StewardRequest::from_change(change)
+            .map_err(|e| anyhow::anyhow!("the request for {:?}: {e}", change.key))?
+            .render();
         let request = Request {
             job: job.clone(),
-            text: change.request.trim().to_string(),
+            text,
             received_at: crate::now(),
             channel: REQUEST_CHANNEL.into(),
         };
@@ -524,11 +652,36 @@ pub fn blind_spot_change(source: &str, title: &str) -> ProposedChange {
         rung: Ladder::Implementation,
         source: Reference::path(source),
         evidence: Vec::new(),
-        request: format!(
-            "The steward could not read {source}: {title}. Find out why, and make it readable, or record why \
-             it cannot be."
-        ),
+        request: blind_spot_request(source, title),
     }
+}
+
+/// The request text for a blind spot, built through [`StewardRequest`]. It names the source's paths in the
+/// workspace (or `crates/` for a source that has none to name).
+fn blind_spot_request(source: &str, title: &str) -> String {
+    let mut files: Vec<String> = SOURCES
+        .iter()
+        .filter(|s| s.name == source)
+        .flat_map(|s| s.paths.iter().map(|p| p.to_string()))
+        .filter(|p| crate::reading::looks_like_path(p))
+        .collect();
+    if files.is_empty() {
+        files.push("crates/".to_string());
+    }
+    let acceptance = [
+        format!("The cause of the failure to read {source} is found and written down"),
+        format!("{source} is readable by the steward, or the notes say why it cannot be"),
+        "fmt, clippy and test pass".to_string(),
+    ];
+    StewardRequest::new(
+        None,
+        &format!("Make the {source} source readable to the steward"),
+        &format!("The steward could not read {source}: {title}. Find out why, and make it readable, or record why it cannot be."),
+        &acceptance,
+        &files,
+    )
+    .expect("a blind-spot request is well formed")
+    .render()
 }
 
 /// Jobs that ended rejected or failed, grouped by class of work. Only groups of two or more repeat. The
@@ -1169,6 +1322,150 @@ mod tests {
             1,
             "the open request is not queued twice"
         );
+    }
+
+    fn strings(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn steward_request_builder_refuses_what_athena_plan_would_refuse() {
+        let ok = strings(&["It works"]);
+        let files = strings(&["crates/x/src/a.rs"]);
+        assert!(StewardRequest::new(None, "Title", "", &[], &files).is_err());
+        assert!(StewardRequest::new(None, "Title", "", &strings(&["  "]), &files).is_err());
+        assert!(StewardRequest::new(None, "Title", "", &strings(&["a\nb"]), &files).is_err());
+        assert!(StewardRequest::new(None, "Title", "", &ok, &[]).is_err());
+        assert!(StewardRequest::new(None, "Title", "", &ok, &strings(&["word"])).is_err());
+        assert!(StewardRequest::new(None, "", "", &ok, &files).is_err());
+        assert!(StewardRequest::new(None, "A\nB", "", &ok, &files).is_err());
+        assert!(
+            StewardRequest::new(None, "Title", "text\n- stray bullet", &ok, &files).is_err(),
+            "a body bullet would be read as acceptance"
+        );
+        assert!(StewardRequest::new(None, "Title", "1. stray", &ok, &files).is_err());
+        let text = StewardRequest::new(
+            Some(crate::plan::Priority::High),
+            "Title",
+            "Some words.",
+            &ok,
+            &files,
+        )
+        .unwrap()
+        .render();
+        assert_eq!(
+            text,
+            "Priority: high\n\nTitle\n\nSome words.\n\nAcceptance:\n- It works\n\nFiles: crates/x/src/a.rs\n"
+        );
+        assert_eq!(
+            crate::reading::request_text_acceptance(&text),
+            ["- It works"]
+        );
+        assert_eq!(
+            crate::reading::request_text_touches(&text),
+            ["crates/x/src/a.rs"]
+        );
+    }
+
+    #[test]
+    fn steward_request_from_a_change_keeps_the_models_bullets_and_paths() {
+        let mut c = change(Ladder::Implementation);
+        c.request =
+            "Fix the parser\n\nIn crates/x/src/p.rs please\nAcceptance:\n1. It parses\n* It is tested".into();
+        let text = StewardRequest::from_change(&c).unwrap().render();
+        assert_eq!(
+            crate::reading::request_text_acceptance(&text),
+            ["- It parses", "- It is tested"]
+        );
+        assert_eq!(
+            crate::reading::request_text_touches(&text),
+            ["crates/x/src/p.rs"]
+        );
+        assert_eq!(text.matches("Acceptance:").count(), 1, "{text}");
+    }
+
+    #[test]
+    fn steward_requests_from_every_writer_pass_the_plan_parse() {
+        use crate::code_health::{
+            BUSY_FILE_LINES, Breach, CodeHealth, FileHealth, MAX_FN_LINES, design_review_text,
+            structural_text,
+        };
+        let file = FileHealth {
+            path: "crates/x/src/big.rs".into(),
+            lines: 2100,
+            longest_fn: 210,
+            longest_fn_name: "sprawl".into(),
+            weekly_landings: 1,
+            citations: 1,
+            limit_lines: BUSY_FILE_LINES,
+            limit_fn: MAX_FN_LINES,
+            breaches: vec![
+                Breach::FileLength { lines: 2100 },
+                Breach::FunctionLength {
+                    name: "sprawl".into(),
+                    lines: 210,
+                },
+            ],
+        };
+        let health = CodeHealth {
+            files: vec![file.clone()],
+            suite_seconds: Some(12.0),
+        };
+        let landing = crate::code_health::Landing {
+            at: 0,
+            files: vec!["crates/x/src/big.rs".into()],
+        };
+        let mut texts: Vec<(String, String)> = vec![
+            ("structural pass".into(), structural_text(&file)),
+            (
+                "design review".into(),
+                design_review_text(&health, &Records::default(), &[landing], 10),
+            ),
+        ];
+        // The writers that go through the queue: an introspection follow-up and a blind spot, a model-written
+        // request with no bullets and no path, and one with both.
+        let queue = RequestQueue;
+        let mut bare = change(Ladder::Implementation);
+        bare.source = Reference::path("records/jobs");
+        let mut full = change(Ladder::Implementation);
+        full.request = "Follow up\n\nAcceptance:\n- It is done\nFiles: crates/x/src/a.rs".into();
+        let mut changes = vec![
+            ("bare follow-up".to_string(), bare),
+            ("full follow-up".to_string(), full),
+        ];
+        for source in source_names() {
+            changes.push((
+                format!("blind spot {source}"),
+                blind_spot_change(source, "boom"),
+            ));
+        }
+        for (name, c) in &changes {
+            let queued = queue.apply(c, &BTreeSet::new()).unwrap();
+            let AnyRecord::Request(request) =
+                AnyRecord::parse(&queued.file.path, &queued.file.bytes).unwrap()
+            else {
+                panic!("{name}: not a request");
+            };
+            assert_eq!(request.channel, REQUEST_CHANNEL);
+            texts.push((name.clone(), request.text));
+        }
+        for (name, text) in &texts {
+            let acceptance = crate::reading::request_text_acceptance(text);
+            let touches = crate::reading::request_text_touches(text);
+            assert!(!acceptance.is_empty(), "{name} has no acceptance:\n{text}");
+            assert!(!touches.is_empty(), "{name} names no file:\n{text}");
+            assert!(text.contains("\nAcceptance:\n- "), "{name}:\n{text}");
+            assert!(text.contains("\nFiles: "), "{name}:\n{text}");
+            // What `athena plan` makes of it: the acceptance is not missing.
+            let mut entry = crate::plan::PlanEntry::bare("x", name);
+            entry.goal = text.lines().find(|l| !l.trim().is_empty()).unwrap().into();
+            entry.acceptance = acceptance;
+            entry.touches = touches;
+            assert!(
+                !entry.missing().contains(&"acceptance"),
+                "{name} is refused for acceptance"
+            );
+        }
     }
 
     fn change(rung: Ladder) -> ProposedChange {

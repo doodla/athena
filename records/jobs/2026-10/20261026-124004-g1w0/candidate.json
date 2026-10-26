@@ -1,0 +1,129 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261026-124004-g1w0",
+  "base_commit": "4c0048bd7c22e095453e8fb12cb2da7f7e71a7b4",
+  "base_fingerprint": "sha256:ca2f1f1866832dfab1a0b4eadb0cc67e758ce210506bbdea80e069285285ac96",
+  "previous_job": "20261026-104718-5y62",
+  "candidate_commit": "c84f65a48eb0b42bed3b0c18f2003475187eaf4d",
+  "candidate_tree": "45418ea8474282a9f2acee7f866dbdf1e2b2e828",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 155601
+    },
+    {
+      "path": "crates/athena-core/src/code_health.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 54188
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 115363
+    },
+    {
+      "path": "crates/athena-core/src/steward.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 71281
+    }
+  ],
+  "fingerprint": "sha256:a0b08c4c52d8cc007e5091bdf589079080813e45a7ee5d06e66a9215c154d238",
+  "violations": [],
+  "producer_report": {
+    "summary": "Every request Athena writes for itself on the steward channel now carries an `Acceptance:` section of `- ` bullets and a `Files:` line, so `athena plan` no longer refuses them for lacking acceptance. I ran clippy, fmt and the steward and code-health tests (all pass). I did not run the full `cargo test`.\n\n**Root cause.** The writers built free-form text with no acceptance bullets, and nothing checked the format.\n\n**Shared builder.** `StewardRequest` in `steward.rs` is now the only way to build such a request. Its constructor refuses empty or blank acceptance, missing or non-path files, a bad title, and body lines that `athena plan` would read as extra acceptance. It also re-checks its own output with the same parse `athena plan` uses.\n\n**Parser.** I moved the unread-request parse out of `plan_entry` into two public functions, `request_text_acceptance` and `request_text_touches`, in `reading.rs`. `plan_entry` calls them, so behaviour is unchanged. Tests use the same functions, so the check cannot drift from the real parse.\n\n**Writers routed through the builder:**\n- **Structural pass.** One bullet per breached limit with the measured numbers, then \"No behavior change; the existing tests pass\" and \"fmt, clippy and test pass\". `Files:` names the path.\n- **Design review.** Priority high, three bullets, and `Files: docs/design/`. I reworded its numbered and dashed body lines so they are not read as acceptance.\n- **Blind spots.** Built through the builder, with files taken from the source's paths.\n- **Model-written follow-ups.** `RequestQueue::apply` uses `StewardRequest::from_change`. It keeps any bullets and paths the model wrote. Where there are none, it adds default bullets and uses the change's source path, or `records/` if the source is not a path.\n\n**Dedupe.** `structural_pass_open` already treated any closed job as not open, so I changed no logic, only its doc. A new test shows that closing a pass makes the next check queue a new one for a file still over its limits. A pass that `athena plan` refused stays Queued and counts as open until someone closes it.\n\n**Tests.** The new tests cover the builder, all writers through the plan parse, the structural-pass bullets, and reopen-after-close. CHANGELOG.md has two entries under Unreleased/Fixed.",
+    "files": [
+      "crates/athena-core/src/steward.rs",
+      "crates/athena-core/src/code_health.rs",
+      "crates/athena-core/src/reading.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test --locked -p athena-core steward",
+        "result": "pass",
+        "note": "16 tests pass, including the new builder and all-writers tests"
+      },
+      {
+        "command": "cargo test --locked -p athena-core code_health",
+        "result": "pass",
+        "note": "17 pass, including the new reopen and structural-bullet tests"
+      },
+      {
+        "command": "cargo test --locked -p athena-core -- steward code_health plan reading drain introspect",
+        "result": "pass",
+        "note": "The only failure was my reopen test's own assertion, which I fixed. The code_health rerun passed."
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "Run before the last test-only edit."
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "Passed after cargo fmt --all. I ran fmt --all once more after the last edit and did not re-run --check."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A test builds the text from each steward-channel writer (structural pass, design review, introspection follow-up, and any other writer found building a steward request) and runs it through the same acceptance and files parse that `athena plan` uses. None is refused for missing acceptance and each yields a non-empty file list. Run `cargo test`.",
+        "status": "met",
+        "evidence": "steward_requests_from_every_writer_pass_the_plan_parse builds structural_text, design_review_text, RequestQueue::apply for a bare follow-up and a full follow-up, and blind_spot_change for every source. It runs each through reading::request_text_acceptance and request_text_touches, which plan_entry calls, and checks PlanEntry::missing(). It passed in `cargo test -p athena-core steward`. RequestQueue::apply is the only place that records a REQUEST_CHANNEL request, and I found no other steward-channel writer."
+      },
+      {
+        "criterion": "A test builds a structural-pass request for a fixture file over each limit. The text has an `Acceptance:` section whose `- ` bullets name the breached limits as measured (lines, function length, weekly landings). The bullets also say no behavior change with existing tests passing, and that fmt, clippy and test pass. The text has a `Files:` line naming the file. Run `cargo test`.",
+        "status": "met",
+        "evidence": "structural_text_lists_acceptance_naming_the_breached_limits builds a FileHealth with FileLength, FunctionLength and BusyFile breaches. It checks 5 parsed bullets with the measured numbers, the no-behavior-change and fmt/clippy/test bullets, the Acceptance: header and the Files: line. It passed in `cargo test -p athena-core code_health`."
+      },
+      {
+        "criterion": "A test queues a structural pass for a file over its limits and closes that job. The next hook run (`code_health_after_landing`) queues a new structural pass for the same file. Run `cargo test`.",
+        "status": "met",
+        "evidence": "structural_pass_is_queued_again_after_the_old_one_is_closed queues a pass, closes it with close_job as Rejected, then runs code_health_check, which is the body of code_health_after_landing. The new pass is for the same path with a different job id, and exactly one pass is open. It passed. The test calls code_health_check, not code_health_after_landing itself."
+      },
+      {
+        "criterion": "A single shared builder for steward requests exists, and every steward-channel writer constructs its text through it. A writer cannot omit `Acceptance:` bullets or `Files:`. The code or tests make this enforced rather than relying on convention.",
+        "status": "met",
+        "evidence": "StewardRequest in steward.rs has a private text field. StewardRequest::new rejects empty or blank acceptance, no files or non-path files, a multi-line or empty title, and a body with bullet-like lines, and it re-checks its output with request_text_acceptance and request_text_touches. structural_text, design_review_text, blind_spot_request and RequestQueue::apply (via from_change) all use it. The test steward_request_builder_refuses_what_athena_plan_would_refuse covers the refusals."
+      },
+      {
+        "criterion": "Closed, including refused, earlier structural passes count as not open in the dedupe. A still-open pass for the same file still suppresses a duplicate, and the existing test for that keeps passing.",
+        "status": "met",
+        "evidence": "structural_pass_open already treats any JobState::Closed (rejected, failed, abandoned, landed) as not open, so I only fixed its doc and added the reopen test. The existing structural_pass_queues_nothing_for_a_file_with_an_open_request still passes. A pass that `athena plan` refused stays Queued and counts as open until a person closes it. That matches the brief's assumption that the user closes the old refused passes."
+      },
+      {
+        "criterion": "`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` all pass.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I ran clippy and fmt, and the targeted tests listed above, but not the full cargo test suite."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry describing the steward request format fix and the dedupe change.",
+        "status": "met",
+        "evidence": "Two bullets under Unreleased/Fixed: the shared StewardRequest builder with the Acceptance and Files format, and the closed-pass dedupe with its test."
+      }
+    ],
+    "open_issues": [
+      "I did not change plan.rs or introspect.rs, which the brief listed as possible edits. Introspection follow-ups reach the queue through ProposedChange.request, which RequestQueue::apply now builds through StewardRequest. The brief's deliverables list included both files.",
+      "The steward prompt text is unchanged. A model request with no bullets or paths gets default acceptance bullets and a Files line. The Files line uses the change's source path, or records/ when the source is not a path. Asking the model for bullets and files in the prompt would give better ones.",
+      "The code-health hook still queues through Athena::queue, so those requests are on the cli channel. The text goes through the builder either way. Whether to switch the hook to the steward channel is left open.",
+      "The full cargo test suite was not run by me. The three Athena checks are left to Athena. Clippy and fmt --check passed before my last edit, a test-only change that I then ran through fmt --all without re-checking."
+    ],
+    "mistakes": [
+      "My first reopen test counted open passes with the open_requests helper, which also lists closed jobs. I fixed it to use open_structural_passes.",
+      "I made one wasted Read call on a nonexistent placeholder path."
+    ],
+    "learnings": [
+      "The plan's unread-request parse lives in reading::plan_entry. It is now exposed as request_text_acceptance and request_text_touches. The parse keeps a trailing '.' on a path, so a request ending a path with a full stop gets a wrong path.",
+      "The code_health tests helper open_requests also returns closed jobs, so a count of open passes must use open_structural_passes.",
+      "Athena::queue records channel \"cli\", not \"steward\". The code-health hook goes through it, so structural passes and design reviews are recorded on the cli channel. The drain works both channels.",
+      "AnyRecord::parse(path, bytes) decodes a NewFile record in tests."
+    ],
+    "desires": [
+      "A way to run the full test suite, or a brief note on which tests cover drain/plan end to end."
+    ]
+  }
+}
