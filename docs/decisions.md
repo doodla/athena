@@ -3230,16 +3230,17 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Provenance:** stated: the request. Read: `reading.rs`, `verify.rs`, D117. Measured: `cargo test -p athena-core`
   for the tests above.
 
-## D129 · Hestia, the continuity role, runs a rules-first sweep with Hades's cleanup folded in (proposed)
+## D129 · Hestia, the continuity role, runs a rules-first sweep with Hades's cleanup folded in (accepted)
 
-- **Status:** proposed. Not accepted; the build jobs are not queued. The design is
-  [`docs/design/hestia.md`](design/hestia.md).
+- **Status:** accepted, decided by the brain under Sri's delegation (BRIEF.md addenda of 2026-10-23 to
+  2026-10-26). Job 1 of the build plan (the sweep skeleton, the findings record and the trigger) is built; jobs 2
+  to 10 are not queued. The design is [`docs/design/hestia.md`](design/hestia.md).
 - **Case:** The BRIEF.md addendum of 2026-10-25 asks for something that sanity checks the system and keeps it
   neat and clean. The request cites, as supplied by it and not checked here, eight things that went unnoticed:
   queued requests already done or superseded; leftover branches, worktrees and build caches (a cache filled the
   disk on 2026-10-23); checkpoints never pushed; an installed binary older than its source; prompt budgets
   nearly full; a keep rule nobody evaluated; `athena propose` never run; docs that no longer match the code.
-- **Decision (proposed):** Hestia (BRIEF.md pantheon row "Continuity") runs a periodic sweep. Code checks the
+- **Decision:** Hestia (BRIEF.md pantheon row "Continuity") runs a periodic sweep. Code checks the
   six plain facts; a model only judges whether a queued request is done and whether a doc still means what the
   code does, and its output is a report. Hestia fixes only through small jobs in the normal pipeline, and
   deletes only what is provably Athena's own and merged; everything else is a work item. She does not gate work
@@ -3248,10 +3249,18 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   check; an empty list is reported with the checks that ran. Hades's cleanup is a "retire" check group inside
   Hestia, splitting out when rollback or deprecation work exists or cleanup exceeds half of findings over four
   weeks. The build is ten one-producer jobs, deterministic checks first.
+  **Trigger, settled by job 1:** an explicit command. `athena hestia sweep` runs the checks and records the
+  report as an `athena.hestia-sweep/1` record (`records/hestia-sweeps/<YYYY-MM>/<id>.json`); `athena hestia last`
+  prints the newest report. A check that fails to run becomes a finding for that check, so it never looks clean.
+  The skeleton ships no checks; the checks of the design's rows 1 to 8 are later jobs.
 - **Alternatives:** (a) Model-only sweeps: rejected, costly, not reproducible, weak on plain facts. (b) Rules
   only: rejected, cannot tell if a request is done or a doc is wrong. (c) Separate Hades now: rejected, no
   rollback workload. (d) Fold into the D127 scope guard: rejected, it blurs tidying with throttling work.
   (e) Direct edits by the sweep: rejected, skips verification. (f) Report only: rejected, tidying piles up.
+  Trigger alternatives: (g) A hook at the end of `athena drain`: deferred, not rejected; it puts a report-only
+  role on the work path and slows every drain, and it can call the same function later. (h) A timer or daemon:
+  rejected for now, Athena has no background scheduler and building one is out of scope. The command is
+  testable and keeps Hestia off the path of work (D127).
 - **Tradeoff:** A sweep adds some cost and a few small jobs, and a check can be wrong; the spot check, the cap on
   open fix jobs and report-only for anything uncertain bound that. Every threshold is an estimate.
 - **Reversal cost:** Low before the build (this entry and the design). Low after, since the sweep only reports

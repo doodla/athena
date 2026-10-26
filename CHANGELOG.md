@@ -45,6 +45,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The Hestia sweep skeleton (job 1 of `docs/design/hestia.md`) and the accepted decision D129. `athena hestia sweep`
+  runs Hestia's checks and commits the report as an `athena.hestia-sweep/1` record at
+  `records/hestia-sweeps/<YYYY-MM>/<id>.json`; `athena hestia last` prints the newest report, or says "no sweep
+  recorded" when there is none. The report lists every check with how many things it looked at and how many
+  findings it reported, even when that is 0, and each finding has a check id, subject, evidence, age and state.
+  A check that fails to run does not stop the sweep: its error becomes a finding for that check and the check is
+  marked as failed, so it never looks clean. The command is the settled trigger; a hook at the end of
+  `athena drain` is deferred and no timer is built (D129). No checks ship yet, so a sweep now reports "no checks
+  registered"; the checks come in later jobs. D129 is now accepted, decided by the brain under Sri's delegation
+  (BRIEF.md addenda of 2026-10-23 to 2026-10-26).
 - Scope guard job 5, the running-line watcher. After each attempt of a line of work finishes, `athena go`
   evaluates the signals T1 to T5 and records a flag or a pause under `<state root>/scope/`, keyed by the first
   request id of the line. A pause names the signal, the numbers that tripped it and what would lift it (a

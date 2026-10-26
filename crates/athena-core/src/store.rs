@@ -240,6 +240,8 @@ pub struct Records {
     pub audience_runs: Vec<Invocation>,
     /// Every audit of a job's outcome (`crate::auditor`), oldest first.
     pub audits: Vec<athena_data::records::Audit>,
+    /// Every Hestia sweep (`crate::hestia`), oldest first; the last is the latest.
+    pub hestia_sweeps: Vec<athena_data::records::HestiaSweep>,
     /// The auditor's model invocations, oldest first, kept apart from `jobs` as the audience's are.
     pub auditor_runs: Vec<Invocation>,
     /// Files that are not acceptable records, by path.
@@ -306,6 +308,7 @@ impl Records {
                 AnyRecord::WorkDecision(d) => records.work_decisions.push(d),
                 AnyRecord::AudienceRating(a) => records.audience_ratings.push(*a),
                 AnyRecord::Audit(a) => records.audits.push(*a),
+                AnyRecord::HestiaSweep(s) => records.hestia_sweeps.push(*s),
                 AnyRecord::Invocation(i) if i.role == Role::Auditor => {
                     records.auditor_runs.push(*i);
                 }
@@ -333,6 +336,9 @@ impl Records {
         records.auditor_runs.sort_by_key(|i| i.started_at);
         records
             .audits
+            .sort_by(|a, b| (a.at, &a.id).cmp(&(b.at, &b.id)));
+        records
+            .hestia_sweeps
             .sort_by(|a, b| (a.at, &a.id).cmp(&(b.at, &b.id)));
         records
             .audience_ratings
@@ -424,6 +430,7 @@ impl Records {
             || self.proposals.iter().any(|r| &r.record == id)
             || self.work_items.iter().any(|r| &r.id == id)
             || self.work_decisions.iter().any(|r| &r.id == id)
+            || self.hestia_sweeps.iter().any(|r| &r.id == id)
     }
 
     /// The current state of each decision, folded from its append-only state records.

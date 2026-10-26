@@ -23,7 +23,7 @@ moved into RM-0, and the other numbers did not change. The rows AD-12 to AD-15 w
 2026-10-14: AD-12 to AD-14 sit in RM-4 and AD-15 in RM-13. Nothing here is implemented by this change.
 
 Continuity and tidiness work (stale queue entries, leftover branches and caches, doc drift) is designed in
-[Hestia](hestia.md), proposed in D129; it adds no row here.
+[Hestia](hestia.md), accepted in D129; it adds no row here.
 
 ## RM-0 Accelerate Athena: build cache, concurrent jobs, pull-request landing, timings
 

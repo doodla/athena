@@ -2,7 +2,8 @@
 //!
 //! Everything Athena writes to, or reads from, a repository has its shape defined here:
 //!
-//! - [`records`]: the twelve immutable record types under `records/`, and where each one lives;
+//! - [`records`]: the immutable record types under `records/` (jobs, audits, Hestia sweeps and more), and where
+//!   each one lives;
 //! - [`history`]: the six record types of the records branch (`athena/records`), schema and validation only;
 //! - [`roles`]: recorded role definitions and the requirements ladder that limits what a role changes itself;
 //! - [`quantity`]: numbers that always carry their provenance (measured, reported, estimated, or pending);

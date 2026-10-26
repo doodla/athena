@@ -58,6 +58,7 @@ records/
   work-items/<YYYY-MM>/<id>.json     athena.work-item/1
   audience-ratings/<YYYY-MM>/<id>.json  athena.audience-rating/1
   audits/<YYYY-MM>/<id>.json         athena.audit/1
+  hestia-sweeps/<YYYY-MM>/<id>.json  athena.hestia-sweep/1
 ```
 
 Ids are `YYYYMMDD-HHMMSS-xxxx`: UTC time, then four Crockford base32 characters. They sort by time and give

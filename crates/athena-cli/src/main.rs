@@ -153,6 +153,12 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Hestia, the continuity role: sweep the system's upkeep checks into one recorded report, or print the
+    /// last report. Reports only; nothing is fixed, deleted or blocked.
+    Hestia {
+        #[command(subcommand)]
+        action: HestiaAction,
+    },
     /// Check a candidate `defaults.toml` against an open or accepted proposal and `defaults.toml` at HEAD:
     /// id, statement, version (base plus one) and parse. Exit 2 on a problem.
     CheckProposal {
@@ -385,6 +391,21 @@ Exit code: 0 only when the target was met; 2 for any other stop; 1 when Athena i
     Hook {
         #[command(subcommand)]
         hook: HookCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum HestiaAction {
+    /// Run every registered check, record the report, and print it. The skeleton registers no checks yet, and
+    /// then the report says so.
+    Sweep {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print the last recorded sweep: each check with its count, and each finding. Says so when none is recorded.
+    Last {
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -895,6 +916,22 @@ fn run(cli: Cli) -> Result<u8> {
                 }))?;
             } else {
                 print!("{}", display::audit_report(&mistakes, audited.as_ref()));
+            }
+            Ok(0)
+        }
+        Command::Hestia { action } => {
+            let (sweep, json) = match action {
+                HestiaAction::Sweep { json } => {
+                    let athena = open(true)?;
+                    let sweep = athena.hestia_sweep(&athena_core::hestia::default_checks())?;
+                    (Some(sweep), json)
+                }
+                HestiaAction::Last { json } => (open(false)?.last_sweep()?, json),
+            };
+            if json {
+                print_json(&sweep)?;
+            } else {
+                print!("{}", athena_cli::hestia_report(sweep.as_ref()));
             }
             Ok(0)
         }
