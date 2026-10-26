@@ -1085,3 +1085,7 @@ It should become demonstrably less likely to make the same kind of mistake again
 ### 2026-10-26: Jev checks for code health
 
 * Get Jev checks designed for code health
+
+### 2026-10-26: Written for agents
+
+* Everything is for agents. So Athena should architect to be context efficient in what it writes, and some role should own the craft there
