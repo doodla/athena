@@ -9,6 +9,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The planning stage now requires each demonstration to name and confirm its test seam. Root cause: nothing in
+  the planner prompt, the planner brief or the critic prompt made a demonstration say which production entry
+  point it calls, what fake or fixture it injects and how, or whether the code provides that seam, so plans
+  assumed seams that did not exist (for example a fake injected into a function that builds its own client) and
+  were stopped by the critic late (five introspections, over five jobs). The fix is in the planning stage, not
+  at any one job: `planner.md` requires the entry point, its guards and preconditions, the seam and how it is
+  injected, and whether it exists today or which step adds it, and forbids putting the logic under test in the
+  test double; the Report section of `planner_brief` repeats the rule; `critic.md` makes a missing seam, one the
+  code does not provide, or a test of only a double a major finding. A unit test in `athena-context` checks all
+  three texts, and the planner frame token limit rises from 500 to 700 to hold the rule.
 - Planning now follows the owner's stated priority, and a check proves it. Root cause: a priority stated in a
   BRIEF.md addendum was never an input to plan ordering (only a `Priority:` line or an `athena priority`
   record was), so such work was ordered by default rung and age, and nothing compared the built order with
