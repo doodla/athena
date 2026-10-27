@@ -1,0 +1,144 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261027-054206-w1y3",
+  "n": 1,
+  "at": "2026-10-27T20:32:02.13502742Z",
+  "invocation_seq": 1,
+  "base_commit": "851e07afc5acb36292aa7f02296f1ce2c8f643b1",
+  "config_sha256": "b812f3c3683488bcd9485d235a6a234bc80722c9f137a6c232094fae2ee727d6",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Check every reading against the boundary words and repo paths",
+  "summary": "The reading stage accepts a reading after checking only the prior-job part (check_prior_result_and_scope in crates/athena-core/src/reading.rs). It never checks the reading's own text against the boundary word list, or its deliverables against the repo's files at HEAD. I add one deterministic post-check, run before a reading is accepted, that sends the reading back with the findings. The goal is to stop the class behind jobs 20261017-001109-qfax, 20261026-002911-8gp8, 20261026-145955-s7e2 and 20261026-002202-n5bp; the audience is the operator and later readers.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "root-cause",
+      "how": "The check is added at the reading stage's validation point, where the class originates, not per job."
+    },
+    {
+      "id": "mechanism",
+      "how": "The rule is enforced by code and tests, not by prompt prose."
+    },
+    {
+      "id": "tested",
+      "how": "Unit tests, plus fmt, clippy and test."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run refusal and acceptance cases."
+    },
+    {
+      "id": "small",
+      "how": "One focused change in reading.rs."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Root cause: the reader's output is validated only for schema, the closed lists and the prior-result/scope rule, never against repo state or the boundary word list. Prompts cannot enforce this, and the reader prompt has 3 tokens of headroom, so the fix is a code check (mechanism default).",
+    "The fix lives beside check_prior_result_and_scope, called from the same place in reading.rs (around line 397). A failure returns the findings as the refusal reason, as the prior-result refusal does now.",
+    "Check 1: run athena_context::briefs::boundary_scan, the scan already used for request input, over the reading's title, summary, assumptions, criteria, out_of_scope and departures.",
+    "Check 2: for each deliverable, 'modify' and 'delete' paths must exist in the tree at HEAD and 'create' paths must not. This catches a reading that re-plans work already landed or names a missing file. It uses the git handle the reader already has.",
+    "Previous jobs 20261017-001109-qfax, 20261026-002911-8gp8 and 20261026-145955-s7e2 are not re-run. Their findings (hold-resume route, stale hold marker, the records reader in gh.rs) are feature-level and outside this root-cause fix; those jobs are addressed only by preventing readings that mis-scope them. 20261026-002911-8gp8 landed already.",
+    "Introspection proposals about call sites for a moved path (grep-based reader checks) and about criteria are not mechanised here. They need semantic judgment, so they stay with the plan critic."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "The change description names the root cause: reading output is checked only for schema and prior-result rules, not against the boundary word list or the repo's files at HEAD. The check sits in crates/athena-core/src/reading.rs next to check_prior_result_and_scope, not in a prompt.",
+      "kind": "content"
+    },
+    {
+      "text": "A unit test in reading.rs fails without the change and passes with it: a reading whose summary holds a boundary-scan word is refused, and the refusal names the word. Run `cargo test -p athena-core reading`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A unit test shows a reading with a 'modify' or 'delete' deliverable for a path absent at HEAD is refused, and a 'create' deliverable for an existing path is refused. A reading with valid paths and clean text is accepted. Run `cargo test -p athena-core reading`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test runs the reader path with the fake reader returning a bad reading. It shows the reading is not accepted and the reason reaches the caller, so the check is wired in and is not only a free function. Run `cargo test -p athena-core`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Existing reading tests, including the prior-result and scope tests, still pass. `cargo fmt --check`, `cargo clippy` and `cargo test` all pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has an entry that says readings are now checked against the boundary words and the repo's files, written for an outside reader.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "p": 0.1
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "p": 0.1
+    }
+  ],
+  "out_of_scope": [
+    "Re-implementing the disk-space hold, the hold-resume route, or the records-branch reader move from the earlier jobs",
+    "Editing prompt files, which have almost no token headroom",
+    "Semantic checks such as finding every reader of a moved path",
+    "Changing athena.toml, defaults.toml or the workflows",
+    "Changing the boundary word list itself"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.65,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.4,
+        "p50": 1.0,
+        "p90": 2.5
+      },
+      "wall_time_s": {
+        "p10": 400.0,
+        "p50": 1500.0,
+        "p90": 3000.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7219653179190751,
+      "p_verification_passes": 0.6614785992217899,
+      "p_user_intervenes": 0.06836363636363636,
+      "cost_usd": {
+        "p10": 0.5004082326777505,
+        "p50": 1.1057353,
+        "p90": 2.699074187881712
+      },
+      "wall_time_s": {
+        "p10": 504.06923605300017,
+        "p50": 1520.2067824830008,
+        "p90": 2980.403074241999
+      }
+    }
+  },
+  "departures": null,
+  "urgent_reason": "It cuts failed and rejected attempts and planning stops that came from readings which were never checked against repo state.",
+  "hard_reason": "It changes the gate that accepts or rejects every reading, so a mistake blocks or wrongly admits other jobs.",
+  "producer_effort": "high"
+}
