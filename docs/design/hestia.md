@@ -211,3 +211,49 @@ the split notice. Depends on: 7, 9.
   not re-measured.
 - The rules marked "prose only" above (the allow-list before job 6, the never-gates rule) have no code
   enforcement until the named job lands.
+
+## 11. Error review: causes that repeat across jobs
+
+Built in `crates/athena-core/src/hestia.rs` (`Athena::error_review`, `repeated_causes`). It is separate from the
+sweep: it runs on an event, not on the `athena hestia sweep` command, and it is enforced by code.
+
+**Why.** Every failed or rejected job already gets an introspection with a cause and a prevention
+(`defaults-loop.md` section 3), but each one is written about one job. Nothing grouped them by cause or acted on
+a repeat, so a person caught patterns by hand and late: four planning-cap stops before a fix, five attempts at
+one request before a stop. The error review is the role that reads the introspections together.
+
+**Trigger.** `Athena::introspect` calls `Athena::error_review` right after a recorded introspection is committed.
+A failed introspection is not reviewed and is not a case. The review never fails the introspection: a problem is
+a line to the user.
+
+**Grouping key** (`cause_key`). Two introspections have the same cause when they resolve to the same failure
+class: the class their record names when the class registry (`athena.failure-class/1`) holds it, otherwise the
+class Jev chose in its stored answer when that is a registry class (`new` and unknown ids are not). An
+introspection that resolves to no registry class is grouped by its cause text with case and punctuation ignored
+(`introspect::normalise`). An introspection with no job, no cause, or a failed status is not a case. The
+cause shown is the earliest introspection's wording.
+
+**Repeat.** A cause is a repeat when its introspections are about two or more distinct jobs (`REPEAT_JOBS`).
+Two introspections of one job are one job, so a single job that failed twice is not a repeat.
+
+**Request and dedupe.** When the just-recorded introspection makes its cause a repeat, and no open or landed
+request cites any introspection of that cause, the review queues one request through the shared steward request
+builder (`steward::StewardRequest`). The request is at `Priority: urgent`, asks for the root cause to be fixed
+where it originates, cites every introspection id of the group with the job and the prevention each proposed,
+and has acceptance bullets that are checked by the builder's own parse. A request cites a cause when its text
+contains one of the group's introspection ids, so a third introspection of a cause finds the open request and
+queues nothing. A request counts while it is open (not closed) or landed. A request that was rejected, failed or
+closed does not, so a cause whose fix did not land can get a new request. The review does not fix the cause
+itself; the request runs as a job under the usual checks and the independent verifier.
+
+**Status.** `athena status` lists each open repeated cause (`StatusView::repeated_causes`): the count of
+introspections, the number of distinct jobs, the cause, its class, the introspection ids, and the request that
+addresses it (or "no request yet", which also adds a line to the next steps). A cause drops off the list when its
+request has landed.
+
+**Scope guard counting.** A related change in `scope_guard.rs` makes the guard count attempts per line of work
+instead of per job id. A line joins a request, the request it retries ("try again on <job>", the previous job of
+the line), any request that quotes it, and any re-ask of the same request text (compared with
+`introspect::normalise`) whose earlier twin was not accepted. The guard's thresholds are unchanged. A re-ask
+after the earlier request landed starts a new line. The chain link `previous_job` of `athena.candidate/2` is not
+used: it names the latest job landed in the base's history, which every job on that base shares.

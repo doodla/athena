@@ -873,6 +873,36 @@ fn lines_section(lines: &[athena_core::scope_guard::LineMark]) -> String {
     out
 }
 
+/// The open repeated causes of Hestia's error review: each with how many times and in how many jobs it
+/// occurred, and the request that addresses it.
+fn repeated_causes_section(causes: &[athena_core::hestia::RepeatedCause]) -> String {
+    let mut out = String::new();
+    for (i, c) in causes.iter().enumerate() {
+        let label = if i == 0 { "repeated" } else { "" };
+        let request = match &c.request {
+            Some(r) => format!("request {} ({})", r.job, r.state),
+            None => "no request yet".to_string(),
+        };
+        let _ = writeln!(
+            out,
+            "{label:<11} {} time(s) in {} jobs · {} · {request}",
+            c.count(),
+            c.jobs.len(),
+            c.cause
+        );
+        if let Some(class) = &c.class {
+            let _ = writeln!(out, "{:<11}   class: {class}", "");
+        }
+        let _ = writeln!(
+            out,
+            "{:<11}   introspections: {}",
+            "",
+            c.introspections.join(", ")
+        );
+    }
+    out
+}
+
 /// `athena status`.
 pub fn status(v: &StatusView) -> String {
     let mut out = String::new();
@@ -959,6 +989,7 @@ pub fn status(v: &StatusView) -> String {
         );
     }
     out.push_str(&lines_section(&v.lines));
+    out.push_str(&repeated_causes_section(&v.repeated_causes));
     for (i, n) in v.open_interventions.iter().enumerate() {
         let label = if i == 0 { "follow-up" } else { "" };
         let _ = writeln!(
@@ -1585,6 +1616,41 @@ mod tests {
             failing_test: test.map(str::to_string),
             warnings: Vec::new(),
         }
+    }
+
+    #[test]
+    fn repeated_causes_are_listed_with_their_counts_and_the_request_that_addresses_them() {
+        use athena_core::hestia::{AddressingRequest, RepeatedCause};
+        let cause = |request| RepeatedCause {
+            key: "class:20261027-090001-1abc".into(),
+            class: Some("Reading ignores the earlier finding (20261027-090001-1abc)".into()),
+            cause: "The reading stage does not load the earlier verdict.".into(),
+            introspections: vec!["20261027-090010-1abc".into(), "20261027-090020-1abc".into()],
+            jobs: vec!["20261027-080000-aaaa".into(), "20261027-080100-bbbb".into()],
+            request,
+        };
+        let text = repeated_causes_section(&[
+            cause(Some(AddressingRequest {
+                job: "20261027-090030-cccc".into(),
+                state: "queued".into(),
+                landed: false,
+            })),
+            cause(None),
+        ]);
+        assert!(
+            text.starts_with("repeated    2 time(s) in 2 jobs"),
+            "{text}"
+        );
+        assert!(
+            text.contains("request 20261027-090030-cccc (queued)"),
+            "{text}"
+        );
+        assert!(text.contains("no request yet"), "{text}");
+        assert!(
+            text.contains("introspections: 20261027-090010-1abc, 20261027-090020-1abc"),
+            "{text}"
+        );
+        assert_eq!(repeated_causes_section(&[]), "");
     }
 
     #[test]
