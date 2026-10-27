@@ -3331,7 +3331,7 @@ mod produce_and_verify_order_tests {
 
     fn repo() -> tempfile::TempDir {
         // Without `[job_plan]` (a job with no planning round) and without a pinned repository.
-        let raw = include_str!("../../../athena.toml");
+        let raw = include_str!("../../../../athena.toml");
         let mut in_job_plan = false;
         let config: String = raw
             .split_inclusive('\n')
@@ -3356,7 +3356,7 @@ mod produce_and_verify_order_tests {
         }
         for (path, text) in [
             ("athena.toml", config.as_str()),
-            ("defaults.toml", include_str!("../../../defaults.toml")),
+            ("defaults.toml", include_str!("../../../../defaults.toml")),
             ("README.md", "# Demo\n"),
         ] {
             std::fs::write(dir.path().join(path), text).unwrap();

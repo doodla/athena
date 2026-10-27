@@ -125,6 +125,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- `crates/athena-core/src/run.rs` became `crates/athena-core/src/run/mod.rs` (structure pass job R1), so later
+  jobs can add submodules beside it. The `run` module path is unchanged. The only text edits are the two test
+  `include_str!` paths, which gain one `../`. No behavior change.
 - Structure pass job G3 (`docs/design/structure-pass.md`): the Git remote items of
   `crates/athena-core/src/gh/mod.rs` (`Remote`, `GitRemote`) move unchanged into `gh/remote.rs`, and the Pages
   items (`PAGES_WORKFLOW`, `PagesRun`, `PagesHost` and its `GhClient` impl, `PagesReport`, the `PAGES_WAIT_*`
