@@ -1347,6 +1347,8 @@ pub struct ReaderInputs {
     pub listing: Vec<String>,
     /// Per capability, what its verifier can run: behavior criteria must be exercisable with these.
     pub verifier_can_run: Vec<(String, Vec<String>)>,
+    /// The token headroom of each budgeted prompt set; the section is left out when empty.
+    pub headroom: Vec<crate::HeadroomRow>,
 }
 
 /// The reader brief: the request, earlier readings and corrections, the reference forecast, the closed
@@ -1501,6 +1503,25 @@ pub fn reader_brief(inputs: &ReaderInputs) -> String {
         );
         for (capability, lines) in &inputs.verifier_can_run {
             let _ = writeln!(out, "{capability}: {}", lines.join("; "));
+        }
+        out.push('\n');
+    }
+    if !inputs.headroom.is_empty() {
+        let _ = writeln!(
+            out,
+            "# Prompt token headroom\n\nEach prompt set has a fixed token budget (estimated tokens). An edit to a prompt file that several sets \
+             compose costs every set that includes it, so pick the target file whose sets all have room, and do not plan growth past the tokens left.\n"
+        );
+        for row in &inputs.headroom {
+            let _ = writeln!(
+                out,
+                "- {}: composes {}; {} of {} tokens used, {} left",
+                row.set,
+                row.components.join(", "),
+                row.used,
+                row.budget,
+                row.left()
+            );
         }
         out.push('\n');
     }
@@ -2683,7 +2704,31 @@ mod tests {
             producer_default: "claude-haiku-5-5".into(),
             listing: vec!["README.md".into()],
             verifier_can_run: vec![("change".into(), vec!["cargo test".into()])],
+            headroom: vec![],
         }
+    }
+
+    #[test]
+    fn the_reader_brief_shows_the_headroom_of_each_set() {
+        let mut inputs = reader_inputs(&reading());
+        inputs.headroom = vec![crate::HeadroomRow {
+            set: "verifier (change)".into(),
+            components: vec!["contract".into(), "frame.verifier".into()],
+            used: 1298,
+            budget: 1300,
+        }];
+        let brief = reader_brief(&inputs);
+        assert!(brief.contains("# Prompt token headroom"));
+        assert!(brief.contains("costs every set that includes it"));
+        assert!(brief.contains(
+            "- verifier (change): composes contract, frame.verifier; 1298 of 1300 tokens used, 2 left"
+        ));
+    }
+
+    #[test]
+    fn the_reader_brief_has_no_headroom_section_without_rows() {
+        let inputs = reader_inputs(&reading());
+        assert!(!reader_brief(&inputs).contains("Prompt token headroom"));
     }
 
     #[test]

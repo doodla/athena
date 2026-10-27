@@ -231,9 +231,118 @@ pub fn check_budget(set: BudgetSet, composed: &Composed) -> Result<u64, String> 
     Ok(estimate)
 }
 
+/// How much of one budgeted prompt set is used: which components it composes and what is left.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeadroomRow {
+    /// The set's name, such as `reader` or `verifier (change)`.
+    pub set: String,
+    /// The ids of the components composed into the set, in order.
+    pub components: Vec<String>,
+    /// The estimated tokens of the composed set.
+    pub used: u64,
+    /// The set's budget, in tokens.
+    pub budget: u64,
+}
+
+impl HeadroomRow {
+    /// The tokens left under the budget; zero when the set is over.
+    pub fn left(&self) -> u64 {
+        self.budget.saturating_sub(self.used)
+    }
+}
+
+/// The token headroom of every budgeted set a prompt edit can touch, computed with [`compose`] and the
+/// budgets of [`BudgetSet`], the same figures the budgets test checks. Rows: contract, reader, planner,
+/// critic, then a producer and a verifier set for each capability as `(id, producer section, verifier
+/// section)`. The planner runs on the producer's budget and the critic on the verifier's. A file listed in
+/// several rows (the contract, a role frame) costs every one of those sets when it grows.
+pub fn headroom_rows(
+    defaults: Component,
+    catalog: Component,
+    capabilities: &[(String, PromptAsset, PromptAsset)],
+) -> Vec<HeadroomRow> {
+    let row = |name: String, set: BudgetSet, components: Vec<Component>| {
+        let composed = compose(&components);
+        HeadroomRow {
+            set: name,
+            components: components.into_iter().map(|c| c.id).collect(),
+            used: composed.estimated_tokens(),
+            budget: set.budget(),
+        }
+    };
+    let mut rows = vec![
+        row(
+            "contract".into(),
+            BudgetSet::Contract,
+            vec![CONTRACT.into()],
+        ),
+        row(
+            "reader".into(),
+            BudgetSet::Reader,
+            vec![CONTRACT.into(), READER_FRAME.into(), defaults, catalog],
+        ),
+        row(
+            "planner".into(),
+            BudgetSet::Producer,
+            vec![CONTRACT.into(), PLANNER_FRAME.into()],
+        ),
+        row(
+            "critic".into(),
+            BudgetSet::Verifier,
+            vec![CONTRACT.into(), CRITIC_FRAME.into()],
+        ),
+    ];
+    for (id, producer, verifier) in capabilities {
+        rows.push(row(
+            format!("producer ({id})"),
+            BudgetSet::Producer,
+            vec![CONTRACT.into(), PRODUCER_FRAME.into(), (*producer).into()],
+        ));
+        rows.push(row(
+            format!("verifier ({id})"),
+            BudgetSet::Verifier,
+            vec![CONTRACT.into(), VERIFIER_FRAME.into(), (*verifier).into()],
+        ));
+    }
+    rows
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn headroom_rows_name_shared_components_in_every_set_that_composes_them() {
+        let section = PromptAsset {
+            id: "capability.x.verifier",
+            version: 1,
+            text: "short",
+        };
+        let rows = headroom_rows(
+            Component::new("defaults", 1, "d"),
+            Component::new("catalog", 1, "c"),
+            &[("x".into(), section, section)],
+        );
+        let names: Vec<_> = rows.iter().map(|r| r.set.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "contract",
+                "reader",
+                "planner",
+                "critic",
+                "producer (x)",
+                "verifier (x)"
+            ]
+        );
+        let verifier = rows.iter().find(|r| r.set == "verifier (x)").unwrap();
+        assert_eq!(
+            verifier.components,
+            ["contract", "frame.verifier", "capability.x.verifier"]
+        );
+        assert_eq!(verifier.budget, BudgetSet::Verifier.budget());
+        assert_eq!(verifier.left(), verifier.budget - verifier.used);
+    }
 
     #[test]
     fn the_contract_is_within_its_budget() {

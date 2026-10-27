@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The reader's brief now shows the token headroom of every prompt set. Root cause: the brief never said how
+  many tokens each composed set had left, so readings planned growth in shared prompt files (the verifier,
+  reader and producer frames) that overran a budget, in three jobs. `athena_context::headroom_rows` computes,
+  with `compose` and the existing budgets, each set's component ids, estimated tokens, budget and tokens left;
+  `reader_brief` lists them under "Prompt token headroom" and says an edit to a shared file costs every set that
+  includes it. A budgets test ties the rows to the budgets test figures. See D141.
 - A stall watchdog in the agent driver. Root cause: the driver enforced only a fixed deadline (1800s for the
   producer) and tracked no progress, so a stalled agent burned the whole deadline before anyone learned of
   it. The driver loop in `athena-agent` now records the last line seen on the agent's stream and ends the run

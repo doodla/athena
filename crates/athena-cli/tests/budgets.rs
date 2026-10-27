@@ -206,6 +206,59 @@ fn every_role_set_is_within_its_budget() {
 }
 
 #[test]
+fn the_reader_headroom_rows_equal_the_budget_figures_and_name_shared_files() {
+    // The rows the reader's brief shows come from the same compose and budgets as `computed_rows`.
+    let defaults = defaults();
+    let capabilities = athena_cli::wiring::capabilities();
+    let cards: Vec<_> = capabilities.iter().map(|c| c.card()).collect();
+    let sections: Vec<_> = capabilities
+        .iter()
+        .map(|c| {
+            (
+                c.id().to_string(),
+                c.producer_section(),
+                c.verifier_section(),
+            )
+        })
+        .collect();
+    let headroom = athena_context::headroom_rows(
+        Component::new("defaults", defaults.version, defaults.render()),
+        Component::new("catalog", 1, render_catalog(&cards)),
+        &sections,
+    );
+    for (name, size, budget) in computed_rows() {
+        // The producer and verifier rows are the largest across capabilities.
+        let mine: Vec<_> = headroom
+            .iter()
+            .filter(|r| r.set == name || r.set.starts_with(&format!("{name} (")))
+            .collect();
+        assert!(!mine.is_empty(), "no headroom row for {name}");
+        let used = mine.iter().map(|r| r.used).max().unwrap();
+        assert_eq!((used, mine[0].budget), (size, budget), "{name}");
+        for r in mine {
+            assert_eq!(r.left(), r.budget - r.used, "{}", r.set);
+        }
+    }
+    // The shared verifier frame is listed in the verifier set of every capability.
+    for capability in &capabilities {
+        let row = headroom
+            .iter()
+            .find(|r| r.set == format!("verifier ({})", capability.id()))
+            .unwrap();
+        assert!(row.components.contains(&VERIFIER_FRAME.id.to_string()));
+        assert!(
+            row.components
+                .contains(&capability.verifier_section().id.to_string())
+        );
+    }
+    let frame_rows = headroom
+        .iter()
+        .filter(|r| r.components.contains(&VERIFIER_FRAME.id.to_string()))
+        .count();
+    assert_eq!(frame_rows, capabilities.len());
+}
+
+#[test]
 fn an_over_budget_role_set_fails() {
     // M18 (blocks): an over-budget role set fails. Moving rules between components escapes nothing.
     let padding =

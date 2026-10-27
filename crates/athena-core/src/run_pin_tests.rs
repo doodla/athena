@@ -1273,6 +1273,73 @@ fn producer_prompts_when_first_report_keeps(keep: &'static [usize]) -> Vec<Strin
 }
 
 #[test]
+fn the_reading_brief_carries_the_token_headroom_of_the_reader_and_verifier_sets() {
+    let (dir, _git) = repo(&config(true));
+    let state = tempfile::tempdir().unwrap();
+    let briefs = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen_briefs = briefs.clone();
+    let tweak: Tweak = Arc::new(move |spec, _| {
+        if spec.role == Role::Reader {
+            seen_briefs.lock().unwrap().push(spec.user_prompt.clone());
+        }
+    });
+    let athena = athena_with(
+        &dir,
+        &state,
+        CountingPinner::new(FAKE_SHA),
+        Arc::default(),
+        tweak,
+    );
+    athena.ask("study the demo", &Quiet).unwrap();
+    let briefs = briefs.lock().unwrap();
+    assert_eq!(briefs.len(), 1);
+    let brief = &briefs[0];
+    assert!(brief.contains("# Prompt token headroom"), "{brief}");
+    assert!(
+        brief.contains("costs every set that includes it"),
+        "{brief}"
+    );
+    // The verifier set of this test's capability is the contract plus the verifier frame twice.
+    let used = athena_context::compose(&[
+        athena_context::CONTRACT.into(),
+        VERIFIER_FRAME.into(),
+        VERIFIER_FRAME.into(),
+    ])
+    .estimated_tokens();
+    // Two frames overrun the budget, so nothing is left.
+    let left = athena_context::BudgetSet::Verifier
+        .budget()
+        .saturating_sub(used);
+    assert_eq!(left, 0);
+    let verifier = format!(
+        "- verifier (study): composes contract, frame.verifier, frame.verifier; {used} of {} tokens used, {left} left",
+        athena_context::BudgetSet::Verifier.budget()
+    );
+    assert!(brief.contains(&verifier), "{brief}");
+    let reader = format!(
+        "- reader: composes contract, frame.reader, defaults, catalog; {} of 2000 tokens used",
+        athena_context::compose(&[
+            athena_context::CONTRACT.into(),
+            athena_context::READER_FRAME.into(),
+            athena_context::Component::new(
+                "defaults",
+                1,
+                athena_data::DefaultsModel::parse(include_str!("../../../defaults.toml"))
+                    .unwrap()
+                    .render()
+            ),
+            athena_context::Component::new(
+                "catalog",
+                1,
+                athena_context::briefs::render_catalog(&[PinningStudy.card()])
+            ),
+        ])
+        .estimated_tokens()
+    );
+    assert!(brief.contains(&reader), "{brief}");
+}
+
+#[test]
 fn a_first_report_with_a_met_entry_for_every_criterion_is_not_sent_back() {
     let prompts = producer_prompts_when_first_report_keeps(&[0, 1]);
     assert_eq!(prompts.len(), 1, "no send-back");
