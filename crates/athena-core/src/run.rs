@@ -1756,9 +1756,12 @@ impl Athena {
             violations: Vec::new(),
             producer_report: report,
         };
-        // A seeded work tree already differs from the base, so an idle producer is told apart by the work
-        // tree being as seeded, not by an empty change list.
-        if changes.is_empty() || snapshot.unchanged_since_seed()? {
+        // The change list is against the base, so it is empty only when the candidate does nothing at all.
+        // A retry seeded from a kept candidate already differs from the base: if its producer adds nothing
+        // (the kept candidate did the work and only evidence was missing), the seeded candidate is the
+        // candidate and goes on to admission, checks and the verifier. Only a run with no change against the
+        // base fails as an idle producer.
+        if changes.is_empty() {
             closing.candidate = Some(candidate);
             let reason = if report_gaps.is_empty() {
                 "the producer made no change".to_string()

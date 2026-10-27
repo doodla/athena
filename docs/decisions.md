@@ -3604,3 +3604,32 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   Measured: line numbers and counts in the design doc at the base commit of the job. Not measured: the landings
   per file in the last week (taken from the request), production line counts (estimated from line ranges, not
   `code_health.rs`), and the number of functions.
+
+## D139 · A seeded retry whose producer adds nothing goes on with the seeded candidate
+
+- **Case:** Job 20261027-011733-vrsk (a G2 retry) was seeded from a kept candidate that had already moved the
+  Transport items. The producer checked with `git status`, correctly made no new change, and `produce_and_verify`
+  failed the job as "the producer made no change", so a complete candidate never reached the checks and the
+  verifier. Root cause: D117 item 5 told an idle seeded producer apart with `Snapshot::unchanged_since_seed`, so a
+  seeded run whose work tree was as seeded failed even though its change list against the base was not empty.
+- **Decision:** The idle-producer check in `run.rs` fails only when the change list against the base is empty.
+  A seeded retry whose work tree is as seeded keeps the seeded candidate as the candidate and goes on to
+  admission, the checks and the verifier as for any candidate. A run from the base with no change, and a seeded
+  retry whose seed equals the base, still fail as "the producer made no change". `Snapshot::unchanged_since_seed`
+  stays in `athena-git` and is no longer used by the run.
+- **Callers and writers touched, with the covering test:** `Athena::produce_and_verify`:
+  `a_seeded_retry_that_changes_nothing_goes_on_with_the_seeded_candidate` (checks, verifier and landing) and
+  `an_unseeded_run_whose_producer_changes_nothing_still_fails` (both in `crates/athena-cli/tests/retry.rs`).
+  The test `a_seeded_retry_that_changes_nothing_fails_as_an_empty_candidate` was renamed and now asserts the
+  new behavior.
+- **Alternatives:** (a) Keep failing and ask the user to retry from the base: redoes complete work, and was the
+  cause of the loss. (b) Land the seeded candidate without the verifier: skips the independent check. (c) The
+  rule above (chosen).
+- **Earlier text:** D117 item 5 and the CHANGELOG sentence that a seeded producer that changes nothing fails as
+  "the producer made no change" are superseded by this decision.
+- **Tradeoff:** A seeded producer that stalls without doing anything now spends a verification round on the
+  kept candidate; the verifier still judges it in full, so a wrong seed is rejected, not landed.
+- **Reversal cost:** Low. Restore the `unchanged_since_seed` test in the condition.
+- **Provenance:** Read: `run.rs`, `snapshot.rs`, D117, the retry tests. Measured: `cargo test --locked -p
+  athena-cli --test retry` (14 passed). The job's account of job 20261027-011733-vrsk is from the request, not
+  re-read.
