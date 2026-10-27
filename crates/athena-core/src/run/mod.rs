@@ -3372,6 +3372,90 @@ mod produce_and_verify_order_tests {
         dir
     }
 
+    /// Commits `text` at `path` in the test repository.
+    fn commit_file(repo: &tempfile::TempDir, path: &str, text: &str) {
+        let git = Git::at(repo.path());
+        let full = repo.path().join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, text).unwrap();
+        git.run(["add", "-A"]).unwrap();
+        git.run(["commit", "-q", "-m", "Add a file\n\nAthena-Job: bootstrap"])
+            .unwrap();
+    }
+
+    #[test]
+    fn a_request_with_a_banned_word_is_refused_before_admission_and_a_clean_one_is_admitted() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena(&repo, &state);
+        let before = athena.head().unwrap();
+        // Built from fragments so this file passes the scan it tests.
+        let banned = ["oper", "ator"].concat();
+        let request = format!("describe the demo\nthen ask the {banned} to check it");
+        for refused in [
+            athena.ask(&request, &Quiet).unwrap_err().to_string(),
+            athena.queue(&request).unwrap_err().to_string(),
+        ] {
+            assert!(refused.contains("not admitted"), "{refused}");
+            assert!(
+                refused.contains(&format!("request:2: {banned}")),
+                "{refused}"
+            );
+        }
+        // Nothing was committed and no model was asked: no job exists.
+        assert_eq!(athena.head().unwrap(), before);
+
+        // The same request, reworded, passes the scan and is admitted.
+        let proposal = athena
+            .ask("describe the demo\nthen check it", &Quiet)
+            .unwrap();
+        assert!(proposal.reading.is_some());
+        assert_ne!(athena.head().unwrap(), before);
+    }
+
+    #[test]
+    fn a_named_file_with_a_banned_word_is_flagged_with_path_and_line_and_a_clean_one_is_not() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena(&repo, &state);
+        let banned = ["sand", "box"].concat();
+        commit_file(
+            &repo,
+            "docs/dirty.md",
+            &format!("# Notes\n\nIt ran in a {banned}.\n"),
+        );
+        commit_file(&repo, "docs/clean.md", "# Notes\n\nNothing to see.\n");
+        let before = athena.head().unwrap();
+
+        let err = athena
+            .ask("tidy up docs/dirty.md", &Quiet)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not admitted"), "{err}");
+        assert!(err.contains(&format!("docs/dirty.md:3: {banned}")), "{err}");
+        assert_eq!(athena.head().unwrap(), before);
+
+        // The scan itself: request text first, then each named file; a path that does not exist is skipped.
+        let findings = crate::reading::scan_request_input(
+            &athena.git,
+            &before,
+            "tidy docs/clean.md and docs/dirty.md and docs/missing.md",
+        )
+        .unwrap();
+        assert_eq!(
+            findings,
+            vec![crate::reading::InputFinding {
+                source: "docs/dirty.md".into(),
+                line: 3,
+                term: banned
+            }]
+        );
+
+        // A clean named file is admitted.
+        let proposal = athena.ask("tidy up docs/clean.md", &Quiet).unwrap();
+        assert!(proposal.reading.is_some());
+    }
+
     #[test]
     fn a_fake_job_takes_its_baseline_before_the_producer_and_numbers_the_invocations_in_order() {
         let repo = repo();

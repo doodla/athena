@@ -550,10 +550,90 @@ fn banned_words_section() -> String {
          design text. The scan matches whole words, case-insensitively, so capital letters do not help; \
          singular, plural and hyphenated forms are all listed. Reword instead.\n\n\
          Words: {}\n\n\
-         Fragments (rejected anywhere in a line, even inside a longer word or path): {}\n",
+         Fragments (rejected anywhere in a line, even inside a longer word or path): {}\n\n\
+         {BOUNDARY_SCAN_INSTRUCTION}\n",
         words.join(", "),
         fragments.join(", ")
     )
+}
+
+/// What the producer brief tells the producer to run before it finishes. A word list alone was not enough
+/// (a brief that warned of a word still produced a file that failed on it), so the producer runs the scan
+/// itself and rewords what it finds. The scan reads tracked files from the working directory, so it covers
+/// edits to existing files; a file the producer created is not tracked until Athena commits it.
+pub const BOUNDARY_SCAN_INSTRUCTION: &str = "Before you finish, run `cargo test -p xtask --test policy` on your changed files. \
+It is the same scan Athena runs, and it names each file, line and word it rejects. Reword any banned word it \
+finds, then run it again until it passes. It reads only tracked files, so it does not see a file you created: \
+reread each new file against the words above.";
+
+/// One boundary hit in a text: the 1-based line and the banned word or fragment found there. The word is
+/// lowercase for fragments, as the policy scan reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundaryHit {
+    pub line: usize,
+    pub term: String,
+}
+
+/// Whether `c` is part of a word for whole-word matching: a letter, a digit or an underscore.
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Whether `word` occurs in `lower_line` as a whole word. Both are lowercase. A match counts when the
+/// characters on either side are not word characters, the same rule as a regex `\b` at each end.
+fn contains_whole_word(lower_line: &str, word: &str) -> bool {
+    let mut from = 0;
+    while let Some(found) = lower_line[from..].find(word) {
+        let start = from + found;
+        let end = start + word.len();
+        let before_ok = lower_line[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !is_word_char(c));
+        let after_ok = lower_line[end..]
+            .chars()
+            .next()
+            .is_none_or(|c| !is_word_char(c));
+        if before_ok && after_ok {
+            return true;
+        }
+        // Step past this match's first character and look again.
+        from = start + lower_line[start..].chars().next().map_or(1, char::len_utf8);
+    }
+    false
+}
+
+/// The boundary scan (M19) over one text: every line that holds a banned word or fragment, in line order.
+/// It uses [`boundary_words`] and [`boundary_fragments`], the lists the producer brief shows, and applies the
+/// policy scan's rules: whole words and fragments, case-insensitively. Athena runs it on a request and on
+/// the files the request names, before the job is admitted.
+pub fn boundary_scan(text: &str) -> Vec<BoundaryHit> {
+    let words: Vec<String> = boundary_words().iter().map(|w| w.to_lowercase()).collect();
+    let fragments: Vec<String> = boundary_fragments()
+        .iter()
+        .map(|f| f.to_lowercase())
+        .collect();
+    let mut found = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        let lower = line.to_lowercase();
+        for word in &words {
+            if contains_whole_word(&lower, word) {
+                found.push(BoundaryHit {
+                    line: i + 1,
+                    term: word.clone(),
+                });
+            }
+        }
+        for fragment in &fragments {
+            if lower.contains(fragment.as_str()) {
+                found.push(BoundaryHit {
+                    line: i + 1,
+                    term: fragment.clone(),
+                });
+            }
+        }
+    }
+    found
 }
 
 /// Producer guidance on what the verifier can see (D43). Without it, a producer cites its own
@@ -1922,6 +2002,59 @@ mod tests {
         assert!(brief.contains("whole words, case-insensitively"));
         let banned = brief.find("## Words you must not write").unwrap();
         assert!(banned < brief.find("## Checks Athena will run").unwrap());
+    }
+
+    #[test]
+    fn producer_briefs_tell_the_producer_to_run_the_boundary_scan() {
+        let brief = producer_brief(&ProducerInputs {
+            job: "20261010-153012-k7q2".into(),
+            request: "add a changelog".into(),
+            reading: AcceptedReading::new(&reading(), &defaults(), |_| false),
+            checks: vec![],
+            commands: vec![],
+            pin: None,
+            retry_from: None,
+            retry_findings: None,
+            failure_classes: Vec::new(),
+        });
+        assert!(brief.contains("run `cargo test -p xtask --test policy` on your changed files"));
+        assert!(brief.contains("Reword any banned word it finds"));
+        // It sits in the banned-words section, before the checks.
+        let at = brief.find("cargo test -p xtask --test policy").unwrap();
+        assert!(at > brief.find("## Words you must not write").unwrap());
+        assert!(at < brief.find("## Checks Athena will run").unwrap());
+    }
+
+    #[test]
+    fn the_boundary_scan_flags_planted_words_with_their_lines() {
+        let word = ["oper", "ator"].concat();
+        let fragment = ["/home", "/user/x"].concat();
+        let text = format!(
+            "A clean line.\nAsk the {}.\nSee {fragment} too.",
+            word.to_uppercase()
+        );
+        let hits = boundary_scan(&text);
+        assert_eq!(
+            hits,
+            vec![
+                BoundaryHit {
+                    line: 2,
+                    term: word
+                },
+                BoundaryHit {
+                    line: 3,
+                    term: ["/home", "/user"].concat()
+                },
+            ]
+        );
+        // Whole words only, hyphenated forms count, and a clean text passes.
+        assert!(boundary_scan("Cooperators accrue the opcode.").is_empty());
+        assert!(boundary_scan("The release hands off to cargo.").is_empty());
+        assert_eq!(
+            boundary_scan(&format!("a {}-like step", ["hand", "-off"].concat())).len(),
+            1
+        );
+        assert!(boundary_scan("Add a changelog entry.").is_empty());
     }
 
     #[test]

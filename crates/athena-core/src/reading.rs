@@ -538,6 +538,7 @@ impl Athena {
             bail!("the request is empty; say what you want in a line or two");
         }
         let head = self.head()?;
+        refuse_banned_input(&self.git, &head, text)?;
         let jc = JobConfig::at(&self.git, &head)?;
         let records = crate::store::Records::load(&self.git, &head)?;
         let mut id = RecordId::generate(crate::now());
@@ -562,6 +563,7 @@ impl Athena {
             bail!("the request is empty; say what you want in a line or two");
         }
         let head = self.head()?;
+        refuse_banned_input(&self.git, &head, text)?;
         let jc = JobConfig::at(&self.git, &head)?;
         let records = crate::store::Records::load(&self.git, &head)?;
         let mut id = RecordId::generate(crate::now());
@@ -1652,6 +1654,75 @@ pub fn request_text_acceptance(text: &str) -> Vec<String> {
         .filter(|l| is_bullet(l))
         .map(String::from)
         .collect()
+}
+
+/// One banned boundary word found in a request or in a file the request names, before the job is admitted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputFinding {
+    /// `request` for the request text, else the repository path of the named file.
+    pub source: String,
+    pub line: usize,
+    pub term: String,
+}
+
+impl std::fmt::Display for InputFinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}: {}", self.source, self.line, self.term)
+    }
+}
+
+/// The boundary scan (the same one `cargo test -p xtask --test policy` runs, from the same word lists) over
+/// a request's text and over each file the request names that exists at `treeish`. A path is "named" when
+/// [`request_text_touches`] finds it in the text. Files under `records/` and the license are skipped, as the
+/// policy scan skips them; a file that is missing or is not text is skipped. Findings come request first,
+/// then files in the order they are named.
+pub fn scan_request_input(
+    git: &athena_git::Git,
+    treeish: &str,
+    text: &str,
+) -> Result<Vec<InputFinding>> {
+    let mut findings: Vec<InputFinding> = athena_context::briefs::boundary_scan(text)
+        .into_iter()
+        .map(|hit| InputFinding {
+            source: "request".to_string(),
+            line: hit.line,
+            term: hit.term,
+        })
+        .collect();
+    for path in request_text_touches(text) {
+        if path.starts_with("records/") || path == "LICENSE" {
+            continue;
+        }
+        let Some(bytes) = git.show_file(treeish, &path)? else {
+            continue;
+        };
+        let Ok(content) = String::from_utf8(bytes) else {
+            continue;
+        };
+        for hit in athena_context::briefs::boundary_scan(&content) {
+            findings.push(InputFinding {
+                source: path.clone(),
+                line: hit.line,
+                term: hit.term,
+            });
+        }
+    }
+    Ok(findings)
+}
+
+/// Refuses a request whose text, or a file it names, holds a banned boundary word, so the words are
+/// reworded before a job exists. Nothing is edited: the message lists each source, line and word.
+fn refuse_banned_input(git: &athena_git::Git, treeish: &str, text: &str) -> Result<()> {
+    let findings = scan_request_input(git, treeish, text)?;
+    if findings.is_empty() {
+        return Ok(());
+    }
+    let list: Vec<String> = findings.iter().map(|f| format!("  {f}")).collect();
+    bail!(
+        "the request was not admitted: it, or a file it names, holds words Athena's boundary scan rejects \
+         (source:line: word). Reword them and ask again:\n{}",
+        list.join("\n")
+    );
 }
 
 /// What a request that has not been read touches: its path-like words, without repeats. This is the parse

@@ -1,0 +1,145 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261018-064510-3m3h",
+  "base_commit": "fae52db1a8f8400e1cf6655baceee7809ebb3c81",
+  "base_fingerprint": "sha256:858f39cbfe63922e3f2c68ccfe634ab31871e6ef084b1b47ed2fca3881284f31",
+  "previous_job": "20261027-055334-x7yx",
+  "candidate_commit": "d11c39fc46431e1c9d71d98b013c0beb3ec51ca3",
+  "candidate_tree": "7261139df54ab8e5fb7a794040def7792954fbf8",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 171927
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 113128
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 124875
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 145691
+    },
+    {
+      "path": "docs/enforcement.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 21009
+    },
+    {
+      "path": "xtask/tests/policy.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 23717
+    }
+  ],
+  "fingerprint": "sha256:93ca2c323d6105761425524456ff2c0d75dfe9fa223e86d82c19252a37d8e5e1",
+  "violations": [],
+  "producer_report": {
+    "summary": "Banned boundary words are now caught at two points. (1) The producer brief's banned-words section now tells the producer to run `cargo test -p xtask --test policy` on its changed files before it finishes, to reword any banned word the scan finds, and to run it again until it passes. It also says the scan cannot see newly created untracked files, so those need a manual reread. (2) `Athena::ask` and `Athena::queue` (reading.rs) now scan the request text and every file the request names, before any record, commit or model call. The file lookup uses the existing `request_text_touches` and reads each named file from the repository's HEAD. A hit refuses the request with `the request was not admitted ...` and one `source:line: word` entry per hit (source is `request` or the file path). Nothing is edited or recorded. The scanner is `briefs::boundary_scan`, a new function in athena-context built on `briefs::boundary_words` and `briefs::boundary_fragments`, so there is no third word list. It is regex-free, so athena-context needed no new dependency or Cargo.lock change. A new policy test, `the_admission_scan_finds_what_the_policy_scan_finds`, checks it agrees with the policy scanner line for line on every term (varying case, embedded in longer words, hyphenated). Root cause: a word list shown to the producer, with no step that ran the scan on its output or on the request input, let banned words through. Docs changed: CHANGELOG.md and the M19 row of docs/enforcement.md. docs/design/job-planning.md and athena.toml needed no change: the policy scan passes on this branch.",
+    "files": [
+      "crates/athena-context/src/briefs.rs",
+      "crates/athena-core/src/reading.rs",
+      "crates/athena-core/src/run/mod.rs",
+      "xtask/tests/policy.rs",
+      "CHANGELOG.md",
+      "docs/enforcement.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-context boundary",
+        "result": "pass",
+        "note": "4 passed, including the new brief-text test and the new scanner test"
+      },
+      {
+        "command": "cargo test -p athena-core banned_word",
+        "result": "pass",
+        "note": "2 passed: request refused with its word and line, then a reworded request admitted; named dirty file flagged with path and line, named clean file admitted"
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "12 passed, including athena_refers_to_no_one_who_runs_it_or_where, the_producer_brief_lists_exactly_the_scanners_terms and the new agreement test"
+      },
+      {
+        "command": "cargo fmt --all",
+        "result": "pass",
+        "note": "applied formatting"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "clean after fixing one useless_format in my new policy test"
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "ran once in full; it returned no error exit code. I could not read the saved output file because it is outside the working directory, so I did not count per-test results."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "The producer brief built in crates/athena-context/src/briefs.rs tells the producer to run `cargo test -p xtask --test policy` on its changed files before finishing and to reword any banned word found; a unit test asserts this text is in the producer brief.",
+        "status": "met",
+        "evidence": "`BOUNDARY_SCAN_INSTRUCTION` is appended to the banned-words section of `producer_brief`. Unit test `producer_briefs_tell_the_producer_to_run_the_boundary_scan` asserts the text and its position between the banned-words section and the checks; it passed under `cargo test -p athena-context boundary`."
+      },
+      {
+        "criterion": "A new test shows a request text containing a banned boundary word (built from fragments) is flagged before admission with the word and its location, while a clean request passes. Run `cargo test` and see the test pass.",
+        "status": "met",
+        "evidence": "`cargo test -p athena-core banned_word` ran `a_request_with_a_banned_word_is_refused_before_admission_and_a_clean_one_is_admitted`. It builds the word from fragments and asserts `ask` and `queue` both fail with `not admitted` and `request:2: <word>`. It asserts HEAD is unchanged, then a reworded request is admitted. Unit test `the_boundary_scan_flags_planted_words_with_their_lines` also passed."
+      },
+      {
+        "criterion": "A new test shows a file named in the request that contains a banned word is flagged before admission, with its path and line, and a clean named file is not. Run `cargo test`.",
+        "status": "met",
+        "evidence": "`cargo test -p athena-core banned_word` ran `a_named_file_with_a_banned_word_is_flagged_with_path_and_line_and_a_clean_one_is_not`. It asserts `docs/dirty.md:3: <word>` in the refusal, `scan_request_input` returns only the dirty file's finding (the clean and missing named files give none), and a request naming the clean file is admitted."
+      },
+      {
+        "criterion": "Admission-time scanning reuses the same word list as the policy scan (boundary_words/boundary_fragments or a shared source), not a third copy; the existing test that keeps the brief list equal to the scanner list still passes.",
+        "status": "met",
+        "evidence": "`briefs::boundary_scan` reads `boundary_words()` and `boundary_fragments()` from briefs.rs, with no new list. `the_producer_brief_lists_exactly_the_scanners_terms` passed in the policy run. The new `the_admission_scan_finds_what_the_policy_scan_finds` also passed."
+      },
+      {
+        "criterion": "`cargo test --locked` passes in full, including athena_refers_to_no_one_who_runs_it_or_where, and `cargo clippy` is clean; no new tracked file contains a banned word.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I also ran `cargo test --locked` in full once (no error exit code), `cargo clippy --all-targets --locked -- -D warnings` (clean) and `cargo test -p xtask --test policy` (12 passed, including athena_refers_to_no_one_who_runs_it_or_where). No new tracked files were added."
+      },
+      {
+        "criterion": "CHANGELOG.md notes the new behavior in plain language for an outside reader.",
+        "status": "met",
+        "evidence": "A new first entry under [Unreleased] > Added in CHANGELOG.md describes both the producer instruction and the refusal of a request, with its `source:line: word` output, in plain words."
+      }
+    ],
+    "open_issues": [
+      "admission.rs and athena.toml are listed as deliverables but needed no change, because the hook sits in `ask`/`queue` in reading.rs; athena.toml is a governance file, so I left it alone.",
+      "docs/design/job-planning.md needed no edit: it passes the scan on this branch.",
+      "`correct`, `read_queued` and steward-generated requests (via `ask`) are not scanned beyond what `ask` already covers; `correct` adds new request text unscanned. Extending the scan there is a small follow-up if wanted.",
+      "The producer's scan cannot see files it newly creates (untracked), so the brief tells it to reread those by hand. A fuller fix would have Athena scan the candidate's new files at admission; I did not do that here."
+    ],
+    "mistakes": [
+      "My first policy test used `format!(\"{term}\")`, which tripped clippy's useless_format; fixed to `term.clone()`.",
+      "I could not read the saved output of the full `cargo test --locked` run, so I judged it a pass from the missing error exit code, not from per-test counts."
+    ],
+    "learnings": [
+      "The policy test reads tracked files from disk at the working directory, so it sees edits to existing files but not files a producer creates; `athena_files()` uses `git ls-files`.",
+      "docs/system-facts.md and producer.md count against fixed prompt budgets (producer 1257 of 1300), so the new brief text went in the brief's own banned-words section.",
+      "`Git::show_file(treeish, path)` returns Ok(None) for a missing path or a directory, so named-file lookup needs no existence check.",
+      "The `repo()` and `athena()` fixtures in run/mod.rs tests build a real throwaway repository with a fake agent driver; they are reusable for intake tests.",
+      "Bash in this environment allows no pipes, tail or grep, and Read/Grep cannot reach cargo's saved tool-result output files outside the working directory."
+    ],
+    "desires": [
+      "Permission to read cargo's saved tool-result output so a full test run's per-test results could be checked.",
+      "A way to run a single command with its output filtered, so full-suite failures could be located without grep or tail."
+    ]
+  }
+}
