@@ -23,6 +23,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Rendered-page assertions for the firstmate study page. Root cause of repeated rejections: criteria about the
+  page's contents were never checked against the built HTML before the verifier saw it. New convention
+  (`docs/conventions/rendered-page-assertions.md`, one sentence in the change producer prompt): a producer adds
+  assertions on the output of `cargo run -p xtask -- site`, runs them before handover, and a failure blocks it.
+  `xtask/tests/site_page.rs` enforces it for the firstmate page (glossary entries and next-step link before the
+  first transition card, which model-limit findings are shown, and agent-decided transitions read from
+  `trigger_evaluated_by`), with a committed wrong page that must fail each check.
+
 - An early plan-time check that a design names the code it changes. Root cause: the design's references to
   existing code were compared with the repository only at the final verdict, so a design that named no
   existing file, or only files that are not there, was built in full and rejected at the end, in three jobs.

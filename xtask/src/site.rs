@@ -221,6 +221,9 @@ fn split_tag(text: &str) -> (Option<&str>, &str) {
     (None, text)
 }
 
+// The built page is checked against the study data by `xtask/tests/site_page.rs`; a change to the
+// page's order, finding labels or "decided by" text must keep that test passing.
+
 /// The words shown for a state or finding kind. The data keeps the study format's own names; a reader
 /// of the page gets plain ones.
 fn kind_label(kind: &str) -> &str {
