@@ -1039,6 +1039,12 @@ pub struct PlannerInputs {
     pub revision: Option<PlanRevision>,
 }
 
+/// The seam rule the planner brief's Report section repeats, so it is enforced in the brief and not only in
+/// the planner prompt. A demonstration that assumes code can be driven a way it cannot fails the plan late.
+const SEAM_REQUIREMENT: &str = "Test seam: for every demonstration, name the production entry point it calls and the guards and preconditions on its path, \
+     the seam, fake or fixture it uses and how that is injected, and whether the seam exists today (confirm it by reading the code) \
+     or which plan step adds it. The logic under test must not live in the test double. A demonstration with no seam, or one the code does not provide, is a major finding.";
+
 /// The planner's brief: the request, the reading with each criterion numbered by kind, the checks, the
 /// verifier's commands and the state of the deliverables; a revision also quotes the previous plan and every
 /// finding on it.
@@ -1105,7 +1111,7 @@ pub fn planner_brief(inputs: &PlannerInputs) -> String {
     }
     let _ = writeln!(
         out,
-        "\n## Report\n\nEnd with the plan as your structured output: one demonstration per acceptance criterion, numbered as above."
+        "\n## Report\n\nEnd with the plan as your structured output: one demonstration per acceptance criterion, numbered as above.\n\n{SEAM_REQUIREMENT}"
     );
     out
 }
@@ -2301,6 +2307,50 @@ mod tests {
         assert!(!brief.contains("## Revision"));
         for forecast in ["0.97", "p10"] {
             assert!(!brief.contains(forecast));
+        }
+    }
+
+    #[test]
+    fn the_planning_stage_requires_each_demonstration_to_name_and_confirm_its_test_seam() {
+        // Root cause: nothing in the planning stage made a demonstration name and confirm its seam.
+        let brief = planner_brief(&planner_inputs(None));
+        let report = &brief[brief.find("## Report").unwrap()..];
+        for text in [
+            "Test seam:",
+            "production entry point",
+            "guards and preconditions",
+            "how that is injected",
+            "exists today",
+            "which plan step adds it",
+            "must not live in the test double",
+            "major finding",
+        ] {
+            assert!(
+                report.contains(text),
+                "the planner brief's Report omits {text}"
+            );
+        }
+        let planner = crate::PLANNER_FRAME.text;
+        for text in [
+            "name its test seam",
+            "production entry point",
+            "guards and preconditions",
+            "how it is injected",
+            "exists today",
+            "which step adds it",
+            "must not live in the test double",
+        ] {
+            assert!(planner.contains(text), "planner.md omits {text}");
+        }
+        let critic = crate::CRITIC_FRAME.text;
+        for text in [
+            "test seam",
+            "major finding",
+            "names no seam",
+            "names one the code does not provide",
+            "tests only a double",
+        ] {
+            assert!(critic.contains(text), "critic.md omits {text}");
         }
     }
 

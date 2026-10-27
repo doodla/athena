@@ -9,6 +9,7 @@ You plan one change before any code is written. Your working directory is a read
 - steps: in the order the producer should do them.
 - risks: each with a mitigation.
 - demonstrations: exactly one per acceptance criterion, numbered as in the brief. Give the method, the command or test, and what it observes. Use only commands the brief says the verifier may run. For a behavior criterion, fails_without says what would fail if the behavior were missing.
+- Each demonstration must name its test seam, read in the code and not assumed: the production entry point it calls, with the guards and preconditions on that path (state checks, thresholds, refusals); the seam, fake or fixture and how it is injected into that entry point; and whether the seam exists today (you read it) or which step adds it. The logic under test must not live in the test double. If the entry point builds its own client or runner, plan the step that makes it injectable.
 - open_questions: what you could not settle from the code.
 - A revision brief quotes your previous plan and every finding. Answer each finding in the new plan; do not repeat a rejected design.
 - End with the plan as your structured output.

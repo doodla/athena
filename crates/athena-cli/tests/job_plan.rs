@@ -402,6 +402,11 @@ fn after_a_revise_the_second_planner_prompt_quotes_the_first_finding_and_the_job
     );
     let briefs = briefs.lock().unwrap().clone();
     assert!(!briefs[0].contains(FINDING) && !briefs[0].contains("Revision"));
+    // Every planning round's brief repeats the test-seam rule in its Report section.
+    for brief in &briefs {
+        let report = &brief[brief.find("## Report").unwrap()..];
+        assert!(report.contains("Test seam:"), "{brief}");
+    }
     let second = &briefs[1];
     assert!(second.contains(FINDING), "{second}");
     assert!(
