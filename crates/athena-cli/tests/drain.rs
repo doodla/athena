@@ -2834,6 +2834,171 @@ fn the_real_steps_approve_only_the_in_limit_proposal_and_leave_the_others_waitin
     assert!(!text.contains(LOW), "{text}");
 }
 
+const APPROVED_JOB: &str = "job-of-20261015-130000-lowr";
+
+/// A stub with one in-limit proposal (whose approved job is old and normal) and one urgent queued request.
+fn proposal_and_urgent_request() -> Stub {
+    let mut urgent = planned("urgent", Ladder::Implementation, &["src/urgent.rs"], &[]);
+    urgent.priority = Priority::Urgent;
+    Stub {
+        items: vec!["urgent"],
+        approvable: vec![in_limit_proposal()],
+        outcomes: passing(),
+        ratings: RefCell::new(vec![1, 1]),
+        plan: vec![urgent],
+        // What the records say of the job once it is approved: a normal item on the lowest rung.
+        after_read: vec![planned(
+            APPROVED_JOB,
+            Ladder::Implementation,
+            &["README.md"],
+            &[],
+        )],
+        ..Stub::default()
+    }
+}
+
+#[test]
+fn an_urgent_queued_request_is_worked_before_an_approved_in_limit_proposal() {
+    // One job slot: the old proposal must not take it from the urgent request at the head of the plan.
+    let stub = proposal_and_urgent_request();
+    let one_slot = Limits {
+        max_jobs: 1,
+        ..limits(9.0)
+    };
+    let report = drain::drain(&stub, one_slot, &Quiet).unwrap();
+    let worked: Vec<String> = stub
+        .log()
+        .into_iter()
+        .filter(|l| l.starts_with("run "))
+        .collect();
+    assert_eq!(worked, ["run urgent"], "{:?}", stub.log());
+    assert_eq!(report.stop, Stop::JobLimit);
+    assert_eq!(report.jobs.len(), 1);
+    assert_eq!(report.jobs[0].item, "urgent");
+    // The proposal's job is approved and kept in the plan, left queued for a later drain.
+    let queued: Vec<&str> = report.queued.iter().map(|i| i.job.as_str()).collect();
+    assert_eq!(queued, [APPROVED_JOB]);
+    assert_eq!(report.plan_groups.concat(), ["urgent", APPROVED_JOB]);
+
+    // With room for both, both are worked and the urgent request is first.
+    let stub = proposal_and_urgent_request();
+    let report = drain::drain(&stub, limits(9.0), &Quiet).unwrap();
+    let worked: Vec<String> = stub
+        .log()
+        .into_iter()
+        .filter(|l| l.starts_with("run "))
+        .collect();
+    assert_eq!(worked, ["run urgent", &format!("run {APPROVED_JOB}")]);
+    assert_eq!(report.landed, 2);
+}
+
+#[test]
+fn an_approved_proposal_whose_job_is_urgent_is_worked_before_normal_requests_and_the_job_limit_holds()
+ {
+    // A proposal whose job is ranked urgent (a priority record, say) goes first; the job limit still applies.
+    let mut stub = proposal_and_urgent_request();
+    stub.after_read[0].priority = Priority::Urgent;
+    stub.plan[0].priority = Priority::Normal;
+    let one_slot = Limits {
+        max_jobs: 1,
+        ..limits(9.0)
+    };
+    let report = drain::drain(&stub, one_slot, &Quiet).unwrap();
+    assert_eq!(report.jobs.len(), 1);
+    assert_eq!(report.jobs[0].item, APPROVED_JOB);
+    assert_eq!(report.stop, Stop::JobLimit);
+}
+
+#[test]
+fn a_proposal_that_fits_neither_the_job_limit_nor_the_budget_is_not_approved_even_with_a_plan() {
+    let stub = proposal_and_urgent_request();
+    let none = Limits {
+        max_jobs: 0,
+        ..limits(9.0)
+    };
+    let report = drain::drain(&stub, none, &Quiet).unwrap();
+    assert!(
+        !stub.log().iter().any(|l| l.starts_with("approve ")),
+        "{:?}",
+        stub.log()
+    );
+    assert_eq!(report.waiting, vec![in_limit_proposal()]);
+}
+
+/// Commits `records` to the fixture's repository.
+fn commit_records_to(fx: &Fixture, records: &[AnyRecord], message: &str) {
+    for record in records {
+        write(fx.root(), &[(&record.canonical_path(), &record.to_json())]);
+    }
+    fx.git.run(["add", "-A"]).unwrap();
+    fx.git.run(["commit", "-q", "-m", message]).unwrap();
+}
+
+#[test]
+fn the_plan_lists_an_approved_proposal_in_its_ordered_place_with_priority_from_the_record_or_its_role()
+ {
+    let fx = Fixture::new();
+    seeded_proposals(&fx);
+    let athena = fx.athena(rated_scenario().script());
+    // A person approved the proposal earlier: it is the oldest item. An urgent request is queued after it.
+    let approved = athena.approve_work(LOW, &Quiet).unwrap().job;
+    let approved_id = approved.as_str().to_string();
+    let (urgent, _) = athena.queue(&format!("{FIRST}\nPriority: urgent")).unwrap();
+    let (normal, _) = athena.queue(SECOND).unwrap();
+    let lander = RecordingLander::default();
+    let steps = real_steps(&athena, &lander);
+
+    let entry_of = |steps: &RealSteps| -> PlanEntry {
+        let queue = steps.queue().unwrap();
+        queue
+            .plan
+            .iter()
+            .find(|e| e.id == approved_id)
+            .cloned()
+            .expect("the approved job has a plan entry")
+    };
+    // Nothing says otherwise: normal, on the proposal's rung.
+    let entry = entry_of(&steps);
+    assert_eq!(entry.priority, Priority::Normal);
+    assert_eq!(entry.rung, Some(Ladder::Implementation));
+
+    // The plan puts the urgent request first although the proposal's job is older; the normal request, equal
+    // in priority and rung, stays behind it by age.
+    let report = drain::plan(&steps, 5.0, &Quiet).unwrap();
+    let order = &report.plan.order;
+    let at = |id: &str| order.iter().position(|o| o == id).unwrap();
+    assert_eq!(order.len(), 3, "{order:?} {:?}", report.plan.refused);
+    assert_eq!(at(urgent.as_str()), 0, "{order:?}");
+    assert!(at(&approved_id) < at(normal.as_str()), "age: {order:?}");
+
+    // The standing instruction of the role that raised it can state a default priority.
+    let mut steward = athena_data::roles::steward("2026-10-16T00:00:00Z".parse().unwrap());
+    steward.version = 3;
+    steward.prompt = format!("{}\nPriority: high", steward.prompt);
+    commit_records_to(&fx, &[AnyRecord::Role(Box::new(steward))], "Role priority");
+    assert_eq!(entry_of(&steps).priority, Priority::High);
+
+    // A priority record is the user's word and wins over the role.
+    commit_records_to(
+        &fx,
+        &[AnyRecord::Priority(athena_data::records::PriorityRecord {
+            job: approved.clone(),
+            n: 1,
+            at: "2026-10-17T00:00:00Z".parse().unwrap(),
+            priority: "low".into(),
+        })],
+        "Priority record",
+    );
+    assert_eq!(entry_of(&steps).priority, Priority::Low);
+    let report = drain::plan(&steps, 5.0, &Quiet).unwrap();
+    assert_eq!(
+        report.plan.order.last().map(String::as_str),
+        Some(approved_id.as_str()),
+        "low priority is last: {:?}",
+        report.plan.order
+    );
+}
+
 #[test]
 fn an_approved_job_is_picked_up_once_and_a_closed_one_is_not_picked_up_again() {
     let fx = Fixture::new();

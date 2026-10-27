@@ -7,6 +7,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+- `athena drain` no longer works approved steward proposals ahead of the plan. Root cause: the drain approved
+  each in-limit proposal before planning, and the job it made had no plan entry, so it kept its place in front of
+  every planned item. An old, normal-priority proposal could therefore take the job slots from the urgent requests
+  at the head of `athena plan`; in one drain it took both slots and failed twice. The job of an approved proposal
+  now gets its plan entry right after the approval and is ordered like any other item: dependency, then
+  priority, then rung, then age. Its priority is normal unless a priority record, the job's own words or the
+  standing instruction of the role that raised it (a `Priority: <level>` line) say otherwise
+  (`plan::proposal_priority`; a priority record wins over the role). The job limit and the budget still apply to the
+  approval and the run. Tests cover a drain with one job slot, an in-limit proposal and an urgent queued request
+  (the urgent request is worked, the proposal's job stays queued), and the plan's order and priorities for an
+  approved proposal.
+
 ### Added
 
 - An early plan-time check that a design names the code it changes. Root cause: the design's references to

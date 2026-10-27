@@ -105,7 +105,13 @@
 //!   has no limit) is approved as `athena approve-work` would, which reads the job and records the decision.
 //!   Jobs that a work decision records as approved and that are still in state proposed are run, once, without
 //!   a second reading; a closed job is never picked up again. An approval is a model call, so it is guarded by
-//!   the budget and the job limit like any other.
+//!   the budget and the job limit like any other. An approved job is not worked first: it enters the plan
+//!   like any other item (a job approved in this pass gets its plan entry right after the approval) and is
+//!   ordered by the same rules, dependency, then priority, then rung, then age. Its priority is normal unless
+//!   a priority record (`athena priority`), the job's own words or the standing instruction of the role that
+//!   raised it (a `Priority: <level>` line) say otherwise ([`athena_core::plan::proposal_priority`]), so an
+//!   urgent queued request is worked before an old proposal, and the job limit and budget apply to it as to
+//!   the rest.
 //! - **People decide the rest.** Rejecting a proposal, and approving one above its role's limit (or from an
 //!   unknown role), stay with people. Such proposals are listed as waiting, and [`Steps`] has no way to reject
 //!   one or to approve one that is not in limit.
@@ -1308,9 +1314,32 @@ fn drain_with<'a, S: Steps + ?Sized, U: Ui + ?Sized>(
     let previous = steps.previous_rating();
     let mut view = view;
     let (approved, left) = d.approve_all(std::mem::take(&mut view.approvable));
-    // Jobs already approved come first, then the ones approved now, then queued requests.
+    // Jobs already approved come first, then the ones approved now, then queued requests. This is only their
+    // age order (the tiebreak of the plan); it does not put them ahead of anything.
     let (read, unread): (Vec<Item>, Vec<Item>) = view.items.drain(..).partition(|i| i.read);
+    // A job approved now enters the plan like one approved earlier. Root cause of the starvation of urgent
+    // requests: it had no plan entry, so it kept its place ahead of every planned item and used the job slots.
+    let any_approved = !approved.is_empty();
+    for item in &approved {
+        match steps.plan_entry(&item.job) {
+            Some(entry) => view.plan.push(entry),
+            None => d.note(format!(
+                "approved job {} has no plan entry, so it cannot be ordered with the rest",
+                item.job
+            )),
+        }
+    }
     view.items = read.into_iter().chain(approved).chain(unread).collect();
+    if any_approved {
+        // The plan's entries are oldest first, as the items are.
+        let place = |id: &str| {
+            view.items
+                .iter()
+                .position(|i| i.job == id)
+                .unwrap_or(usize::MAX)
+        };
+        view.plan.sort_by_key(|e| place(&e.id));
+    }
     view.waiting.extend(left);
     // Planning comes first: the open requests are planned together, and the items are worked in plan order,
     // not oldest first. Items with no plan entry keep their place ahead of the planned ones; items whose plan
@@ -1639,6 +1668,19 @@ pub fn run_setup(dir: &std::path::Path) -> Result<Rebuild, String> {
     ))
 }
 
+/// The default priority of the work a role raises (it applies when the job's own words give none): the `Priority: <level>` line in the standing instruction of
+/// the role's newest recorded definition, normal when the role is not recorded or states none.
+fn role_priority(records: &Records, role: &str) -> athena_core::plan::Priority {
+    records
+        .roles
+        .iter()
+        .filter(|r| r.name == role)
+        .max_by_key(|r| r.version)
+        .map_or(athena_core::plan::Priority::Normal, |r| {
+            athena_core::plan::Priority::from_text(&r.prompt)
+        })
+}
+
 /// The steps against a real repository.
 pub struct RealSteps<'a> {
     pub athena: &'a Athena,
@@ -1682,17 +1724,17 @@ impl<'a> RealSteps<'a> {
     /// of the paths and referenced jobs it names.
     fn entry_of(&self, records: &Records, head: &str, job: &str) -> Option<PlanEntry> {
         let record = records.jobs.get(job)?;
-        let hint = records.work_items.iter().find_map(|work| {
-            let decision = work_decisions::decision_of(records, work)?;
-            match &decision.decision {
-                athena_data::records::WorkDecisionState::Approved { job: made }
-                    if made.as_str() == job =>
-                {
-                    Some(work.rung)
-                }
-                _ => None,
-            }
+        // The proposal this job carries out, if it was made by approving one.
+        let proposal = records.work_items.iter().find(|work| {
+            work_decisions::decision_of(records, work).is_some_and(|decision| {
+                matches!(
+                    &decision.decision,
+                    athena_data::records::WorkDecisionState::Approved { job: made }
+                        if made.as_str() == job
+                )
+            })
         });
+        let hint = proposal.map(|work| work.rung);
         let job_exists = |id: &str| records.jobs.contains_key(id);
         // A lookup that fails counts the path as present, so a git error never invents an open question.
         let path_exists = |path: &str| self.athena.git.path_exists(head, path).unwrap_or(true);
@@ -1705,7 +1747,7 @@ impl<'a> RealSteps<'a> {
             .flatten()
             .map(|b| athena_core::reading::brief_topics(&String::from_utf8_lossy(&b)))
             .unwrap_or_default();
-        Some(athena_core::reading::plan_entry(
+        let mut entry = athena_core::reading::plan_entry(
             record,
             hint,
             &athena_core::reading::Lookup {
@@ -1713,7 +1755,17 @@ impl<'a> RealSteps<'a> {
                 path_exists: &path_exists,
                 brief: &brief,
             },
-        ))
+        );
+        // A job made from a proposal ranks like any other item: normal unless a priority record, its words or
+        // the role that raised it say otherwise.
+        if let Some(work) = proposal {
+            entry.priority = athena_core::plan::proposal_priority(
+                (!record.priorities.is_empty()).then(|| record.priority()),
+                entry.priority,
+                role_priority(records, &work.role),
+            );
+        }
+        Some(entry)
     }
 
     fn audience_cost(&self) -> f64 {

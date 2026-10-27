@@ -14,6 +14,9 @@
 //!   (`athena priority`), which wins. A request that serves a BRIEF.md addendum stating a priority is ranked
 //!   at least that high (see `reading::plan_entry`). With no priority set every item is normal and the order
 //!   is the ladder, then age. [`Plan::priority_violations`] checks a built order against the priorities.
+//!   The job of an approved steward proposal is an item like any other: its priority is normal unless a
+//!   priority record or its raising role says otherwise ([`proposal_priority`]), and it is ordered by the same
+//!   rules, not worked ahead of the plan.
 //! - **Parallel groups.** A wave is split into groups of items that no dependency links and whose touched
 //!   paths are disjoint; the items of one group could run side by side. An item that names no touched path is
 //!   never grouped with another, because nothing is known about what it changes. The shared append-only files
@@ -90,6 +93,21 @@ impl Priority {
         }
         Priority::Normal
     }
+}
+
+/// The priority of the job that carries out an approved steward proposal.
+///
+/// Root cause it addresses: an approved proposal had no rule of its own for how soon it is worked, and drain
+/// worked it before the plan, so it ranked above urgent requests. It now ranks like any other item, and this is
+/// its priority: normal unless something says otherwise. In order of precedence:
+///
+/// 1. A priority record (`athena priority`) is the user's word and decides alone, even when it says normal or
+///    low. `record` is that record's level, when there is one.
+/// 2. Otherwise `own`, what the job's words or reading give, when that is not normal.
+/// 3. Otherwise `role`, the default priority the raising role's standing instruction states, which is normal
+///    when it states none.
+pub fn proposal_priority(record: Option<Priority>, own: Priority, role: Priority) -> Priority {
+    record.unwrap_or(if own == Priority::Normal { role } else { own })
 }
 
 /// One request, fleshed out.
@@ -873,6 +891,92 @@ mod tests {
         ]);
         assert_eq!(plan.order, ["b", "a", "c", "d"]);
         assert_eq!(plan.groups, [vec!["b", "a", "c"], vec!["d"]]);
+    }
+
+    #[test]
+    fn an_approved_proposal_is_normal_unless_a_record_or_its_role_says_otherwise() {
+        use Priority::{High, Low, Normal, Urgent};
+        // Nothing says otherwise: normal.
+        assert_eq!(proposal_priority(None, Normal, Normal), Normal);
+        // The role's default applies when the job's own words say nothing; what they do say beats the role.
+        assert_eq!(proposal_priority(None, Normal, High), High);
+        assert_eq!(proposal_priority(None, Normal, Low), Low);
+        assert_eq!(proposal_priority(None, Urgent, High), Urgent);
+        assert_eq!(proposal_priority(None, Low, High), Low);
+        assert_eq!(proposal_priority(None, Low, Normal), Low);
+        // A priority record is the user's word and decides alone, even against an urgent role.
+        assert_eq!(proposal_priority(Some(Low), Urgent, Urgent), Low);
+        assert_eq!(proposal_priority(Some(Normal), High, High), Normal);
+        assert_eq!(proposal_priority(Some(Urgent), Normal, Normal), Urgent);
+    }
+
+    #[test]
+    fn an_approved_proposal_is_ordered_among_other_items_by_dependency_priority_rung_then_age() {
+        let (top, low) = rungs();
+        let proposal = |id: &str, rung, deps: &[&str], priority| {
+            with_priority(entry(id, rung, &[id], deps), priority)
+        };
+        // The proposal's job is old and on the lowest rung, with the default priority.
+        let normal = proposal(
+            "proposal-job",
+            low,
+            &[],
+            proposal_priority(None, Priority::Normal, Priority::Normal),
+        );
+        let urgent_request =
+            with_priority(entry("urgent-request", low, &["u"], &[]), Priority::Urgent);
+        let plan = Plan::build(&[normal.clone(), urgent_request.clone()]);
+        assert_eq!(
+            plan.order,
+            ["urgent-request", "proposal-job"],
+            "priority first"
+        );
+
+        // Against normal requests: a higher rung first, then age (the proposal is oldest).
+        let plan = Plan::build(&[
+            normal.clone(),
+            entry("old-request", low, &["o"], &[]),
+            entry("ladder-request", top, &["l"], &[]),
+        ]);
+        assert_eq!(
+            plan.order,
+            ["ladder-request", "proposal-job", "old-request"]
+        );
+
+        // A role that states a higher default puts the proposal ahead of the older normal request.
+        let by_role = proposal(
+            "proposal-job",
+            low,
+            &[],
+            proposal_priority(None, Priority::Normal, Priority::High),
+        );
+        let plan = Plan::build(&[
+            entry("old-request", low, &["o"], &[]),
+            by_role,
+            urgent_request.clone(),
+        ]);
+        assert_eq!(
+            plan.order,
+            ["urgent-request", "proposal-job", "old-request"]
+        );
+
+        // A priority record of low puts it behind even though its role says high.
+        let recorded = proposal(
+            "proposal-job",
+            low,
+            &[],
+            proposal_priority(Some(Priority::Low), Priority::Normal, Priority::High),
+        );
+        let plan = Plan::build(&[recorded, entry("old-request", low, &["o"], &[])]);
+        assert_eq!(plan.order, ["old-request", "proposal-job"]);
+
+        // Dependency still comes first: an urgent request that needs the proposal's job runs after it.
+        let needs = with_priority(
+            entry("needs", low, &["n"], &["proposal-job"]),
+            Priority::Urgent,
+        );
+        let plan = Plan::build(&[normal, needs]);
+        assert_eq!(plan.order, ["proposal-job", "needs"]);
     }
 
     #[test]
