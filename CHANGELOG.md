@@ -9,6 +9,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The reading of a retried or follow-up job now has to reflect the previous result and state the change scope,
+  and a check refuses a reading that does not. Root cause: the reader brief carried an earlier job's findings,
+  criteria and deliverables, but not where the job ended, its verdict, or its out-of-scope items, and nothing
+  required the reading to use any of it, so a reading could drop an earlier finding or widen the scope without
+  notice (seven introspections recorded this). The brief has a new section, "Previous result and change scope",
+  for a "try again on" retry and for each earlier job the request names by id: end state, verdict, number of
+  findings, and the deliverables and out-of-scope items of that job's last reading. The scope is stated even
+  when the earlier job had no reading. New `check_prior_result_and_scope` in `athena-core` (`reading.rs`) runs
+  on every reading made for such a job. It refuses a reading that does not name each earlier job's id in its
+  summary, assumptions or criteria (the previous result), or that lists no deliverable or no out-of-scope item
+  (the change scope), and the error names which of the two is missing. A first-attempt job, a declined reading
+  and a reading that asks a question are not checked. The refusal is reported like any invalid reading, so the
+  user corrects and the reader reads again. The brief section states the rule (the reader prompt is at its
+  token budget, so the rule is not repeated there). The fake reader and the scope
+  guard test reader now name the earlier job and give an out-of-scope item. Overlap with the queued item
+  `reading-omits-prior-verifier-finding-or-end-state`: this covers its end-state half (end state and verdict are
+  carried and must be reflected) and its refusal check in code, and it covers the prior-finding half only by
+  carrying the findings and requiring the reading to name the job. What is left: a check that each unmet
+  criterion, blocker and major finding appears in the reading as its own criterion or a stated reason for
+  leaving it out. This job does not edit or close that item.
 - A candidate that leaves a planned file unchanged is now caught before verification starts. Before the
   candidate is built, Athena compares the producer's change list with the accepted plan's files and the
   reading's expected deliverables. A listed file that was not changed, and that the producer's report does not

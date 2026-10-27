@@ -334,6 +334,22 @@ pub fn reading(deliverables: &[(&str, &str)], criteria: &[(&str, &str)]) -> Valu
     })
 }
 
+/// A scripted reader's reading, made to name each earlier job its brief carries a result for. A reading
+/// for a retry or follow-up that does not is refused, so a reader that returns one fixed reading uses this.
+pub fn naming_earlier_jobs(mut reading: Value, brief: &str) -> Value {
+    let named: String = brief
+        .lines()
+        .filter(|l| l.contains(": end state "))
+        .filter_map(|l| l.strip_prefix("Job ")?.split(':').next())
+        .map(|id| format!(" It addresses the earlier result of {id}."))
+        .collect();
+    if !named.is_empty() {
+        let summary = reading["summary"].as_str().unwrap_or_default();
+        reading["summary"] = Value::String(format!("{summary}{named}"));
+    }
+    reading
+}
+
 /// The default reading: README.md gains a line; one content and one behavior criterion.
 pub fn default_reading() -> Value {
     reading(
@@ -547,7 +563,9 @@ impl Scenario {
         Box::new(move |spec: &AgentInvocation| {
             self.invocations.lock().unwrap().push(spec.role);
             let mut turn = match spec.role {
-                Role::Reader => FakeTurn::output(self.reading.clone()),
+                Role::Reader => {
+                    FakeTurn::output(naming_earlier_jobs(self.reading.clone(), &spec.user_prompt))
+                }
                 Role::Producer => {
                     self.seen_by_producer
                         .lock()

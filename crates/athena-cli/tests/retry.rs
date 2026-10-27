@@ -227,6 +227,87 @@ fn a_job_with_no_earlier_case_says_so() {
 }
 
 #[test]
+fn a_retry_brief_carries_the_result_and_scope_and_a_reading_without_them_is_refused() {
+    // Mode 0: the scenario's reader, which names the earlier job. Mode 1: the default reading, which
+    // names no earlier job. Mode 2: a reading that names the job but lists nothing out of scope.
+    let model = Model::default();
+    let mode = Arc::new(Mutex::new(0u8));
+    let earlier = Arc::new(Mutex::new(String::new()));
+    let inner = Scenario {
+        edits: vec![("README.md".into(), None)],
+        ..Scenario::default()
+    }
+    .script();
+    let (picked, job) = (mode.clone(), earlier.clone());
+    let script: Script = Box::new(move |spec| {
+        let reading = match *picked.lock().unwrap() {
+            1 if spec.role == Role::Reader => Some(default_reading()),
+            2 if spec.role == Role::Reader => {
+                let mut r = default_reading();
+                r["summary"] = json!(format!("Retry {}.", job.lock().unwrap()));
+                r["out_of_scope"] = json!([]);
+                Some(r)
+            }
+            _ => None,
+        };
+        match reading {
+            Some(r) => FakeTurn::output(r),
+            None => inner(spec),
+        }
+    });
+    let fx = Fixture::new();
+    let athena = fx.athena(model.script(script));
+    let first = reject(&model, &athena, "remove the readme", None, true);
+    *earlier.lock().unwrap() = first.clone();
+
+    // The brief states where the job ended, its verdict, and the scope it was read with.
+    *mode.lock().unwrap() = 0;
+    let (proposal, _) = athena.retry(&first, &Lines::default()).unwrap();
+    assert!(proposal.reading.is_some(), "{:?}", proposal.reader_error);
+    let brief = model.last_brief();
+    let section = brief
+        .split("# Previous result and change scope")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no section:\n{brief}"));
+    for needle in [
+        format!("Job {first}: end state rejected; final verification verdict fail"),
+        "> modify README.md".to_string(),
+        "> Other files".to_string(),
+    ] {
+        assert!(section.contains(&needle), "{needle:?}:\n{section}");
+    }
+
+    // A reading that leaves out the previous result is refused, and names what is missing.
+    *mode.lock().unwrap() = 1;
+    let (proposal, _) = athena.retry(&first, &Lines::default()).unwrap();
+    assert!(proposal.reading.is_none());
+    let error = proposal.reader_error.unwrap();
+    assert!(error.contains("the previous result"), "{error}");
+    assert!(error.contains(&first), "{error}");
+    assert!(!error.contains("the change scope"), "{error}");
+
+    // A reading that leaves out the change scope is refused too.
+    *mode.lock().unwrap() = 2;
+    let (proposal, _) = athena.retry(&first, &Lines::default()).unwrap();
+    assert!(proposal.reading.is_none());
+    let error = proposal.reader_error.unwrap();
+    assert!(error.contains("the change scope"), "{error}");
+    assert!(!error.contains("the previous result"), "{error}");
+
+    // A first attempt is never refused for it: the default reading names no earlier job and is accepted.
+    *mode.lock().unwrap() = 1;
+    let proposal = athena
+        .ask("add a greeting to the readme", &Lines::default())
+        .unwrap();
+    assert!(proposal.reading.is_some(), "{:?}", proposal.reader_error);
+    assert!(
+        !model
+            .last_brief()
+            .contains("# Previous result and change scope")
+    );
+}
+
+#[test]
 fn a_job_that_is_not_rejected_or_failed_is_refused() {
     let model = Model::default();
     let (fx, athena) = setup(&model);

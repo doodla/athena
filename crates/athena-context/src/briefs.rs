@@ -1209,6 +1209,12 @@ pub struct EarlierAttempt {
     pub reading_criteria: Vec<String>,
     /// The final reading's deliverables, each as `action path`.
     pub reading_deliverables: Vec<String>,
+    /// The final reading's out-of-scope items.
+    pub reading_out_of_scope: Vec<String>,
+    /// Where the job ended: its outcome state, or the state it was left in when it has no outcome.
+    pub end_state: String,
+    /// The final verification's verdict (`pass` or `fail`); `None` when the job was not verified.
+    pub verdict: Option<String>,
     /// The corrections and answers the user gave to the job's readings, oldest first.
     pub corrections: Vec<String>,
 }
@@ -1256,6 +1262,71 @@ fn retry_cause_section(out: &mut String, cause: &RetryCause) {
         }
     }
     out.push('\n');
+}
+
+/// The heading of the section that carries the previous result and the change scope of each earlier job
+/// a request retries or follows up. The fake reader and the tests find the section by it.
+pub const PRIOR_RESULT_HEADING: &str = "# Previous result and change scope";
+
+/// For a retried job and for each job the request names: where it ended, the verdict, how many findings it
+/// recorded, and the change scope (deliverables and out-of-scope items) to read the new request within. The
+/// scope is stated even when the earlier job had no reading. Writes nothing for a first-attempt job.
+/// A reading that leaves out the result or the scope is refused (`check_prior_result_and_scope` in athena-core).
+fn prior_result_section(out: &mut String, inputs: &ReaderInputs) {
+    let priors: Vec<&EarlierAttempt> = inputs
+        .earlier_attempt
+        .iter()
+        .chain(inputs.referenced_jobs.iter())
+        .collect();
+    if priors.is_empty() {
+        return;
+    }
+    let _ = writeln!(
+        out,
+        "{PRIOR_RESULT_HEADING}\n\nThis request retries or follows up the jobs below. Your reading is refused unless, for each job, it \
+         (1) names the job's id in the summary, an assumption or a criterion, and says how the previous result is addressed: each \
+         finding fixed, or why it no longer applies; and (2) lists the deliverables and the out_of_scope items of the change.\n"
+    );
+    for prior in priors {
+        let end_state = if prior.end_state.is_empty() {
+            "unknown"
+        } else {
+            prior.end_state.as_str()
+        };
+        let verdict = prior
+            .verdict
+            .as_deref()
+            .unwrap_or("none, it was not verified");
+        let _ = writeln!(
+            out,
+            "Job {}: end state {end_state}; final verification verdict {verdict}; {} finding(s) or outcome reason(s) recorded.",
+            prior.job,
+            prior.findings.len()
+        );
+        if prior.reading_deliverables.is_empty() {
+            let _ = writeln!(
+                out,
+                "Allowed change scope, deliverables: none recorded for it. Work out from the repository and the findings which paths this request needs, and list them."
+            );
+        } else {
+            let _ = writeln!(out, "Allowed change scope, deliverables:");
+            for deliverable in &prior.reading_deliverables {
+                let _ = writeln!(out, "{}", quote(deliverable));
+            }
+        }
+        if prior.reading_out_of_scope.is_empty() {
+            let _ = writeln!(
+                out,
+                "Out of scope: none recorded for it. State what this change must leave alone, even if it is only the files the findings do not touch."
+            );
+        } else {
+            let _ = writeln!(out, "Out of scope:");
+            for item in &prior.reading_out_of_scope {
+                let _ = writeln!(out, "{}", quote(item));
+            }
+        }
+        out.push('\n');
+    }
 }
 
 /// Everything the reader's brief is built from.
@@ -1376,6 +1447,7 @@ pub fn reader_brief(inputs: &ReaderInputs) -> String {
             }
         }
     }
+    prior_result_section(&mut out, inputs);
     if !inputs.history.is_empty() {
         let _ = writeln!(out, "# Earlier readings\n");
         for (reading, followed_by) in &inputs.history {
@@ -2772,6 +2844,77 @@ mod tests {
         let first = brief.find("> merge only when opted in").unwrap();
         let second = brief.find("> keep it short").unwrap();
         assert!(heading < first && first < second, "{brief}");
+    }
+
+    #[test]
+    fn a_retry_brief_carries_the_previous_result_and_the_change_scope() {
+        let mut inputs = reader_inputs(&reading());
+        inputs.earlier_attempt = Some(EarlierAttempt {
+            job: "20261010-153012-k7q2".into(),
+            request: "add a changelog file".into(),
+            findings: vec!["major: the file is empty".into()],
+            end_state: "rejected".into(),
+            verdict: Some("fail".into()),
+            reading_deliverables: vec!["create CHANGELOG.md".into()],
+            reading_out_of_scope: vec!["the README".into()],
+            ..Default::default()
+        });
+        let brief = reader_brief(&inputs);
+        let start = brief.find(PRIOR_RESULT_HEADING).expect("section");
+        let section = &brief[start..];
+        assert!(section.contains("Job 20261010-153012-k7q2: end state rejected"));
+        assert!(section.contains("verdict fail"));
+        assert!(section.contains("1 finding(s)"));
+        assert!(section.contains("> create CHANGELOG.md"));
+        assert!(section.contains("> the README"));
+        assert!(section.contains("is refused unless"));
+    }
+
+    #[test]
+    fn the_scope_is_stated_for_a_retry_whose_earlier_job_had_no_reading() {
+        let mut inputs = reader_inputs(&reading());
+        inputs.earlier_attempt = Some(EarlierAttempt {
+            job: "20261010-153012-k7q2".into(),
+            request: "add a changelog file".into(),
+            failed: true,
+            findings: vec!["outcome: admission refused".into()],
+            end_state: "failed".into(),
+            ..Default::default()
+        });
+        let brief = reader_brief(&inputs);
+        let start = brief.find(PRIOR_RESULT_HEADING).expect("section");
+        let section = &brief[start..];
+        assert!(section.contains("end state failed"));
+        assert!(section.contains("verdict none, it was not verified"));
+        assert!(section.contains("deliverables: none recorded for it"));
+        assert!(section.contains("Out of scope: none recorded for it"));
+    }
+
+    #[test]
+    fn a_follow_up_brief_carries_the_result_and_scope_of_each_named_job() {
+        let mut inputs = reader_inputs(&reading());
+        inputs.referenced_jobs = vec![EarlierAttempt {
+            job: "20261011-000000-abcd".into(),
+            request: "fix the readme".into(),
+            end_state: "landed".into(),
+            verdict: Some("pass".into()),
+            reading_deliverables: vec!["modify README.md".into()],
+            reading_out_of_scope: vec!["the changelog".into()],
+            ..Default::default()
+        }];
+        let brief = reader_brief(&inputs);
+        let start = brief.find(PRIOR_RESULT_HEADING).expect("section");
+        let section = &brief[start..];
+        assert!(section.contains("Job 20261011-000000-abcd: end state landed"));
+        assert!(section.contains("verdict pass"));
+        assert!(section.contains("> modify README.md"));
+        assert!(section.contains("> the changelog"));
+    }
+
+    #[test]
+    fn a_first_attempt_brief_has_no_previous_result_section() {
+        let inputs = reader_inputs(&reading());
+        assert!(!reader_brief(&inputs).contains(PRIOR_RESULT_HEADING));
     }
 
     #[test]
