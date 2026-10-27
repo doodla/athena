@@ -7,6 +7,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- The transport items of the host client moved from `crates/athena-core/src/gh/mod.rs` into a new
+  `crates/athena-core/src/gh/transport.rs` (structure pass job G2): `Runner`, `GhCli`, `GhFailure`,
+  `parse_status`, `is_transient`, `transient_text`, `Retry`, `retry_transient`, `HttpReply`, `HttpPost`,
+  `CurlHttp` and `HostErrorLog`. They are re-exported from `gh`, so no import path changes. The text of each
+  item is the same, except that the private helper `clock_entropy` is now `pub(super)` because the host client
+  still calls it. No behavior change.
+
 ### Added
 
 - A design for a no-behavior-change structure pass on `gh.rs` and `run.rs`: `docs/design/structure-pass.md`
