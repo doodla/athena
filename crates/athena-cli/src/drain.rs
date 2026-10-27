@@ -1,6 +1,6 @@
 //! `athena drain`: works the queue itself (requests the steward queued and requests deferred with `athena ask --later`), within a budget the user sets. For each queued request
 //! it reads and runs the job, lands it through the pull-request path (`athena land --pr`), and only then
-//! rates the live page as its audience would. It stops at the first of six reasons ([`Stop`]).
+//! rates the live page as its audience would. It stops at the first of the reasons in [`Stop`].
 //!
 //! - **Planning comes first.** The open requests are fleshed out and planned together
 //!   ([`athena_core::plan`]): goal, requirements-ladder rung, acceptance, open questions, dependencies and
@@ -36,6 +36,16 @@
 //!   job that a retry already names is not listed again. A job whose process is still running is never listed.
 //! - **Stop at a job boundary.** [`Steps::stop_requested`] is asked before every job. A job that has started
 //!   is finished (landed and rated) and no further job starts: [`Stop::Requested`]. Nothing is killed.
+//!
+//! - **Athena rebuilds itself after landing its own code.** A landing that changed `crates/`, `xtask/`,
+//!   `Cargo.toml`, `Cargo.lock` or `setup.sh` ([`touches_build`]) leaves the installed binary behind the
+//!   checkout, and the next config read or landing could fail on it. So before the next job starts, the loop
+//!   calls [`Steps::rebuild`] (the real one runs `setup.sh` in the checkout, which builds from the landed tree
+//!   and installs the binary). If that fails the run ends with [`Stop::RebuildFailed`] and
+//!   [`Report::rebuild_output`] holds the build output. If it succeeds the pass ends with [`Stop::Rebuilt`] and
+//!   [`Report::restart`] holds what is left of the budget and job limit; [`follow_restart`] hands those to the
+//!   new binary (`athena drain` again, see [`reexec_args`]), which carries on with the queue. A stop asked for
+//!   meanwhile wins, and a run with no budget or no job limit left ends as such instead of restarting.
 //!
 //! The loop ([`drain`]) holds every rule and calls the world through [`Steps`], so tests drive it with a
 //! stub and no model, no GitHub and no network:
@@ -104,6 +114,7 @@ use athena_core::audience::{LivePage, Page, Target};
 use athena_core::gh::GhCli;
 use athena_core::plan::{Plan, PlanEntry, Refusal};
 use athena_core::pr::LinkState;
+pub use athena_core::status::{BUILD_PATHS, touches_build};
 use athena_core::store::Records;
 use athena_core::{Athena, Ui, steward, work_decisions};
 use athena_data::records::{AcceptedBy, OutcomeState};
@@ -288,6 +299,53 @@ pub fn changes_outcome(paths: &[String]) -> bool {
         .any(|p| OUTCOME_PATHS.iter().any(|root| p.starts_with(root)))
 }
 
+/// What a rebuild did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rebuild {
+    /// Athena was built from the landed tree and installed.
+    Installed,
+    /// The repository is not Athena's own source (it has no `setup.sh`), so there is nothing to rebuild.
+    NotApplicable,
+}
+
+/// What is left of a run that stopped to rebuild: the new binary continues with this.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct Restart {
+    /// The budget not yet spent, in US dollars.
+    pub budget_usd: f64,
+    pub target_rating: u8,
+    /// The job limit minus the jobs this pass started.
+    pub max_jobs: u32,
+}
+
+impl Restart {
+    pub fn limits(&self) -> Limits {
+        Limits {
+            budget_usd: self.budget_usd,
+            target_rating: self.target_rating,
+            max_jobs: self.max_jobs,
+        }
+    }
+}
+
+/// The arguments the new binary is run with to carry on: `athena drain` with the remaining budget and job
+/// limit, and the same rating threshold.
+pub fn reexec_args(limits: &Limits, json: bool) -> Vec<String> {
+    let mut args = vec![
+        "drain".to_string(),
+        "--budget".into(),
+        format!("{}", limits.budget_usd),
+        "--rating-threshold".into(),
+        limits.target_rating.to_string(),
+        "--job-limit".into(),
+        limits.max_jobs.to_string(),
+    ];
+    if json {
+        args.push("--json".into());
+    }
+    args
+}
+
 /// The result of landing a verified job through the pull-request path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Landing {
@@ -358,6 +416,12 @@ pub trait Steps {
     /// The most [`Steps::check_page`] may cost: the cap of one call times the number of studies it checks. The
     /// loop asks the budget for this much before it calls the check.
     fn check_cap(&self) -> f64;
+    /// Builds and installs Athena from the tree a landing just advanced, the steps of `./setup.sh`. It is asked
+    /// once after a landing that touched [`BUILD_PATHS`]. An error is the build output. The default builds
+    /// nothing, as for a repository that is not Athena's own source.
+    fn rebuild(&self) -> Result<Rebuild, String> {
+        Ok(Rebuild::NotApplicable)
+    }
     /// The plan entry of `job` as the records stand now. The planning pass asks for it after it has read an
     /// unread request, because a reading gives the entry its goal, acceptance and touched paths. None (the
     /// default) keeps the entry the queue view carried.
@@ -400,16 +464,24 @@ pub enum Stop {
     /// The user asked the loop to stop (`athena drain-stop`). The job in progress was finished first and no
     /// further job was started; nothing was killed.
     Requested,
+    /// A landing changed Athena's own code and Athena was rebuilt and installed. The pass ends so that the new
+    /// binary can carry on with what is left ([`Report::restart`]); [`follow_restart`] does that.
+    Rebuilt,
+    /// A landing changed Athena's own code and the rebuild failed. Nothing more starts, and
+    /// [`Report::rebuild_output`] holds the build output.
+    RebuildFailed,
 }
 
 impl Stop {
-    pub const ALL: [Stop; 6] = [
+    pub const ALL: [Stop; 8] = [
         Stop::TargetMet,
         Stop::BudgetSpent,
         Stop::RepeatedFailure,
         Stop::QueueEmpty,
         Stop::JobLimit,
         Stop::Requested,
+        Stop::Rebuilt,
+        Stop::RebuildFailed,
     ];
 
     pub fn label(self) -> &'static str {
@@ -420,6 +492,8 @@ impl Stop {
             Stop::QueueEmpty => "queue empty",
             Stop::JobLimit => "job limit",
             Stop::Requested => "stop requested",
+            Stop::Rebuilt => "rebuilt",
+            Stop::RebuildFailed => "rebuild failed",
         }
     }
 
@@ -436,6 +510,12 @@ impl Stop {
             Stop::JobLimit => "the job limit was reached",
             Stop::Requested => {
                 "a stop was asked for; the job in progress was finished and no further job was started, so the rest stays queued"
+            }
+            Stop::Rebuilt => {
+                "a landing changed Athena's own code, so Athena was rebuilt and installed; the new binary carries on with the remaining budget and job limit"
+            }
+            Stop::RebuildFailed => {
+                "a landing changed Athena's own code and rebuilding it failed; the build output follows and the rest stays queued"
             }
         }
     }
@@ -500,6 +580,10 @@ pub struct Report {
     pub refused: Vec<Refusal>,
     /// Anything that went wrong beside the stop reason, such as a rating that could not be taken.
     pub notes: Vec<String>,
+    /// The build output, when `stop` is `rebuild-failed`.
+    pub rebuild_output: Option<String>,
+    /// What is left to carry on with, when `stop` is `rebuilt` ([`follow_restart`]).
+    pub restart: Option<Restart>,
 }
 
 impl Report {
@@ -521,6 +605,10 @@ struct State {
     rating: Option<RatingLine>,
     held_back: Option<String>,
     notes: Vec<String>,
+    /// Set by a landing that touched [`BUILD_PATHS`] and cleared by the rebuild that follows it.
+    rebuild_due: bool,
+    /// The build output of a failed rebuild.
+    rebuild_output: Option<String>,
     /// What the planning pass spent reading an item, charged to that item's job line when it runs.
     read_cost: std::collections::BTreeMap<String, f64>,
     /// Why the run is ending, once any worker has found a reason (the first reason found stands), and the
@@ -748,9 +836,11 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
         match self.steps.land(job) {
             Landing::Landed { changed } => {
                 let outcome = changes_outcome(&changed);
+                let build = touches_build(&changed);
                 {
                     let mut st = self.st();
                     st.jobs[at].landing = "landed".into();
+                    st.rebuild_due |= build;
                     if outcome {
                         st.outcome_landings += 1;
                     }
@@ -1059,10 +1149,41 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 rating: None,
                 held_back: None,
                 notes: Vec::new(),
+                rebuild_due: false,
+                rebuild_output: None,
                 read_cost: Default::default(),
                 stop: None,
             }),
             landing: Mutex::new(()),
+        }
+    }
+
+    /// Rebuilds and installs Athena when a landing touched [`BUILD_PATHS`] since the last rebuild. Returns
+    /// whether it installed a new build, or None when the rebuild failed (the run is then ended with
+    /// [`Stop::RebuildFailed`], which replaces any other reason: the installed binary is stale, and the build
+    /// output is what the user needs). Landings wait while it builds, because a landing moves the checkout
+    /// the build reads.
+    fn rebuild_if_due(&self) -> Option<bool> {
+        let _one_at_a_time = self.landing.lock().unwrap_or_else(PoisonError::into_inner);
+        if !std::mem::take(&mut self.st().rebuild_due) {
+            return Some(false);
+        }
+        self.ui.line(
+            "drain      the landing changed Athena's own code; rebuilding and installing it (setup.sh)",
+        );
+        match self.steps.rebuild() {
+            Ok(Rebuild::Installed) => {
+                self.ui.line("drain      Athena rebuilt and installed");
+                Some(true)
+            }
+            Ok(Rebuild::NotApplicable) => Some(false),
+            Err(output) => {
+                self.ui.line("drain      rebuild failed; stopping");
+                let mut st = self.st();
+                st.rebuild_output = Some(output);
+                st.stop = Some((Stop::RebuildFailed, None));
+                None
+            }
         }
     }
 
@@ -1071,8 +1192,15 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
     fn finish(&self, item: &Item, end: ItemEnd) {
         match end {
             ItemEnd::Landed => {
+                let Some(rebuilt) = self.rebuild_if_due() else {
+                    return;
+                };
                 if let Some(reason) = self.rate() {
                     self.set_stop(reason, None);
+                }
+                // The first reason found stands; a run that is ending anyway has still been rebuilt.
+                if rebuilt {
+                    self.set_stop(Stop::Rebuilt, None);
                 }
             }
             ItemEnd::Failed => self.set_stop(Stop::RepeatedFailure, Some(item.job.clone())),
@@ -1204,7 +1332,26 @@ fn drain_with<'a, S: Steps + ?Sized, U: Ui + ?Sized>(
     }
     run(d, batches);
     let st = d.st();
-    let (stop, failed_item) = st.stop.clone().unwrap_or((Stop::QueueEmpty, None));
+    let (mut stop, failed_item) = st.stop.clone().unwrap_or((Stop::QueueEmpty, None));
+    // A rebuilt Athena carries on with what is left, unless there is nothing left or a stop was asked for.
+    let mut restart = None;
+    if stop == Stop::Rebuilt {
+        let jobs_left = limits.max_jobs.saturating_sub(st.started);
+        let budget_left = limits.budget_usd - st.budget.spent();
+        if steps.stop_requested() {
+            stop = Stop::Requested;
+        } else if jobs_left == 0 {
+            stop = Stop::JobLimit;
+        } else if budget_left <= 0.0 {
+            stop = Stop::BudgetSpent;
+        } else {
+            restart = Some(Restart {
+                budget_usd: budget_left,
+                target_rating: limits.target_rating,
+                max_jobs: jobs_left,
+            });
+        }
+    }
     let landed = st.landed.len() as u32;
     // With nothing landed the only rating there is, if any, is the stale one, and it says so.
     let rating = st.rating.or_else(|| {
@@ -1235,7 +1382,28 @@ fn drain_with<'a, S: Steps + ?Sized, U: Ui + ?Sized>(
         refused: plan.refused,
         notes: st.notes.clone(),
         jobs: st.jobs.clone(),
+        rebuild_output: st.rebuild_output.clone(),
+        restart,
     })
+}
+
+/// Carries a drain across a rebuild: when `report` ended in [`Stop::Rebuilt`], `restart` is called with what is
+/// left of the budget and job limit and its result is the run's result. The real `restart` replaces this
+/// process with the newly installed binary (`athena drain` with [`reexec_args`]) and returns only if that
+/// failed. Any other report is returned as it is.
+pub fn follow_restart(
+    report: Report,
+    ui: &dyn Ui,
+    restart: &dyn Fn(Limits) -> anyhow::Result<Report>,
+) -> anyhow::Result<Report> {
+    let Some(left) = report.restart else {
+        return Ok(report);
+    };
+    ui.line(&format!(
+        "drain      continuing with the new build: ${:.2} and {} job(s) left",
+        left.budget_usd, left.max_jobs
+    ));
+    restart(left.limits())
 }
 
 /// The coordinated plan of the open requests, as `athena plan` prints it.
@@ -1429,6 +1597,32 @@ pub fn study_text(
         sha,
         files: text,
     })
+}
+
+/// Builds and installs Athena from the checkout at `dir` by running its `setup.sh`, which is the one command
+/// that does it (`./setup.sh`). A checkout with no `setup.sh` is not Athena's own source: nothing is built.
+/// A failure is the exit status followed by what the script printed.
+pub fn run_setup(dir: &std::path::Path) -> Result<Rebuild, String> {
+    let script = dir.join("setup.sh");
+    if !script.is_file() {
+        return Ok(Rebuild::NotApplicable);
+    }
+    let out = std::process::Command::new("sh")
+        .arg(&script)
+        .current_dir(dir)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("could not run {}: {e}", script.display()))?;
+    if out.status.success() {
+        return Ok(Rebuild::Installed);
+    }
+    Err(format!(
+        "{} failed ({})\n{}{}",
+        script.display(),
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    ))
 }
 
 /// The steps against a real repository.
@@ -1700,6 +1894,10 @@ impl Steps for RealSteps<'_> {
             },
             other => other,
         }
+    }
+
+    fn rebuild(&self) -> Result<Rebuild, String> {
+        run_setup(self.athena.git.dir())
     }
 
     fn check_cap(&self) -> f64 {

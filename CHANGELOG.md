@@ -9,6 +9,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `athena drain` rebuilds and re-executes Athena after it lands a change to its own code. A landing that touched
+  `crates/`, `xtask/`, `Cargo.toml`, `Cargo.lock` or `setup.sh` runs the steps of `./setup.sh` in the checkout
+  (build from the landed tree, install the binary) before the next job starts, once however many landings
+  there were; the pass then ends as `rebuilt` and the newly installed binary is run as `athena drain` with the
+  remaining budget and job limit (and the same rating threshold), so an unattended run goes on across its own
+  landings and no longer fails on a config field the old binary does not know. If the rebuild fails the run
+  stops as `rebuild failed` and prints the build output; the landing stands and the rest stays queued. A stop
+  asked for with `athena drain-stop` wins over the restart, and a run with no budget or job limit left ends as
+  that instead. Landings that touch only other paths (`docs/`, `records/`, `studies/`) rebuild nothing.
+- `athena status` and every command that runs agents (`go`, `drain`, `audit`, `audience`) print one line when the
+  installed binary's build commit is older than `HEAD` for `crates/`, `xtask/`, `Cargo.toml`, `Cargo.lock` and
+  `setup.sh` (`stale_build` in the status JSON): a stale binary is no longer silent. Changes to `docs/` or
+  `records/` never trigger it, and neither does a build that names no commit.
 - `athena hestia review --backfill` runs the error review over the backlog, which the review after each new
   introspection never saw. Once, and safe to repeat: a repeated cause in a stage that `athena.toml` switches off
   (the planner and the critic, while `[job_plan]` is off) is skipped as dormant; an open request that addresses a

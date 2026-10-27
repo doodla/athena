@@ -11,7 +11,7 @@ use athena_agent::fake::Script;
 use athena_cli::display;
 use athena_cli::drain::{
     self, Approval, Caps, Check, Item, Lander, Landing, Limits, QueueView, Rate, Read, ReadOf,
-    RealSteps, Run, Steps, Stop, Waiting,
+    RealSteps, Rebuild, Run, Steps, Stop, Waiting,
 };
 use athena_core::audience::Page;
 use athena_core::commits::{Committer, message};
@@ -72,9 +72,26 @@ struct Stub {
     no_outcome_first: bool,
     stop: Cell<bool>,
     log: RefCell<Vec<String>>,
+    /// When set, a landing that touches Athena's own code rebuilds: `Ok` installs the build named "new", `Err`
+    /// fails with this build output. Not set means the repository is not Athena's source (nothing is rebuilt).
+    rebuild: Option<Result<(), &'static str>>,
+    /// The build commit of the binary running now; "old" until a rebuild installs "new".
+    build: RefCell<String>,
+    /// Each job run and the build commit it ran under, in order.
+    ran_under: RefCell<Vec<(String, String)>>,
+    /// When set, the queue leaves out the requests that have landed.
+    drop_landed: bool,
 }
 
 impl Stub {
+    /// A stub whose running binary is the build "old".
+    fn old_build() -> Stub {
+        Stub {
+            build: RefCell::new("old".into()),
+            ..Stub::default()
+        }
+    }
+
     fn log(&self) -> Vec<String> {
         self.log.borrow().clone()
     }
@@ -93,12 +110,20 @@ impl Steps for Stub {
             read,
             ..Item::queued(j, &format!("title of {j}"))
         };
+        // A new process reads the queue again, and a request that landed is no longer in it.
+        let landed =
+            |j: &&str| self.drop_landed && self.log.borrow().contains(&format!("land {j}"));
         Ok(QueueView {
             items: self
                 .read_items
                 .iter()
                 .map(|j| item(j, true))
-                .chain(self.items.iter().map(|j| item(j, false)))
+                .chain(
+                    self.items
+                        .iter()
+                        .filter(|j| !landed(j))
+                        .map(|j| item(j, false)),
+                )
                 .chain(self.interrupted.iter().map(|j| Item {
                     interrupted: true,
                     ..item(j, false)
@@ -142,6 +167,9 @@ impl Steps for Stub {
     fn run(&self, job: &str) -> Run {
         let first_run = !self.log.borrow().iter().any(|l| l.starts_with("run "));
         self.log.borrow_mut().push(format!("run {job}"));
+        self.ran_under
+            .borrow_mut()
+            .push((job.to_string(), self.build.borrow().clone()));
         if self.stop_when_running == Some(job) {
             self.stop.set(true);
         }
@@ -191,6 +219,20 @@ impl Steps for Stub {
     }
     fn check_cap(&self) -> f64 {
         self.check_cap
+    }
+    fn rebuild(&self) -> Result<Rebuild, String> {
+        match self.rebuild {
+            None => Ok(Rebuild::NotApplicable),
+            Some(Ok(())) => {
+                self.log.borrow_mut().push("rebuild".into());
+                *self.build.borrow_mut() = "new".into();
+                Ok(Rebuild::Installed)
+            }
+            Some(Err(output)) => {
+                self.log.borrow_mut().push("rebuild".into());
+                Err(output.to_string())
+            }
+        }
     }
     fn rate(&self) -> Rate {
         self.log.borrow_mut().push("rate".into());
@@ -934,6 +976,293 @@ fn the_json_report_names_the_stop_the_money_the_rating_and_what_is_left() {
     for needle in ["stopped", "job ", "spent", "rating", "queued", "waiting"] {
         assert!(text.contains(needle), "{needle}: {text}");
     }
+}
+
+/// A stub whose first item lands a change to Athena's own code, with a rebuild that does `rebuild`.
+fn rebuilding(rebuild: Result<(), &'static str>) -> Stub {
+    Stub {
+        items: vec!["a", "b"],
+        outcomes: passing(),
+        ratings: RefCell::new(vec![1, 1]),
+        unrelated: vec!["a"],
+        rebuild: Some(rebuild),
+        drop_landed: true,
+        ..Stub::old_build()
+    }
+}
+
+fn rebuilds(stub: &Stub) -> usize {
+    stub.log().iter().filter(|e| *e == "rebuild").count()
+}
+
+#[test]
+fn a_landing_that_changes_athenas_code_rebuilds_once_and_the_next_item_runs_under_the_new_build() {
+    let stub = rebuilding(Ok(()));
+    let first = drain::drain(&stub, limits(9.0), &Quiet).unwrap();
+    // The pass ends at the landing, with the rebuild done and the second item not started.
+    assert_eq!(first.stop, Stop::Rebuilt);
+    assert_eq!(rebuilds(&stub), 1);
+    assert_eq!(
+        *stub.ran_under.borrow(),
+        [("a".to_string(), "old".to_string())]
+    );
+    // What is left is the budget less the read (0.1), run (0.5) and rating (0.2) of a, and one job fewer.
+    let left = first.restart.expect("a rebuilt run carries on");
+    assert_eq!(left.max_jobs, 9);
+    assert!((left.budget_usd - 8.2).abs() < 1e-9, "{left:?}");
+    assert_eq!(left.target_rating, 4);
+
+    // The new binary is started with those limits; here it is the same stub, now running the new build.
+    let seen = RefCell::new(None);
+    let report = drain::follow_restart(first, &Quiet, &|limits| {
+        *seen.borrow_mut() = Some(limits);
+        drain::drain(&stub, limits, &Quiet)
+    })
+    .unwrap();
+    assert_eq!(seen.into_inner(), Some(left.limits()));
+    assert_eq!(rebuilds(&stub), 1, "one rebuild in all: {:?}", stub.log());
+    assert_eq!(
+        *stub.ran_under.borrow(),
+        [
+            ("a".to_string(), "old".to_string()),
+            ("b".to_string(), "new".to_string())
+        ]
+    );
+    assert_eq!(report.stop, Stop::QueueEmpty);
+    assert_eq!(report.landed, 1);
+    assert_eq!(report.jobs.len(), 1);
+    assert_eq!(report.jobs[0].item, "b");
+    assert!(report.restart.is_none() && report.rebuild_output.is_none());
+}
+
+#[test]
+fn a_landing_that_changes_only_docs_or_records_rebuilds_nothing_and_the_run_goes_on() {
+    // Both landings change README.md and a study file, which no build reads.
+    let stub = Stub {
+        unrelated: Vec::new(),
+        ..rebuilding(Ok(()))
+    };
+    let report = drain::drain(&stub, limits(9.0), &Quiet).unwrap();
+    assert_eq!(report.stop, Stop::QueueEmpty);
+    assert_eq!(report.landed, 2);
+    assert_eq!(rebuilds(&stub), 0);
+    assert!(report.restart.is_none());
+    assert_eq!(
+        *stub.ran_under.borrow(),
+        [
+            ("a".to_string(), "old".to_string()),
+            ("b".to_string(), "old".to_string())
+        ]
+    );
+}
+
+#[test]
+fn a_failed_rebuild_stops_the_drain_as_rebuild_failed_with_the_build_output() {
+    let output = "error[E0432]: unresolved import `athena_core::nothing`\nerror: could not compile `athena-cli`";
+    let stub = rebuilding(Err(output));
+    let report = drain::drain(&stub, limits(9.0), &Quiet).unwrap();
+    assert_eq!(report.stop, Stop::RebuildFailed);
+    assert_eq!(report.stop.label(), "rebuild failed");
+    assert_eq!(report.rebuild_output.as_deref(), Some(output));
+    assert!(
+        report.restart.is_none(),
+        "nothing carries on after a failed build"
+    );
+    // The landing stands, but nothing more starts: no second item, no rating of the page.
+    assert_eq!(report.landed, 1);
+    assert_eq!(rebuilds(&stub), 1);
+    assert_eq!(stub.ran_under.borrow().len(), 1);
+    assert!(!stub.log().iter().any(|e| e == "rate"), "{:?}", stub.log());
+    // The user sees the reason and the build output.
+    let text = display::drain(&report);
+    assert!(text.contains("stopped     rebuild failed"), "{text}");
+    assert!(text.contains("could not compile `athena-cli`"), "{text}");
+    // follow_restart has nothing to carry on with and returns the report as it is.
+    let same = drain::follow_restart(report.clone(), &Quiet, &|_| panic!("no restart")).unwrap();
+    assert_eq!(same, report);
+}
+
+#[test]
+fn a_rebuilt_run_with_no_job_limit_left_or_a_stop_asked_for_does_not_restart() {
+    // One job allowed: the rebuild is done, and the run ends as the job limit.
+    let stub = rebuilding(Ok(()));
+    let one = Limits {
+        max_jobs: 1,
+        ..limits(9.0)
+    };
+    let report = drain::drain(&stub, one, &Quiet).unwrap();
+    assert_eq!(report.stop, Stop::JobLimit);
+    assert_eq!(rebuilds(&stub), 1);
+    assert!(report.restart.is_none());
+
+    // A stop asked for while the job ran wins over carrying on.
+    let stub = Stub {
+        stop_when_running: Some("a"),
+        ..rebuilding(Ok(()))
+    };
+    let report = drain::drain(&stub, limits(9.0), &Quiet).unwrap();
+    assert_eq!(report.stop, Stop::Requested);
+    assert_eq!(rebuilds(&stub), 1);
+    assert!(report.restart.is_none());
+}
+
+#[test]
+fn the_new_binary_is_started_with_the_remaining_budget_and_job_limit() {
+    let left = Limits {
+        budget_usd: 8.25,
+        target_rating: 3,
+        max_jobs: 9,
+    };
+    assert_eq!(
+        drain::reexec_args(&left, false),
+        [
+            "drain",
+            "--budget",
+            "8.25",
+            "--rating-threshold",
+            "3",
+            "--job-limit",
+            "9"
+        ]
+    );
+    assert_eq!(drain::reexec_args(&left, true).last().unwrap(), "--json");
+}
+
+#[test]
+fn only_changes_to_code_and_the_files_that_build_it_touch_the_build() {
+    let paths = |p: &[&str]| p.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    for yes in [
+        "crates/athena-cli/src/drain.rs",
+        "crates/athena-core/Cargo.toml",
+        "xtask/src/main.rs",
+        "Cargo.toml",
+        "Cargo.lock",
+        "setup.sh",
+    ] {
+        assert!(drain::touches_build(&paths(&["README.md", yes])), "{yes}");
+    }
+    for no in [
+        "README.md",
+        "docs/decisions.md",
+        "records/jobs/x.json",
+        "CHANGELOG.md",
+        "crates-notes.md",
+        "Cargo.toml.bak",
+        "studies/s/claims.json",
+    ] {
+        assert!(!drain::touches_build(&paths(&[no])), "{no}");
+    }
+    assert!(!drain::touches_build(&[]));
+}
+
+#[test]
+fn the_real_rebuild_runs_the_checkouts_setup_script_and_reports_its_output_when_it_fails() {
+    let fx = Fixture::new();
+    let athena = fx.athena(Scenario::default().script());
+    let lander = RecordingLander::default();
+    let steps = RealSteps {
+        athena: &athena,
+        ui: &Quiet,
+        page: &StubPage,
+        lander: &lander,
+    };
+    // A repository that is not Athena's source has no setup.sh: nothing is built.
+    assert_eq!(steps.rebuild(), Ok(Rebuild::NotApplicable));
+
+    write(
+        fx.root(),
+        &[("setup.sh", "echo built > built-here.txt\necho installing\n")],
+    );
+    assert_eq!(steps.rebuild(), Ok(Rebuild::Installed));
+    assert_eq!(fx.file("built-here.txt").as_deref(), Some("built\n"));
+
+    write(
+        fx.root(),
+        &[(
+            "setup.sh",
+            "echo compiling athena-cli\necho 'error: could not compile' >&2\nexit 3\n",
+        )],
+    );
+    let failure = steps.rebuild().unwrap_err();
+    for needle in [
+        "exit status: 3",
+        "compiling athena-cli",
+        "error: could not compile",
+    ] {
+        assert!(failure.contains(needle), "{needle}: {failure}");
+    }
+}
+
+/// Commits `files` to the demo repository.
+fn commit_files(fx: &Fixture, files: &[(&str, &str)], message: &str) {
+    write(fx.root(), files);
+    fx.git.run(["add", "-A"]).unwrap();
+    fx.git.run(["commit", "-q", "-m", message]).unwrap();
+}
+
+fn stale_lines(text: &str) -> usize {
+    text.lines()
+        .filter(|l| l.starts_with("stale build"))
+        .count()
+}
+
+#[test]
+fn status_prints_the_stale_build_line_after_a_crates_change_and_none_after_docs_or_records_changes()
+{
+    let fx = Fixture::new();
+    let mut athena = fx.athena(Scenario::default().script());
+    athena.build.source_commit = fx.head();
+    let built_from = fx.head();
+    let show = |athena: &Athena| display::status(&athena.status().unwrap());
+
+    // Built from HEAD: nothing is stale.
+    assert!(athena.status().unwrap().stale_build.is_none());
+    assert_eq!(stale_lines(&show(&athena)), 0);
+
+    // Docs and records change after the build: the binary is not older for the paths it is built from.
+    commit_files(
+        &fx,
+        &[
+            ("docs/notes.md", "a note\n"),
+            ("records/notes.md", "a note\n"),
+        ],
+        "Change docs and records",
+    );
+    assert_ne!(fx.head(), built_from);
+    assert!(athena.status().unwrap().stale_build.is_none());
+    assert_eq!(stale_lines(&show(&athena)), 0);
+    assert!(athena.stale_build().is_none());
+
+    // A crates/ file changes after the build: one line, naming both commits.
+    commit_files(
+        &fx,
+        &[("crates/demo/src/lib.rs", "pub fn two() {}\n")],
+        "Change a crate",
+    );
+    let text = show(&athena);
+    assert_eq!(stale_lines(&text), 1, "{text}");
+    let line = athena.status().unwrap().stale_build.unwrap();
+    assert!(
+        line.contains(&built_from[..12]) && line.contains(&fx.head()[..12]),
+        "{line}"
+    );
+    assert!(text.contains(&line), "{text}");
+    assert_eq!(athena.stale_build(), Some(line));
+
+    // Each other watched path counts too.
+    for path in ["xtask/src/main.rs", "Cargo.toml", "Cargo.lock", "setup.sh"] {
+        let mut athena = fx.athena(Scenario::default().script());
+        athena.build.source_commit = fx.head();
+        assert!(athena.stale_build().is_none(), "{path}: built from HEAD");
+        commit_files(&fx, &[(path, "changed\n")], "Change a build file");
+        assert!(athena.stale_build().is_some(), "{path}");
+    }
+
+    // Once the binary is built from HEAD, or names no commit, there is no line.
+    athena.build.source_commit = fx.head();
+    assert!(athena.status().unwrap().stale_build.is_none());
+    athena.build.source_commit = "unknown".into();
+    assert!(athena.stale_build().is_none());
 }
 
 #[test]

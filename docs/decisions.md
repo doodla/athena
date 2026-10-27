@@ -3633,3 +3633,59 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Provenance:** Read: `run.rs`, `snapshot.rs`, D117, the retry tests. Measured: `cargo test --locked -p
   athena-cli --test retry` (14 passed). The job's account of job 20261027-011733-vrsk is from the request, not
   re-read.
+
+## D140 · Drain rebuilds Athena after landing its own code and carries on in the new binary
+
+- **Case:** On 2026-10-26 a drain landed a change that added the config field `hard_producer_effort`. The
+  installed binary was still the old build, so the next config read failed with "unknown field
+  hard_producer_effort" and the next landing (job 20261025-034237-2rep) stopped until `./setup.sh` was run by
+  hand. Nothing warned that the binary was behind the checkout; the stale-build request of 2026-10-17 never
+  landed. The case is from the request, not re-read.
+- **Decision:**
+  1. **Rebuild after the landing.** `drain::touches_build` (paths in `athena_core::status::BUILD_PATHS`:
+     `crates/`, `xtask/`, `Cargo.toml`, `Cargo.lock`, `setup.sh`) marks a landing as one that leaves the
+     installed binary behind. Before the next job starts, `Steps::rebuild` runs once for all such landings since
+     the last rebuild. The real step (`drain::run_setup`) runs `sh setup.sh` in the checkout, which is the one
+     command that builds from the landed tree and installs the binary, so there is no second copy of those steps.
+     A checkout with no `setup.sh` is not Athena's source and builds nothing. Landings and the rebuild exclude
+     each other, because a landing moves the checkout the build reads.
+  2. **Carry on in the new binary.** After a good rebuild the pass ends as the new stop reason `rebuilt` with
+     `Report::restart` (remaining budget, remaining job limit, same rating threshold), and `drain::follow_restart`
+     calls the restart: in `main.rs` it replaces the process with the installed binary run as `athena drain
+     --budget <left> --rating-threshold <n> --job-limit <left>` (`drain::reexec_args`; the installed path is
+     `$ATHENA_HOME/bin/athena`, because the running file was replaced on disk). The rating is taken before the
+     rebuild's stop, so a landing is rated as before. A stop asked for with `drain-stop` wins over the restart,
+     and a run with no job limit or budget left ends as `job limit` or `budget spent`.
+  3. **A failed rebuild stops the run.** The stop reason is `rebuild failed`, `Report::rebuild_output` holds the
+     script's exit status and output, and `athena drain` prints it. It replaces any other reason found at the
+     same time, no rating is taken, and the landing stands.
+  4. **A stale binary is never silent.** `athena_core::status::stale_build_line` compares the binary's build
+     commit with `HEAD` using `git diff --name-only <build> HEAD -- <BUILD_PATHS>`; one line results when the
+     build commit is an ancestor of `HEAD` and any of those paths changed. `athena status` prints it (and
+     `stale_build` in its JSON), and `go`, `drain`, `audit` and `audience` print the same line to standard
+     error. Changes to `docs/` or `records/` never trigger it; a build that names no commit or a commit this
+     repository lacks gives no line.
+- **Callers and writers touched, with the covering test:** `Drain::finish` and `Drain::rebuild_if_due`:
+  `a_landing_that_changes_athenas_code_rebuilds_once_and_the_next_item_runs_under_the_new_build`,
+  `a_landing_that_changes_only_docs_or_records_rebuilds_nothing_and_the_run_goes_on`,
+  `a_failed_rebuild_stops_the_drain_as_rebuild_failed_with_the_build_output`,
+  `a_rebuilt_run_with_no_job_limit_left_or_a_stop_asked_for_does_not_restart`; `drain::reexec_args`:
+  `the_new_binary_is_started_with_the_remaining_budget_and_job_limit`; `RealSteps::rebuild`:
+  `the_real_rebuild_runs_the_checkouts_setup_script_and_reports_its_output_when_it_fails`; `Athena::status` and
+  `Athena::stale_build`:
+  `status_prints_the_stale_build_line_after_a_crates_change_and_none_after_docs_or_records_changes` (all in
+  `crates/athena-cli/tests/drain.rs`).
+- **Alternatives:** (a) Only warn, and leave the rebuild to the user: an unattended run still stops. (b) Rebuild
+  with `cargo` directly in drain: a second copy of the steps `setup.sh` already owns, which drifts. (c) Rebuild
+  and keep running in the old binary: the old binary is what fails on the new config. (d) Carry the run's
+  landings across the restart so "target met" still counts them: more state in the arguments for a rare case.
+  (e) The rules above (chosen).
+- **Tradeoff:** A run that restarts forgets its own earlier landings, so a "target met" in the new process
+  needs a landing of that process; the run is then more likely to go on than to stop early. The earlier pass's
+  final report is not printed (its lines went to standard error as they happened). A dirty checkout fails the
+  rebuild (setup refuses it), which stops the run with the build output.
+- **Reversal cost:** Low. Remove the `rebuild` step, the two stop reasons and the warning calls.
+- **Provenance:** Read: `drain.rs`, `main.rs`, `status.rs`, `setup.sh`, `xtask/src/main.rs` (`build_and_adopt`
+  records the build commit through `ATHENA_BUILD_COMMIT` and installs to `$ATHENA_HOME/bin/athena`),
+  `commits.rs` (a landing fast-forwards the checkout). Measured: `cargo test --locked -p athena-cli --test
+  drain`.
