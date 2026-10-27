@@ -1,0 +1,151 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261027-074449-beam",
+  "n": 1,
+  "at": "2026-10-27T18:00:59.494570809Z",
+  "invocation_seq": 1,
+  "base_commit": "810cb1ce79a3ed508d42f8194c185a74d47e493b",
+  "config_sha256": "b812f3c3683488bcd9485d235a6a234bc80722c9f137a6c232094fae2ee727d6",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Add a stall watchdog to the agent driver so stalled producers stop early",
+  "summary": "Root cause: the agent driver loop in crates/athena-agent/src/claude.rs enforces only the fixed wall-clock deadline (1800s for the producer). It cannot tell a stalled agent from a slow one, so a stalled run burns the whole deadline (the failure class behind jobs 20261010-154006-vc5k, 20261016-052605-qw38 and 20261018-070117-qmxv). Fix: the driver tracks the last time the agent's stream showed activity and ends the run early, as a timed-out outcome with a stall reason, when none appears for a fraction of the timeout (1/3, about 10 minutes at 1800s). Existing resumable-timeout handling (kept work tree, progress note) then applies.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "New stall and no-false-stall tests; fmt, clippy and test must pass."
+    },
+    {
+      "id": "root-cause",
+      "how": "Fix in the shared driver loop used by all roles, not in one job or prompt."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run a fake silent agent and check it stops early with a stall reason."
+    },
+    {
+      "id": "small",
+      "how": "One focused change, with no new invocation field and no new outcome variant."
+    },
+    {
+      "id": "rust",
+      "how": "Rust only."
+    },
+    {
+      "id": "outcome-check",
+      "how": "The check is that a stalled run ends early, not that a watchdog exists."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Goal: stop a stalled producer early instead of letting it burn the full deadline. Audience: Athena's operator and maintainers who read the failure outcome.",
+    "Job 20261010-154006-vc5k, job 20261016-052605-qw38 and job 20261018-070117-qmxv: each ended with 'deadline of 1800s reached' and was never verified. Their original requests (verifier prompt note, auditor and warden roles, baseline checks) are separate work and are NOT redone here. The shared cause is addressed, so a retry of them can fail fast or resume. Their prior deliverables are not changed by this job.",
+    "The 'keep partial work, resumable timeout' half of the proposals already exists (keep_timed_out_work in athena-core run/mod.rs, InvocationOutcome::TimedOut, a progress note, and a retry seeded from the kept tree). The missing piece is the stall detection, so this job adds only that.",
+    "Activity means any line on the agent's stdout stream (tool calls, messages), so a hung or silent agent is caught. The stall window is derived from the invocation timeout (timeout/3) rather than a new AgentInvocation field, to avoid touching every constructor.",
+    "A stall stop reuses InvocationOutcome::TimedOut with a distinct detail such as 'no progress for Ns'; no new outcome variant, so records and the schema are unchanged."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "The change description names the root cause: the driver has only a fixed deadline and no progress tracking or stall detection. The fix is in the driver loop in crates/athena-agent/src/claude.rs, with the reason string built in procs.rs next to deadline_reason.",
+      "kind": "content"
+    },
+    {
+      "text": "A new test in crates/athena-agent/src/claude.rs uses a fake agent that emits one line and then goes silent, with a long timeout. It asserts that the run ends well before the timeout with outcome TimedOut and a detail naming a stall (no progress). It fails on the base commit and passes with the change. Run: cargo test -p athena-agent.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A second test shows an agent that keeps emitting lines, slowly but within the stall window, is not stopped early and still completes. It proves slow is told apart from stalled, so the fix covers the class and not one job.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The existing deadline test (detail 'deadline of 2s reached') still passes unchanged, and an agent that is silent for the whole timeout still reports the deadline reason when the stall window is not shorter than the timeout.",
+      "kind": "behavior"
+    },
+    {
+      "text": "cargo fmt --check, cargo clippy --all-targets and cargo test (whole workspace) all pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has an entry describing the stall watchdog and its window.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-agent/src/claude.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-agent/src/procs.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.15
+    },
+    {
+      "path": "crates/athena-agent/src/lib.rs",
+      "action": "modify",
+      "p": 0.1
+    }
+  ],
+  "out_of_scope": [
+    "Redoing the original work of jobs 20261010-154006-vc5k (verifier prompt note), 20261016-052605-qw38 (auditor and warden roles) and 20261018-070117-qmxv (baseline checks); the verifier prompt and briefs, auditor and warden modules, and check baseline logic stay unchanged",
+    "Splitting jobs into sub-jobs or a planning step",
+    "A test-budget wrapper for producer commands (introspection 5z2s / jcd2 test budget)",
+    "Changing the 1800s deadline value, athena.toml, defaults.toml or CI workflows",
+    "Reworking the existing kept-work and retry mechanism",
+    "Adding a new InvocationOutcome variant or record schema change"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.2,
+        "p90": 2.8
+      },
+      "wall_time_s": {
+        "p10": 450.0,
+        "p50": 1500.0,
+        "p90": 3000.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7219653179190751,
+      "p_verification_passes": 0.65748031496063,
+      "p_user_intervenes": 0.06911764705882353,
+      "cost_usd": {
+        "p10": 0.4980230791725342,
+        "p50": 1.1070018745952828,
+        "p90": 2.712268045275895
+      },
+      "wall_time_s": {
+        "p10": 500.2130179826275,
+        "p50": 1505.1531618132028,
+        "p90": 2989.515353195276
+      }
+    }
+  },
+  "departures": "Slightly higher cost and lower pass odds than the reference. Time-based driver tests need care to stay fast and not flake, and workspace-wide clippy and test runs are cold-built.",
+  "urgent_reason": "Cuts wasted time: a stalled producer no longer burns the full 1800s deadline, and the same failure no longer repeats across jobs."
+}
