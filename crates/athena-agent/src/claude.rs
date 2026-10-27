@@ -5,7 +5,9 @@
 //! explicit environment, writes the brief to the child's standard input (so prompts never appear in
 //! argument lists), and reads stream-json events as they arrive. It refuses to start inside a nested run.
 
-use crate::procs::{GRACE, Registry, deadline_reason, isolate, kill_group};
+use crate::procs::{
+    GRACE, Registry, deadline_reason, isolate, kill_group, stall_reason, stall_window,
+};
 use crate::stream::{ResultEvent, StreamState};
 use crate::{
     AgentDriver, AgentInvocation, AgentOutput, DriverError, UsageSink, nested_marker, refuse_nested,
@@ -356,9 +358,15 @@ impl AgentDriver for ClaudeCodeDriver {
         let mut state = StreamState::default();
         let mut killed: Option<String> = None;
         let mut deadline_hit = false;
+        // Root cause of agents burning the whole deadline: only wall-clock time was enforced, so a stalled
+        // agent looked the same as a slow one. Any stream line counts as progress; silence for the stall
+        // window ends the run early as a timeout, so the kept-work path still applies.
+        let stall = stall_window(spec.timeout);
+        let mut last_line = Instant::now();
         loop {
             match rx.recv_timeout(Duration::from_secs(1)) {
                 Ok(line) => {
+                    last_line = Instant::now();
                     state.on_line(&line);
                     sink.update(&state.partial_usage(), &state.commands_run());
                 }
@@ -368,6 +376,9 @@ impl AgentDriver for ClaudeCodeDriver {
             if killed.is_none() {
                 if Instant::now() >= deadline {
                     killed = Some(deadline_reason(spec.timeout.as_secs()));
+                    deadline_hit = true;
+                } else if let Some(window) = stall.filter(|w| last_line.elapsed() >= *w) {
+                    killed = Some(stall_reason(window.as_secs()));
                     deadline_hit = true;
                 } else if self.registry.stopped() {
                     killed = Some("the kill switch was turned on".into());
@@ -579,6 +590,9 @@ if [ "$MODE" = "spill" ]; then
 fi
 echo '{"type":"assistant","message":{"id":"msg_1","model":"claude-haiku-5-5","content":[{"type":"tool_use","id":"tu_1","name":"Bash","input":{"command":"cargo test"}}],"usage":{"input_tokens":3,"cache_creation_input_tokens":100,"cache_read_input_tokens":0,"output_tokens":7}}}'
 if [ "$MODE" = "hang" ]; then sleep 60; exit 0; fi
+if [ "$MODE" = "chatty" ]; then
+  for i in 1 2 3 4 5 6 7; do sleep 1; echo '{"type":"system","subtype":"init","session_id":"0c32611b-5c0a-43eb-bacb-20a90569b268"}'; done
+fi
 if [ "$MODE" = "stopped" ]; then echo on > "$STOP_FILE"; exit 143; fi
 echo '{"type":"result","subtype":"success","is_error":false,"num_turns":2,"duration_api_ms":900,"total_cost_usd":0.002,"usage":{"input_tokens":5,"cache_creation_input_tokens":120,"cache_read_input_tokens":40,"output_tokens":60},"modelUsage":{"claude-haiku-5-5":{"inputTokens":5,"outputTokens":60,"cacheReadInputTokens":40,"cacheCreationInputTokens":120,"costUSD":0.002}},"permission_denials":[],"structured_output":{"answer":42}}'
 "#;
@@ -732,6 +746,53 @@ echo '{"type":"result","subtype":"success","is_error":false,"num_turns":2,"durat
         );
         assert_eq!(out.cost_usd, None);
         assert!(registry.entries().is_empty(), "the group left the registry");
+    }
+
+    #[test]
+    fn a_stalled_agent_is_stopped_long_before_its_deadline() {
+        // A silent agent is a stalled one: with a 12s deadline the stall window is 4s.
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let registry = Registry::new(state.path());
+        let driver = driver(stand_in(dir.path()), registry.clone());
+        let started = Instant::now();
+        let out = driver
+            .invoke(
+                &spec(dir.path(), "hang", Duration::from_secs(12)),
+                &mut Recorder::default(),
+            )
+            .unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the stall was not caught before the deadline"
+        );
+        assert_eq!(out.outcome, InvocationOutcome::TimedOut);
+        assert!(out.detail.as_deref().unwrap().contains("stalled"));
+        assert!(registry.entries().is_empty(), "the group left the registry");
+    }
+
+    #[test]
+    fn an_agent_that_keeps_emitting_past_the_stall_window_is_not_stopped() {
+        // Seven seconds of output a second apart outlasts the 4s window, yet never goes silent for it.
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let driver = driver(stand_in(dir.path()), Registry::new(state.path()));
+        let out = driver
+            .invoke(
+                &spec(dir.path(), "chatty", Duration::from_secs(12)),
+                &mut Recorder::default(),
+            )
+            .unwrap();
+        assert_eq!(out.outcome, InvocationOutcome::Success);
+    }
+
+    #[test]
+    fn the_stall_window_is_a_third_of_the_deadline_and_absent_when_not_shorter() {
+        assert_eq!(
+            stall_window(Duration::from_secs(1800)),
+            Some(Duration::from_secs(600))
+        );
+        assert_eq!(stall_window(Duration::from_secs(2)), None);
     }
 
     #[test]

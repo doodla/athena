@@ -1,0 +1,140 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261027-054145-b5ka",
+  "n": 1,
+  "at": "2026-10-27T05:44:33.151280615Z",
+  "invocation_seq": 1,
+  "base_commit": "cb2552e0da0d2d7fe823030a63174d4679292930",
+  "config_sha256": "b812f3c3683488bcd9485d235a6a234bc80722c9f137a6c232094fae2ee727d6",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Stop stalled agents early instead of burning the full deadline",
+  "summary": "The agent driver (crates/athena-agent/src/claude.rs) only enforces a fixed wall-clock deadline and has no progress tracking, so a stalled producer burns the full 1800s before the job learns it. Add a stall watchdog in the driver: if the agent's stream shows no activity for a fraction of the timeout, kill it and report a timed-out outcome whose reason says it stalled. The existing timed-out work-keeping path (keep_timed_out_work) then preserves the partial work. Audience: Athena maintainers and the verifier.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "New stall tests plus workspace cargo test and clippy criteria."
+    },
+    {
+      "id": "root-cause",
+      "how": "Fix in the shared driver loop, not per job or role."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Tests run a hanging stand-in and check the early timed-out outcome."
+    },
+    {
+      "id": "rust",
+      "how": "Rust change only."
+    },
+    {
+      "id": "small",
+      "how": "One focused change in the driver."
+    },
+    {
+      "id": "verified",
+      "how": "Verifier runs cargo test, clippy, and fmt --check."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Root cause: the driver loop in claude.rs checks only Instant::now() >= clock + spec.timeout, with no notion of progress, so stalled and slow producers are indistinguishable until the full deadline.",
+    "Work retention on timeout already exists (keep_timed_out_work, TimedOut outcome, athena retry seeding), so the missing piece is early detection, not resumability.",
+    "Progress is read as any new stream-json line from the agent; the stall window is derived from spec.timeout (about one third, with a floor) so no AgentInvocation field is added and every role benefits.",
+    "Stalled kills reuse InvocationOutcome::TimedOut with a distinct 'stalled' detail so downstream handling stays the same.",
+    "No change to athena.toml or defaults.toml is needed."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "The change description names the root cause: the driver enforces only a fixed wall-clock deadline and never tracks progress, so a stalled agent is indistinguishable from a slow one.",
+      "kind": "content"
+    },
+    {
+      "text": "A new test in crates/athena-agent/src/claude.rs runs a stand-in agent that emits nothing and hangs, with a long timeout. It asserts the driver ends it well before the deadline, with outcome TimedOut and a detail that says it stalled. It fails on the base commit and passes with the change. Run: cargo test -p athena-agent.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test shows an agent that keeps emitting stream lines past the stall window is not killed early, and the existing deadline test (detail 'deadline of 2s reached') still passes. Run: cargo test -p athena-agent.",
+      "kind": "behavior"
+    },
+    {
+      "text": "cargo fmt --check, cargo clippy --workspace --all-targets, and cargo test --workspace all pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The stall rule is implemented once in the shared driver loop, not per role or per job, so every agent role gets it.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-agent/src/claude.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-agent/src/procs.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.2
+    }
+  ],
+  "out_of_scope": [
+    "Splitting jobs into sub-jobs in planning",
+    "Changing the configured producer timeout values",
+    "Per-test-command budget wrappers",
+    "Changing records/ or past job outcomes"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.4,
+        "p50": 1.0,
+        "p90": 2.5
+      },
+      "wall_time_s": {
+        "p10": 420.0,
+        "p50": 1400.0,
+        "p90": 2800.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.719533527696793,
+      "p_verification_passes": 0.6571428571428571,
+      "p_user_intervenes": 0.0714828897338403,
+      "cost_usd": {
+        "p10": 0.4867715,
+        "p50": 1.1082699,
+        "p90": 2.728978100000001
+      },
+      "wall_time_s": {
+        "p10": 482.72475482913313,
+        "p50": 1485.6554257679998,
+        "p90": 2963.9563382105976
+      }
+    }
+  },
+  "departures": null,
+  "urgent_reason": "Cuts wasted time: producers that stall now stop early instead of burning the full 1800s deadline, which caused 9 failures in 8 jobs."
+}
