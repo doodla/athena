@@ -19,6 +19,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   candidate, checks, verifier) and the invocation numbers (reading 1, producer 2, verifier 3, with the
   baseline recorded as taken before invocation 2). It fails if the baseline is taken after the producer.
   Test only; no behavior change.
+- `crates/athena-core/src/run.rs` became `crates/athena-core/src/run/mod.rs` (structure pass job R1). The
+  file moved unchanged except that the two `include_str!` paths in its test module gained one `../`. The
+  `run` module path is the same, so no caller changed. No behavior change.
 - Class labels derived from evidence, so `athena score-jev` has labeled cases without anyone's opinion (BRIEF.md
   addendum of 2026-10-25: the labels come from what happened afterwards). `athena score-jev --derive` reads the
   records and appends `athena.class-label/1` records with `labeled_by: evidence` and a `basis` that cites the
