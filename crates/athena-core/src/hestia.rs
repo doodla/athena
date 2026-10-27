@@ -19,7 +19,8 @@
 //! repeated causes for `athena status`.
 //!
 //! The review only reacts to a new introspection, so causes that repeated before it existed have no request.
-//! `athena hestia review --backfill` ([`Athena::error_review_backfill`]) sweeps them once: a cause whose stage is
+//! The backfill ([`Athena::error_review_backfill`]) sweeps them. Athena runs it at the start of every drain and in
+//! each sweep ([`Athena::review_passes`]); `athena hestia review --backfill` runs it on request: a cause whose stage is
 //! switched off in `athena.toml` is dormant and skipped; an open request that already addresses a cause is
 //! re-queued through the same builder and the old one closed; any other cause gets a new root-cause request.
 //! The five highest-ranked causes (most occurrences, then most recent) are urgent and the rest normal. A second
@@ -774,8 +775,9 @@ fn plan_backfill(records: &Records, disabled: &[Stage]) -> Vec<Planned> {
 }
 
 impl Athena {
-    /// `athena hestia review --backfill`: reviews the repeated causes already in the records, which the review
-    /// that runs after each new introspection never saw. See the module comment for the rules. Safe to run
+    /// The error review backfill. Athena runs it at the start of every drain and in each sweep, and
+    /// `athena hestia review --backfill` runs it on request. It reviews the repeated causes already in the
+    /// records, which the review that runs after each new introspection never saw. See the module comment for the rules. Safe to run
     /// again: a cause that an open request covers is skipped, so a second run changes nothing.
     pub fn error_review_backfill(&self, ui: &dyn Ui) -> Result<BackfillReport> {
         let head = self.head()?;
@@ -894,7 +896,46 @@ impl Athena {
         Ok(Some((job, cause)))
     }
 
-    /// Runs `checks`, commits the report as a record, and returns it.
+    /// Athena's own housekeeping, run at the start of every drain and in every sweep so that no person has to
+    /// run `athena hestia review --backfill` or `athena score-jev --derive` (both commands stay available).
+    /// Runs the error review backfill, then the evidence-label derivation, and returns one summary line for
+    /// each. Both are idempotent: over unchanged records they write nothing. A pass that fails is reported in
+    /// its line and does not stop the other or the caller.
+    pub fn review_passes(&self, ui: &dyn Ui) -> Vec<String> {
+        let backfill = match self.error_review_backfill(ui) {
+            Ok(r) => format!(
+                "hestia     backfill: {} repeated cause(s) · queued {} · re-queued {} · priority set {} · skipped {}",
+                r.lines.len(),
+                r.count(BackfillAction::Queued),
+                r.count(BackfillAction::Requeued),
+                r.count(BackfillAction::Reprioritised),
+                r.count(BackfillAction::Skipped)
+            ),
+            Err(e) => format!("hestia     backfill: could not run: {e:#}"),
+        };
+        let derive = match self.derive_labels() {
+            Ok(s) => format!(
+                "hestia     evidence labels: {} derived · {} already derived · {} reviewed by a person · {} without evidence",
+                s.derived, s.already_derived, s.reviewed, s.no_evidence
+            ),
+            Err(e) => format!("hestia     evidence labels: could not run: {e:#}"),
+        };
+        vec![backfill, derive]
+    }
+
+    /// Runs `checks`, commits the report as a record, and returns it. The review passes of
+    /// [`Athena::review_passes`] run first and their summary lines go to `ui`.
+    pub fn hestia_sweep_with(&self, checks: &[Box<dyn Check>], ui: &dyn Ui) -> Result<Sweep> {
+        if self.git.head()?.is_some() {
+            for line in self.review_passes(ui) {
+                ui.line(&line);
+            }
+        }
+        self.hestia_sweep(checks)
+    }
+
+    /// Runs `checks`, commits the report as a record, and returns it. Prints nothing; the sweep that also runs
+    /// the review passes is [`Athena::hestia_sweep_with`].
     pub fn hestia_sweep(&self, checks: &[Box<dyn Check>]) -> Result<Sweep> {
         let known = match self.git.head()? {
             Some(head) => Records::load(&self.git, &head)?,
@@ -1775,6 +1816,55 @@ mod tests {
             .filter(|l| l.reason.contains("already covers the cause"))
             .count();
         assert_eq!(covered, 7, "{}", second.render());
+    }
+
+    /// A UI that keeps the lines it is given.
+    #[derive(Default)]
+    struct Lines(std::sync::Mutex<Vec<String>>);
+
+    impl Ui for Lines {
+        fn line(&self, text: &str) {
+            self.0.lock().unwrap().push(text.to_string());
+        }
+    }
+
+    #[test]
+    fn a_sweep_runs_the_backfill_and_the_derivation_and_a_repeat_sweep_changes_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_in(dir.path(), state.path());
+        backlog(dir.path(), &athena);
+        let before = records(&athena).request_jobs().len();
+
+        let ui = Lines::default();
+        athena.hestia_sweep_with(&[clean("alpha", 1)], &ui).unwrap();
+        let first = records(&athena);
+        assert!(
+            first.request_jobs().len() > before,
+            "the sweep ran the backfill, which queued requests"
+        );
+        {
+            let lines = ui.0.lock().unwrap();
+            assert!(
+                lines.iter().any(|l| l.contains("backfill: 9 repeated")),
+                "{lines:?}"
+            );
+            assert!(
+                lines.iter().any(|l| l.contains("evidence labels:")),
+                "{lines:?}"
+            );
+        }
+
+        let requests = first.request_jobs().len();
+        let labels = first.class_labels.len();
+        let sweeps = first.hestia_sweeps.len();
+        let ui = Lines::default();
+        athena.hestia_sweep_with(&[clean("alpha", 1)], &ui).unwrap();
+        let second = records(&athena);
+        assert_eq!(second.request_jobs().len(), requests, "nothing queued");
+        assert_eq!(second.class_labels.len(), labels, "no label written");
+        assert_eq!(second.hestia_sweeps.len(), sweeps + 1, "only the report");
+        assert_eq!(ui.0.lock().unwrap().len(), 2, "one line per pass");
     }
 
     #[test]

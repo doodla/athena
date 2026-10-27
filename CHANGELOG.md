@@ -9,6 +9,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Athena now runs the error review backfill and the evidence-label derivation on its own, at the start of every
+  `athena drain` (before the queue is read) and in every `athena hestia sweep`, and prints one summary line for
+  each. Both are idempotent, so a second drain or sweep over unchanged records writes nothing. A pass that fails
+  says so in its line and does not stop the drain or the sweep. `athena hestia review --backfill` and
+  `athena score-jev --derive` stay available. The recurrence-after-prevention label is now stable: its basis
+  states the threshold (at least 5 closed jobs) instead of the live count of closed jobs, so a rerun after more
+  jobs close no longer writes a fresh copy of the label. This supersedes request 20261026-224929-6erm.
 - `athena drain` rebuilds and re-executes Athena after it lands a change to its own code. A landing that touched
   `crates/`, `xtask/`, `Cargo.toml`, `Cargo.lock` or `setup.sh` runs the steps of `./setup.sh` in the checkout
   (build from the landed tree, install the binary) before the next job starts, once however many landings

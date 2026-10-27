@@ -517,7 +517,7 @@ pub struct StatusView {
     /// switched off are not here; see `dormant_causes`.
     pub repeated_causes: Vec<crate::hestia::RepeatedCause>,
     /// The open repeated causes whose stage (planner or critic) `athena.toml` has switched off: listed apart,
-    /// never queued by the error review backfill (`athena hestia review --backfill`).
+    /// never queued by the error review backfill that Athena runs at drain start and in each sweep.
     pub dormant_causes: Vec<crate::hestia::DormantCause>,
     pub invalid_records: Vec<String>,
     pub next: Vec<String>,
@@ -1138,7 +1138,7 @@ impl Athena {
             crate::hestia::split_dormant(open_causes, &disabled);
         for c in repeated_causes.iter().filter(|c| c.request.is_none()) {
             next.push(format!(
-                "repeated cause in {} jobs has no root-cause request   # {} · athena hestia review --backfill queues it",
+                "repeated cause in {} jobs has no root-cause request   # {} · Athena queues it at the next drain or sweep (athena hestia review --backfill does it now)",
                 c.jobs.len(),
                 c.cause
             ));

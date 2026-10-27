@@ -433,6 +433,13 @@ pub trait Steps {
     fn stop_requested(&self) -> bool {
         false
     }
+    /// Athena's own housekeeping before the queue is read: the error review backfill and the evidence-label
+    /// derivation, so no person has to run `athena hestia review --backfill` or `athena score-jev --derive`.
+    /// Returns one summary line for each pass. Both are idempotent, and a pass that fails says so in its line
+    /// without stopping the drain. The default runs nothing, as for steps that have no records.
+    fn review_passes(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// The file whose presence asks a running drain to stop at the next job boundary, inside the repository's
@@ -1290,6 +1297,10 @@ fn drain_with<'a, S: Steps + ?Sized, U: Ui + ?Sized>(
     run: impl FnOnce(&Drain<'a, S, U>, Vec<Vec<Item>>),
 ) -> anyhow::Result<Report> {
     let limits = d.limits;
+    // Before the queue is read, so a request the backfill queues is worked in this drain.
+    for line in steps.review_passes() {
+        d.ui.line(&line);
+    }
     let view = steps.queue()?;
     let previous = steps.previous_rating();
     let mut view = view;
@@ -1710,6 +1721,10 @@ impl<'a> RealSteps<'a> {
 }
 
 impl Steps for RealSteps<'_> {
+    fn review_passes(&self) -> Vec<String> {
+        self.athena.review_passes(self.ui)
+    }
+
     fn caps(&self) -> anyhow::Result<Caps> {
         let jc = athena_core::capability::JobConfig::at(&self.athena.git, &self.athena.head()?)?;
         Ok(Caps {
@@ -2074,6 +2089,82 @@ mod tests {
             target_rating: 4,
             max_jobs: 10,
         }
+    }
+
+    /// Steps with an empty queue that log when the review passes run and when the queue is read.
+    struct Housekeeping {
+        calls: RefCell<Vec<&'static str>>,
+    }
+
+    impl Steps for Housekeeping {
+        fn review_passes(&self) -> Vec<String> {
+            self.calls.borrow_mut().push("review");
+            vec![
+                "backfill: summary".into(),
+                "evidence labels: summary".into(),
+            ]
+        }
+        fn caps(&self) -> anyhow::Result<Caps> {
+            Ok(Caps {
+                read: 0.5,
+                run: 1.0,
+                rate: 0.5,
+            })
+        }
+        fn queue(&self) -> anyhow::Result<QueueView> {
+            self.calls.borrow_mut().push("queue");
+            Ok(QueueView::default())
+        }
+        fn approve(&self, _: &str) -> Approval {
+            Approval::default()
+        }
+        fn previous_rating(&self) -> Option<u8> {
+            None
+        }
+        fn read(&self, _: ReadOf<'_>) -> Read {
+            unreachable!("nothing is queued")
+        }
+        fn run(&self, _: &str) -> Run {
+            unreachable!("nothing is queued")
+        }
+        fn land(&self, _: &str) -> Landing {
+            unreachable!("nothing is queued")
+        }
+        fn check_page(&self) -> Check {
+            Check::pass("stub")
+        }
+        fn check_cap(&self) -> f64 {
+            0.5
+        }
+        fn rate(&self) -> Rate {
+            unreachable!("nothing is queued")
+        }
+    }
+
+    /// A UI that keeps its lines.
+    #[derive(Default)]
+    struct Kept(Mutex<Vec<String>>);
+
+    impl Ui for Kept {
+        fn line(&self, text: &str) {
+            self.0.lock().unwrap().push(text.to_string());
+        }
+    }
+
+    #[test]
+    fn a_drain_runs_the_review_passes_before_it_reads_the_queue_and_prints_a_line_for_each() {
+        let steps = Housekeeping {
+            calls: RefCell::new(Vec::new()),
+        };
+        let ui = Kept::default();
+        drain(&steps, limits(3.0), &ui).unwrap();
+        assert_eq!(*steps.calls.borrow(), ["review", "queue"]);
+        let lines = ui.0.lock().unwrap();
+        assert_eq!(
+            *lines,
+            ["backfill: summary", "evidence labels: summary"],
+            "one line per pass"
+        );
     }
 
     #[test]

@@ -1,0 +1,160 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261027-055334-x7yx",
+  "base_commit": "7a59958d3bd96dfb6d913f8dc0debc862d9f7c8a",
+  "base_fingerprint": "sha256:c326ff58e6629f851e28fe16000c27de3a20f619b3338dab0ccb3c7229b00cf7",
+  "previous_job": "20261027-055331-4w2w",
+  "candidate_commit": "4cf861f110d79aa713ef82154927d3e5f0fdf3af",
+  "candidate_tree": "b3b16b3e6b25c5957e4c4944ab38ea50aa641cf1",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 171227
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 94753
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 60229
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 149343
+    },
+    {
+      "path": "crates/athena-core/src/evidence_labels.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 43635
+    },
+    {
+      "path": "crates/athena-core/src/hestia.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 80649
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 80480
+    }
+  ],
+  "fingerprint": "sha256:858f39cbfe63922e3f2c68ccfe634ab31871e6ef084b1b47ed2fca3881284f31",
+  "violations": [],
+  "producer_report": {
+    "summary": "Athena now runs the error review backfill and the evidence-label derivation by itself at the start of every drain (before the queue is read) and in every hestia sweep, and prints one summary line for each. A failing pass is reported in its line and stops nothing. Root cause of the label churn: the recurrence-after-prevention basis detail held the live count of closed jobs, so each newly closed job made a different basis and derive() wrote a fresh label. The detail now states the threshold (at least STOPPED_MIN_JOBS closed jobs), so it is the same text whenever the evidence is the same. Added Athena::review_passes and hestia_sweep_with in hestia.rs, and a Steps::review_passes hook with a no-op default that RealSteps implements. The hestia sweep command calls hestia_sweep_with with the terminal UI. Doc comments and the status hint were reworded to say Athena runs these passes. A CHANGELOG entry notes it supersedes request 20261026-224929-6erm. Closing that request is left to the landing process.",
+    "files": [
+      "crates/athena-cli/src/drain.rs",
+      "crates/athena-cli/src/main.rs",
+      "crates/athena-cli/tests/drain.rs",
+      "crates/athena-core/src/hestia.rs",
+      "crates/athena-core/src/evidence_labels.rs",
+      "crates/athena-core/src/status.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-cli --lib --locked drain",
+        "result": "pass",
+        "note": "9 passed, including the new test that the review passes run before the queue is read and print one line each"
+      },
+      {
+        "command": "cargo test -p athena-cli --test drain --locked backfill_and_the_derivation",
+        "result": "pass",
+        "note": "RealSteps drain over a seeded repeated-cause backlog: backfill queued 1 request, derivation line printed; the second drain queued 0, derived 0, and left HEAD unchanged"
+      },
+      {
+        "command": "cargo test -p athena-core --locked --lib hestia",
+        "result": "pass",
+        "note": "17 passed, including the new sweep test"
+      },
+      {
+        "command": "cargo test -p athena-core --locked --lib evidence_labels",
+        "result": "pass",
+        "note": "14 passed, including the new stability test"
+      },
+      {
+        "command": "cargo fmt --all",
+        "result": "pass",
+        "note": "applied formatting"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "Ran once. The output was too large to read back (the file was outside the working directory), but the command did not report a nonzero exit."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A drain test in crates/athena-cli/src/drain.rs shows both passes (backfill and derivation) run at drain start and each prints a one-line summary; a second drain with no new records writes nothing (no new commit or records). Run: cargo test -p athena-cli drain.",
+        "status": "met",
+        "evidence": "drain.rs unit test a_drain_runs_the_review_passes_before_it_reads_the_queue_and_prints_a_line_for_each: calls are [review, queue] and the UI gets exactly two lines. The 'second drain writes nothing' half is in the integration test in crates/athena-cli/tests/drain.rs, not in drain.rs itself. That test, a_drain_runs_the_backfill_and_the_derivation_at_its_start_and_a_second_drain_writes_nothing, queues 1 request on the first drain; the second shows 'queued 0', '0 derived' and an unchanged HEAD. Run with cargo test -p athena-cli --test drain backfill_and_the_derivation."
+      },
+      {
+        "criterion": "A test in crates/athena-core/src/evidence_labels.rs shows a recurrence-after-prevention label is not rewritten on a rerun after more jobs have closed with otherwise unchanged evidence (derive returns no labels). Run: cargo test -p athena-core evidence_labels.",
+        "status": "met",
+        "evidence": "Test a_stopped_after_prevention_label_is_not_rewritten_when_more_jobs_close derives a label, adds it to the records, closes 3 more jobs, and derives again: labels are empty and already_derived is 1. It passed in cargo test -p athena-core --lib evidence_labels."
+      },
+      {
+        "criterion": "A hestia.rs test shows a sweep runs the backfill and derivation and a repeat sweep over unchanged records changes nothing. Run: cargo test -p athena-core hestia.",
+        "status": "met",
+        "evidence": "Test a_sweep_runs_the_backfill_and_the_derivation_and_a_repeat_sweep_changes_nothing_else passed. The first sweep queues requests and prints both lines. The second sweep leaves the request count and class-label count unchanged, adds only the sweep record, and prints 2 lines."
+      },
+      {
+        "criterion": "The recurrence-after-prevention basis detail no longer contains the live count of closed jobs, so it is the same text whenever the evidence is the same.",
+        "status": "met",
+        "evidence": "recurrence_vote in evidence_labels.rs now formats 'did not recur over at least {STOPPED_MIN_JOBS} closed jobs' instead of the live `closed` count; the stability test above exercises it."
+      },
+      {
+        "criterion": "cargo fmt --check, cargo clippy --all-targets -- -D warnings and cargo test all pass.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I ran cargo fmt --all, then clippy with -D warnings (clean), then cargo test --locked once, which did not report a nonzero exit."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry describing automatic backfill and derivation at drain start and sweep, and the stable recurrence label, and noting that it supersedes request 20261026-224929-6erm.",
+        "status": "met",
+        "evidence": "A new first bullet under [Unreleased] / Added in CHANGELOG.md covers all of that and cites request 20261026-224929-6erm."
+      },
+      {
+        "criterion": "Doc comments in hestia.rs and drain.rs that say a person runs athena hestia review --backfill or athena score-jev --derive are updated to say Athena runs them; the CLI commands stay available.",
+        "status": "met",
+        "evidence": "The hestia.rs module doc and the error_review_backfill doc, the Steps::review_passes doc in drain.rs, the derive_labels doc in evidence_labels.rs and the status.rs hint and field doc now say Athena runs the passes, with the CLI commands noted as available. The CLI commands in main.rs are unchanged."
+      }
+    ],
+    "open_issues": [
+      "Request 20261026-224929-6erm must be closed by the landing process, citing this job.",
+      "The 'second drain writes nothing' test lives in crates/athena-cli/tests/drain.rs, not in drain.rs, because it needs RealSteps and fixture records. The unit test in drain.rs covers the order and the printed lines.",
+      "The status display from the superseded request (scored-set size, last derived time) was left out, as the brief says.",
+      "The module comment in lib.rs still says only `athena score-jev --derive` runs the derivation. It was outside the Files list, so I did not touch it."
+    ],
+    "mistakes": [
+      "I first ran `tail`, which the hook denied.",
+      "I ran `athena --help` needlessly, which cost tokens.",
+      "I could not read back the full cargo test output because it was saved outside the working directory, so the full-suite pass rests on the absence of a nonzero exit, not on a counted result."
+    ],
+    "learnings": [
+      "derive() skips a rewrite only when the class and the full LabelBasis (including the detail text) are equal, so any live number in the basis detail makes labels unstable.",
+      "Terminal UI lines go to stderr, so adding summary lines to the hestia sweep command does not disturb its --json output on stdout.",
+      "The ClassLabel basis detail for the 'recurred' variant still contains the number of later recurrences. That is a change in the evidence, so it is correct for it to change."
+    ],
+    "desires": [
+      "A way to read a persisted large tool output inside the working directory, so a long test run can be checked for failures."
+    ]
+  }
+}

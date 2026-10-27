@@ -282,7 +282,7 @@ fn recurrence_vote(records: &Records, i: &IntrospectionRecord, class: &RecordId)
             return None;
         }
         format!(
-            "After the prevention in proposal {} landed (job {applied}), the class did not recur over {closed} jobs.",
+            "After the prevention in proposal {} landed (job {applied}), the class did not recur over at least {STOPPED_MIN_JOBS} closed jobs.",
             proposal.record
         )
     } else {
@@ -432,7 +432,8 @@ pub fn derive(records: &Records, now: Timestamp) -> Derivation {
 }
 
 impl Athena {
-    /// `athena score-jev --derive`: derives the evidence labels from the records at the branch tip and commits
+    /// The evidence-label derivation. Athena runs it at the start of every drain and in each sweep, and
+    /// `athena score-jev --derive` runs it on request. It derives the evidence labels from the records at the branch tip and commits
     /// them as new `athena.class-label/1` records, in one commit. Nothing is committed when there is nothing
     /// new, and no existing record is edited.
     pub fn derive_labels(&self) -> Result<Summary> {
@@ -763,6 +764,52 @@ mod tests {
         // The recurrence itself came after the landing, so no prevention follows it: unlabeled.
         assert!(label_of(&d, 2, 40).is_none());
         assert_eq!(d.summary.by_kind["recurrence-after-prevention"], 2);
+    }
+
+    #[test]
+    fn a_stopped_after_prevention_label_is_not_rewritten_when_more_jobs_close() {
+        let mut records = Records::default();
+        records
+            .introspections
+            .push(intro(3, 2, "j002", IntrospectionTrigger::Intervention, D));
+        add_job(
+            &mut records,
+            "jp01",
+            "Apply the default.",
+            19,
+            Some(OutcomeState::Landed),
+        );
+        records.proposals.push(proposal(D, "jp01"));
+        for n in 0..STOPPED_MIN_JOBS as u32 {
+            add_job(
+                &mut records,
+                &format!("k{n:03}"),
+                "Other work.",
+                30 + n,
+                Some(OutcomeState::Landed),
+            );
+        }
+        let first = derive(&records, ts(100));
+        assert_eq!(first.labels.len(), 1);
+        assert!(
+            !first.labels[0].basis[0]
+                .detail
+                .contains(&format!("over {} jobs", STOPPED_MIN_JOBS))
+        );
+        records.class_labels.extend(first.labels);
+        // More jobs close; the evidence about the class is otherwise unchanged.
+        for n in 0..3u32 {
+            add_job(
+                &mut records,
+                &format!("m{n:03}"),
+                "More work.",
+                50 + n,
+                Some(OutcomeState::Landed),
+            );
+        }
+        let second = derive(&records, ts(200));
+        assert!(second.labels.is_empty(), "{:?}", second.labels);
+        assert_eq!(second.summary.already_derived, 1);
     }
 
     #[test]
