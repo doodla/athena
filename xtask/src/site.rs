@@ -252,14 +252,19 @@ pub fn render(study: &Study) -> Result<String> {
         .get("about")
         .ok_or_else(|| anyhow!("intro.json has no `about`"))?;
 
+    let first = study
+        .intro
+        .get("firstmate_in_one_sentence")
+        .ok_or_else(|| anyhow!("intro.json has no `firstmate_in_one_sentence`"))?;
+
     let mut body = String::new();
     let _ = write!(
         body,
         "<header><h1>Athena explains how {sys} handles work</h1>\
          <p class=\"lede\">{athena}</p>\
          <p class=\"lede\">{study_text}</p>\
-         <p class=\"lede\">This page is that study of {sys}. Its study id, <code>{id}</code>, is the name of \
-         the folder under <code>studies/</code> that holds the data this page is generated from. \
+         <p class=\"lede\">{first_text} {first_cites}</p>\
+         <p class=\"lede\">This page is that study of {sys}. \
          Each statement below ends with the id of the claim that supports it; the claims, with links to \
          their sources, are listed at the end.</p>\
          <p class=\"pin\">Pinned {sys} commit: <code>{sha}</code> in {repo_link}</p>\
@@ -267,7 +272,8 @@ pub fn render(study: &Study) -> Result<String> {
         sys = escape(system),
         athena = escape(str_of(about, "athena", "intro.json about")?),
         study_text = escape(str_of(about, "study", "intro.json about")?),
-        id = escape(study_id),
+        first_text = escape(str_of(first, "text", "the firstmate sentence")?),
+        first_cites = cites(first, "the firstmate sentence", &known)?,
         sha = escape(sha),
     );
 
@@ -495,7 +501,10 @@ pub fn render(study: &Study) -> Result<String> {
     let _ = write!(
         body,
         "<section id=\"next-steps\"><h2>Next steps</h2><ul>\
-         <li>Learn about Athena, and how to install and try it: <a href=\"{a}\">{a}</a>.</li>\
+         <li>Install Athena: <code>./setup.sh</code>, run from a clone of the repository.</li>\
+         <li>Try an example request: <code>athena ask \"add a changelog\"</code>. It shows how it read \
+         the request and its predictions, and Enter runs it.</li>\
+         <li>Learn more about Athena: <a href=\"{a}\">{a}</a>.</li>\
          <li>Learn about {sys}, the project studied here, and see how to use it: {firstmate_link}.</li>\
          <li>Check a statement: follow a bracketed claim id to the claim, then its source link to the \
          file and lines in {sys} at the pinned commit.</li></ul></section>",
@@ -553,10 +562,13 @@ pub fn render(study: &Study) -> Result<String> {
 
     let _ = write!(
         body,
-        "<footer>Generated from <code>{}</code>: {} claims at commit <code>{}</code>.</footer>",
+        "<footer>Generated from <code>{}</code>: {} claims at commit <code>{}</code>. The study id, \
+         <code>{}</code>, is the name of the folder under <code>studies/</code> that holds the data \
+         this page is generated from.</footer>",
         escape(STUDY_DIR),
         known.len(),
-        escape(sha)
+        escape(sha),
+        escape(study_id)
     );
 
     Ok(format!(
@@ -681,6 +693,7 @@ mod tests {
             dir.path(),
             "intro.json",
             r#"{"about":{"athena":"Athena is a system.","study":"A study is a reading."},
+                "firstmate_in_one_sentence":{"text":"Firstmate is a tool.","claims":["c1"]},
                 "what":[{"text":"Firstmate does a thing.","claims":["c1"]}],
                 "walkthrough":[{"text":"First step.","claims":["c1"]}],
                 "limits":[{"text":"A limit.","claims":["c1"]}],
@@ -740,6 +753,27 @@ mod tests {
     }
 
     #[test]
+    fn the_real_page_defines_firstmate_first_starts_athena_and_keeps_the_study_id_last() {
+        let html = render(&real_study()).unwrap();
+        let at = |needle: &str| html.find(needle).unwrap_or_else(|| panic!("{needle}"));
+        let sentence = at("Firstmate is a tool that keeps a backlog");
+        assert!(sentence < at("<h3>Words used first</h3>"));
+        assert!(html[sentence..].find("<span class=\"cites\">").unwrap() < 400);
+        let header_end = at("</header>");
+        assert!(!html[..header_end].contains("Its study id"));
+        assert!(at("The study id,") > at("<h2>Claims and sources</h2>"));
+        let next = &html[at("<h2>Next steps</h2>")..];
+        assert!(next.contains("<code>./setup.sh</code>"));
+        assert!(next.contains("<code>athena ask \"add a changelog\"</code>"));
+        // finding ids are consecutive from f1
+        let limits = &html[at("<h2>Limits of this study</h2>")..at("<h2>Next steps</h2>")];
+        for id in ["f1", "f2", "f3"] {
+            assert!(limits.contains(&format!("<strong>{id}</strong>")), "{id}");
+        }
+        assert!(!limits.contains("<strong>f4</strong>"));
+    }
+
+    #[test]
     fn a_github_pin_gives_linked_repository_and_sources_and_others_do_not() {
         let dir = study_dir("[mechanism] A thing happens.", "c1");
         let plain = render(&load(dir.path()).unwrap()).unwrap();
@@ -770,6 +804,7 @@ mod tests {
     fn an_uncited_intro_element_is_an_error() {
         for (path, bad) in [
             ("/what/0/claims", serde_json::json!([])),
+            ("/firstmate_in_one_sentence/claims", serde_json::json!([])),
             ("/walkthrough/0/claims", serde_json::json!(["c99"])),
             ("/limits/0/claims", serde_json::json!([])),
             ("/glossary/0/claims", serde_json::json!([])),

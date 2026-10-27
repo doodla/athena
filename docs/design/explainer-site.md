@@ -21,10 +21,11 @@ published to GitHub Pages from this repository and runs locally with one command
   an error; no page is written from partial data.
 - The page is for a newcomer who knows neither Athena nor firstmate. Its title and heading name Athena, and
   the opening paragraphs (`intro.json` `about`) say what Athena is, what a study is, and who made this one
-  and why, before firstmate appears. A "Start here" section then says what firstmate is (AI coding agents
+  and why. One plain sentence about firstmate (`intro.json` `firstmate_in_one_sentence`, with claim links)
+  follows, before any firstmate term. The study id and its folder are named only in the footer. A "Start here" section then says what firstmate is (AI coding agents
   as workers, who uses it, what problem it solves) and walks one piece of work from start to finish. The
   glossary is its own section after the main sections (it is reference, not a prerequisite), followed by
-  "Next steps" with links to Athena and firstmate. When the pinned repository is on GitHub, the repository
+  "Next steps" with the install command and an example request from the README, and links to Athena and firstmate. When the pinned repository is on GitHub, the repository
   URL and every claim source link to the pinned commit's file and lines (`blob/<sha>/<path>#Lstart-Lend`);
   otherwise they are shown as text. Citation ids are small and muted so they do not break up the prose.
   The text lives in `intro.json` beside the other study files. Every sentence and every glossary term about firstmate cites claim ids from `claims.json`; a

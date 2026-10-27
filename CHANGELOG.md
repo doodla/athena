@@ -9,6 +9,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The explainer page now answers the newcomer's four complaints. Root cause: the page was built for a reader of
+  the study, not for someone arriving at Athena's address. A one-sentence description of firstmate, with its
+  claim links, comes before "Words used first"; the study-id paragraph moved from the header to the footer;
+  the study's findings are numbered f1 to f3 with no gap; and Next steps gives the install command
+  `./setup.sh` and the example request `athena ask "add a changelog"` from the README.
 - Planning now follows the owner's stated priority, and a check proves it. Root cause: a priority stated in a
   BRIEF.md addendum was never an input to plan ordering (only a `Priority:` line or an `athena priority`
   record was), so such work was ordered by default rung and age, and nothing compared the built order with
