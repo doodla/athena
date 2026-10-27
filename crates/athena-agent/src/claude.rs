@@ -5,7 +5,10 @@
 //! explicit environment, writes the brief to the child's standard input (so prompts never appear in
 //! argument lists), and reads stream-json events as they arrive. It refuses to start inside a nested run.
 
-use crate::procs::{GRACE, Registry, deadline_reason, isolate, kill_group};
+use crate::procs::{
+    GRACE, MIN_STALL_WINDOW, Registry, deadline_reason, isolate, kill_group, stall_reason,
+    stall_window,
+};
 use crate::stream::{ResultEvent, StreamState};
 use crate::{
     AgentDriver, AgentInvocation, AgentOutput, DriverError, UsageSink, nested_marker, refuse_nested,
@@ -35,6 +38,8 @@ pub struct ClaudeCodeDriver {
     registry: Registry,
     /// Always true outside this crate's own tests, which run a stand-in program instead of Claude Code.
     refuse_nested_runs: bool,
+    /// The shortest stall window; tests lower it to exercise the watchdog quickly.
+    min_stall_window: Duration,
 }
 
 /// Retries an operation that executes a program while the program file is busy (ETXTBSY): a file that
@@ -101,6 +106,7 @@ impl ClaudeCodeDriver {
             bin,
             version,
             registry,
+            min_stall_window: MIN_STALL_WINDOW,
         })
     }
 
@@ -356,9 +362,14 @@ impl AgentDriver for ClaudeCodeDriver {
         let mut state = StreamState::default();
         let mut killed: Option<String> = None;
         let mut deadline_hit = false;
+        // Root cause of long dead runs: the deadline alone cannot tell a stalled agent from a slow one.
+        // Any line on the stream is activity; silence for the stall window ends the run early.
+        let window = stall_window(spec.timeout, self.min_stall_window);
+        let mut last_activity = Instant::now();
         loop {
             match rx.recv_timeout(Duration::from_secs(1)) {
                 Ok(line) => {
+                    last_activity = Instant::now();
                     state.on_line(&line);
                     sink.update(&state.partial_usage(), &state.commands_run());
                 }
@@ -368,6 +379,9 @@ impl AgentDriver for ClaudeCodeDriver {
             if killed.is_none() {
                 if Instant::now() >= deadline {
                     killed = Some(deadline_reason(spec.timeout.as_secs()));
+                    deadline_hit = true;
+                } else if last_activity.elapsed() >= window {
+                    killed = Some(stall_reason(window.as_secs()));
                     deadline_hit = true;
                 } else if self.registry.stopped() {
                     killed = Some("the kill switch was turned on".into());
@@ -579,6 +593,9 @@ if [ "$MODE" = "spill" ]; then
 fi
 echo '{"type":"assistant","message":{"id":"msg_1","model":"claude-haiku-5-5","content":[{"type":"tool_use","id":"tu_1","name":"Bash","input":{"command":"cargo test"}}],"usage":{"input_tokens":3,"cache_creation_input_tokens":100,"cache_read_input_tokens":0,"output_tokens":7}}}'
 if [ "$MODE" = "hang" ]; then sleep 60; exit 0; fi
+if [ "$MODE" = "slow" ]; then
+  for i in 1 2 3 4; do sleep 2; echo '{"type":"system","subtype":"progress"}'; done
+fi
 if [ "$MODE" = "stopped" ]; then echo on > "$STOP_FILE"; exit 143; fi
 echo '{"type":"result","subtype":"success","is_error":false,"num_turns":2,"duration_api_ms":900,"total_cost_usd":0.002,"usage":{"input_tokens":5,"cache_creation_input_tokens":120,"cache_read_input_tokens":40,"output_tokens":60},"modelUsage":{"claude-haiku-5-5":{"inputTokens":5,"outputTokens":60,"cacheReadInputTokens":40,"cacheCreationInputTokens":120,"costUSD":0.002}},"permission_denials":[],"structured_output":{"answer":42}}'
 "#;
@@ -598,6 +615,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"num_turns":2,"durat
             version,
             registry,
             refuse_nested_runs: false,
+            min_stall_window: crate::procs::MIN_STALL_WINDOW,
         }
     }
 
@@ -732,6 +750,57 @@ echo '{"type":"result","subtype":"success","is_error":false,"num_turns":2,"durat
         );
         assert_eq!(out.cost_usd, None);
         assert!(registry.entries().is_empty(), "the group left the registry");
+    }
+
+    #[test]
+    fn a_silent_agent_is_stopped_early_as_stalled_not_at_the_deadline() {
+        // The stand-in emits one line and goes silent; the 15s timeout gives a 5s stall window.
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let mut driver = driver(stand_in(dir.path()), Registry::new(state.path()));
+        driver.min_stall_window = Duration::from_secs(1);
+        let started = Instant::now();
+        let out = driver
+            .invoke(
+                &spec(dir.path(), "hang", Duration::from_secs(15)),
+                &mut Recorder::default(),
+            )
+            .unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(12),
+            "the stall ended the run well before the timeout"
+        );
+        assert_eq!(out.outcome, InvocationOutcome::TimedOut);
+        let detail = out.detail.unwrap();
+        assert!(detail.contains("no progress for 5s"), "{detail}");
+    }
+
+    #[test]
+    fn a_slow_agent_that_keeps_emitting_is_not_stopped_as_stalled() {
+        // Lines arrive every 2s, inside the 5s window, and the run lasts longer than the window.
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let mut driver = driver(stand_in(dir.path()), Registry::new(state.path()));
+        driver.min_stall_window = Duration::from_secs(1);
+        let out = driver
+            .invoke(
+                &spec(dir.path(), "slow", Duration::from_secs(15)),
+                &mut Recorder::default(),
+            )
+            .unwrap();
+        assert_eq!(out.outcome, InvocationOutcome::Success);
+        assert!(out.wall_s > 5.0, "the run outlasted the stall window");
+    }
+
+    #[test]
+    fn a_stall_window_is_never_shorter_than_its_floor_or_a_third_of_the_timeout() {
+        use crate::procs::stall_window;
+        let floor = Duration::from_secs(60);
+        assert_eq!(
+            stall_window(Duration::from_secs(1800), floor).as_secs(),
+            600
+        );
+        assert_eq!(stall_window(Duration::from_secs(2), floor), floor);
     }
 
     #[test]
