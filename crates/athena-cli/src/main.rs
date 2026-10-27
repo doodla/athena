@@ -985,7 +985,8 @@ fn run(cli: Cli) -> Result<u8> {
                 HestiaAction::Review { .. } => unreachable!("handled above"),
                 HestiaAction::Sweep { json } => {
                     let athena = open(true)?;
-                    let sweep = athena.hestia_sweep(&athena_core::hestia::default_checks())?;
+                    let sweep = athena
+                        .hestia_sweep_with(&athena_core::hestia::default_checks(), &Terminal)?;
                     (Some(sweep), json)
                 }
                 HestiaAction::Last { json } => (open(false)?.last_sweep()?, json),

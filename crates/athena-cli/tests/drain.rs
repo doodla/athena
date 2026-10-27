@@ -2015,6 +2015,127 @@ fn real_steps_read_an_unread_but_specifiable_request_once_and_then_run_it() {
     assert_eq!(readers, 1, "read by the pass, not again to run");
 }
 
+/// Commits two recorded introspections of one cause, in two jobs, so the error review backfill has a repeated
+/// cause that nothing has queued a request for.
+fn seed_repeated_cause(fx: &Fixture, athena: &Athena) {
+    use athena_core::commits::NewFile;
+    use athena_data::JobId;
+    use athena_data::records::{
+        ClassStatus, FailureClass, IntrospectionRecord, IntrospectionStatus, IntrospectionTrigger,
+        PreventionKind,
+    };
+    let at = |n: u32| -> jiff::Timestamp { format!("2026-10-27T09:00:{n:02}Z").parse().unwrap() };
+    let rid = |n: u32| RecordId::parse(&format!("20261027-0900{n:02}-1abc")).unwrap();
+    let class = FailureClass {
+        id: rid(1),
+        at: at(1),
+        name: "Footer is cut".into(),
+        description: "a class".into(),
+        status: ClassStatus::Proposed,
+        proposed_by: rid(2),
+    };
+    let mut records = vec![AnyRecord::FailureClass(class.clone())];
+    for (n, letter) in [(10u32, 'a'), (11, 'b')] {
+        records.push(AnyRecord::Introspection(Box::new(IntrospectionRecord {
+            id: rid(n),
+            at: at(n),
+            trigger: IntrospectionTrigger::Rejection,
+            job: Some(JobId::parse(&format!("20261027-0800{n:02}-{letter}bcd")).unwrap()),
+            intervention: None,
+            class_of_work: "code".into(),
+            category: "rejected".into(),
+            what_happened: Some("the job was rejected".into()),
+            failure_class: Some(class.id.clone()),
+            new_class: false,
+            earlier_cases: Vec::new(),
+            decisions_matched: Vec::new(),
+            cause: Some("The footer is cut.".into()),
+            prevention_kind: Some(PreventionKind::CodeCheck),
+            prevention: Some("Add a code check.".into()),
+            proposed_request: Some("Add the check".into()),
+            evidence: None,
+            status: IntrospectionStatus::Recorded,
+            failure: None,
+            flags: Vec::new(),
+            dropped_ids: Vec::new(),
+            planning_stopped: false,
+            from_jev: false,
+            jev: None,
+        })));
+    }
+    for record in &records {
+        let file = NewFile::record(record);
+        write_bytes(fx.root(), &file.path, &file.bytes);
+    }
+    athena.git.run(["add", "-A"]).unwrap();
+    athena
+        .git
+        .run(["commit", "-q", "-m", "Record for the test"])
+        .unwrap();
+}
+
+fn write_bytes(root: &Path, path: &str, bytes: &[u8]) {
+    let full = root.join(path);
+    std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+    std::fs::write(full, bytes).unwrap();
+}
+
+#[test]
+fn a_drain_runs_the_backfill_and_the_derivation_at_its_start_and_a_second_drain_writes_nothing() {
+    let fx = Fixture::new();
+    let athena = fx.athena(Scenario::default().script());
+    seed_repeated_cause(&fx, &athena);
+    let before = Records::load(&fx.git, &fx.head()).unwrap();
+    assert!(athena_core::steward::queued_work(&before).is_empty());
+
+    let lander = RecordingLander::default();
+    let steps = real_steps_with(&athena, &lander, &Quiet);
+    let ui = Lines::default();
+    let no_work = Limits {
+        budget_usd: 0.0,
+        target_rating: 5,
+        max_jobs: 0,
+    };
+    drain::drain(&steps, no_work, &ui).unwrap();
+    let first = ui.0.lock().unwrap().clone();
+    assert!(
+        first[0].contains("backfill: 1 repeated cause(s) · queued 1"),
+        "{first:?}"
+    );
+    assert!(first[1].contains("evidence labels:"), "{first:?}");
+    let after = Records::load(&fx.git, &fx.head()).unwrap();
+    assert_eq!(
+        athena_core::steward::queued_work(&after).len(),
+        1,
+        "the backfill queued the root-cause request"
+    );
+
+    // A second drain with no new records: both passes run, and neither writes anything.
+    let head = fx.head();
+    let ui = Lines::default();
+    drain::drain(&steps, no_work, &ui).unwrap();
+    let second = ui.0.lock().unwrap().clone();
+    assert!(
+        second[0].contains("queued 0 · re-queued 0 · priority set 0"),
+        "{second:?}"
+    );
+    assert!(second[1].contains("0 derived"), "{second:?}");
+    assert_eq!(fx.head(), head, "no commit and so no record was written");
+}
+
+fn real_steps_with<'a>(
+    athena: &'a Athena,
+    lander: &'a RecordingLander,
+    ui: &'a (dyn athena_core::Ui + Sync),
+) -> RealSteps<'a> {
+    RealSteps {
+        athena,
+        ui,
+        page: &StubPage,
+        lander,
+    }
+}
+
 const GONE_REQUEST: &str =
     "Edit crates/gone/lib.rs and README.md after 20261012-075824-1x28\n- it is edited";
 
