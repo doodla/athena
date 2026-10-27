@@ -892,10 +892,18 @@ mod watcher_tests {
             verdicts: Mutex::new(verdicts.iter().copied().collect()),
         });
         let script = Box::new(move |spec: &AgentInvocation| {
+            // A reading of a retry must name the earlier job whose result the brief carries.
+            let earlier: String = spec
+                .user_prompt
+                .lines()
+                .filter(|l| l.contains(": end state "))
+                .filter_map(|l| l.strip_prefix("Job ")?.split(':').next())
+                .map(|id| format!(" Retries {id}."))
+                .collect();
             let mut turn = match spec.role {
                 Role::Reader => FakeTurn::output(json!({
                     "title": "Describe the demo",
-                    "summary": "Describe the demo in README.md.",
+                    "summary": format!("Describe the demo in README.md.{earlier}"),
                     "class_of_work": "docs",
                     "capability": "study",
                     "decline_reason": null,

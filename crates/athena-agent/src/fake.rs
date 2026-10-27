@@ -209,11 +209,31 @@ pub fn deterministic_turn(spec: &AgentInvocation) -> FakeTurn {
                 .iter()
                 .find(|w| lowered.contains(*w))
                 .map(|w| format!("A fake reader: the request mentions \"{w}\", so it makes Athena faster or cuts wasted time."));
+            // A retry or follow-up brief carries the previous result and change scope; a reading must name
+            // each earlier job and state what stays out of scope, or it is refused.
+            let earlier_jobs: Vec<String> =
+                section(&spec.user_prompt, "# Previous result and change scope")
+                    .lines()
+                    .filter_map(|l| l.strip_prefix("Job "))
+                    .filter_map(|l| l.split(':').next())
+                    .map(str::to_string)
+                    .collect();
+            let (earlier_note, out_of_scope) = if earlier_jobs.is_empty() {
+                (String::new(), json!([]))
+            } else {
+                (
+                    format!(
+                        " It addresses the earlier result of job {}.",
+                        earlier_jobs.join(", job ")
+                    ),
+                    json!([format!("Anything other than {FAKE_DELIVERABLE}.")]),
+                )
+            };
             FakeTurn::output(json!({
                 "urgent_reason": urgent_reason,
                 "hard_reason": null,
                 "title": format!("Record the request in {FAKE_DELIVERABLE}"),
-                "summary": format!("A fake reading made without a model call: write the request \"{short}\" to {FAKE_DELIVERABLE}."),
+                "summary": format!("A fake reading made without a model call: write the request \"{short}\" to {FAKE_DELIVERABLE}.{earlier_note}"),
                 "class_of_work": first_enum(&spec.json_schema, "class_of_work", "other"),
                 "capability": first_enum(&spec.json_schema, "capability", "change"),
                 "decline_reason": null,
@@ -223,7 +243,7 @@ pub fn deterministic_turn(spec: &AgentInvocation) -> FakeTurn {
                 "question": null,
                 "acceptance_criteria": [{ "text": format!("{FAKE_DELIVERABLE} contains the request"), "kind": "content" }],
                 "deliverables": [{ "path": FAKE_DELIVERABLE, "action": "create", "p": 0.9 }],
-                "out_of_scope": [],
+                "out_of_scope": out_of_scope,
                 "forecast": {
                     "p_reading_accepted": 0.9,
                     "p_verification_passes": 0.9,

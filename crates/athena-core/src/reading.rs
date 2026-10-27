@@ -269,7 +269,7 @@ impl Athena {
         let prompt = reader_brief(&ReaderInputs {
             request: request.text.clone(),
             earlier_attempt: attempt.cloned(),
-            referenced_jobs,
+            referenced_jobs: referenced_jobs.clone(),
             history: history.to_vec(),
             reference: global_reference,
             reference_basis: basis,
@@ -363,7 +363,15 @@ impl Athena {
             &capability_ids,
             redactor,
         ) {
-            Ok(reading) => Ok((Some(reading), record, None)),
+            Ok(reading) => {
+                // A retry or follow-up must reflect the previous result and state the change scope.
+                let priors: Vec<&EarlierAttempt> =
+                    attempt.into_iter().chain(referenced_jobs.iter()).collect();
+                match check_prior_result_and_scope(&reading, &priors) {
+                    Ok(()) => Ok((Some(reading), record, None)),
+                    Err(e) => Ok((None, record, Some(format!("{e:#}")))),
+                }
+            }
             Err(e) => Ok((
                 None,
                 record,
@@ -1426,7 +1434,9 @@ fn carry(job: &JobRecords, redactor: &Redactor) -> Result<Option<EarlierAttempt>
             };
             format!("{action} {}", d.path)
         }));
+        extra.extend(reading.out_of_scope.iter().cloned());
     }
+    let deliverable_count = final_reading.map_or(0, |r| r.deliverables.len());
     let lead = extra.len();
     extra.extend(job.corrections.iter().map(|c| c.text.clone()));
     redactor.redact_all(&mut extra)?;
@@ -1442,7 +1452,16 @@ fn carry(job: &JobRecords, redactor: &Redactor) -> Result<Option<EarlierAttempt>
         findings: texts,
         reading_summary,
         reading_criteria,
-        reading_deliverables: extra.collect(),
+        reading_deliverables: extra.by_ref().take(deliverable_count).collect(),
+        reading_out_of_scope: extra.collect(),
+        end_state: job.outcome.as_ref().map_or_else(
+            || job.state().name().to_string(),
+            |o| o.state.as_str().to_string(),
+        ),
+        verdict: job
+            .verification
+            .as_ref()
+            .map(|v| format!("{:?}", v.final_verdict).to_lowercase()),
         corrections,
     }))
 }
@@ -1845,6 +1864,66 @@ pub fn referenced_jobs(
         }
     }
     Ok(out)
+}
+
+/// Refuses a reading for a retried or follow-up job that leaves out the previous result or the change
+/// scope. `priors` are the retried job and the jobs the request names; with none (a first attempt) every
+/// reading passes, and so does one that declines the request or asks a question, which has no change to
+/// scope yet.
+///
+/// - The previous result is reflected when the reading's own text (title, summary, assumptions,
+///   departures and criteria) names each prior job by its id, so each finding is addressed or set aside
+///   in words the user can read. The brief asks for exactly this.
+/// - The change scope is stated when the reading lists at least one deliverable and at least one
+///   out-of-scope item.
+///
+/// The error names each missing part: "previous result" and "change scope".
+pub fn check_prior_result_and_scope(reading: &Reading, priors: &[&EarlierAttempt]) -> Result<()> {
+    if priors.is_empty() || reading.capability.is_none() || reading.question.is_some() {
+        return Ok(());
+    }
+    let mut text = vec![
+        reading.title.as_str(),
+        reading.summary.as_str(),
+        reading.departures.as_deref().unwrap_or_default(),
+    ];
+    text.extend(reading.assumptions.iter().map(String::as_str));
+    text.extend(reading.acceptance_criteria.iter().map(|c| c.text.as_str()));
+    let text = text.join("\n").to_lowercase();
+    let unnamed: Vec<&str> = priors
+        .iter()
+        .map(|p| p.job.as_str())
+        .filter(|id| !text.contains(&id.to_lowercase()))
+        .collect();
+    let mut missing: Vec<String> = Vec::new();
+    if !unnamed.is_empty() {
+        missing.push(format!(
+            "the previous result: it does not name job {} in its summary, assumptions or criteria, \
+             so it does not say how the earlier findings and end state are addressed or why they no longer apply",
+            unnamed.join(", job ")
+        ));
+    }
+    let mut scope: Vec<&str> = Vec::new();
+    if reading.deliverables.is_empty() {
+        scope.push("deliverables");
+    }
+    if reading.out_of_scope.iter().all(|i| i.trim().is_empty()) {
+        scope.push("out_of_scope items");
+    }
+    if !scope.is_empty() {
+        missing.push(format!(
+            "the change scope: it lists no {}",
+            scope.join(" and no ")
+        ));
+    }
+    if missing.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "the reading was refused because it leaves out {}; this job retries or follows up an earlier job, \
+         so the reading must reflect that job's result and state the allowed change scope",
+        missing.join("; and ")
+    )
 }
 
 /// The records of a job at the current commit.
@@ -3162,5 +3241,193 @@ mod tests {
             tree_retry_seed(&records, &format!("try again on {id}"), &redactor).unwrap(),
             None
         );
+    }
+
+    const PRIOR_JOB: &str = "20261012-084936-n1p0";
+
+    /// A reading of a retry: summary and scope are the parts under test.
+    fn scoped_reading(
+        summary: &str,
+        deliverables: &[&str],
+        out_of_scope: &[&str],
+    ) -> athena_data::records::Reading {
+        let forecast = Forecast {
+            p_reading_accepted: 0.8,
+            p_verification_passes: 0.7,
+            p_user_intervenes: 0.1,
+            cost_usd: Quantiles::new(0.2, 0.5, 1.5).unwrap(),
+            wall_time_s: Quantiles::new(100.0, 300.0, 900.0).unwrap(),
+        };
+        Reading {
+            job: JobId::parse("20261027-054151-ace0").unwrap(),
+            n: 1,
+            at: jiff::Timestamp::UNIX_EPOCH,
+            invocation_seq: 1,
+            base_commit: "a".repeat(40),
+            config_sha256: "b".repeat(64),
+            defaults_sha256: "c".repeat(64),
+            defaults_version: 1,
+            title: "Add a greeting".into(),
+            summary: summary.into(),
+            class_of_work: "feature".into(),
+            capability: Some("change".into()),
+            decline_reason: None,
+            producer_model: "producer".into(),
+            verifier_model: "verifier".into(),
+            defaults_applied: vec![],
+            assumptions: vec![],
+            question: None,
+            acceptance_criteria: vec![Criterion {
+                text: "the greeting prints".into(),
+                kind: CriterionKind::Content,
+            }],
+            deliverables: deliverables
+                .iter()
+                .map(|path| Deliverable {
+                    path: (*path).into(),
+                    action: DeliverableAction::Modify,
+                    p: 0.9,
+                })
+                .collect(),
+            out_of_scope: out_of_scope.iter().map(|s| s.to_string()).collect(),
+            forecasts: Forecasts {
+                reader: forecast.clone(),
+                reference: forecast,
+            },
+            departures: None,
+            urgent_reason: None,
+            hard_reason: None,
+            producer_effort: None,
+        }
+    }
+
+    fn prior() -> EarlierAttempt {
+        EarlierAttempt {
+            job: PRIOR_JOB.into(),
+            request: "add a greeting".into(),
+            findings: vec!["major: the greeting is missing".into()],
+            end_state: "rejected".into(),
+            verdict: Some("fail".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn carry_records_the_end_state_verdict_and_out_of_scope_of_the_earlier_job() {
+        let redactor = Redactor::new(&athena_gate::builtin_config()).unwrap();
+        let mut job = job_with_checks(vec![]);
+        job.outcome = Some(outcome(&job, OutcomeState::Rejected, "unmet criterion"));
+        job.readings.push(scoped_reading(
+            "Add a greeting.",
+            &["src/greeting.rs", "README.md"],
+            &["the changelog"],
+        ));
+        let carried = carry(&job, &redactor).unwrap().unwrap();
+        assert_eq!(carried.end_state, "rejected");
+        assert_eq!(carried.verdict.as_deref(), Some("fail"));
+        assert_eq!(
+            carried.reading_deliverables,
+            ["modify src/greeting.rs", "modify README.md"]
+        );
+        assert_eq!(carried.reading_out_of_scope, ["the changelog"]);
+        // A job with no reading carries an empty scope, and the brief still states one.
+        let mut bare = job_with_checks(vec![]);
+        bare.outcome = Some(outcome(&bare, OutcomeState::Failed, "admission refused"));
+        let carried = carry(&bare, &redactor).unwrap().unwrap();
+        assert_eq!(carried.end_state, "failed");
+        assert!(carried.reading_deliverables.is_empty());
+        assert!(carried.reading_out_of_scope.is_empty());
+    }
+
+    #[test]
+    fn a_complete_reading_of_a_retry_is_accepted() {
+        let reading = scoped_reading(
+            &format!("Retry {PRIOR_JOB}: fix the missing greeting its verification found."),
+            &["src/greeting.rs"],
+            &["the changelog"],
+        );
+        check_prior_result_and_scope(&reading, &[&prior()]).unwrap();
+    }
+
+    #[test]
+    fn a_reading_that_leaves_out_the_previous_result_is_refused() {
+        let reading = scoped_reading("Add a greeting.", &["src/greeting.rs"], &["the changelog"]);
+        let error = check_prior_result_and_scope(&reading, &[&prior()])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("the previous result"), "{error}");
+        assert!(error.contains(PRIOR_JOB), "{error}");
+        assert!(!error.contains("the change scope"), "{error}");
+    }
+
+    #[test]
+    fn a_reading_that_leaves_out_the_change_scope_is_refused() {
+        let summary = format!("Retry {PRIOR_JOB}: fix the missing greeting.");
+        for (deliverables, out_of_scope, named) in [
+            (&[][..], &["the changelog"][..], "no deliverables"),
+            (&["src/greeting.rs"][..], &[][..], "no out_of_scope items"),
+            (
+                &["src/greeting.rs"][..],
+                &["  "][..],
+                "no out_of_scope items",
+            ),
+        ] {
+            let reading = scoped_reading(&summary, deliverables, out_of_scope);
+            let error = check_prior_result_and_scope(&reading, &[&prior()])
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("the change scope"), "{error}");
+            assert!(error.contains(named), "{error}");
+            assert!(!error.contains("the previous result"), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_reading_missing_both_names_both() {
+        let reading = scoped_reading("Add a greeting.", &[], &[]);
+        let error = check_prior_result_and_scope(&reading, &[&prior()])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("the previous result"), "{error}");
+        assert!(error.contains("the change scope"), "{error}");
+    }
+
+    #[test]
+    fn a_follow_up_reading_must_name_every_job_it_follows() {
+        let mut other = prior();
+        other.job = "20261013-000000-abcd".into();
+        let reading = scoped_reading(
+            &format!("Follow up on {PRIOR_JOB}."),
+            &["src/greeting.rs"],
+            &["the changelog"],
+        );
+        let error = check_prior_result_and_scope(&reading, &[&prior(), &other])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("20261013-000000-abcd"), "{error}");
+        assert!(!error.contains(&format!("job {PRIOR_JOB}")), "{error}");
+        let named_both = scoped_reading(
+            &format!("Follow up on {PRIOR_JOB} and 20261013-000000-ABCD."),
+            &["src/greeting.rs"],
+            &["the changelog"],
+        );
+        check_prior_result_and_scope(&named_both, &[&prior(), &other]).unwrap();
+    }
+
+    #[test]
+    fn a_first_attempt_reading_is_not_checked() {
+        let reading = scoped_reading("Add a greeting.", &[], &[]);
+        check_prior_result_and_scope(&reading, &[]).unwrap();
+    }
+
+    #[test]
+    fn a_declined_reading_or_a_question_has_no_scope_to_check() {
+        let mut declined = scoped_reading("Add a greeting.", &[], &[]);
+        declined.capability = None;
+        declined.decline_reason = Some("no capability fits".into());
+        check_prior_result_and_scope(&declined, &[&prior()]).unwrap();
+        let mut asking = scoped_reading("Add a greeting.", &[], &[]);
+        asking.question = Some("which file?".into());
+        check_prior_result_and_scope(&asking, &[&prior()]).unwrap();
     }
 }

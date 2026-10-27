@@ -1,0 +1,141 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261027-054148-g63s",
+  "n": 1,
+  "at": "2026-10-27T10:53:45.392454633Z",
+  "invocation_seq": 1,
+  "base_commit": "0efb3f8bc7914c928e96338e3472f75d22e401d4",
+  "config_sha256": "b812f3c3683488bcd9485d235a6a234bc80722c9f137a6c232094fae2ee727d6",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Reject readings too large for one producer deadline at reading time",
+  "summary": "Root cause: reading validation (build_reading in athena-core/src/reading.rs) never compares a reading's scope with the producer and verifier deadlines in athena.toml, so multi-item sources yield readings no single run can finish. Add a deterministic size gate there that rejects a reading whose own forecast wall time p50 exceeds the configured producer or verifier timeout. The rejection tells the reader to pick one deliverable and name the rest as follow-up requests. Audience: Athena maintainers and the reader loop, which gets a clear retry message.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "mechanism",
+      "how": "The size rule is enforced by code in build_reading, not by prose alone."
+    },
+    {
+      "id": "tested",
+      "how": "Unit tests added; cargo test, clippy and fmt must pass."
+    },
+    {
+      "id": "root-cause",
+      "how": "Fix at reading validation, which every job passes through, not at one job."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Tests feed oversized and fitting readings through build_reading and check the outcome."
+    },
+    {
+      "id": "small",
+      "how": "One gate in one module plus tests and a changelog line."
+    },
+    {
+      "id": "rust",
+      "how": "All code is Rust."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "The gate uses existing config (limits.producer_timeout_s, verifier_timeout_s) so no athena.toml change is needed.",
+    "The reader's own forecast wall_time_s.p50 is the available size signal; a p50 above the deadline means the reader itself expects to overrun.",
+    "A rejected reading goes through the existing 'reader's output was invalid' retry path, bounded by max_readings.",
+    "Reader prompt text is a secondary hint only; the mechanism is the code check."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "The change description names the root cause: reading validation never compares reading scope with the producer/verifier deadline, and the fix sits in build_reading in crates/athena-core/src/reading.rs.",
+      "kind": "content"
+    },
+    {
+      "text": "A new unit test in athena-core builds a reading whose forecast wall_time_s.p50 exceeds limits.producer_timeout_s and asserts build_reading returns an error whose message tells the reader to pick one deliverable and name the rest as follow-up requests. Run cargo test -p athena-core.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A companion test shows a reading with p50 within the deadlines is still accepted, and the oversize test fails if the gate is removed. The tests use a generic oversize forecast, not one job's data. Run cargo test -p athena-core.",
+      "kind": "behavior"
+    },
+    {
+      "text": "cargo fmt --check, cargo clippy --workspace --all-targets and cargo test --workspace all pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md records the new reading size gate.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-context/src/outputs.rs",
+      "action": "modify",
+      "p": 0.1
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "p": 0.1
+    }
+  ],
+  "out_of_scope": [
+    "Changing athena.toml limits or adding new config keys",
+    "Retry-scope tracking across jobs or re-ask handling",
+    "Splitting documents into sections automatically",
+    "Changing producer or verifier timeouts"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.4,
+        "p50": 1.0,
+        "p90": 2.5
+      },
+      "wall_time_s": {
+        "p10": 400.0,
+        "p50": 1400.0,
+        "p90": 2800.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7219653179190751,
+      "p_verification_passes": 0.6547619047619048,
+      "p_user_intervenes": 0.06962962962962964,
+      "cost_usd": {
+        "p10": 0.4955004614404312,
+        "p50": 1.1070018745952828,
+        "p90": 2.715972526265692
+      },
+      "wall_time_s": {
+        "p10": 497.6586092051614,
+        "p50": 1499.282871202059,
+        "p90": 2969.3138416147594
+      }
+    }
+  },
+  "departures": null,
+  "urgent_reason": "Cuts repeated producer and verifier deadline timeouts and rejected or retried attempts caused by oversized readings.",
+  "hard_reason": "Changes the reading gate that decides which readings Athena accepts for all jobs.",
+  "producer_effort": "high"
+}
