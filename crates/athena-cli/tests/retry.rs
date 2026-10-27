@@ -535,7 +535,7 @@ fn a_content_only_rejection_retries_from_the_rejected_tree() {
 }
 
 #[test]
-fn a_seeded_retry_that_changes_nothing_fails_as_an_empty_candidate() {
+fn a_seeded_retry_that_changes_nothing_goes_on_with_the_seeded_candidate() {
     let fx = Fixture::new();
     let idle = Scenario {
         edits: vec![],
@@ -557,20 +557,52 @@ fn a_seeded_retry_that_changes_nothing_fails_as_an_empty_candidate() {
             .contains(&"greeting.txt".to_string()),
         "the retry was seeded"
     );
-    assert_eq!(finished.state, OutcomeState::Failed, "{}", finished.reason);
-    assert!(
-        finished.reason.contains("the producer made no change"),
-        "{}",
-        finished.reason
-    );
+    // The producer added nothing, but the seeded candidate already differs from the base: it is the
+    // candidate, and it reaches the checks and the verifier and lands.
     let verifiers_after = roles
         .lock()
         .unwrap()
         .iter()
         .filter(|r| **r == Role::Verifier)
         .count();
-    assert_eq!(
-        verifiers_after, verifiers_before,
+    assert!(verifiers_after > verifiers_before, "the verifier ran");
+    assert_eq!(finished.state, OutcomeState::Landed, "{}", finished.reason);
+    assert_eq!(fx.file("greeting.txt").as_deref(), Some("hi\n"));
+    assert_eq!(fx.file("README.md").as_deref(), Some(HELLO));
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    let verification = records.jobs[&again].verification.as_ref().unwrap();
+    assert!(!verification.checks.is_empty(), "the checks ran");
+    assert!(verification.checks.iter().all(|c| c.passed));
+    let candidate = records.jobs[&again].candidate.as_ref().unwrap();
+    let paths: Vec<&str> = candidate.changes.iter().map(|c| c.path.as_str()).collect();
+    assert!(paths.contains(&"greeting.txt"), "{paths:?}");
+    assert!(paths.contains(&"README.md"), "{paths:?}");
+}
+
+#[test]
+fn an_unseeded_run_whose_producer_changes_nothing_still_fails() {
+    let fx = Fixture::new();
+    let idle = Scenario {
+        edits: vec![],
+        ..Scenario::default()
+    };
+    let (script, seen, roles) = two_phases(idle, second_attempt());
+    let athena = fx.athena(script);
+    let job = athena
+        .ask("add a greeting", &Lines::default())
+        .unwrap()
+        .job
+        .to_string();
+    let finished = run_retry(&athena, &job);
+    assert_eq!(seen.lock().unwrap().len(), 1);
+    assert_eq!(finished.state, OutcomeState::Failed, "{}", finished.reason);
+    assert!(
+        finished.reason.contains("the producer made no change"),
+        "{}",
+        finished.reason
+    );
+    assert!(
+        !roles.lock().unwrap().contains(&Role::Verifier),
         "no candidate was verified"
     );
     assert_eq!(fx.file("greeting.txt"), None, "nothing landed");

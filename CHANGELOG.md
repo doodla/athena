@@ -92,6 +92,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- A retry seeded from a kept candidate whose producer adds nothing now goes on with the seeded candidate,
+  instead of failing as "the producer made no change". The kept candidate had already done the work (job
+  20261027-011733-vrsk moved the Transport items in the seed and the producer correctly changed nothing), so
+  the complete candidate never reached the checks and the verifier. Root cause: the idle-producer check in
+  `run.rs` also failed a seeded work tree that was unchanged since the seed, though its change list against the
+  base was not empty. It now fails only when that change list is empty, so the seeded candidate goes on to
+  admission, the checks and the verifier as usual; an unseeded run, or a retry whose seed equals the base,
+  with no change still fails as "the producer made no change". Supersedes the sentence in the tree-seeded
+  retry entry below and D117 item 5; see D139 in `docs/decisions.md`. Tests in
+  `crates/athena-cli/tests/retry.rs`:
+  `a_seeded_retry_that_changes_nothing_goes_on_with_the_seeded_candidate` and
+  `an_unseeded_run_whose_producer_changes_nothing_still_fails`.
 - Every request Athena writes for itself on the steward channel can now be scheduled by `athena plan`. The
   structural-pass, design-review, introspection follow-up and blind-spot writers had no `Acceptance:` bullets,
   so `athena plan` refused them ("the plan lacks acceptance"). They are now built by one shared builder,
