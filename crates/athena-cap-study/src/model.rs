@@ -87,6 +87,9 @@ pub struct Transition {
     pub to: String,
     pub trigger: String,
     pub trigger_evaluated_by: EvaluatedBy,
+    /// Who performs the event the trigger names; absent in a model that does not record it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_actor: Option<Actor>,
     /// The guard text, or `none`. `None` here means the field is missing, which is a fault.
     pub guard: Option<String>,
     pub guard_evaluated_by: EvaluatedBy,

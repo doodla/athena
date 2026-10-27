@@ -1,0 +1,170 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261023-203443-mrrf",
+  "n": 1,
+  "at": "2026-10-27T07:49:28.916555575Z",
+  "invocation_seq": 1,
+  "base_commit": "7d7b53b29794d2867033c0eacdbe73ad91915547",
+  "config_sha256": "b812f3c3683488bcd9485d235a6a234bc80722c9f137a6c232094fae2ee727d6",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Warn before the lease expires; refuse runs on a stale athena binary",
+  "summary": "Two guards for commands that run agents (audit, audience, drain, and the other callers of warn_if_stale). First, a warning on stderr when the operator lease (BRIEF.md:107) is close to expiring. Second, a refusal with the rebuild command when the installed binary is older than main, as `stale_build_line` already detects but today only prints. Each guard gets tests.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "Both checks get unit and CLI tests; cargo test and clippy must pass."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria require tests that show a refused run and a printed warning, not just that the functions exist."
+    },
+    {
+      "id": "root-cause",
+      "how": "The refusal reuses the existing stale_build_line rule instead of adding a second staleness definition."
+    },
+    {
+      "id": "mechanism",
+      "how": "The stale-binary rule becomes a refusal in code rather than a printed advisory."
+    },
+    {
+      "id": "small",
+      "how": "One focused change that adds a minimal lease reader only."
+    },
+    {
+      "id": "outcome-check",
+      "how": "The outcome is a refused stale run and a warning before expiry, checked by tests."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "No lease exists in the code today: the only mention is BRIEF.md:107, the single-operator lease with the session and a since-time that expires. I assume 'its lease' means that lease, and that it is stored as a small record in the repository with an expiry time.",
+    "Because the lease has no implementation, the change adds a minimal lease reader. It does not add acquire/release machinery. A missing lease file produces no warning and no error.",
+    "The warning threshold is a constant (for example 10 minutes before expiry), or a field in athena.toml if the config pattern makes that cheap. I assume a constant, so athena.toml stays untouched.",
+    "'Main commit' is the repository HEAD that `Athena::stale_build` compares against. Staleness uses the existing definition (BUILD_PATHS changed since the binary's build commit), so docs-only commits do not block runs.",
+    "The refusal applies to the commands that call warn_if_stale today (audience, audit and the other two callers at main.rs:1041 and 1078), plus the agent-running paths of drain. Read-only commands such as status keep printing the line and still work.",
+    "An environment-variable or flag override for the refusal is out of scope, since it would defeat the guard. The error message names `./setup.sh` as the way out.",
+    "Audience is the project owner, who runs these commands and reads stderr. The tests are the criteria the verifier can run."
+  ],
+  "question": "Which lease do you mean? The code has none. I assumed the single-operator lease in BRIEF.md:107, held as a repository record with an expiry.",
+  "acceptance_criteria": [
+    {
+      "text": "A test makes the installed binary's build commit older than HEAD by a commit that changes a file under crates/. It asserts that the audit command (and one other agent-running command) exits non-zero before any agent runs, with a message naming the build commit, HEAD and ./setup.sh. Run `cargo test`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test shows that a HEAD that differs from the build commit only by docs/ or records/ changes does not refuse the run (the existing stale-build rule is kept). A second test shows a build commit equal to HEAD is not refused. Run `cargo test`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A unit test on the lease check, with an injected clock, shows a warning line when the remaining time is under the threshold, no warning when it is above, and a distinct 'expired' message when it has already passed. A missing lease gives neither a warning nor an error. Run `cargo test`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A CLI-level test shows the lease warning is printed on stderr (not stdout, so --json output stays valid) by an agent-running command and does not stop that command. Run `cargo test`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`cargo clippy --all-targets` and `cargo fmt --check` are clean, and the existing test `status_prints_the_stale_build_line_after_a_crates_change_and_none_after_docs_or_records_changes` still passes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md (Unreleased) records both checks. The code states which lease it reads and what the warning threshold is.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-core/src/lease.rs",
+      "action": "create",
+      "p": 0.55
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.45
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "athena.toml",
+      "action": "modify",
+      "p": 0.15
+    }
+  ],
+  "out_of_scope": [
+    "Acquiring, renewing or releasing the lease, or any multi-session handoff logic",
+    "Automatically rebuilding or replacing the installed binary",
+    "Changing what counts as stale (BUILD_PATHS)",
+    "An override flag to bypass the refusal"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.5,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.12,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.2,
+        "p90": 2.8
+      },
+      "wall_time_s": {
+        "p10": 500.0,
+        "p50": 1600.0,
+        "p90": 3000.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7219653179190751,
+      "p_verification_passes": 0.657258064516129,
+      "p_user_intervenes": 0.07067669172932331,
+      "cost_usd": {
+        "p10": 0.4904934944183057,
+        "p50": 1.110925518325261,
+        "p90": 2.7233966741638493
+      },
+      "wall_time_s": {
+        "p10": 492.5888583898876,
+        "p50": 1488.371373882537,
+        "p90": 2959.500446467481
+      }
+    }
+  },
+  "departures": "The lease has no existing code, so the producer must design a minimal lease record. That adds cost and lowers acceptance and pass odds compared with the reference."
+}

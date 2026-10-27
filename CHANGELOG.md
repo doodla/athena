@@ -133,6 +133,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- In the firstmate work-handling study, the t3 trigger no longer says the agent accepts the worker's
+  report, which no cited claim says. It now names the events the claims give: the PR-check script
+  records a ready PR, or a local-only worker stops with a clean ready branch (claims c3, c31, c37 are
+  now cited). Its trigger is marked as decided by code. Each transition now has a `trigger_actor`
+  field (optional in the model schema), and `cargo run -p xtask -- site` fails when a transition
+  decided by the agent has another trigger actor, or cites a claim that does not exist. This replaces
+  the earlier test that matched words in the trigger text. Tests cover a rejected and an accepted case.
 - A retry seeded from a kept candidate whose producer adds nothing now goes on with the seeded candidate,
   instead of failing as "the producer made no change". The kept candidate had already done the work (job
   20261027-011733-vrsk moved the Transport items in the seed and the producer correctly changed nothing), so

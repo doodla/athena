@@ -149,6 +149,30 @@ fn claim_ids(claims: &Value) -> Result<BTreeSet<String>> {
         .collect()
 }
 
+/// Checks the trigger actor of each transition. Every transition names who performs its trigger's
+/// event in `trigger_actor`, every cited claim must exist, and a transition the agent decides
+/// (`trigger_evaluated_by` is `agent`) must have `agent` as that actor.
+fn check_trigger_actors(model: &Value, known: &BTreeSet<String>) -> Result<()> {
+    for t in array_of(model, "transitions", "model.json")? {
+        let id = str_of(t, "id", "a transition")?;
+        let what = format!("transition {id}");
+        let actor = str_of(t, "trigger_actor", &what)?;
+        if !["person", "process", "agent", "clock"].contains(&actor) {
+            bail!("{what} has an unknown trigger_actor `{actor}`");
+        }
+        if str_of(t, "trigger_evaluated_by", &what)? == "agent" && actor != "agent" {
+            bail!("{what} is decided by the agent but its trigger event is by `{actor}`");
+        }
+        for claim in array_of(t, "claims", &what)? {
+            let claim = claim.as_str().unwrap_or_default();
+            if !known.contains(claim) {
+                bail!("{what} cites unknown claim `{claim}`");
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Links to the claims an element cites. At least one claim is required, and each must exist.
 fn cites(value: &Value, what: &str, known: &BTreeSet<String>) -> Result<String> {
     let ids = array_of(value, "claims", what)?;
@@ -362,6 +386,7 @@ pub fn render(study: &Study) -> Result<String> {
     }
     body.push_str("</dl><div class=\"cards\">");
     let summaries = array_of(&study.intro, "summaries", "intro.json")?;
+    check_trigger_actors(&study.model, &known)?;
     for t in array_of(&study.model, "transitions", "model.json")? {
         let id = str_of(t, "id", "a transition")?;
         let what = format!("transition {id}");
@@ -661,7 +686,7 @@ mod tests {
             "counters": [{"id": "places", "start": 0, "changed_by": ["t1"], "claims": ["c1"]}],
             "transitions": [{
                 "id": "t1", "from": "queued", "to": "queued",
-                "trigger": "x", "trigger_evaluated_by": "agent",
+                "trigger": "x", "trigger_actor": "agent", "trigger_evaluated_by": "agent",
                 "guard": "y", "guard_evaluated_by": "code",
                 "failure": null, "claims": [cited]
             }]
@@ -873,21 +898,62 @@ mod tests {
     }
 
     #[test]
-    fn no_transition_decided_by_the_agent_names_another_deciders_event() {
+    fn every_agent_decided_transition_of_the_real_study_has_the_agent_as_trigger_actor() {
         let study = real_study();
-        for t in study.model["transitions"].as_array().unwrap() {
-            if t["trigger_evaluated_by"] == "agent" {
-                let trigger = t["trigger"].as_str().unwrap();
-                let id = &t["id"];
-                assert!(
-                    trigger.contains("agent") || trigger.contains("firstmate"),
-                    "{id}"
-                );
-                for event in ["lands", "landed", "report exists", "reports a"] {
-                    assert!(!trigger.contains(event), "{id}: {trigger}");
-                }
-            }
+        let known = claim_ids(&study.claims).unwrap();
+        check_trigger_actors(&study.model, &known).unwrap();
+        let t3 = study.model["transitions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["id"] == "t3")
+            .unwrap();
+        assert_eq!(t3["trigger_evaluated_by"], "code");
+        assert_eq!(t3["trigger_actor"], "process");
+    }
+
+    fn model_with(
+        evaluated_by: &str,
+        actor: Option<&str>,
+        cited: &str,
+    ) -> (Value, BTreeSet<String>) {
+        let mut t = serde_json::json!({
+            "id": "t1", "trigger": "the merge lands", "trigger_evaluated_by": evaluated_by,
+            "claims": [cited]
+        });
+        if let Some(actor) = actor {
+            t["trigger_actor"] = actor.into();
         }
+        let known = BTreeSet::from(["c1".to_string()]);
+        (serde_json::json!({"transitions": [t]}), known)
+    }
+
+    #[test]
+    fn an_agent_decided_transition_whose_trigger_event_is_by_another_actor_is_rejected() {
+        let (model, known) = model_with("agent", Some("process"), "c1");
+        let error = check_trigger_actors(&model, &known)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("decided by the agent"), "{error}");
+        let (model, known) = model_with("agent", None, "c1");
+        assert!(check_trigger_actors(&model, &known).is_err());
+    }
+
+    #[test]
+    fn an_agent_decided_transition_with_the_agent_as_trigger_actor_passes() {
+        let (model, known) = model_with("agent", Some("agent"), "c1");
+        check_trigger_actors(&model, &known).unwrap();
+        let (model, known) = model_with("code", Some("process"), "c1");
+        check_trigger_actors(&model, &known).unwrap();
+    }
+
+    #[test]
+    fn a_transition_citing_an_unknown_claim_is_rejected() {
+        let (model, known) = model_with("agent", Some("agent"), "c9");
+        let error = check_trigger_actors(&model, &known)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("c9"), "{error}");
     }
 
     #[test]

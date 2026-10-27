@@ -763,6 +763,7 @@ pub(crate) mod tests {
             to: to.into(),
             trigger: trigger.into(),
             trigger_evaluated_by: EvaluatedBy::Code,
+            trigger_actor: None,
             guard: Some(guard.into()),
             guard_evaluated_by: EvaluatedBy::Code,
             guard_counters: strings(counters),
