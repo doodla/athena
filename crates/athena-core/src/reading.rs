@@ -1518,10 +1518,35 @@ pub struct BriefTopic {
     /// The section's body. Kept only for addenda; a requirement is matched by its heading alone, because its
     /// long body would match nearly any request.
     pub text: String,
+    /// The priority the owner gave the section: from a `Priority: <level>` line in an addendum's body, or
+    /// high when the body says its work ranks above all other work or is a top priority. Normal otherwise.
+    pub priority: Priority,
+}
+
+/// The priority an addendum's body states (see [`BriefTopic::priority`]).
+fn addendum_priority(body: &str) -> Priority {
+    let stated = Priority::from_text(body);
+    if stated != Priority::Normal {
+        return stated;
+    }
+    let lower = body.to_lowercase();
+    if [
+        "ranks above all other work",
+        "top priority",
+        "highest priority",
+    ]
+    .iter()
+    .any(|p| lower.contains(p))
+    {
+        Priority::High
+    } else {
+        Priority::Normal
+    }
 }
 
 /// The sections of `brief` (the text of BRIEF.md) that a request can serve: every `###` heading, and for those
-/// under `## Addenda` the body too.
+/// under `## Addenda` the body too. An addendum that states a priority carries it, so planning can rank the
+/// work that serves it ahead of default order.
 pub fn brief_topics(brief: &str) -> Vec<BriefTopic> {
     let mut topics: Vec<BriefTopic> = Vec::new();
     let mut in_addenda = false;
@@ -1531,6 +1556,7 @@ pub fn brief_topics(brief: &str) -> Vec<BriefTopic> {
             topics.push(BriefTopic {
                 heading: h.trim().to_string(),
                 text: String::new(),
+                priority: Priority::Normal,
             });
             in_topic = true;
         } else if line.starts_with('#') {
@@ -1543,6 +1569,9 @@ pub fn brief_topics(brief: &str) -> Vec<BriefTopic> {
             t.text.push_str(line);
             t.text.push('\n');
         }
+    }
+    for t in &mut topics {
+        t.priority = addendum_priority(&t.text);
     }
     topics
 }
@@ -1823,6 +1852,20 @@ pub fn plan_entry(
     }
     entry.rung =
         rung_hint.or_else(|| infer_rung(text, job.latest_reading(), &entry.touches, lookup.brief));
+    // The owner's stated priority reaches the plan: a request serving an addendum that states one is ranked
+    // at least that high. A priority record from `athena priority` is the user's word and is left alone.
+    if job.priorities.is_empty() {
+        let mut hay = text.to_string();
+        if let Some(r) = job.latest_reading() {
+            hay.push(' ');
+            hay.push_str(&r.summary);
+        }
+        if let Some(topic) = serves_topic(&hay, lookup.brief)
+            && topic.priority < entry.priority
+        {
+            entry.priority = topic.priority;
+        }
+    }
     for path in &entry.touches {
         if !creates.contains(path) && !(lookup.path_exists)(path) {
             entry.open_questions.push(format!(
@@ -2677,6 +2720,64 @@ mod tests {
         // Oldest first in the input: without the brief the old item would lead.
         let plan = crate::plan::Plan::build(&[old_typo, new_speed]);
         assert_eq!(plan.order, ["new", "old"], "{plan:?}");
+    }
+
+    #[test]
+    fn an_addendum_priority_puts_the_work_serving_it_in_the_first_plan_wave() {
+        use crate::plan::{Plan, Priority};
+        use athena_data::roles::Ladder;
+        let brief = brief_topics(
+            "## Addenda\n\n### 2026-01-01: Invoice export\n\nPriority: urgent\nMake invoice export retries reliable.\n\n\
+             ### 2026-01-02: Colour theme\n\nPick a calmer colour theme for reports.\n",
+        );
+        assert_eq!(brief[0].priority, Priority::Urgent);
+        assert_eq!(brief[1].priority, Priority::Normal);
+        let entry = |id: &str, text: &str, rung: Ladder| {
+            let mut job = job_with_checks(vec![]);
+            job.request.as_mut().unwrap().text = format!("{text}\n- it is done");
+            let lookup = Lookup {
+                job_exists: &|_| false,
+                path_exists: &|_| true,
+                brief: &brief,
+            };
+            let mut e = plan_entry(&job, Some(rung), &lookup);
+            e.id = id.into();
+            e
+        };
+        // The older items sit on a higher rung; the newest, on the lowest rung, serves the stated priority.
+        let entries = vec![
+            entry("old-a", "Pick a calmer colour theme", Ladder::OwnerGoals),
+            entry(
+                "old-b",
+                "Pick a calmer colour theme again",
+                Ladder::OwnerGoals,
+            ),
+            entry(
+                "new",
+                "Retry the invoice export reliably",
+                Ladder::Implementation,
+            ),
+        ];
+        assert_eq!(entries[2].priority, Priority::Urgent);
+        assert_eq!(entries[0].priority, Priority::Normal);
+        let plan = Plan::build(&entries);
+        assert_eq!(plan.groups[0], ["new"], "{plan:?}");
+        assert!(plan.priority_violations(&entries).is_empty());
+        // An explicit priority record is the user's word and is not raised.
+        let mut job = job_with_checks(vec![]);
+        job.request.as_mut().unwrap().text = "Retry the invoice export reliably".into();
+        job.priorities = vec![PriorityRecord {
+            job: job.id().clone(),
+            n: 1,
+            at: crate::now(),
+            priority: "low".into(),
+        }];
+        let lookup = Lookup {
+            job_exists: &|_| false,
+            path_exists: &|_| true,
+            brief: &brief,
+        };
+        assert_eq!(plan_entry(&job, None, &lookup).priority, Priority::Low);
     }
 
     #[test]

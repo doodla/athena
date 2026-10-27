@@ -1050,6 +1050,9 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
             .cloned()
             .collect();
         let mut plan = Plan::build(&entries);
+        for contradiction in plan.priority_violations(&entries) {
+            self.note(format!("plan order contradicts priority: {contradiction}"));
+        }
         plan.refused.extend(forced);
         plan
     }

@@ -11,8 +11,9 @@
 //!   prerequisites of a high-priority item run before unrelated older normal items. A dependent item always
 //!   comes after what it needs. A request's priority is [`Priority`]: urgent, high, normal (the default) or
 //!   low, read from a `Priority: <level>` line in its words, or from a later priority record
-//!   (`athena priority`), which wins. With no priority set every item is normal and the order is the
-//!   ladder, then age.
+//!   (`athena priority`), which wins. A request that serves a BRIEF.md addendum stating a priority is ranked
+//!   at least that high (see `reading::plan_entry`). With no priority set every item is normal and the order
+//!   is the ladder, then age. [`Plan::priority_violations`] checks a built order against the priorities.
 //! - **Parallel groups.** A wave is split into groups of items that no dependency links and whose touched
 //!   paths are disjoint; the items of one group could run side by side. An item that names no touched path is
 //!   never grouped with another, because nothing is known about what it changes. The shared append-only files
@@ -214,7 +215,59 @@ fn disjoint(a: &PlanEntry, b: &PlanEntry) -> bool {
     !pa.is_empty() && !pb.is_empty() && !pa.iter().any(|x| pb.iter().any(|y| overlap(x, y)))
 }
 
+/// Effective priority of each entry, in the entries' order: its own, raised to the best of whatever depends on
+/// it (to a fixpoint).
+fn effective_priorities(entries: &[&PlanEntry]) -> Vec<Priority> {
+    let mut effective: Vec<Priority> = entries.iter().map(|e| e.priority).collect();
+    loop {
+        let mut changed = false;
+        for i in 0..entries.len() {
+            for dep in &entries[i].depends_on {
+                if let Some(j) = entries.iter().position(|e| e.id == *dep)
+                    && effective[i] < effective[j]
+                {
+                    effective[j] = effective[i];
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            return effective;
+        }
+    }
+}
+
 impl Plan {
+    /// The order check: finds every place where this plan's order contradicts the owner's priorities. `entries`
+    /// are the ones the plan was built from. The order must never put an item ahead of one with a better
+    /// effective priority, so the top-priority work (with what it needs) is in the first wave. Returns one
+    /// sentence per contradiction; empty when the order follows priority.
+    pub fn priority_violations(&self, entries: &[PlanEntry]) -> Vec<String> {
+        let planned: Vec<&PlanEntry> = entries
+            .iter()
+            .filter(|e| self.position(&e.id).is_some())
+            .collect();
+        let effective = effective_priorities(&planned);
+        let mut ranked: Vec<(usize, &str, Priority)> = planned
+            .iter()
+            .zip(&effective)
+            .filter_map(|(e, p)| Some((self.position(&e.id)?, e.id.as_str(), *p)))
+            .collect();
+        ranked.sort();
+        let mut out = Vec::new();
+        for (i, (_, later, later_p)) in ranked.iter().enumerate() {
+            if let Some((_, earlier, earlier_p)) = ranked[..i].iter().find(|(_, _, p)| p > later_p)
+            {
+                out.push(format!(
+                    "{later} ({}) is planned after {earlier} ({}), which has a lower priority",
+                    later_p.as_str(),
+                    earlier_p.as_str()
+                ));
+            }
+        }
+        out
+    }
+
     /// Plans `entries`, given oldest first (the position is the age used as the tiebreak). A dependency on an
     /// id that is not among the entries counts as done.
     pub fn build(entries: &[PlanEntry]) -> Plan {
@@ -233,24 +286,8 @@ impl Plan {
             }
         }
         let known: Vec<&str> = pending.iter().map(|(_, e)| e.id.as_str()).collect();
-        // Effective priority: an item's own, raised to the best of whatever depends on it (to a fixpoint).
-        let mut effective: Vec<Priority> = pending.iter().map(|(_, e)| e.priority).collect();
-        loop {
-            let mut changed = false;
-            for i in 0..pending.len() {
-                for dep in &pending[i].1.depends_on {
-                    if let Some(j) = known.iter().position(|k| k == dep)
-                        && effective[i] < effective[j]
-                    {
-                        effective[j] = effective[i];
-                        changed = true;
-                    }
-                }
-            }
-            if !changed {
-                break;
-            }
-        }
+        let planned: Vec<&PlanEntry> = pending.iter().map(|(_, e)| *e).collect();
+        let effective = effective_priorities(&planned);
         let effective_of = |id: &str| {
             known
                 .iter()
@@ -610,6 +647,40 @@ mod tests {
             entry("n", low, &["b/"], &[]),
         ]);
         assert_eq!(plan.order, ["n", "l"]);
+    }
+
+    #[test]
+    fn the_order_check_flags_a_plan_that_puts_a_lower_priority_item_first() {
+        let (_, low) = rungs();
+        let entries = vec![
+            entry("a", low, &["a/"], &[]),
+            with_priority(entry("b", low, &["b/"], &[]), Priority::Low),
+            with_priority(entry("c", low, &["c/"], &[]), Priority::Urgent),
+            with_priority(entry("d", low, &["d/"], &["b"]), Priority::High),
+            entry("e", low, &["e/"], &[]),
+        ];
+        // A plan built by `build` follows priority, so the check passes it.
+        let good = Plan::build(&entries);
+        assert_eq!(good.order, ["c", "b", "d", "a", "e"]);
+        assert!(good.priority_violations(&entries).is_empty());
+        // Age order puts the urgent item third: the check names it.
+        let bad = Plan {
+            order: ["a", "b", "c", "d", "e"].map(String::from).to_vec(),
+            ..Plan::default()
+        };
+        let found = bad.priority_violations(&entries);
+        assert!(
+            found.iter().any(|m| m.starts_with("c (urgent)")),
+            "{found:?}"
+        );
+        assert!(found.iter().any(|m| m.starts_with("b (high)")), "{found:?}");
+        // Items equal in priority never contradict each other.
+        let same = vec![entry("x", low, &["x/"], &[]), entry("y", low, &["y/"], &[])];
+        let swapped = Plan {
+            order: vec!["y".into(), "x".into()],
+            ..Plan::default()
+        };
+        assert!(swapped.priority_violations(&same).is_empty());
     }
 
     #[test]
