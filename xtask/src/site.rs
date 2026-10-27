@@ -879,13 +879,13 @@ mod tests {
             if t["trigger_evaluated_by"] == "agent" {
                 let trigger = t["trigger"].as_str().unwrap();
                 let id = &t["id"];
-                assert!(
-                    trigger.contains("agent") || trigger.contains("firstmate"),
-                    "{id}"
-                );
-                for event in ["lands", "landed", "report exists", "reports a"] {
-                    assert!(!trigger.contains(event), "{id}: {trigger}");
-                }
+                // The subject of the trigger sentence must be the agent itself.
+                assert!(trigger.starts_with("the agent "), "{id}: {trigger}");
+            } else {
+                // A trigger decided by anything else must not be an agent act.
+                let trigger = t["trigger"].as_str().unwrap();
+                let id = &t["id"];
+                assert!(!trigger.starts_with("the agent "), "{id}: {trigger}");
             }
         }
     }

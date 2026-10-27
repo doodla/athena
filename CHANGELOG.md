@@ -7,6 +7,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+- The firstmate study's t3 trigger now says only that the agent records a ready PR or branch, which the cited
+  claims support, instead of saying it accepts the worker's report. Four transitions had their JSON spacing
+  fixed. The site test for decider wording now checks structure (an agent-decided trigger has the agent as its
+  subject, and no other trigger does) instead of banning keywords.
+
 ### Added
 
 - Athena now runs the error review backfill and the evidence-label derivation on its own, at the start of every
