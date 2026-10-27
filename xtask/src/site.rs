@@ -261,8 +261,7 @@ pub fn render(study: &Study) -> Result<String> {
         "<header><h1>Athena explains how {sys} handles work</h1>\
          <p class=\"lede\">{athena}</p>\
          <p class=\"lede\">{study_text}</p>\
-         <p class=\"lede\">This page is that study of {sys}. Its study id, <code>{id}</code>, is the name of \
-         the folder under <code>studies/</code> that holds the data this page is generated from. \
+         <p class=\"lede\">This page is that study of {sys}. \
          Each statement below ends with the id of the claim that supports it; the claims, with links to \
          their sources, are listed at the end.</p>\
          <p class=\"pin\">Pinned {sys} commit: <code>{sha}</code> in {repo_link}</p>\
@@ -270,7 +269,6 @@ pub fn render(study: &Study) -> Result<String> {
         sys = escape(system),
         athena = escape(str_of(about, "athena", "intro.json about")?),
         study_text = escape(str_of(about, "study", "intro.json about")?),
-        id = escape(study_id),
         sha = escape(sha),
     );
 
@@ -278,8 +276,17 @@ pub fn render(study: &Study) -> Result<String> {
     body.push_str(
         "<section><h2>Start here</h2>\
          <p>The three parts below say what firstmate is, follow one piece of work, and say what happens \
-         when something fails or has no limit. A glossary of the words used follows the main sections.</p>\
-         <h3>Words used first</h3>",
+         when something fails or has no limit. A glossary of the words used follows the main sections.</p>",
+    );
+    let what_is = study
+        .intro
+        .get("what_is")
+        .ok_or_else(|| anyhow!("intro.json has no `what_is`"))?;
+    let _ = write!(
+        body,
+        "<p class=\"what-is\">{} {}</p><h3>Words used first</h3>",
+        escape(str_of(what_is, "text", "intro.json what_is")?),
+        cites(what_is, "the what_is sentence", &known)?
     );
     leadin(&mut body, &study.intro, "terms", &known)?;
     body.push_str("<dl class=\"deciders\">");
@@ -499,6 +506,8 @@ pub fn render(study: &Study) -> Result<String> {
         body,
         "<section id=\"next-steps\"><h2>Next steps</h2><ul>\
          <li>Learn about Athena, and how to install and try it: <a href=\"{a}\">{a}</a>.</li>\
+         <li>Install Athena from a checkout of its repository: <code>./setup.sh</code></li>\
+         <li>Try it with a one-line request: <code>athena ask \"add a changelog\"</code></li>\
          <li>Learn about {sys}, the project studied here, and see how to use it: {firstmate_link}.</li>\
          <li>Check a statement: follow a bracketed claim id to the claim, then its source link to the \
          file and lines in {sys} at the pinned commit.</li></ul></section>",
@@ -553,6 +562,13 @@ pub fn render(study: &Study) -> Result<String> {
         body.push_str("</ul></li>");
     }
     body.push_str("</ol></section>");
+
+    let _ = write!(
+        body,
+        "<section id=\"about-this-page\"><h2>About this page</h2><p>Its study id, <code>{}</code>, is the \
+         name of the folder under <code>studies/</code> that holds the data this page is generated from.</p></section>",
+        escape(study_id)
+    );
 
     let _ = write!(
         body,
@@ -684,6 +700,7 @@ mod tests {
             dir.path(),
             "intro.json",
             r#"{"about":{"athena":"Athena is a system.","study":"A study is a reading."},
+                "what_is":{"text":"Firstmate is a thing.","claims":["c1"]},
                 "what":[{"text":"Firstmate does a thing.","claims":["c1"]}],
                 "walkthrough":[{"text":"First step.","claims":["c1"]}],
                 "limits":[{"text":"A limit.","claims":["c1"]}],
@@ -1042,7 +1059,21 @@ mod tests {
                 .unwrap_or_else(|| panic!("{term}"));
             assert!(at > 0);
         }
-        assert!(html.contains("is the name of the folder under <code>studies/</code>"));
+        let note = html
+            .find("is the name of the folder under <code>studies/</code>")
+            .unwrap();
+        assert!(note > html.find("<h2>Claims and sources</h2>").unwrap());
+        assert!(html.find("<header>").unwrap() < html.find("</header>").unwrap());
+        assert!(!html[..html.find("</header>").unwrap()].contains("study id"));
+        let what_is = html
+            .find("<p class=\"what-is\">Firstmate is a tool")
+            .unwrap();
+        assert!(what_is < html.find("<h3>Words used first</h3>").unwrap());
+        let sentence = &html[what_is..html.find("<h3>Words used first</h3>").unwrap()];
+        assert!(sentence.contains("href=\"#claim-c1\""));
+        let next = &html[html.find("<h2>Next steps</h2>").unwrap()..];
+        assert!(next.contains("<code>./setup.sh</code>"));
+        assert!(next.contains("<code>athena ask \"add a changelog\"</code>"));
     }
 
     #[test]
