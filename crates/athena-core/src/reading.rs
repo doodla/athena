@@ -1829,6 +1829,9 @@ pub fn request_text_touches(text: &str) -> Vec<String> {
 /// - A request depends on every other job whose full id it names (a retry, or "after <job>").
 /// - Open questions are also filled by lookup: every touched path that does not exist (a file a reading
 ///   creates is excepted), and every referenced job that is not among the records.
+/// - A read request whose design names no existing code it changes or reuses, and does not list only files it
+///   creates, gets `code_problem` set ([`crate::plan::code_reference_problem`]), so the plan refuses it before
+///   production. This is the early form of the check the verifier made only at the final verdict.
 pub fn plan_entry(
     job: &JobRecords,
     rung_hint: Option<athena_data::roles::Ladder>,
@@ -1899,6 +1902,12 @@ pub fn plan_entry(
                 "the touched path {path} does not exist at the base commit"
             ));
         }
+    }
+    // The early check that the design names the existing code it changes or reuses (or says it is wholly
+    // new): it runs here, when the plan is made, not at the final verdict. A declined reading has no design.
+    if job.latest_reading().is_some_and(|r| r.capability.is_some()) {
+        entry.code_problem =
+            crate::plan::code_reference_problem(&entry.touches, &creates, lookup.path_exists);
     }
     for id in &entry.depends_on {
         if !(lookup.job_exists)(id) {
@@ -2957,6 +2966,75 @@ mod tests {
                 "the referenced job 20261012-075824-1x28 is not among the records"
             ]
         );
+    }
+
+    /// A read job whose reading lists `deliverables` (path, action) and is judged against `exists`.
+    fn read_entry(
+        deliverables: &[(&str, DeliverableAction)],
+        exists: &dyn Fn(&str) -> bool,
+    ) -> crate::plan::PlanEntry {
+        let mut job = job_with_checks(vec![]);
+        job.request.as_mut().unwrap().text = "Change the greeting".into();
+        let mut reading = final_reading(&job);
+        reading.deliverables = deliverables
+            .iter()
+            .map(|(path, action)| Deliverable {
+                path: (*path).into(),
+                action: *action,
+                p: 0.9,
+            })
+            .collect();
+        job.readings = vec![reading];
+        let lookup = Lookup {
+            job_exists: &|_| true,
+            path_exists: exists,
+            brief: &[],
+        };
+        plan_entry(
+            &job,
+            Some(athena_data::roles::Ladder::Implementation),
+            &lookup,
+        )
+    }
+
+    #[test]
+    fn a_reading_whose_design_names_no_existing_code_is_refused_at_plan_time() {
+        let there = |p: &str| p == "crates/a/src/lib.rs";
+        for (what, deliverables) in [
+            ("no file at all", vec![]),
+            (
+                "a path that is not in the repository",
+                vec![("crates/gone.rs", DeliverableAction::Modify)],
+            ),
+        ] {
+            let entry = read_entry(&deliverables, &there);
+            assert_eq!(entry.missing(), [crate::plan::MISSING_CODE], "{what}");
+            let plan = crate::plan::Plan::build(&[entry]);
+            assert!(plan.order.is_empty(), "{what}: {plan:?}");
+            let reason = &plan.refused[0].reason;
+            assert!(reason.contains("existing code"), "{what}: {reason}");
+            assert!(reason.contains("the design"), "{what}: {reason}");
+        }
+    }
+
+    #[test]
+    fn a_reading_that_names_existing_code_or_is_wholly_new_passes_the_plan_check() {
+        let there = |p: &str| p == "crates/a/src/lib.rs";
+        let existing = read_entry(
+            &[("crates/a/src/lib.rs", DeliverableAction::Modify)],
+            &there,
+        );
+        assert!(existing.missing().is_empty(), "{:?}", existing.code_problem);
+        let new_only = read_entry(&[("crates/b/new.rs", DeliverableAction::Create)], &there);
+        assert!(new_only.missing().is_empty(), "{:?}", new_only.code_problem);
+        let both = read_entry(
+            &[
+                ("crates/a/src/lib.rs", DeliverableAction::Modify),
+                ("crates/b/new.rs", DeliverableAction::Create),
+            ],
+            &there,
+        );
+        assert_eq!(crate::plan::Plan::build(&[both]).order.len(), 1);
     }
 
     #[test]

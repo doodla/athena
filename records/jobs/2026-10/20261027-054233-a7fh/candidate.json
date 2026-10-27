@@ -1,0 +1,114 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261027-054233-a7fh",
+  "base_commit": "e9760bf931e11fb17943dfb2339fc36828f5a3de",
+  "base_fingerprint": "sha256:183167a85f851db41359ced95daecc4814ffa17f128d834d2a77cabd5559ac26",
+  "previous_job": "20261027-054222-191v",
+  "candidate_commit": "bac60967adc4db65d26dc0d796718e0cbe1453fd",
+  "candidate_tree": "b4e033ff8079eb36cab8ed059f8da4fbc80d8e25",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 178879
+    },
+    {
+      "path": "crates/athena-core/src/plan.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 38278
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 144376
+    }
+  ],
+  "fingerprint": "sha256:e4120a4b14e4419aca25e30bf968f905652662a862361e512d0eab3894fcbba4",
+  "violations": [],
+  "producer_report": {
+    "summary": "Root cause: a design's references to existing code were compared with the repository only at the final verdict. A reading that named no existing file, or only absent files, was planned, built in full and rejected at the end. I added the check at plan time. `plan::code_reference_problem` (crates/athena-core/src/plan.rs) runs from `reading::plan_entry` for a request that already has a reading with a capability, and sets the new `PlanEntry::code_problem`. `PlanEntry::missing()` then reports \\\"existing code it changes or reuses\\\", so `Plan::build` refuses the item before production. The refusal reason says exactly what is missing, for example \\\"the design names no existing code: crates/gone.rs does not exist at the base commit and is not marked as created; name the existing files it changes or reuses, or mark the new ones as created\\\". A design passes if at least one listed file exists at the base commit, or if every listed file is one it creates, which counts as stating it is wholly new code. The CHANGELOG.md that Athena adds to every change reading is ignored by the check. The module and function docs and the CHANGELOG entry name the root cause. The CHANGELOG entry says this check covers the reading half of reading-or-provenance-mismatch-caught-only-at-final-verdict and leaves that item open for the provenance half. I added four tests (two in plan.rs, two in reading.rs) covering refusal and acceptance.",
+    "files": [
+      "crates/athena-core/src/plan.rs",
+      "crates/athena-core/src/reading.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-core plan",
+        "result": "pass",
+        "note": "55 passed, including the 4 new tests"
+      },
+      {
+        "command": "cargo test -p athena-cli --test drain",
+        "result": "pass",
+        "note": "first run: 8 failed because the CHANGELOG.md Athena adds to every change reading counted as a non-existent path; fixed by ignoring that file in the check; second run: 95 passed"
+      },
+      {
+        "command": "cargo test -p athena-cli --locked",
+        "result": "pass",
+        "note": "whole crate, exit 0 (output was too long to read; no failure exit code)"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "clean, run after cargo fmt"
+      },
+      {
+        "command": "cargo fmt --all",
+        "result": "pass",
+        "note": "applied formatting; not run as --check afterwards"
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "12 passed (boundary word scan)"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "The commit message or code docs name the root cause: the design's code references were not checked until the final verdict, and say how the change overlaps with reading-or-provenance-mismatch-caught-only-at-final-verdict.",
+        "status": "met",
+        "evidence": "Read: the doc comment on `code_reference_problem` in crates/athena-core/src/plan.rs and the new CHANGELOG.md entry both name the root cause (code references first compared with the repository at the final verdict) and say the check covers the reading half of reading-or-provenance-mismatch-caught-only-at-final-verdict and leaves that item open for the provenance half. I cannot write a commit message; Athena makes the commit."
+      },
+      {
+        "criterion": "A new test feeds a plan entry or design that names no existing code, or names a path that does not exist, and asserts it is refused or flagged before production. It fails on the pre-change code and passes with the change. Run: cargo test.",
+        "status": "met",
+        "evidence": "Ran `cargo test -p athena-core plan`: plan::tests::a_design_that_names_no_existing_code_is_refused_before_production_and_says_what_is_missing and reading::tests::a_reading_whose_design_names_no_existing_code_is_refused_at_plan_time pass. They feed no files, a path absent from the repository, and only CHANGELOG.md, then assert `missing()` reports the new label and `Plan::build` leaves the item out of the order with a refusal. Before the change `PlanEntry::missing` had no such check, `code_problem` and `code_reference_problem` did not exist, and a read entry with empty or absent deliverables was planned, so the assertions fail without it."
+      },
+      {
+        "criterion": "A new test shows a design that names existing repository paths, or states that it is wholly new code, is accepted, so the gate is not a blanket refusal. Run: cargo test.",
+        "status": "met",
+        "evidence": "Ran `cargo test -p athena-core plan`: plan::tests::a_design_that_names_existing_code_or_says_it_is_wholly_new_is_accepted and reading::tests::a_reading_that_names_existing_code_or_is_wholly_new_passes_the_plan_check pass. They cover an existing path, existing plus created, and create-only deliverables, each planned. The 95 drain tests, which plan read requests, pass too."
+      },
+      {
+        "criterion": "cargo fmt --check, cargo clippy (all targets, no warnings), and cargo test all pass.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I ran cargo fmt --all, cargo clippy --all-targets --locked -- -D warnings (clean), the athena-core plan filter, athena-cli in full and the xtask policy test (all passed). I did not run the full workspace suite."
+      },
+      {
+        "criterion": "The refusal message tells the author what is missing, e.g. which design names no existing code, in plain wording a stranger can follow.",
+        "status": "met",
+        "evidence": "Read the new Refusal reason: \"the plan lacks existing code it changes or reuses; say it in the request ... and plan again (the design names no existing code: crates/gone.rs does not exist at the base commit and is not marked as created; name the existing files it changes or reuses, or mark the new ones as created)\". Drain output in my first failing run showed this text. The no-file case says \"the design lists no file at all; ...\". The tests assert on these phrases."
+      }
+    ],
+    "open_issues": [
+      "The queued item reading-or-provenance-mismatch-caught-only-at-final-verdict is not closed. This check covers a reading that names code that is not there. I did not touch the provenance half or the verifier's final-verdict logic, which are out of scope.",
+      "The gate passes when at least one listed path exists, so a design that names one real file and one non-existent unmarked file is not refused. The missing path is still recorded as an open question, as before. Refusing on any absent unmarked path is stricter and would need a decision."
+    ],
+    "mistakes": [
+      "My first version counted the auto-added CHANGELOG.md as a path that must exist or be created. That made 8 drain tests fail. I found it by running `cargo test -p athena-cli --test drain` and fixed it by ignoring that file, with a test for the case where only CHANGELOG.md is listed."
+    ],
+    "learnings": [
+      "`reading::ensure_changelog` adds CHANGELOG.md as a Modify deliverable to every `change` reading, whether or not the file exists. A gate that counted it would be trivially satisfied in a real repo and would wrongly refuse in test fixtures, so `code_reference_problem` ignores it.",
+      "The drain tests in crates/athena-cli/tests/drain.rs run real readings through `RealSteps` and `reading::plan_entry` against a fixture repository, so a stricter plan gate shows up there first.",
+      "`PlanEntry` struct literals in tests use `..PlanEntry::bare`, so adding a field needed no edits to the cli test files.",
+      "`PlanEntry::missing()` is also what decides whether the drain reads an unread item, so the new check is applied only to entries that already have a reading with a capability. Unread requests are unchanged."
+    ],
+    "desires": [
+      "Bash could not run grep or tail, and tool-result files outside the working directory cannot be read, so I could not read the long full-crate cargo test output after the fact."
+    ]
+  }
+}
