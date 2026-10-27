@@ -163,6 +163,37 @@ fn the_rendered_page_shows_agent_decided_transitions_as_the_model_says() {
 }
 
 #[test]
+fn the_rendered_page_has_the_newcomer_fixes() {
+    let html = rendered_page();
+    let at = |s: &str| html.find(s).unwrap_or_else(|| panic!("missing {s}"));
+    // Finding ids run f1, f2, f3 with no gap.
+    let limits = &html[at("<h2>Limits of this study</h2>")..];
+    let limits = limits.split("</section>").next().unwrap();
+    let ids: Vec<&str> = limits
+        .split("<li><strong>")
+        .skip(1)
+        .map(|i| i.split("</strong>").next().unwrap())
+        .collect();
+    assert_eq!(ids, ["f1", "f2", "f3"]);
+    // The study-id note is not in the header and comes after the claims.
+    assert!(!html[..at("</header>")].contains("study id"));
+    assert!(
+        at("is the name of the folder under <code>studies/</code>")
+            > at("<h2>Claims and sources</h2>")
+    );
+    // One sentence on what firstmate is, with claim links, before the word list.
+    let start = at("<p class=\"what-is\">");
+    assert!(start < at("<h3>Words used first</h3>"));
+    assert!(html[start..at("<h3>Words used first</h3>")].contains("href=\"#claim-c1\""));
+    // Next steps carry the install command and an example request from the README.
+    let next = &html[at("<h2>Next steps</h2>")..at("<h2>Claims and sources</h2>")];
+    assert!(next.contains("<code>./setup.sh</code>"));
+    assert!(next.contains("<code>athena ask \"add a changelog\"</code>"));
+    let readme = std::fs::read_to_string(root().join("README.md")).unwrap();
+    assert!(readme.contains("./setup.sh") && readme.contains("athena ask \"add a changelog\""));
+}
+
+#[test]
 fn the_wrong_fixture_page_fails_every_check() {
     let html = bad_page();
     let order = check_order(&html);
