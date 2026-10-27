@@ -113,6 +113,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- Structure pass job G2 (`docs/design/structure-pass.md`): the Transport items of `crates/athena-core/src/gh/mod.rs`
+  (`Runner`, `GhCli`, `GhFailure`, `parse_status`, `is_transient`, `transient_text`, `Retry`, `retry_transient`,
+  `HttpReply`, `HttpPost`, `CurlHttp`, `HostErrorLog`, and the private `clock_entropy`) move unchanged into
+  `crates/athena-core/src/gh/transport.rs`, and `gh/mod.rs` re-exports them, so every path such as
+  `crate::gh::Runner` is as before. No behavior change; the list from `cargo test -- --list` is the same.
 - First job of the structure pass (G1 of `docs/design/structure-pass.md`): `crates/athena-core/src/gh.rs` is
   renamed to `crates/athena-core/src/gh/mod.rs`, with no line of its code changed, so later jobs can move code
   into files beside it. The decision headers of D87 and D88 in `introspect.rs` now list the directory
