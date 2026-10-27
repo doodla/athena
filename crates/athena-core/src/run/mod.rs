@@ -1435,21 +1435,88 @@ fn is_athena_check_criterion(text: &str) -> bool {
         .any(|t| SCOPES.contains(&t))
 }
 
+/// The paths the candidate is expected to change: the accepted plan's files (when the job was planned)
+/// and the accepted reading's deliverables, each once, in that order. A path written `./x` is `x`.
+pub(crate) fn planned_paths(plan: Option<&JobPlan>, accepted: &AcceptedReading) -> Vec<String> {
+    let mut paths: Vec<String> = Vec::new();
+    let listed = plan
+        .into_iter()
+        .flat_map(|p| p.files.iter().map(|f| f.path.as_str()))
+        .chain(
+            accepted
+                .deliverables
+                .iter()
+                .map(|(path, _, _)| path.as_str()),
+        );
+    for path in listed {
+        let path = normal_path(path);
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    paths
+}
+
+/// The planned paths the candidate left unchanged without saying why: not in `changed` (the snapshot's
+/// change list, which includes deleted files), and with no entry in the report's `unchanged_planned_files`
+/// that names the path and gives a reason. A path is flagged once, in the order of `planned`.
+///
+/// This is the check that sends a candidate with a forgotten planned file back to the producer before
+/// the verifier starts. It reads only paths, never file content.
+pub(crate) fn unchanged_planned_files(
+    report: &ProducerOutput,
+    planned: &[String],
+    changed: &[String],
+) -> Vec<String> {
+    let changed: BTreeSet<String> = changed.iter().map(|p| normal_path(p)).collect();
+    planned
+        .iter()
+        .map(|p| normal_path(p))
+        .filter(|path| !changed.contains(path))
+        .filter(|path| {
+            !report
+                .unchanged_planned_files
+                .iter()
+                .any(|u| normal_path(&u.path) == *path && !u.reason.trim().is_empty())
+        })
+        .collect()
+}
+
+/// A path as compared: surrounding spaces and a leading `./` removed.
+fn normal_path(path: &str) -> String {
+    let path = path.trim();
+    path.strip_prefix("./").unwrap_or(path).to_string()
+}
+
 /// The brief for the producer's one send-back: the original brief, then the criteria the report did not
-/// show as met, each with its exact text.
-pub(crate) fn send_back_text(brief: &str, unmet: &[String]) -> String {
+/// show as met, each with its exact text, and the planned files left unchanged without a reason.
+pub(crate) fn send_back_text(brief: &str, unmet: &[String], unchanged: &[String]) -> String {
     let mut text = format!("{brief}\n\n## Sent back\n\n");
     text.push_str(
-        "Your previous report did not show every acceptance criterion as met in criteria_check. \
-         Your edits are still in your working directory. Fix the work for each criterion below, \
+        "Your previous report did not show every acceptance criterion as met in criteria_check, \
+         or left planned files unchanged without a reason. \
+         Your edits are still in your working directory. Fix the work for each item below, \
          then report every acceptance criterion in criteria_check, copying each line from the brief's \
-         criteria_check section as its text, with its status and your evidence. This is the only send-back: \
+         criteria_check section as its text, with its status and your evidence. A planned file \
+         listed below must be changed, or explained with its path and a reason in \
+         unchanged_planned_files in your report. This is the only send-back: \
          if your changes are still in place afterwards, they go to the verifier with the criteria \
-         your report still leaves unmet or unreported flagged, and the verifier judges them. \
-         A run that leaves no change fails.\n\nCriteria not met or not reported:\n\n",
+         your report still leaves unmet or unreported, and the planned files still unchanged and \
+         unexplained, flagged, and the verifier judges them. \
+         A run that leaves no change fails.\n\n",
     );
-    for criterion in unmet {
-        text.push_str(&format!("- {criterion}\n"));
+    if !unmet.is_empty() {
+        text.push_str("Criteria not met or not reported:\n\n");
+        for criterion in unmet {
+            text.push_str(&format!("- {criterion}\n"));
+        }
+        text.push('\n');
+    }
+    if !unchanged.is_empty() {
+        text.push_str("Planned files left unchanged and not explained:\n\n");
+        for path in unchanged {
+            text.push_str(&format!("- {path}\n"));
+        }
     }
     text
 }
@@ -1615,6 +1682,9 @@ impl Athena {
         // the same working directory, up to `PRODUCER_SEND_BACKS` times.
         let mut attempt_brief = brief.to_string();
         let mut send_backs = 0;
+        // The files the plan and the reading's deliverables expect the candidate to change; the same send-back
+        // also covers any of them left unchanged without a reason in the report.
+        let planned = planned_paths(closing.plans.last(), accepted);
         // What the last report still lacked after the send-back, and where that report is kept.
         let mut report_gaps: Vec<String> = Vec::new();
         let mut report_kept_in = String::new();
@@ -1691,19 +1761,42 @@ impl Athena {
                 }
             };
             let unmet = unmet_criteria(&raw, accepted);
+            // Planned files and expected deliverables the work tree does not change, with no reason in the
+            // report. A run with no change at all fails below as an idle producer, so it is not listed here.
+            let unchanged = {
+                let changed: Vec<String> = snapshot
+                    .change_list()?
+                    .into_iter()
+                    .map(|c| c.path)
+                    .collect();
+                if changed.is_empty() {
+                    Vec::new()
+                } else {
+                    unchanged_planned_files(&raw, &planned, &changed)
+                }
+            };
             left_criteria = left_to_athena(&raw, accepted);
             let report = self.redact_report(raw, ctx.redactor)?;
-            if unmet.is_empty() {
+            if unmet.is_empty() && unchanged.is_empty() {
                 break Some(report);
             }
-            let problems = vec![format!(
-                "acceptance criteria not met or not reported: {}",
-                unmet
-                    .iter()
-                    .map(|c| format!("\"{c}\""))
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            )];
+            let mut problems = Vec::new();
+            if !unmet.is_empty() {
+                problems.push(format!(
+                    "acceptance criteria not met or not reported: {}",
+                    unmet
+                        .iter()
+                        .map(|c| format!("\"{c}\""))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ));
+            }
+            if !unchanged.is_empty() {
+                problems.push(format!(
+                    "planned files left unchanged without a reason: {}",
+                    unchanged.join(", ")
+                ));
+            }
             // Keep the redacted report that failed the check: the attempt's invocation record carries it
             // in `detail`, so each attempt's report stays with the job's records.
             let kept = {
@@ -1735,7 +1828,7 @@ impl Athena {
             send_backs += 1;
             ctx.ui
                 .line(&format!("producer   sent back: {}", problems.join("; ")));
-            attempt_brief = send_back_text(brief, &unmet);
+            attempt_brief = send_back_text(brief, &unmet, &unchanged);
         };
 
         // The candidate: the snapshot's change list, applied to the base's full tree in the user's repository.
@@ -2048,7 +2141,7 @@ impl Athena {
                 passed: true,
                 detail: format!(
                     "the producer's report was still incomplete after its send-back, so these were not confirmed \
-                     by it; judge them yourself from the recorded check results: {}",
+                     by it; judge them yourself from the candidate and the recorded check results: {}",
                     report_gaps.join("; ")
                 ),
             });

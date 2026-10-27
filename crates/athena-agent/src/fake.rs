@@ -247,6 +247,15 @@ pub fn deterministic_turn(spec: &AgentInvocation) -> FakeTurn {
                 .map(|rest| rest.split_once("] ").map_or(rest, |(_, text)| text))
                 .map(|text| json!({ "criterion": text, "status": "met", "evidence": "fake producer: nothing was checked" }))
                 .collect();
+            // The fake changes one file. Every other expected deliverable (a change reading also lists
+            // CHANGELOG.md) is reported as unchanged with a reason, as a real producer must.
+            let unchanged: Vec<Value> = section(&spec.user_prompt, "## Expected deliverables")
+                .lines()
+                .filter_map(|l| l.strip_prefix("- "))
+                .map(|rest| rest.split_once(" (").map_or(rest, |(path, _)| path))
+                .filter(|path| *path != FAKE_DELIVERABLE)
+                .map(|path| json!({ "path": path, "reason": "fake producer: it changes only its own file" }))
+                .collect();
             let mut turn = FakeTurn::output(json!({
                 "summary": format!("Wrote the request to {FAKE_DELIVERABLE} (fake producer, no model call)."),
                 "files": [FAKE_DELIVERABLE],
@@ -255,7 +264,8 @@ pub fn deterministic_turn(spec: &AgentInvocation) -> FakeTurn {
                 "open_issues": [],
                 "mistakes": [],
                 "learnings": [],
-                "desires": []
+                "desires": [],
+                "unchanged_planned_files": unchanged
             }));
             turn.edits.push((
                 FAKE_DELIVERABLE.to_string(),

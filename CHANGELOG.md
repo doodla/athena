@@ -9,6 +9,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A candidate that leaves a planned file unchanged is now caught before verification starts. Before the
+  candidate is built, Athena compares the producer's change list with the accepted plan's files and the
+  reading's expected deliverables. A listed file that was not changed, and that the producer's report does not
+  explain in its new `unchanged_planned_files` field (a path and a reason each), is sent back in the same
+  one send-back as unmet criteria, which names each path. If it is still unexplained after that, it is passed to
+  the verifier among the producer-report gaps, so it is no longer found only at the end. The producer brief
+  now says that listed files must be changed or explained. Two earlier jobs on branch next5 were rejected
+  for test files under `crates/athena-cli/tests` that were never changed. The fake producer and the CLI test
+  harness now explain the listed files they do not edit. Tests are in `run_pin_tests.rs`. The missed time
+  target is a separate item and is unchanged.
 - Banned boundary words are now caught before the work starts, not only after it. The job brief tells the
   producer to run `cargo test -p xtask --test policy` on its changed files before it finishes and to reword any
   banned word that scan finds; a word list in the brief had not been enough on its own. And `athena ask`
