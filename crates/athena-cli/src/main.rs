@@ -238,6 +238,10 @@ and the page text passed the source check
   queue empty       nothing was left to work; this is not success
   job limit         --job-limit jobs were started
   stop requested    `athena drain-stop` was run; the job in progress was finished and no further job was started
+  rebuilt           a landing changed crates/, xtask/, Cargo.toml, Cargo.lock or setup.sh, so Athena was rebuilt \
+and installed (the steps of ./setup.sh); the new binary carries on with the remaining --budget and --job-limit, \
+so a run is not seen to end here
+  rebuild failed    that rebuild failed; the build output is shown and the rest stays queued
 
 Order: planning comes first. Every open request is fleshed out (goal, requirements-ladder rung, acceptance, \
 open questions, dependencies, the paths it touches) and all of them are planned together. Drain works the \
@@ -489,6 +493,29 @@ fn parse_read_budget(text: &str) -> Result<f64, String> {
         Ok(value) if value.is_finite() && value >= 0.0 => Ok(value),
         _ => Err(format!("{text:?} is not an amount of zero or more")),
     }
+}
+
+/// Prints one line on standard error when this binary's build commit is older than `HEAD` for the paths it is
+/// built from (see `Athena::stale_build`). For the commands that run agents.
+fn warn_if_stale(athena: &Athena) {
+    if let Some(line) = athena.stale_build() {
+        eprintln!("{line}");
+    }
+}
+
+/// Replaces this process with the installed Athena run with `args`. It returns only when that failed. A
+/// background role this command started finishes first, as it does when the command ends.
+#[cfg(unix)]
+fn reexec<T>(args: &[String]) -> Result<T> {
+    use std::os::unix::process::CommandExt;
+    athena_core::steward::wait_for_background();
+    let binary = wiring::installed_binary();
+    let error = std::process::Command::new(&binary).args(args).exec();
+    Err(anyhow::anyhow!(
+        "athena was rebuilt but {} could not be run to carry on: {error}; run `athena {}` yourself",
+        binary.display(),
+        args.join(" ")
+    ))
 }
 
 fn open(writes: bool) -> Result<Athena> {
@@ -884,6 +911,7 @@ fn run(cli: Cli) -> Result<u8> {
         }
         Command::Audience { url, reader, json } => {
             let athena = open(true)?;
+            warn_if_stale(&athena);
             let mut target = athena_core::audience::Target::explainer();
             if let Some(url) = url {
                 target.url = url;
@@ -915,6 +943,7 @@ fn run(cli: Cli) -> Result<u8> {
         }
         Command::Audit { job, json } => {
             let athena = open(true)?;
+            warn_if_stale(&athena);
             // The mistake report does not depend on a job audit: it prints when none is produced, and when the
             // audit errors.
             let mistakes = athena.mistakes()?;
@@ -1008,6 +1037,7 @@ fn run(cli: Cli) -> Result<u8> {
         }
         Command::Go { job, json } => {
             let athena = open(true)?;
+            warn_if_stale(&athena);
             go_and_report(&athena, &job, AcceptedBy::User, json)
         }
         Command::Land { job, pr: _, json } => {
@@ -1044,6 +1074,7 @@ fn run(cli: Cli) -> Result<u8> {
             json,
         } => {
             let athena = open(true)?;
+            warn_if_stale(&athena);
             // A stop asked for before this run started belongs to an earlier run.
             let _ = std::fs::remove_file(drain::stop_file(athena.state.root()));
             // `[parallel] max_concurrency` from the head commit's athena.toml; 1 is one job at a time.
@@ -1062,6 +1093,11 @@ fn run(cli: Cli) -> Result<u8> {
                 &Terminal,
                 max_concurrency,
             )?;
+            // After a landing that changed Athena's own code and a successful rebuild, the newly installed
+            // binary carries on with the remaining budget and job limit. This returns only if that failed.
+            let report = drain::follow_restart(report, &Terminal, &|left| {
+                reexec(&drain::reexec_args(&left, json))
+            })?;
             if json {
                 print_json(&report)?;
             } else {

@@ -10,8 +10,51 @@ use athena_data::records::{
     Reading, Role,
 };
 use athena_gate::invariant::{BOOTSTRAP_OUTCOME, BootstrapRange, bootstrap_range};
+use athena_git::Git;
 use serde::Serialize;
 use std::collections::BTreeMap;
+
+/// The paths the installed binary is built from: Athena's own code and the files that build and install it. A
+/// change to one of them after the build commit leaves the installed binary stale.
+pub const BUILD_PATHS: [&str; 5] = ["crates/", "xtask/", "Cargo.toml", "Cargo.lock", "setup.sh"];
+
+/// Whether any of `paths` is one the installed binary is built from.
+pub fn touches_build(paths: &[String]) -> bool {
+    paths.iter().any(|p| {
+        BUILD_PATHS
+            .iter()
+            .any(|root| p == root || (root.ends_with('/') && p.starts_with(root)))
+    })
+}
+
+/// The one line that says the binary built from `build_commit` is older than `head` for [`BUILD_PATHS`], or
+/// None when it is not: the build commit is not in this repository (a build that names no commit, or another
+/// repository's) or is not an ancestor of `head`, or none of those paths changed since it. Changes to
+/// anything else, such as `docs/` or `records/`, never make a build stale.
+pub fn stale_build_line(git: &Git, build_commit: &str, head: &str) -> Option<String> {
+    if !git.commit_exists(build_commit).ok()? {
+        return None;
+    }
+    git.run(["merge-base", "--is-ancestor", build_commit, head])
+        .ok()?;
+    let mut args = vec!["diff", "--name-only", build_commit, head, "--"];
+    args.extend(BUILD_PATHS);
+    let changed = git
+        .run(args)
+        .ok()?
+        .lines()
+        .filter(|l| !l.is_empty())
+        .count();
+    if changed == 0 {
+        return None;
+    }
+    let short = |c: &str| c[..c.len().min(12)].to_string();
+    Some(format!(
+        "stale build: this athena was built from {}, and {changed} file(s) under crates/, xtask/, Cargo.toml, Cargo.lock or setup.sh changed by {}; run ./setup.sh",
+        short(build_commit),
+        short(head)
+    ))
+}
 
 /// One job, in one line.
 #[derive(Debug, Clone, Serialize)]
@@ -413,6 +456,10 @@ pub struct StatusView {
     pub branch: Option<String>,
     pub head: String,
     pub athena: Build,
+    /// Set when the installed binary's build commit is older than `head` for the paths it is built from
+    /// ([`stale_build_line`]): the line `athena status` and the agent-running commands print.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale_build: Option<String>,
     pub driver: String,
     pub kill_switch_on: bool,
     pub nested: Option<String>,
@@ -930,6 +977,12 @@ impl Athena {
         }
     }
 
+    /// The stale-build line when this binary's build commit is older than `HEAD` for the paths it is built
+    /// from, else None ([`stale_build_line`]). Never an error: a repository that cannot be read has no line.
+    pub fn stale_build(&self) -> Option<String> {
+        stale_build_line(&self.git, &self.build.source_commit, &self.head().ok()?)
+    }
+
     /// The mistakes in the records at `HEAD`, per class and per cause, with the prevention proposed.
     pub fn mistakes(&self) -> Result<MistakeReport> {
         let head = self.head()?;
@@ -1127,11 +1180,13 @@ impl Athena {
         let code_health = crate::code_health::compute(&self.git, &head, &records, crate::now())
             .ok()
             .map(|health| health.shown());
+        let stale_build = stale_build_line(&self.git, &self.build.source_commit, &head);
         Ok(StatusView {
             repository: self.git.dir().display().to_string(),
             branch: self.git.current_branch()?,
             head,
             athena: self.build.clone(),
+            stale_build,
             driver: format!("{} {}", self.driver.info().name, self.driver.info().version),
             kill_switch_on,
             nested: self.nested.clone(),

@@ -592,6 +592,13 @@ pub fn drain(report: &crate::drain::Report) -> String {
         }
         (stop, _) => format!("stopped     {}: {}\n", stop.label(), stop.meaning()),
     };
+    if let Some(output) = &report.rebuild_output {
+        out.push_str("build output:\n");
+        out.push_str(output);
+        if !output.ends_with('\n') {
+            out.push('\n');
+        }
+    }
     if report.jobs.is_empty() {
         out.push_str("jobs        none run\n");
     }
@@ -938,6 +945,9 @@ pub fn status(v: &StatusView) -> String {
         if v.athena.dirty { ", dirty" } else { "" },
         v.driver
     );
+    if let Some(line) = &v.stale_build {
+        let _ = writeln!(out, "{line}");
+    }
     let _ = writeln!(
         out,
         "repository  {} · {} @ {}",

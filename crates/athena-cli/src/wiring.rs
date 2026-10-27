@@ -58,6 +58,12 @@ pub fn build_info() -> Build {
     }
 }
 
+/// Where setup installs Athena (`$ATHENA_HOME/bin/athena`). After a rebuild this is the new binary, whereas
+/// the running one may have been replaced on disk.
+pub fn installed_binary() -> PathBuf {
+    athena_data::paths::athena_home().join("bin/athena")
+}
+
 /// The text `athena --version` shows after the name: the package version, the source commit, and a
 /// `dirty` marker when the build does not name a clean commit.
 pub fn version_string(build: &Build) -> String {

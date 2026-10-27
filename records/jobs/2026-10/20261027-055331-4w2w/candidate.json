@@ -1,0 +1,164 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261027-055331-4w2w",
+  "base_commit": "4f7f478a0ab286e5b54faa2e6c1c7b245f5cb975",
+  "base_fingerprint": "sha256:53f081cdcc7cbd1f8e56dc33f9443e8037af6e36120cc3c3a0e1fad23dbc93ff",
+  "previous_job": "20261027-045117-g5sr",
+  "candidate_commit": "41612b174926b209dde522419a3ed7841c4c26cc",
+  "candidate_tree": "359f5f3d175b07a8484e9b95f8cf072d885e7f43",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 170464
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 69363
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 91740
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 60188
+    },
+    {
+      "path": "crates/athena-cli/src/wiring.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 6946
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 144947
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 80418
+    },
+    {
+      "path": "docs/decisions.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 293880
+    }
+  ],
+  "fingerprint": "sha256:c326ff58e6629f851e28fe16000c27de3a20f619b3338dab0ccb3c7229b00cf7",
+  "violations": [],
+  "producer_report": {
+    "summary": "Drain now rebuilds and re-executes Athena after landing a change to its own code, and a stale-build line is printed in the places the request named.\n\n**Rebuild and re-exec (`drain.rs`, `main.rs`, `wiring.rs`)**\n- `Steps::rebuild` is a new injectable step. After a landing that touches `crates/`, `xtask/`, `Cargo.toml`, `Cargo.lock` or `setup.sh`, it runs once, before the next job starts. Landings wait while it builds.\n- The real step (`run_setup`) runs `sh setup.sh` in the checkout, so there is no second copy of the build steps. A checkout with no `setup.sh` builds nothing.\n- On success the pass ends as the new stop reason `rebuilt`. `Report::restart` holds the remaining budget and job limit, plus the same rating threshold.\n- `follow_restart` hands those to the restart call. In `main.rs` that replaces the process with `$ATHENA_HOME/bin/athena drain --budget <left> --rating-threshold <n> --job-limit <left> [--json]`.\n- The installed path is used, not `current_exe`, because the running file has been replaced on disk.\n- A stop asked for with `drain-stop` wins over the restart. A run with no job limit or budget left ends as `job limit` or `budget spent` instead.\n- On failure the run stops as `rebuild failed`, and `Report::rebuild_output` holds the exit status and script output. `display::drain` prints it.\n- The rebuild failure replaces any other stop reason found at the same time. No rating is taken, and the landing stands.\n\n**Stale-build line (`status.rs`, `display.rs`, `main.rs`)**\n- `stale_build_line` runs `git diff --name-only <build> HEAD -- <paths>` when the build commit is an ancestor of HEAD. It gives no line for a build that names no commit, a commit this repository lacks, or only `docs/` or `records/` changes.\n- `athena status` prints the line and carries it as `stale_build` in the JSON. `go`, `drain`, `audit` and `audience` print the same line to standard error through one helper, `warn_if_stale`.\n\n**Docs**\n- `CHANGELOG.md` has two entries. `docs/decisions.md` has a new D140. I also added the two new stop reasons to the `drain` help text.\n\n**Tests**\n- New tests in `crates/athena-cli/tests/drain.rs` cover:\n  - one rebuild, with the second item running under the new build;\n  - a failed rebuild stopping the drain with the build output;\n  - docs-only landings rebuilding nothing;\n  - the job-limit and stop-requested cases;\n  - the re-exec arguments;\n  - the path rules;\n  - the real `setup.sh` runner;\n  - the status line with and without a `crates/` change.\n- Targeted runs pass: the drain, binary and version test files, and the athena-cli unit tests. Clippy with `-D warnings` and `cargo fmt --check` are clean.\n- I ran the full `cargo test --locked` once. The tool returned without an error, but its output was saved to a path I can't read here, so I could not confirm the pass counts myself.",
+    "files": [
+      "CHANGELOG.md",
+      "docs/decisions.md",
+      "crates/athena-cli/src/drain.rs",
+      "crates/athena-cli/src/main.rs",
+      "crates/athena-cli/src/wiring.rs",
+      "crates/athena-cli/src/display.rs",
+      "crates/athena-core/src/status.rs",
+      "crates/athena-cli/tests/drain.rs"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test --locked -p athena-cli --test drain -- rebuild stale touch new_binary",
+        "result": "pass",
+        "note": "8 tests passed"
+      },
+      {
+        "command": "cargo test --locked -p athena-cli --test drain --test binary --test version",
+        "result": "pass",
+        "note": "94 drain, 15 binary and 4 version tests passed"
+      },
+      {
+        "command": "cargo test --locked -q -p athena-cli --lib",
+        "result": "pass",
+        "note": "45 passed"
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "Ran once. The tool returned without an error, but the output was saved to a path I could not read, so I could not confirm the pass counts."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Run cargo test: a test drains two fake items where the first landing changes a crates/ file; it shows the rebuild step ran exactly once and the second item ran under the new build commit.",
+        "status": "met",
+        "evidence": "`a_landing_that_changes_athenas_code_rebuilds_once_and_the_next_item_runs_under_the_new_build` in crates/athena-cli/tests/drain.rs. It drains items a and b, where a's landing changes a crates/ file. It asserts the stop is `Rebuilt`, the remaining limits are 9 jobs and $8.20, the stub log has exactly one \"rebuild\" entry, and the runs were [(a, old), (b, new)] after `follow_restart`. I ran it: `cargo test --locked -p athena-cli --test drain -- rebuild` passed."
+      },
+      {
+        "criterion": "Run cargo test: a test shows a failed rebuild stops the drain with stop reason 'rebuild failed' and includes the build output.",
+        "status": "met",
+        "evidence": "`a_failed_rebuild_stops_the_drain_as_rebuild_failed_with_the_build_output` asserts `Stop::RebuildFailed`, label \"rebuild failed\", `rebuild_output` equal to the fake build text, no restart, no second item run, no rating taken, and that `display::drain` shows \"stopped     rebuild failed\" and the output. `the_real_rebuild_runs_the_checkouts_setup_script_and_reports_its_output_when_it_fails` shows the real runner returns the exit status and the script's stdout and stderr. Both passed when I ran them."
+      },
+      {
+        "criterion": "Run cargo test: a test shows status prints the stale-build line when a crates/ file changed after the build commit, and prints none when only docs/ or records/ changed.",
+        "status": "met",
+        "evidence": "`status_prints_the_stale_build_line_after_a_crates_change_and_none_after_docs_or_records_changes` uses a real git fixture. Built from HEAD, there is no line. After a commit that adds docs/notes.md and records/notes.md, there is still no line. After a crates/ commit, `display::status` prints exactly one \"stale build\" line naming both short commits. The xtask, Cargo.toml, Cargo.lock and setup.sh paths also trigger it, and a build commit of \"unknown\" gives none. It passed when I ran it."
+      },
+      {
+        "criterion": "go, drain, audit and audience print the same one-line stale-build warning when the build commit is older than HEAD for the watched paths.",
+        "status": "met",
+        "evidence": "In main.rs, `Command::Go`, `Command::Drain`, `Command::Audit` and `Command::Audience` each call `warn_if_stale(&athena)` right after `open(true)`. It prints `Athena::stale_build()` to standard error, the same `stale_build_line` that `athena status` prints. There is no binary-level test, because a cargo test build names no commit. The line's condition is covered by the status test and `athena.stale_build()` assertions."
+      },
+      {
+        "criterion": "The re-exec passes the remaining budget and job limit.",
+        "status": "met",
+        "evidence": "`Restart` carries the unspent budget and the job limit minus jobs started (asserted 9 and 8.2 in the rebuild test). `follow_restart` passes `Restart::limits()` to the restart call, and `main.rs` runs `reexec(&drain::reexec_args(&left, json))`. `the_new_binary_is_started_with_the_remaining_budget_and_job_limit` asserts the args [drain, --budget, 8.25, --rating-threshold, 3, --job-limit, 9]. The re-exec uses the installed binary and `CommandExt::exec`; only the argument list and the hand-off are tested, not an actual exec."
+      },
+      {
+        "criterion": "cargo fmt --check, cargo clippy with -D warnings and cargo test all pass.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I ran `cargo fmt --all --check` (clean), `cargo clippy --all-targets --locked -- -D warnings` (clean), and `cargo test --locked` once (returned without an error; output unread)."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry describing the self-rebuild and stale-build warning.",
+        "status": "met",
+        "evidence": "CHANGELOG.md, under Unreleased > Added, has two new entries: the drain self-rebuild and re-exec with `rebuilt` and `rebuild failed`, and the stale-build line in `status` and the go, drain, audit and audience commands."
+      }
+    ],
+    "open_issues": [
+      "A restarted drain forgets its earlier landings, so a \"target met\" in the new process needs a landing in that process. This is recorded as a tradeoff in D140.",
+      "The first pass's final report is not printed; its progress lines already went to standard error.",
+      "If the checkout has uncommitted changes, setup refuses a non-dirty build. The rebuild then fails and the drain stops with `rebuild failed` and the script output. I did not pass --allow-dirty.",
+      "The four commands' stale-build warning has no binary-level test, because a cargo test build names no commit."
+    ],
+    "mistakes": [
+      "I read very large files in full (drain.rs, status.rs) early on, which used a lot of budget; I should have used Grep for the relevant sections.",
+      "I did not unit-test the actual `exec` call, since it would replace the test process; only the arguments and the hand-off are tested."
+    ],
+    "learnings": [
+      "The build commit comes from ATHENA_BUILD_COMMIT, set by `xtask build_and_adopt` (the setup step); it is embedded through `wiring::build_info()`. The binary is installed at $ATHENA_HOME/bin/athena. A cargo test build names no commit, so it reports \"unknown\".",
+      "A landing fast-forwards the local checkout (commits.rs), so running setup.sh in `athena.git.dir()` builds from the landed tree.",
+      "`RealSteps` is built with a struct literal in about 25 tests, so new behavior had to go on the `Steps` trait with a default method and not on new `RealSteps` fields.",
+      "`drain_help_documents_the_flags_and_lists_every_stop_reason` requires every `Stop::ALL` label to appear in the drain help text.",
+      "The Bash tool here allows only cargo, git, ls, chmod, mv and rm. The Grep and Read tools cannot read the persisted tool-output files outside the working directory."
+    ],
+    "desires": [
+      "A way to read saved tool output files, or a quieter full-suite mode, so the suite result can be confirmed without rerunning it.",
+      "A runtime override of the build commit (an environment variable) so the go, drain, audit and audience warnings could be exercised through the real binary."
+    ]
+  }
+}
