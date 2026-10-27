@@ -3689,3 +3689,30 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   records the build commit through `ATHENA_BUILD_COMMIT` and installs to `$ATHENA_HOME/bin/athena`),
   `commits.rs` (a landing fast-forwards the checkout). Measured: `cargo test --locked -p athena-cli --test
   drain`.
+
+## D141 · The reader's brief shows the token headroom of every prompt set
+
+- **Case:** The failure class `reading-edits-prompt-without-checking-token-budget` (20261024-002642-bm4c) was
+  recorded three times: introspections 20261024-002725-eqs1 (job 20261024-002644-1as8), 20261024-104248-8p9c
+  (job 20261024-093833-vava) and 20261025-090447-2zm3 (job 20261025-034452-wqp8). In each, a reading chose a
+  prompt file to grow without knowing how many tokens the sets that compose it had left. The shared verifier
+  frame feeds every verifier set, so an addition there costs all of them, and one set had 2 tokens left.
+- **Root cause:** The reader's brief carried no budget data. The sizes and budgets existed only in the budgets
+  test, after the fact, so a reading could plan growth the test would later reject.
+- **Decision:** `athena_context::headroom_rows` composes each budgeted set with `compose` and reports its
+  component ids, estimated tokens, budget and tokens left (contract, reader, planner, critic, and a producer and
+  a verifier set per enabled capability). `reading.rs` passes the rows in `ReaderInputs::headroom`, and
+  `reader_brief` renders them under "Prompt token headroom", saying that an edit to a file several sets compose
+  costs every one of them. No budget number is written in the brief. The test
+  `the_reader_headroom_rows_equal_the_budget_figures_and_name_shared_files` ties the rows to the figures behind
+  the budgets test. No prompt file changed.
+- **Alternatives:** (a) Reject over-budget readings before dispatch, as two introspections proposed: not built
+  now; the reader sees the numbers and the budgets test is the backstop, which keeps this change small, and it can
+  build on the same function later. (b) A note in `reader.md`: rejected, a fixed note holds no figures and
+  that prompt is near its own budget. (c) Show the figures to the producer instead: rejected, the file is chosen
+  at reading time.
+- **Tradeoff:** The reader brief grows by about one line per set. A reading can still ignore the numbers.
+- **Reversal cost:** Low. Remove the field, the section and the function.
+- **Provenance:** Read: `crates/athena-cli/tests/budgets.rs`, `crates/athena-context/src/lib.rs`, the three
+  introspections as quoted in the request. Measured: `cargo test -p athena-context`, `cargo test -p athena-cli
+  --test budgets`.

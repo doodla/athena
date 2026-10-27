@@ -80,6 +80,32 @@ pub fn reader_system_prompt(athena: &Athena, jc: &JobConfig) -> Composed {
     ])
 }
 
+/// The token headroom of every prompt set, for the reader's brief: the reader's own defaults and catalog
+/// and the enabled capabilities' sections.
+fn reader_headroom(athena: &Athena, jc: &JobConfig) -> Vec<athena_context::HeadroomRow> {
+    let enabled: Vec<_> = athena
+        .capabilities
+        .iter()
+        .filter(|c| jc.config.capability(c.id()).is_some())
+        .collect();
+    let cards: Vec<_> = enabled.iter().map(|c| c.card()).collect();
+    let sections: Vec<_> = enabled
+        .iter()
+        .map(|c| {
+            (
+                c.id().to_string(),
+                c.producer_section(),
+                c.verifier_section(),
+            )
+        })
+        .collect();
+    athena_context::headroom_rows(
+        Component::new("defaults", jc.defaults.version, jc.defaults.render()),
+        Component::new("catalog", 1, render_catalog(&cards)),
+        &sections,
+    )
+}
+
 /// The snapshot's top-level listing, for the reader's brief.
 fn listing(dir: &std::path::Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(dir)
@@ -288,6 +314,7 @@ impl Athena {
                     (c.id().to_string(), lines)
                 })
                 .collect(),
+            headroom: reader_headroom(self, jc),
         });
         let capability_ids: Vec<String> = self
             .capabilities
