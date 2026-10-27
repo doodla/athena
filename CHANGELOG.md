@@ -9,6 +9,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Hestia's error review: introspections are now read together, not one job at a time. After a recorded
+  introspection is committed, Athena groups it with the earlier ones by cause (the failure class, from the class
+  registry or Jev's class answer; the cause text when no registry class places it). When a cause has occurred in
+  two or more distinct jobs and no open or landed request cites it, Athena queues one urgent root-cause request
+  through the shared steward request builder, citing the introspection ids; a third occurrence queues nothing
+  while that request is open or has landed. `athena status` lists the open repeated causes with their counts and
+  the request that addresses each (`repeated_causes` in the JSON). See `docs/design/hestia.md` section 11.
+- The scope guard counts attempts per line of work across retries and re-asks. A request that repeats the words
+  of an earlier request that was not accepted joins that request's line, as a "try again on <job>" retry
+  already did, so a request asked again under a new job id no longer starts the count at one. Thresholds are
+  unchanged.
 - A design for a no-behavior-change structure pass on `gh.rs` and `run.rs`: `docs/design/structure-pass.md`
   names the modules each file would split into, what moves into each with measured line counts, the order of
   move jobs (each sized for one producer run, caller-heavy ones last), the named stages `produce_and_verify`

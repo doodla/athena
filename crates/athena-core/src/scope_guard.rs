@@ -15,6 +15,7 @@
 //!
 //! Every threshold is an **estimate, to be tuned** (section 5); the basis for each is in that section's table.
 
+use crate::introspect::normalise;
 use crate::reading::retried_job;
 use crate::state::StateDir;
 use crate::store::{JobRecords, JobState, Records};
@@ -80,17 +81,21 @@ pub struct AttemptRecord {
 pub struct RequestRecord {
     /// Request id.
     pub id: String,
-    /// The request this one retries, if any.
+    /// The earlier job this one retries ("try again on <job>"), if any: the previous job of the line.
     pub retry_of: Option<String>,
     /// Requests whose text this one quotes.
     pub quotes: Vec<String>,
+    /// The nearest earlier request with the same request text that had not been accepted: this one is a
+    /// re-ask of it.
+    pub same_text_as: Option<String>,
     /// Finished attempts of this request, oldest first.
     pub attempts: Vec<AttemptRecord>,
 }
 
-/// Group requests into lines of work (section 5): a request, its retries and any request that quotes it.
-/// Links to ids not in `requests` are ignored. Returns indices into `requests`; each line is in input order and
-/// lines are ordered by their first member.
+/// Group requests into lines of work (section 5): a request, its retries, any request that quotes it and any
+/// re-ask of the same request text. The count of attempts is therefore per line, not per job id. Links to ids
+/// not in `requests` are ignored. Returns indices into `requests`; each line is in input order and lines are
+/// ordered by their first member.
 pub fn group_lines(requests: &[RequestRecord]) -> Vec<Vec<usize>> {
     let mut parent: Vec<usize> = (0..requests.len()).collect();
     fn find(parent: &mut [usize], mut i: usize) -> usize {
@@ -106,7 +111,11 @@ pub fn group_lines(requests: &[RequestRecord]) -> Vec<Vec<usize>> {
         .map(|(i, r)| (r.id.as_str(), i))
         .collect();
     for (i, r) in requests.iter().enumerate() {
-        let links = r.retry_of.iter().chain(r.quotes.iter());
+        let links = r
+            .retry_of
+            .iter()
+            .chain(r.same_text_as.iter())
+            .chain(r.quotes.iter());
         for target in links {
             if let Some(&j) = index.get(target.as_str()) {
                 let (a, b) = (find(&mut parent, i), find(&mut parent, j));
@@ -491,25 +500,62 @@ fn attempt_of(job: &JobRecords) -> Option<AttemptRecord> {
 }
 
 /// Rebuilds the [`RequestRecord`]s of every request job, oldest first: the retry link from "try again on
-/// <job>", the quoted request ids, and the finished attempt read from the job's outcome and verification.
+/// <job>" (the previous job of the line), the quoted request ids, the re-ask link to an earlier request with
+/// the same text, and the finished attempt read from the job's outcome and verification.
+///
+/// A re-ask links to the nearest earlier request with the same normalised text ([`normalise`]) whose line has
+/// not been accepted. A request whose earlier twin landed starts a line of its own: asking the same words again
+/// after they were done is new work, and an accepted line shows no signals. The chain link
+/// `athena.candidate/2` `previous_job` is not used: it names the latest job landed in the base's history,
+/// which every job started on that base shares, so grouping on it would join unrelated work.
 pub fn request_records(records: &Records) -> Vec<RequestRecord> {
     let mut jobs = records.request_jobs();
-    jobs.reverse();
+    // Oldest request first. Ids carry the time to the second only, so the time of the request decides.
+    jobs.sort_by(|a, b| {
+        let at = |j: &JobRecords| j.request.as_ref().map(|r| r.received_at);
+        (at(a), a.id().as_str()).cmp(&(at(b), b.id().as_str()))
+    });
     let ids: Vec<String> = jobs.iter().map(|j| j.id().as_str().to_string()).collect();
+    // Normalised request text -> the latest request with it whose line is not accepted.
+    let mut open_by_text: HashMap<String, String> = HashMap::new();
+    // Each request's retry link, so an accepted retry closes the requests it retried.
+    let mut retry_parent: HashMap<String, String> = HashMap::new();
     jobs.iter()
         .map(|job| {
             let id = job.id().as_str().to_string();
             let text = job.request.as_ref().map_or("", |r| r.text.as_str());
+            let attempts: Vec<AttemptRecord> = attempt_of(job).into_iter().collect();
+            let retry_of = retried_job(records, text)
+                .map(|j| j.as_str().to_string())
+                .filter(|t| *t != id);
+            if let Some(parent) = &retry_of {
+                retry_parent.insert(id.clone(), parent.clone());
+            }
+            let key = normalise(text);
+            let mut same_text_as = None;
+            if !key.is_empty() {
+                same_text_as = open_by_text.get(&key).cloned();
+                open_by_text.insert(key, id.clone());
+            }
+            if done(&attempts) {
+                // The line is accepted: a later request with the words of any request in it starts anew.
+                let mut line = vec![id.clone()];
+                let mut at = id.clone();
+                while let Some(parent) = retry_parent.get(&at).filter(|p| !line.contains(p)) {
+                    line.push(parent.clone());
+                    at = parent.clone();
+                }
+                open_by_text.retain(|_, job| !line.contains(job));
+            }
             RequestRecord {
-                retry_of: retried_job(records, text)
-                    .map(|j| j.as_str().to_string())
-                    .filter(|t| *t != id),
+                retry_of,
                 quotes: ids
                     .iter()
                     .filter(|other| **other != id && text.contains(other.as_str()))
                     .cloned()
                     .collect(),
-                attempts: attempt_of(job).into_iter().collect(),
+                same_text_as,
+                attempts,
                 id,
             }
         })
@@ -1032,6 +1078,64 @@ mod watcher_tests {
     }
 
     #[test]
+    fn a_retry_and_a_re_ask_of_the_same_request_are_one_line_that_pauses_at_its_threshold() {
+        // Criterion 0 is rejected, then criterion 1 twice. Counted per job id no request has two rejections of
+        // one criterion; counted per line, the retry and the re-ask are attempts 2 and 3 of one line.
+        let r = rig(0.8, 0.01, &[Some(0), Some(1), Some(1)]);
+        let a = r.ask("describe the demo in the readme");
+        assert_eq!(r.go(&a).unwrap(), OutcomeState::Rejected);
+        let b = r.ask(&format!("try again on {a}"));
+        assert_eq!(r.go(&b).unwrap(), OutcomeState::Rejected);
+        assert!(
+            !r.pause(&a).exists(),
+            "different criteria, so the line is only flagged"
+        );
+        assert!(r.flag(&a).exists());
+
+        // The same words asked again, with no mention of the job: a new job id on the same line.
+        let c = r.ask("describe the demo in the readme");
+        assert_ne!(c, a);
+        assert_eq!(r.go(&c).unwrap(), OutcomeState::Rejected);
+        let paused = read_mark(&r.pause(&a)).expect("the third attempt of the line pauses it");
+        assert_eq!(paused.signal_names(), "T1, T4");
+        assert_eq!(paused.numbers.attempts, 3);
+        assert_eq!(paused.numbers.rejections, 3);
+        assert!(
+            !r.pause(&c).exists() && !r.flag(&c).exists(),
+            "the re-ask has no line of its own"
+        );
+
+        let records = r.records();
+        let requests = request_records(&records);
+        assert_eq!(
+            group_lines(&requests),
+            vec![vec![0, 1, 2]],
+            "retry and re-ask are one line"
+        );
+        assert_eq!(
+            r.athena.line_pause(&records, c.as_str()),
+            Some(paused),
+            "the re-ask is refused through the line's pause"
+        );
+        let d = r.ask("describe the demo in the readme");
+        let err = r.go(&d).unwrap_err().to_string();
+        assert!(err.contains("paused") && err.contains("T4"), "{err}");
+    }
+
+    #[test]
+    fn asking_the_words_of_a_landed_request_again_starts_a_new_line() {
+        let r = rig(0.8, 0.01, &[None, Some(0)]);
+        let a = r.ask("describe the demo in the readme");
+        assert_eq!(r.go(&a).unwrap(), OutcomeState::Landed);
+        let b = r.ask("describe the demo in the readme");
+        // The fake producer writes the same file again, so this job does not land (it ends without a verdict).
+        assert_ne!(r.go(&b).unwrap(), OutcomeState::Landed);
+        let requests = request_records(&r.records());
+        assert_eq!(group_lines(&requests), vec![vec![0], vec![1]]);
+        assert_eq!(requests[1].same_text_as, None);
+    }
+
+    #[test]
     fn differing_criteria_flag_only() {
         let r = rig(0.8, 0.01, &[Some(0), Some(1)]);
         let (a, b) = r.two_rejections();
@@ -1261,8 +1365,22 @@ mod tests {
             id: id.to_string(),
             retry_of: retry_of.map(str::to_string),
             quotes: quotes.iter().map(|s| s.to_string()).collect(),
+            same_text_as: None,
             attempts: Vec::new(),
         }
+    }
+
+    #[test]
+    fn grouping_joins_a_re_ask_to_the_request_it_repeats() {
+        let mut again = req("c", None, &[]);
+        again.same_text_as = Some("a".into());
+        let reqs = vec![
+            req("a", None, &[]),
+            req("b", Some("a"), &[]),
+            req("x", None, &[]),
+            again,
+        ];
+        assert_eq!(group_lines(&reqs), vec![vec![0, 1, 3], vec![2]]);
     }
 
     #[test]

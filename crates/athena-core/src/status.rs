@@ -464,6 +464,10 @@ pub struct StatusView {
     /// Lines of work the scope guard flagged or paused, with their signals T1 to T5 (`crate::scope_guard`).
     /// Pauses first. Empty when no mark file exists.
     pub lines: Vec<crate::scope_guard::LineMark>,
+    /// The open repeated causes from Hestia's error review (`crate::hestia::repeated_causes`): causes that
+    /// occurred in two or more distinct jobs and whose root-cause request has not landed, each with its count
+    /// and the request that addresses it. Empty when there are none.
+    pub repeated_causes: Vec<crate::hestia::RepeatedCause>,
     pub invalid_records: Vec<String>,
     pub next: Vec<String>,
     /// The reconciliation that ran before this view was built (`Athena::status_with_reconcile`); absent from
@@ -1063,6 +1067,18 @@ impl Athena {
                 l.lift
             ));
         }
+        let repeated_causes: Vec<crate::hestia::RepeatedCause> =
+            crate::hestia::repeated_causes(&records)
+                .into_iter()
+                .filter(crate::hestia::RepeatedCause::is_open)
+                .collect();
+        for c in repeated_causes.iter().filter(|c| c.request.is_none()) {
+            next.push(format!(
+                "repeated cause in {} jobs has no root-cause request   # {}",
+                c.jobs.len(),
+                c.cause
+            ));
+        }
         let open_interventions = open_interventions(&records);
         for i in &open_interventions {
             next.push(format!(
@@ -1130,6 +1146,7 @@ impl Athena {
             audit: audit_view(&records),
             code_health,
             lines,
+            repeated_causes,
             invalid_records: records.invalid.clone(),
             next,
             reconcile: None,

@@ -29,6 +29,9 @@
 //! caps them at [`CASE_CAP`], and passes only those fields to the model. On return, any id that was not on a
 //! list passed in is dropped and logged, not repaired.
 //!
+//! After a recorded introspection is committed, Hestia's error review ([`Athena::error_review`]) groups it with
+//! the earlier ones by cause and queues one urgent root-cause request when a cause repeats across jobs.
+//!
 //! A failed introspection (model error, invalid answer, a cause that restates the event) is recorded as
 //! failed, never blocks the job that caused it, and is not itself introspected: only the events above start
 //! one.
@@ -1429,6 +1432,11 @@ impl Athena {
                     Written by a language model from the stored fields of the event and earlier cases. Jev, when asked, \
                     answered in shadow and decided nothing.";
         self.commit_records(&files, &message(&subject, body, &[("Athena-Record", path)]))?;
+        // Hestia's error review: the introspection is committed, so it is grouped with the earlier ones by
+        // cause. It never fails the introspection (`Athena::error_review`).
+        if record.status == IntrospectionStatus::Recorded {
+            self.error_review(&record, ui);
+        }
         Ok(record)
     }
 

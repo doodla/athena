@@ -1,0 +1,148 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261027-031444-60zg",
+  "base_commit": "69cb5d994f2f4b3bf487f98d4eee85eef65423a0",
+  "base_fingerprint": "sha256:5ac7e2157ada5a5cd1575072892d3bcf13b46423a42b40b8cffb4abc30dd03b7",
+  "previous_job": "20261027-033006-5ca6",
+  "candidate_commit": "b781717d25674f5e4d5224abd134ffcdd3531142",
+  "candidate_tree": "63e10682e1da19ff7a40a03a6b8c129264f9f924",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 167970
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 67039
+    },
+    {
+      "path": "crates/athena-core/src/hestia.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 40667
+    },
+    {
+      "path": "crates/athena-core/src/introspect.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 78448
+    },
+    {
+      "path": "crates/athena-core/src/scope_guard.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 59299
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 76976
+    },
+    {
+      "path": "docs/design/hestia.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 21038
+    }
+  ],
+  "fingerprint": "sha256:9face8b38d16a2c193a86021c9cd9edbdebde53b60572fa6750ead800d8e019c",
+  "violations": [],
+  "producer_report": {
+    "summary": "Added Hestia's error review and made the scope guard count attempts per line of work.\n\nError review (hestia.rs, introspect.rs):\n- `Athena::introspect` now calls `Athena::error_review` after a recorded introspection is committed.\n- Grouping key (`cause_key`): the failure class the record names, if the class registry holds it; otherwise the class Jev chose, if that is a registry class; otherwise the cause text with case and punctuation ignored. Failed introspections, and ones with no job or no cause, are not cases.\n- A cause is a repeat when its introspections cover two or more distinct jobs.\n- If no open or landed request cites any introspection id of the group, one request is queued at `Priority: urgent`. It is built with `StewardRequest::new` and cites every introspection id.\n- A rejected, failed or closed request does not count as addressing the cause, so a new one may be queued.\n- The request goes through `Athena::queue`, which records channel `cli`. The steward does not need to run for it to be drained.\n\nStatus (status.rs, display.rs):\n- `StatusView.repeated_causes` lists open repeated causes with count, distinct jobs, class, introspection ids and the addressing request. A cause drops off the list once its request lands.\n- A cause with no request adds a \"next\" line.\n- display.rs is not in the brief's file list, but the status text is rendered there, so I added a section and a test for it.\n\nScope guard (scope_guard.rs):\n- `RequestRecord` gains `same_text_as`: the nearest earlier request with the same normalised text whose line was not accepted. `group_lines` joins on it, next to the existing \"try again on\" and quote links.\n- An earlier landed twin starts a new line, because an accepted line shows no signals.\n- `request_records` now orders by `received_at`, because job ids carry the time only to the second.\n\nDocs: hestia.md section 11 and a CHANGELOG entry.\n\nTests:\n- Hestia, five new tests in hestia.rs. One covers the queue, the third occurrence and the landed case. One covers single-job repeats, cited causes and failed or job-less introspections. One covers Jev and text matching. One covers `athena status`. One covers the request builder.\n- Scope guard, three new tests in scope_guard.rs. One checks that a retry plus a re-ask pause at the third attempt as one line (T1 and T4). One checks that re-asking a landed request starts a new line. One is a grouping unit test.\n- Display, one new test for the status section in display.rs.\n\nRoot cause named: repeats were never grouped across jobs, because each introspection is written about one job. The new code groups them where the introspection is recorded.",
+    "files": [
+      "crates/athena-core/src/hestia.rs",
+      "crates/athena-core/src/introspect.rs",
+      "crates/athena-core/src/scope_guard.rs",
+      "crates/athena-core/src/status.rs",
+      "crates/athena-cli/src/display.rs",
+      "docs/design/hestia.md",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "clean after `cargo fmt --all`"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "no warnings"
+      },
+      {
+        "command": "cargo test --locked -p athena-core hestia",
+        "result": "pass",
+        "note": "10 passed, including 5 new"
+      },
+      {
+        "command": "cargo test --locked -p athena-core scope_guard",
+        "result": "pass",
+        "note": "21 passed, including 3 new"
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "Full suite run once. The tool returned no failure, but its output was saved outside my working directory and I could not read it, so I did not confirm the per-crate result lines."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Test (cargo test): two introspections with the same cause on different jobs queue exactly one urgent root-cause request citing both introspection ids via the shared steward request builder; a third introspection with that cause does not queue another while that request is open or landed.",
+        "status": "met",
+        "evidence": "hestia::tests::two_introspections_of_one_cause_in_different_jobs_queue_one_urgent_request_and_a_third_queues_none. After the 2nd introspection exactly 1 request job exists. Its text starts with `Priority: urgent`, `priority()` is Urgent, and it contains both ids. The 3rd queues nothing while the request is open. After a Landed outcome record is added, a 4th still queues nothing. Run with `cargo test --locked -p athena-core hestia`: passes."
+      },
+      {
+        "criterion": "Test (cargo test): a single-job repeat, or causes already cited by an open or landed request, queue nothing.",
+        "status": "met",
+        "evidence": "hestia::tests::a_single_job_repeat_or_a_cited_cause_queues_nothing. Two introspections in the same job queue nothing. A queued request that cites the cause's first introspection id means the 2nd introspection from another job queues nothing. Failed and job-less introspections queue nothing. The landed case is covered in the test above."
+      },
+      {
+        "criterion": "Test (cargo test): athena status output lists each open repeated cause with its count and the request addressing it.",
+        "status": "met",
+        "evidence": "hestia::tests::athena_status_lists_each_open_repeated_cause_with_its_count_and_its_request asserts `status().repeated_causes` holds (3 introspections, 3 jobs, request queued) and (2, 2, no request). It also asserts a landed cause is not listed and the next-steps line appears. athena-cli display::tests::repeated_causes_are_listed_with_their_counts_and_the_request_that_addresses_them asserts the rendered text shows the count, jobs, request job and state, and ids."
+      },
+      {
+        "criterion": "Test (cargo test): the scope guard counts a retry (previous_job) and a re-ask of the same request text as one line of work and pauses at its threshold, not per job id.",
+        "status": "met",
+        "evidence": "scope_guard::watcher_tests::a_retry_and_a_re_ask_of_the_same_request_are_one_line_that_pauses_at_its_threshold. A, then B (\"try again on A\"), then C (same words as A, new job id): the pause is keyed on A with numbers.attempts == 3, and T1 and T4 are the pausing signals. `group_lines` gives one line [0,1,2], and a fourth re-ask is refused by `go`. Counted per job id, no job would have two rejections of the same criterion. Caveat: the retry link used is the existing \"try again on <job>\" text link. I did not group on `athena.candidate/2` `previous_job`, which is the latest landed job in the base history and is shared by unrelated jobs on that base (see open_issues)."
+      },
+      {
+        "criterion": "cargo fmt --check, cargo clippy with -D warnings, and cargo test all pass.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I also ran fmt --check and clippy -D warnings (clean) and the full `cargo test --locked` once, which returned no failure."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry and docs/design/hestia.md describes the error review (grouping key, trigger, dedupe, status display).",
+        "status": "met",
+        "evidence": "CHANGELOG.md [Unreleased] > Added has two new entries. docs/design/hestia.md section 11 covers Why, Trigger, Grouping key, Repeat, Request and dedupe, Status, and Scope guard counting. Grep of the touched files for the banned words and fragments found no matches."
+      }
+    ],
+    "open_issues": [
+      "The request asked the scope guard to follow `previous_job`. I did not group on `athena.candidate/2` `previous_job`: it names the latest landed job in the base history, so every job started on one base shares it, and grouping on it would merge unrelated work. Retries are followed through the existing \"try again on <job>\" link, and re-asks through identical normalised request text. Please confirm this is the intended reading.",
+      "The grouping key is the failure class, not exact cause wording, because model-worded causes rarely match. A class can therefore hold slightly different causes. The queued request shows the earliest wording and lists every introspection with its proposed prevention.",
+      "If a root-cause request is rejected, failed or closed, the next introspection of that cause queues another urgent request. This follows the 'open or landed' rule but could repeat while a cause stays unfixed.",
+      "The root-cause request names `crates/` as its Files line, because the cause's source file is unknown. The producer decides where the fix goes.",
+      "The full `cargo test --locked` returned no failure, but I could not read the saved output to check the result lines; Athena's own run is the authority."
+    ],
+    "mistakes": [
+      "My first test used Jev's class answer for an introspection with no class. That record is invalid by `IntrospectionRecord::validate` and was silently dropped on load, so the test failed. I fixed it by using a class id the registry does not hold.",
+      "My first test job-id helper produced out-of-range seconds. Fixed."
+    ],
+    "learnings": [
+      "`IntrospectionRecord::validate` requires a Recorded introspection to carry `failure_class`, so Jev's class answer can only matter when the record's class is not in the class registry.",
+      "`athena.candidate/2` `previous_job` is the latest job landed in the base's history (`latest_landed_job`), not a retry link. The retry link is the \"try again on <job>\" request text, read by `reading::retried_job`.",
+      "RecordId and JobId seconds must be valid time (00-59), so tests cannot derive ids from arbitrary numbers.",
+      "The fake producer in the scope_guard rig rewrites README.md with the same content each time, so a second job after a landing ends without a verdict.",
+      "`Athena::queue` records channel `cli`, and `cli` is in `DRAINED_CHANNELS`. `code_health` queues its requests the same way."
+    ],
+    "desires": [
+      "Read access to cargo's saved output files, to confirm per-crate test results of the full suite.",
+      "A deterministic id order for jobs created in the same second; tests that depend on creation order are fragile."
+    ]
+  }
+}
