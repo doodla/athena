@@ -9,6 +9,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- The firstmate study page reads better for a newcomer. Root cause: finding f2 had been removed from
+  `findings.json` without renumbering, so the page listed f1, f3, f4; the findings are now f1, f2, f3. The
+  paragraph on the study id and the `studies/` folder moved from the header to an "About this page" note after the
+  claims. One plain sentence on what firstmate is (`what_is` in `intro.json`, with claim links) now comes before
+  "Words used first". Next steps gain the install command `./setup.sh` and the example request
+  `athena ask "add a changelog"`, both from the README Quick start. Tests in `xtask/tests/site_page.rs` and
+  `xtask/src/site.rs` assert the order and the text.
 - `athena drain` no longer works approved steward proposals ahead of the plan. Root cause: the drain approved
   each in-limit proposal before planning, and the job it made had no plan entry, so it kept its place in front of
   every planned item. An old, normal-priority proposal could therefore take the job slots from the urgent requests
