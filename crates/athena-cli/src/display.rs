@@ -903,6 +903,30 @@ fn repeated_causes_section(causes: &[athena_core::hestia::RepeatedCause]) -> Str
     out
 }
 
+/// The repeated causes whose stage `athena.toml` has switched off: apart from the others, because the error
+/// review backfill does not queue a request for them.
+fn dormant_causes_section(causes: &[athena_core::hestia::DormantCause]) -> String {
+    let mut out = String::new();
+    for (i, d) in causes.iter().enumerate() {
+        let label = if i == 0 { "dormant" } else { "" };
+        let _ = writeln!(
+            out,
+            "{label:<11} {} time(s) in {} jobs · {} · {} stage is off in athena.toml, no request queued",
+            d.cause.count(),
+            d.cause.jobs.len(),
+            d.cause.cause,
+            d.stage.name()
+        );
+        let _ = writeln!(
+            out,
+            "{:<11}   introspections: {}",
+            "",
+            d.cause.introspections.join(", ")
+        );
+    }
+    out
+}
+
 /// `athena status`.
 pub fn status(v: &StatusView) -> String {
     let mut out = String::new();
@@ -990,6 +1014,7 @@ pub fn status(v: &StatusView) -> String {
     }
     out.push_str(&lines_section(&v.lines));
     out.push_str(&repeated_causes_section(&v.repeated_causes));
+    out.push_str(&dormant_causes_section(&v.dormant_causes));
     for (i, n) in v.open_interventions.iter().enumerate() {
         let label = if i == 0 { "follow-up" } else { "" };
         let _ = writeln!(
@@ -1651,6 +1676,36 @@ mod tests {
             "{text}"
         );
         assert_eq!(repeated_causes_section(&[]), "");
+    }
+
+    #[test]
+    fn dormant_causes_are_listed_apart_with_their_stage() {
+        use athena_core::hestia::{DormantCause, RepeatedCause, Stage};
+        let dormant = DormantCause {
+            stage: Stage::Planner,
+            cause: RepeatedCause {
+                key: "cause:the planner drops acceptance".into(),
+                class: None,
+                cause: "The planner drops acceptance.".into(),
+                introspections: vec!["20261027-090010-1abc".into(), "20261027-090020-1abc".into()],
+                jobs: vec!["20261027-080000-aaaa".into(), "20261027-080100-bbbb".into()],
+                request: None,
+            },
+        };
+        let text = dormant_causes_section(&[dormant]);
+        assert!(
+            text.starts_with("dormant     2 time(s) in 2 jobs"),
+            "{text}"
+        );
+        assert!(
+            text.contains("planner stage is off in athena.toml, no request queued"),
+            "{text}"
+        );
+        assert!(
+            text.contains("introspections: 20261027-090010-1abc"),
+            "{text}"
+        );
+        assert_eq!(dormant_causes_section(&[]), "");
     }
 
     #[test]

@@ -414,6 +414,18 @@ enum HestiaAction {
         #[arg(long)]
         json: bool,
     },
+    /// Run the error review over the backlog, not only on a new introspection. With --backfill, once and safe to
+    /// repeat: a repeated cause in a stage that athena.toml switches off is skipped as dormant; an open request
+    /// that addresses a cause is queued again through the steward request builder and the old one closed; any
+    /// other cause gets a new root-cause request. The five highest-ranked causes (most occurrences, then most
+    /// recent) are urgent, the rest normal. Prints what was queued, re-queued and skipped, and why.
+    Review {
+        /// Sweep the repeated causes already in the records.
+        #[arg(long, required = true)]
+        backfill: bool,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -928,8 +940,20 @@ fn run(cli: Cli) -> Result<u8> {
             }
             Ok(0)
         }
+        Command::Hestia {
+            action: HestiaAction::Review { json, .. },
+        } => {
+            let report = open(true)?.error_review_backfill(&Terminal)?;
+            if json {
+                print_json(&report)?;
+            } else {
+                print!("{}", report.render());
+            }
+            Ok(0)
+        }
         Command::Hestia { action } => {
             let (sweep, json) = match action {
+                HestiaAction::Review { .. } => unreachable!("handled above"),
                 HestiaAction::Sweep { json } => {
                     let athena = open(true)?;
                     let sweep = athena.hestia_sweep(&athena_core::hestia::default_checks())?;
@@ -1318,6 +1342,24 @@ mod tests {
                 )],
             )
             .unwrap();
+    }
+
+    #[test]
+    fn hestia_review_takes_backfill_and_refuses_to_run_without_it() {
+        let parsed = Cli::try_parse_from(["athena", "hestia", "review", "--backfill"]).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Command::Hestia {
+                action: HestiaAction::Review {
+                    backfill: true,
+                    json: false
+                }
+            }
+        ));
+        assert!(Cli::try_parse_from(["athena", "hestia", "review"]).is_err());
+        assert!(
+            Cli::try_parse_from(["athena", "hestia", "review", "--backfill", "--json"]).is_ok()
+        );
     }
 
     #[test]

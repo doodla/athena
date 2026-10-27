@@ -466,8 +466,12 @@ pub struct StatusView {
     pub lines: Vec<crate::scope_guard::LineMark>,
     /// The open repeated causes from Hestia's error review (`crate::hestia::repeated_causes`): causes that
     /// occurred in two or more distinct jobs and whose root-cause request has not landed, each with its count
-    /// and the request that addresses it. Empty when there are none.
+    /// and the request that addresses it. Empty when there are none. Causes in a stage that `athena.toml` has
+    /// switched off are not here; see `dormant_causes`.
     pub repeated_causes: Vec<crate::hestia::RepeatedCause>,
+    /// The open repeated causes whose stage (planner or critic) `athena.toml` has switched off: listed apart,
+    /// never queued by the error review backfill (`athena hestia review --backfill`).
+    pub dormant_causes: Vec<crate::hestia::DormantCause>,
     pub invalid_records: Vec<String>,
     pub next: Vec<String>,
     /// The reconciliation that ran before this view was built (`Athena::status_with_reconcile`); absent from
@@ -1067,14 +1071,21 @@ impl Athena {
                 l.lift
             ));
         }
-        let repeated_causes: Vec<crate::hestia::RepeatedCause> =
+        let open_causes: Vec<crate::hestia::RepeatedCause> =
             crate::hestia::repeated_causes(&records)
                 .into_iter()
                 .filter(crate::hestia::RepeatedCause::is_open)
                 .collect();
+        // The stages athena.toml switches off are read from the configuration at HEAD; an unreadable
+        // configuration leaves every cause live.
+        let disabled = crate::capability::JobConfig::at(&self.git, &head)
+            .map(|jc| crate::hestia::Stage::disabled(&jc.config))
+            .unwrap_or_default();
+        let (repeated_causes, dormant_causes) =
+            crate::hestia::split_dormant(open_causes, &disabled);
         for c in repeated_causes.iter().filter(|c| c.request.is_none()) {
             next.push(format!(
-                "repeated cause in {} jobs has no root-cause request   # {}",
+                "repeated cause in {} jobs has no root-cause request   # {} · athena hestia review --backfill queues it",
                 c.jobs.len(),
                 c.cause
             ));
@@ -1147,6 +1158,7 @@ impl Athena {
             code_health,
             lines,
             repeated_causes,
+            dormant_causes,
             invalid_records: records.invalid.clone(),
             next,
             reconcile: None,

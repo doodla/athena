@@ -1,0 +1,153 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261027-045117-g5sr",
+  "base_commit": "efb6f0cd87b413b2ad6b4c59d4044aa1dcabe24c",
+  "base_fingerprint": "sha256:9face8b38d16a2c193a86021c9cd9edbdebde53b60572fa6750ead800d8e019c",
+  "previous_job": "20261027-031444-60zg",
+  "candidate_commit": "a64ba0e34dfd969f340058dfee13ff61dbf1f355",
+  "candidate_tree": "894cb04b0aa09db98fe4f70499ad2fcd8320c9dc",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 169070
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 69072
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 58365
+    },
+    {
+      "path": "crates/athena-core/src/hestia.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 76463
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 77839
+    }
+  ],
+  "fingerprint": "sha256:53f081cdcc7cbd1f8e56dc33f9443e8037af6e36120cc3c3a0e1fad23dbc93ff",
+  "violations": [],
+  "producer_report": {
+    "summary": "Added `athena hestia review --backfill`, which runs the error review over repeated causes already in the records. It reads which stages are off from athena.toml and skips causes in those stages as dormant. It skips causes whose request has landed. The remaining causes are ranked by occurrences, then by their newest introspection. The top five get urgent priority and the rest normal.\n\nFor each ranked cause, an open request that addresses it is found. That is one that cites the introspection ids, or names the failure class, or repeats the cause text. If the request is queued, proposed or declined, its text is rebuilt through `StewardRequest::new` and queued again. The rebuilt text gets a default acceptance when it had none, the files it names (else `crates/`), the target priority and the introspection ids. The old request is then closed through `Athena::close` with a reason naming the new job. If the request already covers the cause and only its priority is wrong, `set_priority` is used. A request that is dispatched or blocked is left alone. If no open request matches, a new root-cause request is queued through the same builder.\n\nThe run prints counts, then one line per cause with the action, priority, job and reason. `--json` prints the same as data. A second run finds every cause covered and commits nothing.\n\n`athena status` keeps the repeated-cause section, which now shows each cause with its request. It adds a separate `dormant` section and a `dormant_causes` field in the JSON.\n\nTwo things to know. First, a cause's stage is inferred from the words \"planner\" or \"critic\" in its class name or cause text, because introspections record no stage. This is a heuristic. The word \"planner\" can also mean `athena plan`, which would wrongly mark such a cause dormant. Second, I edited `crates/athena-cli/src/display.rs`, which is not on the deliverables list. The status text is rendered there, so criterion 3 needed it.\n\nI ran the full `cargo test --locked` once after all edits. The harness showed no failure, but its output was too large to read, so I could not confirm the summary lines. fmt and clippy were clean.",
+    "files": [
+      "crates/athena-core/src/hestia.rs",
+      "crates/athena-core/src/status.rs",
+      "crates/athena-cli/src/main.rs",
+      "crates/athena-cli/src/display.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-core --lib hestia",
+        "result": "pass",
+        "note": "16 tests pass, including the 5 new backfill tests"
+      },
+      {
+        "command": "cargo test -p athena-cli --bin athena hestia",
+        "result": "pass",
+        "note": "clap parse test"
+      },
+      {
+        "command": "cargo test -p athena-cli --lib dormant",
+        "result": "pass",
+        "note": "status text section for dormant causes"
+      },
+      {
+        "command": "cargo test -p xtask",
+        "result": "pass",
+        "note": "includes the boundary scan for banned words"
+      },
+      {
+        "command": "cargo run -q --bin athena -- hestia review --help",
+        "result": "pass",
+        "note": "flag accepted and documented"
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "run once after all edits; the harness showed no failure. Its output was too large for me to read."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Run `cargo test`: a fixture test in hestia.rs covers all four branches: a cause in a disabled stage is skipped as dormant, an existing open request is re-queued via the shared builder and the old one is closed with a reason, an uncovered cause gets a new request citing introspection ids, and the top five by occurrences and recency are urgent while the rest are normal.",
+        "status": "met",
+        "evidence": "Ran `cargo test -p athena-core --lib hestia`. `the_backfill_skips_dormant_requeues_an_existing_request_queues_the_rest_and_ranks_the_top_five_urgent` passes. It builds a nine-cause backlog (7 live, 1 planner-stage dormant, 1 landed) plus an open steward request with no acceptance and no cited ids. It asserts: the dormant cause is skipped with a reason starting 'dormant: the planner stage is disabled in athena.toml' and nothing cites it; the old request ends Closed(Dropped) with a reason containing 're-queued as <new>'; the new request has Priority, Acceptance, `Files: crates/` and the introspection ids; 6 new requests cite their ids; the first five in rank order are urgent and the last two normal, with the recency tie-break checked. `a_queued_request_that_covers_a_cause_only_has_its_priority_set` covers the priority-only branch."
+      },
+      {
+        "criterion": "Run `cargo test`: a second backfill run over the same fixtures queues, re-queues and closes nothing.",
+        "status": "met",
+        "evidence": "`a_second_backfill_over_the_same_records_queues_requeues_and_closes_nothing` passes. The first run queues 6; the second looks at the same 9 causes and `changed_nothing()` holds. Queued and re-queued are 0, `athena.head()` is unchanged, the request count is unchanged, and 7 lines say 'already covers the cause'."
+      },
+      {
+        "criterion": "Run `cargo test`: status output lists each repeated cause with its request after the backfill and lists dormant causes in a separate section.",
+        "status": "met",
+        "evidence": "`status_shows_each_repeated_causes_request_after_the_backfill_and_dormant_causes_apart` passes. Before the backfill the 7 live causes have no request. After it, all 7 `repeated_causes` have a queued request and the planner cause is only in `dormant_causes`. No 'no root-cause request' hint is left. The text section is `dormant_causes_section` in display.rs, covered by `display::tests::dormant_causes_are_listed_apart_with_their_stage`, which passes."
+      },
+      {
+        "criterion": "Run `cargo run -- hestia review --backfill` help or a CLI test: the flag is accepted and prints what was queued, re-queued and skipped, with the reason for each.",
+        "status": "met",
+        "evidence": "Ran `cargo run -q --bin athena -- hestia review --help`. It shows `--backfill` (required) and `--json`. `tests::hestia_review_takes_backfill_and_refuses_to_run_without_it` in main.rs passes: it parses the flag and rejects `review` without it. `BackfillReport::render` prints the count line 'queued N · re-queued N · priority set N · skipped N' and a 'why:' line per cause. The main fixture test asserts this text. I did not run the command against a live repository."
+      },
+      {
+        "criterion": "`cargo fmt --check`, `cargo clippy -- -D warnings` and `cargo test` all pass.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I ran `cargo fmt --all --check` (clean), `cargo clippy --all-targets --locked -- -D warnings` (clean) and `cargo test --locked` (no failure shown by the harness)."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry describing the backfill.",
+        "status": "met",
+        "evidence": "Read CHANGELOG.md: a new first bullet under Unreleased / Added describes `athena hestia review --backfill`, its four outcomes, the ranking, the report, and the status change."
+      },
+      {
+        "criterion": "Disabled stages are read from athena.toml, not hardcoded. Re-queued and new requests go through the existing shared steward request builder, with no duplicate construction path.",
+        "status": "met",
+        "evidence": "`Stage::disabled(&Config)` reads `config.job_plan.enabled`, and `error_review_backfill` loads the config at HEAD via `JobConfig::at`. `status()` does the same. `a_stage_is_dormant_only_while_athena_toml_switches_it_off` flips athena.toml to `enabled = true`, commits it, and the same cause is then queued. Both new and re-queued text go through `StewardRequest::new`: `root_cause_request_at` (the old `root_cause_request` now calls it with Urgent) and `rebuild_request`. There is no hand-written request text."
+      }
+    ],
+    "open_issues": [
+      "Stage detection is a keyword heuristic ('planner', 'critic'). A cause about the `athena plan` command that uses the word 'planner' would wrongly be treated as dormant. Recording the stage on the introspection would fix this; that was out of scope.",
+      "A request that the backfill matches only by class name or cause text, and that is dispatched or blocked, is skipped and the cause still gets no new request. It is reported in the skip reason.",
+      "The error review that runs after a new introspection does not skip dormant stages. The request asked for that only in the backfill, so I left it."
+    ],
+    "mistakes": [
+      "My first run of the main fixture test failed because I asserted a trailing newline on the request text. `Athena::queue` trims it. I fixed the assertion and the test passes.",
+      "I tried `grep` and `tail` in Bash, which the policy refused; I switched to the dedicated tools."
+    ],
+    "learnings": [
+      "`athena hestia review` did not exist; only `sweep` and `last` did. I added `Review` as a new subcommand with a required `--backfill`.",
+      "Introspection records carry no stage field. Stage can only be inferred from wording, so the dormant rule is a keyword heuristic.",
+      "`Athena::queue` trims the request text and records channel `cli`, which `athena drain` also works. A re-queued steward request therefore moves from channel `steward` to `cli`.",
+      "`StewardRequest::new` appends the body after the title with a blank line, so parsing a built request back and rebuilding it gives identical text. The backfill's idempotence relies on this; the root-cause request round trip is covered by the second-run test.",
+      "Status text is rendered in crates/athena-cli/src/display.rs, not status.rs. The CLI tests for status text live there.",
+      "The producer's Bash cannot run `tail` or `grep`, and Read/Grep cannot open the persisted tool-output file outside the working directory, so large test output cannot be inspected."
+    ],
+    "desires": [
+      "A stage field on introspection records, so dormant causes need no keyword guess.",
+      "Permission to read the persisted tool-output file, to confirm the full-suite summary line."
+    ]
+  }
+}
