@@ -91,6 +91,16 @@ producer–verifier pair moved earlier, as Sri put it. `Config::validate` alread
   rebuilt from the committed `brief-producer.md` and the plan record without a new markdown file (review F6). The
   send-back builds from the plan-augmented prompt, not the original brief, so a second producer run keeps the
   plan (F6). The producer follows the plan and may depart only with a reason in `open_issues`.
+- **Planned files left unchanged (code):** before the candidate is built, `produce_and_verify` compares the
+  snapshot's change list with the accepted plan's files (when the job was planned) and the accepted reading's
+  deliverables (`planned_paths`, `unchanged_planned_files` in `crates/athena-core/src/run/mod.rs`). A listed path
+  that is not in the change list and has no entry with a reason in the report's `unchanged_planned_files` is
+  sent back with the unmet criteria, in the one send-back (`send_back_text` names each path). If it is still
+  unexplained afterwards, it joins the `producer-report-gaps` entry the verifier is given, so a forgotten file is
+  found before verification and not by the verifier alone. It is a flag, not a failure, like an unmet
+  criterion. A run with no change at all is not checked this way; it fails as an idle producer. The producer
+  brief says the same ("Planned files left unchanged"). The reasons are read from the report and are not kept in
+  the invocation record.
 - **Verifier (design):** it is not given the planner's approach, reasons or rejected options, which come from the
   producer's model and would anchor it (review F5; `VerifierInputs` in `briefs.rs` promises no producer
   reasoning). It gets only the critic-accepted demonstrations (one per criterion) and the planned file list.

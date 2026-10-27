@@ -458,6 +458,7 @@ pub fn producer_brief(inputs: &ProducerInputs) -> String {
     }
     let _ = writeln!(out, "## What the verifier sees\n\n{VERIFIER_VISIBILITY}\n");
     criteria_check_section(&mut out, &inputs.reading);
+    let _ = writeln!(out, "{}", unchanged_files_section());
     let _ = writeln!(
         out,
         "## Report\n\nEnd with the producer report as your structured output."
@@ -491,6 +492,19 @@ fn criteria_check_section(out: &mut String, reading: &AcceptedReading) {
         let _ = writeln!(out, "{text}");
     }
     out.push('\n');
+}
+
+/// The "Planned files left unchanged" section: the rule that a file the plan or the expected deliverables
+/// list must be changed, or its omission explained in the report. Athena compares the change list with
+/// both lists before verification starts, so a forgotten file is sent back instead of found late.
+fn unchanged_files_section() -> String {
+    "## Planned files left unchanged\n\n\
+     Every file in the plan and in the expected deliverables must be changed, or you must say why it \
+     needs no change. Before you report, compare your edits with those lists. For each listed file you \
+     did not change, either change it now or add an entry to `unchanged_planned_files` in your report \
+     with its path and the reason. A listed file that is neither changed nor explained is sent back \
+     once, then flagged to the verifier as a gap.\n"
+        .to_string()
 }
 
 /// Words the boundary scan (M19) rejects, built from fragments so no tracked file contains them. This

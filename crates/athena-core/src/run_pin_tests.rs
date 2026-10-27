@@ -979,12 +979,265 @@ fn the_send_back_names_each_missing_criterion_and_says_to_copy_the_line() {
             "the docs name the flag".to_string(),
             "tests pass".to_string(),
         ],
+        &[],
     );
     assert!(text.starts_with("BRIEF\n\n## Sent back"));
     assert!(text.contains("\n- the docs name the flag\n"));
     assert!(text.contains("\n- tests pass\n"));
     assert!(text.contains("copying each line from the brief's criteria_check section"));
     assert!(!text.contains("without its number"));
+    assert!(!text.contains("Planned files left unchanged and not explained"));
+}
+
+fn planned(files: &[&str]) -> athena_data::records::JobPlan {
+    use athena_data::records::{DeliverableAction, PlanFile};
+    athena_data::records::JobPlan {
+        job: athena_data::JobId::parse("20261026-040900-55ce").unwrap(),
+        round: 1,
+        at: jiff::Timestamp::UNIX_EPOCH,
+        invocation_seq: 1,
+        approach: "Approach.".into(),
+        decisions: vec![],
+        files: files
+            .iter()
+            .map(|path| PlanFile {
+                path: (*path).into(),
+                action: DeliverableAction::Modify,
+                purpose: "Change it.".into(),
+                governance: false,
+                exists: true,
+            })
+            .collect(),
+        steps: vec![],
+        risks: vec![],
+        demonstrations: vec![],
+        open_questions: vec![],
+        producer_section_sha256: String::new(),
+        resumed_from: None,
+    }
+}
+
+fn report_explaining(files: &[(&str, &str)]) -> athena_context::outputs::ProducerOutput {
+    let explained: Vec<_> = files
+        .iter()
+        .map(|(path, reason)| json!({ "path": path, "reason": reason }))
+        .collect();
+    serde_json::from_value(json!({
+        "summary": "done", "files": [], "checks_run": [], "criteria_check": [],
+        "open_issues": [], "mistakes": [], "learnings": [], "desires": [],
+        "unchanged_planned_files": explained
+    }))
+    .unwrap()
+}
+
+const CLI_TEST: &str = "crates/athena-cli/tests/lifecycle.rs";
+const COMMON: &str = "crates/athena-cli/tests/common/mod.rs";
+const RUN: &str = "crates/athena-core/src/run/mod.rs";
+
+fn paths(list: &[&str]) -> Vec<String> {
+    list.iter().map(|p| (*p).to_string()).collect()
+}
+
+#[test]
+fn a_candidate_missing_a_planned_file_is_flagged_with_its_path() {
+    let plan = planned(&[RUN, CLI_TEST, COMMON]);
+    let planned = crate::run::planned_paths(Some(&plan), &accepted(&[]));
+    let flagged = crate::run::unchanged_planned_files(
+        &report(&[]),
+        &planned,
+        &paths(&[RUN, "crates/athena-cli/tests/other.rs", COMMON]),
+    );
+    assert_eq!(flagged, vec![CLI_TEST.to_string()]);
+}
+
+#[test]
+fn a_deliverable_left_unchanged_is_flagged_even_when_the_job_has_no_plan() {
+    let mut reading = accepted(&[]);
+    reading.deliverables = vec![
+        (
+            "CHANGELOG.md".into(),
+            athena_data::records::DeliverableAction::Modify,
+            false,
+        ),
+        (
+            "docs/guide.md".into(),
+            athena_data::records::DeliverableAction::Modify,
+            false,
+        ),
+    ];
+    let planned = crate::run::planned_paths(None, &reading);
+    assert_eq!(planned, paths(&["CHANGELOG.md", "docs/guide.md"]));
+    let flagged =
+        crate::run::unchanged_planned_files(&report(&[]), &planned, &paths(&["./CHANGELOG.md"]));
+    assert_eq!(flagged, vec!["docs/guide.md".to_string()]);
+}
+
+#[test]
+fn a_plan_file_listed_again_as_a_deliverable_is_flagged_once() {
+    let plan = planned(&[RUN]);
+    let mut reading = accepted(&[]);
+    reading.deliverables = vec![(
+        RUN.into(),
+        athena_data::records::DeliverableAction::Modify,
+        false,
+    )];
+    let planned = crate::run::planned_paths(Some(&plan), &reading);
+    let flagged = crate::run::unchanged_planned_files(&report(&[]), &planned, &[]);
+    assert_eq!(flagged, vec![RUN.to_string()]);
+}
+
+#[test]
+fn a_candidate_that_changes_every_planned_file_is_not_flagged() {
+    let plan = planned(&[RUN, CLI_TEST]);
+    let planned = crate::run::planned_paths(Some(&plan), &accepted(&[]));
+    let flagged = crate::run::unchanged_planned_files(
+        &report(&[]),
+        &planned,
+        &paths(&[CLI_TEST, RUN, "extra.md"]),
+    );
+    assert!(flagged.is_empty(), "{flagged:?}");
+}
+
+#[test]
+fn an_unchanged_planned_file_with_a_reason_in_the_report_is_not_flagged_but_a_blank_reason_is() {
+    let plan = planned(&[RUN, CLI_TEST]);
+    let planned = crate::run::planned_paths(Some(&plan), &accepted(&[]));
+    let changed = paths(&[RUN]);
+    let explained = report_explaining(&[(CLI_TEST, "the existing tests already cover it")]);
+    assert!(crate::run::unchanged_planned_files(&explained, &planned, &changed).is_empty());
+    let blank = report_explaining(&[(CLI_TEST, "  ")]);
+    assert_eq!(
+        crate::run::unchanged_planned_files(&blank, &planned, &changed),
+        vec![CLI_TEST.to_string()]
+    );
+    // A reason given for another file does not excuse this one.
+    let other = report_explaining(&[(COMMON, "not needed")]);
+    assert_eq!(
+        crate::run::unchanged_planned_files(&other, &planned, &changed),
+        vec![CLI_TEST.to_string()]
+    );
+}
+
+#[test]
+fn the_send_back_names_each_unchanged_planned_file_and_says_to_change_or_explain_it() {
+    let text = crate::run::send_back_text("BRIEF", &[], &[CLI_TEST.to_string()]);
+    assert!(text.starts_with("BRIEF\n\n## Sent back"));
+    assert!(text.contains(&format!("\n- {CLI_TEST}\n")), "{text}");
+    assert!(text.contains("unchanged_planned_files"));
+    assert!(!text.contains("Criteria not met or not reported"));
+}
+
+/// What a study run showed when the producer's turns were changed by `producer_turn` (called with the
+/// attempt number from 0).
+struct StudyRun {
+    producer_prompts: Vec<String>,
+    verifier_prompts: Vec<String>,
+}
+
+fn study_run(producer_turn: impl Fn(usize, &mut FakeTurn) + Send + Sync + 'static) -> StudyRun {
+    let (dir, _git) = repo(&config(true));
+    let state = tempfile::tempdir().unwrap();
+    let producer_prompts = Arc::new(Mutex::new(Vec::<String>::new()));
+    let verifier_prompts = Arc::new(Mutex::new(Vec::<String>::new()));
+    let (producers, verifiers) = (producer_prompts.clone(), verifier_prompts.clone());
+    let tweak: Tweak = Arc::new(move |spec, turn| match spec.role {
+        Role::Producer => {
+            let mut seen = producers.lock().unwrap();
+            producer_turn(seen.len(), turn);
+            seen.push(spec.user_prompt.clone());
+        }
+        Role::Verifier => verifiers.lock().unwrap().push(spec.user_prompt.clone()),
+        _ => {}
+    });
+    let athena = athena_with(
+        &dir,
+        &state,
+        CountingPinner::new(FAKE_SHA),
+        Arc::default(),
+        tweak,
+    );
+    let proposal = athena.ask("study the demo", &Quiet).unwrap();
+    athena
+        .go(proposal.job.as_str(), AcceptedBy::User, &Quiet)
+        .unwrap();
+    let producer_prompts = producer_prompts.lock().unwrap().clone();
+    let verifier_prompts = verifier_prompts.lock().unwrap().clone();
+    StudyRun {
+        producer_prompts,
+        verifier_prompts,
+    }
+}
+
+/// The study's accepted deliverable is README.md. This turn changes another file instead.
+fn edit_notes_not_readme(turn: &mut FakeTurn) {
+    turn.edits = vec![("NOTES.md".into(), Some("notes\n".into()))];
+}
+
+#[test]
+fn an_unexplained_missing_planned_file_is_sent_back_once_then_flagged_to_the_verifier() {
+    let run = study_run(|_, turn| edit_notes_not_readme(turn));
+    assert_eq!(
+        run.producer_prompts.len(),
+        2,
+        "the first attempt and one send-back"
+    );
+    assert!(!run.producer_prompts[0].contains("## Sent back"));
+    let (_, sent_back) = run.producer_prompts[1].split_once("## Sent back").unwrap();
+    assert!(
+        sent_back.contains("Planned files left unchanged and not explained:\n\n- README.md\n"),
+        "{sent_back}"
+    );
+    assert!(sent_back.contains("unchanged_planned_files"), "{sent_back}");
+    assert!(
+        !sent_back.contains("Criteria not met"),
+        "every criterion was reported met: {sent_back}"
+    );
+    // After the one send-back the gap is not dropped: the verifier is told.
+    assert_eq!(run.verifier_prompts.len(), 1, "the verifier still runs");
+    let verifier = &run.verifier_prompts[0];
+    assert!(verifier.contains("producer-report-gaps"), "{verifier}");
+    assert!(
+        verifier.contains("planned files left unchanged without a reason: README.md"),
+        "{verifier}"
+    );
+}
+
+#[test]
+fn a_planned_file_changed_after_the_send_back_is_not_flagged_to_the_verifier() {
+    let run = study_run(|attempt, turn| {
+        if attempt == 0 {
+            edit_notes_not_readme(turn);
+        }
+    });
+    assert_eq!(run.producer_prompts.len(), 2);
+    assert!(run.producer_prompts[1].contains("\n- README.md\n"));
+    assert_eq!(run.verifier_prompts.len(), 1);
+    assert!(!run.verifier_prompts[0].contains("producer-report-gaps"));
+}
+
+#[test]
+fn a_missing_planned_file_the_report_explains_is_not_sent_back() {
+    let run = study_run(|_, turn| {
+        edit_notes_not_readme(turn);
+        turn.structured.as_mut().unwrap()["unchanged_planned_files"] =
+            json!([{ "path": "README.md", "reason": "the study needs no README change" }]);
+    });
+    assert_eq!(run.producer_prompts.len(), 1, "no send-back");
+    assert_eq!(run.verifier_prompts.len(), 1);
+    assert!(!run.verifier_prompts[0].contains("producer-report-gaps"));
+}
+
+#[test]
+fn the_producer_brief_says_planned_files_left_unchanged_must_be_changed_or_explained() {
+    let run = study_run(|_, _| {});
+    let brief = &run.producer_prompts[0];
+    assert!(brief.contains("## Planned files left unchanged"), "{brief}");
+    assert!(brief.contains("unchanged_planned_files"), "{brief}");
+    assert_eq!(
+        run.producer_prompts.len(),
+        1,
+        "README.md is changed, so no send-back"
+    );
 }
 
 /// Runs a study whose first producer report keeps only the criteria at `keep` (indices into the two

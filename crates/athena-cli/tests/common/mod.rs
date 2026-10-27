@@ -496,6 +496,25 @@ impl Default for Scenario {
     }
 }
 
+/// The paths a producer prompt lists with an action, each once: the expected deliverables
+/// (`- path (modify)`) and the accepted plan's files (`- path (modify, exists): purpose`).
+fn listed_paths(prompt: &str) -> Vec<String> {
+    let mut paths: Vec<String> = Vec::new();
+    for line in prompt.lines() {
+        let Some((path, rest)) = line.strip_prefix("- ").and_then(|l| l.split_once(" (")) else {
+            continue;
+        };
+        let action = rest.split([',', ')']).next().unwrap_or("");
+        if ["create", "modify", "delete"].contains(&action)
+            && !path.contains(' ')
+            && !paths.iter().any(|p| p == path)
+        {
+            paths.push(path.to_string());
+        }
+    }
+    paths
+}
+
 fn snapshot_text(dir: &Path) -> String {
     let mut out = String::new();
     let mut stack = vec![dir.to_path_buf()];
@@ -558,6 +577,17 @@ impl Scenario {
                                 .map(|c| criterion_check(c, "met"))
                                 .collect(),
                         );
+                    }
+                    // A report that lists no `unchanged_planned_files` explains every file the brief or the
+                    // plan lists and the scenario's edits do not touch (a change reading also lists
+                    // CHANGELOG.md); a test that wants the gap itself sets the field.
+                    if report.get("unchanged_planned_files").is_none() {
+                        let untouched: Vec<Value> = listed_paths(&spec.user_prompt)
+                            .into_iter()
+                            .filter(|path| !self.edits.iter().any(|(edited, _)| edited == path))
+                            .map(|path| json!({ "path": path, "reason": "the scenario's producer does not edit it" }))
+                            .collect();
+                        report["unchanged_planned_files"] = Value::Array(untouched);
                     }
                     let mut t = FakeTurn::output(report);
                     t.edits = self.edits.clone();

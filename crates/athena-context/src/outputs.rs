@@ -129,6 +129,22 @@ pub struct ProducerOutput {
     pub learnings: Vec<String>,
     /// Context or tools you wished you had.
     pub desires: Vec<String>,
+    /// Every file the plan or the brief's expected deliverables list that you left unchanged, each with
+    /// the reason. A listed file you did not change and did not explain here is sent back once, then
+    /// flagged to the verifier. Use an empty list when every listed file changed.
+    #[serde(default)]
+    pub unchanged_planned_files: Vec<UnchangedFileOutput>,
+}
+
+/// A planned or expected file the producer left unchanged, with the reason, so a reader can tell a
+/// deliberate omission from a forgotten file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UnchangedFileOutput {
+    /// The file's path, as the plan or the expected deliverables list it.
+    pub path: String,
+    /// Why the file needed no change.
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
