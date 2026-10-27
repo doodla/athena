@@ -9,6 +9,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `athena hestia review --backfill` runs the error review over the backlog, which the review after each new
+  introspection never saw. Once, and safe to repeat: a repeated cause in a stage that `athena.toml` switches off
+  (the planner and the critic, while `[job_plan]` is off) is skipped as dormant; an open request that addresses a
+  cause (it cites the introspections, or names the failure class or repeats the cause) is queued again through
+  the shared steward request builder, with acceptance, files and the introspection ids, and the old request is
+  closed with a reason; any other cause gets a new root-cause request through the same builder. The five
+  highest-ranked causes (most occurrences, then most recent) are urgent and the rest normal; a queued request that
+  already covers a cause only has its priority set. It prints what it queued, re-queued and skipped, and why
+  (`--json` for the same as data); a second run changes nothing. `athena status` now lists each repeated cause
+  with its request, and lists dormant causes in a section of their own (`dormant_causes` in the JSON).
 - Hestia's error review: introspections are now read together, not one job at a time. After a recorded
   introspection is committed, Athena groups it with the earlier ones by cause (the failure class, from the class
   registry or Jev's class answer; the cause text when no registry class places it). When a cause has occurred in

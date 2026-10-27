@@ -17,18 +17,27 @@
 //! in two or more distinct jobs, and that no open or landed request cites, gets one urgent root-cause request,
 //! built by [`crate::steward::StewardRequest`] and citing the introspection ids. [`repeated_causes`] lists the
 //! repeated causes for `athena status`.
+//!
+//! The review only reacts to a new introspection, so causes that repeated before it existed have no request.
+//! `athena hestia review --backfill` ([`Athena::error_review_backfill`]) sweeps them once: a cause whose stage is
+//! switched off in `athena.toml` is dormant and skipped; an open request that already addresses a cause is
+//! re-queued through the same builder and the old one closed; any other cause gets a new root-cause request.
+//! The five highest-ranked causes (most occurrences, then most recent) are urgent and the rest normal. A second
+//! run finds every cause covered and changes nothing.
 
 use crate::commits::{NewFile, message};
+use crate::plan::Priority;
 use crate::steward::StewardRequest;
-use crate::store::{JobState, Records};
+use crate::store::{JobRecords, JobState, Records};
 use crate::{Athena, Ui};
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use athena_data::records::{
     AnyRecord, HestiaCheckResult, IntrospectionRecord, IntrospectionStatus, OutcomeState,
 };
 use athena_data::{JobId, RecordId};
 use jiff::Timestamp;
 use serde::Serialize;
+use std::collections::BTreeSet;
 
 pub use athena_data::records::HestiaCheckResult as CheckResult;
 pub use athena_data::records::HestiaFinding as Finding;
@@ -274,6 +283,15 @@ pub fn repeated_causes(records: &Records) -> Vec<RepeatedCause> {
 /// The text of the urgent root-cause request for a repeated cause, built with [`StewardRequest`]. No body line
 /// starts like a bullet: the builder refuses one, since `athena plan` would read it as acceptance.
 pub fn root_cause_request(cause: &RepeatedCause, records: &Records) -> Result<String, String> {
+    root_cause_request_at(cause, records, Priority::Urgent)
+}
+
+/// [`root_cause_request`] at the given priority: the one place the text of a root-cause request is built.
+fn root_cause_request_at(
+    cause: &RepeatedCause,
+    records: &Records,
+    priority: Priority,
+) -> Result<String, String> {
     let mut body = String::from(
         "The same cause has produced failures in more than one job. Find the cause where it originates and fix \
          it there, so the whole class is prevented; do not work around one instance.\n\n",
@@ -306,7 +324,7 @@ pub fn root_cause_request(cause: &RepeatedCause, records: &Records) -> Result<St
     ];
     let title: String = cause.cause.chars().take(100).collect();
     StewardRequest::new(
-        Some(crate::plan::Priority::Urgent),
+        Some(priority),
         &format!("Fix the root cause of a repeated failure: {title}"),
         &body,
         &acceptance,
@@ -315,7 +333,520 @@ pub fn root_cause_request(cause: &RepeatedCause, records: &Records) -> Result<St
     .map(|r| r.render())
 }
 
+// ---------------------------------------------------------------------------------------------------------
+// Backfill
+
+/// How many of the highest-ranked causes a backfill makes urgent. The rest are normal.
+pub const BACKFILL_URGENT: usize = 5;
+
+/// A stage of the job pipeline that `athena.toml` can switch off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Stage {
+    Planner,
+    Critic,
+}
+
+impl Stage {
+    pub fn name(self) -> &'static str {
+        match self {
+            Stage::Planner => "planner",
+            Stage::Critic => "critic",
+        }
+    }
+
+    /// The stages the configuration switches off. The planner and the critic run only inside job planning, so
+    /// they are off when `[job_plan]` is absent or has `enabled = false`.
+    pub fn disabled(config: &athena_data::Config) -> Vec<Stage> {
+        if config.job_plan.as_ref().is_some_and(|p| p.enabled) {
+            Vec::new()
+        } else {
+            vec![Stage::Planner, Stage::Critic]
+        }
+    }
+
+    /// The stage a cause is about, read from the words of its class name and its cause text, because an
+    /// introspection records no stage. The first word that names a stage decides; none means a stage that
+    /// cannot be switched off.
+    pub fn of(cause: &RepeatedCause) -> Option<Stage> {
+        let words = format!("{} {}", cause.class.as_deref().unwrap_or(""), cause.cause);
+        words
+            .split(|c: char| !c.is_alphanumeric())
+            .find_map(|w| match w.to_lowercase().as_str() {
+                "planner" | "planners" => Some(Stage::Planner),
+                "critic" | "critics" => Some(Stage::Critic),
+                _ => None,
+            })
+    }
+}
+
+/// A repeated cause in a stage that `athena.toml` has switched off: listed, never queued.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DormantCause {
+    pub stage: Stage,
+    pub cause: RepeatedCause,
+}
+
+/// Splits causes into those that can be worked and those whose stage is in `disabled`.
+pub fn split_dormant(
+    causes: Vec<RepeatedCause>,
+    disabled: &[Stage],
+) -> (Vec<RepeatedCause>, Vec<DormantCause>) {
+    let mut live = Vec::new();
+    let mut dormant = Vec::new();
+    for cause in causes {
+        match Stage::of(&cause).filter(|s| disabled.contains(s)) {
+            Some(stage) => dormant.push(DormantCause { stage, cause }),
+            None => live.push(cause),
+        }
+    }
+    (live, dormant)
+}
+
+/// What a backfill did about one cause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BackfillAction {
+    /// A new root-cause request was queued.
+    Queued,
+    /// An existing open request was queued again through the builder, and the old one closed.
+    Requeued,
+    /// An existing queued request already covered the cause; only its priority was set.
+    Reprioritised,
+    /// Nothing was changed, for the reason given.
+    Skipped,
+}
+
+impl BackfillAction {
+    fn label(self) -> &'static str {
+        match self {
+            BackfillAction::Queued => "queued",
+            BackfillAction::Requeued => "re-queued",
+            BackfillAction::Reprioritised => "priority set",
+            BackfillAction::Skipped => "skipped",
+        }
+    }
+}
+
+/// One cause's line in the report of a backfill.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BackfillLine {
+    pub action: BackfillAction,
+    pub cause: String,
+    pub introspections: Vec<String>,
+    /// The priority the ranking gave it; none for a cause that is not ranked (dormant or landed).
+    pub priority: Option<String>,
+    /// The request queued, or the existing request the line is about.
+    pub job: Option<String>,
+    /// The old request a re-queue closed.
+    pub replaced: Option<String>,
+    pub reason: String,
+}
+
+/// What a backfill queued, re-queued and skipped, in rank order.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct BackfillReport {
+    pub lines: Vec<BackfillLine>,
+}
+
+impl BackfillReport {
+    pub fn count(&self, action: BackfillAction) -> usize {
+        self.lines.iter().filter(|l| l.action == action).count()
+    }
+
+    /// True when the backfill changed no record.
+    pub fn changed_nothing(&self) -> bool {
+        self.count(BackfillAction::Skipped) == self.lines.len()
+    }
+
+    /// The report as text: a count line, then one line per cause with the reason for what was done.
+    pub fn render(&self) -> String {
+        if self.lines.is_empty() {
+            return "no repeated causes in the records; nothing to do\n".into();
+        }
+        let mut out = format!(
+            "Hestia error review backfill: {} repeated cause(s) · queued {} · re-queued {} · priority set {} · skipped {}\n",
+            self.lines.len(),
+            self.count(BackfillAction::Queued),
+            self.count(BackfillAction::Requeued),
+            self.count(BackfillAction::Reprioritised),
+            self.count(BackfillAction::Skipped),
+        );
+        for l in &self.lines {
+            out.push_str(&format!(
+                "{:<13} {:<7} {} · {}\n",
+                l.action.label(),
+                l.priority.as_deref().unwrap_or("-"),
+                l.job.as_deref().unwrap_or("-"),
+                l.cause
+            ));
+            out.push_str(&format!("{:<13}   why: {}\n", "", l.reason));
+            if let Some(old) = &l.replaced {
+                out.push_str(&format!("{:<13}   closed: {old}\n", ""));
+            }
+        }
+        out
+    }
+}
+
+/// What a backfill will do about one cause.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Step {
+    Skip { job: Option<String>, reason: String },
+    Queue { text: String },
+    Requeue { old: JobId, text: String },
+    Reprioritise { job: JobId },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Planned {
+    cause: RepeatedCause,
+    /// The priority the ranking gave the cause; none for a cause that is not ranked.
+    priority: Option<Priority>,
+    step: Step,
+}
+
+/// The newest introspection time of a cause.
+fn latest_at(records: &Records, cause: &RepeatedCause) -> Option<Timestamp> {
+    records
+        .introspections
+        .iter()
+        .filter(|i| cause.introspections.contains(&i.id.to_string()))
+        .map(|i| i.at)
+        .max()
+}
+
+/// Whether a line is a `Priority:` line with a valid level, as `athena plan` reads one.
+fn is_priority_line(line: &str) -> bool {
+    let line = line.trim();
+    line.get(..9)
+        .is_some_and(|head| head.eq_ignore_ascii_case("priority:"))
+        && Priority::parse(&line[9..]).is_some()
+}
+
+/// A request's text without its priority line, for telling whether two requests differ in more than priority.
+fn without_priority(text: &str) -> String {
+    text.lines()
+        .filter(|l| !is_priority_line(l))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
+/// Whether a request's words are about a cause: they name its failure class (id or name), or repeat its
+/// cause text with case and punctuation ignored.
+fn mentions(text: &str, cause: &RepeatedCause, records: &Records) -> bool {
+    if let Some(id) = cause.key.strip_prefix("class:") {
+        if text.contains(id) {
+            return true;
+        }
+        let lowered = text.to_lowercase();
+        if records
+            .classes
+            .iter()
+            .any(|c| c.id.as_str() == id && lowered.contains(&c.name.to_lowercase()))
+        {
+            return true;
+        }
+    }
+    let first = cause.introspections.first();
+    let wanted = records
+        .introspections
+        .iter()
+        .find(|i| Some(&i.id.to_string()) == first)
+        .and_then(|i| i.cause.as_deref())
+        .map(crate::introspect::normalise)
+        .unwrap_or_default();
+    !wanted.is_empty() && crate::introspect::normalise(text).contains(&wanted)
+}
+
+/// The open request that addresses a cause: the one that cites its introspections, else one whose words are
+/// about it ([`mentions`]), such as a steward request the planner refuses for missing acceptance. A request
+/// that can be queued again is preferred. A request in `used` already belongs to another cause.
+fn existing_request<'a>(
+    records: &'a Records,
+    cause: &RepeatedCause,
+    used: &BTreeSet<String>,
+) -> Option<&'a JobRecords> {
+    if let Some(job) = cause
+        .request
+        .as_ref()
+        .and_then(|r| records.jobs.get(&r.job))
+        .filter(|j| !used.contains(j.id().as_str()))
+    {
+        return Some(job);
+    }
+    let mut found: Vec<&JobRecords> = records
+        .request_jobs()
+        .into_iter()
+        .filter(|j| !used.contains(j.id().as_str()) && !matches!(j.state(), JobState::Closed(_)))
+        .filter(|j| {
+            j.request
+                .as_ref()
+                .is_some_and(|r| mentions(&r.text, cause, records))
+        })
+        .collect();
+    found.sort_by_key(|j| !can_requeue(j.state()));
+    found.into_iter().next()
+}
+
+/// The states in which a request is only waiting, so it can be closed and queued again.
+fn can_requeue(state: JobState) -> bool {
+    matches!(
+        state,
+        JobState::Queued | JobState::Proposed | JobState::Declined
+    )
+}
+
+/// An existing request's text queued again at `priority`, through [`StewardRequest`]: its title, its body, its
+/// acceptance (a default when it has none, which is why the planner refused it), and the files it names (the
+/// `Files:` line, else any path in it, else `crates/`). The introspection ids are added when it does not cite
+/// them, so `athena status` finds the request.
+fn rebuild_request(
+    text: &str,
+    priority: Priority,
+    cause: &RepeatedCause,
+) -> Result<String, String> {
+    let mut title: Option<&str> = None;
+    let mut body: Vec<&str> = Vec::new();
+    let mut acceptance: Vec<String> = Vec::new();
+    let mut files_line: Option<&str> = None;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if is_priority_line(trimmed) {
+            continue;
+        }
+        if title.is_none() {
+            if !trimmed.is_empty() {
+                title = Some(trimmed);
+            }
+            continue;
+        }
+        if trimmed.eq_ignore_ascii_case("acceptance:") {
+            continue;
+        }
+        if trimmed
+            .get(..6)
+            .is_some_and(|head| head.eq_ignore_ascii_case("files:"))
+        {
+            files_line = Some(&trimmed[6..]);
+            continue;
+        }
+        if crate::reading::request_text_acceptance(trimmed).is_empty() {
+            body.push(line);
+        } else {
+            let words = trimmed.split_once(' ').map_or(trimmed, |(_, rest)| rest);
+            acceptance.push(words.trim().to_string());
+        }
+    }
+    let title = title.ok_or("the request has no title")?;
+    if acceptance.is_empty() {
+        acceptance = vec![
+            "The change the request describes is made, with the root cause named".to_string(),
+            "A test fails without the change and passes with it".to_string(),
+            "fmt, clippy and test pass".to_string(),
+        ];
+    }
+    let mut files = crate::reading::request_text_touches(files_line.unwrap_or(text));
+    if files.is_empty() {
+        files.push("crates/".to_string());
+    }
+    let mut body = body.join("\n").trim().to_string();
+    if !cause
+        .introspections
+        .iter()
+        .any(|id| text.contains(id.as_str()))
+    {
+        body.push_str(&format!(
+            "\n\nIntrospections that record the repeated cause: {}",
+            cause.introspections.join(", ")
+        ));
+    }
+    StewardRequest::new(Some(priority), title, body.trim(), &acceptance, &files).map(|r| r.render())
+}
+
+/// What to do about one cause that can be worked, given the priority its rank earned.
+fn backfill_step(
+    records: &Records,
+    cause: &RepeatedCause,
+    priority: Priority,
+    used: &mut BTreeSet<String>,
+) -> Step {
+    let Some(old) = existing_request(records, cause, used) else {
+        return match root_cause_request_at(cause, records, priority) {
+            Ok(text) => Step::Queue { text },
+            Err(e) => Step::Skip {
+                job: None,
+                reason: format!("the root-cause request could not be built: {e}"),
+            },
+        };
+    };
+    let id = old.id().clone();
+    used.insert(id.as_str().to_string());
+    let state = old.state();
+    let skip = |reason: String| Step::Skip {
+        job: Some(id.as_str().to_string()),
+        reason,
+    };
+    if !can_requeue(state) {
+        return skip(format!(
+            "request {id} is {}; it is left alone",
+            state.name()
+        ));
+    }
+    let text = old.request.as_ref().map_or("", |r| r.text.as_str());
+    let rebuilt = match rebuild_request(text, priority, cause) {
+        Ok(rebuilt) => rebuilt,
+        Err(e) => return skip(format!("request {id} cannot be queued again: {e}")),
+    };
+    if without_priority(&rebuilt) != without_priority(text) {
+        return Step::Requeue {
+            old: id,
+            text: rebuilt,
+        };
+    }
+    if old.priority() == priority {
+        return skip(format!(
+            "request {id} ({}) already covers the cause at {}",
+            state.name(),
+            priority.as_str()
+        ));
+    }
+    if state == JobState::Queued {
+        Step::Reprioritise { job: id }
+    } else {
+        Step::Requeue {
+            old: id,
+            text: rebuilt,
+        }
+    }
+}
+
+/// Plans a backfill over the records. Dormant causes (stage in `disabled`) and causes whose request has landed
+/// are skipped. The rest are ranked by occurrences, then by the newest introspection, and the first
+/// [`BACKFILL_URGENT`] are urgent. The plan lists the ranked causes first, in rank order.
+fn plan_backfill(records: &Records, disabled: &[Stage]) -> Vec<Planned> {
+    let mut skipped: Vec<Planned> = Vec::new();
+    let mut ranked: Vec<(Option<Timestamp>, RepeatedCause)> = Vec::new();
+    for cause in repeated_causes(records) {
+        let reason = if let Some(stage) = Stage::of(&cause).filter(|s| disabled.contains(s)) {
+            format!(
+                "dormant: the {} stage is disabled in athena.toml ([job_plan] enabled is false)",
+                stage.name()
+            )
+        } else if let Some(r) = cause.request.as_ref().filter(|r| r.landed) {
+            format!("request {} has landed", r.job)
+        } else {
+            ranked.push((latest_at(records, &cause), cause));
+            continue;
+        };
+        skipped.push(Planned {
+            step: Step::Skip {
+                job: cause.request.as_ref().map(|r| r.job.clone()),
+                reason,
+            },
+            priority: None,
+            cause,
+        });
+    }
+    ranked
+        .sort_by(|(at_a, a), (at_b, b)| (b.count(), at_b, &a.key).cmp(&(a.count(), at_a, &b.key)));
+    let mut used = BTreeSet::new();
+    let mut plan: Vec<Planned> = ranked
+        .into_iter()
+        .enumerate()
+        .map(|(rank, (_, cause))| {
+            let priority = if rank < BACKFILL_URGENT {
+                Priority::Urgent
+            } else {
+                Priority::Normal
+            };
+            Planned {
+                step: backfill_step(records, &cause, priority, &mut used),
+                priority: Some(priority),
+                cause,
+            }
+        })
+        .collect();
+    plan.extend(skipped);
+    plan
+}
+
 impl Athena {
+    /// `athena hestia review --backfill`: reviews the repeated causes already in the records, which the review
+    /// that runs after each new introspection never saw. See the module comment for the rules. Safe to run
+    /// again: a cause that an open request covers is skipped, so a second run changes nothing.
+    pub fn error_review_backfill(&self, ui: &dyn Ui) -> Result<BackfillReport> {
+        let head = self.head()?;
+        let records = Records::load(&self.git, &head)?;
+        let config = crate::capability::JobConfig::at(&self.git, &head)?.config;
+        let disabled = Stage::disabled(&config);
+        let mut report = BackfillReport::default();
+        for planned in plan_backfill(&records, &disabled) {
+            let line = self.apply_step(planned, ui)?;
+            report.lines.push(line);
+        }
+        Ok(report)
+    }
+
+    fn apply_step(&self, planned: Planned, ui: &dyn Ui) -> Result<BackfillLine> {
+        let Planned {
+            cause,
+            priority,
+            step,
+        } = planned;
+        let level = priority.map(|p| p.as_str().to_string());
+        let n = cause.count();
+        let mut line = BackfillLine {
+            action: BackfillAction::Skipped,
+            cause: cause.cause.clone(),
+            introspections: cause.introspections.clone(),
+            priority: level.clone(),
+            job: None,
+            replaced: None,
+            reason: String::new(),
+        };
+        match step {
+            Step::Skip { job, reason } => {
+                line.job = job;
+                line.reason = reason;
+            }
+            Step::Queue { text } => {
+                let (job, _) = self.queue(&text)?;
+                line.action = BackfillAction::Queued;
+                line.job = Some(job.as_str().to_string());
+                line.reason = format!(
+                    "no open request addressed it; root-cause request queued citing {n} introspection(s)"
+                );
+            }
+            Step::Requeue { old, text } => {
+                let (job, _) = self.queue(&text)?;
+                let why = format!(
+                    "re-queued as {job} through the steward request builder, with acceptance, files and priority {}: the cause repeated in {} jobs",
+                    level.as_deref().unwrap_or("normal"),
+                    cause.jobs.len()
+                );
+                self.close(old.as_str(), &why, ui)
+                    .with_context(|| format!("closing {old} after queuing {job} in its place"))?;
+                line.action = BackfillAction::Requeued;
+                line.job = Some(job.as_str().to_string());
+                line.reason = format!("open request {old} addressed it; {why}");
+                line.replaced = Some(old.as_str().to_string());
+            }
+            Step::Reprioritise { job } => {
+                let to = level.as_deref().unwrap_or("normal");
+                self.set_priority(job.as_str(), to)?;
+                line.action = BackfillAction::Reprioritised;
+                line.job = Some(job.as_str().to_string());
+                line.reason = format!(
+                    "queued request {job} already covers the cause; its priority is now {to}"
+                );
+            }
+        }
+        Ok(line)
+    }
+
     /// The error review, run after `recorded` was committed as an introspection: groups it with the earlier
     /// introspections by cause and, when the cause now occurs in two or more distinct jobs and no open or
     /// landed request cites it, queues one urgent root-cause request citing the introspection ids. Returns the
@@ -618,7 +1149,7 @@ mod tests {
 
     use athena_data::records::{
         ClassStatus, FailureClass, IntrospectionJev, IntrospectionTrigger, JevClassAnswer, Outcome,
-        PreventionKind,
+        PreventionKind, Request,
     };
 
     fn at(n: u32) -> Timestamp {
@@ -1021,5 +1552,412 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("Cause: - first - second\n"), "{text}");
+    }
+
+    // -----------------------------------------------------------------------------------------------------
+    // Backfill
+
+    /// The live causes of the fixture backlog: class name, first introspection number, and how many jobs.
+    const LIVE: [(&str, u32, u32); 7] = [
+        ("Stalled producer burns its deadline", 100, 7),
+        ("Readings larger than one producer run", 200, 6),
+        ("Criteria need evidence the verifier cannot see", 300, 5),
+        ("Reading omits the earlier verdict", 400, 4),
+        ("Check output is cut", 500, 3),
+        ("Order ignores owner priority", 600, 2),
+        ("Brief omits file names", 700, 2),
+    ];
+    const DORMANT: &str = "Planner drops the acceptance of a request";
+
+    /// A backlog of repeated causes, none of which the review ever saw: the seven in [`LIVE`], one about the
+    /// planner (a stage athena.toml switches off), and one whose request has landed. An open steward request
+    /// names the class of the second live cause in its words, cites no introspection and has no acceptance.
+    /// Returns that request's job.
+    fn backlog(dir: &std::path::Path, athena: &Athena) -> JobId {
+        let mut all: Vec<(&str, u32, u32)> = LIVE.to_vec();
+        all.push((DORMANT, 800, 3));
+        all.push(("Footer is cut", 900, 2));
+        let mut records = Vec::new();
+        for (idx, (name, base, count)) in all.iter().enumerate() {
+            let c = class(1 + 2 * idx as u32, name);
+            for k in 0..*count {
+                let letter = (b'a' + k as u8) as char;
+                let i = introspection(base + k, letter, Some(&c.id), &format!("{name}."));
+                records.push(AnyRecord::Introspection(Box::new(i)));
+            }
+            records.push(AnyRecord::FailureClass(c));
+        }
+        let existing = JobId::Id(rec_id(1500));
+        records.push(AnyRecord::Request(Request {
+            job: existing.clone(),
+            text: "Split large readings\n\nReadings larger than one producer run keep failing on the deadline."
+                .into(),
+            received_at: at(1500),
+            channel: "steward".into(),
+        }));
+        put(dir, athena, records);
+        let (footer, _) = athena
+            .queue(&format!(
+                "Fix the footer\n\nSee introspection {}.\n\nAcceptance:\n- The footer is whole\n\nFiles: crates/\n",
+                rec_id(900)
+            ))
+            .unwrap();
+        put(dir, athena, vec![landed(&footer)]);
+        existing
+    }
+
+    fn line_of<'a>(report: &'a BackfillReport, name: &str) -> &'a BackfillLine {
+        report
+            .lines
+            .iter()
+            .find(|l| l.cause.starts_with(name))
+            .unwrap_or_else(|| panic!("no line for {name}"))
+    }
+
+    #[test]
+    fn the_backfill_skips_dormant_requeues_an_existing_request_queues_the_rest_and_ranks_the_top_five_urgent()
+     {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_in(dir.path(), state.path());
+        let existing = backlog(dir.path(), &athena);
+        assert_eq!(records(&athena).request_jobs().len(), 2);
+
+        let report = athena.error_review_backfill(&crate::Quiet).unwrap();
+
+        assert_eq!(report.lines.len(), 9, "{}", report.render());
+        assert_eq!(report.count(BackfillAction::Queued), 6);
+        assert_eq!(report.count(BackfillAction::Requeued), 1);
+        assert_eq!(report.count(BackfillAction::Reprioritised), 0);
+        assert_eq!(report.count(BackfillAction::Skipped), 2);
+
+        // Ranked by occurrences, then recency: the two causes of two jobs tie, and the newer one comes first.
+        let ranked: Vec<&str> = report.lines[..7]
+            .iter()
+            .map(|l| l.cause.trim_end_matches('.'))
+            .collect();
+        let expected: Vec<&str> = [0, 1, 2, 3, 4, 6, 5].iter().map(|&i| LIVE[i].0).collect();
+        assert_eq!(ranked, expected);
+        for (rank, l) in report.lines[..7].iter().enumerate() {
+            let want = if rank < 5 { "urgent" } else { "normal" };
+            assert_eq!(l.priority.as_deref(), Some(want), "{}", l.cause);
+        }
+
+        // Dormant: skipped with the stage named, and nothing queued for it.
+        let dormant = line_of(&report, DORMANT);
+        assert_eq!(dormant.action, BackfillAction::Skipped);
+        assert!(
+            dormant
+                .reason
+                .starts_with("dormant: the planner stage is disabled in athena.toml"),
+            "{}",
+            dormant.reason
+        );
+        assert_eq!(dormant.priority, None);
+        let landed_line = line_of(&report, "Footer is cut");
+        assert_eq!(landed_line.action, BackfillAction::Skipped);
+        assert!(
+            landed_line.reason.contains("has landed"),
+            "{}",
+            landed_line.reason
+        );
+
+        let known = records(&athena);
+        assert_eq!(
+            known.request_jobs().len(),
+            2 + 7,
+            "one request per live cause"
+        );
+        assert!(
+            !known.request_jobs().iter().any(|j| j
+                .request
+                .as_ref()
+                .is_some_and(|r| r.text.contains(rec_id(800).as_str()))),
+            "no request cites the dormant cause"
+        );
+
+        // Re-queued: the old request is closed with a reason, and the new one went through the builder.
+        let requeued = line_of(&report, LIVE[1].0);
+        assert_eq!(requeued.action, BackfillAction::Requeued);
+        assert_eq!(requeued.replaced.as_deref(), Some(existing.as_str()));
+        let new = requeued.job.as_deref().unwrap();
+        let old = &known.jobs[existing.as_str()];
+        assert_eq!(old.state(), JobState::Closed(OutcomeState::Dropped));
+        let reason = &old.outcome.as_ref().unwrap().reason;
+        assert!(reason.contains(&format!("re-queued as {new}")), "{reason}");
+        let text = &known.jobs[new].request.as_ref().unwrap().text;
+        assert!(
+            text.starts_with("Priority: urgent\n\nSplit large readings\n"),
+            "{text}"
+        );
+        assert!(text.contains("keep failing on the deadline."), "{text}");
+        assert_eq!(
+            crate::reading::request_text_acceptance(text).len(),
+            3,
+            "{text}"
+        );
+        assert!(text.ends_with("\nFiles: crates/"), "{text}");
+        for n in 200..206 {
+            assert!(text.contains(rec_id(n).as_str()), "cites {n}: {text}");
+        }
+        assert_eq!(known.jobs[new].state(), JobState::Queued);
+
+        // Queued: every other live cause has a new request citing its introspection ids, at its rank's priority.
+        for (rank, l) in report.lines[..7].iter().enumerate() {
+            let cause = repeated_causes(&known)
+                .into_iter()
+                .find(|c| c.cause == l.cause)
+                .unwrap();
+            let address = cause.request.as_ref().expect("a request addresses it now");
+            assert_eq!(Some(address.job.as_str()), l.job.as_deref());
+            assert_eq!(address.state, "queued");
+            let job = &known.jobs[address.job.as_str()];
+            let want = if rank < 5 {
+                Priority::Urgent
+            } else {
+                Priority::Normal
+            };
+            assert_eq!(job.priority(), want, "{}", l.cause);
+            let text = &job.request.as_ref().unwrap().text;
+            for id in &cause.introspections {
+                assert!(text.contains(id.as_str()), "{} cites {id}: {text}", l.cause);
+            }
+            if l.action == BackfillAction::Queued {
+                assert!(
+                    l.reason.contains("root-cause request queued"),
+                    "{}",
+                    l.reason
+                );
+                assert!(
+                    text.contains("Fix the root cause of a repeated failure"),
+                    "{text}"
+                );
+            }
+        }
+        let rendered = report.render();
+        assert!(
+            rendered.contains("queued 6 · re-queued 1 · priority set 0 · skipped 2"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("why: dormant: the planner stage"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn a_second_backfill_over_the_same_records_queues_requeues_and_closes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_in(dir.path(), state.path());
+        backlog(dir.path(), &athena);
+        let first = athena.error_review_backfill(&crate::Quiet).unwrap();
+        assert_eq!(first.count(BackfillAction::Queued), 6);
+        assert!(!first.changed_nothing());
+
+        let head = athena.head().unwrap();
+        let jobs = records(&athena).request_jobs().len();
+        let second = athena.error_review_backfill(&crate::Quiet).unwrap();
+
+        assert_eq!(
+            second.lines.len(),
+            9,
+            "the same nine causes are looked at again"
+        );
+        assert!(second.changed_nothing(), "{}", second.render());
+        assert_eq!(second.count(BackfillAction::Queued), 0);
+        assert_eq!(second.count(BackfillAction::Requeued), 0);
+        assert_eq!(athena.head().unwrap(), head, "no commit was made");
+        assert_eq!(records(&athena).request_jobs().len(), jobs);
+        let covered = second
+            .lines
+            .iter()
+            .filter(|l| l.reason.contains("already covers the cause"))
+            .count();
+        assert_eq!(covered, 7, "{}", second.render());
+    }
+
+    #[test]
+    fn status_shows_each_repeated_causes_request_after_the_backfill_and_dormant_causes_apart() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_in(dir.path(), state.path());
+        backlog(dir.path(), &athena);
+
+        let before = athena.status().unwrap();
+        assert_eq!(before.repeated_causes.len(), 7);
+        assert!(before.repeated_causes.iter().all(|c| c.request.is_none()));
+        assert_eq!(before.dormant_causes.len(), 1);
+        assert_eq!(before.dormant_causes[0].stage, Stage::Planner);
+        assert!(
+            before
+                .next
+                .iter()
+                .any(|n| n.contains("hestia review --backfill"))
+        );
+
+        athena.error_review_backfill(&crate::Quiet).unwrap();
+
+        let after = athena.status().unwrap();
+        assert_eq!(
+            after.repeated_causes.len(),
+            7,
+            "the landed cause is not listed"
+        );
+        for c in &after.repeated_causes {
+            let request = c.request.as_ref().unwrap_or_else(|| panic!("{}", c.cause));
+            assert_eq!(request.state, "queued", "{}", c.cause);
+        }
+        assert!(
+            after.repeated_causes.iter().all(|c| Stage::of(c).is_none()),
+            "a dormant cause is not among them"
+        );
+        assert_eq!(after.dormant_causes.len(), 1);
+        assert!(after.dormant_causes[0].cause.cause.starts_with(DORMANT));
+        assert_eq!(after.dormant_causes[0].cause.request, None);
+        assert!(
+            !after
+                .next
+                .iter()
+                .any(|n| n.contains("no root-cause request")),
+            "{:?}",
+            after.next
+        );
+    }
+
+    #[test]
+    fn a_queued_request_that_covers_a_cause_only_has_its_priority_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_in(dir.path(), state.path());
+        let c = class(1, "Check output is cut");
+        let (a, b) = (
+            introspection(10, 'a', Some(&c.id), "The tail is cut."),
+            introspection(11, 'b', Some(&c.id), "The tail is cut."),
+        );
+        put(
+            dir.path(),
+            &athena,
+            vec![
+                AnyRecord::FailureClass(c),
+                AnyRecord::Introspection(Box::new(a.clone())),
+                AnyRecord::Introspection(Box::new(b.clone())),
+            ],
+        );
+        // A well-formed request at normal priority that already cites both introspections.
+        let text = StewardRequest::new(
+            Some(Priority::Normal),
+            "Keep the whole check output",
+            &format!("See introspections {} and {}.", a.id, b.id),
+            &["The output is whole".to_string()],
+            &["crates/".to_string()],
+        )
+        .unwrap()
+        .render();
+        let (job, _) = athena.queue(&text).unwrap();
+
+        let report = athena.error_review_backfill(&crate::Quiet).unwrap();
+
+        assert_eq!(
+            report.count(BackfillAction::Reprioritised),
+            1,
+            "{}",
+            report.render()
+        );
+        assert_eq!(report.count(BackfillAction::Queued), 0);
+        assert_eq!(report.count(BackfillAction::Requeued), 0);
+        let known = records(&athena);
+        assert_eq!(known.request_jobs().len(), 1, "no second request");
+        assert_eq!(known.jobs[job.as_str()].state(), JobState::Queued);
+        assert_eq!(known.jobs[job.as_str()].priority(), Priority::Urgent);
+        assert!(
+            athena
+                .error_review_backfill(&crate::Quiet)
+                .unwrap()
+                .changed_nothing()
+        );
+    }
+
+    #[test]
+    fn a_stage_is_dormant_only_while_athena_toml_switches_it_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_in(dir.path(), state.path());
+        let c = class(1, DORMANT);
+        put(
+            dir.path(),
+            &athena,
+            vec![
+                AnyRecord::FailureClass(c.clone()),
+                AnyRecord::Introspection(Box::new(introspection(
+                    10,
+                    'a',
+                    Some(&c.id),
+                    "Drops it.",
+                ))),
+                AnyRecord::Introspection(Box::new(introspection(
+                    11,
+                    'b',
+                    Some(&c.id),
+                    "Drops it.",
+                ))),
+            ],
+        );
+        let first = athena.error_review_backfill(&crate::Quiet).unwrap();
+        assert_eq!(
+            first.count(BackfillAction::Skipped),
+            1,
+            "{}",
+            first.render()
+        );
+        assert!(records(&athena).request_jobs().is_empty());
+
+        // Job planning on: the planner stage is no longer dormant, and the cause is queued.
+        let config = std::fs::read_to_string(dir.path().join("athena.toml")).unwrap();
+        assert!(config.contains("[job_plan]\nenabled = false"));
+        std::fs::write(
+            dir.path().join("athena.toml"),
+            config.replace("[job_plan]\nenabled = false", "[job_plan]\nenabled = true"),
+        )
+        .unwrap();
+        athena.git.run(["add", "-A"]).unwrap();
+        athena
+            .git
+            .run(["commit", "-q", "-m", "Turn job planning on"])
+            .unwrap();
+        let second = athena.error_review_backfill(&crate::Quiet).unwrap();
+        assert_eq!(
+            second.count(BackfillAction::Queued),
+            1,
+            "{}",
+            second.render()
+        );
+        assert_eq!(records(&athena).request_jobs().len(), 1);
+        assert!(athena.status().unwrap().dormant_causes.is_empty());
+    }
+
+    #[test]
+    fn the_stage_of_a_cause_is_read_from_the_words_of_its_class_and_cause() {
+        let cause = |class: Option<&str>, text: &str| RepeatedCause {
+            key: "cause:x".into(),
+            class: class.map(String::from),
+            cause: text.into(),
+            introspections: Vec::new(),
+            jobs: Vec::new(),
+            request: None,
+        };
+        assert_eq!(
+            Stage::of(&cause(None, "The critic approves a plan.")),
+            Some(Stage::Critic)
+        );
+        assert_eq!(
+            Stage::of(&cause(Some("Planner drops acceptance (x)"), "It drops.")),
+            Some(Stage::Planner)
+        );
+        assert_eq!(Stage::of(&cause(None, "The producer stalls.")), None);
+        assert_eq!(
+            Stage::of(&cause(None, "Plan order ignores priority.")),
+            None
+        );
     }
 }
