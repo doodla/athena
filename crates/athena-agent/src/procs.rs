@@ -21,6 +21,20 @@ pub fn deadline_reason(secs: u64) -> String {
     format!("deadline of {secs}s reached")
 }
 
+/// The shortest stall window the driver uses, so a short timeout is never cut by a stall check first.
+pub const MIN_STALL_WINDOW: Duration = Duration::from_secs(60);
+
+/// How long an agent may show no activity before the driver ends it: a third of its timeout, but never
+/// less than `floor`. A window not shorter than the timeout can never fire before the deadline does.
+pub fn stall_window(timeout: Duration, floor: Duration) -> Duration {
+    (timeout / 3).max(floor)
+}
+
+/// The reason recorded when an agent showed no activity for `secs` seconds.
+pub fn stall_reason(secs: u64) -> String {
+    format!("no progress for {secs}s (stalled)")
+}
+
 #[allow(unsafe_code)]
 mod sys {
     //! The only unsafe code in Athena: three libc calls, each with its contract stated.

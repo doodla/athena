@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A stall watchdog in the agent driver. Root cause: the driver enforced only a fixed deadline (1800s for the
+  producer) and tracked no progress, so a stalled agent burned the whole deadline before anyone learned of
+  it. The driver loop in `athena-agent` now records the last line seen on the agent's stream and ends the run
+  as a timed-out outcome, with the detail `no progress for Ns (stalled)`, when none appears for a third of the
+  timeout (600s at 1800s), never less than 60s. The existing kept-work and retry handling then applies.
+  Tests run a silent agent and a slow but steady one.
 - Planned demonstrations now have to name their test seam. Root cause: the planning stage never required a
   demonstration to name the production entry point, its guards, the seam, fake or fixture and how it is
   injected, and whether that seam exists today, so a plan could demonstrate a criterion with a double that
