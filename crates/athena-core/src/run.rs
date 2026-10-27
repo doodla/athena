@@ -3162,3 +3162,282 @@ mod left_to_athena_tests {
         assert!(!is_athena_check_criterion(CONTENT));
     }
 }
+
+/// Characterization of the order `produce_and_verify` works in (structure pass, R0): a fake job goes through
+/// `Athena::go` and the test reads what the UI said and which invocation numbers were recorded. It guards the
+/// moves of the produce and verify code against a change of order.
+#[cfg(test)]
+mod produce_and_verify_order_tests {
+    use super::*;
+    use crate::Quiet;
+    use crate::capability::{CapabilityCard, CheckSpec, ToolGrant};
+    use athena_agent::fake::{FakeAgentDriver, FakeTurn};
+    use athena_agent::{AgentInvocation, Usage};
+    use athena_data::config::CheckKind;
+    use athena_data::records::PolicyViolation;
+    use athena_git::Git;
+    use serde_json::json;
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
+
+    const CRITERION: &str = "README.md describes the demo";
+
+    /// A capability that edits files and runs one configured check, so the baseline has something to say.
+    struct Docs;
+
+    impl Capability for Docs {
+        fn id(&self) -> &'static str {
+            "study"
+        }
+        fn card(&self) -> CapabilityCard {
+            CapabilityCard {
+                id: "study",
+                purpose: "describe a demo.",
+                when: "for a request to describe a demo.",
+                produces: "files describing the demo.",
+            }
+        }
+        fn producer_section(&self) -> athena_context::PromptAsset {
+            PRODUCER_FRAME
+        }
+        fn verifier_section(&self) -> athena_context::PromptAsset {
+            VERIFIER_FRAME
+        }
+        fn producer_grant(&self, _: &JobConfig) -> ToolGrant {
+            ToolGrant {
+                tools: vec!["Read".into()],
+                commands: BTreeMap::new(),
+                writes: true,
+                permission_mode: "acceptEdits".into(),
+            }
+        }
+        fn verifier_grant(&self, _: &JobConfig) -> ToolGrant {
+            ToolGrant {
+                tools: vec!["Read".into()],
+                commands: BTreeMap::new(),
+                writes: false,
+                permission_mode: "dontAsk".into(),
+            }
+        }
+        fn checks(&self, _: &JobConfig) -> Vec<CheckSpec> {
+            vec![CheckSpec {
+                name: "probe".into(),
+                run: vec!["true".into()],
+                kind: CheckKind::Command,
+                skip_when_only: None,
+            }]
+        }
+        fn env(&self, _: &JobConfig) -> BTreeMap<String, String> {
+            BTreeMap::new()
+        }
+        fn admit(&self, _: &ChangeList, _: &JobConfig) -> Vec<PolicyViolation> {
+            Vec::new()
+        }
+    }
+
+    /// A UI that keeps every line, in order.
+    #[derive(Default)]
+    struct Lines(Mutex<Vec<String>>);
+
+    impl Ui for Lines {
+        fn line(&self, text: &str) {
+            self.0.lock().unwrap().push(text.to_string());
+        }
+    }
+
+    fn athena(repo: &tempfile::TempDir, state: &tempfile::TempDir) -> Athena {
+        let state = crate::state::StateDir::new(state.path().join("repo"))
+            .with_free_space(crate::test_support::plenty_of_space);
+        let script = Box::new(|spec: &AgentInvocation| {
+            let mut turn = match spec.role {
+                Role::Reader => FakeTurn::output(json!({
+                    "title": "Describe the demo",
+                    "summary": "Describe the demo in README.md.",
+                    "class_of_work": "docs",
+                    "capability": "study",
+                    "decline_reason": null,
+                    "producer_model": "claude-haiku-5-5",
+                    "defaults_applied": [{ "id": "strangers", "how": "plain words" }],
+                    "assumptions": [],
+                    "question": null,
+                    "acceptance_criteria": [{ "text": CRITERION, "kind": "content" }],
+                    "deliverables": [{ "path": "README.md", "action": "modify", "p": 0.9 }],
+                    "out_of_scope": ["Other files"],
+                    "forecast": {
+                        "p_reading_accepted": 0.8,
+                        "p_verification_passes": 0.7,
+                        "p_user_intervenes": 0.1,
+                        "cost_usd": { "p10": 0.05, "p50": 0.2, "p90": 0.8 },
+                        "wall_time_s": { "p10": 5.0, "p50": 30.0, "p90": 300.0 },
+                        "departures": null
+                    }
+                })),
+                Role::Producer => {
+                    let mut t = FakeTurn::output(json!({
+                        "summary": "Described the demo.",
+                        "files": ["README.md"],
+                        "checks_run": [],
+                        "criteria_check": [
+                            { "criterion": CRITERION, "status": "met", "evidence": "read it" }
+                        ],
+                        "open_issues": [], "mistakes": [], "learnings": [], "desires": []
+                    }));
+                    t.edits = vec![("README.md".into(), Some("# Demo\n\nA demo.\n".into()))];
+                    t
+                }
+                Role::Verifier => FakeTurn::output(json!({
+                    "verdict": "pass",
+                    "criteria": [
+                        { "criterion": CRITERION, "met": true, "evidence": "checked", "commands": [] }
+                    ],
+                    "findings": [],
+                    "request_reading_mismatch": null,
+                    "summary": "Checked."
+                })),
+                Role::Planner | Role::Critic => unreachable!("planning is off in this repository"),
+                Role::Steward => FakeTurn::output(json!({ "items": [] })),
+                Role::Audience => FakeTurn::output(json!({ "rating": 3, "findings": [] })),
+                Role::Auditor => FakeTurn::output(json!({ "summary": "Fine.", "findings": [] })),
+            };
+            turn.cost_usd = 0.01;
+            turn.usage = Usage {
+                input: 1,
+                output: 1,
+                cache_read: 1,
+                cache_write: 1,
+            };
+            turn
+        });
+        let driver = FakeAgentDriver::new(script).with_registry(state.registry());
+        Athena {
+            git: Git::at(repo.path()),
+            state,
+            driver: std::sync::Arc::new(driver),
+            capabilities: vec![Box::new(Docs)],
+            build: Build {
+                version: "0.1.0".into(),
+                source_commit: "0".repeat(40),
+                dirty: false,
+            },
+            athena_bin: "/bin/false".into(),
+            nested: None,
+            pinner: Box::new(crate::fake::CountingPinner::new(&"a".repeat(40))),
+            jev: None,
+        }
+    }
+
+    fn repo() -> tempfile::TempDir {
+        // Without `[job_plan]` (a job with no planning round) and without a pinned repository.
+        let raw = include_str!("../../../athena.toml");
+        let mut in_job_plan = false;
+        let config: String = raw
+            .split_inclusive('\n')
+            .filter(|line| {
+                let key = line.trim_start();
+                if key.starts_with('[') {
+                    in_job_plan = key.trim_end() == "[job_plan]";
+                }
+                !(in_job_plan || key.starts_with("repo_url") || key.starts_with("repo_ref"))
+            })
+            .collect();
+        let dir = tempfile::tempdir().unwrap();
+        let git = Git::at(dir.path());
+        git.run(["init", "-q", "-b", "main"]).unwrap();
+        for (key, value) in [
+            ("user.name", "Test User"),
+            ("user.email", "noreply@example.com"),
+            ("commit.gpgsign", "false"),
+            ("core.hooksPath", "/dev/null"),
+        ] {
+            git.run(["config", key, value]).unwrap();
+        }
+        for (path, text) in [
+            ("athena.toml", config.as_str()),
+            ("defaults.toml", include_str!("../../../defaults.toml")),
+            ("README.md", "# Demo\n"),
+        ] {
+            std::fs::write(dir.path().join(path), text).unwrap();
+        }
+        git.run(["add", "-A"]).unwrap();
+        git.run([
+            "commit",
+            "-q",
+            "-m",
+            "Start a demo repository\n\nAthena-Job: bootstrap",
+        ])
+        .unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_fake_job_takes_its_baseline_before_the_producer_and_numbers_the_invocations_in_order() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena(&repo, &state);
+        let proposal = athena.ask("describe the demo", &Quiet).unwrap();
+        let ui = Lines::default();
+        let GoResult::Finished(finished) = athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &ui)
+            .unwrap()
+        else {
+            panic!("expected the job to finish");
+        };
+        assert_eq!(finished.state, OutcomeState::Landed, "{}", finished.reason);
+
+        // The lines the three stages say, in the order they said them; the rest (dispatch, landing) is
+        // not the order under test.
+        let lines = ui.0.lock().unwrap().clone();
+        let stages: Vec<&str> = lines
+            .iter()
+            .map(String::as_str)
+            .filter(|l| l.starts_with("dispatched ") || l.starts_with("landed "))
+            .map(|l| l.split_once(' ').unwrap().0)
+            .collect();
+        assert_eq!(stages, ["dispatched", "landed"]);
+        let first = lines
+            .iter()
+            .position(|l| l.starts_with("dispatched "))
+            .unwrap();
+        let said: Vec<&str> = lines[first..]
+            .iter()
+            .map(String::as_str)
+            .take_while(|l| !l.starts_with("landed "))
+            .collect();
+        assert_eq!(said.len(), 6, "{said:#?}");
+        assert!(said[0].starts_with("dispatched "), "{said:#?}");
+        assert_eq!(said[1], "baseline   probe ok");
+        // The producer and verifier lines carry a model, a wall time, a cost and a count or verdict.
+        assert!(
+            said[2].starts_with("producer   claude-haiku-5-5 · ")
+                && said[2].ends_with(" · $0.01 · 0 commands run"),
+            "{said:#?}"
+        );
+        assert!(
+            said[3].starts_with("candidate  README.md (modified) · "),
+            "{said:#?}"
+        );
+        assert!(said[4].starts_with("checks     probe ok ("), "{said:#?}");
+        assert!(
+            said[5].starts_with("verifier   ") && said[5].ends_with(" · $0.01 · pass"),
+            "{said:#?}"
+        );
+
+        // The invocation numbers: the reading is 1, the producer 2, the verifier 3, and the baseline was
+        // taken before the producer, so it names the producer's number.
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        let job = &records.jobs[proposal.job.as_str()];
+        let mut invocations: Vec<(u32, Role)> =
+            job.invocations.iter().map(|i| (i.seq, i.role)).collect();
+        invocations.sort();
+        assert_eq!(
+            invocations,
+            [(1, Role::Reader), (2, Role::Producer), (3, Role::Verifier)]
+        );
+        let baseline = job
+            .baseline
+            .as_ref()
+            .expect("the job recorded its baseline");
+        assert_eq!(baseline.before_invocation, 2);
+        assert_eq!(baseline.checks.len(), 1);
+    }
+}

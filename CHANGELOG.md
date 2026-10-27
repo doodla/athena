@@ -14,6 +14,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   move jobs (each sized for one producer run, caller-heavy ones last), the named stages `produce_and_verify`
   would split into, and how each move is shown to change nothing. D138 records it as proposed. Design only; no
   code moved.
+- A characterization test for the order `produce_and_verify` works in (structure pass job R0). A fake job goes
+  through `Athena::go` and the test asserts the order of the UI lines (dispatch, baseline, producer,
+  candidate, checks, verifier) and the invocation numbers (reading 1, producer 2, verifier 3, with the
+  baseline recorded as taken before invocation 2). It fails if the baseline is taken after the producer.
+  Test only; no behavior change.
 - Class labels derived from evidence, so `athena score-jev` has labeled cases without anyone's opinion (BRIEF.md
   addendum of 2026-10-25: the labels come from what happened afterwards). `athena score-jev --derive` reads the
   records and appends `athena.class-label/1` records with `labeled_by: evidence` and a `basis` that cites the
