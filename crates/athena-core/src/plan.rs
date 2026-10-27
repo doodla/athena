@@ -24,7 +24,10 @@
 //!   plan order and runs the items of one group at once, up to `[parallel] max_concurrency` (default 1: one
 //!   job at a time).
 //! - **Gate.** An item whose plan has no goal, no ladder rung or no acceptance is refused for design or code
-//!   ([`PlanEntry::missing`], [`Plan::refused`]), so planning cannot be skipped. Nothing is filled in by
+//!   ([`PlanEntry::missing`], [`Plan::refused`]), so planning cannot be skipped. A read request whose design
+//!   names no existing code it changes or reuses, and does not say it is wholly new, is refused the same way
+//!   ([`code_reference_problem`]), so a design that does not match the repository is stopped before
+//!   production and not at the final verdict. Nothing is filled in by
 //!   default: acceptance comes only from explicit bullets in the request or from a reading's criteria, and
 //!   the rung only from the caller or from what the request serves in BRIEF.md and its addenda
 //!   (`reading::plan_entry`, `reading::infer_rung`); a word such as "fix" or "code" is not a rung. A request
@@ -109,6 +112,57 @@ pub struct PlanEntry {
     pub touches: Vec<String>,
     /// How soon the request should be worked; normal unless its words say otherwise.
     pub priority: Priority,
+    /// Why the design of a read request does not name the existing code it changes or reuses, in a sentence
+    /// a stranger can follow; None when it does, when it states it is wholly new code, or when the request
+    /// has not been read yet. Set by `reading::plan_entry`; see [`code_reference_problem`].
+    pub code_problem: Option<String>,
+}
+
+/// The changelog Athena adds to every change reading (`reading::ensure_changelog`).
+const AUTO_ADDED_CHANGELOG: &str = "CHANGELOG.md";
+
+/// What `PlanEntry::missing` reports when the design names no existing code.
+pub const MISSING_CODE: &str = "existing code it changes or reuses";
+
+/// The early check that a design names the code it changes: `paths` are the files the design lists, `created`
+/// those it says it creates, and `exists` tells whether a path exists at the base commit.
+///
+/// Root cause it addresses: the design's references to existing code were first compared with the repository
+/// at the final verdict, so a design that named nothing, or named files that are not there, was built in full
+/// and rejected at the end. Doing it when the plan is made refuses such a design before production starts. The
+/// queued item reading-or-provenance-mismatch-caught-only-at-final-verdict has the same cause; this one check
+/// covers its reading half (a reading that names code that is not there) and leaves its provenance half and
+/// the item itself open.
+///
+/// A design passes when at least one listed path exists, or when every listed path is one it creates (it
+/// says the code is wholly new). Otherwise the returned sentence says what is missing. `CHANGELOG.md` is left
+/// out of the test: Athena adds it to every change reading itself, so it says nothing about the design.
+pub fn code_reference_problem(
+    paths: &[String],
+    created: &[String],
+    exists: &dyn Fn(&str) -> bool,
+) -> Option<String> {
+    let paths: Vec<String> = paths
+        .iter()
+        .filter(|p| p.as_str() != AUTO_ADDED_CHANGELOG)
+        .cloned()
+        .collect();
+    let paths = paths.as_slice();
+    if paths.is_empty() {
+        return Some(
+            "the design lists no file at all; name the existing files it changes or reuses, or list only files it creates to say the code is wholly new"
+                .into(),
+        );
+    }
+    if paths.iter().all(|p| created.contains(p)) || paths.iter().any(|p| exists(p)) {
+        return None;
+    }
+    Some(format!(
+        "the design names no existing code: {} {} not exist at the base commit and {} not marked as created; name the existing files it changes or reuses, or mark the new ones as created",
+        paths.join(", "),
+        if paths.len() == 1 { "does" } else { "do" },
+        if paths.len() == 1 { "is" } else { "are" },
+    ))
 }
 
 impl PlanEntry {
@@ -124,10 +178,12 @@ impl PlanEntry {
             depends_on: Vec::new(),
             touches: Vec::new(),
             priority: Priority::Normal,
+            code_problem: None,
         }
     }
 
-    /// What a plan must have and this one lacks: `goal`, `ladder rung`, `acceptance`.
+    /// What a plan must have and this one lacks: `goal`, `ladder rung`, `acceptance`, and
+    /// [`MISSING_CODE`] when a read request's design names no existing code (see [`code_reference_problem`]).
     pub fn missing(&self) -> Vec<&'static str> {
         let mut lacks = Vec::new();
         if self.goal.trim().is_empty() {
@@ -138,6 +194,9 @@ impl PlanEntry {
         }
         if self.acceptance.iter().all(|a| a.trim().is_empty()) {
             lacks.push("acceptance");
+        }
+        if self.code_problem.is_some() {
+            lacks.push(MISSING_CODE);
         }
         lacks
     }
@@ -158,10 +217,23 @@ pub struct Refusal {
 impl Refusal {
     /// A refusal for an incomplete plan.
     pub fn lacking(id: &str, title: &str, missing: Vec<String>) -> Refusal {
-        let reason = format!(
+        Refusal::lacking_because(id, title, missing, None)
+    }
+
+    /// A refusal for an incomplete plan, with `detail` (what exactly is missing) added to the reason.
+    pub fn lacking_because(
+        id: &str,
+        title: &str,
+        missing: Vec<String>,
+        detail: Option<&str>,
+    ) -> Refusal {
+        let mut reason = format!(
             "the plan lacks {}; say it in the request (acceptance as bullets, the files it changes) and plan again",
             missing.join(", ")
         );
+        if let Some(detail) = detail {
+            reason.push_str(&format!(" ({detail})"));
+        }
         Refusal {
             id: id.into(),
             title: title.into(),
@@ -278,10 +350,11 @@ impl Plan {
             if missing.is_empty() {
                 pending.push((age, entry));
             } else {
-                plan.refused.push(Refusal::lacking(
+                plan.refused.push(Refusal::lacking_because(
                     &entry.id,
                     &entry.title,
                     missing.into_iter().map(String::from).collect(),
+                    entry.code_problem.as_deref(),
                 ));
             }
         }
@@ -550,6 +623,73 @@ mod tests {
         assert_eq!(plan.order, ["ok"]);
         let lacks: Vec<_> = plan.refused.iter().map(|r| r.missing.clone()).collect();
         assert_eq!(lacks, [["goal"], ["ladder rung"], ["acceptance"]]);
+    }
+
+    fn strings(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_design_that_names_no_existing_code_is_refused_before_production_and_says_what_is_missing()
+    {
+        let there = |p: &str| p == "crates/a/src/lib.rs";
+        // No file at all.
+        let none = code_reference_problem(&[], &[], &there).unwrap();
+        assert!(none.contains("lists no file at all"), "{none}");
+        // Only a file that is not in the repository and is not marked as created.
+        let gone = code_reference_problem(&strings(&["crates/gone.rs"]), &[], &there).unwrap();
+        assert!(gone.contains("crates/gone.rs does not exist"), "{gone}");
+        assert!(gone.contains("name the existing files"), "{gone}");
+
+        // The changelog Athena adds to every change reading does not count as naming existing code.
+        let always = |_: &str| true;
+        let only_changelog = code_reference_problem(&strings(&["CHANGELOG.md"]), &[], &always);
+        assert!(only_changelog.is_some(), "{only_changelog:?}");
+
+        // The plan refuses such an entry, so it never reaches production, and names the cause.
+        let (_, low) = rungs();
+        let mut bad = entry("bad", low, &["crates/gone.rs"], &[]);
+        bad.code_problem = Some(gone.clone());
+        assert_eq!(bad.missing(), [MISSING_CODE]);
+        let plan = Plan::build(&[bad, entry("ok", low, &["o"], &[])]);
+        assert_eq!(plan.order, ["ok"]);
+        assert_eq!(plan.refused.len(), 1);
+        assert_eq!(plan.refused[0].missing, [MISSING_CODE]);
+        assert!(
+            plan.refused[0].reason.contains("existing code")
+                && plan.refused[0]
+                    .reason
+                    .contains("crates/gone.rs does not exist"),
+            "{}",
+            plan.refused[0].reason
+        );
+    }
+
+    #[test]
+    fn a_design_that_names_existing_code_or_says_it_is_wholly_new_is_accepted() {
+        let there = |p: &str| p == "crates/a/src/lib.rs";
+        // One existing file is enough, beside a file that is not there yet.
+        assert_eq!(
+            code_reference_problem(
+                &strings(&["crates/a/src/lib.rs", "crates/a/src/new.rs"]),
+                &strings(&["crates/a/src/new.rs"]),
+                &there
+            ),
+            None
+        );
+        // Wholly new code: every listed file is one the design creates.
+        assert_eq!(
+            code_reference_problem(
+                &strings(&["new/a.rs", "new/b.rs"]),
+                &strings(&["new/a.rs", "new/b.rs"]),
+                &there
+            ),
+            None
+        );
+        let (_, low) = rungs();
+        let ok = entry("ok", low, &["crates/a/src/lib.rs"], &[]);
+        assert!(ok.missing().is_empty());
+        assert_eq!(Plan::build(&[ok]).order, ["ok"]);
     }
 
     #[test]

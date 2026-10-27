@@ -9,6 +9,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- An early plan-time check that a design names the code it changes. Root cause: the design's references to
+  existing code were compared with the repository only at the final verdict, so a design that named no
+  existing file, or only files that are not there, was built in full and rejected at the end, in three jobs.
+  `plan::code_reference_problem` now runs in `reading::plan_entry` for a read request and sets
+  `PlanEntry::code_problem`; `PlanEntry::missing` then reports "existing code it changes or reuses", so
+  `Plan::build` refuses the item before production with a reason that says what is missing. A design passes when
+  at least one listed file exists at the base commit or when every listed file is one it creates (wholly new
+  code); the `CHANGELOG.md` Athena adds itself does not count. The queued item
+  reading-or-provenance-mismatch-caught-only-at-final-verdict has the same cause; this check covers its reading
+  half and the item stays open for the provenance half.
 - The reader's brief now shows the token headroom of every prompt set. Root cause: the brief never said how
   many tokens each composed set had left, so readings planned growth in shared prompt files (the verifier,
   reader and producer frames) that overran a budget, in three jobs. `athena_context::headroom_rows` computes,
