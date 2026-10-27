@@ -230,6 +230,35 @@ fn the_producer_brief_lists_exactly_the_scanners_terms() {
     );
 }
 
+#[test]
+fn the_admission_scan_finds_what_the_policy_scan_finds() {
+    // M19 (blocks): Athena scans a request and the files it names with `athena_context::briefs::boundary_scan`
+    // before admitting a job. It must agree with this scanner on every line, so a word the policy scan would
+    // reject is never admitted. Tested on each term in both lists, in both cases, inside longer words, and
+    // with hyphens.
+    let mut lines: Vec<String> = Vec::new();
+    for term in boundary_words().into_iter().chain(boundary_fragments()) {
+        lines.push(format!("see {term} here"));
+        lines.push(format!("see {} here", term.to_uppercase()));
+        lines.push(format!("see x{term}y here"));
+        lines.push(format!("see {term}s and {term}-like here"));
+        lines.push(term.clone());
+    }
+    lines.push("Cooperators accrue the opcode and the release hands off.".to_string());
+    lines.push("plain words only".to_string());
+    let text = lines.join("\n");
+    let policy: Vec<(usize, String)> = boundary_scan(&text);
+    let admission: Vec<(usize, String)> = athena_context::briefs::boundary_scan(&text)
+        .into_iter()
+        .map(|hit| (hit.line, hit.term))
+        .collect();
+    let (mut policy, mut admission) = (policy, admission);
+    policy.sort();
+    admission.sort();
+    assert_eq!(admission, policy);
+    assert!(!policy.is_empty());
+}
+
 // --------------------------------------------------------------------------------------------------------
 // M20: no code in another language
 

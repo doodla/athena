@@ -9,6 +9,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Banned boundary words are now caught before the work starts, not only after it. The job brief tells the
+  producer to run `cargo test -p xtask --test policy` on its changed files before it finishes and to reword any
+  banned word that scan finds; a word list in the brief had not been enough on its own. And `athena ask`
+  (including `--later`) now runs the same scan, from the same word lists, on the request text and on every file
+  the request names that exists in the repository. If it finds a banned word it refuses the request, lists each
+  place as `source:line: word`, and records nothing; reword the request (or the named file) and ask again.
+  Athena never edits the request text itself.
 - Athena now runs the error review backfill and the evidence-label derivation on its own, at the start of every
   `athena drain` (before the queue is read) and in every `athena hestia sweep`, and prints one summary line for
   each. Both are idempotent, so a second drain or sweep over unchanged records writes nothing. A pass that fails
