@@ -9,6 +9,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Planned demonstrations now have to name their test seam. Root cause: the planning stage never required a
+  demonstration to name the production entry point, its guards, the seam, fake or fixture and how it is
+  injected, and whether that seam exists today, so a plan could demonstrate a criterion with a double that
+  holds the logic under test. It is fixed in the planning stage, not at one job: the planner prompt and the
+  Report section of the planner brief require it, and the critic prompt raises a major finding when a
+  demonstration names no seam, names one the code does not provide, or tests only a double. A unit test in
+  `athena-context` checks the three texts. The token budgets are unchanged; the planner and critic lines in
+  `docs/system-facts.md` now read 806 and 783 of 1300, and the planner prompt was shortened to stay under the
+  500-token frame guard in `lib.rs`.
 - Planning now follows the owner's stated priority, and a check proves it. Root cause: a priority stated in a
   BRIEF.md addendum was never an input to plan ordering (only a `Priority:` line or an `athena priority`
   record was), so such work was ordered by default rung and age, and nothing compared the built order with

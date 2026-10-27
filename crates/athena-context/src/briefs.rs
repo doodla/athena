@@ -1105,7 +1105,7 @@ pub fn planner_brief(inputs: &PlannerInputs) -> String {
     }
     let _ = writeln!(
         out,
-        "\n## Report\n\nEnd with the plan as your structured output: one demonstration per acceptance criterion, numbered as above."
+        "\n## Report\n\nEnd with the plan as your structured output: one demonstration per acceptance criterion, numbered as above. Each names the production entry point it calls, its guards and preconditions, the seam, fake or fixture and how it is injected, and whether that seam exists today (checked by reading the code) or which plan step adds it. Never put the logic under test inside the test double."
     );
     out
 }
@@ -1688,6 +1688,28 @@ mod tests {
         ] {
             assert!(section.contains(needle), "missing wording: {needle}");
         }
+    }
+
+    #[test]
+    fn planning_prompts_and_brief_require_a_named_test_seam() {
+        let brief = planner_brief(&planner_inputs(None));
+        let report = brief.split("## Report").nth(1).expect("report section");
+        for text in [report, crate::PLANNER_FRAME.text, crate::CRITIC_FRAME.text] {
+            assert!(text.contains("seam"), "no seam rule in: {text}");
+        }
+        assert!(report.contains("seam, fake or fixture"));
+        assert!(report.contains("inside the test double"));
+        assert!(crate::PLANNER_FRAME.text.contains("seam, fake or fixture"));
+        assert!(
+            crate::PLANNER_FRAME
+                .text
+                .contains("Never put the logic under test inside the double")
+        );
+        assert!(
+            crate::CRITIC_FRAME
+                .text
+                .contains("major finding when a demonstration names no seam")
+        );
     }
 
     #[test]
