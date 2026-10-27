@@ -9,6 +9,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Planning now follows the owner's stated priority, and a check proves it. Root cause: a priority stated in a
+  BRIEF.md addendum was never an input to plan ordering (only a `Priority:` line or an `athena priority`
+  record was), so such work was ordered by default rung and age, and nothing compared the built order with
+  the priorities. A request that serves an addendum with a `Priority: <level>` line, or one that says its
+  work ranks above all other work or is a top priority, is now ranked at least that high (an explicit
+  priority record is left alone). `Plan::priority_violations` checks a built order and names every item
+  planned after one of lower effective priority; `athena drain` prints each as a note.
 - The reading of a retried or follow-up job now has to reflect the previous result and state the change scope,
   and a check refuses a reading that does not. Root cause: the reader brief carried an earlier job's findings,
   criteria and deliverables, but not where the job ended, its verdict, or its out-of-scope items, and nothing
