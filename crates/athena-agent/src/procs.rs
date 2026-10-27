@@ -21,6 +21,18 @@ pub fn deadline_reason(secs: u64) -> String {
     format!("deadline of {secs}s reached")
 }
 
+/// The reason recorded when an agent has produced no output for `secs` seconds, well before its deadline.
+pub fn stall_reason(secs: u64) -> String {
+    format!("stalled: no output for {secs}s")
+}
+
+/// How long an agent may stay silent before it is judged stalled: a third of its deadline, never under two
+/// seconds. `None` when that is not shorter than the deadline itself, so the deadline alone applies.
+pub fn stall_window(timeout: std::time::Duration) -> Option<std::time::Duration> {
+    let window = (timeout / 3).max(std::time::Duration::from_secs(2));
+    (window < timeout).then_some(window)
+}
+
 #[allow(unsafe_code)]
 mod sys {
     //! The only unsafe code in Athena: three libc calls, each with its contract stated.

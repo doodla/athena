@@ -7,6 +7,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+- A stalled agent no longer burns its whole deadline. Root cause: the agent driver enforced only a fixed
+  wall-clock deadline and never tracked progress, so a stalled agent was indistinguishable from a slow one. The
+  shared driver loop now treats any stream line as progress and ends the agent as timed out, with a reason that
+  says it stalled, after a third of its deadline (at least two seconds) of silence. Every agent role gets this;
+  the existing path that keeps timed-out work applies unchanged.
+
 ### Added
 
 - `athena hestia review --backfill` runs the error review over the backlog, which the review after each new
