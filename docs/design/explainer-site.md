@@ -30,6 +30,11 @@ published to GitHub Pages from this repository and runs locally with one command
   The text lives in `intro.json` beside the other study files. Every sentence and every glossary term about firstmate cites claim ids from `claims.json`; a
   glossary term about the page's own structure (state, transition, trigger, guard, counter, claim, pin,
   mark) is marked "about this page" and cites nothing. An entry with no claims and no such mark is an error.
+- Reading order for a newcomer: the header carries no study id (it is explained under "About this page",
+  after the claims). Under "Start here", one cited sentence (`intro.json` `what_is`) says what firstmate
+  is, before "Words used first". "Next steps" gives the install command and an example request from the
+  README Quick start. The finding ids under "Limits of this study" are consecutive (f1, f2, f3); a test in
+  `xtask/src/site.rs` checks this.
 - Between the walk-through and the glossary, a list headed "When things go wrong, and what is not limited"
   comes from `intro.json` `limits`: lock contention and an unreadable capacity both exit 1, a failed relaunch
   restores the record, no retry or relaunch bound was found, and a close is replayed only at a session start.

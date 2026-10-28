@@ -9,6 +9,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- The firstmate study page was rated 3 of 5 by a newcomer for four gaps: a missing finding id, an early
+  study-id paragraph, no short definition of firstmate before its terms, and no install command in Next
+  steps. The base already renders all four fixes (consecutive finding ids f1 to f3, the study id under
+  "About this page" after the claims, a cited one-sentence definition before "Words used first", and the
+  README install command and example request in Next steps), so the study data is unchanged. This change adds
+  a test in `xtask/src/site.rs` that fails if the finding ids on the page stop being consecutive, and a note
+  in `docs/design/explainer-site.md`.
+
 - The reader's carry-over of an earlier job now includes what the job did. Root cause: `carry` in
   `crates/athena-core/src/reading.rs` and `prior_result_section` in `crates/athena-context/src/briefs.rs`
   copied a retried or followed-up job's request, findings, reading scope and end state, but left out the files
