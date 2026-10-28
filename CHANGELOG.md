@@ -9,6 +9,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- The previous-result check on a reading now applies only to the job the request continues, and no longer refuses a
+  request that cites earlier jobs as evidence. Root cause: the check ran over every job id named in the request
+  text, so a root-cause request from the error review, which cites past jobs' introspections, was refused because
+  its reading did not restate results the reader had no reason to restate; the drain stopped on it twice. The check
+  now covers the retried job (the `previous_job` link) and a job the request says it follows up ("follows up job
+  <id>", "follow-up of <id>", "following up on <id>"; `followed_up_ids`, `continued_jobs`). Every other cited job is
+  still carried into the reader's brief with its recorded result, and is not checked. A followed-up job is carried
+  first, so the limit on carried jobs never drops it. Tests in `reading.rs` cover a root-cause request citing two
+  jobs (accepted), a retry that omits the previous job (refused) or names it (accepted), and a follow-up request
+  (checked for the followed job only).
 - The firstmate study page reads better for a newcomer. Root cause: finding f2 had been removed from
   `findings.json` without renumbering, so the page listed f1, f3, f4; the findings are now f1, f2, f3. The
   paragraph on the study id and the `studies/` folder moved from the header to an "About this page" note after the
