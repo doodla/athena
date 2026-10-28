@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261028-082151-67fa",
+  "round": 1,
+  "at": "2026-10-28T09:13:46.803209033Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The marker check runs again on the retry, so the retry stops at the same gate and verifier=1 fails.",
+      "evidence": "The check command is `sh -c \"grep -q 'A demo' README.md && touch <marker>\"`. Decision 6 says that on a candidate-stage resume, Athena's checks re-run. The resumed candidate still holds the 'A demo' edit, so the retry's check run creates the marker again right after the test deleted it. The low_while_marked reader then returns 3 GB at verifier_environment_problem (run/mod.rs:2178), and the retry closes `environment: low disk ... before the verifier` with verifier=0. Fix: Make the marker one-shot. For example, the check creates the marker only while an 'arm' file exists under the state root and deletes the arm file in the same command; the test creates the arm file before the first go and does not recreate it before the retry. Or have the test change the check command between runs. State which, and assert verifier=1 on the retry.",
+      "location": "Demonstrations, criterion 3 (retry_after_low_disk_before_the_verifier_runs_only_the_verifier); Decision 6",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The end-to-end interrupted-process test names a seam the code does not provide, and its fixture is left to the producer.",
+      "evidence": "The plan expects a verifier driver error to make `go` return Err early and leave the job Dispatched. In run/mod.rs:2256-2261, `match invoked?` handles the driver's `Err(error)` as `verifier_failure = Some(\"the verifier could not run: ...\")`, and the job then closes. Only record-keeping errors propagate through `?`. The demonstration text trails off ('or more simply ... the producer chooses the fake'). Without this test, 'resumes from the kept candidate' for an interrupted process is shown only by the pure resume_stage unit test, which never touches the keep or rename path. Fix: Choose one concrete fixture. Run a normal first job with planning off, then rebuild an interrupted state: rewrite the job to Dispatched (or commit only the dispatch), put jobs/<old>/work back and write the producer's completed invocation with StateDir::write_live. Alternatively, add a test-only hook that stops `go` after the producer. Name the seam and assert that the retry shows producer=0, verifier=1, that the verifier snapshot holds the README edit, and that kept/<old> is gone.",
+      "location": "Demonstrations, criterion 4 (resume_after_an_interrupted_process_runs_only_the_verifier); Open questions",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Nothing closes the old interrupted job, and the records recover_interrupted builds are thrown away.",
+      "evidence": "recover_interrupted (manage.rs:238-308) returns (files, invocations). The plan uses only the invocations. The old job stays Dispatched with its work moved away, and its producer cost is never committed unless an operator runs `athena close` later. The plan takes try_lock_job(old) but does not say how long the lock is held. Fix: State what happens to the old job. Either close it as interrupted through the existing manage.rs close path, committing the recovered files, or say that it stays open and that a later `athena close` still works. Hold the old job's lock until the move is done.",
+      "location": "Decision 5 / Step 9 (interrupted branch of timeout_seed)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The planning fallback would make the planner=0 and critic=0 assertions empty.",
+      "evidence": "In athena-data/src/config.rs:100, `plans(hard)` is `enabled && (mode == PlanMode::All || hard)`, so a [job_plan] with mode = \"all\" plans every job. The fallback (\"if planning cannot be enabled, still assert the planner count is 0\") would pass on the old code too. The test fixture also hits `unreachable!` for the Planner and Critic roles (run/mod.rs:3420), so the new script must replace that arm. Fix: Commit to enabled = true with mode = \"all\" in the test config. Give the Planner and Critic real fake outputs. Assert planner=1 and critic=1 on the first run, which the plan already does, and drop the fallback.",
+      "location": "Risks (planning-enabled test); Demonstration of criterion 3",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "\"All checks passed\" ignores pre-existing failures, so a job with a pre-existing failing check keeps target/produce and can still stop on disk.",
+      "evidence": "mark_pre_existing (run/mod.rs:2102) marks a check that already failed on the base. Such a check does not fail the verdict or cause a send-back, yet `check_runs.iter().all(|r| r.passed)` would keep target/produce. Fix: Remove target/produce when no check failed outside the pre-existing ones, using the same test the verdict and send-back use.",
+      "location": "Step 7 (removal when check_runs all passed)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "'The new tests fail on the old code' is shown only by reasoning.",
+      "evidence": "Step 12 says 'Confirm the new tests fail on the old code by reasoning from the gates'. Criterion 6 asks for this to be shown. Fix: Note in the change description that each new test was run against the unmodified code paths (for example with the new call stubbed out) and failed, or keep the argument per test but make it explicit and specific.",
+      "location": "Demonstration, criterion 6",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan reads the request correctly and the change sits where the fault starts. The functions it names exist where it says they do: timeout_seed and keep_timed_out_work in run/mod.rs (lines 238 and 277), is_environment_reason in disk.rs (line 203), recover_interrupted in manage.rs (line 238), and the SnapshotRepo::BaseThenDir resume (around line 1669). It also correctly places timeout_seed in run/mod.rs rather than reading.rs, as the brief had it. Two demonstrations would not work as written. First, criterion 3's check command recreates the low-disk marker on every check run. The plan's own design re-runs Athena's checks on a resumed retry, so the retry stops again at the gate before the verifier and verifier=1 can never hold. Second, the end-to-end interrupted-process test has no workable seam. The plan relies on a verifier driver error making `go` return Err early, but the code catches driver errors and turns them into a recorded verifier failure (run/mod.rs:2258-2261), so the job closes normally. Smaller issues: the old interrupted job is left Dispatched with nobody closing it; the planner/critic fallback could make criterion 3's planner=0 and critic=0 assertions empty; and \"all checks passed\" ignores pre-existing failures. All of these can be fixed in the plan, so the verdict is revise."
+}
