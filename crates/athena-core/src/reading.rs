@@ -842,7 +842,21 @@ impl Athena {
         let seeded = has_retry_introspection(&records, job);
         // `ask` refuses a job that is not rejected, failed or interrupted before any model is called.
         self.state.registry().reap();
-        let proposal = self.ask(&format!("{RETRY_PREFIX}{id}"), ui)?;
+        // A job that stopped for the environment, or was interrupted, after its candidate was built resumes
+        // from that candidate: `go` runs no planner or producer. The reader still runs below.
+        let request = format!("{RETRY_PREFIX}{id}");
+        if resumable_job(&records, &request, &|j| self.running(j)).is_some()
+            && let Some(mark) = self.state.read_resume(&id)
+        {
+            ui.line(&format!(
+                "resume     job {id} kept its candidate (stage: {}); `athena go` resumes from it with no new planner or producer run",
+                match mark.stage {
+                    crate::state::ResumeStage::Checks => "checks",
+                    crate::state::ResumeStage::Verifier => "verifier",
+                }
+            ));
+        }
+        let proposal = self.ask(&request, ui)?;
         Ok((proposal, seeded))
     }
 
@@ -1188,6 +1202,24 @@ pub fn has_retry_introspection(records: &Records, job: &JobRecords) -> bool {
 pub fn retried_job(records: &Records, request: &str) -> Option<JobId> {
     let reference = retry_reference(request).ok().flatten()?;
     records.resolve(reference).ok()
+}
+
+/// The job a request of the form "try again on <job>" may resume from its kept candidate: one that failed for
+/// an environment cause, or was interrupted (dispatched, and `running` says no process works on it). See
+/// [`crate::disk::resumable_stop`]. Whether a candidate was kept is for the caller to find out.
+pub fn resumable_job(
+    records: &Records,
+    request: &str,
+    running: &dyn Fn(&str) -> bool,
+) -> Option<JobId> {
+    let id = retried_job(records, request)?;
+    let job = records.jobs.get(id.as_str())?;
+    let state = job.state();
+    if state == JobState::Dispatched && running(id.as_str()) {
+        return None;
+    }
+    let reason = job.outcome.as_ref().map(|o| o.reason.as_str());
+    crate::disk::resumable_stop(state, reason).then_some(id)
 }
 
 /// Whether a retry of a job may start its producer from the job's rejected candidate instead of the base.

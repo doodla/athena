@@ -1,0 +1,210 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261028-091836-kbnb",
+  "round": 1,
+  "at": "2026-10-28T09:22:51.954045677Z",
+  "invocation_seq": 2,
+  "approach": "Fault 1: the producer's build directory is `<job_dir>/target/produce` (CARGO_TARGET_DIR is `{job_dir}/target/{side}` in athena-agent env.rs). Only the idle-job sweep removes it, and only under pressure. In `produce_and_verify`, once every check passes, remove it before the gate that runs before the verifier. Fault 2: a stopped job keeps nothing, because closing runs `clean_job` and the job record holds no check results, so a retry plans and produces again. Fix: record a small resume mark in `<state>/kept/<job>/resume.json`. That path is outside the job directory, which `clean_job` removes, and next to the timed-out job's kept work. The mark holds the candidate record, base commit, baseline, stage (Checks or Verifier) and, at stage Verifier, the check results. It is written when the candidate is built and moved to Verifier once the checks pass. A new `resumable_stop` helper in disk.rs accepts a job that closed Failed with `is_environment_reason`, or one that is dispatched and not running (interrupted). In `dispatch`, when the request is \"try again on <job>\" and that job qualifies, a resume seed is built. The reader has already run in `athena retry`, so nothing changes there. The seed skips the planner and producer. It rebuilds the candidate commit on the new prediction commit from `diff_tree(old base, old candidate)`, so the verifier diff has no records/ noise. It then enters the second half of `produce_and_verify`. That half is split out as `check_and_verify` and starts at the gate before the checks. The Verifier stage skips the gate and the checks and uses the recorded results. The mark stays only when the job closes Failed with an environment reason. Any other close removes it, and so does consuming it.",
+  "decisions": [
+    {
+      "choice": "Store the resume mark under `<state>/kept/<job>/resume.json`, written through new StateDir methods in state.rs.",
+      "reason": "The job directory is removed by `clean_job` on every close. `kept/<job>` already exists for timed-out work and survives that. The mark is written when the candidate is built, so a dead process leaves it behind too, which gives the interrupted case the same data as the environment case.",
+      "rejected": [
+        {
+          "option": "Rebuild resume data from the closed job's git records (candidate and outcome reason).",
+          "why": "An interrupted job commits no records. A closed one has no check results, and the stage would be read from reason text."
+        },
+        {
+          "option": "Keep the whole job directory for failed-environment jobs.",
+          "why": "It holds target/verify and snapshots. That is the disk pressure being fixed."
+        }
+      ]
+    },
+    {
+      "choice": "Remove `target/produce` after all `check_runs` pass, immediately before the pre-verifier gate. Keep it when any check fails. Use the existing StateDir remover seam through a new `remove_produce`.",
+      "reason": "Matches the request exactly. A failed check leads to a send-back that needs the build directory. Checks use `target/verify`, so `target/produce` is idle once they pass.",
+      "rejected": [
+        {
+          "option": "Remove it at candidate build time.",
+          "why": "Frees space before the checks but would delete it even when a check fails."
+        },
+        {
+          "option": "Rely on the sweep inside the gate.",
+          "why": "The sweep skips the asking job's own directory, which is the bug."
+        }
+      ]
+    },
+    {
+      "choice": "Resume rebuilds the candidate commit on the new base from the stored candidate's diff and does not reuse the old commit hash.",
+      "reason": "The old commit's parent is the old prediction commit. Its tree carries older records/, so the verifier's HEAD~1..HEAD diff and landing would include records changes. The existing tree-retry guard is reused: resume only if `diff_tree(old base, head)` touches nothing outside records/ and both commits still exist.",
+      "rejected": [
+        {
+          "option": "Verify the old commit unchanged.",
+          "why": "Pollutes the diff and the fingerprint with records/ differences."
+        }
+      ]
+    },
+    {
+      "choice": "Split `produce_and_verify` at the gate before the checks into `check_and_verify`. The producer path and the resume path both call it.",
+      "reason": "Resume must skip the planner and producer and share the checks, verifier and closing code. Duplicating about 400 lines would drift.",
+      "rejected": [
+        {
+          "option": "A second copy of the checks and verifier code for resume.",
+          "why": "Two copies of the gate, check and verdict logic."
+        }
+      ]
+    },
+    {
+      "choice": "Interrupted jobs are eligible only when a mark exists. Eligibility is `resumable_stop` in disk.rs plus a running-process check.",
+      "reason": "The request says to treat an interrupt like an environment stop only when a candidate was built. Without a mark the old behavior (plan and produce again) is unchanged.",
+      "rejected": [
+        {
+          "option": "Resume every interrupted job.",
+          "why": "One interrupted before the candidate has nothing to resume."
+        }
+      ]
+    },
+    {
+      "choice": "Do not change thresholds. At stage Verifier skip the checks and use the recorded `CheckRun`s.",
+      "reason": "This is resuming at the stage that stopped. Out of scope list forbids changing gates.",
+      "rejected": [
+        {
+          "option": "Always rerun the checks on resume.",
+          "why": "The stage would carry no meaning, and the checks are what filled the disk."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/state.rs",
+      "action": "modify",
+      "purpose": "Add `produce_dir`, `remove_produce` (uses the remover seam, returns bytes freed), and the `ResumeStage` and `ResumeMark` types with `resume_file`, `write_resume`, `read_resume` and `remove_resume` under `kept/<job>/resume.json`. Add unit tests for them.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "action": "modify",
+      "purpose": "Add `resumable_stop(state, reason)`, which uses `is_environment_reason` and treats an interrupted job the same way. Update the module doc and add unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Add `resumable_job(records, request, running)`: resolve \"try again on <job>\" (`retried_job`) and apply `disk::resumable_stop`. Make `retry` print one line when a resumable candidate exists. The reader call in `ask` is unchanged. Add a unit test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "Split `produce_and_verify` into the producer half and `check_and_verify`. Write the resume mark at candidate build and again at stage Verifier with the check runs. Remove `target/produce` when all checks pass, before the verifier gate. Add `resume_seed` and the resume entry (rebuild the candidate on the new base, skip planning and the producer). Remove marks on close, keeping the mark only for a Failed environment stop. Add the three new tests in `produce_and_verify_order_tests` and the `athena_with` helper.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/test_support.rs",
+      "action": "modify",
+      "purpose": "Add `low_once_verifying` and the recording free-space function with a way to read its records per state root, as plain `fn(&Path)` values for `with_free_space`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an Unreleased entry for the `target/produce` cleanup and the resume-from-candidate retry.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read `athena-data` records for Candidate, CheckRun and Baseline derive attributes. Read the top Unreleased section of CHANGELOG.md. Read an existing interrupted-job test around reading.rs:3656 and `Athena::running`.",
+    "state.rs: add `produce_dir`, `remove_produce`, `ResumeStage`, `ResumeMark`, `resume_file`, `write_resume`, `read_resume`, `remove_resume` (also remove the empty `kept/<job>` dir). Add unit tests.",
+    "disk.rs: add `resumable_stop(JobState, Option<&str>) -> bool`, update the module doc and add tests, including that Rejected, Landed and a Failed job with a work reason are not resumable.",
+    "reading.rs: add `resumable_job(records, request, running)`. Print a resume line from `retry` when a mark is present. Add a test.",
+    "run/mod.rs, refactor only: extract `check_and_verify` (from the gate before the checks to the end of the verifier) from `produce_and_verify`. Run the existing tests to show no change in behavior.",
+    "run/mod.rs, cleanup: in `check_and_verify`, after the checks line, if every check passed call `remove_produce` and print a `disk` line with the bytes freed. If one failed, keep it. Then write the mark at stage Verifier with the check runs.",
+    "run/mod.rs, mark: write the mark at stage Checks right after `closing.candidate = Some(candidate)` in the producer half. A failure to write prints a warning line and is not fatal.",
+    "run/mod.rs, resume: add `resume_seed` (mark read, job check via `reading::resumable_job` and `self.running`, commit and records-only guards). In `dispatch`, skip planning when a seed exists. Add `resume_candidate`, which rebuilds the candidate on the new base from `diff_tree(old base, old candidate)`, sets `closing.candidate`, `closing.baseline` and `changed_paths`, writes the new job's own mark, and calls `check_and_verify` with the stage. At stage Verifier skip the gate before the checks, the check run and `early_pr`'s check wait, and use the recorded check runs.",
+    "run/mod.rs, close: in `close_dispatched` and `land_or_block` (state not Blocked), after the existing cleanup, remove the consumed mark of the resumed job. Remove this job's own mark unless it closed Failed with `is_environment_reason`.",
+    "test_support.rs: add `low_once_verifying` and the recording plenty-space function with its reader. run/mod.rs tests: add `athena_with` (check command and Script wrapper). Add the three tests, with Planner, Producer, Reader and Verifier counters in the Script wrapper.",
+    "CHANGELOG.md: add the entry.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Fix any failure, including the drain.rs low-disk tests."
+  ],
+  "risks": [
+    {
+      "risk": "Splitting `produce_and_verify` in a 150 KB file changes order or loses a local.",
+      "mitigation": "Keep the move mechanical: the second half starts at the gate before the checks and takes its locals through one small struct. The existing characterization tests in `produce_and_verify_order_tests` and `crates/athena-cli/tests/drain.rs` (low_disk_after_the_checks_fails_the_job_as_the_environment_before_the_verifier_runs) must pass unchanged."
+    },
+    {
+      "risk": "A stale or wrong mark resumes the wrong thing, for example after `athena close` on an interrupted job or after garbage collection of the unreferenced candidate commit.",
+      "mitigation": "Write the mark only after the candidate is set. Remove it on any close except a Failed environment stop. `resume_seed` also checks the old job's state, that the candidate and base commits exist, and that only records/ differs between the old base and head; otherwise it returns None and the retry plans and produces from scratch."
+    },
+    {
+      "risk": "The rebuilt candidate on a newer base differs from the one the checks ran on.",
+      "mitigation": "Hold the repository checks as they are. The second half of the function keeps the base-versus-candidate fingerprint calls. The resume path recomputes the fingerprint on the new base before verification."
+    },
+    {
+      "risk": "Recorded check results at stage Verifier are reused on a candidate whose tree is the same but whose commit differs.",
+      "mitigation": "At stage Verifier the verifier snapshot is built from the rebuilt commit c', and the recorded checks were run on a candidate with the same content. Add the assertion in the test that the new verification fingerprint equals the first candidate's. If the fingerprints differ, resume is refused and the job starts over."
+    },
+    {
+      "risk": "The panic-based interrupt simulation is not faithful to a killed process.",
+      "mitigation": "The Script panic occurs inside Ui::line only. The test drops the Athena job lock by unwinding, as a real death would. If the unwind leaves state that differs from real death, the assertion on `JobState::Dispatched` fails loudly rather than passing silently."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "New test in `produce_and_verify_order_tests` in run/mod.rs. It drives `Athena::ask` and then `Athena::go` (the production entry points) with the fake driver and a temporary git repo. The Producer turn in the Script plants a file under `<state>/jobs/<id>/target/produce`. A new `test_support::recording_plenty_space` free-space function is installed with `StateDir::with_free_space`. The seam exists today. The function returns plenty of space and records, per state root, whether `jobs/*/verify` exists and whether `jobs/*/target/produce` exists, on every call. Reading the disk at the gate observes the directory before the job directory is cleaned. Case A uses a capability whose check is `true`. Case B uses one whose check is `false`, via a new `athena_with` constructor that `athena` calls. The check command is a parameter of the capability, so no job logic sits in the double.",
+      "command": "cargo test -p athena-core produce_dir_is_removed_after_checks_pass_and_kept_when_a_check_fails",
+      "observes": "Case A: at the pre-verifier gate call (verify dir exists) produce is absent. Case B: at that call produce is present, and the job still reaches the verifier.",
+      "fails_without": "Without the removal step, the probe records produce present at the pre-verifier gate in the passing case, and the first assertion fails. If removal ran for failing checks too, the second case fails on the missing directory."
+    },
+    {
+      "criterion": 2,
+      "method": "New test in `produce_and_verify_order_tests`. `ask`, then `go` with `test_support::low_once_verifying`: plenty of space until `jobs/*/verify` exists, 3 GB after, unless a `freed` file exists in the state root. That passes the gate before the checks and stops at the gate before the verifier. The Script is wrapped to count Planner and Producer invocations per role in AtomicUsize counters, and Reader and Verifier too. The seam exists (Script closure and `with_free_space`). The test asserts the first job ends Failed with `is_environment_reason`. It then removes the stop condition, calls `Athena::retry`, and calls `go` on the proposal's job.",
+      "command": "cargo test -p athena-core low_disk_before_the_verifier_resumes_without_planner_or_producer",
+      "observes": "Before the retry: producer count 1, verifier count 0. In the retry: planner 0, producer 0 (unchanged at 1), reader 1, verifier 1. The retry finishes Landed with a verification whose `verified_fingerprint` equals the first job's candidate record fingerprint. A `checks` UI line is absent in the retry, which resumed at stage Verifier. `kept/<job>/resume.json` of the first job is gone.",
+      "fails_without": "Without the resume path the retry runs the producer again, so the producer count is 1 and the assertion on 0 fails. Without the mark the retry cannot find the candidate."
+    },
+    {
+      "criterion": 3,
+      "method": "New test in the same module. The Ui given to `go` panics when it sees a line starting `checks     `. `go` is wrapped in `std::panic::catch_unwind` with `AssertUnwindSafe`. That simulates a process dying after the candidate is built. The job lock is dropped and the job is Dispatched with no outcome. Counters wrap the Script as in criterion 2. The test asserts the old job's state is `JobState::Dispatched`. It then calls `retry` and `go` with a normal Ui. The Ui seam exists today (`Ui::line`).",
+      "command": "cargo test -p athena-core interrupted_job_with_a_candidate_resumes_without_planner_or_producer",
+      "observes": "In the retry: planner 0, producer 0 (total stays 1 from the first run), reader 1, verifier 1. The job lands and the landed README content is the first producer's edit. The first job's mark is removed.",
+      "fails_without": "Without the interrupted-job handling, no resume seed is built for a dispatched job that never closed, and the retry runs the producer (count 1, expected 0). Without the mark written at candidate build, there is nothing to resume."
+    },
+    {
+      "criterion": 4,
+      "method": "Run the three Athena checks listed in the brief, as whole commands one after another.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0. Added unit tests in state.rs (mark round trip, `remove_produce` keeps the rest of `target/`), disk.rs (`resumable_stop` for Failed with and without an environment reason, Rejected, Landed, interrupted) and reading.rs (resume job lookup) also pass.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "Read the diff of CHANGELOG.md.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "A new entry under the existing Unreleased heading, in the file's existing entry format, describes both changes. It says target/produce is removed once Athena's checks pass and kept when one fails. It also says `athena retry` resumes from the kept candidate after an environment or interrupt stop, with no planner or producer run and the reader still run.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Read the diff of the new tests (Grep over the added lines gives the same). Check that the resume tests assert on counters bumped in the Script for `Role::Planner` and `Role::Producer`.",
+      "command": "git diff -- crates/athena-core/src/run/mod.rs crates/athena-core/src/test_support.rs",
+      "observes": "Assertions on the planner and producer counters in the retry equal 0. The free-space function is used only to simulate low space and to record directory presence for criterion 1. No assertion counts its reads.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Where does the Producer turn in the Script learn the job directory to plant `target/produce`? The plan scans `<state>/jobs/*/target` once, or reads CARGO_TARGET_DIR from the invocation's env. The code for `AgentInvocation` fields was not read.",
+    "A resumed job carries no accepted plan, so the verifier sees no plan section, and `left_criteria` and report gaps are empty. Planning is off in the default test repository, so this is untested. Storing `JobPlan` records in the mark would close the gap but was left out for size. The producer must decide whether to include it if cheap.",
+    "`Candidate`, `CheckRun` and `Baseline` are assumed to derive Serialize and Deserialize, since `AnyRecord` wraps them. The producer must confirm in athena-data before relying on it.",
+    "`Athena::running` may behave differently inside a test with the fake driver's registry. The interrupted test relies on it saying not running once the lock is dropped. The existing interrupted-job tests in reading.rs (around line 3656) show the usual pattern.",
+    "The CHANGELOG.md entry format was not read (the file is 191 KB). The producer must read the top Unreleased section and match it."
+  ],
+  "producer_section_sha256": "9824c00dbf62c1841611b1103f30b7b32e094cc056dcb662f4115acd0eae893a"
+}

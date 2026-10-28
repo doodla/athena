@@ -20,10 +20,19 @@
 //! in such an environment, and the closing reason says it is the environment ([`is_environment_reason`]).
 //!
 //! A free amount that cannot be read never holds or fails a job. A failing write probe always does.
+//!
+//! Freeing and resuming. The producer's build directory (`target/produce`) is idle once Athena's checks have
+//! passed, since the checks build in their own directory; it is removed then, before the gate that runs
+//! before the verifier, and kept when a check fails (the send-back needs it). A job that stops for an
+//! environment cause after its candidate is built, or that is interrupted, leaves a resume mark
+//! ([`crate::state::ResumeMark`]) outside its job directory; [`resumable_stop`] says which stopped jobs
+//! `athena retry` resumes from that candidate, with no new planner or producer run.
 
 use crate::state::{StateDir, format_bytes};
+use crate::store::JobState;
 use crate::{Athena, Ui};
 use athena_data::JobId;
+use athena_data::records::OutcomeState;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -202,6 +211,19 @@ pub fn before_verifier_reason(problem: &str, job: &JobId) -> String {
 /// workspace), not a failure of the work. It holds for any job.
 pub fn is_environment_reason(reason: &str) -> bool {
     reason.starts_with(LOW_DISK)
+}
+
+/// Whether a job that stopped is one `athena retry` may resume from its kept candidate: it closed failed
+/// with an environment reason (`reason`, see [`is_environment_reason`]), or it is dispatched with no process
+/// working on it (interrupted; the caller has checked that no process runs it). Whether a candidate was built
+/// is a separate question: only a resume mark says so. A rejected job, a landed one and a failure of the work
+/// are never resumed.
+pub fn resumable_stop(state: JobState, reason: Option<&str>) -> bool {
+    match state {
+        JobState::Closed(OutcomeState::Failed) => reason.is_some_and(is_environment_reason),
+        JobState::Dispatched => true,
+        _ => false,
+    }
 }
 
 /// Checks free disk space against `required_gb`. When low, it removes idle jobs' build directories and
@@ -391,6 +413,28 @@ mod tests {
         assert!(!is_environment_reason(
             "the verifier returned no valid verdict"
         ));
+    }
+
+    #[test]
+    fn only_an_environment_failure_or_an_interrupted_job_is_resumable() {
+        let low = before_verifier_reason(LOW_DISK, &id(1));
+        let failed = JobState::Closed(OutcomeState::Failed);
+        assert!(resumable_stop(failed, Some(&low)));
+        assert!(!resumable_stop(
+            failed,
+            Some("admission refused the change: x")
+        ));
+        assert!(!resumable_stop(failed, None));
+        // An interrupted job has no outcome and so no reason.
+        assert!(resumable_stop(JobState::Dispatched, None));
+        for state in [
+            OutcomeState::Rejected,
+            OutcomeState::Landed,
+            OutcomeState::TimedOut,
+        ] {
+            assert!(!resumable_stop(JobState::Closed(state), Some(&low)));
+        }
+        assert!(!resumable_stop(JobState::Proposed, None));
     }
 
     #[test]

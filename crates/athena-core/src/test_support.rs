@@ -597,6 +597,68 @@ pub fn plenty_of_space(_: &Path) -> std::io::Result<u64> {
     Ok(1_000_000_000_000_000)
 }
 
+/// A free-space reader for a job that clears the gate before its checks and stops at the gate before its
+/// verifier: plenty of space until a job's `verify` directory exists (the verifier's snapshot, made after the
+/// checks), 3 GB then, unless a file named `freed` lies in the state root. Install it with
+/// [`StateDir::with_free_space`]; create `<state root>/freed` to let a retry through.
+pub fn low_once_verifying(state: &Path) -> std::io::Result<u64> {
+    if state.join("freed").exists() {
+        return plenty_of_space(state);
+    }
+    let verifying = std::fs::read_dir(state.join("jobs"))
+        .map(|dirs| dirs.flatten().any(|e| e.path().join("verify").exists()))
+        .unwrap_or(false);
+    if verifying {
+        Ok(3_000_000_000)
+    } else {
+        plenty_of_space(state)
+    }
+}
+
+/// What a [`recording_plenty_space`] call saw in the state root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpaceProbe {
+    /// Some job has a `verify` directory: the checks ran, and the verifier's snapshot exists.
+    pub verifying: bool,
+    /// Some job has a `target/produce` directory.
+    pub produce_present: bool,
+}
+
+type Probes = std::sync::Mutex<std::collections::BTreeMap<PathBuf, Vec<SpaceProbe>>>;
+
+static PROBES: Probes = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// A free-space reader that reports plenty of space and records, for the state root it was asked about, what
+/// the job directories held at that moment ([`SpaceProbe`]). Read the record back with [`probes_of`].
+pub fn recording_plenty_space(state: &Path) -> std::io::Result<u64> {
+    let any = |inside: &str| {
+        std::fs::read_dir(state.join("jobs"))
+            .map(|dirs| dirs.flatten().any(|e| e.path().join(inside).exists()))
+            .unwrap_or(false)
+    };
+    let probe = SpaceProbe {
+        verifying: any("verify"),
+        produce_present: any("target/produce"),
+    };
+    PROBES
+        .lock()
+        .expect("the probe record is not poisoned")
+        .entry(state.to_path_buf())
+        .or_default()
+        .push(probe);
+    plenty_of_space(state)
+}
+
+/// Every [`SpaceProbe`] [`recording_plenty_space`] made for `state`, in order.
+pub fn probes_of(state: &Path) -> Vec<SpaceProbe> {
+    PROBES
+        .lock()
+        .expect("the probe record is not poisoned")
+        .get(state)
+        .cloned()
+        .unwrap_or_default()
+}
+
 /// An [`Athena`] over any repository `git` (for example a fresh clone of the fixture's remote), with its own
 /// state directory `state_root`.
 pub fn make_athena(

@@ -225,6 +225,8 @@ impl Athena {
         })?;
         ui.line(&format!("{:<10} {id} · {}", state.as_str(), short(&commit)));
         crate::state::report_clean(ui, &self.state.clean_job(&id));
+        // A job the user closed is not resumed: its kept candidate, if any, is spent.
+        self.state.remove_resume(&id);
         Ok(Closed {
             job: id,
             state,

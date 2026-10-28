@@ -7,6 +7,8 @@
 use anyhow::{Context, Result};
 use athena_agent::procs::Registry;
 use athena_data::JobId;
+use athena_data::records::{Candidate, CheckRun};
+use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
@@ -172,6 +174,62 @@ impl StateDir {
             .map_err(|e| e.to_string())
     }
 
+    /// The producer's build directory of `job` (`CARGO_TARGET_DIR` is `<job dir>/target/produce`).
+    pub fn produce_dir(&self, job: &JobId) -> PathBuf {
+        self.job_dir(job).join("target").join("produce")
+    }
+
+    /// Removes only the producer's build directory of `job`, keeping the rest of `target/` (the checks'
+    /// own build directory). Returns the allocated bytes it held, or the system's message when removal failed.
+    pub fn remove_produce(&self, job: &JobId) -> std::result::Result<u64, String> {
+        let dir = self.produce_dir(job);
+        if !dir.exists() {
+            return Ok(0);
+        }
+        let bytes = allocated_bytes(&dir);
+        (self.remover)(&dir)
+            .map(|()| bytes)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Where the resume mark of `job` is kept. It lies outside the job's own directory, which closing
+    /// removes, so `athena retry` can resume from the built candidate after the job stopped.
+    pub fn resume_file(&self, job: &JobId) -> PathBuf {
+        self.root
+            .join("kept")
+            .join(job.as_str())
+            .join("resume.json")
+    }
+
+    /// Writes the resume mark of `job`, replacing an earlier one.
+    pub fn write_resume(&self, job: &JobId, mark: &ResumeMark) -> Result<()> {
+        let path = self.resume_file(job);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, serde_json::to_vec(mark)?)
+            .with_context(|| format!("writing {}", path.display()))
+    }
+
+    /// The resume mark of `job`; `None` when there is none or it cannot be read.
+    pub fn read_resume(&self, job: &JobId) -> Option<ResumeMark> {
+        let bytes = std::fs::read(self.resume_file(job)).ok()?;
+        serde_json::from_slice(&bytes).ok()
+    }
+
+    /// Removes the resume mark of `job`, and its directory when nothing else is kept there.
+    pub fn remove_resume(&self, job: &JobId) {
+        let file = self.resume_file(job);
+        let _ = std::fs::remove_file(&file);
+        // `remove_dir` removes only an empty directory: other kept work stays.
+        if let Some(dir) = file.parent() {
+            let _ = std::fs::remove_dir(dir);
+            if let Some(kept) = dir.parent() {
+                let _ = std::fs::remove_dir(kept);
+            }
+        }
+    }
+
     /// The local marker that says dispatch of `job` was held for lack of disk space.
     pub fn hold_file(&self, job: &JobId) -> PathBuf {
         self.root
@@ -193,6 +251,31 @@ impl StateDir {
             },
         }
     }
+}
+
+/// The stage a job had reached when it stopped, which `athena retry` resumes at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ResumeStage {
+    /// The candidate was built; the checks had not all passed.
+    Checks,
+    /// Every check passed; the verifier had not run.
+    Verifier,
+}
+
+/// What a retry needs to resume a job from its built candidate without a planner or a producer run.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResumeMark {
+    pub stage: ResumeStage,
+    /// The job's base (prediction) commit, which the candidate's commit sits on.
+    pub base_commit: String,
+    pub candidate: Candidate,
+    /// The check results, recorded once the stage is [`ResumeStage::Verifier`]; empty before.
+    pub check_runs: Vec<CheckRun>,
+    /// What the producer's report still lacked after its send-back, as the verifier is told.
+    pub report_gaps: Vec<String>,
+    /// The criteria the producer left to Athena's checks.
+    pub left_criteria: Vec<String>,
 }
 
 /// How a job directory is removed.
@@ -398,5 +481,72 @@ mod tests {
             vec![format!("reclaimed {}", format_bytes(report.bytes))]
         );
         assert!(!ok.job_dir(&job()).exists());
+    }
+
+    #[test]
+    fn removing_the_producer_build_directory_keeps_the_rest_of_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = StateDir::new(temp.path().to_path_buf());
+        let dir = state.job_dir(&job());
+        std::fs::create_dir_all(dir.join("target/produce/debug")).unwrap();
+        std::fs::create_dir_all(dir.join("target/verify")).unwrap();
+        std::fs::write(dir.join("target/produce/debug/big"), vec![1u8; 50_000]).unwrap();
+        std::fs::write(dir.join("target/verify/keep"), b"x").unwrap();
+
+        let freed = state.remove_produce(&job()).unwrap();
+        assert!(freed >= 50_000, "{freed}");
+        assert!(!state.produce_dir(&job()).exists());
+        assert!(dir.join("target/verify/keep").exists());
+        // Nothing to remove is not an error.
+        assert_eq!(state.remove_produce(&job()), Ok(0));
+    }
+
+    fn mark(stage: ResumeStage) -> ResumeMark {
+        ResumeMark {
+            stage,
+            base_commit: "a".repeat(40),
+            candidate: Candidate {
+                job: job(),
+                base_commit: "a".repeat(40),
+                base_fingerprint: None,
+                previous_job: None,
+                candidate_commit: Some("b".repeat(40)),
+                candidate_tree: Some("c".repeat(40)),
+                changes: Vec::new(),
+                fingerprint: Some("f".repeat(64)),
+                violations: Vec::new(),
+                producer_report: None,
+            },
+            check_runs: Vec::new(),
+            report_gaps: vec!["a gap".into()],
+            left_criteria: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_resume_mark_round_trips_and_removing_it_removes_its_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = StateDir::new(temp.path().to_path_buf());
+        assert_eq!(state.read_resume(&job()), None);
+        state
+            .write_resume(&job(), &mark(ResumeStage::Checks))
+            .unwrap();
+        assert_eq!(state.read_resume(&job()), Some(mark(ResumeStage::Checks)));
+        // A later write replaces it.
+        state
+            .write_resume(&job(), &mark(ResumeStage::Verifier))
+            .unwrap();
+        assert_eq!(
+            state.read_resume(&job()).unwrap().stage,
+            ResumeStage::Verifier
+        );
+        // It lies outside the job directory, so cleaning the job keeps it.
+        std::fs::create_dir_all(state.job_dir(&job())).unwrap();
+        assert_eq!(state.clean_job(&job()).error, None);
+        assert!(state.read_resume(&job()).is_some());
+        state.remove_resume(&job());
+        assert_eq!(state.read_resume(&job()), None);
+        assert!(!state.resume_file(&job()).parent().unwrap().exists());
+        assert!(!temp.path().join("kept").exists(), "nothing else is kept");
     }
 }
