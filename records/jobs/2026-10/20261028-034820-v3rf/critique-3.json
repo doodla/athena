@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261028-034820-v3rf",
+  "round": 3,
+  "at": "2026-10-28T05:55:24.274678352Z",
+  "invocation_seq": 7,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The records check would refuse `<job>/replay.md`, so the replay record the plan depends on cannot be committed.",
+      "evidence": "Read in the snapshot: `const JOB_MARKDOWN: [&str; 3] = [\"brief-producer.md\", \"brief-verifier.md\", \"progress-note.md\"];` and `check_record_file` returns Ok(None) only for those names in a job directory. athena-data is not a deliverable, so the plan cannot add `replay.md` to the list. Criteria 4 and 6 require the replay to be recorded, and every criterion 6 pipeline test asserts a committed replay.md. Committing the file would at best be refused, and at worst fail the closing commit of every job. Fix: Settle the open question now. Record the replay in files the records check already accepts. The verifier brief section (committed as brief-verifier.md) always carries the summary, the list or `no replay: <reason>`, and the Athena Blocker finding in verification.json names the list when held. Update the criterion 6 demonstrations to assert on the committed brief-verifier.md section, not on replay.md. Also say how a skipped replay ('no replay: checks failed') is recorded: in the brief section, which is still written in that path. If a separate file is wanted, add athena-data/src/records.rs to the deliverables with a reason, but that widens the user's file list.",
+      "location": "Plan decision 7, step 6, criterion 6 demonstration (\"`<job>/replay.md` is committed saying 3 of 12\"), open question 1; crates/athena-data/src/records.rs:2603-2622",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The pipeline test's override must sit in front of tree resolution and the subcommand probe, not only the cargo build. Otherwise the fixture repository skips the replay.",
+      "evidence": "The criterion 6 demonstration adds a resolution test in which 'a tree without crates/athena-cli/Cargo.toml gives a no replay skip reason'. The `repo()` fixture used by produce_and_verify_order_tests is not the Athena workspace. If `resolve_tree` and `probe_subcommand` run before the overridden build step, Test 1 records 'no replay' and lands instead of Rejected. Fix: State that the #[cfg(test)] override replaces everything from resolve, build and probe up to a pair of deciders. Alternatively, have the pipeline tests seed a crates/athena-cli/Cargo.toml in the fixture repository.",
+      "location": "Step 6 and criterion 6 demonstration (\"replaces only the cargo build step\")",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The criterion 5 'no model call' pipeline check compares with 'an identical run with the replay skipped', but the plan gives no switch for skipping the replay.",
+      "evidence": "The replay is run unconditionally when `nested` is None and no check failed (decision 4). The only test hook named is the build-step override, which returns deciders and does not skip the replay. Fix: Assert against a fixed expected driver-request list, the same one the existing order tests use for a producer plus verifier run. Or have the override offer an explicit 'skip' mode and name it.",
+      "location": "Criterion 5 demonstration part (b)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The open question about which commit Records::load reads is already answered by existing code.",
+      "evidence": "run/mod.rs:166 and :2527, status.rs, review.rs and auditor.rs all call `Records::load(&self.git, &head)`, and the pipeline test at run/mod.rs:3634 does the same. Fix: Use the same `Records::load(&self.git, &head)` call that run/mod.rs:166 uses, and drop the question.",
+      "location": "Open questions, item 2",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan fits the request and the accepted reading. It adds an `athena check-reading` subcommand, replays every candidate through a base build and a candidate build over the newest 50 accepted readings, holds at more than 10% unless the criteria state a higher rate, and gives the verifier brief a bounded section. I checked the code it names, and it exists where the plan says: `check_reading_acceptance(reading, request, attempt, referenced)` at reading.rs:2196, `Records.jobs` and `request_jobs()` (newest first) in store.rs, `verify::is_pre_existing` and `mark_pre_existing`, `judge` at run/mod.rs:2368, the `brief-verifier.md` write at run/mod.rs:2204, `produce_and_verify_order_tests` at run/mod.rs:3293, `fake.rs:43 requests()`, `plain_verifier_inputs` at briefs.rs:2634, `MAX_INLINE_DIFF_BYTES` = 40 KiB, and main.rs `Command` at line 29, `run` at 787 and the test module at 1361. The ordering also works: the replay can run after `mark_pre_existing` (line 2102) and before `VerifierInputs` is built and the disk check runs before the verifier. One design point is wrong. The plan records the replay as `<job>/replay.md`, but `check_record_file` in athena-data accepts only three Markdown names in a job directory: `JOB_MARKDOWN = [\"brief-producer.md\", \"brief-verifier.md\", \"progress-note.md\"]` (crates/athena-data/src/records.rs:2604). The records check would refuse the file, and criteria 4 and 6, which need the replay recorded, rest on it. The plan leaves this as an open question when the code settles it, and the fix is easy: record the replay through brief-verifier.md and the hold finding. The rest of the demonstrations are sound. Each uses a real seam, keeps the comparison and threshold logic in production code, and would fail without the behavior."
+}
