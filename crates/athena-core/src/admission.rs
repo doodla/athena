@@ -705,6 +705,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn plan_admission_and_the_gate_agree_on_when_the_schema_judges_a_config_edit() {
+        let text = format!("{BASE_CONFIG}\n[telemetry]\nsample_rate = 2\n");
+        let cases: [(&str, &[(&str, &str)]); 2] = [
+            ("config alone", &[("athena.toml", &text)]),
+            (
+                "config with the schema",
+                &[("athena.toml", &text), (SCHEMA_FILE, "// adds it\n")],
+            ),
+        ];
+        for (what, files) in cases {
+            let changed: Vec<(&str, bool)> = files.iter().map(|(p, _)| (*p, false)).collect();
+            // The plan rule flags the change exactly when admission parses the file itself and refuses it.
+            let planned = crate::plan::schema_reference_problem(
+                &changed
+                    .iter()
+                    .map(|(p, d)| (p.to_string(), *d))
+                    .collect::<Vec<_>>(),
+            );
+            let admitted = configuration(admit_files(files));
+            assert_eq!(
+                planned.is_some(),
+                !admitted.is_empty(),
+                "{what}: {planned:?}"
+            );
+            // The gate's own deferral is the opposite of both.
+            assert_eq!(
+                defers_to_schema_test(changed.iter().copied()),
+                planned.is_none(),
+                "{what}"
+            );
+        }
+        // And the plan message names the schema file to change.
+        let problem =
+            crate::plan::schema_reference_problem(&[("athena.toml".to_string(), false)]).unwrap();
+        assert!(problem.contains(SCHEMA_FILE), "{problem}");
+    }
+
     fn configuration(violations: Vec<PolicyViolation>) -> Vec<PolicyViolation> {
         violations
             .into_iter()

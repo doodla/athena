@@ -9,6 +9,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- A plan is now refused when its design edits `athena.toml` or `defaults.toml` without listing a file under
+  `crates/athena-data/`. Root cause: the configuration files and the code that parses them (strict on unknown
+  fields) are changed separately, and nothing connected a new section to the schema that must accept it before
+  plan time, so the mismatch surfaced only at admission or at the landing gate, after production. Jobs
+  20261016-071202-q0xy and 20261016-185517-qcrz planned a `[parallel]` table with the schema in the wrong crate or
+  missing, and 20261016-200605-xh54 passed verification and was then refused by the landing gate. New
+  `athena_gate::config_edits_without_schema` is the other side of the existing `defers_to_schema_test` and shares
+  its `SCHEMA_DIR`; `plan::schema_reference_problem` applies it through `reading::plan_entry`, and the refusal
+  names the schema file to change (`config.rs` or `defaults.rs`). The check cannot see at plan time whether an
+  edit adds a section, so it takes the narrowest sound form: any non-deleted configuration file needs a
+  non-deleted path under `crates/athena-data/` beside it. Tests cover the plan rule, the reading path, and
+  agreement between the plan rule, admission and the gate.
 - A reading is now refused when its outcome needs a governance file it does not cover. Root cause: reading
   acceptance had no mapping from the request's outcome to governance files, so a reading for "publish to GitHub
   Pages" without a workflow, a new configuration section without `athena.toml`, or CI routing without

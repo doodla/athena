@@ -446,6 +446,40 @@ mod tests {
     }
 
     #[test]
+    fn config_edits_without_schema_is_the_other_side_of_the_deferral() {
+        use crate::config_edits_without_schema as lacking;
+        let schema = "crates/athena-data/src/config.rs";
+        // A config edit alone is the case the schema would refuse; with the schema it is deferred.
+        assert_eq!(lacking([("athena.toml", false)]), ["athena.toml"]);
+        assert_eq!(
+            lacking([("defaults.toml", false), ("athena.toml", false)]),
+            ["defaults.toml", "athena.toml"]
+        );
+        assert!(lacking([("athena.toml", false), (schema, false)]).is_empty());
+        // A deleted schema file does not defer; a deleted config file is not parsed.
+        assert_eq!(
+            lacking([("athena.toml", false), (schema, true)]),
+            ["athena.toml"]
+        );
+        assert!(lacking([("athena.toml", true)]).is_empty());
+        assert!(lacking([("a.txt", false)]).is_empty());
+        // The two rules never both hold for the same change.
+        for changed in [
+            vec![("athena.toml", false)],
+            vec![("athena.toml", false), (schema, false)],
+            vec![("athena.toml", false), (schema, true)],
+            vec![
+                ("defaults.toml", false),
+                ("crates/athena-data/tests/repo_config.rs", false),
+            ],
+        ] {
+            let defers = defers_to_schema_test(changed.iter().copied());
+            let flagged = !lacking(changed.iter().copied()).is_empty();
+            assert!(!(defers && flagged), "{changed:?}");
+        }
+    }
+
+    #[test]
     fn email_redaction_keeps_allowed_addresses() {
         let allow = crate::builtin_config().personal_data;
         let text = format!("mail {} or noreply@anthropic.com", private_email());
