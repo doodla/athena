@@ -265,6 +265,7 @@ fn job_of(record: &AnyRecord) -> Option<&JobId> {
         AnyRecord::JobPlan(r) => Some(&r.job),
         AnyRecord::Critique(r) => Some(&r.job),
         AnyRecord::Baseline(r) => Some(&r.job),
+        AnyRecord::Replay(r) => Some(&r.job),
         _ => None,
     }
 }
@@ -590,5 +591,39 @@ mod tests {
         assert_eq!(job.critiques[0].final_verdict, CritiqueVerdict::Revise);
         assert!(job.outcome.is_none());
         assert_eq!(job.state(), JobState::Dispatched);
+    }
+
+    #[test]
+    fn replay_record_loads_without_closing_or_breaking_its_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = Git::at(dir.path());
+        git.run(["init", "-q", "-b", "main"]).unwrap();
+        for (key, value) in [
+            ("user.name", "Test User"),
+            ("user.email", "noreply@example.com"),
+            ("commit.gpgsign", "false"),
+            ("core.hooksPath", "/dev/null"),
+        ] {
+            git.run(["config", key, value]).unwrap();
+        }
+        let replay = athena_data::records::Replay::none(
+            job_id(),
+            &"a".repeat(40),
+            10,
+            "no accepted readings",
+        );
+        for record in [
+            AnyRecord::Job(Box::new(dispatched())),
+            AnyRecord::Replay(Box::new(replay)),
+        ] {
+            let path = dir.path().join(record.canonical_path());
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, record.to_json()).unwrap();
+        }
+        git.run(["add", "-A"]).unwrap();
+        git.run(["commit", "-q", "-m", "Record a replay"]).unwrap();
+        let loaded = Records::load(&git, "HEAD").unwrap();
+        assert!(loaded.invalid.is_empty(), "{:?}", loaded.invalid);
+        assert_eq!(loaded.jobs[job_id().as_str()].state(), JobState::Dispatched);
     }
 }

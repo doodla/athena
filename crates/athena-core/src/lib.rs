@@ -10,7 +10,10 @@
 //! - [`state`]: the per-repository state directory;
 //! - [`store`]: records at a commit, and state derived from them;
 //! - [`commits`]: records and landing commits built with plumbing, gated in process, fast-forwarded;
-//! - [`reading`], [`run`], [`manage`]: the commands;
+//! - [`reading`], [`run`], [`manage`]: the commands. `reading` also holds the reading replay: before the
+//!   verifier, the newest accepted readings are checked against the base and candidate reading rules (each
+//!   build asked through `athena check-reading`), the result is the `athena.replay/1` record `replay.json`,
+//!   and more than 10% newly refused fails the verdict ([`verify::apply_replay_hold`]). It makes no model call;
 //! - [`records_import`]: the importer that copies `records/` at a commit onto the `athena/records` branch and
 //!   checks the copy; not wired into any command;
 //! - [`reconcile`]: the reconcile step of `docs/design/records-history.md` §8.1, run at the start of

@@ -381,6 +381,18 @@ Exit code: 0 only when the target was met; 2 for any other stop; 1 when Athena i
         #[arg(long)]
         json: bool,
     },
+    /// Check one stored request and reading against the reading rules this build has, and print `accept`, or
+    /// `refuse: <reason>`. It uses the same acceptance rules as a new reading, calls no model and writes
+    /// nothing. The job pipeline runs it on the base and candidate builds to replay earlier readings. Exit 0
+    /// for either answer; exit 1 when a file cannot be read as the record it should be.
+    CheckReading {
+        /// A file holding an `athena.request/1` record.
+        #[arg(long)]
+        request: PathBuf,
+        /// A file holding an `athena.reading/1` record.
+        #[arg(long)]
+        reading: PathBuf,
+    },
     /// Read-only backtest of decisions D87 and D88 over `docs/decisions.md`, its confirmed link list `docs/decision-links.toml` and `records/`; exit 2 on a finding.
     Backtest {
         #[arg(long)]
@@ -1355,7 +1367,32 @@ fn run(cli: Cli) -> Result<u8> {
         Command::Hook {
             hook: HookCommand::PreToolUse { policy },
         } => Ok(hooks::pre_tool_use(&policy) as u8),
+        Command::CheckReading { request, reading } => {
+            println!("{}", check_reading_line(&request, &reading)?);
+            Ok(0)
+        }
     }
+}
+
+/// The line `athena check-reading` prints for a stored request and reading: `accept`, or `refuse: <reason>`,
+/// from the same acceptance rules a new reading must pass.
+fn check_reading_line(request: &std::path::Path, reading: &std::path::Path) -> Result<String> {
+    use anyhow::Context;
+    use athena_data::records::AnyRecord;
+    let read = |path: &std::path::Path| -> Result<AnyRecord> {
+        let bytes =
+            std::fs::read(path).with_context(|| format!("could not read {}", path.display()))?;
+        Ok(AnyRecord::parse(&path.display().to_string(), &bytes)?)
+    };
+    let AnyRecord::Request(request) = read(request)? else {
+        anyhow::bail!("{} is not an athena.request/1 record", request.display());
+    };
+    let AnyRecord::Reading(reading) = read(reading)? else {
+        anyhow::bail!("{} is not an athena.reading/1 record", reading.display());
+    };
+    Ok(athena_core::reading::acceptance_line(
+        &athena_core::reading::check_stored_reading(&request, &reading),
+    ))
 }
 
 #[cfg(test)]
@@ -1379,6 +1416,125 @@ mod tests {
                 )],
             )
             .unwrap();
+    }
+
+    /// A stored request and reading whose one criterion is `criterion`, written as record files in `dir`.
+    fn write_stored(dir: &std::path::Path, name: &str, criterion: &str) -> (PathBuf, PathBuf) {
+        use athena_data::records::{
+            AnyRecord, Criterion, CriterionKind, Forecast, Forecasts, Quantiles, Reading, Request,
+        };
+        let job = JobId::parse("20261027-054151-ace0").unwrap();
+        let at = jiff::Timestamp::UNIX_EPOCH;
+        let forecast = Forecast {
+            p_reading_accepted: 0.8,
+            p_verification_passes: 0.7,
+            p_user_intervenes: 0.1,
+            cost_usd: Quantiles::new(0.2, 0.5, 1.5).unwrap(),
+            wall_time_s: Quantiles::new(100.0, 300.0, 900.0).unwrap(),
+        };
+        let request = Request {
+            job: job.clone(),
+            text: "change the demo".into(),
+            received_at: at,
+            channel: "cli".into(),
+        };
+        let reading = Reading {
+            job,
+            n: 1,
+            at,
+            invocation_seq: 1,
+            base_commit: "a".repeat(40),
+            config_sha256: "b".repeat(64),
+            defaults_sha256: "c".repeat(64),
+            defaults_version: 1,
+            title: "Change the demo".into(),
+            summary: "Change the demo.".into(),
+            class_of_work: "feature".into(),
+            capability: Some("change".into()),
+            decline_reason: None,
+            producer_model: "producer".into(),
+            verifier_model: "verifier".into(),
+            defaults_applied: vec![],
+            assumptions: vec![],
+            question: None,
+            acceptance_criteria: vec![Criterion {
+                text: criterion.into(),
+                kind: CriterionKind::Behavior,
+            }],
+            deliverables: vec![],
+            out_of_scope: vec![],
+            forecasts: Forecasts {
+                reader: forecast.clone(),
+                reference: forecast,
+            },
+            departures: None,
+            urgent_reason: None,
+            hard_reason: None,
+            producer_effort: None,
+        };
+        let request_path = dir.join(format!("{name}-request.json"));
+        let reading_path = dir.join(format!("{name}-reading.json"));
+        std::fs::write(&request_path, AnyRecord::Request(request).to_json()).unwrap();
+        std::fs::write(
+            &reading_path,
+            AnyRecord::Reading(Box::new(reading)).to_json(),
+        )
+        .unwrap();
+        (request_path, reading_path)
+    }
+
+    #[test]
+    fn check_reading_prints_accept_or_refuse_with_the_reason_the_reading_rules_give() {
+        let dir = tempfile::tempdir().unwrap();
+        let (good_request, good_reading) =
+            write_stored(dir.path(), "good", "cargo test --locked passes");
+        let (bad_request, bad_reading) = write_stored(
+            dir.path(),
+            "bad",
+            "the producer's report lists the caller-check Grep",
+        );
+        // The subcommand parses with both files.
+        let parsed = Cli::try_parse_from([
+            "athena",
+            "check-reading",
+            "--request",
+            good_request.to_str().unwrap(),
+            "--reading",
+            good_reading.to_str().unwrap(),
+        ])
+        .unwrap();
+        let Command::CheckReading { request, reading } = parsed.command else {
+            panic!("expected the check-reading subcommand");
+        };
+        assert_eq!(check_reading_line(&request, &reading).unwrap(), "accept");
+
+        let refused = check_reading_line(&bad_request, &bad_reading).unwrap();
+        assert!(refused.starts_with("refuse: "), "{refused}");
+        assert!(
+            refused.contains("the producer's report lists the caller-check Grep"),
+            "{refused}"
+        );
+        // It is what the reading rules give directly.
+        let athena_data::records::AnyRecord::Reading(stored) =
+            athena_data::records::AnyRecord::parse("r", &std::fs::read(&bad_reading).unwrap())
+                .unwrap()
+        else {
+            panic!("not a reading");
+        };
+        let direct =
+            athena_core::reading::check_reading_acceptance(&stored, "change the demo", None, &[])
+                .unwrap_err()
+                .to_string();
+        assert_eq!(
+            refused,
+            format!(
+                "refuse: {}",
+                direct.split_whitespace().collect::<Vec<_>>().join(" ")
+            )
+        );
+        // A file that is not the record asked for is an error, not an answer.
+        assert!(check_reading_line(&good_reading, &good_reading).is_err());
+        assert!(check_reading_line(&dir.path().join("missing.json"), &good_reading).is_err());
     }
 
     #[test]
