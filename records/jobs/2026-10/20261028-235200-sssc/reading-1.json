@@ -1,0 +1,200 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261028-235200-sssc",
+  "n": 1,
+  "at": "2026-10-28T23:52:43.634427614Z",
+  "invocation_seq": 1,
+  "base_commit": "c8f82e6cc9c239038ec3eeb72fb81046bf80df12",
+  "config_sha256": "b812f3c3683488bcd9485d235a6a234bc80722c9f137a6c232094fae2ee727d6",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Handle model usage-limit replies as a hold, not a failure",
+  "summary": "Retry of job 20261028-232924-czz3, which was dispatched but never verified. It has no candidate, findings or checks, so the work is redone from the base. A usage-limit driver reply is recognised once, recorded as limited at zero cost, and drain stops with 'usage limit' naming the reset time. The audience is the maintainer running the queue. Status shows the hold.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "Criteria require new tests plus cargo test and clippy -D warnings."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Each criterion runs a test that exercises the limit reply and checks the outcome."
+    },
+    {
+      "id": "root-cause",
+      "how": "The limit is recognised once in the driver layer and carried as a typed result, so it is not patched per stage."
+    },
+    {
+      "id": "verified",
+      "how": "Criteria use commands the verifier can run."
+    },
+    {
+      "id": "rust",
+      "how": "All changes are Rust."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Prior job 20261028-232924-czz3 had no candidate, no findings and no checks, so there is no work to keep; all its listed deliverables are redone and its out_of_scope items stay out of scope.",
+    "Code survey: Grep over crates/ for 'weekly limit', 'usage limit' and 'UsageLimit' found no existing handling. The relevant files are crates/athena-agent/src/claude.rs, crates/athena-core/src/run/mod.rs, crates/athena-core/src/reading.rs, crates/athena-cli/src/drain.rs, crates/athena-core/src/status.rs, crates/athena-core/src/invocation.rs and crates/athena-data/src/records.rs. I did not read their contents in full, so the producer must trace the entry point (drain, then reading, then run stages) and how the gate validates invocation records. Any new record field is covered by the existing records round-trip tests (check_record_file or AnyRecord). The limit is measured directly by feeding the fake driver in crates/athena-agent/src/fake.rs the limit reply, not through a stand-in.",
+    "The limit state is carried as a typed result or field (for example a limited invocation outcome and a stored hold with its reset time), so drain and status do not parse closing-reason text.",
+    "This adds no refusal rule for other records; the gate's rules for them are unchanged, so no refusal-rate figure applies.",
+    "No governance file (athena.toml, defaults.toml, workflows) needs to change."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Run `cargo test`: a claude.rs test feeds a fake driver reply 'You've hit your weekly limit · resets Oct 29, 6pm (UTC)' with no usage and asserts it is recognised as a usage limit with the reset time parsed.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`: a test for each model-call stage (reading, planning, critic, producer, verifier) injects the limit reply and asserts the invocation record is limited at zero cost, passes the gate, the job stays retryable with its candidate kept, and no failure is counted.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`: a drain test where the limit hits at the reading step of a queued item asserts the stop reason is 'usage limit' naming the reset time, not 'repeated failure', and the failure counter is unchanged. A second drain test does the same for the run step.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`: a status.rs test asserts `athena status` shows the usage limit and its reset time while it holds, and shows neither after the reset time has passed.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`: a test shows an ordinary non-limit driver error at the reading step still records as an error and counts as a failure.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Drain learns of the limit from a structured field or typed result. A Grep of crates/athena-cli/src/drain.rs finds no parsing of the 'environment: usage limit' text.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has an entry describing the usage-limit handling, the 'usage limit' stop reason and the status display.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test`; all pass.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-agent/src/claude.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/invocation.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-agent/src/fake.rs",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "crates/athena-core/src/plan.rs",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "action": "modify",
+      "p": 0.15
+    }
+  ],
+  "out_of_scope": [
+    "Site-rating work of job 20261027-123701-77zh (xtask/src/site.rs, studies/, docs/design/explainer-site.md)",
+    "Automatic waiting or sleeping until the reset time",
+    "Changing the gate's rules for other records",
+    "Records under records/, athena.toml, defaults.toml and workflows"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.8,
+        "p50": 1.8,
+        "p90": 4.0
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 1900.0,
+        "p90": 4000.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7212121212121212,
+      "p_verification_passes": 0.6761565836298933,
+      "p_user_intervenes": 0.07854785478547854,
+      "cost_usd": {
+        "p10": 0.5242463,
+        "p50": 1.185954,
+        "p90": 2.8914685
+      },
+      "wall_time_s": {
+        "p10": 526.2073135793798,
+        "p50": 1635.3990292000003,
+        "p90": 3138.396955251678
+      }
+    }
+  },
+  "departures": "Cost and time are above the reference because the change spans many crates and ten files, and it touches the drain and gate path.",
+  "urgent_reason": "Cuts wasted time: a usage limit currently counts as repeated failure and stops drain with a misleading reason.",
+  "hard_reason": "Changes how an invocation record is accepted by the gate path, how jobs are retried or counted as failures, and the drain stop rules, so a mistake is costly and hard to see.",
+  "producer_effort": "high"
+}
