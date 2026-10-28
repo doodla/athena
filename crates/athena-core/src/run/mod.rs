@@ -10,8 +10,8 @@ use crate::land::{Plan, plan};
 use crate::pin::{is_full_sha, mount};
 use crate::reading::{
     BinaryChecker, NO_HISTORY_REASON, Proposal, ReadingChecker, ReplayCheckers, ReplayRun,
-    TreeRetrySeed, planning_resume_seed, replay, replay_cases, resumable_job, retried_job,
-    retry_findings, same_scope, tree_retry_seed,
+    TreeRetrySeed, planning_resume_seed, replay, replay_cases, replay_declaration_of,
+    resumable_job, retried_job, retry_findings, same_scope, tree_retry_seed,
 };
 use crate::scoring::{self, Happened, score, totals};
 use crate::state::{ResumeMark, ResumeStage};
@@ -153,8 +153,12 @@ fn change_status(status: char) -> ChangeStatus {
     }
 }
 
-/// What the verifier brief shows of a replay record.
-fn replay_view(replay: &Replay) -> ReplayView {
+/// What the verifier brief shows of a replay record and of what the reading declares about it. The declared
+/// share and its reason are read from the reading by the same function the gate uses, so the verifier sees
+/// the share that was applied. A share above 25% with no reason is shown as unsupported, and the 10% limit
+/// applied to it.
+fn replay_view(replay: &Replay, reading: &Reading) -> ReplayView {
+    let declaration = replay_declaration_of(reading);
     ReplayView {
         total: replay.total as usize,
         newly_refused: replay
@@ -163,7 +167,11 @@ fn replay_view(replay: &Replay) -> ReplayView {
             .map(|r| (r.job.as_str().to_string(), r.reason.clone()))
             .collect(),
         held: replay.held,
-        intended: replay.intended,
+        declared: declaration.effective_share(),
+        reason: declaration
+            .effective_share()
+            .and(declaration.reason.clone()),
+        unsupported: declaration.unsupported_share(),
         no_replay: replay.no_replay.clone(),
     }
 }
@@ -2507,7 +2515,7 @@ impl Athena {
             commands: athena_agent::policy::describe_commands(&verifier_grant.commands),
             tool_config_from_base: tool_config_from_base.clone(),
             pin: ctx.job.job.as_ref().and_then(|j| j.pin.clone()),
-            replay: Some(replay_view(&replay_record)),
+            replay: Some(replay_view(&replay_record, ctx.reading)),
             // Change verification asks the soundness question; a study's verifier brief does not.
             soundness: ctx.capability.id() != "study",
         };
@@ -2839,7 +2847,7 @@ impl Athena {
                 &cases,
                 &*base_checker,
                 &*candidate_checker,
-                &ctx.reading.acceptance_criteria,
+                replay_declaration_of(ctx.reading).effective_share(),
             ),
             Err(reason) => ReplayRun::none(&reason),
         };
@@ -4451,6 +4459,46 @@ mod produce_and_verify_order_tests {
             athena_data::records::check_record_file(path, &bytes)
                 .unwrap_or_else(|e| panic!("{path}: {e}"));
         }
+    }
+
+    #[test]
+    fn replay_view_carries_the_declared_share_and_reason() {
+        let id = JobId::parse("20200101-000000-0000").unwrap();
+        let record = ReplayRun {
+            total: 50,
+            newly_refused: vec![athena_data::records::ReplayRefusal {
+                job: id.clone(),
+                reason: "the marker rule refuses this".into(),
+            }],
+            intended: true,
+            held: false,
+            no_replay: None,
+        }
+        .record(&id, "a", "b");
+        let reason = "readers now ask for a new required section, because past readings lack it";
+        let mut reading = fixture_reading(&id, "Add a greeting");
+        reading.acceptance_criteria[0].text = "expected 80% of newly refused readings".into();
+        reading.out_of_scope = vec!["the changelog".into(), reason.into()];
+        // A share above 25% with a reason: the view carries both, as the verifier brief site passes them.
+        let view = replay_view(&record, &reading);
+        assert_eq!(view.declared, Some(80));
+        assert_eq!(view.reason.as_deref(), Some(reason));
+        assert_eq!(view.unsupported, None);
+        assert_eq!((view.total, view.newly_refused.len()), (50, 1));
+        // The same share with no reason is unsupported, and the 10% limit applied.
+        reading.out_of_scope = vec!["the changelog".into()];
+        let view = replay_view(&record, &reading);
+        assert_eq!(
+            (view.declared, view.reason, view.unsupported),
+            (None, None, Some(80))
+        );
+        // A reading that declares nothing leaves all three empty.
+        let plain = fixture_reading(&id, "Add a greeting");
+        let view = replay_view(&record, &plain);
+        assert_eq!(
+            (view.declared, view.reason, view.unsupported),
+            (None, None, None)
+        );
     }
 
     #[test]

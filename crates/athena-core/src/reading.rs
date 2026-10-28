@@ -2543,7 +2543,8 @@ fn names_record_evidence(survey: &str) -> bool {
 /// only content criteria need no survey.
 ///
 /// This check refuses more readings; the higher refusal rate is intended. A replay of accepted readings
-/// (`replay`) reads the same sentence from the job's criteria and does not hold the job for it.
+/// (`replay`) holds a job that newly refuses more than 10% unless the job's criteria declare a share, as
+/// "expected N% of newly refused readings", and give a reason when it is above 25%.
 ///
 /// The error names the missing survey or the missing evidence and tells the reader what to write.
 pub fn check_code_survey(reading: &Reading) -> Result<()> {
@@ -2594,8 +2595,8 @@ pub fn check_code_survey(reading: &Reading) -> Result<()> {
 /// The most accepted readings one replay uses: the newest ones.
 pub const REPLAY_WINDOW: usize = 50;
 
-/// A candidate that newly refuses more than this share of the replayed readings is held, unless its criteria
-/// state that a higher refusal rate is intended. Exactly this share is not held.
+/// A candidate that newly refuses more than this share of the replayed readings is held, unless it declares a
+/// share of its own ([`replay_declaration`]). Exactly this share is not held.
 pub const REPLAY_HOLD_PERCENT: usize = 10;
 
 /// Why a replay of an empty history did not run.
@@ -2741,38 +2742,148 @@ pub fn replay_cases(records: &Records, exclude: Option<&JobId>) -> Vec<ReplayCas
         .collect()
 }
 
-/// Phrases, whole words and lowercase, with which a candidate's criteria state that it is meant to refuse
-/// more readings. A phrase that only mentions refusals ("the check names the refusal") is not on the list.
-const INTENDED_REFUSAL_PHRASES: [&str; 8] = [
-    "refuse more",
-    "refuses more",
-    "refuse additional",
-    "refuses additional",
-    "higher refusal rate",
-    "higher rate of refusal",
-    "more readings are refused",
-    "more requests are refused",
+/// How many percentage points above its declared share a candidate may newly refuse before it is held.
+/// Exactly declared plus this many points is not held.
+pub const REPLAY_DECLARED_MARGIN_POINTS: usize = 5;
+
+/// A declared share above this percentage counts only with a stated reason (see [`replay_declaration`]).
+/// Exactly this share needs no reason.
+pub const REPLAY_REASON_ABOVE_PERCENT: u32 = 25;
+
+/// The most characters of a stated reason that the replay keeps for the verifier.
+const REPLAY_REASON_CHARS: usize = 300;
+
+/// Words, lowercase, one of which a criterion or out_of_scope item must contain to count as a reason for a
+/// declared share above [`REPLAY_REASON_ABOVE_PERCENT`] percent. Whole phrases, matched by `has_phrase`.
+const REPLAY_REASON_MARKERS: [&str; 3] = ["because", "now asks", "new required"];
+
+/// Words, lowercase, one of which the same item must also contain, so the sentence is about past readings or
+/// refusals and not about something else. Whole phrases, matched by `has_phrase`.
+const REPLAY_REASON_ANCHORS: [&str; 9] = [
+    "past readings",
+    "previous readings",
+    "earlier readings",
+    "older readings",
+    "refuse",
+    "refuses",
+    "refused",
+    "refusal",
+    "refusals",
 ];
 
-/// Whether the criteria state that a higher refusal rate is intended.
-pub fn criteria_intend_higher_refusal(criteria: &[Criterion]) -> bool {
-    criteria.iter().any(|c| {
-        let text = c
-            .text
-            .to_lowercase()
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
-        INTENDED_REFUSAL_PHRASES
-            .iter()
-            .any(|phrase| has_phrase(&text, phrase))
-    })
+/// What a reading declares about the replay: the share of newly refused readings it expects, and the reason
+/// it gives for a share above [`REPLAY_REASON_ABOVE_PERCENT`] percent.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ReplayDeclaration {
+    /// The declared whole percent, 0 to 100, when a criterion states one.
+    pub share: Option<u32>,
+    /// The first criterion or out_of_scope item that gives a reason, cut to a fixed length.
+    pub reason: Option<String>,
 }
 
-/// Whether `newly` refusals among `total` replayed readings hold the job: more than
-/// [`REPLAY_HOLD_PERCENT`] percent, and not intended. Integer math, so exactly the threshold is not held.
-pub fn replay_is_held(total: usize, newly: usize, intended: bool) -> bool {
-    newly * 100 > total * REPLAY_HOLD_PERCENT && !intended
+impl ReplayDeclaration {
+    /// The share the replay holds the candidate to: the declared share when it is at most
+    /// [`REPLAY_REASON_ABOVE_PERCENT`] percent or has a reason; otherwise none, so the
+    /// [`REPLAY_HOLD_PERCENT`] limit applies.
+    pub fn effective_share(&self) -> Option<u32> {
+        self.share
+            .filter(|s| *s <= REPLAY_REASON_ABOVE_PERCENT || self.reason.is_some())
+    }
+
+    /// The declared share when it is above [`REPLAY_REASON_ABOVE_PERCENT`] percent and has no reason, so it
+    /// was not applied.
+    pub fn unsupported_share(&self) -> Option<u32> {
+        self.share
+            .filter(|s| *s > REPLAY_REASON_ABOVE_PERCENT && self.reason.is_none())
+    }
+}
+
+/// Lowercase text with runs of white space made single spaces.
+fn normalised(text: &str) -> String {
+    text.to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The percent that `text` (normalised) declares for newly refused readings: a whole number from 0 to 100
+/// and `%`, then optionally `of` and `the`, then `newly refused` ("expected 30% of newly refused readings").
+/// A decimal, a number inside a word, or a percentage that is not tied to newly refused readings declares
+/// nothing, so a quoted example does not count. The first match wins.
+fn declared_percent(text: &str) -> Option<u32> {
+    for (at, _) in text.match_indices('%') {
+        let digits_start = at
+            - text[..at]
+                .bytes()
+                .rev()
+                .take_while(u8::is_ascii_digit)
+                .count();
+        let digits = &text[digits_start..at];
+        if digits.is_empty() || digits.len() > 3 {
+            continue;
+        }
+        let before = text[..digits_start].chars().next_back();
+        if before.is_some_and(|c| c.is_alphanumeric() || c == '.') {
+            continue;
+        }
+        let mut rest = text[at + 1..].trim_start();
+        for word in ["of ", "the "] {
+            rest = rest.strip_prefix(word).unwrap_or(rest);
+        }
+        let tied = rest
+            .strip_prefix("newly refused")
+            .is_some_and(|after| !after.chars().next().is_some_and(char::is_alphanumeric));
+        match digits.parse::<u32>() {
+            Ok(percent) if tied && percent <= 100 => return Some(percent),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// What the criteria and out_of_scope items declare about the replay. A share is declared only as
+/// "N% of newly refused readings" ([`declared_percent`]), the first in criteria order. The reason is the
+/// first criterion, then out_of_scope item, that has one of [`REPLAY_REASON_MARKERS`] and one of
+/// [`REPLAY_REASON_ANCHORS`]. This is a text floor, not proof of a good reason: the verifier is shown the
+/// sentence beside the replay list and judges it.
+pub fn replay_declaration(criteria: &[Criterion], out_of_scope: &[String]) -> ReplayDeclaration {
+    let share = criteria
+        .iter()
+        .find_map(|c| declared_percent(&normalised(&c.text)));
+    let reason = criteria
+        .iter()
+        .map(|c| c.text.as_str())
+        .chain(out_of_scope.iter().map(String::as_str))
+        .find(|item| {
+            let text = normalised(item);
+            REPLAY_REASON_MARKERS.iter().any(|m| has_phrase(&text, m))
+                && REPLAY_REASON_ANCHORS.iter().any(|a| has_phrase(&text, a))
+        })
+        .map(|item| {
+            item.split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .chars()
+                .take(REPLAY_REASON_CHARS)
+                .collect()
+        });
+    ReplayDeclaration { share, reason }
+}
+
+/// What the reading declares about the replay, from its acceptance criteria and out_of_scope. The gate and the
+/// verifier's view both read it from here.
+pub fn replay_declaration_of(reading: &Reading) -> ReplayDeclaration {
+    replay_declaration(&reading.acceptance_criteria, &reading.out_of_scope)
+}
+
+/// Whether `newly` refusals among `total` replayed readings hold the job. With a declared share, more than
+/// that share plus [`REPLAY_DECLARED_MARGIN_POINTS`] points holds it; with none, more than
+/// [`REPLAY_HOLD_PERCENT`] percent does. Integer math, so exactly the limit is not held.
+pub fn replay_is_held(total: usize, newly: usize, declared: Option<u32>) -> bool {
+    let limit = declared.map_or(REPLAY_HOLD_PERCENT, |d| {
+        d as usize + REPLAY_DECLARED_MARGIN_POINTS
+    });
+    newly * 100 > total * limit
 }
 
 /// The result of one replay.
@@ -2781,6 +2892,7 @@ pub struct ReplayRun {
     pub total: usize,
     /// Refused by the candidate and accepted by the base, newest request first.
     pub newly_refused: Vec<ReplayRefusal>,
+    /// Whether a declared share applied to this replay and the job is not held for it.
     pub intended: bool,
     pub held: bool,
     /// Why no replay ran (`no replay: <reason>`). Never a pass.
@@ -2816,13 +2928,14 @@ impl ReplayRun {
 }
 
 /// Replays `cases` through the base and the candidate rules and lists the requests the candidate refuses and
-/// the base accepted. `criteria` are the running job's, read for an intended higher refusal rate. No cases, or
-/// a checker that fails, gives a replay that did not run, never a pass.
+/// the base accepted. `declared` is the share of newly refused readings the running job declares
+/// ([`ReplayDeclaration::effective_share`]); see [`replay_is_held`]. No cases, or a checker that fails, gives
+/// a replay that did not run, never a pass.
 pub fn replay(
     cases: &[ReplayCase],
     base: &dyn ReadingChecker,
     candidate: &dyn ReadingChecker,
-    criteria: &[Criterion],
+    declared: Option<u32>,
 ) -> ReplayRun {
     if cases.is_empty() {
         return ReplayRun::none(NO_HISTORY_REASON);
@@ -2854,12 +2967,13 @@ pub fn replay(
             });
         }
     }
-    let intended = criteria_intend_higher_refusal(criteria);
+    // `Replay::validate` rejects a record that is held and intended, so a declared share that is exceeded is held only.
+    let held = replay_is_held(cases.len(), newly_refused.len(), declared);
     ReplayRun {
         total: cases.len(),
-        held: replay_is_held(cases.len(), newly_refused.len(), intended),
+        held,
         newly_refused,
-        intended,
+        intended: declared.is_some() && !held,
         no_replay: None,
     }
 }
@@ -5162,7 +5276,7 @@ mod tests {
             replay_case(&case_id(4), MARKER, ACCEPTED_CRITERION),
             replay_case(&case_id(5), MARKER, ACCEPTED_CRITERION),
         ];
-        let run = replay(&cases, &base_checker(), &marker_candidate(), &[]);
+        let run = replay(&cases, &base_checker(), &marker_candidate(), None);
         assert_eq!(run.no_replay, None);
         assert_eq!(run.total, 5);
         assert_eq!(run.newly_refused.len(), 2, "{:?}", run.newly_refused);
@@ -5176,7 +5290,7 @@ mod tests {
             run.newly_refused
         );
         // Refused by both is not new, and a candidate equal to the base lists nothing.
-        let same = replay(&cases, &base_checker(), &base_checker(), &[]);
+        let same = replay(&cases, &base_checker(), &base_checker(), None);
         assert!(same.newly_refused.is_empty());
         assert!(!same.held);
     }
@@ -5185,7 +5299,7 @@ mod tests {
     fn a_checker_that_fails_gives_no_replay_not_a_pass() {
         let cases = marked_cases(3, 0);
         let broken = |_: &str, _: &Reading| -> Result<ReadingCheck> { bail!("exec format error") };
-        let run = replay(&cases, &base_checker(), &broken, &[]);
+        let run = replay(&cases, &base_checker(), &broken, None);
         let reason = run.no_replay.expect("no replay");
         assert!(
             reason.starts_with("no replay: the candidate build failed on"),
@@ -5247,7 +5361,7 @@ mod tests {
     fn replay_window_with_an_empty_history_is_no_replay_not_a_pass() {
         let empty = replay_cases(&Records::default(), None);
         assert!(empty.is_empty());
-        let run = replay(&empty, &base_checker(), &marker_candidate(), &[]);
+        let run = replay(&empty, &base_checker(), &marker_candidate(), None);
         assert_eq!(
             run.no_replay.as_deref(),
             Some("no replay: no accepted readings in the history")
@@ -5265,10 +5379,10 @@ mod tests {
     }
 
     #[test]
-    fn replay_hold_is_over_ten_percent_and_not_when_the_criteria_intend_it() {
+    fn replay_hold_is_over_ten_percent_without_a_declared_share() {
         let marked = |n| {
             let cases = marked_cases(10, n);
-            replay(&cases, &base_checker(), &marker_candidate(), &[])
+            replay(&cases, &base_checker(), &marker_candidate(), None)
         };
         // 2 of 10: held, with the list.
         let held = marked(2);
@@ -5278,28 +5392,25 @@ mod tests {
         let at = marked(1);
         assert!(!at.held);
         assert_eq!(at.newly_refused.len(), 1);
-        // The criteria say a higher rate is intended: not held, and the replay is still recorded in full.
-        let intended_criteria = [
-            criterion(ACCEPTED_CRITERION),
-            criterion("the change refuses more readings than the base"),
-        ];
+        // A declared 20% makes 2 of 10 not held, and the replay is still recorded in full.
         let cases = marked_cases(10, 2);
-        let intended = replay(
-            &cases,
-            &base_checker(),
-            &marker_candidate(),
-            &intended_criteria,
-        );
-        assert!(intended.intended && !intended.held);
-        assert_eq!(intended.newly_refused.len(), 2);
-        assert_eq!(intended.total, 10);
-        intended
+        let declared = replay(&cases, &base_checker(), &marker_candidate(), Some(20));
+        assert!(declared.intended && !declared.held);
+        assert_eq!(declared.newly_refused.len(), 2);
+        assert_eq!(declared.total, 10);
+        declared
             .record(&JobId::parse(PRIOR_JOB).unwrap(), "a", "b")
             .validate()
             .unwrap();
-        // Criteria that only mention refusal do not intend a higher rate.
+        // Criteria that only mention refusal declare nothing.
         let mentions = [criterion("readings that already refuse stay refused")];
-        let still_held = replay(&cases, &base_checker(), &marker_candidate(), &mentions);
+        let none = replay_declaration(&mentions, &[]);
+        let still_held = replay(
+            &cases,
+            &base_checker(),
+            &marker_candidate(),
+            none.effective_share(),
+        );
         assert!(!still_held.intended && still_held.held);
     }
 
@@ -5314,19 +5425,269 @@ mod tests {
             (50, 6, true),
             (3, 1, true),
         ] {
-            assert_eq!(replay_is_held(total, newly, false), held, "{newly}/{total}");
-            assert!(!replay_is_held(total, newly, true), "{newly}/{total}");
+            assert_eq!(replay_is_held(total, newly, None), held, "{newly}/{total}");
         }
-        assert!(criteria_intend_higher_refusal(&[criterion(
-            "This change refuses MORE readings: the new rule is stricter."
-        )]));
-        assert!(criteria_intend_higher_refusal(&[criterion(
-            "a higher refusal rate is intended"
-        )]));
-        assert!(!criteria_intend_higher_refusal(&[
-            criterion("the check names the refusal in its error"),
-            criterion("the refusal rate is shown in the log"),
-        ]));
+    }
+
+    /// Replays `marked` newly refused readings of `total` under what `criteria` and `out_of_scope` declare.
+    fn declared_run(
+        criteria: &[&str],
+        out_of_scope: &[&str],
+        total: usize,
+        marked: usize,
+    ) -> (ReplayDeclaration, ReplayRun) {
+        let criteria: Vec<Criterion> = criteria.iter().map(|t| criterion(t)).collect();
+        let out_of_scope: Vec<String> = out_of_scope.iter().map(|s| s.to_string()).collect();
+        let declaration = replay_declaration(&criteria, &out_of_scope);
+        let run = replay(
+            &marked_cases(total, marked),
+            &base_checker(),
+            &marker_candidate(),
+            declaration.effective_share(),
+        );
+        (declaration, run)
+    }
+
+    const REASON: &str =
+        "readers now ask for a new required section, because past readings lack it";
+
+    #[test]
+    fn replay_declared_share_of_30_with_80_measured_is_held_and_80_declared_passes() {
+        let job = JobId::parse(PRIOR_JOB).unwrap();
+        // 40 of 50 (80%) newly refused against a declared 30%: held, and the record is valid.
+        let (declaration, held) = declared_run(
+            &[ACCEPTED_CRITERION, "expected 30% of newly refused readings"],
+            &[],
+            50,
+            40,
+        );
+        assert_eq!(declaration.share, Some(30));
+        assert_eq!((held.total, held.newly_refused.len()), (50, 40));
+        assert!(held.held && !held.intended);
+        held.record(&job, "a", "b").validate().unwrap();
+        // The same 80% against a declared 80% with a stated reason passes, and the list is kept.
+        let (declaration, passed) = declared_run(
+            &[ACCEPTED_CRITERION, "expected 80% of newly refused readings"],
+            &[REASON],
+            50,
+            40,
+        );
+        assert_eq!(declaration.share, Some(80));
+        assert_eq!(declaration.effective_share(), Some(80));
+        assert!(!passed.held && passed.intended);
+        assert_eq!(passed.newly_refused.len(), 40);
+        passed.record(&job, "a", "b").validate().unwrap();
+    }
+
+    #[test]
+    fn replay_phrase_without_a_number_does_not_exempt() {
+        for text in [
+            "the higher refusal rate is intended",
+            "the change refuses more readings than the base",
+        ] {
+            let (declaration, run) = declared_run(&[ACCEPTED_CRITERION, text], &[], 50, 40);
+            assert_eq!(declaration, ReplayDeclaration::default(), "{text}");
+            assert!(run.held && !run.intended, "{text}");
+            // Exactly 10% (1 of 10) is still not held.
+            let (_, at) = declared_run(&[ACCEPTED_CRITERION, text], &[], 10, 1);
+            assert!(!at.held, "{text}");
+            assert_eq!(at.newly_refused.len(), 1);
+        }
+    }
+
+    #[test]
+    fn replay_phrase_only_candidate_is_now_held() {
+        // The 2026-10-28 case: 40 of 50 newly refused and only a phrase saying the higher rate is intended.
+        let (_, run) = declared_run(
+            &[
+                ACCEPTED_CRITERION,
+                "the change refuses more readings than the base, and the higher refusal rate is intended",
+            ],
+            &[],
+            50,
+            40,
+        );
+        assert_eq!(run.newly_refused.len(), 40);
+        assert!(run.held && !run.intended);
+        assert!(replay_is_held(50, 40, None));
+    }
+
+    #[test]
+    fn replay_declared_margin_edge_is_five_points_inclusive() {
+        let declared = "expected 30% of newly refused readings";
+        // Declared 30% with 35 of 100 passes; 36 of 100 is held.
+        // A share above 25% needs a reason to apply.
+        let share = replay_declaration(&[criterion(declared)], &[REASON.to_string()]);
+        let share = share.effective_share();
+        assert_eq!(share, Some(30));
+        let hundred = |marked: usize| {
+            let cases: Vec<ReplayCase> = (0..100)
+                .map(|n| {
+                    let title = if n < marked { MARKER } else { "Add a greeting" };
+                    replay_case(
+                        &format!("20201001-000000-{n:04}"),
+                        title,
+                        ACCEPTED_CRITERION,
+                    )
+                })
+                .collect();
+            replay(&cases, &base_checker(), &marker_candidate(), share)
+        };
+        let (at, over) = (hundred(35), hundred(36));
+        assert_eq!((at.newly_refused.len(), over.newly_refused.len()), (35, 36));
+        assert!(!at.held && at.intended, "35 of 100");
+        assert!(over.held && !over.intended, "36 of 100");
+        for (total, newly, declared, held) in [
+            (50, 17, Some(30), false),
+            (50, 18, Some(30), true),
+            (100, 5, Some(0), false),
+            (100, 6, Some(0), true),
+            (10, 1, None, false),
+            (10, 2, None, true),
+            (50, 40, Some(80), false),
+            (50, 43, Some(80), true),
+            (50, 42, Some(80), false),
+            (100, 100, Some(100), false),
+        ] {
+            assert_eq!(
+                replay_is_held(total, newly, declared),
+                held,
+                "{newly}/{total} declared {declared:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn replay_reason_is_needed_above_25_percent() {
+        // 25% needs no reason; 26% does, and without one the 10% limit applies.
+        let at = replay_declaration(&[criterion("expected 25% of newly refused readings")], &[]);
+        assert_eq!((at.share, at.effective_share()), (Some(25), Some(25)));
+        assert_eq!(at.unsupported_share(), None);
+        let above = replay_declaration(&[criterion("expected 26% of newly refused readings")], &[]);
+        assert_eq!(above.share, Some(26));
+        assert_eq!(
+            (above.effective_share(), above.unsupported_share()),
+            (None, Some(26))
+        );
+        // 80% declared without a reason: 2 of 10 is held at the 10% limit, 1 of 10 is not.
+        let declared = "expected 80% of newly refused readings";
+        let (_, held) = declared_run(&[declared], &[], 10, 2);
+        assert!(held.held && !held.intended);
+        let (_, kept) = declared_run(&[declared], &[], 10, 1);
+        assert!(!kept.held);
+        // An out_of_scope item with a marker and no anchor does not unlock it.
+        let (declaration, run) = declared_run(
+            &[declared],
+            &["records.rs is out of scope because it needs a migration"],
+            10,
+            2,
+        );
+        assert_eq!(declaration.reason, None);
+        assert!(run.held);
+        // An anchor and no marker does not unlock it either.
+        let (declaration, run) = declared_run(&[declared], &["past readings are refused"], 10, 2);
+        assert_eq!(declaration.reason, None);
+        assert!(run.held);
+        // One item with a marker and an anchor does, from out_of_scope or from a criterion.
+        let (declaration, run) = declared_run(&[declared], &[REASON], 10, 8);
+        assert_eq!(declaration.reason.as_deref(), Some(REASON));
+        assert!(!run.held && run.intended);
+        let (declaration, _) = declared_run(
+            &[
+                declared,
+                "the reader brief now asks for a new section, so earlier readings are refused",
+            ],
+            &[],
+            10,
+            8,
+        );
+        assert!(declaration.reason.is_some());
+        // A long reason is cut, with white space made single spaces.
+        let long = format!("because  past readings\nlack it {}", "x".repeat(400));
+        let cut = replay_declaration(&[criterion(declared)], &[long]);
+        let reason = cut.reason.unwrap();
+        assert_eq!(reason.chars().count(), REPLAY_REASON_CHARS);
+        assert!(reason.starts_with("because past readings lack it "));
+    }
+
+    #[test]
+    fn replay_declared_percent_ignores_quoted_examples_and_other_numbers() {
+        for text in [
+            "a candidate declaring 'expected 30%' is held",
+            "the log shows 30% progress",
+            "expected 2.5% of newly refused readings",
+            "coverage expected 90%",
+            "expected 101% of newly refused readings",
+            "expected 3000% of newly refused readings",
+            "v30% of newly refused readings",
+            "expected 30 percent of newly refused readings",
+        ] {
+            assert_eq!(
+                replay_declaration(&[criterion(text)], &[]).share,
+                None,
+                "{text}"
+            );
+        }
+        // The forms that do declare, and the first one wins.
+        for (text, share) in [
+            ("expected 30% of newly refused readings", Some(30)),
+            ("Expected 30%  of the newly refused readings.", Some(30)),
+            ("at most 0% of newly refused readings", Some(0)),
+            ("100% of newly refused", Some(100)),
+            ("(12% of newly refused readings)", Some(12)),
+        ] {
+            assert_eq!(
+                replay_declaration(&[criterion(text)], &[]).share,
+                share,
+                "{text}"
+            );
+        }
+        let two = replay_declaration(
+            &[
+                criterion("coverage expected 90%"),
+                criterion("expected 20% of newly refused readings"),
+                criterion("expected 40% of newly refused readings"),
+            ],
+            &[],
+        );
+        assert_eq!(two.share, Some(20));
+    }
+
+    #[test]
+    fn replay_declaration_of_reads_the_reading_criteria_and_out_of_scope() {
+        let mut reading = reading_with_criterion("expected 60% of newly refused readings");
+        reading.out_of_scope = vec![REASON.to_string()];
+        let declaration = replay_declaration_of(&reading);
+        assert_eq!(declaration.share, Some(60));
+        assert_eq!(declaration.reason.as_deref(), Some(REASON));
+        assert_eq!(
+            replay_declaration_of(&reading_with_criterion(ACCEPTED_CRITERION)),
+            ReplayDeclaration::default()
+        );
+    }
+
+    #[test]
+    fn changelog_describes_the_declared_share_rule() {
+        let changelog = include_str!("../../../CHANGELOG.md")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let unreleased = changelog
+            .split("## [Unreleased]")
+            .nth(1)
+            .expect("an Unreleased section")
+            .split(" ## [")
+            .next()
+            .unwrap();
+        for needle in [
+            "of newly refused readings",
+            "5 points",
+            "10%",
+            "25%",
+            "reason",
+        ] {
+            assert!(unreleased.contains(needle), "{needle}");
+        }
     }
 
     #[test]
@@ -5600,6 +5961,7 @@ mod tests {
 
     #[test]
     fn code_survey_refusal_is_declared_intended() {
+        // The sentence alone declares no share, so a replay would hold a check like this at 10%.
         let criterion = Criterion {
             text: "The change refuses more readings: change readings of class code or tests with a behavior \
                    criterion and no 'Code survey:' assumption naming a crates/ path are refused, and a higher \
@@ -5607,7 +5969,7 @@ mod tests {
                 .into(),
             kind: CriterionKind::Content,
         };
-        assert!(criteria_intend_higher_refusal(&[criterion]));
+        assert_eq!(replay_declaration(&[criterion], &[]).share, None);
         // The change does refuse the reading it names.
         assert!(accept(&code_reading(&[], &[MODIFY_READING])).is_err());
         // The check's own doc comment and the changelog carry the same sentence.

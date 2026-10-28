@@ -1,0 +1,208 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261028-162948-9a36",
+  "round": 1,
+  "at": "2026-10-28T16:43:24.81922102Z",
+  "invocation_seq": 3,
+  "approach": "Remove the phrase list and make the hold rule a number. In reading.rs add a parser that reads a declared share from criteria (\"expected N%\" or \"N% of newly refused\", first wins, 0..=100). Add a reason detector over criteria and out_of_scope (\"because\", \"now asks\", \"new required\"). A share above 25 with no reason counts as not declared. `replay_is_held(total, newly, declared: Option<u32>)` holds when newly*100 > total*(declared+5), or total*10 when none is declared, in integer math. `replay()` takes the effective declared share instead of the criteria. The stored `intended` bool is kept; it is set to \"a share was declared and the job is not held\", because `Replay::validate` in records.rs rejects held && intended and records.rs stays unchanged. run/mod.rs computes the declaration from `ctx.reading` (criteria and out_of_scope), passes it to `replay`, and passes it into `replay_view`. `ReplayView` in crates/athena-context/src/briefs.rs gains the declared percent and the reason, and `replay_section` prints them just above the list. The brief names `crates/athena-core/src/brief.rs`, which does not exist; the verifier-brief code is `crates/athena-context/src/briefs.rs`, so that file is modified instead. Stale wording is updated in `verify.rs` (the blocker finding text) and in `CODE_SURVEY_GUIDE`, which today tells readers to write the phrase that no longer exempts. CHANGELOG.md gets an entry under Unreleased/Changed.",
+  "decisions": [
+    {
+      "choice": "A candidate declares its share as a number in its criteria; the hold limit is declared+5 points, or 10 when none is declared. The 5-point margin is inclusive (exactly declared+5 is not held).",
+      "reason": "The loophole was a phrase with no measure. A number compared with the measured share (newly_refused.len() out of total, already computed directly by `replay`) closes it at its source, and the integer math matches the existing 'exactly the threshold is not held' rule.",
+      "rejected": [
+        {
+          "option": "Lengthen or tighten INTENDED_REFUSAL_PHRASES",
+          "why": "Still a phrase exemption with no link to the measured share; the 80% case would pass again with other wording."
+        },
+        {
+          "option": "Hard cap on the share any candidate may declare",
+          "why": "The request wants a declared share above 25% allowed when the reading states why; a cap would block the legitimate case."
+        }
+      ]
+    },
+    {
+      "choice": "A share above 25% without a detected reason is treated as not declared, so the 10% limit applies. The reason is the first criterion or out_of_scope item containing 'because', 'now asks' or 'new required' (whole-word, lowercase, white space normalised), cut to 300 characters.",
+      "reason": "A deterministic detector enforced by code, not prose. Dropping the declaration is a stricter outcome than rejecting the reading, and it needs no new admission rule. The reason text is what the verifier sees.",
+      "rejected": [
+        {
+          "option": "Refuse the reading at acceptance when it declares >25% with no reason",
+          "why": "Wider change in reading acceptance than the request; it would also reach readings that never replay."
+        },
+        {
+          "option": "Free-text judgement of the reason by a model",
+          "why": "The replay stage calls no model; it must stay deterministic."
+        }
+      ]
+    },
+    {
+      "choice": "Keep the Replay record shape. `ReplayRun.intended` / `Replay.intended` now mean 'a declared share applied and the job is not held'. The declared percent and reason travel to the verifier through `ReplayView`, computed from `ctx.reading` at the call site in run/mod.rs, not stored.",
+      "reason": "records.rs is out of scope and `validate` forbids held && intended. Setting intended = declared.is_some() && !held keeps old and new records valid and the round-trip test untouched. The declaration is a pure function of the accepted reading, so recomputing it for the view is cheap and cannot drift.",
+      "rejected": [
+        {
+          "option": "Add declared_share and reason fields to Replay",
+          "why": "Out of scope (stored record shape); would need a records change and a migration of replay.json files."
+        }
+      ]
+    },
+    {
+      "choice": "`replay()` takes `declared: Option<u32>` (the effective share) instead of `&[Criterion]`. A new `replay_declaration(criteria, out_of_scope) -> ReplayDeclaration { share, reason }` with `effective_share()` does the parsing in one place.",
+      "reason": "The brief requires replay_is_held to take the declared share; parsing stays in one function that both the gate and the view call, so they cannot disagree.",
+      "rejected": [
+        {
+          "option": "Parse inside replay_is_held",
+          "why": "The brief requires replay_is_held to take the declared share, and tests need to call it with plain numbers."
+        }
+      ]
+    },
+    {
+      "choice": "Edit crates/athena-context/src/briefs.rs, not a new brief.rs. Also fix the stale text in verify.rs and CODE_SURVEY_GUIDE.",
+      "reason": "The listed deliverable brief.rs does not exist; ReplayView and replay_section live in briefs.rs. CODE_SURVEY_GUIDE tells readers to write 'the higher refusal rate is intended', which would now make their change held; verify.rs's blocker text says the criteria 'do not state a higher refusal rate is intended'.",
+      "rejected": [
+        {
+          "option": "Create crates/athena-core/src/brief.rs",
+          "why": "A new file with no home in the existing code; ReplayView is already defined and tested in briefs.rs."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Delete INTENDED_REFUSAL_PHRASES and criteria_intend_higher_refusal. Add constants REPLAY_DECLARED_MARGIN_POINTS (5) and REPLAY_REASON_ABOVE_PERCENT (25), the ReplayDeclaration type and replay_declaration parser/reason detector. Change replay_is_held to take Option<u32>. Change replay() to take the effective declared share and set intended = declared.is_some() && !held. Update the doc comment on REPLAY_HOLD_PERCENT. Rewrite the old tests (replay_hold_is_over_ten_percent..., replay_hold_boundary_uses_integer_percent, code_survey_refusal_is_declared_intended) and add the new tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "replay_run computes the declaration from ctx.reading.acceptance_criteria and ctx.reading.out_of_scope and passes its effective share to replay. replay_view takes the declaration and fills ReplayView. The call at the verifier-inputs site passes it. Update the replay test that asserts `!replay.intended`; add the replay_view test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "This is the file the brief calls brief.rs (which does not exist). ReplayView: replace `intended: bool` with `declared: Option<u32>` and `reason: Option<String>`. replay_section prints the declared share and the reason before the list, with a no-reason note for a share above 25. Update the not-held sentence. Update CODE_SURVEY_GUIDE and its test phrase list. Update the three ReplayView constructors and the tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "action": "modify",
+      "purpose": "Change the blocker finding's evidence text, which says the criteria do not state a higher refusal rate is intended, to name the declared-share rule (declared share + 5 points, or REPLAY_HOLD_PERCENT when none). It is text only; the Replay literal at line 821 keeps `intended: false`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One Changed entry under Unreleased: root cause (the phrase exemption let an 80% newly-refusing rule through on 2026-10-28), the declared-share rule, the 5-point margin, the 10% default and the 25% reason requirement, and the verifier brief showing the reason. The older entry that says 'refuses more readings ... higher refusal rate is intended' is left as is, because an existing test asserts it.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "reading.rs: delete INTENDED_REFUSAL_PHRASES and criteria_intend_higher_refusal. Add REPLAY_DECLARED_MARGIN_POINTS = 5 and REPLAY_REASON_ABOVE_PERCENT = 25. Add `ReplayDeclaration { share: Option<u32>, reason: Option<String> }` with `effective_share()` (the share when it is <= 25 or a reason exists, else None).",
+    "reading.rs: add `replay_declaration(criteria: &[Criterion], out_of_scope: &[String])`. It lowercases and normalises white space per criterion, finds 'expected N%' or 'N% of newly refused' (digits then '%', value <= 100), first match wins across criteria in order, and finds the first criterion or out_of_scope item with a whole-word 'because', 'now asks' or 'new required' (use the existing `has_phrase`), cut to 300 characters.",
+    "reading.rs: change `replay_is_held(total, newly, declared: Option<u32>)` to `newly * 100 > total * declared.map_or(REPLAY_HOLD_PERCENT, |d| d as usize + 5)`. Change `replay(..)` to take `declared: Option<u32>`, hold by that, and set `intended: declared.is_some() && !held`. Fix the doc comments.",
+    "run/mod.rs: in `replay_run` build `replay_declaration(&ctx.reading.acceptance_criteria, &ctx.reading.out_of_scope)` and pass `.effective_share()` to `replay`. Change `replay_view(replay, declaration)` and its caller near line 2510, which builds the same declaration from ctx.reading.",
+    "briefs.rs: replace `ReplayView.intended` with `declared: Option<u32>` and `reason: Option<String>`. In `replay_section`, before the list, print the declared share and the reason (or the no-reason note for >25), and reword the not-held sentence to 'within 5 points of the declared share'. Update CODE_SURVEY_GUIDE and the test constructors and phrase list.",
+    "verify.rs: update the replay blocker evidence text to the declared-share wording (REPLAY_HOLD_PERCENT stays imported and used).",
+    "reading.rs tests: rewrite `replay_hold_is_over_ten_percent_and_not_when_the_criteria_intend_it`, `replay_hold_boundary_uses_integer_percent` and `code_survey_refusal_is_declared_intended` (drop the criteria_intend assertion; keep the doc and changelog assertions); change every `replay(.., &[])` to `None`. Add tests named replay_declared_share_*, replay_phrase_without_a_number_*, replay_declared_margin_*, replay_phrase_only_candidate_is_now_held, a parser test, and changelog_describes_the_declared_share_rule.",
+    "run/mod.rs tests: keep the held-3-of-10 assertion working (`!replay.intended`); add `replay_view_carries_the_declared_share_and_reason`. briefs.rs tests: add the replay_summary_* test for the reason beside the list and the >25 no-reason note.",
+    "CHANGELOG.md: add the Changed entry under Unreleased.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`; run the Grep for the two removed names; check that `system_facts_budgets_match_computed` still passes."
+  ],
+  "risks": [
+    {
+      "risk": "Replay::validate rejects held && intended; a declared share that is exceeded would produce an invalid record.",
+      "mitigation": "Set intended = declared.is_some() && !held in replay(), and assert `record.validate()` is Ok in the 80%-with-reason test and in a held 30% test. The records.rs round-trip tests are untouched."
+    },
+    {
+      "risk": "The parser reads an unrelated percentage in a criterion (for example 'coverage above 90%') as the declared share.",
+      "mitigation": "Parse only 'expected N%' and 'N% of newly refused', accept 0..=100, ignore other percentages, and test a criterion such as 'the log shows 30% progress' declaring nothing. The first match wins."
+    },
+    {
+      "risk": "CODE_SURVEY_GUIDE keeps telling readers to write a phrase that no longer exempts, so honest candidates are held.",
+      "mitigation": "Edit CODE_SURVEY_GUIDE so readers are told to declare 'expected N%' and give a reason, and update its test's phrase list. The guide text lives in briefs.rs, so a reader brief and the gate agree."
+    },
+    {
+      "risk": "Integer overflow or rounding at the 5-point boundary (35 versus 36 of 100).",
+      "mitigation": "Keep the 50-case window and `replay_cases` untouched; test with total 50 and with total 100/10 at the edges, using integer math with usize multiplication."
+    },
+    {
+      "risk": "The reason reaches the view in run/mod.rs but the end-to-end go() path is not tested, because the fake driver's reading criteria are not controllable.",
+      "mitigation": "Add one test that renders the real output of `replay_declaration` into the view, and one test of the rendered brief, so a break on either side fails a test."
+    },
+    {
+      "risk": "CHANGELOG.md is 198 KB and a test already asserts old wording in it.",
+      "mitigation": "The planned test for the changelog entry is one more reader of CHANGELOG.md; the old entry is left untouched so the existing include_str! assertions keep passing."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit test in reading.rs `mod tests`. It calls `replay_declaration` on criteria [ACCEPTED_CRITERION, 'the change refuses new readings; expected 30%'] and the same with 'expected 80%' plus out_of_scope ['readers now ask for a new required section, because past readings lack it']. It then calls the production `replay(&marked_cases(50, 40), &base_checker(), &marker_candidate(), declaration.effective_share())`. Preconditions: the 50 cases and the checker doubles already exist (`marked_cases`, `base_checker`, `marker_candidate`, used by the existing replay tests). The doubles only decide which cases refuse; the held/pass logic under test is the real `replay` and `replay_is_held`.",
+      "command": "cargo test -p athena-core replay_declared_share",
+      "observes": "The 30% run has total 50, newly_refused 40, held true. The 80% run with a reason has held false and `intended` true, and `record(...).validate()` is Ok.",
+      "fails_without": "With the old phrase-only rule, 'expected 30%' is not parsed, so nothing distinguishes a 30% declaration from none: a declared 80% with a reason would still be held at 10%, and the 80%-vs-30% case could pass if any intended phrase were present. The first assertion (held at declared 30) and the second (passes at declared 80 with a reason) cannot both hold under the old code."
+    },
+    {
+      "criterion": 2,
+      "method": "Unit test in reading.rs. Criteria: 'the higher refusal rate is intended' and 'the change refuses more readings'. It asserts `replay_declaration(..).share` is None. It runs the production `replay` over `marked_cases(50, 40)` (80%) and `marked_cases(10, 1)` (exactly 10%), passing `effective_share()`.",
+      "command": "cargo test -p athena-core replay_phrase_without_a_number",
+      "observes": "80% measured: held true and intended false. Exactly 10% (1 of 10): held false.",
+      "fails_without": "The old code exempts any candidate whose criterion contains 'higher refusal rate' or 'refuses more', so the 80% case would be not held; the assertion that it is held fails."
+    },
+    {
+      "criterion": 3,
+      "method": "Unit tests in reading.rs. (a) `replay_is_held(100, 35, Some(30))` is false and `replay_is_held(100, 36, Some(30))` is true. A second table uses total 50 (25 and 20) and Some(0) against None; None holds above 10 percent. (b) Criteria 'expected 80%' with an empty out_of_scope and no reason in the criteria: `replay_declaration` gives raw share Some(80) but effective_share None; the production `replay` on `marked_cases(10, 2)` is held, and `marked_cases(10, 1)` is not. (c) Exactly 25% declared needs no reason, and 'expected 26%' without a reason falls back to 10%.",
+      "command": "cargo test -p athena-core replay_declared_margin",
+      "observes": "The boundary table matches. The undocumented 80% is held at 20% measured because the 10% limit applies. 25% is accepted without a reason; 26% is not.",
+      "fails_without": "Without the declared+5 comparison, 36% against 'expected 30%' would not be held (or 35% would be held), and a declared 80% with no reason would not fall back to 10%."
+    },
+    {
+      "criterion": 4,
+      "method": "Two tests joined at the public ReplayView. (1) In run/mod.rs `mod tests`: build a declaration with the production `replay_declaration(criteria, out_of_scope)` for 'expected 80%' plus a reason in out_of_scope, make a record with the production `ReplayRun::record`, call the production `replay_view(&record, &declaration)`, and assert `ReplayView.declared == Some(80)` and the reason string equals the out_of_scope text. (2) In briefs.rs `mod tests`: use the existing `replay_view` helper and `plain_verifier_inputs`, set declared Some(80) and a reason, render `verifier_brief(&inputs, true)`, take `replay_part(&brief)`. The seam is the `ReplayView` struct, whose two new fields are added in step 5. The end-to-end `go` path is not used because the fake driver's reading has no controllable criteria.",
+      "command": "cargo test -p athena-core replay_view_carries && cargo test -p athena-context replay_summary",
+      "observes": "The replay section contains 'Declared share: 80%', contains the reason text, and the reason line appears before the first '- <job>:' list line. Without a reason on a >25% share the section says the declared share has no stated reason and the 10% limit applies.",
+      "fails_without": "If the reason is not carried from the reading into the view, or not printed in the replay section, the asserted reason text is missing from the brief and both tests fail."
+    },
+    {
+      "criterion": 5,
+      "method": "Use the Grep tool (not a shell grep) for 'INTENDED_REFUSAL_PHRASES' and 'criteria_intend_higher_refusal' over crates/ and for the signature of `replay_is_held`. `cargo build -p athena-core` fails to compile if any caller still passes a bool.",
+      "command": "grep -rn INTENDED_REFUSAL_PHRASES crates/ ; grep -rn criteria_intend_higher_refusal crates/ ; cargo build -p athena-core",
+      "observes": "Grep finds no match for either name; `replay_is_held` is declared with `declared: Option<u32>`; the build succeeds.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Content check: a test in reading.rs (next to `code_survey_refusal_is_declared_intended`) reads CHANGELOG.md with include_str!, collapses white space, and asserts the Unreleased section names the declared-share rule ('expected N%'), the 5-point margin, the 10% default and the 25% reason requirement. The verifier may also read the file with Read.",
+      "command": "cargo test -p athena-core changelog_describes_the_declared_share_rule",
+      "observes": "The test passes; CHANGELOG.md has a Changed entry under Unreleased that states all four.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Run the three Athena checks exactly as listed. Existing tests that call `replay(.., &[])` or `criteria_intend_higher_refusal` (reading.rs tests at the replay hold boundary and `code_survey_refusal_is_declared_intended`; briefs.rs ReplayView constructors; the `Replay` view assertion in run/mod.rs `replay_holds_over_threshold...`) are updated in step 9.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three commands exit 0, including the athena-data replay record round-trip test, which is untouched.",
+      "fails_without": "A leftover use of the removed `intended` bool, an unused import (REPLAY_HOLD_PERCENT, has_phrase), or a stale `replay(.., &[])` call in a test would fail compile or clippy."
+    },
+    {
+      "criterion": 8,
+      "method": "Unit test in reading.rs that runs the production `replay` on the two criteria sets: the criterion 'the change refuses more readings than the base' (the exact one the old test used as intended) against `marked_cases(50, 40)`. It compares the result with `replay_is_held(50, 40, None)` and asserts `held` is true. The doubles `base_checker` and `marker_candidate` exist today.",
+      "command": "cargo test -p athena-core replay_phrase_only_candidate_is_now_held",
+      "observes": "held is true, intended is false, newly_refused.len() is 40 of 50. This is the 2026-10-28 case no longer passing.",
+      "fails_without": "Under the base code the same candidate (criteria with 'the change refuses more readings than the base') over `marked_cases(50, 40)` is not held; the test asserts held and fails there."
+    }
+  ],
+  "open_questions": [
+    "The brief lists crates/athena-core/src/brief.rs, which does not exist. The plan edits crates/athena-context/src/briefs.rs, the file that holds ReplayView. Athena's file-list check may flag that file and verify.rs as unlisted; confirm they are accepted.",
+    "The reason detector ('because', 'now asks', 'new required') is loose: any criterion containing 'because' counts. The code does not settle a stricter rule, and the request defines the reason only as 'mentions why'.",
+    "Whether changing CODE_SURVEY_GUIDE moves any prompt budget line in system facts is not known; I did not find that the guide is in a budgeted set (briefs sit outside the sets), but the `system_facts_budgets_match_computed` test would show it.",
+    "verify.rs's blocker text and the `Replay.intended` doc comment in records.rs now say less than the new rule; records.rs is out of scope, so its comment stays stale."
+  ],
+  "producer_section_sha256": "68e37d29a784b7a4c45393c2c37d4865863fa5c669be355788df541ab9c7e732"
+}

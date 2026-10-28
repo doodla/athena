@@ -717,8 +717,13 @@ pub struct ReplayView {
     /// Each request the candidate newly refuses: its job id and the refusal reason.
     pub newly_refused: Vec<(String, String)>,
     pub held: bool,
-    /// Whether the criteria state that a higher refusal rate is intended.
-    pub intended: bool,
+    /// The share of newly refused readings, in whole percent, that the reading declares and the replay applied.
+    /// `None` when it declares none, so the 10% limit applied.
+    pub declared: Option<u32>,
+    /// The reason the reading gives for a declared share above 25%: the sentence the verifier judges.
+    pub reason: Option<String>,
+    /// A declared share above 25% that has no stated reason, so it was not applied and the 10% limit applied.
+    pub unsupported: Option<u32>,
     /// `no replay: <reason>` when no replay ran.
     pub no_replay: Option<String>,
 }
@@ -737,13 +742,34 @@ fn replay_section(out: &mut String, replay: &ReplayView) {
         "Athena ran the newest accepted readings through the base and the candidate reading rules: {newly} of {} \
          are newly refused by the candidate and were accepted by the base. {}\n",
         replay.total,
-        match (replay.held, replay.intended) {
+        match (replay.held, replay.declared) {
             (true, _) => "The job is held for this.",
-            (false, true) =>
-                "The criteria state a higher refusal rate is intended, so the job is not held.",
-            (false, false) => "This is within the allowed share, so the job is not held.",
+            (false, Some(_)) =>
+                "This is within 5 points of the declared share, so the job is not held.",
+            (false, None) => "This is within the allowed share, so the job is not held.",
         }
     );
+    // The declared share and its reason come before the list, so the verifier reads them first.
+    if let Some(declared) = replay.declared {
+        let _ = writeln!(
+            out,
+            "Declared share: {declared}% of newly refused readings (the job is held above the declared share plus 5 points)."
+        );
+        if let Some(reason) = &replay.reason {
+            let _ = writeln!(
+                out,
+                "Reason given for the declared share (judge whether it explains why past readings should be refused): {}",
+                reason.replace('\n', " ")
+            );
+        }
+        let _ = writeln!(out);
+    } else if let Some(unsupported) = replay.unsupported {
+        let _ = writeln!(
+            out,
+            "A share of {unsupported}% is declared, but a share above 25% needs a reason in out_of_scope or the criteria \
+             and none is stated, so it was not applied and the 10% limit applies.\n"
+        );
+    }
     for (job, reason) in replay.newly_refused.iter().take(REPLAY_BRIEF_MAX_LISTED) {
         let reason: String = reason.chars().take(REPLAY_BRIEF_REASON_CHARS).collect();
         let _ = writeln!(out, "- {job}: {}", reason.replace('\n', " "));
@@ -1475,7 +1501,10 @@ pub const CODE_SURVEY_GUIDE: &str = "Before you give behavior criteria for a cod
 with `Code survey:` and names the crates/ paths you read. Cover: the entry point, and the order in which resolution and probing run; \
 what the records validation allow-list accepts, and, if the change adds a record or data file under crates/, name `check_record_file`, \
 `AnyRecord` or the round-trip test that covers it; and how the property is measured directly, not through a stand-in. \
-When the request adds or tightens a refusal rule, also write a criterion that says the change refuses more readings and the higher refusal rate is intended.";
+When the request adds or tightens a refusal rule, also write a criterion that says the change refuses more readings and the higher refusal rate is intended. \
+Say how many: write `expected N% of newly refused readings` (a whole percent). A replay of past readings holds the job when more than N plus 5 points \
+of them are newly refused, and when you give no number it holds the job above 10%. For N above 25, also write, in a criterion or in out_of_scope, \
+one sentence with `because`, `now asks` or `new required` that says why past readings should be refused; the verifier is shown it.";
 
 /// The reader brief: the request, earlier readings and corrections, the reference forecast, the closed
 /// lists, the reading rules, what the verifier can run, and the repository's top level.
@@ -2880,7 +2909,9 @@ mod tests {
                 .map(|n| (format!("20201001-{n:06}-{n:04}"), "r".repeat(reason_chars)))
                 .collect(),
             held: newly * 100 > total * 10,
-            intended: false,
+            declared: None,
+            reason: None,
+            unsupported: None,
             no_replay: None,
         }
     }
@@ -2926,7 +2957,9 @@ mod tests {
             total: 0,
             newly_refused: vec![],
             held: false,
-            intended: false,
+            declared: None,
+            reason: None,
+            unsupported: None,
             no_replay: Some("no replay: the base build has no check-reading subcommand".into()),
         });
         let brief = verifier_brief(&inputs, true);
@@ -2939,17 +2972,57 @@ mod tests {
         // Without a replay the brief is the stored copy.
         inputs.replay = None;
         assert_eq!(verifier_brief(&inputs, true), VERIFIER_BRIEF_WITHOUT_A_PLAN);
-        // A replay inside the allowed share, and one the criteria intend, say why they are not held.
+        // A replay inside the allowed share, and one inside a declared share, say why they are not held.
         let mut within = replay_view(1, 10, 5);
         within.held = false;
         inputs.replay = Some(within);
         assert!(verifier_brief(&inputs, true).contains("1 of 10"));
         assert!(verifier_brief(&inputs, true).contains("not held"));
-        let mut intended = replay_view(3, 10, 5);
-        intended.held = false;
-        intended.intended = true;
-        inputs.replay = Some(intended);
-        assert!(verifier_brief(&inputs, true).contains("higher refusal rate is intended"));
+        let mut declared = replay_view(3, 10, 5);
+        declared.held = false;
+        declared.declared = Some(30);
+        inputs.replay = Some(declared);
+        let brief = verifier_brief(&inputs, true);
+        let section = replay_part(&brief);
+        assert!(
+            section.contains("within 5 points of the declared share"),
+            "{section}"
+        );
+        assert!(
+            !section.contains("higher refusal rate is intended"),
+            "{section}"
+        );
+    }
+
+    #[test]
+    fn replay_summary_shows_the_declared_share_and_reason_before_the_list() {
+        let mut inputs = plain_verifier_inputs();
+        let reason = "readers now ask for a new required section, because past readings lack it";
+        let mut view = replay_view(8, 10, 5);
+        view.held = false;
+        view.declared = Some(80);
+        view.reason = Some(reason.into());
+        inputs.replay = Some(view);
+        let brief = verifier_brief(&inputs, true);
+        let section = replay_part(&brief);
+        let share = section.find("Declared share: 80%").expect(section);
+        let given = section.find(reason).expect(section);
+        let list = section.find("\n- 2020").expect(section);
+        assert!(share < list && given < list, "{section}");
+        assert!(section.contains("not held"), "{section}");
+        // A declared share above 25% with no reason says it was not applied and that 10% applies.
+        let mut unsupported = replay_view(2, 10, 5);
+        unsupported.unsupported = Some(80);
+        inputs.replay = Some(unsupported);
+        let brief = verifier_brief(&inputs, true);
+        let section = replay_part(&brief);
+        let note = section.find("none is stated").expect(section);
+        assert!(
+            section.contains("80%") && section.contains("10% limit applies"),
+            "{section}"
+        );
+        assert!(note < section.find("\n- 2020").unwrap(), "{section}");
+        assert!(!section.contains("Declared share:"), "{section}");
     }
 
     #[test]
@@ -3067,6 +3140,12 @@ mod tests {
             "measured directly",
             "refuses more readings",
             "higher refusal rate is intended",
+            "expected N% of newly refused readings",
+            "plus 5 points",
+            "above 10%",
+            "N above 25",
+            "because",
+            "past readings should be refused",
         ] {
             assert!(
                 CODE_SURVEY_GUIDE

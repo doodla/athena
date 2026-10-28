@@ -51,6 +51,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- The replay of accepted readings no longer exempts a candidate for a phrase. Root cause: a candidate whose
+  criteria held a phrase such as `refuses more` or `higher refusal rate` was never held (the constant
+  `INTENDED_REFUSAL_PHRASES`), so on 2026-10-28 a rule that newly refused 40 of the last 50 accepted readings
+  (80%) landed. The phrase list and `criteria_intend_higher_refusal` are removed. A candidate now declares a
+  number: a criterion that says `expected N% of newly refused readings` (a whole percent from 0 to 100; the
+  first such criterion counts, and a percentage not tied to newly refused readings, such as a quoted example,
+  declares nothing). The replay holds it when the measured share is more than the declared share plus 5
+  points (exactly 5 points over is not held), and when it declares none it holds it above 10% as before.
+  A declared share above 25% also needs a reason: one criterion or `out_of_scope` item that has `because`,
+  `now asks` or `new required` and also names past readings or refusals (for example a new required section
+  that the reader brief now asks for). Without that reason the declared share is not applied and the 10% limit
+  holds; with it, the verifier brief shows the declared share and the reason sentence above the replay list so
+  the verifier can judge it. `replay_is_held` takes the declared share (`Option<u32>`) instead of a bool, and
+  `replay_declaration_of` reads the same declaration for the gate and for the verifier's view. The stored
+  `athena.replay/1` record is unchanged: `intended` now means a declared share applied and the job is not
+  held. The verifier brief code is in `crates/athena-context/src/briefs.rs` (`ReplayView`, `replay_section`
+  and `CODE_SURVEY_GUIDE`, which now teaches the declared form), and the held-replay finding text in
+  `crates/athena-core/src/verify.rs` names the new rule. Tests cover 30% declared with 80% measured (held),
+  80% declared with a reason (passes), a phrase without a number (held at 80%, not at exactly 10%), the 5-point
+  edge, and the reason in the verifier view.
 - Job planning is back on for hard jobs only, and the keep rule now counts later harm as well as landed share
   (D143; `docs/design/job-planning.md` section 9). Planning was turned off on 2026-10-26 because the keep rule
   measured landed share and cost. The next day, job 20261027-054211-a2n5 ran with no planner or critic and landed
