@@ -1,0 +1,109 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261028-065915-a41d",
+  "base_commit": "f1b76f593bf2d50054413ae17b7a7f103be23412",
+  "base_fingerprint": "sha256:82c7baf92e0998dd070942cea15b654402da33b1f91b6fb4d3b4cf5ad1e9ccb3",
+  "previous_job": "20261028-091836-kbnb",
+  "candidate_commit": "f1788571c87b53badbe05f13395d4d5bb52bb069",
+  "candidate_tree": "c1e8727b43486326e87e4beae7d73cc9af7f155b",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 194748
+    },
+    {
+      "path": "crates/athena-core/src/scope_guard.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 72613
+    }
+  ],
+  "fingerprint": "sha256:254cad6a7bc2fe9e78587e0d496edcd2a9accb91bccb084d222c89ea8efcb2c7",
+  "violations": [],
+  "producer_report": {
+    "summary": "The scope guard no longer counts an attempt that ended on the environment as a failed attempt. A retry that resumes a kept candidate is now judged on the stages left. Root cause: `attempt_of` turned every closed job that was neither landed nor rejected into a `Failed` attempt. A low-disk stop therefore counted toward T1, T2, T5 and T3.\\n\\nWhat changed in `scope_guard.rs`:\\n- **Classification:** a job closed `failed` with a reason starting `environment:` becomes `Verdict::Environment`. A failed verification is still `Rejected` and still counts.\\n- **T1, T2, T5:** these ignore Environment attempts through a `counted` helper. T4 still counts only rejections.\\n- **T3 spend:** T3 drops the spend of an Environment attempt whose work was kept. That means it is the last attempt, or the next attempt resumed it. If the next attempt redid the work, the spend stays counted.\\n- **T3 forecast:** when the last attempt resumed a kept candidate, the forecast is the reading's cost p90 times `VERIFIER_SHARE` (0.3, marked as an estimate). A retry counts as resuming when its target is one `disk::resumable_stop` accepts and the retry ran no producer. The records are the only evidence left, because the resume mark is spent when the job closes.\\n- **Mark numbers:** the pause and flag files now show the numbers the signals used (counted attempts and the `t3_basis` spend and forecast).\\n\\nI added unit tests for the environment-versus-rejection case and the resumed-retry case with its control. A third test runs a real low-disk stop through `ask`, `go` and `retry` and checks that no pause or flag file is written. `CHANGELOG.md` has an entry under Unreleased / Fixed. fmt, clippy with `-D warnings`, the policy word scan and the full test suite all pass. Job 20261028-034820-v3rf's own records and pause file are untouched.",
+    "files": [
+      "crates/athena-core/src/scope_guard.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-core scope_guard",
+        "result": "pass",
+        "note": "26 scope_guard tests pass, including the new ones and the existing t4/retry/t3 watcher tests"
+      },
+      {
+        "command": "cargo fmt --all",
+        "result": "pass",
+        "note": "applied formatting"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "clean, no warnings"
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "12 pass, including the boundary word scan"
+      },
+      {
+        "command": "cargo test --locked -q",
+        "result": "pass",
+        "note": "whole workspace, every suite ok, 0 failed"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A unit test in crates/athena-core/src/scope_guard.rs builds a line whose earlier attempt ended on low disk and shows evaluate_before_attempt gives no T1/T2/T5 pause or flag from it, while the same line with a Rejected verification does. Run: cargo test -p athena-core scope_guard.",
+        "status": "met",
+        "evidence": "mod tests::environment_stop_is_not_counted_but_a_rejection_is: two Environment attempts (120 min each, plan 4 then 9, round 3) give Level::None on t1..t5; same line as Rejected gives T1 Flag, T2 Pause, T4 Pause, T5 Pause. Also watcher_tests::a_low_disk_job_is_read_as_an_environment_attempt runs a real low-disk stop through ask/go and checks Verdict::Environment and no pause/flag file. Both pass under cargo test -p athena-core scope_guard."
+      },
+      {
+        "criterion": "A unit test in scope_guard.rs shows a retry that resumes a kept candidate (planning, build and checks done) is judged against the cost of its remaining stages: spend that would pause as a fresh job does not pause, and the same spend on a non-resuming retry does. Run: cargo test -p athena-core scope_guard.",
+        "status": "met",
+        "evidence": "mod tests::resumed_retry_is_judged_on_remaining_stages: [Environment 1.4, resumed 0.1] gives Level::None (spend 0.1 vs forecast 0.3); control [Environment 1.4, non-resumed 0.1] gives spend 1.5 vs p90 1.0 and Level::Pause; resumed 0.5 pauses and 0.35 flags so T3 stays active. The end-to-end test confirms request_records marks the real retry resumed: true. Passes."
+      },
+      {
+        "criterion": "The existing scope_guard tests (t4_pause_via_go_and_ask, retry_refuses_paused_line, t3_pause_from_reading_forecast and the rest) still pass, so real rejections and cost overruns still pause lines. Run: cargo test.",
+        "status": "met",
+        "evidence": "Ran cargo test --locked -q: all suites ok with 0 failures; the 26 scope_guard tests include the unchanged existing ones. Only the att helper gained resumed: false."
+      },
+      {
+        "criterion": "cargo fmt --check and cargo clippy --all-targets -- -D warnings are clean.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I ran cargo fmt --all and cargo clippy --all-targets --locked -- -D warnings; clippy produced no warnings."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry naming the scope guard change: environment-ended attempts are not counted, and resumed retries are forecast on remaining stages.",
+        "status": "met",
+        "evidence": "A new first bullet under Unreleased / Fixed in CHANGELOG.md: states environment-ended attempts are not counted toward T1, T2, T5 (T3 drops kept-work spend), a retry resuming a kept candidate is compared against 0.3 of the p90, root cause, and job 20261028-034820-v3rf."
+      },
+      {
+        "criterion": "Each new constant or rule in scope_guard.rs has a doc comment stating its basis or marking it an estimate, and the diff touches only crates/athena-core/src/scope_guard.rs and CHANGELOG.md.",
+        "status": "met",
+        "evidence": "ENVIRONMENT_PREFIX (basis: disk::LOW_DISK, tied by a unit test), PRODUCER_SHARE and VERIFIER_SHARE (marked estimates), Verdict::Environment, AttemptRecord::resumed (basis: resumable_stop), counted, t3_basis, resumed_candidate all have doc comments. git status --short lists only CHANGELOG.md and scope_guard.rs."
+      }
+    ],
+    "open_issues": [
+      "run/mod.rs is in the brief's expected deliverables but is unchanged, as the plan decided: criterion 6 limits the diff to scope_guard.rs and CHANGELOG.md, and `go` already calls `watch_line` for every finished job. Please confirm that is intended.",
+      "No code records a usage-limit stop: only `disk::LOW_DISK` carries the `environment:` prefix. A usage-limit stop is excluded once it is recorded with that prefix. Recording it is outside this change.",
+      "An interrupted job (dispatched, no outcome) was never counted, because `attempt_of` returns None for it. If it is closed with `athena close` it reads as a plain failure; the guard cannot tell without new records.",
+      "Edge case: a retry of an environment-stopped job that fails before running a producer, with no resume mark, would be read as resumed and judged on the scaled forecast. The plan accepted this; it is also noted in the `t3_basis` doc comment together with the earlier-rejection case.",
+      "The 0.7/0.3 producer and verifier split is an estimate and may be off."
+    ],
+    "mistakes": [
+      "My first test run was piped through tail, which the Bash policy refused; I reran without the pipe. The first full test run's output was too large to inspect, so I ran the suite twice."
+    ],
+    "learnings": [
+      "The rig in scope_guard watcher_tests reproduces a real low-disk stop before the verifier with test_support::low_once_verifying, and a retry after writing <state root>/freed resumes with no producer invocation.",
+      "disk::resumable_stop also accepts a Dispatched (interrupted) target; attempt_of returns None for such a job, so its spend is never counted.",
+      "Producer is a Role in athena_data::records; Invocation.role identifies it."
+    ],
+    "desires": [
+      "A way to read a long tool-result file inside the working directory, to see a full cargo test log without rerunning it."
+    ]
+  }
+}

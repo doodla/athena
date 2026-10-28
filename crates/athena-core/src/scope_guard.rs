@@ -22,7 +22,7 @@ use crate::store::{JobRecords, JobState, Records};
 use crate::{Athena, Ui};
 use anyhow::{Context, Result};
 use athena_data::JobId;
-use athena_data::records::OutcomeState;
+use athena_data::records::{OutcomeState, Role};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -47,6 +47,17 @@ pub const T4_REJECTIONS: usize = 2;
 pub const T5_FLAG_MINUTES: u32 = 60;
 /// T5 (section 5): pause at this many minutes of agent time with no accepted candidate. Estimate.
 pub const T5_PAUSE_MINUTES: u32 = 120;
+/// The prefix of a closing reason that records a stop of the environment, not of the work. Basis:
+/// [`crate::disk::LOW_DISK`] starts with it, and [`crate::disk::is_environment_reason`] checks that text; a
+/// unit test ties the two. A usage-limit stop is read as an environment stop once it is recorded with this prefix.
+pub const ENVIRONMENT_PREFIX: &str = "environment:";
+/// Share of the reading's `cost_usd` forecast that the producer is expected to use. Estimate, not measured: the
+/// forecast covers the producer and the verifier only (checks cost no agent dollars, and planning is outside it).
+pub const PRODUCER_SHARE: f64 = 0.7;
+/// Share of the reading's `cost_usd` forecast that the verifier is expected to use. Estimate, not measured; it is
+/// what is left to spend when a retry resumes a kept candidate, so T3 compares such a retry with this share of
+/// the forecast p90, not the whole of it. Together with [`PRODUCER_SHARE`] it makes 1.
+pub const VERIFIER_SHARE: f64 = 0.3;
 
 /// How a finished attempt ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +68,10 @@ pub enum Verdict {
     Rejected,
     /// The attempt ended without a verdict (for example a failed run).
     Failed,
+    /// The attempt stopped for an environment cause (its closing reason starts with [`ENVIRONMENT_PREFIX`], such
+    /// as low disk): the work was not judged and not found wrong. T1, T2 and T5 do not count it, T4 sees only
+    /// rejections, and T3 drops its spend when the work was kept (see [`t3_basis`]).
+    Environment,
 }
 
 /// One finished attempt, as the watcher reads it from job records.
@@ -74,6 +89,10 @@ pub struct AttemptRecord {
     pub plan_size: Option<u32>,
     /// Which planning round produced the plan (1 for the first), when known.
     pub planning_round: u32,
+    /// True when this attempt resumed a kept candidate: its retry target stopped for an environment cause or was
+    /// interrupted ([`crate::disk::resumable_stop`]) and this job ran no producer. Planning, build and checks were
+    /// then already done, so only the verifier was left to pay for.
+    pub resumed: bool,
 }
 
 /// One request and its finished attempts.
@@ -198,9 +217,19 @@ fn done(attempts: &[AttemptRecord]) -> bool {
     attempts.iter().any(|a| a.verdict == Verdict::Accepted)
 }
 
-/// T1, repeated retries: flag when the next attempt would be the `T1_ATTEMPT`th on the line.
+/// The attempts that count toward the attempt, round and time signals: every attempt except one that ended on
+/// an environment cause. A failed verification (`Rejected`) and a failure of the work (`Failed`) count.
+fn counted(attempts: &[AttemptRecord]) -> Vec<&AttemptRecord> {
+    attempts
+        .iter()
+        .filter(|a| a.verdict != Verdict::Environment)
+        .collect()
+}
+
+/// T1, repeated retries: flag when the next attempt would be the `T1_ATTEMPT`th on the line. An attempt that
+/// ended on an environment cause is not an attempt of the work and is not counted.
 pub fn t1_retries(attempts: &[AttemptRecord]) -> Level {
-    if !done(attempts) && attempts.len() as u32 + 1 >= T1_ATTEMPT {
+    if !done(attempts) && counted(attempts).len() as u32 + 1 >= T1_ATTEMPT {
         Level::Flag
     } else {
         Level::None
@@ -209,10 +238,12 @@ pub fn t1_retries(attempts: &[AttemptRecord]) -> Level {
 
 /// T2, growing plan: flag when the latest known plan is over `T2_RATIO` times the first, or a planning round
 /// reached `T2_PLANNING_ROUND`. The "pause if T1 or T4 also holds" rule is applied in [`evaluate_before_attempt`].
+/// The plan size and planning round of an attempt that ended on an environment cause are not used.
 pub fn t2_plan_growth(attempts: &[AttemptRecord]) -> Level {
     if done(attempts) {
         return Level::None;
     }
+    let attempts = counted(attempts);
     let sizes: Vec<u32> = attempts.iter().filter_map(|a| a.plan_size).collect();
     let grew = match (sizes.first(), sizes.last()) {
         (Some(&first), Some(&last)) if sizes.len() > 1 && first > 0 => {
@@ -230,13 +261,45 @@ pub fn t2_plan_growth(attempts: &[AttemptRecord]) -> Level {
     }
 }
 
-/// T3, cost against forecast: pause at `T3_PAUSE_RATIO` times `forecast_p90_dollars`, flag at `T3_FLAG_RATIO`
+/// The spend and the forecast T3 compares, from the line's attempts and the reading's forecast p90.
+///
+/// Spend drops an attempt that ended on an environment cause when its work was kept: it is the last attempt
+/// of the line, or the next attempt resumed it. Kept work is not waste. An environment-stopped attempt that a
+/// later attempt redid from scratch stays in the spend, since that spend was lost.
+///
+/// When the last attempt resumed a kept candidate, only the verifier was left to run, so the forecast is
+/// `forecast_p90_dollars` times [`VERIFIER_SHARE`] (an estimate); otherwise it is `forecast_p90_dollars`.
+/// Known limit: an earlier rejection on the same line still counts in the spend of a resumed attempt.
+pub fn t3_basis(attempts: &[AttemptRecord], forecast_p90_dollars: f64) -> (f64, f64) {
+    let spend: f64 = attempts
+        .iter()
+        .enumerate()
+        .filter(|(i, a)| {
+            let kept = *i + 1 == attempts.len() || attempts[*i + 1].resumed;
+            !(a.verdict == Verdict::Environment && kept)
+        })
+        .map(|(_, a)| a.cost_dollars)
+        .sum();
+    let resumed_last = attempts
+        .last()
+        .is_some_and(|a| a.resumed && a.verdict != Verdict::Environment);
+    let forecast = if resumed_last {
+        forecast_p90_dollars * VERIFIER_SHARE
+    } else {
+        forecast_p90_dollars
+    };
+    (spend, forecast)
+}
+
+/// T3, cost against forecast: pause at `T3_PAUSE_RATIO` times the forecast p90, flag at `T3_FLAG_RATIO`
 /// times it, and flag over `T3_LINE_DOLLARS` regardless of forecast. A forecast of 0 or less is not used.
+/// `forecast_p90_dollars` is the p90 for a whole job; spend and forecast are adjusted by [`t3_basis`] for
+/// environment stops and for a retry that resumed a kept candidate.
 pub fn t3_cost(attempts: &[AttemptRecord], forecast_p90_dollars: f64) -> Level {
     if done(attempts) {
         return Level::None;
     }
-    let spend: f64 = attempts.iter().map(|a| a.cost_dollars).sum();
+    let (spend, forecast_p90_dollars) = t3_basis(attempts, forecast_p90_dollars);
     if forecast_p90_dollars > 0.0 && spend >= T3_PAUSE_RATIO * forecast_p90_dollars {
         Level::Pause
     } else if (forecast_p90_dollars > 0.0 && spend >= T3_FLAG_RATIO * forecast_p90_dollars)
@@ -283,12 +346,12 @@ pub fn t4_level(attempts: &[AttemptRecord]) -> Level {
 }
 
 /// T5, wall time: flag at `T5_FLAG_MINUTES` of agent time on the line with no accepted candidate, pause at
-/// `T5_PAUSE_MINUTES`.
+/// `T5_PAUSE_MINUTES`. The minutes of an attempt that ended on an environment cause are not counted.
 pub fn t5_wall_time(attempts: &[AttemptRecord]) -> Level {
     if done(attempts) {
         return Level::None;
     }
-    let minutes: u32 = attempts.iter().map(|a| a.agent_minutes).sum();
+    let minutes: u32 = counted(attempts).iter().map(|a| a.agent_minutes).sum();
     if minutes >= T5_PAUSE_MINUTES {
         Level::Pause
     } else if minutes >= T5_FLAG_MINUTES {
@@ -457,11 +520,18 @@ pub fn list_lines(state: &StateDir) -> Vec<LineMark> {
 }
 
 /// The finished attempt a request's job made, when it has one: it was dispatched and reached a final state.
-fn attempt_of(job: &JobRecords) -> Option<AttemptRecord> {
+/// A job closed `failed` with a reason that starts with [`ENVIRONMENT_PREFIX`] is an environment stop; `resumed`
+/// says whether it resumed a kept candidate (see [`AttemptRecord::resumed`]).
+fn attempt_of(job: &JobRecords, resumed: bool) -> Option<AttemptRecord> {
     job.job.as_ref()?;
+    let environment = job
+        .outcome
+        .as_ref()
+        .is_some_and(|o| o.reason.starts_with(ENVIRONMENT_PREFIX));
     let verdict = match job.state() {
         JobState::Closed(OutcomeState::Landed) => Verdict::Accepted,
         JobState::Closed(OutcomeState::Rejected) => Verdict::Rejected,
+        JobState::Closed(OutcomeState::Failed) if environment => Verdict::Environment,
         JobState::Closed(_) => Verdict::Failed,
         _ => return None,
     };
@@ -490,7 +560,20 @@ fn attempt_of(job: &JobRecords) -> Option<AttemptRecord> {
         agent_minutes,
         plan_size: plan.map(|p| (p.files.len() + p.steps.len()) as u32),
         planning_round: plan.map_or(1, |p| p.round),
+        resumed,
     })
+}
+
+/// Whether `job`, a retry of `target`, resumed the target's kept candidate. Basis: the target stopped in a way
+/// `athena retry` resumes ([`crate::disk::resumable_stop`]) and this job ran no producer. The resume mark in the
+/// state directory is spent when the job closes, so the records are the only evidence left. A retry that planned
+/// and built again has a producer invocation and is judged as a fresh job.
+fn resumed_candidate(job: &JobRecords, target: Option<&JobRecords>) -> bool {
+    job.job.is_some()
+        && !job.invocations.iter().any(|i| i.role == Role::Producer)
+        && target.is_some_and(|t| {
+            crate::disk::resumable_stop(t.state(), t.outcome.as_ref().map(|o| o.reason.as_str()))
+        })
 }
 
 /// Rebuilds the [`RequestRecord`]s of every request job, oldest first: the retry link from "try again on
@@ -520,10 +603,14 @@ pub fn request_records(records: &Records) -> Vec<RequestRecord> {
         .map(|job| {
             let id = job.id().as_str().to_string();
             let text = job.request.as_ref().map_or("", |r| r.text.as_str());
-            let attempts: Vec<AttemptRecord> = attempt_of(job).into_iter().collect();
             let retry_of = retried_job(records, text)
                 .map(|j| j.as_str().to_string())
                 .filter(|t| *t != id);
+            let resumed = resumed_candidate(
+                job,
+                retry_of.as_ref().and_then(|t| records.jobs.get(t.as_str())),
+            );
+            let attempts: Vec<AttemptRecord> = attempt_of(job, resumed).into_iter().collect();
             if let Some(parent) = &retry_of {
                 retry_parent.insert(id.clone(), parent.clone());
             }
@@ -592,6 +679,7 @@ fn facts(signals: &Signals, attempts: &[AttemptRecord], numbers: &MarkNumbers) -
             numbers.attempts + 1
         ),
     );
+    let attempts = counted(attempts);
     let sizes: Vec<u32> = attempts.iter().filter_map(|a| a.plan_size).collect();
     add(
         "T2",
@@ -683,16 +771,21 @@ impl Athena {
         let latest = &requests[*line.last().expect("a line has a request")].id;
         let p90 = records.jobs.get(latest).map_or(0.0, forecast_p90_dollars);
         let signals = evaluate_before_attempt(&attempts, p90);
-        let rejected: Vec<&AttemptRecord> = attempts
+        // The mark shows the numbers the signals used: environment stops are not counted, and a resumed retry
+        // is shown against the forecast of its remaining stages.
+        let counted_attempts = counted(&attempts);
+        let rejected: Vec<&AttemptRecord> = counted_attempts
             .iter()
+            .copied()
             .filter(|a| a.verdict == Verdict::Rejected)
             .collect();
+        let (spend_usd, forecast_p90_usd) = t3_basis(&attempts, p90);
         let numbers = MarkNumbers {
-            attempts: attempts.len(),
+            attempts: counted_attempts.len(),
             rejections: rejected.len(),
-            spend_usd: attempts.iter().map(|a| a.cost_dollars).sum(),
-            forecast_p90_usd: p90,
-            agent_minutes: attempts.iter().map(|a| a.agent_minutes).sum(),
+            spend_usd,
+            forecast_p90_usd,
+            agent_minutes: counted_attempts.iter().map(|a| a.agent_minutes).sum(),
             matched_criterion: rejected.last().and_then(|a| a.unmet_criterion.clone()),
         };
         let (flag_file, pause_file) = (
@@ -836,6 +929,16 @@ mod watcher_tests {
     }
 
     fn rig(p90: f64, cost: f64, verdicts: &[Option<usize>]) -> Rig {
+        rig_with_space(p90, cost, verdicts, crate::test_support::plenty_of_space)
+    }
+
+    /// As [`rig`], with the given free-space reader (for a test that makes the disk run low).
+    fn rig_with_space(
+        p90: f64,
+        cost: f64,
+        verdicts: &[Option<usize>],
+        free_space: crate::state::FreeSpace,
+    ) -> Rig {
         let raw = include_str!("../../../athena.toml");
         let mut in_job_plan = false;
         let config: String = raw
@@ -875,8 +978,7 @@ mod watcher_tests {
         ])
         .unwrap();
         let state_dir = tempfile::tempdir().unwrap();
-        let state = StateDir::new(state_dir.path().join("repo"))
-            .with_free_space(crate::test_support::plenty_of_space);
+        let state = StateDir::new(state_dir.path().join("repo")).with_free_space(free_space);
         let plan = Arc::new(Plan {
             p90,
             cost,
@@ -1269,6 +1371,34 @@ mod watcher_tests {
         assert!(!r.pause(&a).exists() && !r.flag(&a).exists());
     }
 
+    #[test]
+    fn a_low_disk_job_is_read_as_an_environment_attempt() {
+        let r = rig_with_space(0.8, 0.01, &[None], crate::test_support::low_once_verifying);
+        let a = r.ask("describe the demo in the readme");
+        assert_eq!(r.go(&a).unwrap(), OutcomeState::Failed);
+        let records = r.records();
+        let reason = &records.jobs[a.as_str()].outcome.as_ref().unwrap().reason;
+        assert!(reason.starts_with(ENVIRONMENT_PREFIX), "{reason}");
+        let requests = request_records(&records);
+        assert_eq!(requests[0].attempts.len(), 1);
+        assert_eq!(requests[0].attempts[0].verdict, Verdict::Environment);
+        assert!(!requests[0].attempts[0].resumed);
+        assert!(
+            !r.pause(&a).exists() && !r.flag(&a).exists(),
+            "an environment stop marks nothing"
+        );
+
+        // Space is back: the retry resumes the kept candidate (no producer), lands, and is read as resumed.
+        std::fs::write(r.athena.state.root().join("freed"), b"").unwrap();
+        let (retry, _) = r.athena.retry(a.as_str(), &Quiet).unwrap();
+        assert_eq!(r.go(&retry.job).unwrap(), OutcomeState::Landed);
+        let requests = request_records(&r.records());
+        assert_eq!(requests[1].retry_of.as_deref(), Some(a.as_str()));
+        assert!(requests[1].attempts[0].resumed, "{requests:?}");
+        assert_eq!(requests[1].attempts[0].verdict, Verdict::Accepted);
+        assert!(!r.pause(&a).exists() && !r.flag(&a).exists());
+    }
+
     /// Kills and reaps a child at the end of a test, even when an assertion fails.
     struct Reaper(std::process::Child);
 
@@ -1395,6 +1525,7 @@ mod tests {
             agent_minutes: minutes,
             plan_size: None,
             planning_round: 1,
+            resumed: false,
         }
     }
 
@@ -1555,6 +1686,97 @@ mod tests {
         let mut rounds = vec![rej("a", 1.0, 5)];
         rounds[0].planning_round = 3;
         assert_eq!(t2_plan_growth(&rounds), Level::Flag);
+    }
+
+    #[test]
+    fn the_environment_prefix_is_the_low_disk_prefix() {
+        assert!(crate::disk::LOW_DISK.starts_with(ENVIRONMENT_PREFIX));
+        assert!((PRODUCER_SHARE + VERIFIER_SHARE - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn environment_stop_is_not_counted_but_a_rejection_is() {
+        // Two attempts, each long and costly, with growing plans and a late planning round: counted as work, they
+        // would trip T1, T2 (paused with T1) and T5 (240 minutes).
+        let line = |verdict: Verdict| {
+            let mut a = vec![
+                att(verdict, Some("the file is plain text"), 0.1, 120),
+                att(verdict, Some("the file is plain text"), 0.1, 120),
+            ];
+            a[0].plan_size = Some(4);
+            a[1].plan_size = Some(9);
+            a[1].planning_round = T2_PLANNING_ROUND;
+            a
+        };
+        let env = evaluate_before_attempt(&line(Verdict::Environment), 50.0);
+        assert_eq!(
+            (env.t1, env.t2, env.t3, env.t4, env.t5),
+            (
+                Level::None,
+                Level::None,
+                Level::None,
+                Level::None,
+                Level::None
+            )
+        );
+        assert_eq!(env.overall(), Level::None);
+
+        let rejected = evaluate_before_attempt(&line(Verdict::Rejected), 50.0);
+        assert_eq!(rejected.t1, Level::Flag);
+        assert_eq!(rejected.t2, Level::Pause);
+        assert_eq!(rejected.t4, Level::Pause);
+        assert_eq!(rejected.t5, Level::Pause);
+        assert_eq!(rejected.overall(), Level::Pause);
+
+        // One environment stop between two real attempts is not an attempt: two counted attempts, so no T1.
+        let mixed = vec![
+            rej("a b", 0.1, 5),
+            att(Verdict::Environment, None, 0.1, 5),
+            rej("c d", 0.1, 5),
+        ];
+        assert_eq!(t1_retries(&mixed[..2]), Level::None);
+        assert_eq!(t1_retries(&mixed), Level::Flag);
+    }
+
+    #[test]
+    fn resumed_retry_is_judged_on_remaining_stages() {
+        let p90 = 1.0;
+        let resumed = |cost| AttemptRecord {
+            resumed: true,
+            ..att(Verdict::Failed, None, cost, 1)
+        };
+        let stopped = att(Verdict::Environment, None, 1.4, 30);
+
+        // The stopped attempt's work was kept: its spend is not counted, and the forecast is the verifier's share.
+        let line = vec![stopped.clone(), resumed(0.1)];
+        let (spend, forecast) = t3_basis(&line, p90);
+        assert!((spend - 0.1).abs() < 1e-12 && (forecast - p90 * VERIFIER_SHARE).abs() < 1e-12);
+        assert_eq!(t3_cost(&line, p90), Level::None);
+
+        // Control: the same costs where the retry did not resume the candidate redid the work, so the stopped
+        // attempt's spend was lost; 1.5 against 1.0 pauses as a fresh job does.
+        let redone = vec![stopped.clone(), att(Verdict::Failed, None, 0.1, 1)];
+        let (spend, forecast) = t3_basis(&redone, p90);
+        assert!((spend - 1.5).abs() < 1e-12 && (forecast - p90).abs() < 1e-12);
+        assert_eq!(t3_cost(&redone, p90), Level::Pause);
+
+        // T3 stays active for a resumed retry: spend over 1.5 times the remaining-stage forecast pauses, and
+        // at the remaining-stage forecast it flags.
+        let over = vec![stopped.clone(), resumed(0.5)];
+        assert_eq!(t3_cost(&over, p90), Level::Pause);
+        let at = vec![stopped.clone(), resumed(0.35)];
+        assert_eq!(t3_cost(&at, p90), Level::Flag);
+        // The same 0.5 spent by a non-resuming retry is below the whole-job limit and does not pause.
+        let fresh = vec![att(Verdict::Failed, None, 0.5, 1)];
+        assert_eq!(t3_cost(&fresh, p90), Level::None);
+
+        // A stopped attempt that is last keeps its work: its spend is dropped and the forecast is the whole p90.
+        let last = vec![att(Verdict::Environment, None, 1.6, 30)];
+        assert_eq!(t3_basis(&last, p90), (0.0, p90));
+        assert_eq!(evaluate_before_attempt(&last, p90).overall(), Level::None);
+        // The same spend as a failure of the work pauses.
+        let failed = vec![att(Verdict::Failed, None, 1.6, 30)];
+        assert_eq!(t3_cost(&failed, p90), Level::Pause);
     }
 
     #[test]
