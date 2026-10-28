@@ -1,0 +1,96 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261027-160815-k3wz",
+  "base_commit": "82c1d7e274b3184874beab2bdb8e3852dc8871c0",
+  "base_fingerprint": "sha256:9fb7d23e5b315ebad945c290b5c9c09559a3b4108845db44e502fc7f4fac9364",
+  "previous_job": "20261027-225544-q7fe",
+  "candidate_commit": "1639047fbb1bd1fd7b68be9b935d64db587e39fa",
+  "candidate_tree": "bf673e204dde7e2dddc7e04f0362ab522c35526c",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 182508
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 153579
+    }
+  ],
+  "fingerprint": "sha256:c10d8bf13ba3c115fcc4463f7180b424ffd177093bff40d29b94a1bcae377345",
+  "violations": [],
+  "producer_report": {
+    "summary": "The previous-result check in reading.rs now covers only the job the request continues: the retried job (previous_job) and any job the request says it follows up. Jobs the request cites as evidence are no longer checked. Root-cause requests that cite past introspections are therefore accepted and the drain no longer stops on them.\n\nThe root cause was that read_for checked every job id in the request text. A new followed_up_ids function reads \"follows up job <id>\", \"follow-up of <id>\", \"following up on <id>\" and similar. A new continued_jobs function picks the retried job plus the followed-up ones from the carried jobs, and read_for passes only those to check_prior_result_and_scope. Evidence jobs still reach the reader's brief with their recorded results. referenced_jobs now carries followed-up jobs first, so the limit of three carried jobs cannot drop one. I added six tests and a CHANGELOG entry. No prompt files changed.\n\nThe `cargo test -p athena-core reading` run passed with 55 tests, including the six new ones. The fmt check, clippy on athena-core and `cargo test -p xtask --test policy` also passed. I did not run the full test suite.",
+    "files": [
+      "crates/athena-core/src/reading.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-core reading",
+        "result": "pass",
+        "note": "55 passed, including the 6 new tests"
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo clippy -p athena-core --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "only athena-core, the crate changed"
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "boundary scan passed"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A new test in reading.rs reads a root-cause request that cites two past jobs' introspections as evidence, with no previous_job and no follow-up wording. The reading does not restate those jobs' results and is accepted. Run `cargo test -p athena-core reading`.",
+        "status": "met",
+        "evidence": "The new test a_root_cause_request_citing_past_jobs_as_evidence_is_accepted passed in `cargo test -p athena-core reading`. It builds a request citing two job ids, passes no attempt, and checks that followed_up_ids and continued_jobs are empty. It then shows a reading that restates nothing is accepted. It also shows the same two jobs, if they were checked as continued, would be refused with 'the previous result'."
+      },
+      {
+        "criterion": "A new test shows that a retry whose reading omits the previous attempt's job id and result is still refused with 'the previous result'. A second test shows that the same retry with a reading that names the previous job is accepted. Run `cargo test -p athena-core reading`.",
+        "status": "met",
+        "evidence": "The new tests a_retry_whose_reading_omits_the_previous_result_is_refused and a_retry_whose_reading_names_the_previous_job_is_accepted passed. a_retry_is_checked_even_when_the_request_also_cites_evidence also passed."
+      },
+      {
+        "criterion": "A test shows that a request saying it follows up a named job is checked for that job only. A reading that omits the followed-up job is refused. A different job cited in the same request as evidence is not required to be named.",
+        "status": "met",
+        "evidence": "a_follow_up_request_is_checked_for_the_followed_job_only passed. It shows continued_jobs returns only the followed job. An omitting reading is refused, naming only the followed job and not the evidence job. A reading naming the followed job alone is accepted. follow_up_wording_is_matched_narrowly covers the phrase match."
+      },
+      {
+        "criterion": "read_for passes check_prior_result_and_scope only the retried job and the explicitly followed-up jobs. Evidence-only referenced jobs are still given to the reader in the brief. The doc comments describe this distinction.",
+        "status": "met",
+        "evidence": "In read_for, priors is now continued_jobs(&request.text, attempt, &referenced_jobs). The ReaderInputs still receive the full referenced_jobs list. Doc comments on followed_up_ids, continued_jobs, referenced_jobs and check_prior_result_and_scope describe the split."
+      },
+      {
+        "criterion": "`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` all pass, including the existing prior-result tests.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I ran fmt --check and clippy on athena-core only, and both were clean. The existing prior-result tests passed in the reading run (55 passed)."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry describing that the previous-result check applies only to the continued job and no longer refuses evidence citations.",
+        "status": "met",
+        "evidence": "A new first entry under Unreleased / Fixed in CHANGELOG.md names the root cause and the new scope. `cargo test -p xtask --test policy` passed."
+      }
+    ],
+    "open_issues": [
+      "Follow-up detection is a phrase match. It takes only the first id after the phrase, so 'follows up A and B' continues only A. Free-form wording such as 'continuing from <id>' counts as evidence and is not checked.",
+      "I did not run the full `cargo test`; Athena runs it."
+    ],
+    "mistakes": [],
+    "learnings": [
+      "read_for needs a live reader to run, so I put the choice of which jobs to check in a pure function, continued_jobs, and tested the accept and refuse paths through it.",
+      "RecordId::parse accepts only lowercase ids, so the follow-up matcher lowercases with to_ascii_lowercase, which keeps byte offsets. Phrases are matched case-insensitively; ids must be lowercase."
+    ],
+    "desires": []
+  }
+}

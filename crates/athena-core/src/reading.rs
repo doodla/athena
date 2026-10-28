@@ -391,9 +391,10 @@ impl Athena {
             redactor,
         ) {
             Ok(reading) => {
-                // A retry or follow-up must reflect the previous result and state the change scope.
-                let priors: Vec<&EarlierAttempt> =
-                    attempt.into_iter().chain(referenced_jobs.iter()).collect();
+                // A retry or follow-up must reflect the previous result and state the change scope. Only the
+                // retried job and the jobs the request says it follows up count; jobs it cites as evidence
+                // (such as the introspections in a root-cause request) are shown to the reader, not checked.
+                let priors = continued_jobs(&request.text, attempt, &referenced_jobs);
                 match check_prior_result_and_scope(&reading, &priors) {
                     Ok(()) => Ok((Some(reading), record, None)),
                     Err(e) => Ok((None, record, Some(format!("{e:#}")))),
@@ -1919,9 +1920,76 @@ pub fn plan_entry(
     entry
 }
 
+/// Words that may sit between a follow-up phrase and the job id it names ("follows up on job <id>").
+const FOLLOW_UP_FILLER: [&str; 6] = ["on", "of", "to", "job", "the", "earlier"];
+
+/// The phrases that say a request continues a named job.
+const FOLLOW_UP_PHRASES: [&str; 5] = [
+    "follows up",
+    "follow up",
+    "follow-up",
+    "following up",
+    "followup",
+];
+
+/// The job ids a request says it follows up: the id that comes right after a phrase such as "follows up
+/// job <id>", "follow-up of <id>" or "following up on <id>" (case-insensitive; only the words `on`, `of`,
+/// `to`, `job`, `the` and `earlier` may sit between the phrase and the id). Every other id in the text is
+/// evidence the request cites, not a job it continues. In order, without repeats.
+pub fn followed_up_ids(text: &str) -> Vec<RecordId> {
+    // ASCII lowercasing keeps byte offsets, so positions in `lower` index `text` too.
+    let lower = text.to_ascii_lowercase();
+    let mut found: Vec<(usize, RecordId)> = Vec::new();
+    for phrase in FOLLOW_UP_PHRASES {
+        for (at, _) in lower.match_indices(phrase) {
+            let rest = &text[at + phrase.len()..];
+            let words = rest.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'));
+            for word in words.filter(|w| !w.is_empty()) {
+                if FOLLOW_UP_FILLER.contains(&word.to_ascii_lowercase().as_str()) {
+                    continue;
+                }
+                if let Ok(id) = RecordId::parse(word) {
+                    found.push((at, id));
+                }
+                break;
+            }
+        }
+    }
+    found.sort_by_key(|(at, _)| *at);
+    let mut ids: Vec<RecordId> = Vec::new();
+    for (_, id) in found {
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    ids
+}
+
+/// The earlier jobs a reading must account for: the retried job (`attempt`, from the job's `previous_job`
+/// link) and those of the carried `referenced` jobs that the request says it follows up (see
+/// [`followed_up_ids`]). Jobs the request only cites as evidence are left out, so their results need not be
+/// restated; the reader still sees them in its brief.
+pub fn continued_jobs<'a>(
+    request: &str,
+    attempt: Option<&'a EarlierAttempt>,
+    referenced: &'a [EarlierAttempt],
+) -> Vec<&'a EarlierAttempt> {
+    let followed = followed_up_ids(request);
+    attempt
+        .into_iter()
+        .chain(
+            referenced
+                .iter()
+                .filter(|r| followed.iter().any(|id| id.as_str() == r.job)),
+        )
+        .collect()
+}
+
 /// The jobs a request names by full id, other than `skip` (the retried job): each one's request and
 /// final findings, redacted. Ids that match no job (or a job without a request) are ignored. At most
-/// [`MAX_REFERENCED_JOBS`] are carried.
+/// [`MAX_REFERENCED_JOBS`] are carried; jobs the request says it follows up come first so the cap never
+/// drops one. Carrying a job only shows it to the reader: [`continued_jobs`] decides which of them the
+/// reading must account for.
 pub fn referenced_jobs(
     records: &Records,
     request: &str,
@@ -1929,7 +1997,13 @@ pub fn referenced_jobs(
     redactor: &Redactor,
 ) -> Result<Vec<EarlierAttempt>> {
     let mut out = Vec::new();
+    let mut ids = followed_up_ids(request);
     for id in job_ids_in(request) {
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    for id in ids {
         if out.len() >= MAX_REFERENCED_JOBS {
             break;
         }
@@ -1946,8 +2020,9 @@ pub fn referenced_jobs(
 }
 
 /// Refuses a reading for a retried or follow-up job that leaves out the previous result or the change
-/// scope. `priors` are the retried job and the jobs the request names; with none (a first attempt) every
-/// reading passes, and so does one that declines the request or asks a question, which has no change to
+/// scope. `priors` are the retried job and the jobs the request says it follows up (see
+/// [`continued_jobs`]), never jobs it only cites as evidence; with none (a first attempt, or a request
+/// that cites jobs as evidence) every reading passes, and so does one that declines the request or asks a question, which has no change to
 /// scope yet.
 ///
 /// - The previous result is reflected when the reading's own text (title, summary, assumptions,
@@ -3618,6 +3693,147 @@ mod tests {
             &["the changelog"],
         );
         check_prior_result_and_scope(&named_both, &[&prior(), &other]).unwrap();
+    }
+
+    const EVIDENCE_A: &str = "20261020-101010-aaaa";
+    const EVIDENCE_B: &str = "20261021-111111-bbbb";
+
+    fn earlier(job: &str) -> EarlierAttempt {
+        EarlierAttempt {
+            job: job.into(),
+            request: "an earlier request".into(),
+            findings: vec!["major: something was found".into()],
+            end_state: "rejected".into(),
+            ..Default::default()
+        }
+    }
+
+    /// What `read_for` checks for a request: the jobs it continues, then the reading against them.
+    fn check_reading(
+        request: &str,
+        attempt: Option<&EarlierAttempt>,
+        referenced: &[EarlierAttempt],
+        reading: &Reading,
+    ) -> Result<()> {
+        check_prior_result_and_scope(reading, &continued_jobs(request, attempt, referenced))
+    }
+
+    #[test]
+    fn a_root_cause_request_citing_past_jobs_as_evidence_is_accepted() {
+        let request = format!(
+            "Root cause of the repeated refusal. Evidence: the introspection of {EVIDENCE_A} \
+             and the introspection of {EVIDENCE_B} both record it."
+        );
+        let referenced = [earlier(EVIDENCE_A), earlier(EVIDENCE_B)];
+        // No previous_job and no follow-up wording: neither cited job is continued.
+        assert!(followed_up_ids(&request).is_empty());
+        assert!(continued_jobs(&request, None, &referenced).is_empty());
+        // The reading restates neither job's result, nor does it state a change scope.
+        let reading = scoped_reading("Scope the check to the continued job.", &[], &[]);
+        check_reading(&request, None, &referenced, &reading).unwrap();
+        // The cited jobs would have been refused when checked as continued jobs.
+        let error = check_prior_result_and_scope(&reading, &[&referenced[0], &referenced[1]])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("the previous result"), "{error}");
+    }
+
+    #[test]
+    fn a_retry_whose_reading_omits_the_previous_result_is_refused() {
+        let request = "add a greeting";
+        let previous = prior();
+        let reading = scoped_reading("Add a greeting.", &["src/greeting.rs"], &["the changelog"]);
+        let error = check_reading(request, Some(&previous), &[], &reading)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("the previous result"), "{error}");
+        assert!(error.contains(PRIOR_JOB), "{error}");
+    }
+
+    #[test]
+    fn a_retry_whose_reading_names_the_previous_job_is_accepted() {
+        let request = "add a greeting";
+        let previous = prior();
+        let reading = scoped_reading(
+            &format!("Retry {PRIOR_JOB}: fix the missing greeting its verification found."),
+            &["src/greeting.rs"],
+            &["the changelog"],
+        );
+        check_reading(request, Some(&previous), &[], &reading).unwrap();
+    }
+
+    #[test]
+    fn a_retry_is_checked_even_when_the_request_also_cites_evidence() {
+        let request = format!("Retry, and note that {EVIDENCE_A} saw the same fault.");
+        let previous = prior();
+        let referenced = [earlier(EVIDENCE_A)];
+        let reading = scoped_reading(
+            &format!("Retry {PRIOR_JOB}: fix the missing greeting."),
+            &["src/greeting.rs"],
+            &["the changelog"],
+        );
+        check_reading(&request, Some(&previous), &referenced, &reading).unwrap();
+        let bare = scoped_reading("Add a greeting.", &["src/greeting.rs"], &["the changelog"]);
+        let error = check_reading(&request, Some(&previous), &referenced, &bare)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(PRIOR_JOB), "{error}");
+        assert!(!error.contains(EVIDENCE_A), "{error}");
+    }
+
+    #[test]
+    fn a_follow_up_request_is_checked_for_the_followed_job_only() {
+        let request = format!(
+            "This follows up job {PRIOR_JOB}. Evidence: {EVIDENCE_A} recorded the same fault."
+        );
+        assert_eq!(
+            followed_up_ids(&request)
+                .iter()
+                .map(RecordId::as_str)
+                .collect::<Vec<_>>(),
+            [PRIOR_JOB]
+        );
+        let referenced = [earlier(EVIDENCE_A), prior()];
+        let jobs = continued_jobs(&request, None, &referenced);
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].job, PRIOR_JOB);
+        // A reading that omits the followed-up job is refused, and names only that job.
+        let omits = scoped_reading("Add a greeting.", &["src/greeting.rs"], &["the changelog"]);
+        let error = check_reading(&request, None, &referenced, &omits)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("the previous result"), "{error}");
+        assert!(error.contains(PRIOR_JOB), "{error}");
+        assert!(!error.contains(EVIDENCE_A), "{error}");
+        // Naming the followed-up job is enough; the evidence job need not be named.
+        let names = scoped_reading(
+            &format!("Follow up on {PRIOR_JOB}: add the missing greeting."),
+            &["src/greeting.rs"],
+            &["the changelog"],
+        );
+        check_reading(&request, None, &referenced, &names).unwrap();
+    }
+
+    #[test]
+    fn follow_up_wording_is_matched_narrowly() {
+        let id = PRIOR_JOB;
+        for text in [
+            format!("follows up {id}"),
+            format!("Follow-up of {id}"),
+            format!("a follow up on job {id}"),
+            format!("Following up on the earlier job {id}."),
+        ] {
+            assert_eq!(followed_up_ids(&text).len(), 1, "{text}");
+        }
+        // An id that merely follows other words, or a phrase that names no id, is not a follow-up.
+        for text in [
+            format!("see {id} and follow the evidence"),
+            format!("follows up the cause; see {id}"),
+            format!("Follow up carefully, citing {id}"),
+            "follows up".to_string(),
+        ] {
+            assert!(followed_up_ids(&text).is_empty(), "{text}");
+        }
     }
 
     #[test]
