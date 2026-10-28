@@ -2225,7 +2225,9 @@ pub fn check_prior_result_and_scope(reading: &Reading, priors: &[&EarlierAttempt
 
 /// Every check a built reading must pass before it is accepted: the previous result and change scope of a
 /// retried or followed-up job ([`check_prior_result_and_scope`]), then the evidence each criterion rests on
-/// ([`check_criteria_evidence`]). It applies to a first attempt as well as a retry.
+/// ([`check_criteria_evidence`]), then the code survey a code or tests reading with a behavior criterion
+/// rests on ([`check_code_survey`]), then the governance files the outcome needs
+/// ([`check_governance_coverage`]). It applies to a first attempt as well as a retry.
 pub fn check_reading_acceptance(
     reading: &Reading,
     request: &str,
@@ -2234,6 +2236,7 @@ pub fn check_reading_acceptance(
 ) -> Result<()> {
     check_prior_result_and_scope(reading, &continued_jobs(request, attempt, referenced))?;
     check_criteria_evidence(reading)?;
+    check_code_survey(reading)?;
     check_governance_coverage(reading, request)
 }
 
@@ -2459,6 +2462,130 @@ pub fn check_criteria_evidence(reading: &Reading) -> Result<()> {
          file in the snapshot",
         refused.join("; and ")
     )
+}
+
+/// The `Code survey:` assumptions of a reading: those whose trimmed text starts with that label, in any case.
+fn code_surveys(reading: &Reading) -> Vec<&str> {
+    reading
+        .assumptions
+        .iter()
+        .map(|a| a.trim())
+        .filter(|a| a.to_lowercase().starts_with("code survey:"))
+        .collect()
+}
+
+/// Whether `text` names a path under `crates/`: `crates/` followed by a letter or digit.
+fn names_crates_path(text: &str) -> bool {
+    text.match_indices("crates/").any(|(at, marker)| {
+        text[at + marker.len()..]
+            .chars()
+            .next()
+            .is_some_and(char::is_alphanumeric)
+    })
+}
+
+/// Whether the deliverable adds or changes a record or data file under `crates/`: it is created there with a
+/// data extension (not a `Cargo.toml`) or under a `records` or `data` directory, or it is a `records.rs`.
+/// Only the deliverable list is read, never a criterion, so a criterion that says `records/` is not changed
+/// triggers nothing.
+fn is_record_or_data_deliverable(d: &Deliverable) -> bool {
+    if !d.path.starts_with("crates/") {
+        return false;
+    }
+    let mut parts = d.path.split('/');
+    let file = parts.next_back().unwrap_or("");
+    if file == "records.rs" {
+        return true;
+    }
+    if d.action != DeliverableAction::Create || file == "Cargo.toml" {
+        return false;
+    }
+    let data_extension = file.rsplit_once('.').is_some_and(|(_, ext)| {
+        ["json", "jsonl", "ndjson", "toml", "yaml", "yml", "csv"].contains(&ext)
+    });
+    data_extension
+        || d.path
+            .split('/')
+            .any(|part| part == "records" || part == "data")
+}
+
+/// Whether a survey names evidence that a new record or data file is accepted: `check_record_file`,
+/// `AnyRecord`, or a round-trip test (an identifier with `round_trip` or `roundtrip`, or a path with
+/// `round-trip`). A bare word such as "allow-list" or "round-trip" in prose is not evidence.
+fn names_record_evidence(survey: &str) -> bool {
+    survey
+        .split(|c: char| !(c.is_alphanumeric() || matches!(c, '_' | '-' | '/')))
+        .any(|token| {
+            let lower = token.to_lowercase();
+            token == "check_record_file"
+                || token == "AnyRecord"
+                || lower.contains("round_trip")
+                || lower.contains("roundtrip")
+                || (lower.contains("round-trip") && token.contains('/'))
+        })
+}
+
+/// Refuses a reading that changes code or tests with a behavior criterion and carries no code survey: an
+/// assumption that starts `Code survey:` and names a `crates/` path. A reading that also adds a record or data
+/// file under `crates/` (or changes a `records.rs`) must have a survey that names `check_record_file`,
+/// `AnyRecord`, or a round-trip test.
+///
+/// Root cause this check removes: the reading stage designs storage, override and test seams from a general
+/// idea of the feature, without surveying what the records validation accepts or where resolution and probing
+/// happen in the code. Jobs 20261028-055601-hg0n and 20261028-082151-67fa each began from a reading that
+/// fixed its seams that way, and introspections 20261028-055651-dhh0 and 20261028-082240-77as traced both to
+/// the missing survey. Reader briefs now ask for the survey (`CODE_SURVEY_GUIDE` in athena-context), and this
+/// check enforces it where readings are accepted. It costs no model call, and it reads the assumptions and
+/// the deliverable list, never the repository.
+///
+/// It applies when the reading has a capability and no question, its class of work is `code` or `tests`, and
+/// at least one criterion is a behavior criterion. A docs reading, a decline, a question and a reading with
+/// only content criteria need no survey.
+///
+/// This check refuses more readings; the higher refusal rate is intended. A replay of accepted readings
+/// (`replay`) reads the same sentence from the job's criteria and does not hold the job for it.
+///
+/// The error names the missing survey or the missing evidence and tells the reader what to write.
+pub fn check_code_survey(reading: &Reading) -> Result<()> {
+    if reading.capability.is_none()
+        || reading.question.is_some()
+        || !matches!(reading.class_of_work.as_str(), "code" | "tests")
+        || !reading
+            .acceptance_criteria
+            .iter()
+            .any(|c| c.kind == CriterionKind::Behavior)
+    {
+        return Ok(());
+    }
+    let surveys: Vec<&str> = code_surveys(reading)
+        .into_iter()
+        .filter(|s| names_crates_path(s))
+        .collect();
+    if surveys.is_empty() {
+        bail!(
+            "the reading was refused because it changes {} with a behavior criterion but has no `Code survey:` \
+             assumption that names a crates/ path; the criteria were designed from a general idea of the feature \
+             and not from the code. Read the code, then add an assumption that starts `Code survey:` and names \
+             the crates/ paths you read: the entry point and the order of resolution and probing, what the \
+             records validation allow-list accepts, and how the property is measured directly",
+            reading.class_of_work
+        );
+    }
+    let new_records: Vec<&str> = reading
+        .deliverables
+        .iter()
+        .filter(|d| is_record_or_data_deliverable(d))
+        .map(|d| d.path.as_str())
+        .collect();
+    if !new_records.is_empty() && !surveys.iter().any(|s| names_record_evidence(s)) {
+        bail!(
+            "the reading was refused because it adds or changes a record or data file ({}) but its `Code survey:` \
+             assumption does not name what accepts it; name `check_record_file`, `AnyRecord` or a round-trip test \
+             by its function name or path, as read in the records validation, not the word allow-list alone",
+            new_records.join(", ")
+        );
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -5274,5 +5401,233 @@ mod tests {
         assert!(error.contains("oops"), "{error}");
         let missing = BinaryChecker::new(dir.path().join("no-such-binary"));
         assert!(missing.check("add a greeting", &reading).is_err());
+    }
+
+    const SURVEY: &str = "Code survey: crates/athena-core/src/reading.rs check_reading_acceptance is the entry point; \
+         the records validation allow-list was read in crates/athena-data/src/records.rs";
+
+    /// A change reading of class code with one behavior criterion that cites a command, these assumptions
+    /// and these deliverables.
+    fn code_reading(assumptions: &[&str], deliverables: &[(&str, DeliverableAction)]) -> Reading {
+        let mut reading =
+            scoped_reading("Change the reading rules.", &[], &["the planner prompts"]);
+        reading.class_of_work = "code".into();
+        reading.assumptions = assumptions.iter().map(|a| a.to_string()).collect();
+        reading.acceptance_criteria = vec![Criterion {
+            text: "Run `cargo test -p athena-core`: the new unit test passes".into(),
+            kind: CriterionKind::Behavior,
+        }];
+        reading.deliverables = deliverables
+            .iter()
+            .map(|(path, action)| Deliverable {
+                path: (*path).into(),
+                action: *action,
+                p: 0.9,
+            })
+            .collect();
+        reading
+    }
+
+    fn accept(reading: &Reading) -> Result<()> {
+        check_reading_acceptance(reading, "change the reading rules", None, &[])
+    }
+
+    const MODIFY_READING: (&str, DeliverableAction) = (
+        "crates/athena-core/src/reading.rs",
+        DeliverableAction::Modify,
+    );
+
+    #[test]
+    fn code_survey_missing_is_refused_and_present_is_accepted() {
+        let error = accept(&code_reading(&[], &[MODIFY_READING]))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("`Code survey:`"), "{error}");
+        assert!(error.contains("crates/"), "{error}");
+        assert!(error.contains("was refused"), "{error}");
+        accept(&code_reading(&[SURVEY], &[MODIFY_READING])).unwrap();
+        // The label is matched after trimming, in any case.
+        accept(&code_reading(
+            &["  code SURVEY: crates/athena-core/src/reading.rs"],
+            &[MODIFY_READING],
+        ))
+        .unwrap();
+    }
+
+    #[test]
+    fn code_survey_tests_class_is_refused_too() {
+        let mut reading = code_reading(&[], &[MODIFY_READING]);
+        reading.class_of_work = "tests".into();
+        assert!(accept(&reading).is_err());
+        reading.assumptions = vec![SURVEY.into()];
+        accept(&reading).unwrap();
+    }
+
+    #[test]
+    fn code_survey_must_start_with_the_label_and_name_a_crates_path() {
+        // The label is not at the start.
+        let error = accept(&code_reading(
+            &["The Code survey: crates/athena-core/src/reading.rs was read"],
+            &[MODIFY_READING],
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("`Code survey:`"), "{error}");
+        // A survey with no crates/ path, or a bare `crates/`.
+        for text in [
+            "Code survey: I read the reading rules",
+            "Code survey: crates/ was read",
+        ] {
+            assert!(
+                accept(&code_reading(&[text], &[MODIFY_READING])).is_err(),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn code_survey_new_record_file_needs_named_evidence() {
+        let new_file = (
+            "crates/athena-data/src/example.json",
+            DeliverableAction::Create,
+        );
+        let plain =
+            "Code survey: crates/athena-data/src/records.rs was read; the allow-list is wide";
+        let error = accept(&code_reading(&[plain], &[new_file]))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("check_record_file"), "{error}");
+        assert!(error.contains("AnyRecord"), "{error}");
+        assert!(error.contains("round-trip"), "{error}");
+        assert!(
+            error.contains("crates/athena-data/src/example.json"),
+            "{error}"
+        );
+        // A bare round-trip in prose is not a named test.
+        let prose =
+            "Code survey: crates/athena-data/src/records.rs was read; a round-trip is needed";
+        assert!(accept(&code_reading(&[prose], &[new_file])).is_err());
+        // A change to records.rs needs the same evidence.
+        let records_rs = (
+            "crates/athena-data/src/records.rs",
+            DeliverableAction::Modify,
+        );
+        assert!(accept(&code_reading(&[plain], &[records_rs])).is_err());
+        for evidence in [
+            "Code survey: crates/athena-data/src/records.rs: `check_record_file` accepts it",
+            "Code survey: crates/athena-data/src/records.rs: AnyRecord has a variant for it",
+            "Code survey: crates/athena-data/src/records.rs: `records_round_trip_every_kind` covers it",
+            "Code survey: crates/athena-data/src/records.rs: crates/athena-data/tests/round-trip.rs covers it",
+        ] {
+            accept(&code_reading(&[evidence], &[new_file]))
+                .unwrap_or_else(|e| panic!("{evidence}: {e}"));
+            accept(&code_reading(&[evidence], &[records_rs]))
+                .unwrap_or_else(|e| panic!("{evidence}: {e}"));
+        }
+        // The evidence may sit in a second survey assumption.
+        accept(&code_reading(
+            &[
+                SURVEY,
+                "Code survey: crates/athena-data/src/records.rs: `AnyRecord`",
+            ],
+            &[new_file],
+        ))
+        .unwrap();
+    }
+
+    #[test]
+    fn code_survey_record_file_requirement_ignores_ordinary_deliverables_and_criteria() {
+        // A new crate's manifest, a changed existing json and a new source file are not new record files.
+        for deliverable in [
+            ("crates/foo/Cargo.toml", DeliverableAction::Create),
+            ("crates/foo/src/lib.rs", DeliverableAction::Create),
+            ("crates/foo/data.json", DeliverableAction::Modify),
+            ("docs/example.json", DeliverableAction::Create),
+        ] {
+            accept(&code_reading(&[SURVEY], &[deliverable]))
+                .unwrap_or_else(|e| panic!("{deliverable:?}: {e}"));
+        }
+        // A criterion that mentions records/ only to exclude it triggers nothing.
+        let mut reading = code_reading(&[SURVEY], &[MODIFY_READING]);
+        reading.acceptance_criteria.push(Criterion {
+            text:
+                "records/ is not changed; Run `git status --short`: no file under records/ appears"
+                    .into(),
+            kind: CriterionKind::Behavior,
+        });
+        accept(&reading).unwrap();
+        // A new file in a records or data directory is one.
+        for path in ["crates/foo/records/one.rs", "crates/foo/data/x"] {
+            assert!(
+                accept(&code_reading(
+                    &[SURVEY],
+                    &[(path, DeliverableAction::Create)]
+                ))
+                .is_err(),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn code_survey_does_not_apply_outside_its_gate() {
+        let none: &[&str] = &[];
+        // Docs and other classes.
+        let mut docs = code_reading(none, &[MODIFY_READING]);
+        docs.class_of_work = "docs".into();
+        accept(&docs).unwrap();
+        // No capability (a decline).
+        let mut declined = code_reading(none, &[MODIFY_READING]);
+        declined.capability = None;
+        declined.decline_reason = Some("no capability fits".into());
+        accept(&declined).unwrap();
+        // A question.
+        let mut asking = code_reading(none, &[MODIFY_READING]);
+        asking.question = Some("which file?".into());
+        accept(&asking).unwrap();
+        // Content criteria only.
+        let mut content = code_reading(none, &[MODIFY_READING]);
+        content.acceptance_criteria = vec![Criterion {
+            text: "the doc comment names the cause".into(),
+            kind: CriterionKind::Content,
+        }];
+        accept(&content).unwrap();
+        // The check itself agrees on each.
+        for reading in [&docs, &declined, &asking, &content] {
+            check_code_survey(reading).unwrap();
+        }
+    }
+
+    #[test]
+    fn code_survey_refusal_is_declared_intended() {
+        let criterion = Criterion {
+            text: "The change refuses more readings: change readings of class code or tests with a behavior \
+                   criterion and no 'Code survey:' assumption naming a crates/ path are refused, and a higher \
+                   refusal rate is intended."
+                .into(),
+            kind: CriterionKind::Content,
+        };
+        assert!(criteria_intend_higher_refusal(&[criterion]));
+        // The change does refuse the reading it names.
+        assert!(accept(&code_reading(&[], &[MODIFY_READING])).is_err());
+        // The check's own doc comment and the changelog carry the same sentence.
+        let source = include_str!("reading.rs");
+        let doc = source
+            .split("pub fn check_code_survey")
+            .next()
+            .unwrap()
+            .rsplit("\n\n")
+            .next()
+            .unwrap();
+        assert!(
+            doc.contains("This check refuses more readings; the higher refusal rate is intended.")
+        );
+        // The changelog wraps lines, so compare with runs of white space made single spaces.
+        let changelog = include_str!("../../../CHANGELOG.md")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(changelog.contains("refuses more readings"));
+        assert!(changelog.contains("higher refusal rate is intended"));
     }
 }

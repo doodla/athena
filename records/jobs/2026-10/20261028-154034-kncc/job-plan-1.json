@@ -1,0 +1,195 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261028-154034-kncc",
+  "round": 1,
+  "at": "2026-10-28T15:43:54.855308946Z",
+  "invocation_seq": 2,
+  "approach": "Add `pub fn check_code_survey(reading: &Reading) -> Result<()>` in crates/athena-core/src/reading.rs, next to `check_criteria_evidence`, and call it from `check_reading_acceptance` after `check_criteria_evidence`. It gates on: capability is set, no question, class_of_work is \"code\" or \"tests\", and at least one Behavior criterion. When the gate holds, it needs an assumption that starts (trimmed, case-insensitive) with \"Code survey:\" and names a `crates/<name>` path. If the reading also lists a create deliverable for a record or data file under crates/, or lists a `records.rs` under crates/, the survey must additionally name `check_record_file`, `AnyRecord`, or a round-trip test token. The check works on deliverable paths and the survey text, never on criterion text, so a criterion that says records/ is untouched triggers nothing. The doc comment names the root cause, jobs 20261028-055601-hg0n and 20261028-082151-67fa, introspections 20261028-055651-dhh0 and 20261028-082240-77as, and says outright that this refuses more readings and the higher refusal rate is intended. A new `code_survey_*` test group calls `check_reading_acceptance`. In briefs.rs, add a fifth line to `READING_RULES` naming `check_code_survey`, and a short guide paragraph (new constant `CODE_SURVEY_GUIDE`) printed after the rule list. The guide covers the survey contents and the intended-refusal criterion. Update the existing rule-line test for the new count, the new check name and a larger section bound, and add a guide test. Add a CHANGELOG entry under [Unreleased] > Added. The change adds no governance file and no switch.",
+  "decisions": [
+    {
+      "choice": "Gate the check on class_of_work in {code, tests}, capability set, no question, and at least one Behavior criterion. Apply the record-file requirement only inside that gate.",
+      "reason": "Criteria 2-4 define the refusal that way and keep docs-only, no-capability and content-only readings accepted. Existing reading tests use class \"feature\" and the fake reader writes only content criteria, so none of them is affected and the existing reading tests pass unchanged.",
+      "rejected": [
+        {
+          "option": "Apply the survey to every reading that has a capability",
+          "why": "It would refuse docs and content-only readings, which the criteria say are still accepted, and it would break the existing fixtures."
+        },
+        {
+          "option": "Apply the record-file requirement to any reading with such a deliverable, with no gate",
+          "why": "It would contradict 'readings with only content criteria are still accepted'."
+        }
+      ]
+    },
+    {
+      "choice": "Count a survey only if an assumption starts with 'Code survey:' (trimmed, case-insensitive) and contains `crates/` followed by an alphanumeric character. Evidence for a new record file is a whole-token match: `check_record_file`, `AnyRecord`, or a whitespace-separated token (backticks and punctuation trimmed) containing `round_trip` or `roundtrip`, or `round-trip` together with `/`.",
+      "reason": "Criterion 3 asks for a survey that names a crates/ path. Criterion 4 asks for named evidence, not a bare 'allow-list'. A bare prose 'round-trip' or 'allow-list' must not satisfy it.",
+      "rejected": [
+        {
+          "option": "Accept any assumption that mentions 'survey' or 'allow-list'",
+          "why": "This was the critic's single-keyword finding on job 20261028-082300-y4yj."
+        },
+        {
+          "option": "Require a full file:line citation",
+          "why": "It is too strict, and not testable without reading the repository, which this check does not do."
+        }
+      ]
+    },
+    {
+      "choice": "Trigger the new-output requirement from deliverables only: action Create, path under crates/, extension json, jsonl, ndjson, toml, yaml, yml or csv (excluding the file name Cargo.toml), or any path component named `records` or `data`. Also trigger on any deliverable under crates/ whose file name is `records.rs`. Do not scan criterion text.",
+      "reason": "This drops signal C, so a criterion saying 'records/ is not changed' cannot trigger it. Excluding Cargo.toml keeps a new crate from being read as a data file.",
+      "rejected": [
+        {
+          "option": "Trigger on any mention of records/ in a criterion",
+          "why": "It refuses criteria that exclude records/, which is the critic's minor finding."
+        }
+      ]
+    },
+    {
+      "choice": "Put the long guidance in a new constant `CODE_SURVEY_GUIDE`, printed as a paragraph after the rule list. Keep one short `READING_RULES` line, at most 220 bytes, for `check_code_survey`.",
+      "reason": "The existing test caps each rule line at 220 bytes and counts '- ' lines, so the survey contents and the intended-refusal instruction will not fit in one line. The section bound is raised from 1200 to about 1800 bytes. The reader brief sits outside the always-loaded reader prompt set, so `system_facts_budgets_match_computed` is unaffected.",
+      "rejected": [
+        {
+          "option": "Put every instruction in READING_RULES lines",
+          "why": "It breaks the 220-byte line cap or forces a cap change."
+        },
+        {
+          "option": "Change the reader frame or the prompt set",
+          "why": "The reader set is at 1997 of 2000 tokens, so there is no room."
+        }
+      ]
+    },
+    {
+      "choice": "The CHANGELOG entry and the doc comment contain the phrases 'refuses more readings' and 'higher refusal rate is intended'. A test pins that `criteria_intend_higher_refusal` is true for the criterion 2 text.",
+      "reason": "The replay gate reads these phrases from the acceptance criteria. The phrases are on the INTENDED_REFUSAL_PHRASES list, so the replay treats the rise as intended and does not hold the job.",
+      "rejected": [
+        {
+          "option": "Build the separate intended-refusal acceptance check",
+          "why": "It is out of scope; the user's retry takes precedence over the follow-up in introspection 20261028-154006-ebdw."
+        }
+      ]
+    },
+    {
+      "choice": "Leave crates/athena-core/src/run/mod.rs unchanged.",
+      "reason": "The replay reads check_reading_text, which calls check_reading_acceptance, so the new check is picked up with no change there.",
+      "rejected": [
+        {
+          "option": "Edit run/mod.rs anyway",
+          "why": "Nothing in it needs to change and the brief says 'if needed'."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Add `check_code_survey` with its doc comment and the helpers it needs (survey lookup, record or data file test, evidence token test). Call it from `check_reading_acceptance`, update that function's doc comment, and add the `code_survey_*` unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Make `READING_RULES` five lines with a `check_code_survey` rule. Add `CODE_SURVEY_GUIDE`, printed after the rule list in `reader_brief`. Update the rule-line test: count, new check name, section bound. Add a guide test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an entry under [Unreleased] > Added. It states the root cause and the fix, cites the jobs and introspections, and says the change refuses more readings and the higher refusal rate is intended.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In reading.rs, write `check_code_survey` after `check_criteria_evidence`: the gate (capability set, no question, class \"code\" or \"tests\", at least one Behavior criterion); survey lookup (assumptions starting 'Code survey:' after trim and lowercase, naming `crates/` plus an alphanumeric character); then the record or data file trigger over deliverables (Create, under crates/, data extensions, not Cargo.toml, or a `records`/`data` path component, or a `records.rs` file name) with the evidence token test. Return one error naming the missing survey, or the missing evidence for the record file, and telling the reader how to repair it.",
+    "Write the doc comment in the style of the neighbouring checks: root cause, the two jobs and two introspections, what the check refuses, the sentence 'This check refuses more readings; the higher refusal rate is intended', and that the error names the repair.",
+    "Call `check_code_survey(reading)?` in `check_reading_acceptance` between `check_criteria_evidence` and `check_governance_coverage`, and extend its doc comment to list the new check.",
+    "Add the tests in the reading.rs tests module with a `code_reading` helper built on `scoped_reading` (class \"code\", one Behavior criterion citing a command). Cover: missing survey refused with 'Code survey:' in the error; survey present accepted; class tests refused; prefix not at the start refused; survey without crates/ refused; record-file create refused with 'allow-list' only, with bare 'round-trip' only; accepted with `check_record_file`, `AnyRecord`, `records_round_trip_every_kind`; Cargo.toml, modified json and 'records/ is not changed' criterion not triggering; docs class, capability None, question and content-only accepted; and `criteria_intend_higher_refusal` true for the criterion 2 text.",
+    "Run `cargo test --locked -p athena-core` and confirm the pre-existing reading tests pass unedited. Confirm the main refusal test fails when the `check_code_survey` call is temporarily removed from `check_reading_acceptance`.",
+    "In briefs.rs, change `READING_RULES` to five entries, adding the `check_code_survey` rule of at most 220 bytes. Add `pub const CODE_SURVEY_GUIDE: &str` (survey before behavior criteria; entry point and order of resolution and probing; the records validation allow-list, naming `check_record_file`, `AnyRecord` or a round-trip test for a new record file; how to measure the property directly; and an intended-refusal criterion containing 'refuses more readings' when a request adds or tightens a refusal rule). Print it after the rule bullets in `reader_brief`.",
+    "Update `the_reader_brief_names_each_reading_rule_in_one_short_line` (add `check_code_survey` to the check names; raise the section bound to about 1800 with a comment) and add `the_reader_brief_tells_the_reader_to_write_a_code_survey`, which asserts the guide's key phrases. Run `cargo test --locked -p athena-context`.",
+    "Add the CHANGELOG.md entry under [Unreleased] > Added: root cause, jobs and introspections, the check and the reader-brief guide, and the sentence that it refuses more readings and the higher refusal rate is intended.",
+    "Run `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`; fix any failure. Do not touch run/mod.rs, athena.toml, defaults.toml or workflows."
+  ],
+  "risks": [
+    {
+      "risk": "The new check refuses a share of the last 50 accepted readings that the replay would hold.",
+      "mitigation": "The change carries the intended-refusal phrases in its CHANGELOG entry and doc comment, and a test pins `criteria_intend_higher_refusal` on criterion 2's text. The replay therefore treats the rise as intended, as criterion 2 requires."
+    },
+    {
+      "risk": "The survey match is too loose (prose mentions pass) or too strict (valid surveys refused).",
+      "mitigation": "Tests cover the two `has_phrase`-style edge cases: a prefix match is exact after trimming and lowercasing, and evidence is matched per token. Reviewed against the allow-list-only and bare round-trip cases."
+    },
+    {
+      "risk": "A new crate or an ordinary toml/json file is mistaken for a record or data file and refused.",
+      "mitigation": "Gate on deliverable action and path only, exclude Cargo.toml, and test a new crate's Cargo.toml and a modified existing json as non-triggers."
+    },
+    {
+      "risk": "The new rule line or guide breaks the existing brief length assertions.",
+      "mitigation": "Keep the rule line at 220 bytes or less. Raise the section bound in that one test from 1200 to about 1800 bytes, and note why. The test continues to compare each line to `READING_RULES`."
+    },
+    {
+      "risk": "The reader brief names a check function that does not match the real one.",
+      "mitigation": "`the_reader_brief_names_each_reading_rule_in_one_short_line` lists every check name. The new `check_code_survey` name is added to that list, so a drift between the rule and the function name fails the test."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the diff of reading.rs. Entry point: `check_reading_acceptance`. Content criterion, no seam needed.",
+      "command": "git diff -- crates/athena-core/src/reading.rs",
+      "observes": "A `pub fn check_code_survey(reading: &Reading) -> Result<()>` exists. `check_reading_acceptance` calls it. Its doc comment names the root cause (the reading stage designs storage, override and test seams from a general idea of the feature without surveying what the records validation accepts or where resolution and probing happen), both job ids and both introspection ids.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Unit test calling the real `check_reading_acceptance` and the real `criteria_intend_higher_refusal`. The seam is the `Reading` value built by the existing `scoped_reading` helper and `Criterion` values; both exist today. No double. Also read `git diff -- CHANGELOG.md crates/athena-core/src/reading.rs` for the phrases 'refuses more readings' and 'higher refusal rate is intended'.",
+      "command": "cargo test --locked -p athena-core code_survey",
+      "observes": "The refusal happens, and the intended-refusal phrases are recognized, so the replay would not hold the job.",
+      "fails_without": "Test `code_survey_refusal_is_declared_intended` fails if the doc comment, CHANGELOG or refusal behavior is missing. It asserts that `criteria_intend_higher_refusal` is true for the text of criterion 2 and that a code reading with a behavior criterion and no survey is refused through `check_reading_acceptance`."
+    },
+    {
+      "criterion": 3,
+      "method": "Unit tests `code_survey_missing_is_refused_and_present_is_accepted` and `code_survey_tests_class_is_refused_too`. Entry point is the production `check_reading_acceptance(&reading, request, None, &[])`. Fixture: `scoped_reading(...)` with class_of_work set to \"code\", capability \"change\" (default), and one Behavior criterion that cites a command, so `check_criteria_evidence` passes. First case has no 'Code survey:' assumption. Further cases have an assumption without the prefix, a 'Code survey:' assumption without a crates/ path, and a valid one (accepted). The step that adds the tests builds the helper `code_reading(assumptions, deliverables, criteria)` in the tests module. The seam is plain data, with no double.",
+      "command": "cargo test --locked -p athena-core code_survey_missing",
+      "observes": "The unsurveyed reading returns Err whose text contains 'Code survey:' and 'crates/'. The same reading with `Code survey: crates/athena-core/src/reading.rs ...` returns Ok.",
+      "fails_without": "Removing the `check_code_survey(reading)?` call from `check_reading_acceptance` makes the refusal assertion fail, because the reading is then accepted."
+    },
+    {
+      "criterion": 4,
+      "method": "Unit tests `code_survey_new_record_file_needs_named_evidence` and `code_survey_does_not_apply_outside_its_gate`, through `check_reading_acceptance`. Fixtures come from the `code_reading` helper added in the test step. Refused: a Create deliverable `crates/athena-data/src/example.json` with a survey that only says 'the allow-list' or only 'round-trip' in prose. Accepted: the same reading with a survey naming `check_record_file`, `AnyRecord`, or `records_round_trip_every_kind`. A new `crates/foo/Cargo.toml` create, a modify of an existing json, and a criterion 'records/ is not changed' do not trigger the requirement. Still accepted: class docs, capability None, question set, and content-only criteria. The existing reading tests are not edited, and `cargo test -p athena-core` runs them.",
+      "command": "cargo test --locked -p athena-core code_survey",
+      "observes": "The refusal names the missing evidence (`check_record_file`, `AnyRecord` or a round-trip test). The accepted cases return Ok. All pre-existing reading tests pass unchanged.",
+      "fails_without": "Without the record-file branch, the 'allow-list only' case is accepted and `code_survey_new_record_file_needs_named_evidence` fails. Without the gate, the docs, no-capability, question and content-only cases are refused and `code_survey_does_not_apply_outside_its_gate` fails."
+    },
+    {
+      "criterion": 5,
+      "method": "Unit tests in briefs.rs call the real `reader_brief` with the existing `reader_inputs` fixture. Also run `cargo test --locked -p athena-context` for the token-budget tests, and read `git diff -- crates/athena-context/src/briefs.rs`.",
+      "command": "cargo test --locked -p athena-context reader_brief",
+      "observes": "The Reading rules section carries a 'Code survey:' line before the criteria guidance and a guide paragraph. The guide names the entry point and order of resolution and probing, the records validation allow-list, measuring the property directly, and writing a criterion saying the change 'refuses more readings' when a request adds or tightens a refusal rule. Every rule line is at most 220 bytes. The budget tests pass.",
+      "fails_without": "`the_reader_brief_tells_the_reader_to_write_a_code_survey` fails if the guide text is absent from `reader_brief`. `the_reader_brief_names_each_reading_rule_in_one_short_line` fails if the rule for `check_code_survey` is absent. Both go through the real `reader_brief(&reader_inputs(&reading()))`."
+    },
+    {
+      "criterion": 6,
+      "method": "List the changed files and read the CHANGELOG diff with `git diff -- CHANGELOG.md`. Content criterion; the producer snapshot is a git repository, so these git commands are available.",
+      "command": "git status --short",
+      "observes": "The changed files are crates/athena-core/src/reading.rs, crates/athena-context/src/briefs.rs and CHANGELOG.md. run/mod.rs, athena.toml, defaults.toml and .github/workflows are absent. The CHANGELOG entry states the root cause and the fix.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Run the three Athena checks. As separate whole commands: `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0.",
+      "fails_without": "Fails if any new code is unformatted, triggers a clippy warning (for example a needless `clone` or an unused import in the new helpers), or breaks a test. That includes tests that count `READING_RULES` and the system-facts budget test."
+    }
+  ],
+  "open_questions": [
+    "Criterion 4 names only a create deliverable as the trigger, while the reading's assumptions also mention a records.rs change. The plan triggers on both, inside the class and behavior-criterion gate. If the verifier reads criterion 4 strictly, a records.rs-only reading with a plain survey is still refused here.",
+    "Is a `Code survey:` assumption required for the capability `study` too? The plan gates on any set capability, as the criteria say 'change readings' only through the class gate; a study reading in class code with a behavior criterion would also be refused.",
+    "run/mod.rs is listed as a deliverable but the plan does not touch it; the producer should confirm no change there is needed after the tests pass."
+  ],
+  "producer_section_sha256": "1b702344f509b2cbc135cc75fe89104bc6a894e0b789ad0ace88f3f5ae0f8aca"
+}
