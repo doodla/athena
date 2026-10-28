@@ -697,6 +697,9 @@ pub struct VerifierInputs {
     /// The replay of the newest accepted readings through the base and candidate reading rules. `None` leaves
     /// the brief as it was.
     pub replay: Option<ReplayView>,
+    /// Whether the brief asks the soundness question ([`SOUNDNESS_QUESTION`]). True for change verification;
+    /// false for a study, whose verifier brief is unchanged.
+    pub soundness: bool,
 }
 
 /// The most refused requests the verifier brief lists; the rest are counted ("and N more"). The full list is
@@ -814,6 +817,21 @@ impl VerifierInputs {
     }
 }
 
+/// The soundness question, asked of a plan by the critic and of a change by the verifier. It is one constant so
+/// the two briefs cannot drift apart. It is about the approach, not style.
+pub const SOUNDNESS_QUESTION: &str = "Would a careful senior engineer reject this approach as a crude heuristic, \
+a special case that should be general, a guess where the code or data could be read, or a rule with obvious false \
+positives (for example, one that matches common words)? Name every such problem, each with the simpler or more \
+correct alternative. Judge the approach only, not style.";
+
+/// The `## Soundness` section: [`SOUNDNESS_QUESTION`], then what a finding of it does to this role's verdict.
+fn soundness_section(out: &mut String, consequence: &str) {
+    let _ = writeln!(
+        out,
+        "## Soundness\n\n{SOUNDNESS_QUESTION}\n\n{consequence}\n"
+    );
+}
+
 /// The verifier brief (design §7.2). With `inline_diff` false, the diff is elided, as stored in the record.
 pub fn verifier_brief(inputs: &VerifierInputs, inline_diff: bool) -> String {
     verifier_brief_with_plan(inputs, None, inline_diff)
@@ -839,6 +857,13 @@ pub fn verifier_brief_with_plan(
         "## Scope\n\nThe expected deliverables list is the one statement of scope. A changed file that is not on that \
          list is the scope finding, judged against the list and not against the wording of a criterion.\n"
     );
+    if inputs.soundness {
+        soundness_section(
+            &mut out,
+            "A blocker or major soundness finding fails the verdict like an unmet criterion, even when every criterion is met. \
+             Minor and nit findings do not.",
+        );
+    }
     if let Some(plan) = plan {
         verifier_plan_section(&mut out, plan);
     }
@@ -1201,9 +1226,14 @@ pub fn critic_brief(inputs: &CriticInputs) -> String {
     plan_body(&mut out, &inputs.plan);
     let _ = writeln!(out, "\n## Athena's own findings on this plan\n");
     findings_list(&mut out, &inputs.athena_findings, "(none)");
+    let _ = writeln!(out);
+    soundness_section(
+        &mut out,
+        "A blocker or major soundness finding makes your verdict revise. Minor and nit findings do not.",
+    );
     let _ = writeln!(
         out,
-        "\n## Critique\n\nEnd with the critique as your structured output."
+        "## Critique\n\nEnd with the critique as your structured output."
     );
     out
 }
@@ -2152,6 +2182,7 @@ mod tests {
             tool_config_from_base: vec![],
             pin: None,
             replay: None,
+            soundness: false,
         };
         let brief = verifier_brief(&inputs, true);
         assert!(brief.contains("## Scope"));
@@ -2178,6 +2209,7 @@ mod tests {
             tool_config_from_base: vec![],
             pin: None,
             replay: None,
+            soundness: false,
         };
         let brief = verifier_brief(&inputs, true);
         assert!(brief.contains(
@@ -2202,6 +2234,7 @@ mod tests {
             tool_config_from_base: vec![],
             pin: Some(pin()),
             replay: None,
+            soundness: false,
         };
         let brief = verifier_brief(&inputs, true);
         assert!(brief.contains("## Pinned source"));
@@ -2310,6 +2343,7 @@ mod tests {
             tool_config_from_base: vec![],
             pin: None,
             replay: None,
+            soundness: false,
         };
         assert!(verifier_brief(&inputs, true).contains("+# Changelog"));
         let recorded = verifier_brief(&inputs, false);
@@ -2722,7 +2756,75 @@ mod tests {
             tool_config_from_base: vec![],
             pin: None,
             replay: None,
+            soundness: false,
         }
+    }
+
+    /// The text of the `## Soundness` section of a brief, up to the role's own consequence sentence.
+    fn soundness_text(brief: &str) -> &str {
+        let start =
+            brief.find("## Soundness\n\n").expect("a soundness section") + "## Soundness\n\n".len();
+        let rest = &brief[start..];
+        rest[..rest.find("\n\n").expect("the section ends")].trim()
+    }
+
+    #[test]
+    fn soundness_question_is_one_const_with_the_four_problems_and_the_alternative() {
+        let q = SOUNDNESS_QUESTION;
+        for needed in [
+            "careful senior engineer",
+            "crude heuristic",
+            "special case that should be general",
+            "guess where the code or data could be read",
+            "obvious false positives",
+            "Name every such problem",
+            "simpler or more correct alternative",
+            "approach only, not style",
+        ] {
+            assert!(
+                q.contains(needed),
+                "the soundness question omits {needed:?}"
+            );
+        }
+        // The text is small, and the words the critic brief must never hold are not in it.
+        assert!(q.len() <= 700, "{} bytes", q.len());
+        let lower = q.to_lowercase();
+        for absent in ["cost", "usd", "$"] {
+            assert!(!lower.contains(absent), "the question holds {absent}");
+        }
+    }
+
+    #[test]
+    fn soundness_is_in_both_briefs_with_identical_text() {
+        let critic = critic_brief(&critic_inputs());
+        let mut inputs = plain_verifier_inputs();
+        inputs.soundness = true;
+        let verifier = verifier_brief(&inputs, true);
+        for (who, brief) in [("critic", &critic), ("verifier", &verifier)] {
+            assert_eq!(
+                brief.matches(SOUNDNESS_QUESTION).count(),
+                1,
+                "the {who} brief must hold the question once"
+            );
+            assert_eq!(soundness_text(brief), SOUNDNESS_QUESTION, "{who}");
+        }
+        assert_eq!(soundness_text(&critic), soundness_text(&verifier));
+        // The consequence differs per role and matches the verdict rules.
+        assert!(critic.contains("A blocker or major soundness finding makes your verdict revise."));
+        assert!(verifier.contains("fails the verdict like an unmet criterion"));
+        // The section sits before the critique in the critic brief and after the scope in the verifier's.
+        assert!(critic.find("## Soundness").unwrap() < critic.find("## Critique").unwrap());
+        assert!(verifier.find("## Scope").unwrap() < verifier.find("## Soundness").unwrap());
+    }
+
+    #[test]
+    fn a_verifier_brief_without_the_soundness_flag_lacks_the_question() {
+        let inputs = plain_verifier_inputs();
+        assert!(!inputs.soundness);
+        let brief = verifier_brief(&inputs, true);
+        assert!(!brief.contains("## Soundness"));
+        assert!(!brief.contains(SOUNDNESS_QUESTION));
+        assert_eq!(brief, VERIFIER_BRIEF_WITHOUT_A_PLAN);
     }
 
     /// The verifier brief for `plain_verifier_inputs` as it was before plans existed, captured from the

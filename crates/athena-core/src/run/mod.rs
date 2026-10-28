@@ -168,6 +168,39 @@ fn replay_view(replay: &Replay) -> ReplayView {
     }
 }
 
+/// The findings on a plan: Athena's own (minor ones only, here) first, then the critic's. A soundness finding
+/// is an ordinary finding of the critic, with its own severity.
+fn critic_findings(athena_findings: Vec<Finding>, critic: &CriticOutput) -> Vec<Finding> {
+    let mut findings = athena_findings;
+    findings.extend(critic.findings.iter().map(|f| Finding {
+        severity: match f.severity {
+            SeverityOutput::Blocker => Severity::Blocker,
+            SeverityOutput::Major => Severity::Major,
+            SeverityOutput::Minor => Severity::Minor,
+            SeverityOutput::Nit => Severity::Nit,
+        },
+        summary: f.summary.clone(),
+        evidence: format!("{} Fix: {}", f.evidence.trim(), f.fix.trim()),
+        location: Some(f.location.clone()),
+        source: FindingSource::Critic,
+    }));
+    findings
+}
+
+/// The plan's verdict: the critic's own, except that an accept with a blocker or major finding on the plan
+/// (from either source) becomes revise.
+fn plan_verdict(agent_verdict: CritiqueVerdict, findings: &[Finding]) -> CritiqueVerdict {
+    if agent_verdict == CritiqueVerdict::Accept
+        && findings
+            .iter()
+            .any(|f| matches!(f.severity, Severity::Blocker | Severity::Major))
+    {
+        CritiqueVerdict::Revise
+    } else {
+        agent_verdict
+    }
+}
+
 /// Runs `command` to the end, killing it after `timeout`. An error says how it ended when it did not succeed.
 fn run_bounded(
     command: &mut std::process::Command,
@@ -1163,29 +1196,8 @@ impl Athena {
             CritiqueVerdictOutput::Revise => CritiqueVerdict::Revise,
             CritiqueVerdictOutput::Reject => CritiqueVerdict::Reject,
         };
-        // Athena's own findings (minor ones only, here) come first, then the critic's.
-        let mut findings = athena_findings;
-        findings.extend(critic_output.findings.iter().map(|f| Finding {
-            severity: match f.severity {
-                SeverityOutput::Blocker => Severity::Blocker,
-                SeverityOutput::Major => Severity::Major,
-                SeverityOutput::Minor => Severity::Minor,
-                SeverityOutput::Nit => Severity::Nit,
-            },
-            summary: f.summary.clone(),
-            evidence: format!("{} Fix: {}", f.evidence.trim(), f.fix.trim()),
-            location: Some(f.location.clone()),
-            source: FindingSource::Critic,
-        }));
-        let verdict = if agent_verdict == CritiqueVerdict::Accept
-            && findings
-                .iter()
-                .any(|f| matches!(f.severity, Severity::Blocker | Severity::Major))
-        {
-            CritiqueVerdict::Revise
-        } else {
-            agent_verdict
-        };
+        let findings = critic_findings(athena_findings, &critic_output);
+        let verdict = plan_verdict(agent_verdict, &findings);
         let critique = Critique {
             job: id.clone(),
             round,
@@ -2496,6 +2508,8 @@ impl Athena {
             tool_config_from_base: tool_config_from_base.clone(),
             pin: ctx.job.job.as_ref().and_then(|j| j.pin.clone()),
             replay: Some(replay_view(&replay_record)),
+            // Change verification asks the soundness question; a study's verifier brief does not.
+            soundness: ctx.capability.id() != "study",
         };
         // What the producer's report still lacked after the send-back goes to the verifier as one more
         // entry under the checks. It is not a check and fails nothing; it names what the self-check
@@ -3620,6 +3634,74 @@ mod planning_grant_tests {
         assert_eq!(
             athena_context::briefs::HISTORY_LIMIT,
             athena_git::snapshot::HISTORY_LIMIT
+        );
+    }
+}
+
+#[cfg(test)]
+mod critic_soundness_tests {
+    use super::*;
+    use serde_json::json;
+
+    const SOUNDNESS_SUMMARY: &str =
+        "Soundness: the refusal rule matches common words, so it has false positives";
+
+    /// A critic output as the model returns it, parsed as the production round parses it, with one
+    /// soundness finding at `severity`.
+    fn critic_output(verdict: &str, severity: &str) -> CriticOutput {
+        serde_json::from_value(json!({
+            "verdict": verdict,
+            "findings": [{
+                "severity": severity,
+                "summary": SOUNDNESS_SUMMARY,
+                "location": "Approach",
+                "evidence": "The rule matches words that common requests contain.",
+                "fix": "Read the request's structure instead of matching words."
+            }],
+            "request_reading_mismatch": null,
+            "summary": "A crude heuristic."
+        }))
+        .unwrap()
+    }
+
+    fn verdict_for(verdict: &str, severity: &str) -> CritiqueVerdict {
+        let output = critic_output(verdict, severity);
+        let findings = critic_findings(Vec::new(), &output);
+        plan_verdict(CritiqueVerdict::Accept, &findings)
+    }
+
+    #[test]
+    fn soundness_finding_blocker_makes_the_plan_revise() {
+        let output = critic_output("accept", "blocker");
+        let findings = critic_findings(Vec::new(), &output);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, Severity::Blocker);
+        assert_eq!(findings[0].source, FindingSource::Critic);
+        assert!(findings[0].summary.starts_with("Soundness:"));
+        // The critic said accept; the blocker finding overrides it.
+        assert_eq!(
+            plan_verdict(CritiqueVerdict::Accept, &findings),
+            CritiqueVerdict::Revise
+        );
+        assert_eq!(verdict_for("accept", "major"), CritiqueVerdict::Revise);
+    }
+
+    #[test]
+    fn soundness_finding_minor_or_nit_leaves_the_plan_accepted() {
+        assert_eq!(verdict_for("accept", "minor"), CritiqueVerdict::Accept);
+        assert_eq!(verdict_for("accept", "nit"), CritiqueVerdict::Accept);
+    }
+
+    #[test]
+    fn soundness_finding_does_not_soften_the_critics_own_verdict() {
+        let findings = critic_findings(Vec::new(), &critic_output("revise", "minor"));
+        assert_eq!(
+            plan_verdict(CritiqueVerdict::Revise, &findings),
+            CritiqueVerdict::Revise
+        );
+        assert_eq!(
+            plan_verdict(CritiqueVerdict::Reject, &findings),
+            CritiqueVerdict::Reject
         );
     }
 }

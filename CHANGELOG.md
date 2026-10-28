@@ -9,6 +9,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- One soundness question in the critic's brief and in every change-verification brief (a study's verifier brief
+  is unchanged). It asks whether a careful senior engineer would reject the approach as a crude heuristic, a
+  special case that should be general, a guess where the code or data could be read, or a rule with obvious
+  false positives, and it requires naming each such problem with the simpler or more correct alternative. It
+  judges the approach, not style. The text is the code constant `SOUNDNESS_QUESTION`, rendered by both briefs,
+  so the two cannot drift. A soundness finding is an ordinary finding: a blocker or major one makes the critic's
+  verdict revise and fails the verifier's verdict even when every criterion is met; minor and nit ones change
+  neither. Tests with fake critic and verifier outputs pin those verdicts; whether a model raises the finding
+  stays its judgment.
 - `athena check-reading --request <file> --reading <file>` applies this build's reading rules
   (`check_reading_acceptance`, as a first attempt) to a stored request and reading and prints `accept` or
   `refuse: <reason>`; the exit code is 0 or 2. It needs no repository and calls no model.

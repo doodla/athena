@@ -1,0 +1,120 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261028-035237-radk",
+  "base_commit": "cf03abb96e4073eae8a33ea2e627762ccb49cebe",
+  "base_fingerprint": "sha256:c8275f93110549312bc5783c68ab27cb32fd77076b935af33c1b399854348fa0",
+  "previous_job": "20261028-124903-wngz",
+  "candidate_commit": "d4b0787a459673024cc3473c774b7ae7b09b6aab",
+  "candidate_tree": "874567d9cb96491948a297ef41e9d0b8aeaab5e6",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 197536
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 140100
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 201439
+    },
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 48600
+    }
+  ],
+  "fingerprint": "sha256:1b5f712dda1a2979c58bd9045de10b4c971073e2227a21e491bc68eec45f57ec",
+  "violations": [],
+  "producer_report": {
+    "summary": "I added one soundness question to the critic's brief and to every change-verification brief. The full workspace tests, fmt, clippy with -D warnings and the boundary-word scan all pass. The question is the constant `SOUNDNESS_QUESTION` in briefs.rs, rendered by a shared `soundness_section` helper, so the two briefs cannot drift. It asks whether a careful senior engineer would reject the approach as a crude heuristic, a special case that should be general, a guess where the code or data could be read, or a rule with obvious false positives. It requires naming each problem with the simpler or more correct alternative, and it is limited to approach, not style.\\n\\nEach brief adds its own one-sentence consequence after the question. In the critic's brief, a blocker or major soundness finding makes the verdict revise. In the verifier's brief, it fails the verdict like an unmet criterion, even when every criterion is met. Minor and nit findings do not change either verdict.\\n\\nChanges beyond the shared text:\\n- **Study verifier:** `VerifierInputs` has a new `soundness: bool`, set to `ctx.capability.id() != \\\"study\\\"`, so the study verifier brief is byte-identical to before.\\n- **Critic gate extraction:** the inline critic code in run/mod.rs is now two pure functions, `critic_findings` and `plan_verdict`. I moved the code unchanged so the revise rule can be tested without a model.\\n- **Prompt files:** `critic.md` and `verifier.md` are unchanged. The verifier set is at 1298 of 1300 tokens, and the budgets are pinned in docs/system-facts.md, which is not a deliverable.\\n\\nThe tests are:\\n- **briefs.rs:** the question text, the same text once in each brief, and the study brief lacking it.\\n- **run/mod.rs:** critic outputs parsed from JSON, giving revise for blocker and major findings and staying accept for minor and nit.\\n- **verify.rs:** a blocker soundness finding with all criteria met gives Fail, and a minor or nit one stays Pass.\\n\\nThe CHANGELOG has a new entry under Unreleased / Added.",
+    "files": [
+      "crates/athena-context/src/briefs.rs",
+      "crates/athena-core/src/run/mod.rs",
+      "crates/athena-core/src/verify.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test --locked -p athena-context -p athena-core soundness",
+        "result": "pass",
+        "note": "3 briefs tests and 5 athena-core tests (3 critic, 2 verifier) pass"
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "clean after cargo fmt --all"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "clean"
+      },
+      {
+        "command": "cargo test --locked -q",
+        "result": "pass",
+        "note": "whole workspace: every test result ok, none failed (includes budget and stored-brief tests)"
+      },
+      {
+        "command": "cargo test --locked -p xtask --test policy",
+        "result": "pass",
+        "note": "12 passed, including the boundary-word scan"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "briefs.rs defines the soundness question once, and both the critic brief and the change-verifier brief render that same constant. It asks about a crude heuristic, a special case that should be general, a guess where code or data could be read, and a rule with obvious false positives. It requires naming every such problem with the simpler or more correct alternative, and it is limited to approach, not style.",
+        "status": "met",
+        "evidence": "Read briefs.rs: `pub const SOUNDNESS_QUESTION` is defined once; only `soundness_section` renders it, called from `critic_brief` and from `verifier_brief_with_plan` (when `inputs.soundness`). The text names all four problems, 'Name every such problem, each with the simpler or more correct alternative', and 'Judge the approach only, not style.' Test soundness_question_is_one_const_with_the_four_problems_and_the_alternative passes."
+      },
+      {
+        "criterion": "Run `cargo test`: the brief tests assert the critic brief and the change-verifier brief both contain the identical soundness question text, and the existing prompt size/token-limit test passes.",
+        "status": "met",
+        "evidence": "`cargo test --locked -p athena-context -p athena-core soundness` passes soundness_is_in_both_briefs_with_identical_text (each brief holds the const exactly once, the extracted Soundness section text is equal in both) and a_verifier_brief_without_the_soundness_flag_lacks_the_question. Full `cargo test --locked -q` passed, including the budget tests, since critic.md and verifier.md are unchanged."
+      },
+      {
+        "criterion": "Run `cargo test`: a test with a fake critic output carrying a blocker soundness finding yields plan verdict revise, and one with only a minor soundness finding does not change the verdict.",
+        "status": "met",
+        "evidence": "run/mod.rs tests critic_soundness_tests::soundness_finding_blocker_makes_the_plan_revise (CriticOutput parsed from JSON with verdict accept and a blocker or major soundness finding gives Revise) and soundness_finding_minor_or_nit_leaves_the_plan_accepted (Accept stays Accept) pass. They call `critic_findings` and `plan_verdict`, the functions the production round now calls."
+      },
+      {
+        "criterion": "Run `cargo test`: a test with a fake verifier output carrying a blocker soundness finding, with all criteria met, yields a failed verdict, and a minor soundness finding leaves a passing verdict passing.",
+        "status": "met",
+        "evidence": "verify.rs tests soundness_finding_blocker_fails_the_verdict_with_all_criteria_met (asserts every criterion met, Verdict::Fail, reason '1 blocker or major finding(s)', no Verified) and soundness_finding_minor_or_nit_leaves_a_passing_verdict_passing (Pass) pass."
+      },
+      {
+        "criterion": "Run `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`: both are clean. `cargo test` passes for the whole workspace.",
+        "status": "met",
+        "evidence": "left to Athena's checks (I also ran fmt --check, clippy -D warnings and the whole `cargo test --locked`; all passed)."
+      },
+      {
+        "criterion": "CHANGELOG.md has a new entry describing the soundness question in the critic and verifier. No governance files (athena.toml, defaults.toml) change.",
+        "status": "met",
+        "evidence": "Read CHANGELOG.md: new first bullet under [Unreleased] / Added describes the shared question, its verdict effects and that the study verifier is unchanged. Edited files are only briefs.rs, run/mod.rs, verify.rs and CHANGELOG.md; no governance file touched."
+      }
+    ],
+    "open_issues": [
+      "The question is a prompt: the tests pin what the verdict does with a soundness finding, not whether a model raises one. The CHANGELOG entry says so.",
+      "The study capability is identified by `capability.id() != \"study\"` (as run/mod.rs already does elsewhere), so a future capability gets the question by default.",
+      "The consequence sentences say 'blocker or major' (matching the existing `judge` and critic rules), while the request names only blocker."
+    ],
+    "mistakes": [],
+    "learnings": [
+      "The verifier brief has one builder (`verifier_brief_with_plan`) shared by change and study, so a `soundness: bool` on `VerifierInputs` was needed to keep the study brief unchanged.",
+      "The always-loaded prompt files are pinned by budget tests and docs/system-facts.md (verifier set 1298 of 1300 tokens), so wording that must be shared lives in a briefs.rs const, outside those sets.",
+      "The critic brief is scanned for the substrings 'cost', 'usd' and '$'; the soundness text avoids them and a test checks that.",
+      "The critic's verdict override (accept with a blocker or major finding becomes revise) was inline in the planning round; it is now `critic_findings` and `plan_verdict` in run/mod.rs, with the code moved unchanged."
+    ],
+    "desires": [
+      "A way to read the saved output of a long test run, since Grep refuses paths outside the working directory; I reran with -q instead."
+    ]
+  }
+}
