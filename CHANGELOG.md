@@ -9,6 +9,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A reading size gate. Root cause: reading validation never compared a reading's scope with the producer and
+  verifier deadlines, so a source with many items produced a reading that no single run could finish. Fix:
+  `check_reading_size` in athena-core, called from `build_reading` after the forecast is validated, refuses a
+  reading that names a capability when its own `wall_time_s.p50` is greater than `budget.producer_timeout_s`
+  or `budget.verifier_timeout_s` (equal is allowed; a decline is not gated). The refusal goes back to the
+  reader once, and says to pick one deliverable and name the rest as follow-up requests in `out_of_scope`.
+  This change refuses more readings, and the higher refusal rate is intended: an estimated 3% of readings
+  (not measured), only those forecasting a median wall time beyond a configured timeout. No config key is
+  added and no timeout changes.
 - A code survey requirement in reading acceptance. Root cause: the reading stage designed storage, override
   and test seams from a general idea of the feature, without surveying what the records validation accepts or
   where resolution and probing happen in the code (jobs 20261028-055601-hg0n and 20261028-082151-67fa;
