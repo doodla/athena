@@ -1220,6 +1220,56 @@ mod tests {
         assert_eq!(fault[0].source, FindingSource::Athena);
     }
 
+    fn soundness_finding(severity: SeverityOutput) -> FindingOutput {
+        FindingOutput {
+            severity,
+            summary: "Soundness: the refusal rule matches common words, so it has false positives".into(),
+            evidence: "The rule refuses any request holding a common word. Read the request's structure instead."
+                .into(),
+            location: Some("src/reading.rs".into()),
+        }
+    }
+
+    #[test]
+    fn soundness_finding_blocker_fails_the_verdict_with_all_criteria_met() {
+        let ran = ["cargo test".to_string()];
+        let j = judge_with(
+            &output(
+                vec!["cargo test"],
+                vec![soundness_finding(SeverityOutput::Blocker)],
+            ),
+            &ran,
+            &[check(true)],
+        );
+        // Every criterion is met and the check passed; the finding alone fails the verdict.
+        assert!(j.criteria.iter().all(|c| c.met), "{:?}", j.criteria);
+        assert_eq!(j.final_verdict, Verdict::Fail);
+        assert!(
+            j.reasons
+                .iter()
+                .any(|r| r == "1 blocker or major finding(s)"),
+            "{:?}",
+            j.reasons
+        );
+        assert!(verified(&j, "b", "c", "sha256:x").is_none());
+    }
+
+    #[test]
+    fn soundness_finding_minor_or_nit_leaves_a_passing_verdict_passing() {
+        let ran = ["cargo test".to_string()];
+        for severity in [SeverityOutput::Minor, SeverityOutput::Nit] {
+            let j = judge_with(
+                &output(vec!["cargo test"], vec![soundness_finding(severity)]),
+                &ran,
+                &[check(true)],
+            );
+            assert!(j.criteria.iter().all(|c| c.met));
+            assert_eq!(j.final_verdict, Verdict::Pass, "{:?}", j.reasons);
+            assert!(j.reasons.is_empty(), "{:?}", j.reasons);
+            assert_eq!(j.findings.len(), 1);
+        }
+    }
+
     #[test]
     fn major_findings_and_failed_checks_fail_the_verdict() {
         let major = FindingOutput {

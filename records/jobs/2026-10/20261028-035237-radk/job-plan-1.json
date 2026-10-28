@@ -1,0 +1,169 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261028-035237-radk",
+  "round": 1,
+  "at": "2026-10-28T14:15:01.728156064Z",
+  "invocation_seq": 2,
+  "approach": "Define `pub const SOUNDNESS_QUESTION: &str` once in briefs.rs. It asks whether a careful senior engineer would reject the approach as a crude heuristic, a special case that should be general, a guess where the code or data could be read, or a rule with obvious false positives. It requires naming every such problem with the simpler or more correct alternative, and it is limited to the approach, not style. One private `soundness_section(out, consequence)` renders `## Soundness`, the const, then a one-sentence role consequence. `critic_brief` calls it before `## Critique`. `verifier_brief_with_plan` calls it after `## Scope`, only when a new `VerifierInputs.soundness: bool` is true. run/mod.rs sets that field to `ctx.capability.id() != \"study\"`; the same file already compares the id with \"study\" at line 2356. The study verifier brief stays byte-identical. The verdict rules already exist: `verify::judge` fails on any blocker or major finding, and the critic path forces revise on one. The work is the wording and tests that pin soundness findings to those rules. To make the critic rule testable without a model, extract the inline merge and verdict code at run/mod.rs 1166-1188 into two pure functions that the production path calls, and unit-test them. critic.md and verifier.md stay unchanged: the always-loaded budgets are exact and a test pins them in docs/system-facts.md, which is not a deliverable. The question lives in the briefs, which sit outside those sets.",
+  "decisions": [
+    {
+      "choice": "Render the question in the briefs (briefs.rs) and leave critic.md and verifier.md unchanged.",
+      "reason": "The prompt files are the always-loaded role sets. The verifier set is 1298 of 1300 tokens and the critic set is 783. Any byte change moves a computed budget line in docs/system-facts.md, which `system_facts_budgets_match_computed` pins and which is not a deliverable. The briefs are outside those sets (system facts say so), so the criterion 'stays within size limits' holds without touching the budgets. The shared const in briefs.rs is the single source, so the wording cannot drift.",
+      "rejected": [
+        {
+          "option": "Put the question text in critic.md and verifier.md.",
+          "why": "Two copies can drift. It also breaks the 2-token verifier headroom and forces an edit to docs/system-facts.md."
+        },
+        {
+          "option": "Add a one-line pointer to each frame.",
+          "why": "It still shifts the pinned budget lines. The brief already carries the question and its consequence, so a pointer adds nothing."
+        }
+      ]
+    },
+    {
+      "choice": "Add a `soundness: bool` field to `VerifierInputs`, set in run/mod.rs from `ctx.capability.id() != \"study\"`.",
+      "reason": "`verifier_brief_with_plan` is the only verifier brief builder and the study capability shares it. The request limits the question to change verification. A field keeps the study brief unchanged, and `VERIFIER_BRIEF_WITHOUT_A_PLAN` stays valid when `plain_verifier_inputs` sets false. run/mod.rs line 2356 already branches on `capability.id() == \"study\"`.",
+      "rejected": [
+        {
+          "option": "Use `pin.is_none()` as the signal.",
+          "why": "It is a proxy that happens to correlate with study. The explicit field avoids exactly the kind of crude proxy this change targets."
+        },
+        {
+          "option": "Add the question to every verifier brief, study included.",
+          "why": "It contradicts the reading's scope ('study verifier untouched' and out of scope)."
+        }
+      ]
+    },
+    {
+      "choice": "The role consequence sentence stays outside the shared const. Critic: 'A blocker soundness finding makes your verdict revise.' Verifier: 'A blocker or major soundness finding fails the verdict like an unmet criterion; a minor one does not.'",
+      "reason": "The question text is identical. The consequence differs per role and matches the existing gates (critic revise on blocker or major; `judge` fail on blocker or major).",
+      "rejected": [
+        {
+          "option": "Put the consequence in the const.",
+          "why": "The two roles' outcomes differ, so one sentence would be wrong for one of them."
+        }
+      ]
+    },
+    {
+      "choice": "Extract `critic_findings(athena, &CriticOutput) -> Vec<Finding>` and `plan_verdict(agent, &[Finding]) -> CritiqueVerdict` from run/mod.rs lines 1166-1188. The production path calls both.",
+      "reason": "The critic gate is inline in a long method that needs a git repository and a driver. Pure functions make the 'fake critic output with a blocker soundness finding gives revise' test direct and cheap. The test feeds a real `CriticOutput` parsed by `serde_json` the way production parses it. The logic under test is not inside the double.",
+      "rejected": [
+        {
+          "option": "Drive the whole planning round in a run/mod.rs unit test.",
+          "why": "It needs a repository fixture and a driver, which is heavy. The CLI integration tests (`job_plan.rs`, `Scenario.critiques`) are outside the listed files."
+        },
+        {
+          "option": "Add a new severity or a `soundness` field to the output schema.",
+          "why": "Out of scope. Soundness findings are ordinary findings."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Add `SOUNDNESS_QUESTION` and `soundness_section`. Add the `soundness: bool` field to `VerifierInputs` (documented, with an updated doc comment). Render the section in `critic_brief` and, when the field is true, in `verifier_brief_with_plan`. Update the five test constructors and `plain_verifier_inputs` (false). Add brief tests: identical text in both, absent for study, stored-copy test unchanged, const length bound, and no 'cost', 'usd' or '$' in the wording because the critic-brief absence test scans for them.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "Set `soundness: ctx.capability.id() != \"study\"` in the `VerifierInputs` built at line 2472. Extract `critic_findings` and `plan_verdict` from lines 1166-1188 and call them. Add unit tests for the blocker, minor and nit soundness cases.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "action": "modify",
+      "purpose": "Add tests only: a blocker soundness finding with all criteria met fails the verdict, and a minor one leaves it passing. No production change is planned, because `judge` already fails on blocker or major findings.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an entry under Unreleased / Added describing the shared soundness question in the critic and change-verifier briefs and its verdict effect.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In briefs.rs add `pub const SOUNDNESS_QUESTION` (under 700 bytes, with no 'cost', 'usd' or '$' substring) and a private `soundness_section(out, consequence)` that writes `## Soundness`, the const and the consequence sentence.",
+    "Add `pub soundness: bool` to `VerifierInputs` with a doc comment. Update all constructors: the five test sites near lines 2140, 2166, 2190, 2293 and 2705 (false, except where a test wants true), and run/mod.rs line 2472.",
+    "Call `soundness_section` in `critic_brief` before `## Critique` (critic consequence). Call it in `verifier_brief_with_plan` right after `## Scope` when `inputs.soundness` is true (verifier consequence: a blocker or major soundness finding fails the verdict like an unmet criterion; minor and nit do not).",
+    "In run/mod.rs set `soundness: ctx.capability.id() != \"study\"`. Extract `critic_findings(athena_findings, &CriticOutput) -> Vec<Finding>` and `plan_verdict(agent_verdict, &[Finding]) -> CritiqueVerdict` from lines 1166-1188, moving the code unchanged, and call them from the round.",
+    "Add the briefs.rs tests (const content, identical text in both briefs, study brief lacks it, size bound). Add the run/mod.rs tests (`soundness_finding_blocker_makes_the_plan_revise`, minor and nit leave accept), building `CriticOutput` with `serde_json::from_value`. Add the verify.rs tests (`soundness_finding_blocker_fails_the_verdict_with_all_criteria_met`, minor leaves pass) using `judge_with`.",
+    "Add a CHANGELOG.md bullet under [Unreleased] / Added.",
+    "Run `cargo fmt --all`, then `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Confirm that the budgets test and `system_facts_budgets_match_computed` still pass and that no governance file changed."
+  ],
+  "risks": [
+    {
+      "risk": "Existing tests that compare brief text exactly (`VERIFIER_BRIEF_WITHOUT_A_PLAN`, the critic absence scan for 'cost', 'usd' and '$') break on the new section or wording.",
+      "mitigation": "Keep the plain verifier inputs at `soundness: false` so the stored copy is unchanged. Word the section without 'cost', 'usd' or '$'. Run the full briefs tests."
+    },
+    {
+      "risk": "CLI integration tests that read the verifier or critic brief (lifecycle.rs, job_plan.rs) assume an exact layout.",
+      "mitigation": "The new section is additive between existing headings. The producer runs the full `cargo test --locked`."
+    },
+    {
+      "risk": "The extraction in run/mod.rs changes behavior by accident.",
+      "mitigation": "Move the code unchanged: the same severity mapping, the same Accept-plus-blocker-or-major override. The existing job_plan.rs integration tests still cover the live path."
+    },
+    {
+      "risk": "The question is a prompt and only a model's judgment enforces it. The tests pin the verdict mechanics, not the model's catch rate.",
+      "mitigation": "Say so in the CHANGELOG. The question's consequence sentence tells the model how to rate findings, and the mechanics are fixed by tests."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the change and run the brief tests. In briefs.rs `SOUNDNESS_QUESTION` is defined once and only `soundness_section` renders it. Test `soundness_question_is_one_const_with_the_four_problems_and_the_alternative` asserts the const contains each of: crude heuristic, special case, guess, false positives, the simpler-or-more-correct alternative requirement, and the approach-not-style limit.",
+      "command": "cargo test --locked -p athena-context soundness",
+      "observes": "The soundness tests pass. A read of the diff shows exactly one definition of the text (`grep -c` style check in the test: the const's text appears once in each brief) and no copy in critic.md or verifier.md.",
+      "fails_without": "The test fails if the const lacks any of the four problem phrases, the alternative requirement or the style limit, or if a brief renders it zero or two times."
+    },
+    {
+      "criterion": 2,
+      "method": "Unit tests in briefs.rs call the production builders `critic_brief(&critic_inputs())` and `verifier_brief(&inputs, true)` with `soundness: true`. They assert each brief contains `SOUNDNESS_QUESTION` exactly once and that the text extracted from the `## Soundness` section of each, up to the role sentence, is equal. A second test asserts the study case (`soundness: false`) does not contain it, and that `VERIFIER_BRIEF_WITHOUT_A_PLAN` still matches. The existing budget tests run in the same command. Seams: `critic_inputs()` and `plain_verifier_inputs()` exist today. The `soundness` field is added by step 2.",
+      "command": "cargo test --locked",
+      "observes": "The brief tests pass. `every_role_set_is_within_its_budget` and `system_facts_budgets_match_computed` in athena-cli/tests/budgets.rs pass because the prompt files are unchanged. A bound assertion on the const's length (at most 700 bytes) keeps the brief small.",
+      "fails_without": "`soundness_is_in_both_briefs_with_identical_text` fails if either builder omits the section or the two texts differ. The study test fails if the field is ignored."
+    },
+    {
+      "criterion": 3,
+      "method": "Unit tests in run/mod.rs build a `CriticOutput` with `serde_json::from_value` from JSON: verdict accept, one finding with severity blocker and summary 'Soundness: matches common words, false positives'. They pass it through `critic_findings` and `plan_verdict`, which are the same functions the production round calls. They assert `plan_verdict` returns `CritiqueVerdict::Revise`. A second case has the same finding at severity minor and expects `Accept`. A third has verdict accept and a nit, expecting `Accept`. Seam: the two functions are extracted in step 4 from the inline code at lines 1166-1188. No agent or repository is needed.",
+      "command": "cargo test --locked -p athena-core soundness_finding",
+      "observes": "The blocker case yields revise (agent verdict accept overridden). The minor and nit cases leave accept.",
+      "fails_without": "If the blocker-or-major override in `plan_verdict` is removed or the severity mapping in `critic_findings` is wrong, the blocker case returns accept and the test fails."
+    },
+    {
+      "criterion": 4,
+      "method": "Unit tests in verify.rs call `judge_with` (the existing helper that wraps `judge`) with `output(vec![\"cargo test\"], vec![finding])`, `ran = [\"cargo test\"]` and `check(true)`. All criteria are met and the command is seen. Case A: a `FindingOutput` with severity blocker and a soundness summary yields `final_verdict == Verdict::Fail`, and `reasons` includes '1 blocker or major finding(s)' while zero criteria are unmet. Case B: the same finding at minor leaves `Verdict::Pass`. The helpers `output`, `check` and `judge_with` exist today (seen at verify.rs 1224-1260).",
+      "command": "cargo test --locked -p athena-core soundness_finding",
+      "observes": "The blocker soundness finding with all criteria met gives fail. The minor one leaves pass.",
+      "fails_without": "If `judge` ignored blocker findings when every criterion is met, case A would return pass and fail the test."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the three Athena checks over the whole workspace.",
+      "command": "cargo fmt --all --check",
+      "observes": "fmt is clean. Then `cargo clippy --all-targets --locked -- -D warnings` shows no warnings and `cargo test --locked` passes for the workspace, including the CLI integration tests that read `brief-verifier.md` and the planning tests.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Read the diff. CHANGELOG.md gets one new bullet under `## [Unreleased]` / `### Added`, in the existing prose style. It says the critic's brief and every change-verification brief carry one shared soundness question, a blocker finding makes the critic revise and fails the verifier, and the study verifier is unchanged. `git diff --stat` lists no athena.toml, defaults.toml, workflow or lint file.",
+      "command": "git diff --stat HEAD~1",
+      "observes": "The changed files are only briefs.rs, run/mod.rs, verify.rs and CHANGELOG.md, with the CHANGELOG hunk under Unreleased. No governance file appears.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "critic.md and verifier.md are listed as deliverables but the plan leaves them unchanged. An edit shifts the computed budget lines in docs/system-facts.md (not a deliverable) and the verifier set has 2 tokens of headroom. If the user wants a frame pointer, docs/system-facts.md must be added to the deliverables.",
+    "Should a major soundness finding also be called out in the verifier consequence sentence? The plan says 'blocker or major', which matches the existing `judge` rule. The request only names blocker.",
+    "Studies are identified by `capability.id() == \"study\"`, as run/mod.rs line 2356 already does. A future capability would get the question by default."
+  ],
+  "producer_section_sha256": "06a779d86a74631174b2be21bad8d75c1240866168ea4f28e61606a9d3f6291a"
+}
