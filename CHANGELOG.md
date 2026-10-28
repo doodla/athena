@@ -9,6 +9,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- A reading is now refused when an acceptance criterion rests on the producer's own report, summary, claims or
+  statement as its evidence. Root cause: criteria were written without a defined list of what the verifier can
+  observe (the candidate diff, the repository snapshot, the recorded check output and the commands it may run), and
+  nothing compared the evidence a criterion requires with that list, so a criterion such as "the producer's report
+  lists the caller-check Grep" was accepted and then could not be judged. Jobs 20261027-004517-gk9e,
+  20261027-011733-vrsk, 20261027-012938-yckz, 20261026-232402-6qme and 20261026-232423-hvyb each failed that way.
+  New `check_criteria_evidence` in `athena-core` (`reading.rs`) runs next to `check_prior_result_and_scope`, through
+  `check_reading_acceptance`, on every reading with a capability, first attempt or retry; the refusal names each
+  criterion and says to restate it as a command or Grep the verifier can run, or a file in the snapshot. The
+  reader's brief ("What the verifier can run") states the same rule in code-built text, not in a prompt file. Tests in
+  `reading.rs` cover each phrase family, ordinary criteria that are accepted, and a first attempt and a retry
+  through `Athena::ask` and `Athena::retry` (`run_pin_tests.rs`).
 - The previous-result check on a reading now applies only to the job the request continues, and no longer refuses a
   request that cites earlier jobs as evidence. Root cause: the check ran over every job id named in the request
   text, so a root-cause request from the error review, which cites past jobs' introspections, was refused because

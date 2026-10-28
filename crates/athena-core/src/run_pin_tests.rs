@@ -1414,3 +1414,116 @@ fn a_report_that_fails_the_self_check_is_kept_for_both_attempts_and_the_work_sti
         finished.reason
     );
 }
+
+/// The criterion that rests on the producer's report, as the reader wrote it in five failed jobs.
+const REPORT_CRITERION: &str = "the producer's report lists the caller-check Grep";
+
+/// The criterion a verifier can check with a Grep.
+const GREP_CRITERION: &str = "a Grep of crates/ for `gh::` outside gh/ returns no hits";
+
+/// Makes the reader's first criterion `criterion`. A reader brief that carries the previous result of an
+/// earlier job also gets the job's id in the summary, as a retry's reading must.
+fn reader_writes(criterion: &'static str, verifier: Tweak) -> Tweak {
+    Arc::new(move |spec, turn| {
+        if spec.role == Role::Reader {
+            let reading = turn.structured.as_mut().unwrap();
+            reading["acceptance_criteria"][0]["text"] = json!(criterion);
+            let brief = &spec.user_prompt;
+            if let Some((_, section)) =
+                brief.split_once(athena_context::briefs::PRIOR_RESULT_HEADING)
+            {
+                let ids: Vec<&str> = section
+                    .lines()
+                    .filter_map(|l| l.strip_prefix("Job "))
+                    .filter_map(|l| l.split(':').next())
+                    .collect();
+                let summary = format!("Retry of job {}.", ids.join(", job "));
+                reading["summary"] = json!(summary);
+            }
+        }
+        verifier(spec, turn);
+    })
+}
+
+#[test]
+fn a_first_reading_resting_on_the_producers_report_comes_back_as_a_refusal_not_a_reading() {
+    for (criterion, accepted) in [(REPORT_CRITERION, false), (GREP_CRITERION, true)] {
+        let (dir, git) = repo(&config(true));
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_with(
+            &dir,
+            &state,
+            CountingPinner::new(FAKE_SHA),
+            Arc::default(),
+            reader_writes(criterion, Arc::new(|_, _| {})),
+        );
+        let proposal = athena.ask("study the demo", &Quiet).unwrap();
+        assert_eq!(proposal.reading.is_some(), accepted, "{criterion}");
+        match &proposal.reader_error {
+            None => assert!(accepted),
+            Some(error) => {
+                assert!(error.contains("was refused"), "{error}");
+                assert!(error.contains(criterion), "{error}");
+                // The refusal is committed with the reader's invocation and no reading.
+                let prefix = format!("{}/", proposal.job.dir());
+                let paths: Vec<String> = git
+                    .ls_tree_under("HEAD", &prefix)
+                    .unwrap()
+                    .into_iter()
+                    .map(|e| e.path)
+                    .collect();
+                assert!(
+                    paths.iter().any(|p| p.contains("invocations/")),
+                    "{paths:?}"
+                );
+                assert!(!paths.iter().any(|p| p.contains("reading")), "{paths:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_retry_reading_resting_on_the_producers_report_comes_back_as_a_refusal_not_a_reading() {
+    for (criterion, accepted) in [(REPORT_CRITERION, false), (GREP_CRITERION, true)] {
+        let (dir, _git) = repo(&config(true));
+        let state = tempfile::tempdir().unwrap();
+        // The first job is rejected: its verifier changes its snapshot on both runs.
+        let runs: Runs = Arc::default();
+        let athena = athena_with(
+            &dir,
+            &state,
+            CountingPinner::new(FAKE_SHA),
+            Arc::default(),
+            reader_writes(GREP_CRITERION, faulty_verifier(runs, 2, 0.01)),
+        );
+        let first = athena.ask("study the demo", &Quiet).unwrap();
+        assert!(first.reading.is_some());
+        let GoResult::Finished(finished) = athena
+            .go(first.job.as_str(), AcceptedBy::User, &Quiet)
+            .unwrap()
+        else {
+            panic!("expected the job to finish");
+        };
+        assert_eq!(finished.state, OutcomeState::Rejected);
+        // Now the reader reads the retry with `criterion`; the brief carries the earlier job.
+        let athena = athena_with(
+            &dir,
+            &state,
+            CountingPinner::new(FAKE_SHA),
+            Arc::default(),
+            reader_writes(criterion, Arc::new(|_, _| {})),
+        );
+        let (retry, _) = athena.retry(first.job.as_str(), &Quiet).unwrap();
+        assert_eq!(retry.reading.is_some(), accepted, "{criterion}");
+        match &retry.reader_error {
+            None => assert!(accepted),
+            Some(error) => {
+                assert!(error.contains(criterion), "{error}");
+                assert!(
+                    !error.contains("the previous result"),
+                    "the reading names the earlier job, so the evidence check decided: {error}"
+                );
+            }
+        }
+    }
+}
