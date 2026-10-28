@@ -393,6 +393,18 @@ Exit code: 0 only when the target was met; 2 for any other stop; 1 when Athena i
         #[arg(long)]
         json: bool,
     },
+    /// Read-only: apply the reading rules of this build to a stored request and reading and print `accept`, or
+    /// `refuse: <reason>`. Needs no repository and calls no model. Exit 0 on accept, 2 on refuse. Athena runs
+    /// the base and the candidate builds of this command over its newest accepted readings before it verifies
+    /// a candidate.
+    CheckReading {
+        /// The request: its `request.json` record, or the request text in a plain file.
+        #[arg(long)]
+        request: PathBuf,
+        /// The reading: its `reading-<n>.json` record.
+        #[arg(long)]
+        reading: PathBuf,
+    },
     /// The kill switch: terminate every running agent and check, and block new ones.
     Stop,
     /// Turn the kill switch off.
@@ -477,6 +489,40 @@ fn main() -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+/// `athena check-reading`: applies this build's reading rules (`athena_core::reading::check_reading_text`) to a
+/// stored request and reading. Returns the line to print (`accept`, or `refuse: <reason>`) and the exit code (0,
+/// or 2 on a refusal). A file that cannot be read, or a reading that is not a reading record, is an error and
+/// never an `accept`.
+fn check_reading_command(
+    request: &std::path::Path,
+    reading: &std::path::Path,
+) -> Result<(String, u8)> {
+    use anyhow::Context as _;
+    let request_bytes =
+        std::fs::read(request).with_context(|| format!("reading {}", request.display()))?;
+    let request_text = match athena_data::records::AnyRecord::parse(
+        &request.display().to_string(),
+        &request_bytes,
+    ) {
+        Ok(athena_data::records::AnyRecord::Request(r)) => r.text,
+        _ => String::from_utf8(request_bytes)
+            .with_context(|| format!("{} is not text", request.display()))?,
+    };
+    let reading_bytes =
+        std::fs::read(reading).with_context(|| format!("reading {}", reading.display()))?;
+    let record =
+        athena_data::records::AnyRecord::parse(&reading.display().to_string(), &reading_bytes)?;
+    let athena_data::records::AnyRecord::Reading(parsed) = record else {
+        anyhow::bail!("{} is not an athena.reading/1 record", reading.display());
+    };
+    let check = athena_core::reading::check_reading_text(&parsed, &request_text);
+    let code = match check {
+        athena_core::reading::ReadingCheck::Accept => 0,
+        athena_core::reading::ReadingCheck::Refuse(_) => 2,
+    };
+    Ok((check.line(), code))
 }
 
 /// A budget in US dollars: a number above zero.
@@ -1331,6 +1377,11 @@ fn run(cli: Cli) -> Result<u8> {
             }
             Ok(if report.errors.is_empty() { 0 } else { 2 })
         }
+        Command::CheckReading { request, reading } => {
+            let (line, code) = check_reading_command(&request, &reading)?;
+            println!("{line}");
+            Ok(code)
+        }
         Command::Stop => {
             let athena = open(false)?;
             let n = athena.stop()?;
@@ -1379,6 +1430,146 @@ mod tests {
                 )],
             )
             .unwrap();
+    }
+
+    /// A stored reading with this one acceptance criterion, as `reading-1.json`'s content.
+    fn reading_json(criterion: &str) -> String {
+        use athena_data::records::{
+            AnyRecord, Criterion, CriterionKind, Deliverable, DeliverableAction, Forecast,
+            Forecasts, Quantiles, Reading,
+        };
+        let forecast = Forecast {
+            p_reading_accepted: 0.8,
+            p_verification_passes: 0.7,
+            p_user_intervenes: 0.1,
+            cost_usd: Quantiles::new(0.2, 0.5, 1.5).unwrap(),
+            wall_time_s: Quantiles::new(100.0, 300.0, 900.0).unwrap(),
+        };
+        AnyRecord::Reading(Box::new(Reading {
+            job: JobId::parse("20261027-054151-ace0").unwrap(),
+            n: 1,
+            at: jiff::Timestamp::UNIX_EPOCH,
+            invocation_seq: 1,
+            base_commit: "a".repeat(40),
+            config_sha256: "b".repeat(64),
+            defaults_sha256: "c".repeat(64),
+            defaults_version: 1,
+            title: "Add a greeting".into(),
+            summary: "Add a greeting.".into(),
+            class_of_work: "feature".into(),
+            capability: Some("change".into()),
+            decline_reason: None,
+            producer_model: "producer".into(),
+            verifier_model: "verifier".into(),
+            defaults_applied: vec![],
+            assumptions: vec![],
+            question: None,
+            acceptance_criteria: vec![Criterion {
+                text: criterion.into(),
+                kind: CriterionKind::Behavior,
+            }],
+            deliverables: vec![Deliverable {
+                path: "src/greeting.rs".into(),
+                action: DeliverableAction::Modify,
+                p: 0.9,
+            }],
+            out_of_scope: vec!["the changelog".into()],
+            forecasts: Forecasts {
+                reader: forecast.clone(),
+                reference: forecast,
+            },
+            departures: None,
+            urgent_reason: None,
+            hard_reason: None,
+            producer_effort: None,
+        }))
+        .to_json()
+    }
+
+    /// Writes a request and a reading to a scratch directory and returns the two paths.
+    fn check_reading_fixture(
+        dir: &std::path::Path,
+        criterion: &str,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
+        let request = dir.join("request.txt");
+        let reading = dir.join("reading-1.json");
+        std::fs::write(&request, "add a greeting").unwrap();
+        std::fs::write(&reading, reading_json(criterion)).unwrap();
+        (request, reading)
+    }
+
+    #[test]
+    fn check_reading_prints_accept_for_a_reading_the_rules_accept() {
+        let dir = tempfile::tempdir().unwrap();
+        let (request, reading) = check_reading_fixture(dir.path(), "cargo test --locked passes");
+        assert_eq!(
+            check_reading_command(&request, &reading).unwrap(),
+            ("accept".to_string(), 0)
+        );
+    }
+
+    #[test]
+    fn check_reading_prints_refuse_and_the_reason_for_a_criterion_on_the_producers_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let bad = "the producer's report lists the caller-check Grep";
+        let (request, reading) = check_reading_fixture(dir.path(), bad);
+        let (line, code) = check_reading_command(&request, &reading).unwrap();
+        assert_eq!(code, 2);
+        assert!(line.starts_with("refuse: "), "{line}");
+        assert!(line.contains("criterion 1"), "{line}");
+        assert!(line.contains(bad), "{line}");
+        assert!(!line.contains('\n'), "{line}");
+        // The request may also be its stored record; the answer is the same.
+        let record = athena_data::records::AnyRecord::Request(athena_data::records::Request {
+            job: JobId::parse("20261027-054151-ace0").unwrap(),
+            text: "add a greeting".into(),
+            received_at: jiff::Timestamp::UNIX_EPOCH,
+            channel: "cli".into(),
+        });
+        std::fs::write(&request, record.to_json()).unwrap();
+        assert_eq!(
+            check_reading_command(&request, &reading).unwrap(),
+            (line, 2)
+        );
+    }
+
+    #[test]
+    fn check_reading_applies_the_governance_rule_to_the_request_text() {
+        // The request names athena.toml and the reading does not say whether the job changes it.
+        let dir = tempfile::tempdir().unwrap();
+        let (request, reading) = check_reading_fixture(dir.path(), "cargo test --locked passes");
+        std::fs::write(&request, "add a greeting and change athena.toml").unwrap();
+        let (line, code) = check_reading_command(&request, &reading).unwrap();
+        assert_eq!(code, 2, "{line}");
+        assert!(line.contains("athena.toml"), "{line}");
+    }
+
+    #[test]
+    fn check_reading_with_an_unreadable_or_wrong_file_is_an_error_not_an_accept() {
+        let dir = tempfile::tempdir().unwrap();
+        let (request, reading) = check_reading_fixture(dir.path(), "cargo test --locked passes");
+        let missing = dir.path().join("none.json");
+        assert!(check_reading_command(&request, &missing).is_err());
+        assert!(check_reading_command(&missing, &reading).is_err());
+        // A request record is not a reading.
+        let not_reading = dir.path().join("notes.json");
+        std::fs::write(&not_reading, "{ \"schema\": \"nope\" }").unwrap();
+        assert!(check_reading_command(&request, &not_reading).is_err());
+    }
+
+    #[test]
+    fn check_reading_is_a_subcommand_that_takes_a_request_and_a_reading() {
+        let parsed = Cli::try_parse_from([
+            "athena",
+            "check-reading",
+            "--request",
+            "r.txt",
+            "--reading",
+            "reading-1.json",
+        ])
+        .unwrap();
+        assert!(matches!(parsed.command, Command::CheckReading { .. }));
+        assert!(Cli::try_parse_from(["athena", "check-reading", "--request", "r.txt"]).is_err());
     }
 
     #[test]

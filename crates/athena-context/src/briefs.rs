@@ -694,6 +694,67 @@ pub struct VerifierInputs {
     pub tool_config_from_base: Vec<String>,
     /// The repository Athena pinned for a study, when the capability pins one.
     pub pin: Option<PinnedRepo>,
+    /// The replay of the newest accepted readings through the base and candidate reading rules. `None` leaves
+    /// the brief as it was.
+    pub replay: Option<ReplayView>,
+}
+
+/// The most refused requests the verifier brief lists; the rest are counted ("and N more"). The full list is
+/// in `replay.json`.
+pub const REPLAY_BRIEF_MAX_LISTED: usize = 20;
+
+/// The most characters of one refusal reason in the verifier brief.
+pub const REPLAY_BRIEF_REASON_CHARS: usize = 200;
+
+/// What the verifier is told of the replay (`athena.replay/1`): a summary and a capped list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayView {
+    /// How many accepted readings were replayed.
+    pub total: usize,
+    /// Each request the candidate newly refuses: its job id and the refusal reason.
+    pub newly_refused: Vec<(String, String)>,
+    pub held: bool,
+    /// Whether the criteria state that a higher refusal rate is intended.
+    pub intended: bool,
+    /// `no replay: <reason>` when no replay ran.
+    pub no_replay: Option<String>,
+}
+
+/// The replay section of the verifier brief. At most [`REPLAY_BRIEF_MAX_LISTED`] requests are listed, each
+/// reason cut to [`REPLAY_BRIEF_REASON_CHARS`] characters, so the section has a fixed bound however long the list.
+fn replay_section(out: &mut String, replay: &ReplayView) {
+    let _ = writeln!(out, "## Replay of accepted readings\n");
+    if let Some(reason) = &replay.no_replay {
+        let _ = writeln!(out, "{}\n", reason.trim());
+        return;
+    }
+    let newly = replay.newly_refused.len();
+    let _ = writeln!(
+        out,
+        "Athena ran the newest accepted readings through the base and the candidate reading rules: {newly} of {} \
+         are newly refused by the candidate and were accepted by the base. {}\n",
+        replay.total,
+        match (replay.held, replay.intended) {
+            (true, _) => "The job is held for this.",
+            (false, true) =>
+                "The criteria state a higher refusal rate is intended, so the job is not held.",
+            (false, false) => "This is within the allowed share, so the job is not held.",
+        }
+    );
+    for (job, reason) in replay.newly_refused.iter().take(REPLAY_BRIEF_MAX_LISTED) {
+        let reason: String = reason.chars().take(REPLAY_BRIEF_REASON_CHARS).collect();
+        let _ = writeln!(out, "- {job}: {}", reason.replace('\n', " "));
+    }
+    if newly > REPLAY_BRIEF_MAX_LISTED {
+        let _ = writeln!(
+            out,
+            "- and {} more (the full list is in replay.json)",
+            newly - REPLAY_BRIEF_MAX_LISTED
+        );
+    }
+    if newly > 0 {
+        let _ = writeln!(out);
+    }
 }
 
 impl VerifierInputs {
@@ -782,6 +843,9 @@ pub fn verifier_brief_with_plan(
         verifier_plan_section(&mut out, plan);
     }
     pin_section(&mut out, inputs.pin.as_ref());
+    if let Some(replay) = &inputs.replay {
+        replay_section(&mut out, replay);
+    }
     let c = &inputs.candidate;
     let _ = writeln!(
         out,
@@ -2087,6 +2151,7 @@ mod tests {
             commands: vec![],
             tool_config_from_base: vec![],
             pin: None,
+            replay: None,
         };
         let brief = verifier_brief(&inputs, true);
         assert!(brief.contains("## Scope"));
@@ -2112,6 +2177,7 @@ mod tests {
             commands: vec![],
             tool_config_from_base: vec![],
             pin: None,
+            replay: None,
         };
         let brief = verifier_brief(&inputs, true);
         assert!(brief.contains(
@@ -2135,6 +2201,7 @@ mod tests {
             commands: vec![],
             tool_config_from_base: vec![],
             pin: Some(pin()),
+            replay: None,
         };
         let brief = verifier_brief(&inputs, true);
         assert!(brief.contains("## Pinned source"));
@@ -2242,6 +2309,7 @@ mod tests {
             commands: vec!["cargo test".into()],
             tool_config_from_base: vec![],
             pin: None,
+            replay: None,
         };
         assert!(verifier_brief(&inputs, true).contains("+# Changelog"));
         let recorded = verifier_brief(&inputs, false);
@@ -2653,6 +2721,7 @@ mod tests {
             commands: vec!["cargo test".into()],
             tool_config_from_base: vec![],
             pin: None,
+            replay: None,
         }
     }
 
@@ -2687,6 +2756,102 @@ mod tests {
             VERIFIER_BRIEF_WITHOUT_A_PLAN
         );
         assert_eq!(inputs.names_with_plan(None), inputs.names());
+    }
+
+    fn replay_view(newly: usize, total: usize, reason_chars: usize) -> ReplayView {
+        ReplayView {
+            total,
+            newly_refused: (0..newly)
+                .map(|n| (format!("20201001-{n:06}-{n:04}"), "r".repeat(reason_chars)))
+                .collect(),
+            held: newly * 100 > total * 10,
+            intended: false,
+            no_replay: None,
+        }
+    }
+
+    /// The replay section of the brief: from its heading to the next one.
+    fn replay_part(brief: &str) -> &str {
+        let start = brief
+            .find("## Replay of accepted readings")
+            .expect("a replay section");
+        let rest = &brief[start..];
+        let end = rest[3..].find("\n## ").map_or(rest.len(), |at| at + 3);
+        &rest[..end]
+    }
+
+    #[test]
+    fn replay_summary_gives_the_count_the_total_and_the_list() {
+        let mut inputs = plain_verifier_inputs();
+        let mut view = replay_view(2, 10, 0);
+        view.newly_refused[0].1 = "criterion 1 cites the producer's report".into();
+        view.newly_refused[1].1 = "the reading omits a governance file".into();
+        inputs.replay = Some(view);
+        let brief = verifier_brief(&inputs, true);
+        let section = replay_part(&brief);
+        assert!(section.contains("2 of 10"), "{section}");
+        assert!(section.contains("The job is held"), "{section}");
+        assert!(
+            section.contains("- 20201001-000000-0000: criterion 1 cites the producer's report"),
+            "{section}"
+        );
+        assert!(
+            section.contains("- 20201001-000001-0001: the reading omits a governance file"),
+            "{section}"
+        );
+        // It sits before the change and the checks, and the rest of the brief is untouched.
+        assert!(brief.find("## Replay").unwrap() < brief.find("## The change").unwrap());
+        assert!(brief.contains("## Verdict"));
+    }
+
+    #[test]
+    fn replay_summary_says_when_no_replay_ran_and_nothing_when_absent() {
+        let mut inputs = plain_verifier_inputs();
+        inputs.replay = Some(ReplayView {
+            total: 0,
+            newly_refused: vec![],
+            held: false,
+            intended: false,
+            no_replay: Some("no replay: the base build has no check-reading subcommand".into()),
+        });
+        let brief = verifier_brief(&inputs, true);
+        let section = replay_part(&brief);
+        assert!(
+            section.contains("no replay: the base build has no check-reading subcommand"),
+            "{section}"
+        );
+        assert!(!section.contains("held"), "{section}");
+        // Without a replay the brief is the stored copy.
+        inputs.replay = None;
+        assert_eq!(verifier_brief(&inputs, true), VERIFIER_BRIEF_WITHOUT_A_PLAN);
+        // A replay inside the allowed share, and one the criteria intend, say why they are not held.
+        let mut within = replay_view(1, 10, 5);
+        within.held = false;
+        inputs.replay = Some(within);
+        assert!(verifier_brief(&inputs, true).contains("1 of 10"));
+        assert!(verifier_brief(&inputs, true).contains("not held"));
+        let mut intended = replay_view(3, 10, 5);
+        intended.held = false;
+        intended.intended = true;
+        inputs.replay = Some(intended);
+        assert!(verifier_brief(&inputs, true).contains("higher refusal rate is intended"));
+    }
+
+    #[test]
+    fn replay_summary_stays_within_its_cap_with_a_very_long_list() {
+        let mut inputs = plain_verifier_inputs();
+        let plain = verifier_brief(&inputs, true);
+        inputs.replay = Some(replay_view(1000, 1000, 2000));
+        let brief = verifier_brief(&inputs, true);
+        let section = replay_part(&brief);
+        assert!(section.contains("1000 of 1000"), "{section}");
+        assert!(section.contains("and 980 more"), "{section}");
+        assert_eq!(section.matches("\n- 2020").count(), REPLAY_BRIEF_MAX_LISTED);
+        // Twenty entries of at most 200 characters, a job id and a marker each, and fixed headings.
+        let cap = REPLAY_BRIEF_MAX_LISTED * (REPLAY_BRIEF_REASON_CHARS + 40) + 600;
+        assert!(section.len() <= cap, "{} > {cap}", section.len());
+        assert!(brief.len() < plain.len() + cap, "{}", brief.len());
+        assert!(!section.contains(&"r".repeat(REPLAY_BRIEF_REASON_CHARS + 1)));
     }
 
     #[test]

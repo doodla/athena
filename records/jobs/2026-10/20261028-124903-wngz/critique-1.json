@@ -1,0 +1,62 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261028-124903-wngz",
+  "round": 1,
+  "at": "2026-10-28T12:54:04.963767991Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/check_reading.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/check_reading.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/store.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/store.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The no-model-call test cannot fail, and the call-count comparison it relies on is wrong.",
+      "evidence": "I read `Counts`. It counts only planner, producer, reader and verifier; `counter` returns None for every other role. The test also sets `REPLAY_OVERRIDE`, so the production checkers (the only code that could call anything) never run. Both runs use double checkers that make no call, so the counts are equal whether or not the stage is correct. Also, `go` calls `introspect_job` for a Rejected job (lines 172-180). The held run (run two) therefore makes an introspector model call that run one, which lands, does not make. A count over all roles would differ for a reason that has nothing to do with the replay. As written, the test checks the double, not the behavior. Fix: Count every invocation the fake driver receives, of any role, and compare the counts taken when `check_and_verify` reaches the verdict (or count the job's Invocation records written before the outcome). That leaves out the introspection that follows a rejection. Also add a unit test proving the production checker built in `replay_checkers` (the binary-running `ReadingChecker`) holds no agent handle, for example by building it from a path and showing it runs `check-reading` over a fixture with no driver. Then the claim covers production code, not only the override.",
+      "location": "Demonstrations, Criterion 7; crates/athena-core/src/run/mod.rs:3997-4025 and 172-180",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The plan starts two cargo builds after the last disk check before the verifier, which defeats that check.",
+      "evidence": "Step 5 places the replay 'after the second disk gate and before the verifier'. The gate just before the verifier is `verifier_environment_problem` at line 2489. Its comment says it exists because a verifier started on a full disk fails in ways that read like a fault in the work. Two extra `cargo build -p athena-cli` runs after it bring that failure back. The Risks entry and open question 3 say the gate 'also runs just before the verifier' or 'again after it', which contradicts step 5. Also, `VerifierInputs` is built at line 2423, before that gate, while step 5 puts the `ReplayView` into it after the gate. Fix: Run the replay stage before the line-2489 gate: after the checks and the line-2396 build-directory removal, and before `VerifierInputs` is built at line 2423. The existing gate then measures disk after the replay builds. Delete the replay's shared `CARGO_TARGET_DIR` before the gate. State the order once and consistently in the Steps, Risks and Open questions.",
+      "location": "Steps 5 and 4; Risks (disk pressure); crates/athena-core/src/run/mod.rs:2423 and 2484-2498",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The example intent phrases do not match the fixture sentence under whole-word matching.",
+      "evidence": "`has_phrase` matches whole words only. The fixture criterion 'the change refuses more readings than the base' contains neither 'refuse more' nor 'newly refuse' as whole words, because 'refuses' is followed by 's'. If the test sets `intended` directly, `criteria_intend_higher_refusal` is never exercised; if it calls the function, the case is held. Fix: Have the criterion 4 test call `criteria_intend_higher_refusal` on the fixture criteria, not pass `intended` by hand. Include the inflected forms ('refuses more', 'newly refused', 'refusal rate') in the phrase list. Add a negative case: a criterion mentioning refusal without intent is held.",
+      "location": "Decision 3 and Demonstrations, Criterion 4; crates/athena-core/src/reading.rs:2386",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan does not say how the pipeline test gets 10 accepted-reading jobs into the records the stage loads.",
+      "evidence": "The stage loads Records at `athena.head()`, as `job_records` does (reading.rs:2464). Open question 2 admits it is unknown whether the accepted readings are visible there after the records cutover. The demonstration does not say how the 10 records are committed, or how many cases the wrapped checker newly refuses, which must be at least 2 of 10 to pass the threshold. Fix: Name the helper that commits the fixture request, reading and job records to the repository the test's `Athena` loads from (the same path `go_job` uses at run/mod.rs:192-193). State that the wrapped checker newly refuses 2 or more of the 10. Add an assert that `replay.total == 10`, so an empty load (which yields 'no replay') cannot pass silently.",
+      "location": "Demonstrations, Criterion 5",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The plan calls `job_of` exhaustive, but it is not.",
+      "evidence": "`job_of` (store.rs:253-270) ends with `_ => None`. A missing `Replay` arm compiles and then panics at `expect(\"every other record names its job\")` (line 326) when records load. `JobRecords::add` (line 185) also has a catch-all, so without its own arm the new `replay` field is never filled. Fix: Say that both arms (in `job_of` and in `JobRecords::add`) are required, and that the compiler will not catch a missing one. The records.rs or store tests should load a job directory containing replay.json through `Records::load`.",
+      "location": "Files, crates/athena-core/src/store.rs",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan matches the accepted reading: a retry that redoes the replay work of 3d47 and leaves credential preflight to a separate job. The code it names exists and works as the plan assumes: `check_reading_acceptance`, `has_phrase`, `check_criteria_evidence`, `athena_finding`, `VerdictInputs`, `VerifierInputs`, `verifier_brief_with_plan`, `check_record_file`, the `is_fake`/`nested` checks and the `Counts`/`counting` test helpers. The new-record-kind design follows `Baseline` and fits one producer run. Athena's two out-of-deliverables findings (the CLI test file and store.rs) are justified by the plan. Two problems need revision. First, the criterion 7 demonstration cannot fail. `Counts` ignores every role but four, the override bypasses the production checker, and a Rejected run triggers an introspector model call that a landed run does not. Second, the replay's two cargo builds run after the disk gate that guards the verifier, which undoes that gate, and the plan's own text is inconsistent on the order. Smaller fixes: the intent phrase list does not match its fixture under whole-word matching, the criterion 5 test does not say how records are seeded, and `job_of` is not exhaustive as claimed. All of these are from reading the snapshot; I ran nothing."
+}

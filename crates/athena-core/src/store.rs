@@ -7,7 +7,7 @@ use anyhow::{Result, anyhow, bail};
 use athena_data::records::{
     AnyRecord, Baseline, Candidate, Correction, Critique, DecisionState, DecisionStateKind,
     DefaultExpectations, FailureClass, HostError, Intervention, IntrospectionRecord, Invocation,
-    Job, JobPlan, Outcome, OutcomeState, PriorityRecord, ProposalRecord, Reading, Request,
+    Job, JobPlan, Outcome, OutcomeState, PriorityRecord, ProposalRecord, Reading, Replay, Request,
     Resolution, Restart, Role, Score, Verification, fold_decision_states,
 };
 use athena_data::{JobId, RecordId};
@@ -38,6 +38,8 @@ pub struct JobRecords {
     pub critiques: Vec<Critique>,
     /// The checks run on the base commit before the producer (`athena.baseline/1`). Recorded only.
     pub baseline: Option<Baseline>,
+    /// The replay of the newest accepted readings through the candidate's reading rules (`athena.replay/1`).
+    pub replay: Option<Replay>,
     pub briefs: BTreeMap<String, String>,
 }
 
@@ -182,6 +184,7 @@ impl JobRecords {
             AnyRecord::JobPlan(p) => self.plans.push(*p),
             AnyRecord::Critique(c) => self.critiques.push(*c),
             AnyRecord::Baseline(b) => self.baseline = Some(*b),
+            AnyRecord::Replay(r) => self.replay = Some(*r),
             other => {
                 let _ = (path, other);
             }
@@ -265,6 +268,7 @@ fn job_of(record: &AnyRecord) -> Option<&JobId> {
         AnyRecord::JobPlan(r) => Some(&r.job),
         AnyRecord::Critique(r) => Some(&r.job),
         AnyRecord::Baseline(r) => Some(&r.job),
+        AnyRecord::Replay(r) => Some(&r.job),
         _ => None,
     }
 }
@@ -457,7 +461,7 @@ mod tests {
     use super::*;
     use athena_data::records::{
         Critique, CritiqueVerdict, DeliverableAction, Demonstration, Finding, FindingSource,
-        JobKind, JobPlan, Owner, PlanFile, Severity,
+        JobKind, JobPlan, Owner, PlanFile, Replay, Severity,
     };
 
     fn job_id() -> JobId {
@@ -590,5 +594,45 @@ mod tests {
         assert_eq!(job.critiques[0].final_verdict, CritiqueVerdict::Revise);
         assert!(job.outcome.is_none());
         assert_eq!(job.state(), JobState::Dispatched);
+    }
+
+    #[test]
+    fn replay_record_loads_into_its_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = Git::at(dir.path());
+        git.run(["init", "-q", "-b", "main"]).unwrap();
+        for (key, value) in [
+            ("user.name", "Test User"),
+            ("user.email", "noreply@example.com"),
+            ("commit.gpgsign", "false"),
+            ("core.hooksPath", "/dev/null"),
+        ] {
+            git.run(["config", key, value]).unwrap();
+        }
+        let replay = Replay {
+            job: job_id(),
+            base_commit: "a".repeat(40),
+            candidate_commit: "b".repeat(40),
+            window: 50,
+            total: 0,
+            newly_refused: vec![],
+            held: false,
+            intended: false,
+            no_replay: Some("no replay: no accepted readings in the history".into()),
+        };
+        for record in [
+            AnyRecord::Job(Box::new(dispatched())),
+            AnyRecord::Replay(Box::new(replay.clone())),
+        ] {
+            let path = dir.path().join(record.canonical_path());
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, record.to_json()).unwrap();
+        }
+        git.run(["add", "-A"]).unwrap();
+        git.run(["commit", "-q", "-m", "Replay"]).unwrap();
+
+        let loaded = Records::load(&git, "HEAD").unwrap();
+        assert!(loaded.invalid.is_empty(), "{:?}", loaded.invalid);
+        assert_eq!(loaded.jobs[job_id().as_str()].replay, Some(replay));
     }
 }

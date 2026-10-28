@@ -24,12 +24,13 @@ use athena_data::records::{
     DefaultApplied, Deliverable, DeliverableAction, Finding, Forecast, Forecasts, Intervention,
     InterventionCategory, InterventionSource, IntrospectionRecord, IntrospectionStatus,
     IntrospectionTrigger, Invocation, OutcomeState, PreventionKind, PriorityRecord, Quantiles,
-    Reading, Request, Role,
+    Reading, Replay, ReplayRefusal, Request, Role,
 };
 use athena_data::{JobId, RecordId};
 use athena_gate::redact::Redactor;
 use athena_git::snapshot::{Snapshot, SnapshotRepo};
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::time::Duration;
 
 /// Whether two readings promise the same work: the same capability, the same class of work, and the same
@@ -2460,6 +2461,282 @@ pub fn check_criteria_evidence(reading: &Reading) -> Result<()> {
     )
 }
 
+// ---------------------------------------------------------------------------------------------------------
+// Replay of accepted readings through the base and candidate reading rules
+
+/// The most accepted readings one replay uses: the newest ones.
+pub const REPLAY_WINDOW: usize = 50;
+
+/// A candidate that newly refuses more than this share of the replayed readings is held, unless its criteria
+/// state that a higher refusal rate is intended. Exactly this share is not held.
+pub const REPLAY_HOLD_PERCENT: usize = 10;
+
+/// Why a replay of an empty history did not run.
+pub const NO_HISTORY_REASON: &str = "no accepted readings in the history";
+
+/// What the reading rules say about one reading and its request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadingCheck {
+    Accept,
+    /// Refused, with the reason on one line.
+    Refuse(String),
+}
+
+impl ReadingCheck {
+    /// The one line `athena check-reading` prints: `accept`, or `refuse: <reason>`.
+    pub fn line(&self) -> String {
+        match self {
+            ReadingCheck::Accept => "accept".to_string(),
+            ReadingCheck::Refuse(reason) => format!("refuse: {reason}"),
+        }
+    }
+
+    /// Parses the first line of what `athena check-reading` printed.
+    pub fn parse(output: &str) -> Result<ReadingCheck> {
+        let line = output.lines().next().unwrap_or("").trim();
+        if line == "accept" {
+            return Ok(ReadingCheck::Accept);
+        }
+        match line.strip_prefix("refuse:") {
+            Some(reason) if !reason.trim().is_empty() => {
+                Ok(ReadingCheck::Refuse(reason.trim().to_string()))
+            }
+            _ => bail!("check-reading printed {line:?}, not `accept` or `refuse: <reason>`"),
+        }
+    }
+}
+
+/// Runs the reading rules ([`check_reading_acceptance`]) on one stored reading and request. There are no
+/// earlier attempts, so the retry rule (`check_prior_result_and_scope`) sees a first attempt. This is what
+/// `athena check-reading` runs, and no model is called.
+pub fn check_reading_text(reading: &Reading, request: &str) -> ReadingCheck {
+    match check_reading_acceptance(reading, request, None, &[]) {
+        Ok(()) => ReadingCheck::Accept,
+        Err(error) => ReadingCheck::Refuse(
+            error
+                .to_string()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" "),
+        ),
+    }
+}
+
+/// Something that applies one build's reading rules to a stored reading. It is given the request and the
+/// reading and nothing else, so it cannot reach a model.
+pub trait ReadingChecker {
+    fn check(&self, request: &str, reading: &Reading) -> Result<ReadingCheck>;
+}
+
+impl<F> ReadingChecker for F
+where
+    F: Fn(&str, &Reading) -> Result<ReadingCheck>,
+{
+    fn check(&self, request: &str, reading: &Reading) -> Result<ReadingCheck> {
+        self(request, reading)
+    }
+}
+
+/// The base checker and the candidate checker of one replay.
+pub type ReplayCheckers = (
+    std::rc::Rc<dyn ReadingChecker>,
+    std::rc::Rc<dyn ReadingChecker>,
+);
+
+/// A build of Athena, run as `<bin> check-reading --request <file> --reading <file>`. It holds a path and
+/// nothing else: no driver, no agent handle.
+#[derive(Debug, Clone)]
+pub struct BinaryChecker {
+    bin: PathBuf,
+}
+
+impl BinaryChecker {
+    pub fn new(bin: PathBuf) -> BinaryChecker {
+        BinaryChecker { bin }
+    }
+}
+
+impl ReadingChecker for BinaryChecker {
+    fn check(&self, request: &str, reading: &Reading) -> Result<ReadingCheck> {
+        let dir = tempfile::tempdir().context("making a scratch directory for check-reading")?;
+        let request_file = dir.path().join("request.txt");
+        let reading_file = dir.path().join("reading.json");
+        std::fs::write(&request_file, request)?;
+        std::fs::write(
+            &reading_file,
+            AnyRecord::Reading(Box::new(reading.clone())).to_json(),
+        )?;
+        let output = std::process::Command::new(&self.bin)
+            .arg("check-reading")
+            .arg("--request")
+            .arg(&request_file)
+            .arg("--reading")
+            .arg(&reading_file)
+            .output()
+            .with_context(|| format!("running {} check-reading", self.bin.display()))?;
+        // Exit 0 is accept and 2 is refuse; both print the one line. Anything else is a failure to check.
+        if !matches!(output.status.code(), Some(0 | 2)) {
+            bail!(
+                "{} check-reading exited with {}: {}",
+                self.bin.display(),
+                output.status,
+                tail(&String::from_utf8_lossy(&output.stderr), 300)
+            );
+        }
+        ReadingCheck::parse(&String::from_utf8_lossy(&output.stdout))
+    }
+}
+
+/// One stored request and its accepted reading.
+#[derive(Debug, Clone)]
+pub struct ReplayCase {
+    pub job: JobId,
+    pub request: String,
+    pub reading: Reading,
+}
+
+/// The newest [`REPLAY_WINDOW`] jobs that have an accepted reading, newest first, with their request and
+/// that reading. `exclude` (the running job) is left out, so a history of only that job is empty.
+pub fn replay_cases(records: &Records, exclude: Option<&JobId>) -> Vec<ReplayCase> {
+    records
+        .request_jobs()
+        .into_iter()
+        .filter(|j| Some(j.id()) != exclude)
+        .filter_map(|j| {
+            let n = j.job.as_ref()?.accepted_reading?;
+            Some(ReplayCase {
+                job: j.id().clone(),
+                request: j.request.as_ref()?.text.clone(),
+                reading: j.reading(n)?.clone(),
+            })
+        })
+        .take(REPLAY_WINDOW)
+        .collect()
+}
+
+/// Phrases, whole words and lowercase, with which a candidate's criteria state that it is meant to refuse
+/// more readings. A phrase that only mentions refusals ("the check names the refusal") is not on the list.
+const INTENDED_REFUSAL_PHRASES: [&str; 8] = [
+    "refuse more",
+    "refuses more",
+    "refuse additional",
+    "refuses additional",
+    "higher refusal rate",
+    "higher rate of refusal",
+    "more readings are refused",
+    "more requests are refused",
+];
+
+/// Whether the criteria state that a higher refusal rate is intended.
+pub fn criteria_intend_higher_refusal(criteria: &[Criterion]) -> bool {
+    criteria.iter().any(|c| {
+        let text = c
+            .text
+            .to_lowercase()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        INTENDED_REFUSAL_PHRASES
+            .iter()
+            .any(|phrase| has_phrase(&text, phrase))
+    })
+}
+
+/// Whether `newly` refusals among `total` replayed readings hold the job: more than
+/// [`REPLAY_HOLD_PERCENT`] percent, and not intended. Integer math, so exactly the threshold is not held.
+pub fn replay_is_held(total: usize, newly: usize, intended: bool) -> bool {
+    newly * 100 > total * REPLAY_HOLD_PERCENT && !intended
+}
+
+/// The result of one replay.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReplayRun {
+    pub total: usize,
+    /// Refused by the candidate and accepted by the base, newest request first.
+    pub newly_refused: Vec<ReplayRefusal>,
+    pub intended: bool,
+    pub held: bool,
+    /// Why no replay ran (`no replay: <reason>`). Never a pass.
+    pub no_replay: Option<String>,
+}
+
+impl ReplayRun {
+    /// A replay that did not run, for `reason`.
+    pub fn none(reason: &str) -> ReplayRun {
+        ReplayRun {
+            total: 0,
+            newly_refused: vec![],
+            intended: false,
+            held: false,
+            no_replay: Some(format!("no replay: {reason}")),
+        }
+    }
+
+    /// The record of this replay.
+    pub fn record(&self, job: &JobId, base_commit: &str, candidate_commit: &str) -> Replay {
+        Replay {
+            job: job.clone(),
+            base_commit: base_commit.to_string(),
+            candidate_commit: candidate_commit.to_string(),
+            window: REPLAY_WINDOW as u32,
+            total: self.total as u32,
+            newly_refused: self.newly_refused.clone(),
+            held: self.held,
+            intended: self.intended,
+            no_replay: self.no_replay.clone(),
+        }
+    }
+}
+
+/// Replays `cases` through the base and the candidate rules and lists the requests the candidate refuses and
+/// the base accepted. `criteria` are the running job's, read for an intended higher refusal rate. No cases, or
+/// a checker that fails, gives a replay that did not run, never a pass.
+pub fn replay(
+    cases: &[ReplayCase],
+    base: &dyn ReadingChecker,
+    candidate: &dyn ReadingChecker,
+    criteria: &[Criterion],
+) -> ReplayRun {
+    if cases.is_empty() {
+        return ReplayRun::none(NO_HISTORY_REASON);
+    }
+    let mut newly_refused = Vec::new();
+    for case in cases {
+        let before = match base.check(&case.request, &case.reading) {
+            Ok(check) => check,
+            Err(error) => {
+                return ReplayRun::none(&format!(
+                    "the base build failed on {}: {error:#}",
+                    case.job
+                ));
+            }
+        };
+        let after = match candidate.check(&case.request, &case.reading) {
+            Ok(check) => check,
+            Err(error) => {
+                return ReplayRun::none(&format!(
+                    "the candidate build failed on {}: {error:#}",
+                    case.job
+                ));
+            }
+        };
+        if let (ReadingCheck::Accept, ReadingCheck::Refuse(reason)) = (before, after) {
+            newly_refused.push(ReplayRefusal {
+                job: case.job.clone(),
+                reason,
+            });
+        }
+    }
+    let intended = criteria_intend_higher_refusal(criteria);
+    ReplayRun {
+        total: cases.len(),
+        held: replay_is_held(cases.len(), newly_refused.len(), intended),
+        newly_refused,
+        intended,
+        no_replay: None,
+    }
+}
+
 /// The records of a job at the current commit.
 pub fn job_records(athena: &Athena, job_ref: &str) -> Result<(Records, JobRecords)> {
     let head = athena.head()?;
@@ -4693,5 +4970,309 @@ mod tests {
         let mut retry = reading_with_criterion(good);
         retry.summary = format!("Retry {PRIOR_JOB}: fix the missing greeting.");
         check_reading_acceptance(&retry, "add a greeting", Some(&previous), &[]).unwrap();
+    }
+
+    // -- The replay of accepted readings
+
+    const REFUSED_CRITERION: &str = "the producer's report lists the caller-check Grep";
+    const ACCEPTED_CRITERION: &str = "cargo test --locked passes";
+    const MARKER: &str = "MARKER";
+
+    /// A stored request and accepted reading for `id` with this title and one criterion.
+    fn replay_case(id: &str, title: &str, criterion: &str) -> ReplayCase {
+        let mut reading = reading_with_criterion(criterion);
+        reading.job = JobId::parse(id).unwrap();
+        reading.title = title.into();
+        ReplayCase {
+            job: reading.job.clone(),
+            request: "add a greeting".into(),
+            reading,
+        }
+    }
+
+    /// The base rules: the real reading rules.
+    fn base_checker() -> impl ReadingChecker {
+        |request: &str, reading: &Reading| Ok(check_reading_text(reading, request))
+    }
+
+    /// A candidate-like rule change: the real rules plus one more refusal, for a marker in the title.
+    fn marker_candidate() -> impl ReadingChecker {
+        |request: &str, reading: &Reading| match check_reading_text(reading, request) {
+            ReadingCheck::Accept if reading.title.contains(MARKER) => {
+                Ok(ReadingCheck::Refuse("the marker rule refuses this".into()))
+            }
+            other => Ok(other),
+        }
+    }
+
+    fn case_id(n: usize) -> String {
+        format!("20201001-{n:06}-{n:04}")
+    }
+
+    /// `total` cases of which the first `marked` carry the marker.
+    fn marked_cases(total: usize, marked: usize) -> Vec<ReplayCase> {
+        (0..total)
+            .map(|n| {
+                let title = if n < marked { MARKER } else { "Add a greeting" };
+                replay_case(&case_id(n), title, ACCEPTED_CRITERION)
+            })
+            .collect()
+    }
+
+    fn criterion(text: &str) -> Criterion {
+        Criterion {
+            text: text.into(),
+            kind: CriterionKind::Behavior,
+        }
+    }
+
+    #[test]
+    fn replay_lists_only_the_requests_the_candidate_newly_refuses() {
+        let cases = vec![
+            replay_case(&case_id(1), "Add a greeting", REFUSED_CRITERION),
+            replay_case(&case_id(2), "Add a greeting", REFUSED_CRITERION),
+            replay_case(&case_id(3), "Add a greeting", ACCEPTED_CRITERION),
+            replay_case(&case_id(4), MARKER, ACCEPTED_CRITERION),
+            replay_case(&case_id(5), MARKER, ACCEPTED_CRITERION),
+        ];
+        let run = replay(&cases, &base_checker(), &marker_candidate(), &[]);
+        assert_eq!(run.no_replay, None);
+        assert_eq!(run.total, 5);
+        assert_eq!(run.newly_refused.len(), 2, "{:?}", run.newly_refused);
+        let ids: Vec<&str> = run.newly_refused.iter().map(|r| r.job.as_str()).collect();
+        assert_eq!(ids, [case_id(4), case_id(5)]);
+        assert!(
+            run.newly_refused
+                .iter()
+                .all(|r| r.reason == "the marker rule refuses this"),
+            "{:?}",
+            run.newly_refused
+        );
+        // Refused by both is not new, and a candidate equal to the base lists nothing.
+        let same = replay(&cases, &base_checker(), &base_checker(), &[]);
+        assert!(same.newly_refused.is_empty());
+        assert!(!same.held);
+    }
+
+    #[test]
+    fn a_checker_that_fails_gives_no_replay_not_a_pass() {
+        let cases = marked_cases(3, 0);
+        let broken = |_: &str, _: &Reading| -> Result<ReadingCheck> { bail!("exec format error") };
+        let run = replay(&cases, &base_checker(), &broken, &[]);
+        let reason = run.no_replay.expect("no replay");
+        assert!(
+            reason.starts_with("no replay: the candidate build failed on"),
+            "{reason}"
+        );
+        assert!(reason.contains("exec format error"), "{reason}");
+        assert_eq!((run.total, run.held), (0, false));
+    }
+
+    fn history_job(id: &str, accepted: bool) -> JobRecords {
+        let case = replay_case(id, "Add a greeting", ACCEPTED_CRITERION);
+        let mut job = dispatched_job_stub();
+        job.id = case.job.clone();
+        job.accepted_reading = accepted.then_some(1);
+        JobRecords {
+            id: Some(case.job.clone()),
+            request: Some(Request {
+                job: case.job,
+                text: case.request,
+                received_at: jiff::Timestamp::UNIX_EPOCH,
+                channel: "cli".into(),
+            }),
+            readings: vec![case.reading],
+            job: Some(job),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn replay_window_is_the_newest_fifty_accepted_readings() {
+        let mut records = Records::default();
+        let mut add = |job: JobRecords| {
+            records.jobs.insert(job.id().as_str().to_string(), job);
+        };
+        // 60 accepted readings, oldest first by id.
+        for n in 0..60 {
+            add(history_job(&case_id(n), true));
+        }
+        // Five newer jobs whose reading was never accepted, and the running job, newest of all.
+        for n in 0..5 {
+            add(history_job(&format!("20210101-{n:06}-{n:04}"), false));
+        }
+        let running = JobId::parse("20220101-000000-0000").unwrap();
+        add(history_job(running.as_str(), true));
+
+        let cases = replay_cases(&records, Some(&running));
+        assert_eq!(cases.len(), REPLAY_WINDOW);
+        let ids: Vec<&str> = cases.iter().map(|c| c.job.as_str()).collect();
+        let expected: Vec<String> = (10..60).rev().map(case_id).collect();
+        assert_eq!(ids, expected.iter().map(String::as_str).collect::<Vec<_>>());
+        // Without the exclusion the running job would be the newest case.
+        assert_eq!(
+            replay_cases(&records, None)[0].job.as_str(),
+            running.as_str()
+        );
+    }
+
+    #[test]
+    fn replay_window_with_an_empty_history_is_no_replay_not_a_pass() {
+        let empty = replay_cases(&Records::default(), None);
+        assert!(empty.is_empty());
+        let run = replay(&empty, &base_checker(), &marker_candidate(), &[]);
+        assert_eq!(
+            run.no_replay.as_deref(),
+            Some("no replay: no accepted readings in the history")
+        );
+        assert_eq!((run.total, run.held), (0, false));
+        let record = run.record(&JobId::parse(PRIOR_JOB).unwrap(), "a", "b");
+        record.validate().unwrap();
+        // A history of only the running job is empty too.
+        let running = JobId::parse(PRIOR_JOB).unwrap();
+        let mut records = Records::default();
+        records
+            .jobs
+            .insert(PRIOR_JOB.into(), history_job(PRIOR_JOB, true));
+        assert!(replay_cases(&records, Some(&running)).is_empty());
+    }
+
+    #[test]
+    fn replay_hold_is_over_ten_percent_and_not_when_the_criteria_intend_it() {
+        let marked = |n| {
+            let cases = marked_cases(10, n);
+            replay(&cases, &base_checker(), &marker_candidate(), &[])
+        };
+        // 2 of 10: held, with the list.
+        let held = marked(2);
+        assert!(held.held && !held.intended);
+        assert_eq!(held.newly_refused.len(), 2);
+        // Exactly 10% (1 of 10) is not held; the list is still recorded.
+        let at = marked(1);
+        assert!(!at.held);
+        assert_eq!(at.newly_refused.len(), 1);
+        // The criteria say a higher rate is intended: not held, and the replay is still recorded in full.
+        let intended_criteria = [
+            criterion(ACCEPTED_CRITERION),
+            criterion("the change refuses more readings than the base"),
+        ];
+        let cases = marked_cases(10, 2);
+        let intended = replay(
+            &cases,
+            &base_checker(),
+            &marker_candidate(),
+            &intended_criteria,
+        );
+        assert!(intended.intended && !intended.held);
+        assert_eq!(intended.newly_refused.len(), 2);
+        assert_eq!(intended.total, 10);
+        intended
+            .record(&JobId::parse(PRIOR_JOB).unwrap(), "a", "b")
+            .validate()
+            .unwrap();
+        // Criteria that only mention refusal do not intend a higher rate.
+        let mentions = [criterion("readings that already refuse stay refused")];
+        let still_held = replay(&cases, &base_checker(), &marker_candidate(), &mentions);
+        assert!(!still_held.intended && still_held.held);
+    }
+
+    #[test]
+    fn replay_hold_boundary_uses_integer_percent() {
+        for (total, newly, held) in [
+            (0, 0, false),
+            (10, 0, false),
+            (10, 1, false),
+            (10, 2, true),
+            (50, 5, false),
+            (50, 6, true),
+            (3, 1, true),
+        ] {
+            assert_eq!(replay_is_held(total, newly, false), held, "{newly}/{total}");
+            assert!(!replay_is_held(total, newly, true), "{newly}/{total}");
+        }
+        assert!(criteria_intend_higher_refusal(&[criterion(
+            "This change refuses MORE readings: the new rule is stricter."
+        )]));
+        assert!(criteria_intend_higher_refusal(&[criterion(
+            "a higher refusal rate is intended"
+        )]));
+        assert!(!criteria_intend_higher_refusal(&[
+            criterion("the check names the refusal in its error"),
+            criterion("the refusal rate is shown in the log"),
+        ]));
+    }
+
+    #[test]
+    fn check_lines_round_trip_and_odd_output_is_an_error() {
+        for check in [
+            ReadingCheck::Accept,
+            ReadingCheck::Refuse("criterion 1 cites it".into()),
+        ] {
+            assert_eq!(ReadingCheck::parse(&check.line()).unwrap(), check);
+        }
+        for odd in ["", "ok", "refuse:", "refuse:   ", "error: boom"] {
+            assert!(ReadingCheck::parse(odd).is_err(), "{odd:?}");
+        }
+        let one_line =
+            check_reading_text(&reading_with_criterion(REFUSED_CRITERION), "add a greeting").line();
+        assert!(one_line.starts_with("refuse: "), "{one_line}");
+        assert!(!one_line.contains('\n'), "{one_line}");
+    }
+
+    /// An executable script that stands in for a build of `athena`.
+    #[cfg(unix)]
+    fn stub_binary(dir: &std::path::Path, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("athena-stub");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    /// Runs a checker, trying again while the freshly written stub is busy (a parallel test's fork can hold it).
+    #[cfg(unix)]
+    fn check_stub(bin: PathBuf, reading: &Reading) -> Result<ReadingCheck> {
+        let checker = BinaryChecker::new(bin);
+        let mut result = checker.check("add a greeting", reading);
+        for _ in 0..20 {
+            if !result
+                .as_ref()
+                .is_err_and(|e| format!("{e:#}").contains("Text file busy"))
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+            result = checker.check("add a greeting", reading);
+        }
+        result
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replay_binary_checker_runs_a_build_from_its_path_alone_and_parses_its_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let reading = reading_with_criterion(ACCEPTED_CRITERION);
+        // The stub also proves the arguments: it exits 3 unless both files exist.
+        let body = |line: &str, code: u8| {
+            format!(
+                "[ \"$1\" = check-reading ] && [ -f \"$3\" ] && [ -f \"$5\" ] || exit 3\n\
+                 echo '{line}'\nexit {code}"
+            )
+        };
+        let refusing = stub_binary(dir.path(), &body("refuse: the stub says no", 2));
+        assert_eq!(
+            check_stub(refusing, &reading).unwrap(),
+            ReadingCheck::Refuse("the stub says no".into())
+        );
+        let accepting = stub_binary(dir.path(), &body("accept", 0));
+        assert_eq!(
+            check_stub(accepting, &reading).unwrap(),
+            ReadingCheck::Accept
+        );
+        let failing = stub_binary(dir.path(), "echo oops >&2\nexit 1");
+        let error = check_stub(failing, &reading).unwrap_err().to_string();
+        assert!(error.contains("oops"), "{error}");
+        let missing = BinaryChecker::new(dir.path().join("no-such-binary"));
+        assert!(missing.check("add a greeting", &reading).is_err());
     }
 }

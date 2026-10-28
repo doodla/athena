@@ -11,10 +11,11 @@
 //! [`Verified`] has private fields and is constructed only here, only for a pass, so `land()` cannot be
 //! called with anything unverified.
 
+use crate::reading::REPLAY_HOLD_PERCENT;
 use athena_context::outputs::{SeverityOutput, VerdictOutput, VerdictValue};
 use athena_data::records::{
     Baseline, CheckRun, Criterion, CriterionKind, CriterionResult, Finding, FindingSource,
-    PRE_EXISTING_NOTE, Severity, Verdict, Verification,
+    PRE_EXISTING_NOTE, Replay, Severity, Verdict, Verification,
 };
 
 /// A candidate that passed verification: the only input landing accepts.
@@ -124,6 +125,9 @@ pub struct VerdictInputs<'a> {
     /// The checks on the base commit, if a usable baseline for this job's base exists. A check that failed
     /// there and fails again is pre-existing and does not fail the verdict.
     pub baseline: Option<&'a Baseline>,
+    /// The replay of the newest accepted readings through the candidate's reading rules. A held replay is a
+    /// blocker: the candidate newly refuses too many readings the base accepted.
+    pub replay: Option<&'a Replay>,
 }
 
 /// True when `check` failed now and the baseline shows the same check failing on the base commit.
@@ -316,6 +320,38 @@ pub fn judge(inputs: &VerdictInputs<'_>) -> Judgment {
             Severity::Major,
             format!("The change marked requirement row {id} Covered; a job may not mark its own rows covered"),
             format!("{id} is Covered in docs/design/requirements-map.md at the candidate and was not Covered at the base"),
+        ));
+    }
+
+    if let Some(replay) = inputs.replay.filter(|r| r.held) {
+        let list: Vec<String> = replay
+            .newly_refused
+            .iter()
+            .map(|r| format!("{}: {}", r.job, r.reason))
+            .collect();
+        reasons.push(format!(
+            "the change newly refuses {} of {} replayed accepted readings",
+            replay.newly_refused.len(),
+            replay.total
+        ));
+        findings.push(athena_finding(
+            Severity::Blocker,
+            format!(
+                "The change newly refuses {} of {} accepted readings the base accepted ({})",
+                replay.newly_refused.len(),
+                replay.total,
+                replay
+                    .newly_refused
+                    .iter()
+                    .map(|r| r.job.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            format!(
+                "more than {REPLAY_HOLD_PERCENT}% of the newest {} accepted readings are refused by the candidate and accepted by the base, and the criteria do not state a higher refusal rate is intended: {}",
+                replay.total,
+                list.join("; ")
+            ),
         ));
     }
 
@@ -688,6 +724,7 @@ mod tests {
             map_base: None,
             map_candidate: None,
             baseline: None,
+            replay: None,
         })
     }
 
@@ -715,6 +752,7 @@ mod tests {
             map_base: None,
             map_candidate: None,
             baseline,
+            replay: None,
         })
     }
 
@@ -737,7 +775,80 @@ mod tests {
             map_base: None,
             map_candidate: None,
             baseline: None,
+            replay: None,
         })
+    }
+
+    fn judge_replay(replay: Option<&Replay>) -> Judgment {
+        let ran = ["cargo test".to_string()];
+        judge(&VerdictInputs {
+            criteria: &criteria(),
+            checks: &[check(true)],
+            output: Some(&output(vec!["cargo test"], vec![])),
+            commands_run: &ran,
+            candidate_tree: None,
+            checks_tree: None,
+            system_fault: None,
+            verifier_failure: None,
+            map_base: None,
+            map_candidate: None,
+            baseline: None,
+            replay,
+        })
+    }
+
+    #[test]
+    fn replay_hold_is_a_blocker_that_names_the_list_and_fails_an_otherwise_passing_verdict() {
+        use athena_data::records::ReplayRefusal;
+        let id = |s: &str| athena_data::JobId::parse(s).unwrap();
+        let mut replay = Replay {
+            job: id("20261018-073510-m3yh"),
+            base_commit: "a".repeat(40),
+            candidate_commit: "b".repeat(40),
+            window: 50,
+            total: 10,
+            newly_refused: vec![
+                ReplayRefusal {
+                    job: id("20261001-000000-aaaa"),
+                    reason: "criterion 1 cites the producer's report".into(),
+                },
+                ReplayRefusal {
+                    job: id("20261001-000001-bbbb"),
+                    reason: "no governance file".into(),
+                },
+            ],
+            held: true,
+            intended: false,
+            no_replay: None,
+        };
+        assert_eq!(judge_replay(None).final_verdict, Verdict::Pass);
+        let held = judge_replay(Some(&replay));
+        assert_eq!(held.final_verdict, Verdict::Fail);
+        let blocker = held
+            .findings
+            .iter()
+            .find(|f| f.severity == Severity::Blocker)
+            .expect("a blocker");
+        assert_eq!(blocker.source, FindingSource::Athena);
+        let text = format!("{} {}", blocker.summary, blocker.evidence);
+        assert!(text.contains("2 of 10"), "{text}");
+        for needle in [
+            "20261001-000000-aaaa",
+            "20261001-000001-bbbb",
+            "criterion 1 cites the producer's report",
+        ] {
+            assert!(text.contains(needle), "{needle}: {text}");
+        }
+        assert!(
+            held.reasons
+                .iter()
+                .any(|r| r.contains("newly refuses 2 of 10")),
+            "{:?}",
+            held.reasons
+        );
+        // The same list, not held, is only a record.
+        replay.held = false;
+        assert_eq!(judge_replay(Some(&replay)).final_verdict, Verdict::Pass);
     }
 
     fn d43_finding(j: &Judgment) -> Option<&Finding> {
@@ -902,6 +1013,7 @@ mod tests {
             map_base: Some(base),
             map_candidate: Some(candidate),
             baseline: None,
+            replay: None,
         })
     }
 
@@ -1075,6 +1187,7 @@ mod tests {
             map_base: None,
             map_candidate: None,
             baseline: None,
+            replay: None,
         })
     }
 

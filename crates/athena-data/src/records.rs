@@ -2305,6 +2305,79 @@ impl Baseline {
 }
 
 // ---------------------------------------------------------------------------------------------------------
+// The replay of accepted readings
+
+pub const REPLAY_SCHEMA: &str = "athena.replay/1";
+
+/// One request that the candidate's reading rules refuse and the base's rules accepted.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplayRefusal {
+    /// The job whose accepted reading is now refused.
+    pub job: JobId,
+    /// The candidate's refusal text.
+    pub reason: String,
+}
+
+/// `athena.replay/1`: the newest accepted readings run through the base build and the candidate build of
+/// `athena check-reading`, at `<job>/replay.json`. It lists the requests the candidate refuses and the base
+/// accepted. A candidate that newly refuses more than a tenth of the replayed readings is held, unless its
+/// acceptance criteria state that a higher refusal rate is intended; the record keeps the list either way.
+///
+/// When the replay could not run (no history, a build or probe failure, a failed check), `no_replay` says why,
+/// `total` is 0 and the list is empty. That is a recorded absence, never a pass.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Replay {
+    pub job: JobId,
+    /// The base commit the base build was made from.
+    pub base_commit: String,
+    /// The candidate commit the candidate build was made from.
+    pub candidate_commit: String,
+    /// The most readings one replay uses.
+    pub window: u32,
+    /// How many accepted readings were replayed.
+    pub total: u32,
+    /// The requests the candidate refuses and the base accepted.
+    pub newly_refused: Vec<ReplayRefusal>,
+    /// Whether the job is held for the refusal rate.
+    pub held: bool,
+    /// Whether the criteria state that a higher refusal rate is intended.
+    pub intended: bool,
+    /// Why no replay ran, if none did.
+    pub no_replay: Option<String>,
+}
+
+impl Replay {
+    /// Why this record is not acceptable, if it is not.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.window == 0 {
+            return Err("a replay's window is above 0".into());
+        }
+        if self.newly_refused.len() > self.total as usize {
+            return Err("a replay cannot refuse more requests than it replayed".into());
+        }
+        if self
+            .no_replay
+            .as_deref()
+            .is_some_and(|r| r.trim().is_empty())
+        {
+            return Err("a replay that did not run says why".into());
+        }
+        if self.no_replay.is_some() && (self.total != 0 || !self.newly_refused.is_empty()) {
+            return Err("a replay that did not run holds no readings and no refusals".into());
+        }
+        if self.held && self.newly_refused.is_empty() {
+            return Err("a held replay lists the requests it refuses".into());
+        }
+        if self.held && self.intended {
+            return Err("a replay whose criteria intend the refusals is not held".into());
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------
 // The envelope
 
 /// Any record, tagged by its `schema` field.
@@ -2371,6 +2444,8 @@ pub enum AnyRecord {
     Critique(Box<Critique>),
     #[serde(rename = "athena.baseline/1")]
     Baseline(Box<Baseline>),
+    #[serde(rename = "athena.replay/1")]
+    Replay(Box<Replay>),
     #[serde(rename = "athena.code-health-baseline/1")]
     CodeHealthBaseline(CodeHealthBaseline),
 }
@@ -2459,6 +2534,7 @@ impl AnyRecord {
             AnyRecord::JobPlan(p) => p.validate().map_err(invalid)?,
             AnyRecord::Critique(c) => c.validate().map_err(invalid)?,
             AnyRecord::Baseline(b) => b.validate().map_err(invalid)?,
+            AnyRecord::Replay(r) => r.validate().map_err(invalid)?,
             AnyRecord::DefaultsProposal(p) => p.validate().map_err(invalid)?, // Totals are what reconciliation checks an outcome against; only the bootstrap has none
             // (acceptance verification 2).
             AnyRecord::Outcome(o) if o.job.is_request() && o.totals.is_none() => {
@@ -2557,6 +2633,7 @@ impl AnyRecord {
             AnyRecord::JobPlan(r) => format!("{}/job-plan-{}.json", r.job.dir(), r.round),
             AnyRecord::Critique(r) => format!("{}/critique-{}.json", r.job.dir(), r.round),
             AnyRecord::Baseline(r) => format!("{}/baseline.json", r.job.dir()),
+            AnyRecord::Replay(r) => format!("{}/replay.json", r.job.dir()),
             AnyRecord::CodeHealthBaseline(r) => {
                 format!("records/code-health/{}/{}.json", r.id.month(), r.id)
             }
@@ -2595,6 +2672,7 @@ impl AnyRecord {
             AnyRecord::JobPlan(_) => JOB_PLAN_SCHEMA,
             AnyRecord::Critique(_) => CRITIQUE_SCHEMA,
             AnyRecord::Baseline(_) => BASELINE_SCHEMA,
+            AnyRecord::Replay(_) => REPLAY_SCHEMA,
             AnyRecord::CodeHealthBaseline(_) => CODE_HEALTH_BASELINE_SCHEMA,
         }
     }
@@ -3728,6 +3806,91 @@ mod tests {
         empty.base_commit = " ".into();
         for b in [bad, empty] {
             let record = AnyRecord::Baseline(Box::new(b));
+            assert!(matches!(
+                AnyRecord::parse("x", record.to_json().as_bytes()),
+                Err(RecordError::Invalid { .. })
+            ));
+        }
+    }
+
+    fn sample_replay() -> Replay {
+        Replay {
+            job: job(),
+            base_commit: "a".repeat(40),
+            candidate_commit: "b".repeat(40),
+            window: 50,
+            total: 10,
+            newly_refused: vec![
+                ReplayRefusal {
+                    job: JobId::parse("20261001-000000-aaaa").unwrap(),
+                    reason: "refused: criterion 1".into(),
+                },
+                ReplayRefusal {
+                    job: JobId::parse("20261001-000001-bbbb").unwrap(),
+                    reason: "refused: criterion 2".into(),
+                },
+            ],
+            held: true,
+            intended: false,
+            no_replay: None,
+        }
+    }
+
+    #[test]
+    fn a_replay_round_trips_and_belongs_at_replay_json_and_nowhere_else() {
+        let record = AnyRecord::Replay(Box::new(sample_replay()));
+        assert_eq!(record.schema(), "athena.replay/1");
+        let json = record.to_json();
+        assert_eq!(AnyRecord::parse("x", json.as_bytes()).unwrap(), record);
+        let right = format!("{}/replay.json", job().dir());
+        assert_eq!(record.canonical_path(), right);
+        assert_eq!(
+            check_record_file(&right, json.as_bytes()).unwrap(),
+            Some(record.clone())
+        );
+        let wrong = format!("{}/replay-1.json", job().dir());
+        assert!(matches!(
+            check_record_file(&wrong, json.as_bytes()),
+            Err(RecordError::Misplaced { .. })
+        ));
+        // A replay that did not run is a valid record too.
+        let mut none = sample_replay();
+        none.total = 0;
+        none.newly_refused.clear();
+        none.held = false;
+        none.no_replay = Some("no replay: no accepted readings in the history".into());
+        let record = AnyRecord::Replay(Box::new(none));
+        assert_eq!(
+            AnyRecord::parse("x", record.to_json().as_bytes()).unwrap(),
+            record
+        );
+    }
+
+    #[test]
+    fn an_inconsistent_replay_is_refused() {
+        let mut too_many = sample_replay();
+        too_many.total = 1;
+        let mut held_empty = sample_replay();
+        held_empty.newly_refused.clear();
+        let mut absent_with_list = sample_replay();
+        absent_with_list.no_replay = Some("no replay: x".into());
+        let mut held_but_intended = sample_replay();
+        held_but_intended.intended = true;
+        let mut no_window = sample_replay();
+        no_window.window = 0;
+        let mut blank_reason = sample_replay();
+        blank_reason.held = false;
+        blank_reason.newly_refused.clear();
+        blank_reason.no_replay = Some(" ".into());
+        for r in [
+            too_many,
+            held_empty,
+            absent_with_list,
+            held_but_intended,
+            no_window,
+            blank_reason,
+        ] {
+            let record = AnyRecord::Replay(Box::new(r));
             assert!(matches!(
                 AnyRecord::parse("x", record.to_json().as_bytes()),
                 Err(RecordError::Invalid { .. })
