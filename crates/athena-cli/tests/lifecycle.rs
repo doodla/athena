@@ -617,6 +617,22 @@ fn try_again_on_a_job_rejected_by_a_check_carries_the_failed_checks_output() {
     assert!(brief.contains("failed check test"), "{brief}");
     assert!(brief.contains("FAILED-CHECK-CANARY"), "{brief}");
     assert!(!brief.contains("PASSING-CANARY"), "{brief}");
+    // The brief also says what the earlier job did: the file its candidate changed, the producer's own
+    // account, and a measured line for each check (the failed one and a passed one), with no output text.
+    let section = brief
+        .split("# Previous result and change scope")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no section:\n{brief}"));
+    assert!(section.contains("> deleted README.md"), "{section}");
+    assert!(
+        section.contains("Producer approach (its own report"),
+        "{section}"
+    );
+    assert!(
+        section.contains("> test: failed (exit code 1, 0 tests ran)"),
+        "{section}"
+    );
+    assert!(section.contains(": passed (exit code 0"), "{section}");
 }
 
 #[test]

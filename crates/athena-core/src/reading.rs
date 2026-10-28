@@ -1558,8 +1558,96 @@ fn earlier_jobs<'a>(records: &'a Records, job: &'a JobRecords) -> Vec<&'a JobRec
 /// The most bytes of one failed check's output that are carried; the end of the output is kept.
 const CARRIED_CHECK_OUTPUT_BYTES: usize = 1024;
 
+/// The most changed files of one earlier job that are carried; the rest are counted, not named.
+const CARRIED_CHANGED_FILES: usize = 30;
+
+/// The most characters of the producer's account that are carried; the start is kept.
+const CARRIED_APPROACH_CHARS: usize = 800;
+
+/// The most measured-check lines that are carried.
+const CARRIED_CHECK_LINES: usize = 20;
+
+/// The parts of [`EarlierAttempt`] that say what the earlier job did.
+struct CarriedWork {
+    changed_files: Vec<String>,
+    changed_files_omitted: usize,
+    approach: Option<String>,
+    checks: Vec<String>,
+}
+
+/// What the earlier job did, from the records it already has: the files its candidate changed (`status
+/// path`, at most [`CARRIED_CHANGED_FILES`]), the producer's own summary (at most
+/// [`CARRIED_APPROACH_CHARS`] characters) and one line per measured check (at most
+/// [`CARRIED_CHECK_LINES`], no output text). All of it is redacted. A file whose name redaction altered is
+/// dropped from the list and counted in the returned number, with the files past the cap, so no reading is
+/// ever asked to repeat a redaction marker.
+fn carried_work(job: &JobRecords, redactor: &Redactor) -> Result<CarriedWork> {
+    use athena_data::records::ChangeStatus;
+    let raw_files: Vec<String> = job
+        .candidate
+        .iter()
+        .flat_map(|c| &c.changes)
+        .map(|c| {
+            let status = match c.status {
+                ChangeStatus::Added => "added",
+                ChangeStatus::Modified => "modified",
+                ChangeStatus::Deleted => "deleted",
+                ChangeStatus::TypeChanged => "type-changed",
+            };
+            format!("{status} {}", c.path)
+        })
+        .collect();
+    let summary = job
+        .candidate
+        .as_ref()
+        .and_then(|c| c.producer_report.as_ref())
+        .map(|r| r.summary.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let checks: Vec<String> = job
+        .verification
+        .iter()
+        .flat_map(|v| &v.checks)
+        .take(CARRIED_CHECK_LINES)
+        .map(|c| {
+            let exit = c.exit_code.map_or("no exit code".to_string(), |code| {
+                format!("exit code {code}")
+            });
+            let tests = c
+                .tests_ran
+                .map_or(String::new(), |n| format!(", {n} tests ran"));
+            let result = if c.passed { "passed" } else { "failed" };
+            format!("{}: {result} ({exit}{tests})", c.name)
+        })
+        .collect();
+    // One redaction pass over the files, the summary and the check lines, so a secret that spans them is
+    // found; the summary is shortened after redaction so a cut never leaves half a secret.
+    let files = raw_files.len();
+    let mut texts = raw_files.clone();
+    texts.extend(summary.clone());
+    texts.extend(checks);
+    redactor.redact_all(&mut texts)?;
+    let mut rest = texts.split_off(files);
+    let approach = summary.map(|_| rest.remove(0));
+    let approach = approach.map(|s| crate::truncate_at_word(&s, CARRIED_APPROACH_CHARS));
+    let kept: Vec<String> = texts
+        .into_iter()
+        .zip(&raw_files)
+        .filter(|(redacted, raw)| redacted == *raw)
+        .map(|(_, raw)| raw.clone())
+        .take(CARRIED_CHANGED_FILES)
+        .collect();
+    let omitted = files - kept.len();
+    Ok(CarriedWork {
+        changed_files: kept,
+        changed_files_omitted: omitted,
+        approach,
+        checks: rest,
+    })
+}
+
 /// The job's request, final verification findings and reasons, and each failed check's name, command,
-/// exit code and output tail, redacted. `None` without a request.
+/// exit code and output tail, redacted; the files its candidate changed, the producer's account and the
+/// measured checks (see [`carried_work`]). `None` without a request.
 fn carry(job: &JobRecords, redactor: &Redactor) -> Result<Option<EarlierAttempt>> {
     let Some(earlier) = &job.request else {
         return Ok(None);
@@ -1654,6 +1742,7 @@ fn carry(job: &JobRecords, redactor: &Redactor) -> Result<Option<EarlierAttempt>
     let mut extra = extra.into_iter();
     let reading_summary = final_reading.and_then(|_| extra.next());
     let reading_criteria: Vec<String> = extra.by_ref().take(criteria).collect();
+    let work = carried_work(job, redactor)?;
     Ok(Some(EarlierAttempt {
         introspection: None,
         job: job.id().as_str().to_string(),
@@ -1673,6 +1762,10 @@ fn carry(job: &JobRecords, redactor: &Redactor) -> Result<Option<EarlierAttempt>
             .as_ref()
             .map(|v| format!("{:?}", v.final_verdict).to_lowercase()),
         corrections,
+        changed_files: work.changed_files,
+        changed_files_omitted: work.changed_files_omitted,
+        approach: work.approach,
+        checks: work.checks,
     }))
 }
 
@@ -2224,8 +2317,22 @@ pub fn referenced_jobs(
 ///   in words the user can read. The brief asks for exactly this.
 /// - The change scope is stated when the reading lists at least one deliverable and at least one
 ///   out-of-scope item.
+/// - The earlier job's files are accounted for when each file its candidate changed (the carried
+///   `changed_files`) is covered by a deliverable (the same path, or a directory deliverable above it) or is
+///   named in an out-of-scope item, as its own path or as a directory above it (see [`names_path_token`]).
+///   Only deliverables and out-of-scope items count: the survey and other prose of a reading do not say
+///   whether earlier work is kept or dropped. A prior with no recorded files asks for nothing.
 ///
-/// The error names each missing part: "previous result" and "change scope".
+/// The error names each missing part: "previous result", "change scope" and "the earlier job's files".
+///
+/// Root cause this part removes: the carry-over of an earlier job left out the files its candidate changed,
+/// so a retry's reading could name the job and still ignore (keep or drop without saying) the work it did.
+///
+/// This check refuses more readings; the higher refusal rate is intended. A replay of accepted readings
+/// (`replay`) holds a job that newly refuses more than 10% unless the job's criteria declare a share, as
+/// "expected N% of newly refused readings", and give a reason when it is above 25%. The replay passes no
+/// earlier attempts to the checks (see `check_reading_text`), so it cannot observe this part: the share a
+/// job declares is an expectation, not a measurement.
 pub fn check_prior_result_and_scope(reading: &Reading, priors: &[&EarlierAttempt]) -> Result<()> {
     if priors.is_empty() || reading.capability.is_none() || reading.question.is_some() {
         return Ok(());
@@ -2264,6 +2371,32 @@ pub fn check_prior_result_and_scope(reading: &Reading, priors: &[&EarlierAttempt
             scope.join(" and no ")
         ));
     }
+    let ignored: Vec<String> = priors
+        .iter()
+        .filter_map(|p| {
+            let files = unaccounted_files(p, reading);
+            if files.is_empty() {
+                return None;
+            }
+            let shown = files
+                .iter()
+                .take(MAX_FILES_NAMED)
+                .copied()
+                .collect::<Vec<_>>();
+            let more = match files.len() - shown.len() {
+                0 => String::new(),
+                n => format!(" and {n} more"),
+            };
+            Some(format!("job {} changed {}{more}", p.job, shown.join(", ")))
+        })
+        .collect();
+    if !ignored.is_empty() {
+        missing.push(format!(
+            "the earlier job's files: {}, but the reading neither lists them as deliverables nor excludes them \
+             in out_of_scope, so it does not say whether that work is kept or dropped",
+            ignored.join("; ")
+        ));
+    }
     if missing.is_empty() {
         return Ok(());
     }
@@ -2272,6 +2405,77 @@ pub fn check_prior_result_and_scope(reading: &Reading, priors: &[&EarlierAttempt
          so the reading must reflect that job's result and state the allowed change scope",
         missing.join("; and ")
     )
+}
+
+/// The most files of one earlier job that a refusal names.
+const MAX_FILES_NAMED: usize = 5;
+
+/// The paths of the files `prior`'s candidate changed that the reading neither lists nor excludes: a file is
+/// accounted for when a deliverable is the file itself or a directory above it (compared by whole path
+/// components), or when an out-of-scope item names the file or a directory above it as a whole path token
+/// ([`names_path_token`]). Case is ignored. Free text such as the summary or the assumptions never counts.
+fn unaccounted_files<'a>(prior: &'a EarlierAttempt, reading: &Reading) -> Vec<&'a str> {
+    let deliverables: Vec<String> = reading
+        .deliverables
+        .iter()
+        .map(|d| d.path.trim().trim_end_matches('/').to_lowercase())
+        .collect();
+    let out_of_scope: Vec<String> = reading
+        .out_of_scope
+        .iter()
+        .map(|item| item.to_lowercase())
+        .collect();
+    prior
+        .changed_files
+        .iter()
+        // A carried entry is `status path`; the path may itself hold spaces.
+        .filter_map(|entry| entry.split_once(' ').map(|(_, path)| path))
+        .filter(|path| {
+            let file = path.to_lowercase();
+            let covered = deliverables.iter().any(|d| {
+                file == *d
+                    || file
+                        .strip_prefix(d.as_str())
+                        .is_some_and(|r| r.starts_with('/'))
+            });
+            let mut names = vec![file.clone()];
+            let mut ancestor = file.as_str();
+            while let Some((parent, _)) = ancestor.rsplit_once('/') {
+                names.push(parent.to_string());
+                names.push(format!("{parent}/"));
+                ancestor = parent;
+            }
+            let excluded = out_of_scope
+                .iter()
+                .any(|item| names.iter().any(|name| names_path_token(item, name)));
+            !(covered || excluded)
+        })
+        .collect()
+}
+
+/// Whether `item` holds `token` as a whole path token (both lowercase). A token starts at the start of the
+/// text or after white space, a backtick, a quote, `(`, `[`, `{`, `,` or `;`. It ends at the end of the text, or
+/// before white space, a closing quote, a backtick, `)`, `]`, `}`, `,`, `;`, `:` or `*`, or before a `.`, `!` or `?`
+/// that is itself followed by the end of the text or white space. A `/` or a letter or digit next to the token
+/// never matches, so `src/a.rs` is not found in `crates/x/src/a.rs`, and `src/a` is not found in `src/a.rs`.
+fn names_path_token(item: &str, token: &str) -> bool {
+    if token.is_empty() {
+        return false;
+    }
+    let starts = |c: char| c.is_whitespace() || "`\"'([{,;\u{2018}\u{201c}".contains(c);
+    let ends = |c: char| c.is_whitespace() || "`\"')]},;:*\u{2019}\u{201d}".contains(c);
+    item.match_indices(token).any(|(at, _)| {
+        let before_ok = item[..at].chars().next_back().is_none_or(starts);
+        let rest = &item[at + token.len()..];
+        let mut after = rest.chars();
+        let after_ok = match after.next() {
+            None => true,
+            Some(c) if ends(c) => true,
+            Some('.' | '!' | '?') => after.next().is_none_or(char::is_whitespace),
+            Some(_) => false,
+        };
+        before_ok && after_ok
+    })
 }
 
 /// The free-text fields of a reading, each with the label a refusal names it by. The deliverable paths are
@@ -3186,6 +3390,7 @@ fn reading_title(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use athena_data::records::{ChangeEntry, ChangeStatus, ProducerReport};
 
     #[test]
     fn the_reader_is_told_a_job_is_hard_when_it_touches_a_refusing_rule_landing_the_history_check_records_the_pipeline_or_the_drain()
@@ -4974,6 +5179,420 @@ mod tests {
             &["the changelog"],
         );
         check_prior_result_and_scope(&named_both, &[&prior(), &other]).unwrap();
+    }
+
+    fn change(path: &str, status: ChangeStatus) -> ChangeEntry {
+        ChangeEntry {
+            path: path.into(),
+            status,
+            mode: None,
+            bytes: None,
+        }
+    }
+
+    /// A candidate that changed `paths` (each modified), with the producer's summary when given.
+    fn candidate_changing(
+        job: &JobRecords,
+        paths: &[&str],
+        summary: Option<&str>,
+    ) -> athena_data::records::Candidate {
+        let mut candidate = candidate_of(job);
+        candidate.changes = paths
+            .iter()
+            .map(|p| change(p, ChangeStatus::Modified))
+            .collect();
+        candidate.producer_report = summary.map(|s| ProducerReport {
+            summary: s.into(),
+            files: vec![],
+            checks_run: vec![],
+            criteria_check: vec![],
+            open_issues: vec![],
+            mistakes: vec![],
+            learnings: vec![],
+            desires: vec![],
+        });
+        candidate
+    }
+
+    /// Failure shape (a): a job dispatched and abandoned before verification. It has a candidate and no
+    /// verification, no outcome and no findings.
+    fn abandoned_job(paths: &[&str]) -> JobRecords {
+        let mut job = job_with_checks(vec![]);
+        job.verification = None;
+        job.candidate = Some(candidate_changing(&job, paths, Some("Wrote the parser.")));
+        job
+    }
+
+    /// Failure shape (b): a job rejected with a finding and a failed check.
+    fn rejected_job(paths: &[&str]) -> JobRecords {
+        let mut job = job_with_checks(vec![check("test", false, "assertion failed")]);
+        job.outcome = Some(outcome(&job, OutcomeState::Rejected, "a check failed"));
+        job.candidate = Some(candidate_changing(&job, paths, Some("Wrote the parser.")));
+        job
+    }
+
+    fn carry_of(job: &JobRecords) -> EarlierAttempt {
+        let redactor = Redactor::new(&athena_gate::builtin_config()).unwrap();
+        carry(job, &redactor).unwrap().unwrap()
+    }
+
+    #[test]
+    fn carry_includes_changed_files_approach_and_measured_checks_redacted_and_bounded() {
+        let redactor = Redactor::new(&athena_gate::builtin_config()).unwrap();
+        let token = format!(
+            "{}{}",
+            ["gh", "p_"].concat(),
+            "Zq8rT2vK9mW4xN7bP3cH6jL1sD5fG0aYuE2i"
+        );
+        let mut passed = check("fmt", true, "PASSING-OUTPUT");
+        passed.tests_ran = Some(12);
+        let mut job = job_with_checks(vec![
+            passed,
+            check("test", false, "FAILED-OUTPUT-TEXT assertion failed"),
+        ]);
+        // 35 plain files and one whose name holds a token: 36 in all, one past the cap by 6.
+        let mut changes = vec![change("src/new.rs", ChangeStatus::Added)];
+        changes.push(change(&format!("src/{token}.rs"), ChangeStatus::Modified));
+        changes.push(change("old.md", ChangeStatus::Deleted));
+        changes.extend((0..33).map(|i| change(&format!("src/f{i}.rs"), ChangeStatus::Modified)));
+        let mut candidate = candidate_changing(
+            &job,
+            &[],
+            Some(&format!(
+                "START-OF-SUMMARY key {token}. {}",
+                "words ".repeat(400)
+            )),
+        );
+        candidate.changes = changes;
+        job.candidate = Some(candidate);
+
+        let carried = carry(&job, &redactor).unwrap().unwrap();
+        // The cap: exactly 30 entries, each `status path`, in the order recorded.
+        assert_eq!(carried.changed_files.len(), CARRIED_CHANGED_FILES);
+        assert_eq!(carried.changed_files[0], "added src/new.rs");
+        assert_eq!(carried.changed_files[1], "deleted old.md");
+        assert_eq!(carried.changed_files[2], "modified src/f0.rs");
+        // The path with the token is dropped, not carried redacted; with the 5 past the cap it is counted.
+        assert!(
+            !carried.changed_files.iter().any(|f| f.contains("[secret:")),
+            "{:?}",
+            carried.changed_files
+        );
+        assert_eq!(carried.changed_files_omitted, 36 - 30);
+        // The approach keeps its start, is bounded, and holds no token.
+        let approach = carried.approach.as_deref().unwrap();
+        assert!(approach.starts_with("START-OF-SUMMARY key "), "{approach}");
+        assert!(approach.contains("[secret:github-pat]"), "{approach}");
+        assert!(!approach.contains(&token), "{approach}");
+        assert!(approach.chars().count() <= CARRIED_APPROACH_CHARS);
+        assert!(approach.len() > 600, "the bound keeps most of the text");
+        // The measured checks: one line each, pass or fail, exit code and tests, and no output text.
+        assert_eq!(
+            carried.checks,
+            [
+                "fmt: passed (exit code 0, 12 tests ran)",
+                "test: failed (exit code 101)"
+            ]
+        );
+        let everything = format!("{carried:?}");
+        assert!(!everything.contains(&token), "{everything}");
+        assert!(!carried.checks.iter().any(|c| c.contains("OUTPUT")));
+    }
+
+    #[test]
+    fn carry_without_a_candidate_has_no_files_or_approach_but_keeps_the_checks() {
+        let job = job_with_checks(vec![check("fmt", true, ""), check("test", false, "x")]);
+        assert!(job.candidate.is_none());
+        let carried = carry_of(&job);
+        assert!(carried.changed_files.is_empty());
+        assert_eq!(carried.changed_files_omitted, 0);
+        assert_eq!(carried.approach, None);
+        assert_eq!(carried.checks.len(), 2);
+        // A candidate with no report has files but no approach, and one with a blank summary has none.
+        let mut job = job;
+        job.candidate = Some(candidate_changing(&job, &["src/a.rs"], None));
+        let carried = carry_of(&job);
+        assert_eq!(carried.changed_files, ["modified src/a.rs"]);
+        assert_eq!(carried.approach, None);
+        job.candidate = Some(candidate_changing(&job, &["src/a.rs"], Some("  \n")));
+        assert_eq!(carry_of(&job).approach, None);
+    }
+
+    #[test]
+    fn carry_bounds_the_check_lines() {
+        let job = job_with_checks((0..25).map(|i| check(&format!("c{i}"), true, "")).collect());
+        let carried = carry_of(&job);
+        assert_eq!(carried.checks.len(), CARRIED_CHECK_LINES);
+        assert_eq!(carried.checks[0], "c0: passed (exit code 0)");
+    }
+
+    const GREETING_SUMMARY: &str = "Retry n1p0 follows";
+
+    /// A reading of the retried job that lists README.md and excludes the changelog, and cites no earlier
+    /// file; `PRIOR_JOB` is the id `job_with_checks` gives its jobs.
+    fn retry_reading(deliverables: &[&str], out_of_scope: &[&str]) -> Reading {
+        let summary = format!("{GREETING_SUMMARY} {PRIOR_JOB}: the parser is rewritten.");
+        scoped_reading(&summary, deliverables, out_of_scope)
+    }
+
+    #[test]
+    fn check_prior_result_refuses_files_the_reading_neither_lists_nor_excludes_for_both_failure_shapes()
+     {
+        for (shape, job) in [
+            (
+                "abandoned",
+                abandoned_job(&["src/a.rs", "crates/x/src/a.rs"]),
+            ),
+            ("rejected", rejected_job(&["src/a.rs", "crates/x/src/a.rs"])),
+        ] {
+            let prior = carry_of(&job);
+            assert_eq!(prior.changed_files.len(), 2, "{shape}");
+            // The reading names the job id and gives a scope, but says nothing of the two files.
+            let reading = retry_reading(&["README.md"], &["the changelog"]);
+            let error = check_prior_result_and_scope(&reading, &[&prior])
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("the earlier job's files"),
+                "{shape}: {error}"
+            );
+            assert!(error.contains(PRIOR_JOB), "{shape}: {error}");
+            assert!(error.contains("src/a.rs"), "{shape}: {error}");
+            assert!(error.contains("crates/x/src/a.rs"), "{shape}: {error}");
+            assert!(!error.contains("the previous result"), "{shape}: {error}");
+            assert!(!error.contains("the change scope"), "{shape}: {error}");
+            // Accepted when the reading lists the files, or a directory deliverable covers them, or an
+            // out_of_scope item names the paths or a directory above them.
+            for (deliverables, out_of_scope) in [
+                (
+                    &["README.md", "src/a.rs", "crates/x/src/a.rs"][..],
+                    &["the changelog"][..],
+                ),
+                (
+                    &["README.md", "src", "crates/x/"][..],
+                    &["the changelog"][..],
+                ),
+                (
+                    &["README.md"][..],
+                    &["Leave `src/a.rs` and crates/x/src/a.rs. alone."][..],
+                ),
+                (
+                    &["README.md"][..],
+                    &["Everything under `src/` and crates/x/ stays as the job left it."][..],
+                ),
+                (
+                    &["README.md", "src/a.rs"][..],
+                    &["no change to (crates/x/src/a.rs)"][..],
+                ),
+            ] {
+                let reading = retry_reading(deliverables, out_of_scope);
+                check_prior_result_and_scope(&reading, &[&prior])
+                    .unwrap_or_else(|e| panic!("{shape}: {deliverables:?} {out_of_scope:?}: {e}"));
+            }
+        }
+    }
+
+    #[test]
+    fn check_prior_result_does_not_count_survey_prose_or_a_sibling_path() {
+        let prior = carry_of(&rejected_job(&["crates/athena-core/src/a.rs", "src/a.rs"]));
+        // A survey in the assumptions and the summary cites crates/ and a sibling file; neither accounts for
+        // the unlisted file.
+        let mut reading = retry_reading(&["README.md"], &["the changelog"]);
+        reading
+            .summary
+            .push_str(" See crates/ and crates/athena-core/src/lib.rs.");
+        reading.assumptions = vec![
+            "Code survey: read crates/athena-core/src/lib.rs, src/a.rs and crates/ in full.".into(),
+        ];
+        let error = check_prior_result_and_scope(&reading, &[&prior])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("crates/athena-core/src/a.rs"), "{error}");
+        assert!(error.contains("src/a.rs"), "{error}");
+        // A sibling file in out_of_scope does not account for the other file.
+        let reading = retry_reading(
+            &["README.md"],
+            &["crates/athena-core/src/lib.rs stays; so does crates/x/src/a.rs"],
+        );
+        let error = check_prior_result_and_scope(&reading, &[&prior])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("crates/athena-core/src/a.rs"), "{error}");
+        assert!(error.contains("src/a.rs"), "{error}");
+        // `crates/x/src/a.rs` does not account for `src/a.rs`: a path inside a longer path is not a token.
+        let only = carry_of(&rejected_job(&["src/a.rs"]));
+        let reading = retry_reading(&["README.md"], &["crates/x/src/a.rs stays"]);
+        assert!(check_prior_result_and_scope(&reading, &[&only]).is_err());
+        // A criterion naming the file does not account for it either: only deliverables and out_of_scope do.
+        let mut reading = retry_reading(&["README.md"], &["the changelog"]);
+        reading.acceptance_criteria[0].text = "src/a.rs is rewritten".into();
+        assert!(check_prior_result_and_scope(&reading, &[&only]).is_err());
+    }
+
+    #[test]
+    fn path_tokens_match_only_on_whole_path_boundaries() {
+        for (item, token, found) in [
+            ("src/a.rs", "src/a.rs", true),
+            ("keep src/a.rs.", "src/a.rs", true),
+            ("keep src/a.rs. Next", "src/a.rs", true),
+            ("keep src/a.rs!", "src/a.rs", true),
+            ("keep `src/a.rs`, too", "src/a.rs", true),
+            ("keep \"src/a.rs\"", "src/a.rs", true),
+            ("keep 'src/a.rs'", "src/a.rs", true),
+            ("keep (src/a.rs)", "src/a.rs", true),
+            ("keep [src/a.rs]", "src/a.rs", true),
+            ("keep {src/a.rs}", "src/a.rs", true),
+            ("keep a,src/a.rs;b", "src/a.rs", true),
+            ("src/a.rs: kept", "src/a.rs", true),
+            ("everything in src/* stays", "src/", true),
+            ("everything in src/ stays", "src/", true),
+            ("src/a", "src/a.rs", false),
+            ("src/a.rs", "src/a", false),
+            ("src/a.rsx", "src/a.rs", false),
+            ("src/a.rs.bak", "src/a.rs", false),
+            ("crates/x/src/a.rs", "src/a.rs", false),
+            ("xsrc/a.rs", "src/a.rs", false),
+            ("src/a.rs/more", "src/a.rs", false),
+            ("keep/src/a.rs", "src/a.rs", false),
+            ("src/a.rs", "", false),
+        ] {
+            assert_eq!(names_path_token(item, token), found, "{item:?} {token:?}");
+        }
+        // The same token twice: the second, well-bounded one is found after the first fails.
+        assert!(names_path_token("xsrc/a.rs and src/a.rs", "src/a.rs"));
+    }
+
+    #[test]
+    fn check_prior_result_ignores_a_file_whose_name_redaction_altered() {
+        let token = format!(
+            "{}{}",
+            ["gh", "p_"].concat(),
+            "Zq8rT2vK9mW4xN7bP3cH6jL1sD5fG0aYuE2i"
+        );
+        let prior = carry_of(&rejected_job(&[&format!("src/{token}.rs")]));
+        assert!(prior.changed_files.is_empty());
+        assert_eq!(prior.changed_files_omitted, 1);
+        let reading = retry_reading(&["README.md"], &["the changelog"]);
+        check_prior_result_and_scope(&reading, &[&prior]).unwrap();
+    }
+
+    #[test]
+    fn check_prior_result_names_only_the_prior_with_unaccounted_files() {
+        let mut other = carry_of(&abandoned_job(&["docs/b.md"]));
+        other.job = "20261013-000000-abcd".into();
+        let listed = carry_of(&rejected_job(&["src/a.rs"]));
+        let reading = scoped_reading(
+            &format!("Follow up on {PRIOR_JOB} and 20261013-000000-abcd."),
+            &["src/a.rs"],
+            &["the changelog"],
+        );
+        let error = check_prior_result_and_scope(&reading, &[&listed, &other])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("job 20261013-000000-abcd changed docs/b.md"),
+            "{error}"
+        );
+        assert!(
+            !error.contains("job 20261012-084936-n1p0 changed"),
+            "{error}"
+        );
+        // More than five files are named five at a time, with the count of the rest.
+        let many: Vec<String> = (0..8).map(|i| format!("lib/f{i}.rs")).collect();
+        let many: Vec<&str> = many.iter().map(String::as_str).collect();
+        let prior = carry_of(&rejected_job(&many));
+        let reading = retry_reading(&["README.md"], &["the changelog"]);
+        let error = check_prior_result_and_scope(&reading, &[&prior])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("lib/f4.rs and 3 more"), "{error}");
+        assert!(!error.contains("lib/f5.rs"), "{error}");
+    }
+
+    #[test]
+    fn check_prior_result_refuses_only_priors_with_recorded_files_the_reading_ignores() {
+        // One fixed reading: it names the job, lists README.md, excludes CHANGELOG.md and cites no other file.
+        let reading = retry_reading(&["README.md"], &["CHANGELOG.md stays as it is"]);
+        let mut no_changes = abandoned_job(&[]);
+        no_changes.candidate = Some(candidate_changing(&no_changes, &[], None));
+        let mut no_candidate = abandoned_job(&["src/a.rs"]);
+        no_candidate.candidate = None;
+        let rows: [(&str, JobRecords, bool); 6] = [
+            ("no candidate", no_candidate, false),
+            ("a candidate with no changes", no_changes, false),
+            (
+                "files the reading lists",
+                abandoned_job(&["README.md"]),
+                false,
+            ),
+            ("files it excludes", rejected_job(&["CHANGELOG.md"]), false),
+            (
+                "files it ignores, abandoned",
+                abandoned_job(&["src/a.rs"]),
+                true,
+            ),
+            (
+                "files it ignores, rejected",
+                rejected_job(&["src/a.rs"]),
+                true,
+            ),
+        ];
+        for (row, job, refused) in rows {
+            let prior = carry_of(&job);
+            let result = check_prior_result_and_scope(&reading, &[&prior]);
+            assert_eq!(result.is_err(), refused, "{row}: {result:?}");
+            if let Err(error) = result {
+                assert!(
+                    error.to_string().contains("the earlier job's files"),
+                    "{row}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn prior_result_refusal_is_declared_intended() {
+        // The share parses as 5, below the 10% a replay holds an undeclared check at, so no reason is needed.
+        let criterion = Criterion {
+            text: "The change refuses more readings: retries whose prior job changed files that the reading \
+                   neither lists nor excludes are refused, and the higher refusal rate is intended: expected 5% \
+                   of newly refused readings."
+                .into(),
+            kind: CriterionKind::Content,
+        };
+        let declaration = replay_declaration(&[criterion], &[]);
+        assert_eq!(declaration.share, Some(5));
+        // The check's doc comment and the changelog carry the same sentences.
+        let source = include_str!("reading.rs");
+        let doc = source
+            .split("pub fn check_prior_result_and_scope")
+            .next()
+            .unwrap()
+            .rsplit("\n\n")
+            .next()
+            .unwrap();
+        assert!(
+            doc.contains("This check refuses more readings; the higher refusal rate is intended.")
+        );
+        assert!(
+            doc.replace("\n/// ", " ")
+                .contains("The replay passes no earlier attempts"),
+            "the replay cannot see this check"
+        );
+        let changelog = include_str!("../../../CHANGELOG.md")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for phrase in [
+            "refuses more readings",
+            "higher refusal rate is intended",
+            "expected 5% of newly refused readings",
+            "20261027-054209-z7sj",
+            "check_prior_result_and_scope",
+            "prior_result_section",
+        ] {
+            assert!(changelog.contains(phrase), "CHANGELOG.md lacks {phrase:?}");
+        }
     }
 
     const EVIDENCE_A: &str = "20261020-101010-aaaa";

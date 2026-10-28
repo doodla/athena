@@ -211,22 +211,56 @@ pub fn deterministic_turn(spec: &AgentInvocation) -> FakeTurn {
                 .map(|w| format!("A fake reader: the request mentions \"{w}\", so it makes Athena faster or cuts wasted time."));
             // A retry or follow-up brief carries the previous result and change scope; a reading must name
             // each earlier job and state what stays out of scope, or it is refused.
-            let earlier_jobs: Vec<String> =
-                section(&spec.user_prompt, "# Previous result and change scope")
-                    .lines()
-                    .filter_map(|l| l.strip_prefix("Job "))
-                    .filter_map(|l| l.split(':').next())
-                    .map(str::to_string)
-                    .collect();
+            let prior_section = section(&spec.user_prompt, "# Previous result and change scope");
+            let earlier_jobs: Vec<String> = prior_section
+                .lines()
+                .filter_map(|l| l.strip_prefix("Job "))
+                .filter_map(|l| l.split(':').next())
+                .map(str::to_string)
+                .collect();
+            // The files an earlier job's candidate changed, from the lines under its "Files its candidate
+            // changed" header (each `status path`; `section` has already removed the quote marks). The
+            // reading must keep each as a deliverable or exclude it, so the out_of_scope item names every one
+            // of them. The list ends at the first line that does not start with a status word.
+            let mut earlier_files: Vec<&str> = Vec::new();
+            let mut in_files = false;
+            for line in prior_section.lines() {
+                if line.starts_with("Files its candidate changed (") {
+                    in_files = true;
+                    continue;
+                }
+                let entry = line.split_once(' ').filter(|(status, _)| {
+                    in_files && ["added", "modified", "deleted", "type-changed"].contains(status)
+                });
+                match entry {
+                    Some((_, path)) => {
+                        if path != FAKE_DELIVERABLE && !earlier_files.contains(&path) {
+                            earlier_files.push(path);
+                        }
+                    }
+                    None => in_files = false,
+                }
+            }
             let (earlier_note, out_of_scope) = if earlier_jobs.is_empty() {
                 (String::new(), json!([]))
             } else {
+                let mut items = vec![format!("Anything other than {FAKE_DELIVERABLE}.")];
+                if !earlier_files.is_empty() {
+                    items.push(format!(
+                        "The earlier job's other files are left alone: {}.",
+                        earlier_files
+                            .iter()
+                            .map(|f| format!("`{f}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                }
                 (
                     format!(
                         " It addresses the earlier result of job {}.",
                         earlier_jobs.join(", job ")
                     ),
-                    json!([format!("Anything other than {FAKE_DELIVERABLE}.")]),
+                    json!(items),
                 )
             };
             // The reader's workdir is a copy of the base commit. A file a landed fake job left there is
@@ -412,6 +446,35 @@ mod tests {
         assert_eq!(action(), "create");
         std::fs::write(dir.path().join(FAKE_DELIVERABLE), "an earlier fake job\n").unwrap();
         assert_eq!(action(), "modify");
+    }
+
+    #[test]
+    fn the_fake_reader_names_the_files_an_earlier_job_changed_in_out_of_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let driver = FakeAgentDriver::deterministic();
+        let brief = format!(
+            "# Request (verbatim)\n\n> add a note\n\n# Previous result and change scope\n\nintro\n\n\
+             Job 20261010-153012-k7q2: end state rejected; final verification verdict fail; 0 finding(s).\n\
+             Allowed change scope, deliverables:\n> modify src/other.rs\n\
+             Files its candidate changed (3); keep each as a deliverable or exclude it in out_of_scope:\n\
+             > modified src/a.rs\n> added {FAKE_DELIVERABLE}\n> deleted docs/b.md\n\
+             Producer approach: none recorded for it.\n"
+        );
+        let turn = driver
+            .invoke(&spec(Role::Reader, &brief, dir.path().into()), &mut NoSink)
+            .unwrap();
+        let reading = turn.structured.unwrap();
+        let out_of_scope = reading["out_of_scope"].to_string();
+        // The files under the header are named; the deliverable and the quoted scope lines are not.
+        assert!(out_of_scope.contains("`src/a.rs`"), "{out_of_scope}");
+        assert!(out_of_scope.contains("`docs/b.md`"), "{out_of_scope}");
+        assert!(!out_of_scope.contains("src/other.rs"), "{out_of_scope}");
+        assert!(
+            reading["summary"]
+                .as_str()
+                .unwrap()
+                .contains("job 20261010-153012-k7q2")
+        );
     }
 
     #[test]

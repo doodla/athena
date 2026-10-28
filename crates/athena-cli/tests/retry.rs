@@ -308,6 +308,78 @@ fn a_retry_brief_carries_the_result_and_scope_and_a_reading_without_them_is_refu
 }
 
 #[test]
+fn a_retry_brief_carries_the_earlier_jobs_files_and_a_reading_that_ignores_them_is_refused() {
+    // Mode 0: the scenario's reader, which lists README.md as a deliverable and names the earlier job.
+    // Mode 1: names the job and gives a scope, but lists only a new file and excludes nothing the earlier
+    // job changed. Mode 2: the same, but its out_of_scope item names README.md.
+    let model = Model::default();
+    let mode = Arc::new(Mutex::new(0u8));
+    let earlier = Arc::new(Mutex::new(String::new()));
+    let inner = Scenario {
+        edits: vec![("README.md".into(), None)],
+        report: producer_report("Deleted README.md as asked.", &["cargo test --locked"]),
+        ..Scenario::default()
+    }
+    .script();
+    let (picked, job) = (mode.clone(), earlier.clone());
+    let script: Script = Box::new(move |spec| {
+        let mode = *picked.lock().unwrap();
+        if spec.role == Role::Reader && mode > 0 {
+            let mut r = reading(
+                &[("NOTES.md", "create")],
+                &[("content", "NOTES.md holds a note")],
+            );
+            r["summary"] = json!(format!("Retry {}: write the note.", job.lock().unwrap()));
+            if mode == 2 {
+                r["out_of_scope"] = json!(["README.md stays as the earlier job left it."]);
+            }
+            return FakeTurn::output(r);
+        }
+        inner(spec)
+    });
+    let fx = Fixture::new();
+    let athena = fx.athena(model.script(script));
+    let first = reject(&model, &athena, "remove the readme", None, true);
+    *earlier.lock().unwrap() = first.clone();
+
+    // The brief lists the file the earlier job changed, its own account and its measured checks.
+    let (proposal, _) = athena.retry(&first, &Lines::default()).unwrap();
+    assert!(proposal.reading.is_some(), "{:?}", proposal.reader_error);
+    let brief = model.last_brief();
+    let section = brief
+        .split("# Previous result and change scope")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no section:\n{brief}"));
+    for needle in [
+        "Files its candidate changed (1)",
+        "> deleted README.md",
+        "> Deleted README.md as asked.",
+        "Measured checks:\n> ",
+    ] {
+        assert!(section.contains(needle), "{needle:?}:\n{section}");
+    }
+
+    // A reading that names the job and gives a scope but ignores the changed file is refused, and the
+    // refusal names the file and no other part.
+    *mode.lock().unwrap() = 1;
+    let (proposal, _) = athena.retry(&first, &Lines::default()).unwrap();
+    assert!(proposal.reading.is_none());
+    let error = proposal.reader_error.unwrap();
+    assert!(error.contains("the earlier job's files"), "{error}");
+    assert!(
+        error.contains(&format!("job {first} changed README.md")),
+        "{error}"
+    );
+    assert!(!error.contains("the previous result"), "{error}");
+    assert!(!error.contains("the change scope"), "{error}");
+
+    // Excluding the file in out_of_scope is enough to be accepted.
+    *mode.lock().unwrap() = 2;
+    let (proposal, _) = athena.retry(&first, &Lines::default()).unwrap();
+    assert!(proposal.reading.is_some(), "{:?}", proposal.reader_error);
+}
+
+#[test]
 fn a_job_that_is_not_rejected_or_failed_is_refused() {
     let model = Model::default();
     let (fx, athena) = setup(&model);
@@ -519,9 +591,21 @@ fn first_attempt(verdict: Value) -> Scenario {
     }
 }
 
+/// The retry's reading, which says what becomes of the file the first attempt added: a reading of a retry
+/// lists or excludes each file the earlier job changed (`greeting.txt` here), or it is refused.
+fn retry_reading() -> Value {
+    let mut reading = default_reading();
+    reading["out_of_scope"] = json!([
+        "Other files",
+        "greeting.txt stays as the first attempt wrote it."
+    ]);
+    reading
+}
+
 /// The retry's producer edits `README.md` again; its verdict passes.
 fn second_attempt() -> Scenario {
     Scenario {
+        reading: retry_reading(),
         edits: vec![(
             "README.md".into(),
             Some("# Demo\n\nHello, reader.\n\nChanged by the retry.\n".into()),

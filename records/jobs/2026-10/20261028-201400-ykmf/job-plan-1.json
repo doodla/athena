@@ -1,0 +1,224 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261028-201400-ykmf",
+  "round": 1,
+  "at": "2026-10-28T20:17:12.657082074Z",
+  "invocation_seq": 2,
+  "approach": "The fault starts where a retry's earlier job is turned into reader input. `carry` (reading.rs) keeps only the request, findings, failed-check output, reading scope and end state. It drops what the job's `Candidate` and `Verification` record: the changed files, the producer's own summary of its approach, and the measured check results. `prior_result_section` (briefs.rs) can't print what was never carried. `check_prior_result_and_scope` only tests that the job id is named plus deliverables and out_of_scope exist, so a reading may ignore the earlier work and pass. Fix all three together with no new record or data file. (1) Add `changed_files` (\"status path\", bounded, redacted), `changed_files_omitted`, `approach` (Option, bounded, redacted) and `checks` (one line per recorded check, bounded) to `EarlierAttempt`. `carry` fills them from `job.candidate` (`changes`, `producer_report.summary`) and `job.verification.checks` (name, passed, exit code, tests_ran; no output text, since failed-check output is already carried). All text goes through the redactor. (2) `prior_result_section` prints, for every prior, a files block, an approach block and a measured-checks block, each with an explicit \"none recorded for it\" line when empty. This covers the retried job and referenced jobs, since both go through that function. It also adds a third requirement to the section intro and shortens READING_RULES rule 1 to mention it. (3) `check_prior_result_and_scope` gets a third missing part, \"the earlier job's files\". For each prior with carried files, every file must be a deliverable path (or under a deliverable directory) or be named, by its path or an ancestor directory, in the reading's text (title, summary, departures, assumptions, criteria, out_of_scope). A prior with no recorded files adds no requirement. This reuses the `missing` list and bail! in the function. (4) Update the fake reader in athena-agent/fake.rs to parse the new files block and name those files in out_of_scope, so nested runs keep passing. Update test readers whose retries now fail the check. Add tests for each layer and a CHANGELOG entry under Unreleased/Fixed naming the root cause. The reader prompt files are untouched; all new wording is in the generated brief.",
+  "decisions": [
+    {
+      "choice": "Read changed files, approach and checks from the existing `Candidate` and `Verification` records inside `carry`; add no record, schema or allow-list entry.",
+      "reason": "The data is already recorded (`job.candidate.changes`, `producer_report.summary`, `verification.checks`). The omission is in what `carry` copies, so that is where to fix it. The records allow-list (`check_record_file`, `AnyRecord`) stays untouched.",
+      "rejected": [
+        {
+          "option": "Persist a new 'prior summary' record when a job closes (this would make `run/mod.rs` the core change).",
+          "why": "It duplicates recorded data, needs a schema and allow-list change, and does nothing for jobs already closed."
+        },
+        {
+          "option": "Re-derive the files from `closing.happened.changed_paths` in run/mod.rs.",
+          "why": "That value is scoring state, not a record the reader can load later. `Candidate.changes` is the persisted source."
+        }
+      ]
+    },
+    {
+      "choice": "Store files as 'status path' strings (like the existing 'action path' deliverables), plus an omitted count, capped at 30 files; the check uses only the carried files.",
+      "reason": "Matches the existing convention. The status (deleted vs added) matters to a retry. The cap keeps the brief bounded, and the check cannot demand more than the reader was shown.",
+      "rejected": [
+        {
+          "option": "Carry bare paths.",
+          "why": "Loses whether the earlier job deleted or added the file."
+        },
+        {
+          "option": "Carry every file uncapped.",
+          "why": "A candidate that touches hundreds of files would bloat the brief and make the check impossible to satisfy."
+        }
+      ]
+    },
+    {
+      "choice": "Take the approach from `producer_report.summary` of the candidate only, bounded with `truncate_at_word` (about 800 chars). Print 'none recorded' when no candidate or report exists.",
+      "reason": "The brief asks for the 'producer approach summary', and the report summary is the producer's own account. An interrupted job with no candidate honestly has none recorded.",
+      "rejected": [
+        {
+          "option": "Fall back to `job.plans.last().approach`.",
+          "why": "That is a plan, not what the producer did. Mixing the two would mislabel it. It can be a later job if wanted."
+        }
+      ]
+    },
+    {
+      "choice": "Measured results are one line per check (name, pass/fail, exit code, tests ran), with no output text.",
+      "reason": "Failed-check output tails are already carried as findings. Passed-check output stays out, which the lifecycle test asserts with PASSING-CANARY. Bounded to 20 lines.",
+      "rejected": [
+        {
+          "option": "Also include output tails of passing checks.",
+          "why": "Breaks the existing canary test and bloats the brief."
+        }
+      ]
+    },
+    {
+      "choice": "The check treats a file as accounted for when it is a deliverable (exact or under a directory deliverable), or its path or an ancestor directory (with a trailing slash) appears in the reading's text, including out_of_scope. The error label is 'the earlier job's files' and avoids the phrases 'the previous result' and 'the change scope'.",
+      "reason": "Matches 'lists or excludes'. Directory mentions keep a many-file retry satisfiable. Existing retry.rs tests assert on those two phrases, so the new part must not trigger or contain them.",
+      "rejected": [
+        {
+          "option": "Require every file as an exact deliverable or an exact out_of_scope string.",
+          "why": "Too strict; a reading that excludes 'crates/athena-core/' would be refused for no reason."
+        },
+        {
+          "option": "Require only that at least one file be mentioned.",
+          "why": "A reading could ignore most of the earlier work and pass."
+        }
+      ]
+    },
+    {
+      "choice": "Put the new wording only in the generated brief section and READING_RULES rule 1, and keep that rule line at or below 220 chars and the rules section under 2400 bytes.",
+      "reason": "The reader prompt set has 3 tokens of headroom. The existing test `the_reader_brief_names_each_reading_rule_in_one_short_line` enforces the line and section sizes.",
+      "rejected": [
+        {
+          "option": "Edit the reader prompt files.",
+          "why": "Out of scope, and there is no budget."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Add `changed_files`, `changed_files_omitted`, `approach` and `checks` to `EarlierAttempt`. Print them (or 'none recorded' lines) in `prior_result_section`, add the third requirement to the section intro, and shorten READING_RULES rule 1 to mention the earlier job's files (at most 220 chars). Add the criterion 3 tests; existing struct literals keep working through `..Default::default()`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "`carry` fills the new fields from `job.candidate` and `job.verification.checks`, redacted and bounded. `check_prior_result_and_scope` gets the 'earlier job's files' missing part. Update the doc comments of `carry` and the check. Add the criterion 2, 4 and 5 tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-agent/src/fake.rs",
+      "action": "modify",
+      "purpose": "The fake reader parses the quoted files block of the previous-result section and names those files in its out_of_scope item, so nested runs pass the new check. Add a small unit test if fake.rs has a test module for `deterministic_turn`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/retry.rs",
+      "action": "modify",
+      "purpose": "Add a test that a retry reading ignoring the earlier job's files is refused with the files message and accepted when it lists them, reusing the mode-switching reader of the existing result-and-scope test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "purpose": "In the retry-with-failed-check test, assert the brief also carries the earlier job's changed file and a measured check line, and fix any retry test whose reader breaks under the new check.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an entry under [Unreleased] / Fixed that names the root cause, the three layers fixed, job 20261027-054209-z7sj as dispatched and never verified with no findings, and the estimated 5% of newly refused readings, labeled as an estimate.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "Only the retry test reader (`scripts` wrapper near line 4650) if the full test run shows a retry reading that must now account for the earlier job's files. No production code in run/mod.rs changes: `earlier_attempt` at ~1437 already passes the records to `carry`.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read `JobRecords`, `Candidate`, `ChangeEntry`/`ChangeStatus` (athena-data/src/records.rs) and the existing `carry` tests (reading.rs ~3390, ~4878) and `candidate_of` / `check` helpers to reuse for fixtures.",
+    "briefs.rs: add `changed_files: Vec<String>`, `changed_files_omitted: usize`, `approach: Option<String>` and `checks: Vec<String>` to `EarlierAttempt` with doc comments. Default already derives, so literal call sites with `..Default::default()` still compile; fix any that list every field.",
+    "briefs.rs: extend `prior_result_section`. Per prior, after the end-state line, print 'Files its candidate changed (N):' followed by `quote(entry)` lines and an 'and M more not listed' line, or 'Files its candidate changed: none recorded for it (no candidate or no changes).'. Print 'Producer approach (its own report):' with a quoted text, or 'Producer approach: none recorded for it.'. Print 'Measured checks:' with quoted lines, or 'Measured checks: none recorded for it.'. No line starts with 'Job '. Add the third requirement to the intro and tighten READING_RULES rule 1 (at most 220 chars).",
+    "reading.rs `carry`: build files from `job.candidate.changes` as 'status path' (added/modified/deleted/type-changed), capped at 30 with the omitted count; the approach from `candidate.producer_report.summary` using `crate::truncate_at_word`; the checks from `job.verification.checks` as 'name: passed|failed (exit code N, M tests ran)', capped at 20. Redact all of it with `redactor.redact_all` and fill the new `EarlierAttempt` fields. Update the doc comment of `carry`.",
+    "reading.rs `check_prior_result_and_scope`: add a helper that returns, per prior, the carried file paths (text after the first space) that are not deliverables (exact or under a directory deliverable) and whose path or ancestor directory is not in the lowercased reading text, including out_of_scope. Add a third entry to `missing` naming up to 5 files per prior: \"the earlier job's files: job X changed a, b but the reading neither lists them as deliverables nor names them in out_of_scope, so it does not say whether that work is kept or dropped\". Avoid the phrases 'the previous result' and 'the change scope'. Update the function's doc comment.",
+    "fake.rs: in the `Role::Reader` arm, parse the quoted lines under the files header of the previous-result section into paths and include them in the out_of_scope item. Keep the 'Job ' parsing unchanged.",
+    "Write the tests: reading.rs (criterion 2 carry test; `check_prior_result_*` tests for criteria 4 and 5, with priors built by `carry` for the dispatched-unverified and rejected-with-findings shapes), briefs.rs (criterion 3 tests), retry.rs (refused-then-accepted reading test), lifecycle.rs (retry brief carries file and check line).",
+    "Run `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Fix test readers that now fail the check, in run/mod.rs if it is that one; report any outside the deliverables.",
+    "CHANGELOG.md: add the Fixed entry under [Unreleased] with the root cause, the layers, job 20261027-054209-z7sj, and the 5% figure labeled an estimate."
+  ],
+  "risks": [
+    {
+      "risk": "The new check refuses readings in existing tests whose retried job changed files the test reader does not list (scope_guard.rs, status.rs, evidence_labels.rs, run_pin_tests.rs, run/mod.rs, lifecycle.rs, retry.rs).",
+      "mitigation": "Most test readers list README.md as the deliverable, which is the file the scripted producers change. The fake reader is updated to name the earlier files. Run the full suite and fix any remaining reader double; unlisted files that break are reported."
+    },
+    {
+      "risk": "The brief grows. The reader prompt has 3 tokens of headroom, and rule lines and the rules section have size tests (220 chars per line, 2400 bytes).",
+      "mitigation": "All new wording is in the generated section, not in prompt files. Cap files (30), approach (about 800 chars) and checks (20 lines). Keep the READING_RULES edit short and run `the_reader_brief_names_each_reading_rule_in_one_short_line`."
+    },
+    {
+      "risk": "A machine path or secret in a changed-file name or producer summary reaches the brief.",
+      "mitigation": "Pass files, approach and check lines through `redactor.redact_all` in `carry`; the criterion 2 test plants a token in both."
+    },
+    {
+      "risk": "Path matching in the check is too loose (a short ancestor like 'src/' matches unrelated text) or too strict (differing case, redacted path).",
+      "mitigation": "Compare lowercased text; accept exact path or any ancestor directory with a trailing slash. Cover the exact, directory, deliverable and ignored cases in tests."
+    },
+    {
+      "risk": "The fake reader's parsing of the brief breaks, because its existing code treats every line starting with 'Job ' as a job id.",
+      "mitigation": "The new lines never start with 'Job '; the files block uses '> ' quoted lines under a fixed header. A fake-reader or retry test shows it round-trips."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Content check of the CHANGELOG diff: the entry under [Unreleased] / Fixed must name `carry`, `prior_result_section`, `check_prior_result_and_scope`, the three omitted things (changed files, approach, measured check results), and job 20261027-054209-z7sj as dispatched, never verified, no findings, restarted from the base.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "The added lines contain the root cause naming `carry` in crates/athena-core/src/reading.rs, `prior_result_section` in crates/athena-context/src/briefs.rs, the check that only tests the job id, and the 20261027-054209-z7sj sentence. Also states the 5% refusal figure as an estimate, not a measurement.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Unit test in reading.rs, `carry_includes_changed_files_approach_and_measured_checks_redacted_and_bounded`. Entry point: `carry(&JobRecords, &Redactor)`. Fixture: reuse `job_with_checks` (existing, ~line 3358), then set `job.candidate` through the existing `candidate_of` helper (~line 4438 usage; the test sets `changes` to more than 30 entries including a path with a token-shaped secret, and `producer_report` summary to a long text with the same token). Add two checks (one passed with tests_ran, one failed with an exit code). Redactor is `Redactor::new(&athena_gate::builtin_config())`, as in the existing carry tests. The fixtures use real record structs, not doubles. Asserts: changed_files has 30 'status path' entries and omitted equals the rest; the token is absent from files and approach; the approach is bounded and keeps its start; checks lists both with pass/fail, the exit code and the test count and carries no output text; a job with no candidate yields empty files, `approach == None`, and keeps `checks` from verification.",
+      "command": "cargo test --locked -p athena-core reading",
+      "observes": "The new test passes with the change. On the base commit the fields do not exist, so the test fails to compile, which counts as failing. The existing `carry_*` tests still pass.",
+      "fails_without": "If `carry` did not copy candidate.changes, producer_report.summary or the checks, the files/approach/checks assertions fail; if it skipped redaction, the token assertion fails; if it skipped the cap, the length assertions fail."
+    },
+    {
+      "criterion": 3,
+      "method": "Unit tests in briefs.rs. Entry point: `reader_brief(&ReaderInputs)`, built with the existing `reader_inputs(&reading())` helper. Tests: `a_retry_brief_prints_files_approach_and_checks_of_the_earlier_job` sets `inputs.earlier_attempt` with changed_files ['modified src/a.rs', 'deleted README.md'], an approach and checks; `a_referenced_job_brief_prints_files_approach_and_checks` sets `inputs.referenced_jobs` the same way; `a_prior_without_a_candidate_says_none_recorded` uses a Default `EarlierAttempt`. The section is cut at PRIOR_RESULT_HEADING as the existing tests do. Asserts the quoted '> modified src/a.rs' lines, the approach text, the check line, the omitted-count line, and for the empty prior the lines 'Files its candidate changed: none recorded for it', 'none recorded' for approach and for measured checks. `the_reader_brief_names_each_reading_rule_in_one_short_line` still passes (rule line at most 220 chars, section under 2400 bytes). No double: inputs are plain data and `reader_brief` is the production function.",
+      "command": "cargo test --locked -p athena-context briefs",
+      "observes": "Files, approach and checks appear in the section for both the retried and the referenced job, and the 'none recorded' lines appear for a prior with no candidate.",
+      "fails_without": "If `prior_result_section` printed nothing for the new fields, the contains-assertions fail for both prior kinds; if it printed nothing for empty priors, the 'none recorded' assertions fail."
+    },
+    {
+      "criterion": 4,
+      "method": "Unit tests in reading.rs whose names start `check_prior_result_` so the filter selects them. Entry point: `check_prior_result_and_scope(&Reading, &[&EarlierAttempt])`, using the existing `scoped_reading` helper (~line 4811). Priors are built two ways: (a) a dispatched/abandoned unverified job made by `carry` over a `JobRecords` with a candidate and no verification or outcome (end_state 'dispatched', verdict None, no findings); (b) a rejected job with findings and verdict fail, built the same way from `job_with_checks` plus a candidate. The reading names each job id and lists README.md as the only deliverable plus out_of_scope ['the changelog'], while the prior changed src/a.rs. Asserts: refused, the error contains \"the earlier job's files\" and the file, and does not contain 'the previous result' or 'the change scope'; accepted when the file is added as a deliverable; accepted when out_of_scope names the path; accepted when out_of_scope names its ancestor directory; accepted for a prior with no recorded files; with two priors only the one with unaccounted files is named. Real `carry` output feeds the check, so nothing under test is faked.",
+      "command": "cargo test --locked -p athena-core check_prior_result",
+      "observes": "Both failure shapes are refused when their files are neither listed nor excluded and accepted when listed or excluded. The existing id and scope tests are unchanged and pass.",
+      "fails_without": "If the check ignored the files, the refusal assertions fail for both shapes; if it ignored deliverables or out_of_scope, the acceptance assertions fail."
+    },
+    {
+      "criterion": 5,
+      "method": "Unit test `check_prior_result_refuses_only_priors_with_recorded_files_the_reading_ignores` in reading.rs. It runs one fixed reading (names the job, lists a deliverable and an out_of_scope item, mentions no earlier file) against a table of priors: no candidate, a candidate with no changes, a candidate whose files the reading lists, a candidate whose files it excludes, and a candidate whose files it ignores in the two failure shapes from criterion 4. It counts refusals and asserts exactly the 'ignores' rows are refused and nothing else changed. The 5% figure is an estimate that cannot be measured from the repo; the CHANGELOG entry labels it so.",
+      "command": "cargo test --locked -p athena-core check_prior_result",
+      "observes": "Exactly the retries with a recorded candidate whose reading ignores its files are newly refused; every other row is accepted, so the refusal increase is bounded to that class.",
+      "fails_without": "If the check also refused priors with no recorded files, or refused readings that list or exclude them, the table assertions fail; if it never refused, the 'ignores' rows fail."
+    },
+    {
+      "criterion": 6,
+      "method": "Run the three checks Athena runs, which include the nested-run tests: the fake reader in crates/athena-agent/src/fake.rs (parses the new files block in the '# Previous result and change scope' section and names the files in out_of_scope, so retries in its users still pass), crates/athena-cli/tests/retry.rs (new test: a retry whose reading names the job and has out_of_scope but whose deliverables and text omit the earlier job's file is refused with \"the earlier job's files\", and accepted when it lists README.md; existing modes assert only on 'the previous result' / 'the change scope'), and crates/athena-cli/tests/lifecycle.rs (a retry assertion that the brief carries the earlier job's file and measured check lines).",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0, including `retry` and `lifecycle` integration tests and nested runs that use `deterministic_turn`.",
+      "fails_without": "If the fake reader did not name the earlier job's files, a nested retry whose producer changed files other than FAKE-CHANGE.md would be refused by the new check and the retry tests would fail."
+    },
+    {
+      "criterion": 7,
+      "method": "Content check that CHANGELOG.md has the entry and that no governance or prompt file changed.",
+      "command": "git status",
+      "observes": "Modified files are only the seven deliverables (reading.rs, briefs.rs, fake.rs, retry.rs, lifecycle.rs, CHANGELOG.md, and run/mod.rs only if its test reader needed it); no prompt file, athena.toml, defaults.toml or workflow appears. `git diff -- CHANGELOG.md` shows the Fixed entry. The budget test `system_facts_budgets_match_computed` passes in the criterion 6 run, showing the prompt sets are unchanged.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Do other test readers that retry (scope_guard.rs ~987, status.rs, evidence_labels.rs, run_pin_tests.rs) have scripted producers that change files other than README.md? If so, the new check refuses their readings. The plan only fixes the listed deliverables (and run/mod.rs); the producer should run the full `cargo test --locked` and, if one breaks, report it, since those files are outside the deliverable list.",
+    "Is `producer_report.summary` the right 'approach' for jobs closed before a report exists (interrupted jobs)? The plan prints 'none recorded' there and does not fall back to the plan's approach.",
+    "The 5% figure of newly refused readings in the brief cannot be checked from the repository; the plan treats it as an estimate and tests only the shape of the affected class.",
+    "Whether the fake in athena-agent/fake.rs has its own test module is unconfirmed (only deterministic_turn was read)."
+  ],
+  "producer_section_sha256": "ddd00ecf0cce4f2bd0ad0c3ee44df9026b3133abd245f3bbbeabf351b053c92e"
+}
