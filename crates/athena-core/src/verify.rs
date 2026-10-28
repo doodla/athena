@@ -348,7 +348,7 @@ pub fn judge(inputs: &VerdictInputs<'_>) -> Judgment {
                     .join(", ")
             ),
             format!(
-                "more than {REPLAY_HOLD_PERCENT}% of the newest {} accepted readings are refused by the candidate and accepted by the base, and the criteria do not state a higher refusal rate is intended: {}",
+                "more than {REPLAY_HOLD_PERCENT}% of the newest {} accepted readings are refused by the candidate and accepted by the base, more than the share the criteria declare (plus 5 points) or, when they declare none or declare one above 25% without a reason, more than that limit: {}",
                 replay.total,
                 list.join("; ")
             ),

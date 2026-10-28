@@ -1,0 +1,155 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261028-162948-9a36",
+  "base_commit": "387358d797c8d7f2541eb583e1c2a4883c42dcc2",
+  "base_fingerprint": "sha256:c8c10666753e61adfbdf97b0541ddebd5276f5e2aeebdc0cef9a4ce191194288",
+  "previous_job": "20261028-154034-kncc",
+  "candidate_commit": "618b3cf4ab980ff880c01219130548988faf23bc",
+  "candidate_tree": "72a263dc236efe5b3598b4d42e5618627182258f",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 200914
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 146449
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 243683
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 203866
+    },
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 48684
+    }
+  ],
+  "fingerprint": "sha256:9b11de8d5f81aa7067eaab2cba090c894baee31f8a4073ef1540cc6e091c0b8e",
+  "violations": [],
+  "producer_report": {
+    "summary": "The replay gate no longer exempts a candidate for a phrase. Root cause: INTENDED_REFUSAL_PHRASES let any criterion saying 'higher refusal rate is intended' skip the 10% hold, which is how the rule that newly refused 80% landed on 2026-10-28. The phrase list and criteria_intend_higher_refusal are gone from reading.rs. A candidate now declares a number in a criterion, as 'expected N% of newly refused readings' (whole percent 0-100, first match wins; a percentage not tied to 'newly refused', such as a quoted example, declares nothing). replay_is_held(total, newly, declared: Option<u32>) holds when newly*100 > total*(declared+5), or total*10 with no declaration. A declared share above 25% needs a reason: one criterion or out_of_scope item with 'because', 'now asks' or 'new required' that also names past/previous/earlier/older readings or refuse/refusal words. Without it the share counts as not declared and the 10% limit applies. replay_declaration_of(&Reading) is the single function the gate (replay_run) and the verifier view (replay_view) both use. The stored Replay record is unchanged (intended = declared and not held, because Replay::validate rejects held && intended). ReplayView swaps `intended` for declared, reason and unsupported. The verifier brief prints 'Declared share: N%' and the reason above the replay list, or a note that a share above 25% had no stated reason and 10% applied. CODE_SURVEY_GUIDE teaches the declared form. verify.rs blocker text names the new rule. CHANGELOG.md has a Changed entry under Unreleased. Tests I ran pass: athena-core `reading::` (90) and replay-filtered run tests, all of athena-context, xtask policy, `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and one full `cargo test --locked` (no failure reported).",
+    "files": [
+      "crates/athena-core/src/reading.rs",
+      "crates/athena-core/src/run/mod.rs",
+      "crates/athena-context/src/briefs.rs",
+      "crates/athena-core/src/verify.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-core replay",
+        "result": "pass",
+        "note": "22 tests incl. replay_view_carries_the_declared_share_and_reason; first run caught a test-id and a missing-reason mistake in my own margin test, fixed and rerun"
+      },
+      {
+        "command": "cargo test -p athena-core reading::",
+        "result": "pass",
+        "note": "90 passed, includes replay_declared_*, replay_phrase_*, replay_reason_*, changelog_describes_the_declared_share_rule"
+      },
+      {
+        "command": "cargo test -p athena-context",
+        "result": "pass",
+        "note": "85 passed, includes the replay_summary_* tests and the CODE_SURVEY_GUIDE phrase test"
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "12 passed, no banned word"
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "ran once; the tool returned no failure exit code. Its output was saved outside the working directory, which I could not read back, so I did not see the per-crate result lines"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A unit test run with `cargo test -p athena-core` shows a candidate declaring 'expected 30%' with 40 of 50 (80%) newly refused is held, and one declaring 'expected 80%' with a stated reason and 80% measured passes the replay.",
+        "status": "met",
+        "evidence": "reading.rs test replay_declared_share_of_30_with_80_measured_is_held_and_80_declared_passes: criteria 'expected 30% of newly refused readings' over marked_cases(50, 40) gives held && !intended; 'expected 80% of newly refused readings' with a marker-and-anchor reason in out_of_scope gives !held && intended; both records pass validate(). Ran `cargo test -p athena-core replay_declared`: ok. Note: the parser needs the full form 'N% of newly refused readings', so the literal bare 'expected 30%' declares nothing (the tests use the full form)."
+      },
+      {
+        "criterion": "A unit test run with `cargo test -p athena-core` shows a criterion such as 'the higher refusal rate is intended' with no number no longer exempts a candidate: at 80% measured it is held, and at exactly 10% it is not.",
+        "status": "met",
+        "evidence": "replay_phrase_without_a_number_does_not_exempt asserts the declaration is default, 40 of 50 is held and not intended, and 1 of 10 is not held, for both 'the higher refusal rate is intended' and 'the change refuses more readings than the base'. Passed in `cargo test -p athena-core reading::`."
+      },
+      {
+        "criterion": "Unit tests show the 5-point margin edge (declared 30% with 35% measured passes, 36% is held), and a declared share above 25% with no reason in out_of_scope or criteria is held at the 10% limit.",
+        "status": "met",
+        "evidence": "replay_declared_margin_edge_is_five_points_inclusive runs the real replay over 100 cases: 35 newly refused is not held, 36 is held (declared 30% with a reason), plus a replay_is_held table at totals 50 and 100. replay_reason_is_needed_above_25_percent: 'expected 80% ...' with no reason is held at 2 of 10 and not at 1 of 10; 25% needs no reason; 26% falls back to the 10% limit; an out_of_scope item with 'because' but no anchor, and one with an anchor but no marker, do not unlock the share. Both passed."
+      },
+      {
+        "criterion": "A test shows the reason for a declared share above 25% appears in the ReplayView or verifier brief beside the replay list.",
+        "status": "met",
+        "evidence": "run/mod.rs replay_view_carries_the_declared_share_and_reason builds a Replay with ReplayRun::record and calls the production replay_view(&record, &reading) (the call site now passes ctx.reading): declared Some(80) and the reason text are present; without a reason declared is None and unsupported is Some(80). briefs.rs replay_summary_shows_the_declared_share_and_reason_before_the_list renders verifier_brief and asserts 'Declared share: 80%' and the reason come before the first '- <job>:' list line, and the unsupported note likewise. Both passed."
+      },
+      {
+        "criterion": "INTENDED_REFUSAL_PHRASES and the phrase-based exemption are removed from crates/athena-core/src/reading.rs (Grep finds no remaining use), and replay_is_held takes the declared share instead of an `intended` bool.",
+        "status": "met",
+        "evidence": "Grep over the working tree for INTENDED_REFUSAL_PHRASES and criteria_intend_higher_refusal finds only two mentions in CHANGELOG.md, which describe the removal; none in any .rs file. replay_is_held signature is (total: usize, newly: usize, declared: Option<u32>); the crate compiles under clippy."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry that describes the declared-share rule, the 5-point margin, the 10% default and the 25% reason requirement.",
+        "status": "met",
+        "evidence": "CHANGELOG.md [Unreleased] > Changed has the entry. Test changelog_describes_the_declared_share_rule checks that the Unreleased section contains 'of newly refused readings', '5 points', '10%', '25%' and 'reason'; it passed."
+      },
+      {
+        "criterion": "`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` all pass.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I also ran `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` (both clean) and one `cargo test --locked`, which returned no failure."
+      },
+      {
+        "criterion": "The change refuses more readings than before: an 80% newly refused candidate with only a phrase is now held. The higher refusal rate is intended, and a test covers it.",
+        "status": "met",
+        "evidence": "replay_phrase_only_candidate_is_now_held: criteria with 'the change refuses more readings than the base, and the higher refusal rate is intended' over marked_cases(50, 40) give 40 newly refused, held and not intended; replay_is_held(50, 40, None) is true. The go()-level test replay_holds_over_threshold_rejects_the_job_and_records_the_list still asserts held && !intended. Passed."
+      }
+    ],
+    "open_issues": [
+      "Departure from the listed files, as the plan stated: crates/athena-core/src/brief.rs does not exist, so I edited crates/athena-context/src/briefs.rs, and also crates/athena-core/src/verify.rs (text of the held-replay blocker evidence). Both are unlisted and may be flagged as scope notes.",
+      "The parser needs the full form 'N% of newly refused readings', so a bare 'expected 30%' declares nothing and the 10% limit applies (fails safe). CODE_SURVEY_GUIDE teaches the full form.",
+      "The reason check is a text floor (marker plus anchor in one item). It does not prove the reason is good; the verifier is shown the sentence beside the list.",
+      "crates/athena-data/src/records.rs doc comments on Replay.intended are now slightly stale; the file is out of scope so I left it.",
+      "Per-crate result lines of the final full `cargo test --locked` run were not readable by me (output saved outside the working directory); the command returned no failure, and Athena reruns it."
+    ],
+    "mistakes": [
+      "My first margin test used a declared 30% without a reason, so the share was not applied and 35 of 100 was held; I added a reason to the fixture.",
+      "My first margin table had wrong numbers (25 of 50 at declared 30% is above the 35% limit); I corrected it to 17 not held and 18 held.",
+      "My first 100-case fixture used ids that do not parse as job ids (case_id fails past 59); fixed by building ids directly."
+    ],
+    "learnings": [
+      "There is no crates/athena-core/src/brief.rs. The verifier brief code (ReplayView, replay_section, CODE_SURVEY_GUIDE) lives in crates/athena-context/src/briefs.rs, and athena-context cannot import constants from athena-core, so core decides which replay case applies and the brief only prints it.",
+      "Replay::validate in athena-data rejects held && intended, so Replay.intended can only mean 'a declared share applied and the job is not held'.",
+      "case_id() in reading.rs tests only works for n < 60 (the number is read as seconds in the job id); the 100-case margin test builds its own ids.",
+      "The CHANGELOG heading is '## [Unreleased]' with brackets; older entries mention 'refuses more' and 'higher refusal rate is intended' and an existing test reads them, so they stay unedited.",
+      "A declared share above 25% needs a reason to apply at all, so a 'declared 30%' test needs a reason or the 10% limit applies."
+    ],
+    "desires": [
+      "A way to read a persisted tool-output file inside the working directory, so I could confirm per-crate test result lines from the full cargo test run.",
+      "The brief's file list named crates/athena-core/src/brief.rs, which does not exist; a pointer to briefs.rs in the brief would have saved a search."
+    ]
+  }
+}
