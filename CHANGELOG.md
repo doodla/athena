@@ -9,6 +9,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- The governance-file rule on a reading no longer refuses a request for using a common word, and a refused
+  reading is now read once more at once with the refusal text. Root cause: `check_governance_coverage` required a
+  governance path whenever the request contained a word from a table (deploy, config, CI, gate, budgets and the
+  like), so ordinary requests were refused, and the reader was never shown why, so the next read failed the same
+  way; the rule stopped three drains in a row and refused the reading of its own fix three times. Now
+  `GOVERNANCE_BY_KEYWORD` is replaced by `GOVERNANCE_BY_NAMED_PATH`: a path is required only when the request
+  names it (`athena.toml`, `defaults.toml`, `setup.sh`, `rust-toolchain.toml`, or `.github/workflows` and a file
+  under it) and the reading neither lists and names it nor puts it in `out_of_scope`. A governance file listed
+  as a deliverable without a criterion that names it, and the `GOVERNANCE_BY_DELIVERABLE` table, are unchanged.
+  `Athena::read_for` (first reads, rereads after a correction, and configuration rereads) runs the reader once
+  more when a reading rule refuses its reading (an invalid output, the previous-result and scope check, the
+  criteria-evidence check, the governance check). The refusal text goes into the second brief under "Your
+  previous reading was refused"; only a second refusal is the failure, and a reader that did not run or finished
+  with nothing is not read again. Both invocations are recorded and counted in the job's spend. The reader brief
+  also lists each reading rule in one short line ("Reading rules"). No prompt file changed. Tests cover common
+  words that are now accepted, a named path that is still refused until covered, the refusal text reaching the
+  second read, a second refusal, and the brief's rule lines.
 - The verifier no longer starts in an environment that cannot build or write. Root cause: the `[disk]
   min_free_gb` guard ran at dispatch and before the checks, but the checks' builds fill the disk afterwards, so
   nothing covered the point between the checks and the verifier, and a full disk there read as a failure of the
