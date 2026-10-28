@@ -2428,6 +2428,326 @@ pub fn check_criteria_evidence(reading: &Reading) -> Result<()> {
     )
 }
 
+// ---------------------------------------------------------------------------------------------------------
+// Replaying past readings through the reading rules of a base build and a candidate build
+
+/// How many past readings a replay covers: the newest ones that have an accepted reading and a request.
+pub const REPLAY_LIMIT: usize = 50;
+
+/// The share of replayed readings, in percent, a candidate may newly refuse before the job is held. More than
+/// this is held; exactly this or less is not. A candidate whose criteria intend a higher rate replaces it
+/// (see [`intended_rate`]).
+pub const HOLD_PERCENT: u32 = 10;
+
+/// What the reading rules say about one stored request and reading.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Decision {
+    Accept,
+    /// Refused, with the rule's reason.
+    Refuse(String),
+}
+
+/// The acceptance rules of this build applied to a stored request and reading, as `athena check-reading`
+/// does. A stored reading has no earlier attempt to compare with, so only the rules that need none apply.
+pub fn decide_stored(request: &str, reading: &Reading) -> Decision {
+    match check_reading_acceptance(reading, request, None, &[]) {
+        Ok(()) => Decision::Accept,
+        Err(e) => Decision::Refuse(e.to_string()),
+    }
+}
+
+/// Writes a request and a reading where `athena check-reading` reads them: `request.txt` and `reading.json`
+/// in `dir`. Returns the two paths.
+pub fn write_case_files(
+    dir: &std::path::Path,
+    request: &str,
+    reading: &Reading,
+) -> Result<(std::path::PathBuf, std::path::PathBuf)> {
+    std::fs::create_dir_all(dir)?;
+    let request_path = dir.join("request.txt");
+    let reading_path = dir.join("reading.json");
+    std::fs::write(&request_path, request)?;
+    std::fs::write(&reading_path, serde_json::to_vec(reading)?)?;
+    Ok((request_path, reading_path))
+}
+
+/// One past request with its accepted reading.
+#[derive(Debug, Clone)]
+pub struct ReplayCase {
+    pub job: JobId,
+    pub request: String,
+    pub reading: Reading,
+}
+
+/// The newest [`REPLAY_LIMIT`] past requests that have an accepted reading and a stored request, newest
+/// first. `exclude` is the job being verified.
+pub fn replay_cases(records: &Records, exclude: &str) -> Vec<ReplayCase> {
+    let mut cases: Vec<ReplayCase> = records
+        .jobs
+        .iter()
+        .filter(|(id, _)| id.as_str() != exclude)
+        .filter_map(|(_, job)| {
+            let n = job.job.as_ref()?.accepted_reading?;
+            Some(ReplayCase {
+                job: job.id.clone()?,
+                request: job.request.as_ref()?.text.clone(),
+                reading: job.reading(n)?.clone(),
+            })
+        })
+        .collect();
+    cases.sort_by(|a, b| b.job.as_str().cmp(a.job.as_str()));
+    cases.truncate(REPLAY_LIMIT);
+    cases
+}
+
+/// Decides one case. A failure to decide makes the whole replay a `no replay`.
+pub trait Decide: Send + Sync {
+    fn decide(&self, case: &ReplayCase) -> Result<Decision>;
+}
+
+/// Decides with a built `athena` binary's `check-reading` subcommand.
+#[derive(Debug)]
+pub struct BinaryDecide {
+    pub binary: std::path::PathBuf,
+    /// Where case files are written.
+    pub work: std::path::PathBuf,
+}
+
+impl Decide for BinaryDecide {
+    fn decide(&self, case: &ReplayCase) -> Result<Decision> {
+        let (request, reading) = write_case_files(
+            &self.work.join(case.job.as_str()),
+            &case.request,
+            &case.reading,
+        )?;
+        let output = std::process::Command::new(&self.binary)
+            .arg("check-reading")
+            .arg("--request")
+            .arg(&request)
+            .arg("--reading")
+            .arg(&reading)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .with_context(|| format!("running {}", self.binary.display()))?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let first = stdout.trim();
+        match output.status.code() {
+            Some(0) if first == "accept" => Ok(Decision::Accept),
+            Some(1) if first.starts_with("refuse:") => Ok(Decision::Refuse(
+                first.trim_start_matches("refuse:").trim().to_string(),
+            )),
+            code => bail!(
+                "check-reading gave exit {code:?} and {:?} for {}",
+                tail(first, 200),
+                case.job.as_str()
+            ),
+        }
+    }
+}
+
+/// Whether `binary` has the `check-reading` subcommand.
+pub fn probe_subcommand(binary: &std::path::Path) -> bool {
+    std::process::Command::new(binary)
+        .args(["check-reading", "--help"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// Why a tree cannot be built for a replay, if it cannot: it is not the Athena workspace.
+pub fn resolve_tree(dir: &std::path::Path) -> Result<(), String> {
+    if dir.join("crates/athena-cli/Cargo.toml").is_file() {
+        Ok(())
+    } else {
+        Err("the tree has no crates/athena-cli to build".into())
+    }
+}
+
+/// A past request the candidate newly refuses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refused {
+    pub job: JobId,
+    pub reason: String,
+}
+
+/// The result of replaying past readings through a base and a candidate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReplayReport {
+    Ran {
+        replayed: u32,
+        /// Refused by the candidate and accepted by the base.
+        newly_refused: Vec<Refused>,
+        /// A refusal rate the criteria intend, in percent.
+        intended_percent: Option<u32>,
+    },
+    /// No replay ran; this is never a pass.
+    NoReplay { reason: String },
+}
+
+/// The refusal rate, in percent, a candidate's criteria intend, when one criterion states a percent above
+/// [`HOLD_PERCENT`], speaks of refusing, and says it is intended, expected or deliberate.
+pub fn intended_rate(criteria: &[String]) -> Option<u32> {
+    criteria
+        .iter()
+        .filter_map(|text| {
+            let lower = text.to_lowercase();
+            let intent = ["intend", "expected", "deliberate", "on purpose"]
+                .iter()
+                .any(|w| lower.contains(w));
+            if !lower.contains("refus") || !intent {
+                return None;
+            }
+            let mut best = None;
+            for (i, _) in lower.match_indices('%') {
+                let digits: String = lower[..i]
+                    .chars()
+                    .rev()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect();
+                if let Ok(p) = digits.parse::<u32>()
+                    && p > HOLD_PERCENT
+                    && p <= 100
+                {
+                    best = best.max(Some(p));
+                }
+            }
+            best
+        })
+        .max()
+}
+
+/// Replays `cases` through the base and the candidate deciders and lists what only the candidate refuses.
+pub fn replay(
+    cases: &[ReplayCase],
+    base: &dyn Decide,
+    candidate: &dyn Decide,
+    criteria: &[String],
+) -> ReplayReport {
+    if cases.is_empty() {
+        return ReplayReport::NoReplay {
+            reason: "no accepted readings in the history".into(),
+        };
+    }
+    let mut newly_refused = Vec::new();
+    for case in cases {
+        let decided = base
+            .decide(case)
+            .and_then(|b| candidate.decide(case).map(|c| (b, c)));
+        match decided {
+            Ok((Decision::Accept, Decision::Refuse(reason))) => newly_refused.push(Refused {
+                job: case.job.clone(),
+                reason,
+            }),
+            Ok(_) => {}
+            Err(e) => {
+                return ReplayReport::NoReplay {
+                    reason: format!("a build could not decide {}: {e}", case.job.as_str()),
+                };
+            }
+        }
+    }
+    ReplayReport::Ran {
+        replayed: cases.len() as u32,
+        newly_refused,
+        intended_percent: intended_rate(criteria),
+    }
+}
+
+impl ReplayReport {
+    /// True when more than the allowed share of replayed readings is newly refused.
+    pub fn held(&self) -> bool {
+        match self {
+            ReplayReport::Ran {
+                replayed,
+                newly_refused,
+                intended_percent,
+            } => {
+                let limit = intended_percent.unwrap_or(HOLD_PERCENT);
+                !newly_refused.is_empty()
+                    && newly_refused.len() as u64 * 100 > u64::from(limit) * u64::from(*replayed)
+            }
+            ReplayReport::NoReplay { .. } => false,
+        }
+    }
+
+    /// True only for a replay that ran and was not held. A replay that did not run is no pass.
+    pub fn is_pass(&self) -> bool {
+        matches!(self, ReplayReport::Ran { .. }) && !self.held()
+    }
+
+    /// The newly refused requests, one `job (reason)` entry each.
+    pub fn list(&self) -> String {
+        match self {
+            ReplayReport::Ran { newly_refused, .. } => newly_refused
+                .iter()
+                .map(|r| format!("{} ({})", r.job.as_str(), r.reason))
+                .collect::<Vec<_>>()
+                .join("; "),
+            ReplayReport::NoReplay { .. } => String::new(),
+        }
+    }
+
+    /// One line: the count, the total and the list, or `no replay: <reason>`.
+    pub fn summary(&self) -> String {
+        match self {
+            ReplayReport::Ran {
+                replayed,
+                newly_refused,
+                ..
+            } => format!(
+                "{} of {replayed} replayed readings newly refused{}{}",
+                newly_refused.len(),
+                if newly_refused.is_empty() { "" } else { ": " },
+                self.list()
+            ),
+            ReplayReport::NoReplay { reason } => format!("no replay: {reason}"),
+        }
+    }
+
+    /// The typed record of this replay.
+    pub fn to_record(
+        &self,
+        job: &JobId,
+        base_commit: &str,
+        candidate_commit: &str,
+    ) -> athena_data::records::Replay {
+        let (replayed, newly_refused, intended_percent, no_replay) = match self {
+            ReplayReport::Ran {
+                replayed,
+                newly_refused,
+                intended_percent,
+            } => (
+                *replayed,
+                newly_refused
+                    .iter()
+                    .map(|r| athena_data::records::ReplayRefusal {
+                        job: r.job.clone(),
+                        reason: r.reason.clone(),
+                    })
+                    .collect(),
+                *intended_percent,
+                None,
+            ),
+            ReplayReport::NoReplay { reason } => (0, vec![], None, Some(reason.clone())),
+        };
+        athena_data::records::Replay {
+            job: job.clone(),
+            base_commit: base_commit.to_string(),
+            candidate_commit: candidate_commit.to_string(),
+            replayed,
+            newly_refused,
+            held: self.held(),
+            intended_percent,
+            no_replay,
+        }
+    }
+}
+
 /// The records of a job at the current commit.
 pub fn job_records(athena: &Athena, job_ref: &str) -> Result<(Records, JobRecords)> {
     let head = athena.head()?;
@@ -4661,5 +4981,322 @@ mod tests {
         let mut retry = reading_with_criterion(good);
         retry.summary = format!("Retry {PRIOR_JOB}: fix the missing greeting.");
         check_reading_acceptance(&retry, "add a greeting", Some(&previous), &[]).unwrap();
+    }
+
+    mod replay_tests {
+        use super::*;
+        use std::collections::BTreeSet;
+
+        fn id(i: usize) -> JobId {
+            JobId::parse(&format!("20261001-{:02}{:02}00-a{:03}", i / 60, i % 60, i)).unwrap()
+        }
+
+        fn case(i: usize, request: &str) -> ReplayCase {
+            let mut reading = scoped_reading("Add a greeting.", &["src/a.rs"], &[]);
+            reading.job = id(i);
+            ReplayCase {
+                job: id(i),
+                request: request.into(),
+                reading,
+            }
+        }
+
+        /// The rules of this build.
+        struct Stored;
+        impl Decide for Stored {
+            fn decide(&self, case: &ReplayCase) -> Result<Decision> {
+                Ok(decide_stored(&case.request, &case.reading))
+            }
+        }
+
+        /// A candidate-like rule change: the stored rules plus one more refusal.
+        struct Stricter(&'static str);
+        impl Decide for Stricter {
+            fn decide(&self, case: &ReplayCase) -> Result<Decision> {
+                if case.request.contains(self.0) {
+                    return Ok(Decision::Refuse(format!("the request says {}", self.0)));
+                }
+                Ok(decide_stored(&case.request, &case.reading))
+            }
+        }
+
+        /// Accepts everything, except the named jobs, which it refuses.
+        struct Refuses(BTreeSet<String>);
+        impl Decide for Refuses {
+            fn decide(&self, case: &ReplayCase) -> Result<Decision> {
+                Ok(if self.0.contains(case.job.as_str()) {
+                    Decision::Refuse("a new rule".into())
+                } else {
+                    Decision::Accept
+                })
+            }
+        }
+
+        fn fifty(refused: usize) -> (Vec<ReplayCase>, Refuses) {
+            let cases: Vec<ReplayCase> = (0..50).map(|i| case(i, "add a greeting")).collect();
+            let set = cases
+                .iter()
+                .take(refused)
+                .map(|c| c.job.as_str().to_string())
+                .collect();
+            (cases, Refuses(set))
+        }
+
+        #[test]
+        fn decide_stored_agrees_with_check_reading_acceptance() {
+            let bare = scoped_reading("Do it.", &["src/a.rs"], &[]);
+            let covered = scoped_reading("Do it.", &["src/a.rs"], &["athena.toml"]);
+            for (request, reading) in [
+                ("change athena.toml", &bare),
+                ("change athena.toml", &covered),
+                ("add a greeting", &bare),
+            ] {
+                let expected = check_reading_acceptance(reading, request, None, &[]);
+                match (decide_stored(request, reading), expected) {
+                    (Decision::Accept, Ok(())) => {}
+                    (Decision::Refuse(got), Err(e)) => assert_eq!(got, e.to_string()),
+                    (got, want) => panic!("{request}: {got:?} vs {want:?}"),
+                }
+            }
+            assert!(matches!(
+                decide_stored("change athena.toml", &bare),
+                Decision::Refuse(_)
+            ));
+        }
+
+        #[test]
+        fn a_stricter_candidate_rule_lists_what_it_newly_refuses() {
+            let cases = vec![
+                case(1, "add a greeting"),
+                case(2, "add a strict greeting"),
+                case(3, "add a strict farewell"),
+                case(4, "change athena.toml, strict"),
+                case(5, "add a strict hello"),
+                case(6, "add a farewell"),
+            ];
+            let report = replay(&cases, &Stored, &Stricter("strict"), &[]);
+            let ReplayReport::Ran {
+                replayed,
+                newly_refused,
+                ..
+            } = &report
+            else {
+                panic!("{report:?}");
+            };
+            assert_eq!(*replayed, 6);
+            let ids: Vec<&str> = newly_refused.iter().map(|r| r.job.as_str()).collect();
+            assert_eq!(
+                ids,
+                [id(2), id(3), id(5)]
+                    .iter()
+                    .map(|i| i.as_str())
+                    .collect::<Vec<_>>(),
+                "the base refuses case 4 too, so it is not new"
+            );
+            assert!(newly_refused.iter().all(|r| r.reason.contains("strict")));
+            assert!(
+                report
+                    .summary()
+                    .starts_with("3 of 6 replayed readings newly refused: ")
+            );
+            assert!(report.list().contains(id(2).as_str()));
+        }
+
+        fn job_records(i: usize, accepted: Option<u32>, with_request: bool) -> JobRecords {
+            let c = case(i, "add a greeting");
+            let job = athena_data::records::Job {
+                id: id(i),
+                kind: athena_data::records::JobKind::Request,
+                title: "t".into(),
+                class_of_work: None,
+                capability: None,
+                accepted_reading: accepted,
+                accepted_by: None,
+                owner: athena_data::records::Owner {
+                    role: "athena".into(),
+                    capability: None,
+                    model: None,
+                    note: None,
+                },
+                verifier_model: None,
+                caps: None,
+                base_commit: None,
+                config_sha256: None,
+                defaults_sha256: None,
+                athena: None,
+                driver: None,
+                brief_sha256: None,
+                dispatched_at: None,
+                request_path: None,
+                request_sha256: None,
+                cost: None,
+                tokens: None,
+                note: None,
+                pin: None,
+            };
+            JobRecords {
+                id: Some(id(i)),
+                job: Some(job),
+                request: with_request.then(|| Request {
+                    job: id(i),
+                    text: c.request,
+                    received_at: jiff::Timestamp::UNIX_EPOCH,
+                    channel: "cli".into(),
+                }),
+                readings: vec![c.reading],
+                ..JobRecords::default()
+            }
+        }
+
+        #[test]
+        fn history_uses_newest_fifty_that_have_an_accepted_reading_and_a_request() {
+            let mut records = Records::default();
+            let mut put = |i: usize, accepted: Option<u32>, with_request: bool| {
+                records.jobs.insert(
+                    id(i).as_str().to_string(),
+                    job_records(i, accepted, with_request),
+                );
+            };
+            for i in 0..60 {
+                put(i, Some(1), true);
+            }
+            for i in 60..63 {
+                put(i, None, true); // not accepted
+            }
+            put(63, Some(1), false); // no stored request
+            put(64, Some(1), true); // the job being verified
+            let cases = replay_cases(&records, id(64).as_str());
+            assert_eq!(cases.len(), REPLAY_LIMIT);
+            let want: Vec<String> = (10..60).rev().map(|i| id(i).as_str().to_string()).collect();
+            let got: Vec<String> = cases.iter().map(|c| c.job.as_str().to_string()).collect();
+            assert_eq!(got, want);
+        }
+
+        #[test]
+        fn history_empty_is_no_replay_and_not_a_pass() {
+            let cases = replay_cases(&Records::default(), "x");
+            assert!(cases.is_empty());
+            let report = replay(&cases, &Stored, &Stored, &[]);
+            assert!(matches!(report, ReplayReport::NoReplay { .. }));
+            assert!(
+                report.summary().starts_with("no replay: "),
+                "{}",
+                report.summary()
+            );
+            assert!(!report.held());
+            assert!(!report.is_pass());
+        }
+
+        #[test]
+        fn hold_is_over_ten_percent_unless_the_criteria_intend_more() {
+            let none: Vec<String> = vec![];
+            let intend = vec!["the rule is intended to refuse about 30% of requests".to_string()];
+            // (newly refused, criteria, held)
+            let table: [(usize, &Vec<String>, bool); 6] = [
+                (6, &none, true),
+                (5, &none, false),
+                (0, &none, false),
+                (20, &intend, true),
+                (12, &intend, false),
+                (1, &none, false),
+            ];
+            for (n, criteria, held) in table {
+                let (cases, refuses) = fifty(n);
+                let report = replay(&cases, &Stored.accepting(), &refuses, criteria);
+                assert_eq!(report.held(), held, "{n} refused of 50");
+                let ReplayReport::Ran { newly_refused, .. } = &report else {
+                    panic!("{report:?}");
+                };
+                assert_eq!(newly_refused.len(), n, "the list is kept either way");
+                let record = report.to_record(&id(99), "a", "b");
+                assert_eq!(record.replayed, 50);
+                assert_eq!(record.newly_refused.len(), n);
+                assert_eq!(record.held, held);
+                assert!(
+                    AnyRecord::parse(
+                        "x",
+                        AnyRecord::Replay(Box::new(record)).to_json().as_bytes()
+                    )
+                    .is_ok()
+                );
+            }
+            // 1 of 4 is 25%.
+            let cases: Vec<ReplayCase> = (0..4).map(|i| case(i, "add a greeting")).collect();
+            let one = Refuses(BTreeSet::from([cases[0].job.as_str().to_string()]));
+            assert!(replay(&cases, &Stored.accepting(), &one, &none).held());
+            let (cases, refuses) = fifty(12);
+            let report = replay(&cases, &Stored.accepting(), &refuses, &intend);
+            assert!(report.summary().contains(cases[0].job.as_str()));
+            assert!(report.is_pass(), "intended: recorded and not held");
+        }
+
+        impl Stored {
+            fn accepting(&self) -> Refuses {
+                Refuses(BTreeSet::new())
+            }
+        }
+
+        #[test]
+        fn intended_rate_needs_a_percent_over_the_limit_refusing_and_an_intent_word() {
+            let rate = |text: &str| intended_rate(&[text.to_string()]);
+            assert_eq!(
+                rate("the rule is intended to refuse about 30% of requests"),
+                Some(30)
+            );
+            assert_eq!(rate("the rule is intended to refuse requests"), None);
+            assert_eq!(rate("the rule is intended to refuse 10% of requests"), None);
+            assert_eq!(rate("the rule is intended to refuse 5% of requests"), None);
+            assert_eq!(rate("the rule refuses 30% of requests"), None);
+            assert_eq!(rate("about 30% of requests are intended to pass"), None);
+            assert_eq!(
+                rate("the rule is intended to refuse 250% of requests"),
+                None
+            );
+        }
+
+        #[test]
+        fn a_binary_decider_reads_accept_and_refuse_and_rejects_anything_else() {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = tempfile::tempdir().unwrap();
+            let stub = dir.path().join("athena-stub");
+            std::fs::write(
+                &stub,
+                "#!/bin/sh\ncase \"$(cat \"$3\" 2>/dev/null)\" in\n*strict*) echo \"refuse: too strict\"; exit 1;;\n*odd*) echo \"what\"; exit 0;;\n*) echo accept;;\nesac\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(probe_subcommand(&stub));
+            let decider = BinaryDecide {
+                binary: stub.clone(),
+                work: dir.path().join("work"),
+            };
+            assert_eq!(
+                decider.decide(&case(1, "add a greeting")).unwrap(),
+                Decision::Accept
+            );
+            assert_eq!(
+                decider.decide(&case(2, "add a strict greeting")).unwrap(),
+                Decision::Refuse("too strict".into())
+            );
+            assert!(decider.decide(&case(3, "odd")).is_err());
+            let missing = BinaryDecide {
+                binary: dir.path().join("none"),
+                work: dir.path().join("work"),
+            };
+            assert!(missing.decide(&case(4, "x")).is_err());
+            assert!(!probe_subcommand(&dir.path().join("none")));
+            let cases = vec![case(1, "add a greeting"), case(3, "odd")];
+            let report = replay(&cases, &decider, &decider, &[]);
+            assert!(
+                report.summary().starts_with("no replay: "),
+                "{}",
+                report.summary()
+            );
+            // A tree is built only when it is the Athena workspace.
+            assert!(resolve_tree(dir.path()).is_err());
+            std::fs::create_dir_all(dir.path().join("crates/athena-cli")).unwrap();
+            std::fs::write(dir.path().join("crates/athena-cli/Cargo.toml"), "").unwrap();
+            assert!(resolve_tree(dir.path()).is_ok());
+        }
     }
 }

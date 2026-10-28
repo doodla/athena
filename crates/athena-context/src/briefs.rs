@@ -694,12 +694,102 @@ pub struct VerifierInputs {
     pub tool_config_from_base: Vec<String>,
     /// The repository Athena pinned for a study, when the capability pins one.
     pub pin: Option<PinnedRepo>,
+    /// The replay of past readings through the base and candidate reading rules; None when the stage did not
+    /// run at all.
+    pub replay: Option<ReplaySummary>,
+}
+
+/// The most newly refused requests the verifier brief lists; the rest are counted.
+pub const REPLAY_LIST_MAX: usize = 20;
+
+/// The most the replay section may add to the verifier brief, in bytes.
+pub const REPLAY_SECTION_MAX_BYTES: usize = 6 * 1024;
+
+/// The longest reason the brief shows for one refused request, in characters.
+const REPLAY_REASON_MAX_CHARS: usize = 160;
+
+/// What the verifier is told of the replay of past readings: how many were replayed and which the candidate
+/// newly refuses, or why no replay ran.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplaySummary {
+    /// How many past readings were replayed.
+    pub replayed: u32,
+    /// Refused by the candidate and accepted by the base: the job id and the candidate's reason.
+    pub newly_refused: Vec<(String, String)>,
+    /// Whether the refusal rate held the job.
+    pub held: bool,
+    /// Why no replay ran, if none did.
+    pub note: Option<String>,
+}
+
+impl ReplaySummary {
+    /// The name recorded among the verifier's inputs when a replay is shown.
+    pub const INPUT_NAME: &'static str = "reading-rule replay";
+}
+
+/// The replay section: the count, the total and the list, or `no replay: <reason>`. Bounded by
+/// [`REPLAY_LIST_MAX`] entries, a reason length and [`REPLAY_SECTION_MAX_BYTES`].
+fn replay_section(out: &mut String, replay: Option<&ReplaySummary>) {
+    let Some(replay) = replay else {
+        return;
+    };
+    let mut section = String::from("\n## Reading-rule replay\n\n");
+    if let Some(note) = &replay.note {
+        let _ = writeln!(section, "no replay: {}", flat_cut(note, 400));
+    } else {
+        let _ = writeln!(
+            section,
+            "The newest accepted readings were replayed through the base's reading rules and the candidate's. {} of {} \
+             are newly refused (refused by the candidate, accepted by the base){}.",
+            replay.newly_refused.len(),
+            replay.replayed,
+            if replay.held {
+                "; more than the allowed share, so the job is held"
+            } else {
+                ""
+            }
+        );
+        for (job, reason) in replay.newly_refused.iter().take(REPLAY_LIST_MAX) {
+            let _ = writeln!(
+                section,
+                "- {}: {}",
+                flat_cut(job, 40),
+                flat_cut(reason, REPLAY_REASON_MAX_CHARS)
+            );
+        }
+        if replay.newly_refused.len() > REPLAY_LIST_MAX {
+            let _ = writeln!(
+                section,
+                "and {} more",
+                replay.newly_refused.len() - REPLAY_LIST_MAX
+            );
+        }
+    }
+    if section.len() > REPLAY_SECTION_MAX_BYTES {
+        let mut cut = REPLAY_SECTION_MAX_BYTES;
+        while !section.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        section.truncate(cut);
+    }
+    out.push_str(&section);
+}
+
+/// `text` on one line, cut to `max` characters with an ellipsis.
+fn flat_cut(text: &str, max: usize) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= max {
+        return flat;
+    }
+    let mut cut: String = flat.chars().take(max).collect();
+    cut.push('…');
+    cut
 }
 
 impl VerifierInputs {
     /// The names of the inputs, recorded in `verification.json`.
     pub fn names(&self) -> Vec<String> {
-        [
+        let mut names: Vec<String> = [
             "request",
             "accepted reading",
             "acceptance criteria",
@@ -710,7 +800,11 @@ impl VerifierInputs {
         ]
         .into_iter()
         .map(String::from)
-        .collect()
+        .collect();
+        if self.replay.is_some() {
+            names.push(ReplaySummary::INPUT_NAME.into());
+        }
+        names
     }
 }
 
@@ -828,6 +922,7 @@ pub fn verifier_brief_with_plan(
             }
         );
     }
+    replay_section(&mut out, inputs.replay.as_ref());
     let _ = writeln!(out, "\n## Commands Bash may run\n");
     list(&mut out, &inputs.commands, "(none)");
     let _ = writeln!(
@@ -2087,6 +2182,7 @@ mod tests {
             commands: vec![],
             tool_config_from_base: vec![],
             pin: None,
+            replay: None,
         };
         let brief = verifier_brief(&inputs, true);
         assert!(brief.contains("## Scope"));
@@ -2112,6 +2208,7 @@ mod tests {
             commands: vec![],
             tool_config_from_base: vec![],
             pin: None,
+            replay: None,
         };
         let brief = verifier_brief(&inputs, true);
         assert!(brief.contains(
@@ -2135,6 +2232,7 @@ mod tests {
             commands: vec![],
             tool_config_from_base: vec![],
             pin: Some(pin()),
+            replay: None,
         };
         let brief = verifier_brief(&inputs, true);
         assert!(brief.contains("## Pinned source"));
@@ -2242,6 +2340,7 @@ mod tests {
             commands: vec!["cargo test".into()],
             tool_config_from_base: vec![],
             pin: None,
+            replay: None,
         };
         assert!(verifier_brief(&inputs, true).contains("+# Changelog"));
         let recorded = verifier_brief(&inputs, false);
@@ -2653,7 +2752,100 @@ mod tests {
             commands: vec!["cargo test".into()],
             tool_config_from_base: vec![],
             pin: None,
+            replay: None,
         }
+    }
+
+    fn refused(n: usize, reason_len: usize) -> Vec<(String, String)> {
+        (0..n)
+            .map(|i| {
+                (
+                    format!("20261001-0000{i:02}-a{i:03}"),
+                    "r".repeat(reason_len),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_verifier_brief_carries_the_replay_count_total_and_list() {
+        let mut inputs = plain_verifier_inputs();
+        let without = verifier_brief_with_plan(&inputs, None, true);
+        inputs.replay = Some(ReplaySummary {
+            replayed: 50,
+            newly_refused: vec![
+                ("20261001-000001-a001".into(), "names athena.toml".into()),
+                ("20261001-000002-a002".into(), "names setup.sh".into()),
+                ("20261001-000003-a003".into(), "no evidence".into()),
+            ],
+            held: false,
+            note: None,
+        });
+        let brief = verifier_brief_with_plan(&inputs, None, true);
+        assert!(brief.contains("3 of 50"), "{brief}");
+        for text in [
+            "20261001-000001-a001: names athena.toml",
+            "20261001-000002-a002: names setup.sh",
+            "20261001-000003-a003: no evidence",
+        ] {
+            assert!(brief.contains(text), "{text}");
+        }
+        assert!(!brief.contains("no replay"));
+        assert!(brief.len() > without.len());
+        assert!(
+            inputs
+                .names()
+                .contains(&ReplaySummary::INPUT_NAME.to_string())
+        );
+        inputs.replay = None;
+        assert_eq!(verifier_brief_with_plan(&inputs, None, true), without);
+        assert!(
+            !inputs
+                .names()
+                .contains(&ReplaySummary::INPUT_NAME.to_string())
+        );
+    }
+
+    #[test]
+    fn the_verifier_brief_says_no_replay_and_why() {
+        let mut inputs = plain_verifier_inputs();
+        inputs.replay = Some(ReplaySummary {
+            replayed: 0,
+            newly_refused: vec![],
+            held: false,
+            note: Some("no accepted readings in the history".into()),
+        });
+        let brief = verifier_brief_with_plan(&inputs, None, true);
+        assert!(
+            brief.contains("no replay: no accepted readings in the history"),
+            "{brief}"
+        );
+        assert!(!brief.contains("newly refused"));
+    }
+
+    #[test]
+    fn a_very_long_replay_list_stays_within_the_section_limit() {
+        let mut inputs = plain_verifier_inputs();
+        let without = verifier_brief_with_plan(&inputs, None, true).len();
+        inputs.replay = Some(ReplaySummary {
+            replayed: 400,
+            newly_refused: refused(400, 2000),
+            held: true,
+            note: None,
+        });
+        let brief = verifier_brief_with_plan(&inputs, None, true);
+        assert!(brief.contains("400 of 400"));
+        assert!(brief.contains(&format!("and {} more", 400 - REPLAY_LIST_MAX)));
+        assert_eq!(brief.matches("\n- 20261001-0000").count(), REPLAY_LIST_MAX);
+        assert!(brief.len() - without <= REPLAY_SECTION_MAX_BYTES);
+        inputs.replay = Some(ReplaySummary {
+            replayed: 1,
+            newly_refused: vec![],
+            held: false,
+            note: Some("x".repeat(100_000)),
+        });
+        let long = verifier_brief_with_plan(&inputs, None, true);
+        assert!(long.len() - without <= REPLAY_SECTION_MAX_BYTES);
     }
 
     /// The verifier brief for `plain_verifier_inputs` as it was before plans existed, captured from the

@@ -265,6 +265,7 @@ fn job_of(record: &AnyRecord) -> Option<&JobId> {
         AnyRecord::JobPlan(r) => Some(&r.job),
         AnyRecord::Critique(r) => Some(&r.job),
         AnyRecord::Baseline(r) => Some(&r.job),
+        AnyRecord::Replay(r) => Some(&r.job),
         _ => None,
     }
 }
