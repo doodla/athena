@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261028-201400-ykmf",
+  "round": 2,
+  "at": "2026-10-28T20:22:28.812273721Z",
+  "invocation_seq": 5,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "An ancestor written as one bare path component in out_of_scope (e.g. `crates`, `docs`) excuses every file below it, so a common word can satisfy the check. This also contradicts the Approach.",
+      "evidence": "The Approach says a bare ancestor like `crates/` never counts. Decision 5(b), however, accepts any ancestor directory \"written `dir/` or `dir`\" as a whole token in an out_of_scope item. Under that rule an item such as \"Adding other crates\" or \"Editing docs\" accounts for every carried file under crates/ or docs/. This is the same kind of hole that round-1 finding 1 closed for free text, now reopened inside out_of_scope with ordinary English words. The criterion 4 regression cases test bare `crates/` only in the summary, never in out_of_scope. Fix: Resolve the contradiction. Make an ancestor count only when it has at least two components (e.g. `crates/athena-core/`), or when it ends in `/` and is not a single top-level directory. Add a criterion 4 case showing that out_of_scope \"Changing other crates\" does not account for `crates/x/src/a.rs`.",
+      "location": "Plan Approach vs Decision 5(b); Step 5 `names_path_token`",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan says new refusals are bounded to retries, but the check also applies to referenced follow-up jobs, including landed ones.",
+      "evidence": "`check_prior_result_and_scope` receives both the retried job and `continued_jobs` (reading.rs ~2216-2219). The new files rule therefore also refuses a follow-up of a passed or landed job whose reading does not list or exclude that job's files. The plan's mitigation claims \"Refusals are bounded by construction to retries with a recorded candidate (table test)\", and the table test has only retry-shaped rows. Fix: Add a table row for a referenced follow-up of a passed job, and state in the doc comment and CHANGELOG that follow-ups with a recorded candidate are affected too. Alternatively, apply the files rule only to the retried job, if that is the intent. Either way, align the 5% rationale with what is shown.",
+      "location": "Decision 7; Risks (replay); Criterion 5 demonstration",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Lowercasing paths makes `README.md` and `readme.md` match, but they are distinct files on Linux.",
+      "evidence": "Step 5: \"Lowercase both sides.\" Deliverable paths and candidate paths are both exact repository paths. Fix: Compare deliverable paths case-sensitively. Lowercase only if the out_of_scope prose needs it, or not at all.",
+      "location": "Decision 5 / Step 5 (lowercase both sides)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Token matching cannot tell an exclusion from its negation, so \"Anything other than src/a.rs\" counts as excluding src/a.rs.",
+      "evidence": "The fake reader's existing out_of_scope item has exactly this shape (fake.rs:229, \"Anything other than {FAKE_DELIVERABLE}.\"). Under the token rule it would mark FAKE-CHANGE.md as excluded. Fix: Accept this as a known limit and note it in the doc comment. When the fake reader adds the earlier files, it should put them in their own out_of_scope item, not append them to the \"Anything other than\" item.",
+      "location": "Decision 5(b)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the snapshot with Read and Grep. Everything it names exists:\n- In reading.rs: `carry` at 1563 (it carries only failed checks and no candidate data), `check_prior_result_and_scope` at 2229 (it tests only the job id and that deliverables and out_of_scope are non-empty), `check_reading_text` at 2831 and `replay_declaration` at 3040.\n- In briefs.rs: `EarlierAttempt` at 1316 (derives Default), `prior_result_section` at 1395, and `READING_RULES`.\n- In records.rs: `Candidate.changes`, `ProducerReport.summary` and `Verification.checks`/`CheckRun`, with the fields the plan uses.\n- In run/mod.rs: the test fixtures `FAILS_ON_EDIT`, `athena_with`, `base_script` (whose summary is \"Described the demo.\"), the \"probe\" check and `counting`.\n- In fake.rs: the Reader arm, which reads job ids from lines starting \"Job \" (line 217), and a tests module.\n\nThe fix is made where the fault starts, and it adds no record or schema change. Each demonstration calls a production entry point (`carry`, `reader_brief`, `check_prior_result_and_scope`, `Athena::retry`). Each would fail without the behavior, and none tests only a double. The plan is honest that the replay cannot observe this check, so the 5% is a declared expectation, not a measurement. The deliverables match the reading's list.\n\nThe remaining issues are minor:\n- A bare single-component ancestor such as `crates` in out_of_scope counts as excluding everything below it. This is a common-word loophole, and it contradicts the plan's own Approach.\n- The claim that refusals are bounded to retries ignores referenced follow-up jobs, which go through the same check.\n- Two nits: paths are lowercased before matching, and token matching cannot tell an exclusion from its negation.\n\nNo finding is a blocker or major, so I accept the plan."
+}

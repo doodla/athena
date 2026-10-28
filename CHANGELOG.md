@@ -7,6 +7,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+- The reader's carry-over of an earlier job now includes what the job did. Root cause: `carry` in
+  `crates/athena-core/src/reading.rs` and `prior_result_section` in `crates/athena-context/src/briefs.rs`
+  copied a retried or followed-up job's request, findings, reading scope and end state, but left out the files
+  its candidate changed, the producer's own account of its approach and the measured check results, which the
+  job's candidate and verification records already held. `check_prior_result_and_scope` only tested that the
+  reading named the job id and gave some deliverable and out-of-scope item, so a retry could name the job and
+  still keep or drop its work without saying so. Fix, in all three places: `EarlierAttempt` gains
+  `changed_files` (at most 30 as `status path`, with `changed_files_omitted` counting the rest and any path
+  that redaction altered), `approach` (the producer's report summary, redacted, about 800 characters) and
+  `checks` (one `name: passed|failed (exit code, tests)` line each, no output text); the brief section prints
+  them for the retried and the referenced jobs, with a "none recorded for it" line when there is nothing; and
+  the check now requires each carried file to be a deliverable (or under a directory deliverable) or to be
+  named in an out_of_scope item, as its own path or a directory above it, matched as a whole path token. Prose
+  such as a code survey does not count. The fake reader names the earlier job's files in its out_of_scope item,
+  so nested retries pass. No record, schema or data file is added, and no prompt file or configuration
+  changes. Job 20261027-054209-z7sj, which tried this fix, was dispatched and never verified, with no
+  findings recorded; this retry starts from the base commit. This change refuses more readings, and the higher
+  refusal rate is intended: expected 5% of newly refused readings, a declared expectation and not a
+  measurement, because only retries whose earlier job has a recorded candidate that changed files are
+  affected. The replay of accepted readings passes no earlier attempts to the checks, so it cannot observe
+  this check.
+
 ### Added
 
 - A check of every reading's text against the boundary words, and of its deliverables against the repository's

@@ -4822,6 +4822,60 @@ mod produce_and_verify_order_tests {
         assert_eq!(athena.state.read_resume(&retry.job), None);
     }
 
+    #[test]
+    fn a_retry_reader_brief_carries_the_earlier_jobs_files_approach_and_checks() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        // The base script, keeping every prompt the reader is given.
+        let prompts: Arc<Mutex<Vec<String>>> = Arc::default();
+        let inner = counting(Arc::new(Counts::default()), None);
+        let kept = prompts.clone();
+        let script: athena_agent::fake::Script = Box::new(move |spec: &AgentInvocation| {
+            if spec.role == Role::Reader {
+                kept.lock().unwrap().push(spec.user_prompt.clone());
+            }
+            inner(spec)
+        });
+        let athena = athena_with(
+            &repo,
+            &state,
+            FAILS_ON_EDIT,
+            crate::test_support::plenty_of_space,
+            script,
+        );
+        let proposal = athena.ask("describe the demo", &Quiet).unwrap();
+        let first = proposal.job.clone();
+        let rejected = finished(
+            athena
+                .go(first.as_str(), AcceptedBy::User, &Lines::default())
+                .unwrap(),
+        );
+        assert_eq!(
+            rejected.state,
+            OutcomeState::Rejected,
+            "{}",
+            rejected.reason
+        );
+
+        // The retry's reader is shown what the rejected job did, from its candidate and verification.
+        let (retry, _) = athena.retry(first.as_str(), &Quiet).unwrap();
+        assert_eq!(retry.reader_error, None);
+        let prompts = prompts.lock().unwrap();
+        let brief = prompts.last().unwrap();
+        let section = brief
+            .split_once(athena_context::briefs::PRIOR_RESULT_HEADING)
+            .unwrap_or_else(|| panic!("no section:\n{brief}"))
+            .1;
+        for needle in [
+            "Files its candidate changed (1)",
+            "\n> modified README.md\n",
+            "\n> Described the demo.\n",
+            "Measured checks:\n> probe: failed (exit code 1",
+        ] {
+            assert!(section.contains(needle), "{needle:?}:\n{section}");
+        }
+    }
+
     /// A UI that dies, as a process does, when the checks start.
     struct DiesAtChecks;
 

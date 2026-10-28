@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261028-201400-ykmf",
+  "round": 1,
+  "at": "2026-10-28T20:18:32.100519004Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The rule for 'accounted for' (substring match plus any ancestor directory) passes almost every reading, so the new check is close to useless",
+      "evidence": "Step 5 accepts a file when its 'path or ancestor directory is not in the lowercased reading text', with no check on where the match starts or ends. The text it searches (reading.rs:2233-2240, plus out_of_scope) includes assumptions, and readings for code work must survey crates/ paths there (check_code_survey, reading.rs:2740, keeps surveys that name crates paths). So the ancestor `crates/` matches in practically every code reading, and every earlier file under crates/ counts as accounted for. The accepted reading for this very job contains 'crates/athena-core/src/reading.rs' in its assumptions. Matching exact paths with no boundary is also loose: 'src/a.rs' is found inside 'crates/athena-core/src/a.rs'. The plan names this risk, but its mitigation (a trailing slash on the ancestor) does not stop either case. The criterion 4 and 5 tests use a fixture reading that names no other paths, so they would pass while the check stays useless. Fix: Match whole path tokens: a path or directory counts only when it starts at the start of the text, after whitespace, a backtick, a quote or an opening bracket, and ends at the end of the text, at whitespace or at closing punctuation. Accept an ancestor directory only when it is written as its own token and only inside out_of_scope items (as an exclusion) or as a directory deliverable, not anywhere in the free text. Alternatively, require it to be at least two levels deep. Add tests for both cases: a reading whose assumptions mention 'crates/athena-core/src/lib.rs' must still be refused for an unlisted earlier file 'crates/athena-core/src/a.rs', and a reading that names 'crates/x/src/a.rs' must not count for 'src/a.rs'.",
+      "location": "Plan Decision 5 and Step 5 (check_prior_result_and_scope helper)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The 5% refusal figure is treated as impossible to measure, but Athena already has a replay check that measures it",
+      "evidence": "reading.rs:2735-2737 and `replay` (reading.rs:3125) re-run past accepted readings through the base rules and the candidate rules. They hold a job that newly refuses more than 10% unless its criteria declare 'expected N% of newly refused readings'. This job's criterion 5 makes exactly that declaration. The plan calls the figure 'an estimate that cannot be measured from the repo' and never mentions the replay. Fix: Say that the verification-time replay measures the declared 5% (declared below the 10% limit, so no reason is needed). Keep the table test as evidence of which class is affected. Do not describe the CHANGELOG figure as unmeasurable.",
+      "location": "Plan Criterion 5 demonstration; Open question 3; Step 9",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The check's doc comment does not follow the convention for checks that refuse more readings",
+      "evidence": "check_code_survey's doc comment (reading.rs:2735-2737) states 'This check refuses more readings; the higher refusal rate is intended. A replay of accepted readings ... holds a job that newly refuses more than 10%...'. The plan's update to the doc comment of check_prior_result_and_scope does not say the same thing. Fix: Add the same 'refuses more readings; the higher refusal rate is intended; replay ...' sentence to the doc comment of check_prior_result_and_scope.",
+      "location": "Plan Step 5 (update the function's doc comment)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "run/mod.rs is a 'modify' deliverable, but the plan changes it only if a test breaks",
+      "evidence": "The reading lists run/mod.rs (modify). The plan says no production code there changes and its test reader changes only if the full suite fails. If nothing changes, the candidate leaves a declared deliverable untouched, and the criterion 7 demonstration already hedges ('only if its test reader needed it'). Fix: Either commit to a concrete run/mod.rs change, such as a test showing the brief built for a retry carries the earlier job's files, or say in the change description why the deliverable is left untouched, so verification does not treat it as missing.",
+      "location": "Plan Files: crates/athena-core/src/run/mod.rs",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Paths in the brief are redacted, so the check may require a reading to repeat redacted text",
+      "evidence": "Changed-file paths go through `redactor.redact_all` before the check compares them against the reading text. A redacted path can only be accounted for by copying the redaction marker. Fix: Skip files whose carried path was changed by redaction when building the check's requirement, or treat a redacted path as accounted for, and add a test for it.",
+      "location": "Plan Step 4 / Step 5",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan fixes the fault where it starts. `carry` (reading.rs:1563) copies only the request, the findings, failed checks, the reading and the end state. It never reads `Candidate.changes`, `producer_report.summary` or the passed checks, although `Candidate`, `ChangeEntry`, `ProducerReport` and `CheckRun` in records.rs:676–792 hold all three. The plan's three layers (carry, brief section, check) are correct; it adds no record, which is correct; and the criteria 2–4 tests call the production functions on real record structs. The fake reader parses lines starting with 'Job ' (fake.rs:217), so the plan's rule that the new brief lines never start with 'Job ' protects it. One major soundness problem: the check decides whether an earlier job's file is 'accounted for' by plain substring search in the lowercased reading text, and it accepts any ancestor directory. In this repository almost every file lives under `crates/`. A reading that mentions any crate path, as nearly all code readings do in their survey assumptions, would therefore pass for every file. A short path such as `src/a.rs` would also match inside `crates/x/src/a.rs`. The new mechanism would refuse almost nothing, and the criterion 4 tests would not catch this, because their fixture reading mentions no other paths. Smaller points: the 5% figure has an existing replay check that measures it, the doc-comment convention for checks that refuse more readings is not followed, and run/mod.rs is a listed deliverable the plan may leave unchanged."
+}
