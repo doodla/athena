@@ -1077,6 +1077,21 @@ mod tests {
     }
 
     #[test]
+    fn the_real_pages_limits_list_has_consecutive_finding_ids() {
+        let html = render(&real_study()).unwrap();
+        let limits = &html[html.find("<h2>Limits of this study</h2>").unwrap()..];
+        let limits = limits.split("</section>").next().unwrap();
+        let ids: Vec<u64> = limits
+            .split("<li><strong>f")
+            .skip(1)
+            .map(|s| s.split('<').next().unwrap().parse().unwrap())
+            .collect();
+        assert!(!ids.is_empty());
+        let expected: Vec<u64> = (1..=ids.len() as u64).collect();
+        assert_eq!(ids, expected);
+    }
+
+    #[test]
     fn a_rationale_without_a_title_is_an_error() {
         let dir = study_dir("[mechanism] A thing happens.", "c1");
         let mut intro = read_intro(dir.path());
