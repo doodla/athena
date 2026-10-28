@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261028-124903-wngz",
+  "round": 2,
+  "at": "2026-10-28T12:58:19.31231749Z",
+  "invocation_seq": 5,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/store.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/store.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "The new record kind athena.replay/1 is not added to docs/records.md, which lists every job-directory record.",
+      "evidence": "docs/records.md:37 lists `baseline.json  athena.baseline/1` next to the other record kinds; no test enforces the list (a Grep for records.md in *.rs found only status.rs messages), so the docs would silently fall behind. Fix: Add a `replay.json  athena.replay/1` row to docs/records.md, and name the file as a further deliverable outside the brief's list, beside store.rs.",
+      "location": "Files list; docs/records.md:37",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "On a resumed run the replay stage runs again and writes replay.json a second time; the plan does not say how that is handled.",
+      "evidence": "The checks block is skipped when `resumed_checks` is true, and a resume mark is written at 2411 before the planned stage. The stage sits after that block, so a resume at the verifier rebuilds both sides and pushes `NewFile::record(Replay)` again. Fix: Reuse an existing replay.json for the job on resume, or state that it is replaced and that the records check accepts it. Cover it with an assertion in a resumed pipeline test, or in the step text.",
+      "location": "Step 6 / crates/athena-core/src/run/mod.rs:2380-2412 (resumed_checks)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "It is unclear whether the replay record is kept when the disk gate before the verifier closes the job.",
+      "evidence": "The replay is pushed to `closing.files` before `verifier_environment_problem`. When the gate fails, `closing.happened` is replaced by `self.failure(..)`, and the plan does not say whether the queued replay.json is still committed. Fix: Say whether replay.json is committed with the 'environment: low disk' failure (the useful choice), and make sure the job-directory records check still holds.",
+      "location": "Step 6 / run/mod.rs:2489-2499",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The exact role list [Reader, Producer, Verifier] may not match what base_script actually produces.",
+      "evidence": "The test asserts an exact sequence. If the script also runs a planner or critic, or a producer send-back, the assertion fails for a reason unrelated to the replay. Fix: Assert that the two prefixes are equal and that no role appears between the last producer call and the first verifier call, not a hard-coded list.",
+      "location": "Demonstration for criterion 7",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan matches the accepted reading and the code it names. I confirmed this by reading the snapshot; I ran nothing. In store.rs, `job_of` (line 253) ends in `_ => None` and `JobRecords::add` (line 169) ends in a catch-all. `Records::load` calls `.expect(\"every other record names its job\")` at line 326. So editing store.rs is required, which answers Athena's own scope finding. In run/mod.rs the producer build directory is removed at 2398–2412, the `VerifierInputs` literal starts at 2423 and the disk gate before the verifier is at 2489, so the replay stage fits ahead of the gate as planned. `check_reading_acceptance(reading, request, attempt, referenced)`, `has_phrase`, `athena_finding`, `judge`, `VerdictInputs` and `Job.accepted_reading` all exist. Existing reading.rs tests already use \"the producer's report\" as a refused criterion, which the fixtures rely on. The athena-core pipeline spawns no threads (only steward.rs does), and gh/mod.rs already uses a `thread_local!`, so the thread-local test override is visible to the run. Each demonstration uses production code and would fail without the behavior. Criterion 4 runs the real phrase matcher with a negative case. Criterion 7 compares role sequences up to the first verifier call, which leaves out the introspector call a rejected job makes. What remains is minor: docs/records.md is not updated for the new record kind, how a resumed run treats replay.json is unspecified, and so is what happens to the replay record when the disk gate stops the job. None of these leaves a criterion unshown."
+}

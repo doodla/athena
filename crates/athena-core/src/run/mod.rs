@@ -9,8 +9,9 @@ use crate::invocation::InvocationFacts;
 use crate::land::{Plan, plan};
 use crate::pin::{is_full_sha, mount};
 use crate::reading::{
-    Proposal, TreeRetrySeed, planning_resume_seed, resumable_job, retried_job, retry_findings,
-    same_scope, tree_retry_seed,
+    BinaryChecker, NO_HISTORY_REASON, Proposal, ReadingChecker, ReplayCheckers, ReplayRun,
+    TreeRetrySeed, planning_resume_seed, replay, replay_cases, resumable_job, retried_job,
+    retry_findings, same_scope, tree_retry_seed,
 };
 use crate::scoring::{self, Happened, score, totals};
 use crate::state::{ResumeMark, ResumeStage};
@@ -22,9 +23,9 @@ use athena_agent::env::{EnvSpec, Side};
 use athena_agent::policy::Policy;
 use athena_context::briefs::{
     AcceptedReading, CandidateView, CheckResultView, CheckView, CriticInputs, DeliverableFact,
-    LEFT_TO_ATHENA, PlanRevision, PlannerInputs, ProducerInputs, RetryFindings, RetrySeed,
-    VerifierInputs, VerifierPlan, class_summaries, critic_brief, planner_brief, producer_brief,
-    producer_prompt_with_plan, render_plan_section, verifier_brief_with_plan,
+    LEFT_TO_ATHENA, PlanRevision, PlannerInputs, ProducerInputs, ReplayView, RetryFindings,
+    RetrySeed, VerifierInputs, VerifierPlan, class_summaries, critic_brief, planner_brief,
+    producer_brief, producer_prompt_with_plan, render_plan_section, verifier_brief_with_plan,
 };
 use athena_context::outputs::{
     CriterionCheckOutput, CriterionStatusOutput, CriticOutput, CritiqueVerdictOutput,
@@ -39,7 +40,7 @@ use athena_data::records::{
     Critique, CritiqueVerdict, DeliverableAction, Demonstration, Finding, FindingSource,
     Invocation, InvocationOutcome, Job, JobKind, JobPlan, Outcome, OutcomeState, Owner, PinnedRepo,
     PlanDecision, PlanFile, PlanRisk, PolicyViolation, ProducerReport, Reading, RejectedOption,
-    ReportedCheck, ReportedCriterion, Role, Score, Severity, Totals, Verdict, Verification,
+    Replay, ReportedCheck, ReportedCriterion, Role, Score, Severity, Totals, Verdict, Verification,
 };
 use athena_data::{JobId, sha256_hex};
 use athena_gate::redact::Redactor;
@@ -149,6 +150,43 @@ fn change_status(status: char) -> ChangeStatus {
         'D' => ChangeStatus::Deleted,
         'T' => ChangeStatus::TypeChanged,
         _ => ChangeStatus::Modified,
+    }
+}
+
+/// What the verifier brief shows of a replay record.
+fn replay_view(replay: &Replay) -> ReplayView {
+    ReplayView {
+        total: replay.total as usize,
+        newly_refused: replay
+            .newly_refused
+            .iter()
+            .map(|r| (r.job.as_str().to_string(), r.reason.clone()))
+            .collect(),
+        held: replay.held,
+        intended: replay.intended,
+        no_replay: replay.no_replay.clone(),
+    }
+}
+
+/// Runs `command` to the end, killing it after `timeout`. An error says how it ended when it did not succeed.
+fn run_bounded(
+    command: &mut std::process::Command,
+    timeout: std::time::Duration,
+) -> std::result::Result<(), String> {
+    let mut child = command.spawn().map_err(|e| e.to_string())?;
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(status)) => return Err(format!("it exited with {status}")),
+            Ok(None) if started.elapsed() >= timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("it ran past {}s", timeout.as_secs()));
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(200)),
+            Err(e) => return Err(e.to_string()),
+        }
     }
 }
 
@@ -2412,6 +2450,17 @@ impl Athena {
             }
         }
 
+        // The replay of the newest accepted readings through the base and candidate reading rules. It runs
+        // after the checks and the removal of the producer's build directory, and before the gate that
+        // measures the disk for the verifier, because it builds twice and removes what it built. It calls no
+        // model. A held replay fails the verdict (`judge`); the record is kept either way.
+        let replay_record = self.replay_stage(ctx, &id, &p, &c, &check_runs);
+        closing
+            .files
+            .push(NewFile::record(&AnyRecord::Replay(Box::new(
+                replay_record.clone(),
+            ))));
+
         let criteria = ctx.reading.acceptance_criteria.clone();
         let verifier_grant = ctx.capability.verifier_grant(jc);
         let candidate_view = CandidateView {
@@ -2446,6 +2495,7 @@ impl Athena {
             commands: athena_agent::policy::describe_commands(&verifier_grant.commands),
             tool_config_from_base: tool_config_from_base.clone(),
             pin: ctx.job.job.as_ref().and_then(|j| j.pin.clone()),
+            replay: Some(replay_view(&replay_record)),
         };
         // What the producer's report still lacked after the send-back goes to the verifier as one more
         // entry under the checks. It is not a check and fails nothing; it names what the self-check
@@ -2689,6 +2739,7 @@ impl Athena {
             map_base: map_base.as_deref(),
             map_candidate: map_candidate.as_deref(),
             baseline: usable_baseline,
+            replay: Some(&replay_record),
         });
         let verification = Verification {
             job: id.clone(),
@@ -2720,6 +2771,128 @@ impl Athena {
         closing.verified = verified(&judgment, &p, &c, &f);
         closing.verification = Some(verification);
         Ok(closing)
+    }
+
+    /// The replay record of this job: the newest accepted readings run through the base and candidate builds'
+    /// reading rules. It never fails the job and never passes silently: when the replay cannot run, the record
+    /// says `no replay: <reason>`. Everything the replay builds is removed before this returns.
+    fn replay_stage(
+        &self,
+        ctx: &RunContext<'_>,
+        id: &JobId,
+        base: &str,
+        candidate: &str,
+        checks: &[CheckRun],
+    ) -> Replay {
+        let run = self.replay_run(ctx, id, base, candidate, checks);
+        ctx.ui.line(&match &run.no_replay {
+            Some(reason) => format!("replay     {reason}"),
+            None => format!(
+                "replay     {} of {} accepted readings newly refused{}",
+                run.newly_refused.len(),
+                run.total,
+                if run.held { " (held)" } else { "" }
+            ),
+        });
+        run.record(id, base, candidate)
+    }
+
+    fn replay_run(
+        &self,
+        ctx: &RunContext<'_>,
+        id: &JobId,
+        base: &str,
+        candidate: &str,
+        checks: &[CheckRun],
+    ) -> ReplayRun {
+        if !checks.iter().all(|r| r.passed) {
+            return ReplayRun::none("a check failed");
+        }
+        let records = match self.head().and_then(|head| Records::load(&self.git, &head)) {
+            Ok(records) => records,
+            Err(error) => {
+                return ReplayRun::none(&format!("the records could not be read: {error:#}"));
+            }
+        };
+        let cases = replay_cases(&records, Some(id));
+        if cases.is_empty() {
+            return ReplayRun::none(NO_HISTORY_REASON);
+        }
+        let dir = self.state.job_dir(id).join("replay");
+        let timeout = std::time::Duration::from_secs(ctx.jc.config.budget.check_timeout_s);
+        let run = match self.replay_checkers(base, candidate, &dir, timeout) {
+            Ok((base_checker, candidate_checker)) => replay(
+                &cases,
+                &*base_checker,
+                &*candidate_checker,
+                &ctx.reading.acceptance_criteria,
+            ),
+            Err(reason) => ReplayRun::none(&reason),
+        };
+        let _ = crate::pin::remove_tree(&dir);
+        run
+    }
+
+    /// The base and the candidate reading rules as checkers. In tests the seam comes first, before any other
+    /// step. Otherwise each is a build of `athena` from that commit's visible files, in `dir`, probed for the
+    /// `check-reading` subcommand. A nested run, a fake driver, a missing package, a failed build or a missing
+    /// subcommand is an `Err` with the reason: `no replay`, never a pass.
+    fn replay_checkers(
+        &self,
+        base: &str,
+        candidate: &str,
+        dir: &std::path::Path,
+        timeout: std::time::Duration,
+    ) -> std::result::Result<ReplayCheckers, String> {
+        #[cfg(test)]
+        if let Some(pair) = crate::replay_seam::current() {
+            return Ok(pair);
+        }
+        if self.nested.is_some() {
+            return Err("a nested run builds nothing".into());
+        }
+        if self.is_fake() {
+            return Err("the driver is a fake, so nothing is built".into());
+        }
+        let target = dir.join("target");
+        let mut checkers: Vec<std::rc::Rc<dyn ReadingChecker>> = Vec::new();
+        for (side, rev) in [("base", base), ("candidate", candidate)] {
+            let tree = dir.join(format!("{side}-tree"));
+            crate::pin::remove_tree(&tree)
+                .map_err(|e| format!("the {side} tree could not be cleared: {e}"))?;
+            std::fs::create_dir_all(&tree)
+                .map_err(|e| format!("the {side} tree could not be made: {e}"))?;
+            athena_git::snapshot::materialize(&self.git, rev, rev, &tree)
+                .map_err(|e| format!("the {side} tree could not be written: {e:#}"))?;
+            if !tree.join("crates/athena-cli/Cargo.toml").is_file() {
+                return Err(format!(
+                    "the {side} tree has no athena-cli package to build"
+                ));
+            }
+            let mut build = std::process::Command::new("cargo");
+            build
+                .args(["build", "-p", "athena-cli", "--bin", "athena", "--locked"])
+                .current_dir(&tree)
+                .env("CARGO_TARGET_DIR", &target)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            run_bounded(&mut build, timeout)
+                .map_err(|e| format!("the {side} build failed: {e}"))?;
+            let bin = dir.join(format!("athena-{side}"));
+            std::fs::copy(target.join("debug/athena"), &bin)
+                .map_err(|e| format!("the {side} build left no binary: {e}"))?;
+            let mut probe = std::process::Command::new(&bin);
+            probe
+                .args(["check-reading", "--help"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            run_bounded(&mut probe, timeout)
+                .map_err(|_| format!("the {side} build has no check-reading subcommand"))?;
+            checkers.push(std::rc::Rc::new(BinaryChecker::new(bin)));
+        }
+        let candidate_checker = checkers.pop().expect("two checkers");
+        let base_checker = checkers.pop().expect("two checkers");
+        Ok((base_checker, candidate_checker))
     }
 
     /// Creates the verifier's snapshot at `dir` (removing what is there): base then candidate as two commits,
@@ -3580,6 +3753,7 @@ mod left_to_athena_tests {
             map_base: None,
             map_candidate: None,
             baseline: None,
+            replay: None,
         });
         assert_eq!(judgment.final_verdict, Verdict::Fail);
         assert!(
@@ -3954,7 +4128,7 @@ mod produce_and_verify_order_tests {
             .map(String::as_str)
             .take_while(|l| !l.starts_with("landed "))
             .collect();
-        assert_eq!(said.len(), 6, "{said:#?}");
+        assert_eq!(said.len(), 7, "{said:#?}");
         assert!(said[0].starts_with("dispatched "), "{said:#?}");
         assert_eq!(said[1], "baseline   probe ok");
         // The producer and verifier lines carry a model, a wall time, a cost and a count or verdict.
@@ -3968,8 +4142,10 @@ mod produce_and_verify_order_tests {
             "{said:#?}"
         );
         assert!(said[4].starts_with("checks     probe ok ("), "{said:#?}");
+        // The replay has no history to replay here, and a fake driver builds nothing: it says why.
+        assert!(said[5].starts_with("replay     no replay: "), "{said:#?}");
         assert!(
-            said[5].starts_with("verifier   ") && said[5].ends_with(" · $0.01 · pass"),
+            said[6].starts_with("verifier   ") && said[6].ends_with(" · $0.01 · pass"),
             "{said:#?}"
         );
 
@@ -3990,6 +4166,303 @@ mod produce_and_verify_order_tests {
             .expect("the job recorded its baseline");
         assert_eq!(baseline.before_invocation, 2);
         assert_eq!(baseline.checks.len(), 1);
+    }
+
+    const MARKER: &str = "MARKER";
+
+    /// Commits `total` jobs, each with a request, an accepted reading and a job record, as an older history.
+    /// The first `marked` readings carry the marker in their title. The ids are dated 2020, so they are older
+    /// than any job the test runs.
+    fn fixture_reading(id: &JobId, title: &str) -> Reading {
+        use athena_data::records::{
+            Criterion, CriterionKind, Deliverable, Forecast, Forecasts, Quantiles,
+        };
+        let forecast = Forecast {
+            p_reading_accepted: 0.8,
+            p_verification_passes: 0.7,
+            p_user_intervenes: 0.1,
+            cost_usd: Quantiles::new(0.2, 0.5, 1.5).unwrap(),
+            wall_time_s: Quantiles::new(100.0, 300.0, 900.0).unwrap(),
+        };
+        Reading {
+            job: id.clone(),
+            n: 1,
+            at: jiff::Timestamp::UNIX_EPOCH,
+            invocation_seq: 1,
+            base_commit: "a".repeat(40),
+            config_sha256: "b".repeat(64),
+            defaults_sha256: "c".repeat(64),
+            defaults_version: 1,
+            title: title.into(),
+            summary: "Add a greeting.".into(),
+            class_of_work: "feature".into(),
+            capability: Some("study".into()),
+            decline_reason: None,
+            producer_model: "producer".into(),
+            verifier_model: "verifier".into(),
+            defaults_applied: vec![],
+            assumptions: vec![],
+            question: None,
+            acceptance_criteria: vec![Criterion {
+                text: "cargo test --locked passes".into(),
+                kind: CriterionKind::Behavior,
+            }],
+            deliverables: vec![Deliverable {
+                path: "src/greeting.rs".into(),
+                action: DeliverableAction::Modify,
+                p: 0.9,
+            }],
+            out_of_scope: vec!["the changelog".into()],
+            forecasts: Forecasts {
+                reader: forecast.clone(),
+                reference: forecast,
+            },
+            departures: None,
+            urgent_reason: None,
+            hard_reason: None,
+            producer_effort: None,
+        }
+    }
+
+    fn seed_accepted_jobs(athena: &Athena, total: usize, marked: usize) {
+        use athena_data::records::Request;
+        let mut files = Vec::new();
+        for n in 0..total {
+            let id = JobId::parse(&format!("20200101-{n:06}-{n:04}")).unwrap();
+            let request = Request {
+                job: id.clone(),
+                text: "add a greeting".into(),
+                received_at: jiff::Timestamp::UNIX_EPOCH,
+                channel: "cli".into(),
+            };
+            let title = if n < marked { MARKER } else { "Add a greeting" };
+            let reading = fixture_reading(&id, title);
+            let job: Job = serde_json::from_value(json!({
+                "id": id.as_str(), "kind": "request", "title": "Add a greeting",
+                "class_of_work": null, "capability": "study", "accepted_reading": 1,
+                "accepted_by": null,
+                "owner": { "role": "producer", "capability": null, "model": null, "note": null },
+                "verifier_model": null, "caps": null, "base_commit": null, "config_sha256": null,
+                "defaults_sha256": null, "athena": null, "driver": null, "brief_sha256": null,
+                "dispatched_at": null, "request_path": null, "request_sha256": null, "cost": null,
+                "tokens": null, "note": null, "pin": null
+            }))
+            .unwrap();
+            files.push(NewFile::record(&AnyRecord::Request(request)));
+            files.push(NewFile::record(&AnyRecord::Reading(Box::new(reading))));
+            files.push(NewFile::record(&AnyRecord::Job(Box::new(job))));
+        }
+        athena
+            .commit_records(
+                &files,
+                &message(
+                    "Seed accepted readings",
+                    "Fixture history for the replay.",
+                    &[],
+                ),
+            )
+            .unwrap();
+    }
+
+    /// The base rules: the real reading rules.
+    fn real_rules() -> std::rc::Rc<dyn ReadingChecker> {
+        std::rc::Rc::new(|request: &str, reading: &Reading| {
+            Ok(crate::reading::check_reading_text(reading, request))
+        })
+    }
+
+    /// A candidate-like rule change: the real rules plus a refusal for the marker in the title.
+    fn rules_refusing_the_marker() -> std::rc::Rc<dyn ReadingChecker> {
+        std::rc::Rc::new(|request: &str, reading: &Reading| {
+            Ok(match crate::reading::check_reading_text(reading, request) {
+                crate::reading::ReadingCheck::Accept if reading.title.contains(MARKER) => {
+                    crate::reading::ReadingCheck::Refuse("the marker rule refuses this".into())
+                }
+                other => other,
+            })
+        })
+    }
+
+    fn finished_job(athena: &Athena) -> (JobId, Box<Finished>) {
+        let proposal = athena.ask("describe the demo", &Quiet).unwrap();
+        let GoResult::Finished(finished) = athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Quiet)
+            .unwrap()
+        else {
+            panic!("expected the job to finish");
+        };
+        (proposal.job, finished)
+    }
+
+    #[test]
+    fn replay_holds_over_threshold_rejects_the_job_and_records_the_list() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena(&repo, &state);
+        seed_accepted_jobs(&athena, 10, 3);
+        // The seam is read before tree resolution, the builds and the subcommand probe, so the fake
+        // driver's "no replay" skip is not reached.
+        let _seam = crate::replay_seam::install(real_rules(), rules_refusing_the_marker());
+        let (job, finished) = finished_job(&athena);
+        assert_eq!(
+            finished.state,
+            OutcomeState::Rejected,
+            "{}",
+            finished.reason
+        );
+
+        let head = athena.head().unwrap();
+        let records = Records::load(&athena.git, &head).unwrap();
+        let jr = &records.jobs[job.as_str()];
+        let replay = jr.replay.as_ref().expect("replay.json is recorded");
+        assert_eq!(replay.no_replay, None);
+        assert_eq!(replay.total, 10);
+        assert_eq!(replay.newly_refused.len(), 3, "{:?}", replay.newly_refused);
+        assert!(replay.held && !replay.intended);
+        let listed: Vec<&str> = replay
+            .newly_refused
+            .iter()
+            .map(|r| r.job.as_str())
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                "20200101-000002-0002",
+                "20200101-000001-0001",
+                "20200101-000000-0000"
+            ]
+        );
+        // The Athena blocker finding names the same list.
+        let verification = jr.verification.as_ref().expect("verification.json");
+        let blocker = verification
+            .findings
+            .iter()
+            .find(|f| f.severity == Severity::Blocker)
+            .expect("a blocker finding");
+        assert_eq!(blocker.source, FindingSource::Athena);
+        let text = format!("{} {}", blocker.summary, blocker.evidence);
+        for id in &listed {
+            assert!(text.contains(id), "{id}: {text}");
+        }
+        assert_eq!(verification.final_verdict, Verdict::Fail);
+        // The records check accepts every file of the job directory, and no free-form replay.md exists.
+        let dir = job.dir();
+        let names = athena
+            .git
+            .run([
+                "ls-tree",
+                "-r",
+                "--name-only",
+                head.as_str(),
+                "--",
+                dir.as_str(),
+            ])
+            .unwrap();
+        let paths: Vec<&str> = names.lines().collect();
+        assert!(
+            paths.iter().any(|p| p.ends_with("/replay.json")),
+            "{paths:?}"
+        );
+        assert!(!paths.iter().any(|p| p.ends_with("replay.md")), "{paths:?}");
+        for path in &paths {
+            let bytes = athena.git.show_file(&head, path).unwrap().unwrap();
+            athena_data::records::check_record_file(path, &bytes)
+                .unwrap_or_else(|e| panic!("{path}: {e}"));
+        }
+    }
+
+    #[test]
+    fn replay_within_threshold_records_the_list_and_lands() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena(&repo, &state);
+        seed_accepted_jobs(&athena, 10, 1);
+        let _seam = crate::replay_seam::install(real_rules(), rules_refusing_the_marker());
+        let (job, finished) = finished_job(&athena);
+        assert_eq!(finished.state, OutcomeState::Landed, "{}", finished.reason);
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        let replay = records.jobs[job.as_str()].replay.clone().expect("a replay");
+        assert_eq!((replay.total, replay.newly_refused.len()), (10, 1));
+        assert!(!replay.held);
+    }
+
+    /// Wraps `script` to log the role of every invocation it receives, in order.
+    fn role_log(
+        script: athena_agent::fake::Script,
+        log: Arc<Mutex<Vec<Role>>>,
+    ) -> athena_agent::fake::Script {
+        Box::new(move |spec: &AgentInvocation| {
+            log.lock().unwrap().push(spec.role);
+            script(spec)
+        })
+    }
+
+    /// Runs one job over a seeded history with this candidate rule; returns the roles invoked up to the
+    /// verifier, the (seq, role) invocation records up to the verifier, and the replay record.
+    fn run_with_candidate(
+        candidate: std::rc::Rc<dyn ReadingChecker>,
+    ) -> (Vec<Role>, Vec<(u32, Role)>, Replay) {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            role_log(base_script(), log.clone()),
+        );
+        seed_accepted_jobs(&athena, 10, 3);
+        let _seam = crate::replay_seam::install(real_rules(), candidate);
+        let (job, _) = finished_job(&athena);
+        let roles = log.lock().unwrap().clone();
+        let upto = roles
+            .iter()
+            .position(|r| *r == Role::Verifier)
+            .expect("the verifier ran");
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        let jr = &records.jobs[job.as_str()];
+        let mut invocations: Vec<(u32, Role)> =
+            jr.invocations.iter().map(|i| (i.seq, i.role)).collect();
+        invocations.sort();
+        invocations.truncate(upto + 1);
+        (
+            roles[..=upto].to_vec(),
+            invocations,
+            jr.replay.clone().expect("a replay"),
+        )
+    }
+
+    #[test]
+    fn replay_makes_no_model_call_with_or_without_a_candidate_rule_change() {
+        // Run one: the candidate rules equal the base. Run two: the candidate adds a refusal, so the job is held.
+        let (plain_roles, plain_records, plain) = run_with_candidate(real_rules());
+        let (changed_roles, changed_records, changed) =
+            run_with_candidate(rules_refusing_the_marker());
+        assert!(!plain.held && plain.newly_refused.is_empty());
+        assert!(changed.held && changed.newly_refused.len() == 3);
+        // The replay stage runs before the verifier, so a model call it made would put a role here.
+        assert_eq!(
+            plain_roles,
+            [Role::Reader, Role::Producer, Role::Verifier],
+            "{plain_roles:?}"
+        );
+        assert_eq!(plain_roles, changed_roles);
+        assert_eq!(plain_records, changed_records);
+        assert_eq!(
+            plain_records.iter().map(|(_, r)| *r).collect::<Vec<_>>(),
+            [Role::Reader, Role::Producer, Role::Verifier]
+        );
+    }
+
+    #[test]
+    fn replay_makes_no_model_call_because_the_checker_is_built_from_a_path_alone() {
+        // `BinaryChecker::new` takes a path: there is no driver or agent handle to call. Run on a path that
+        // is no program, it fails to spawn, which is all it can do.
+        let checker = BinaryChecker::new(PathBuf::from("/nonexistent/athena"));
+        let id = JobId::parse("20200101-000000-0000").unwrap();
+        let reading = fixture_reading(&id, "Add a greeting");
+        assert!(checker.check("add a greeting", &reading).is_err());
     }
 
     /// How many times each agent role was invoked.

@@ -138,6 +138,41 @@ impl Ui for Quiet {
     fn line(&self, _: &str) {}
 }
 
+/// The seam tests use to give the replay of accepted readings checkers in place of two cargo builds. It is read
+/// first in `Athena::replay_checkers`, before the nested-run and fake-driver skips, tree resolution, the
+/// builds and the subcommand probe. It is per thread, so parallel tests do not see each other's checkers.
+#[cfg(test)]
+pub(crate) mod replay_seam {
+    use crate::reading::ReadingChecker;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// The base checker and the candidate checker.
+    pub type Pair = (Rc<dyn ReadingChecker>, Rc<dyn ReadingChecker>);
+
+    thread_local! {
+        static SEAM: RefCell<Option<Pair>> = const { RefCell::new(None) };
+    }
+
+    /// Clears the seam when dropped.
+    pub struct Guard;
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            SEAM.with(|s| *s.borrow_mut() = None);
+        }
+    }
+
+    pub fn install(base: Rc<dyn ReadingChecker>, candidate: Rc<dyn ReadingChecker>) -> Guard {
+        SEAM.with(|s| *s.borrow_mut() = Some((base, candidate)));
+        Guard
+    }
+
+    pub fn current() -> Option<Pair> {
+        SEAM.with(|s| s.borrow().clone())
+    }
+}
+
 /// One command's view of Athena: the repository, its state directory, the driver, and the capabilities.
 pub struct Athena {
     pub git: Git,

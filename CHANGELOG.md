@@ -7,6 +7,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- `athena check-reading --request <file> --reading <file>` applies this build's reading rules
+  (`check_reading_acceptance`, as a first attempt) to a stored request and reading and prints `accept` or
+  `refuse: <reason>`; the exit code is 0 or 2. It needs no repository and calls no model.
+- A replay of accepted readings before every verification. After the checks pass, Athena builds `athena` from
+  the base and from the candidate, probes both for `check-reading`, runs the newest 50 accepted readings (the
+  running job left out) through each, and lists the requests the candidate refuses and the base accepted. More
+  than 10% newly refused holds the job: `judge` adds an Athena Blocker finding that names the list, so the
+  verdict is fail and the job is rejected, not landed. Exactly 10% is not held, and neither is a candidate
+  whose acceptance criteria state it is meant to refuse more (`refuse more`, `higher refusal rate`); the
+  replay is recorded in every case. The threshold is the code constant `REPLAY_HOLD_PERCENT`; there is no
+  switch to skip it and no flag or diff detection. No model is called. An empty history, a nested run, a fake
+  driver, a failed build or a build without the subcommand gives `no replay: <reason>`, never a pass. The
+  replay's trees and build directory are removed before the disk gate that precedes the verifier.
+- The replay is the typed record `athena.replay/1` at `<job>/replay.json` (window, total, the newly refused
+  requests with their reasons, held, intended, or why no replay ran); the records check accepts it, and
+  `Records::load` reads it into `JobRecords::replay`. No `replay.md` is written.
+- The verifier brief has a "Replay of accepted readings" section: the newly refused count, the total and the
+  list (at most 20 requests, each reason cut to 200 characters, then "and N more"), or `no replay: <reason>`.
+
 ### Changed
 
 - Job planning is back on for hard jobs only, and the keep rule now counts later harm as well as landed share
