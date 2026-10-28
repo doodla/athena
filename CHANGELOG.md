@@ -9,6 +9,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- The verifier no longer starts in an environment that cannot build or write. Root cause: the `[disk]
+  min_free_gb` guard ran at dispatch and before the checks, but the checks' builds fill the disk afterwards, so
+  nothing covered the point between the checks and the verifier, and a full disk there read as a failure of the
+  work. Jobs 20261016-044847-hem1 (`No space left on device`) and 20261026-064950-38jx hit it. The shared disk
+  gate (with the idle build-directory cleanup) and a write probe in the verifier's snapshot now run immediately
+  before the verifier agent (`disk::verifier_environment_problem`); a problem closes the job as failed with the
+  retryable `environment: low disk` reason, the `athena retry` hint and no verification verdict. Tests cover the
+  probe, the classification for any job, and a drain run whose free space drops after the checks.
 - A plan is now refused when its design edits `athena.toml` or `defaults.toml` without listing a file under
   `crates/athena-data/`. Root cause: the configuration files and the code that parses them (strict on unknown
   fields) are changed separately, and nothing connected a new section to the schema that must accept it before

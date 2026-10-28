@@ -1,0 +1,154 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261027-054217-c896",
+  "base_commit": "1cc2d43530e0af0c211493d0fcf2c0ad2f917ce4",
+  "base_fingerprint": "sha256:08877b605862f46a100f65caf296298842f1dc0338f5a2b0f3a1b75eae0e1efb",
+  "previous_job": "20261027-054214-dn47",
+  "candidate_commit": "3486f4021bd688eea2690c66261da473ae5af883",
+  "candidate_tree": "c21bc29335876070d4e1a38f08bf958f852f5857",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 187360
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 158781
+    },
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 16790
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 150838
+    },
+    {
+      "path": "docs/architecture.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 8498
+    },
+    {
+      "path": "docs/decisions.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 299376
+    }
+  ],
+  "fingerprint": "sha256:8d0fd55ba8befa73f43fd0e947c7c781a4e61e708356e06fb5d633106c54e3bf",
+  "violations": [],
+  "producer_report": {
+    "summary": "Root cause: the `[disk] min_free_gb` guard ran at dispatch and before the checks. The checks' builds fill the disk after that. Nothing covered the point between the checks and the verifier, so the verifier started in an environment that could not build or write. Its failure read as a failure of the work (jobs 20261016-044847-hem1 and 20261026-064950-38jx). Fix: `disk.rs` now has `verifier_environment_problem`, which runs the shared gate (same threshold, same idle-target sweep) and then `write_probe`, a small file written, flushed and removed in the verifier's snapshot. `run/mod.rs` calls it immediately before the verifier agent is set up. On a problem the job closes as Failed (retryable) with the existing `environment: low disk` text, \"before the verifier; this is the environment, not the work\" and the `athena retry <id>` hint. `verification_passed` is None, the verifier is not invoked, no verifier brief is recorded and no verification record is written. `is_environment_reason` and `before_verifier_reason` classify and word this for any job. Docs: new D142 in decisions.md, an architecture.md paragraph, a CHANGELOG entry, and the disk.rs module docs. Tests: three `disk.rs` unit tests, and a drain test whose free space turns low only once the verifier's snapshot exists, after the checks have run. With the new call disabled, that drain test failed (job Landed instead of Failed).",
+    "files": [
+      "crates/athena-core/src/disk.rs",
+      "crates/athena-core/src/run/mod.rs",
+      "crates/athena-cli/tests/drain.rs",
+      "docs/decisions.md",
+      "docs/architecture.md",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test --locked -p athena-core disk",
+        "result": "pass",
+        "note": "8 disk tests pass, including the 3 new ones"
+      },
+      {
+        "command": "cargo test --locked -p athena-cli --test drain low_disk",
+        "result": "pass",
+        "note": "6 pass, including the new after-the-checks test"
+      },
+      {
+        "command": "cargo test --locked -p athena-cli --test drain low_disk_after_the_checks (with the new call temporarily disabled)",
+        "result": "fail",
+        "note": "Expected: shows the test fails without the change (Landed, not Failed). The call is restored."
+      },
+      {
+        "command": "cargo fmt --all",
+        "result": "pass",
+        "note": "applied formatting"
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "12 pass; boundary words clean"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "Exited without error. The output was too large to read here, so I did not read the per-test lines."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "The change description and the code comment/docs (disk.rs module docs, docs/decisions.md entry) name the root cause: the disk guard did not cover the point between the checks and the verifier, and an environment failure there was not separated from a work failure.",
+        "status": "met",
+        "evidence": "Read the disk.rs module docs (\"Why the third place exists\"), the D142 \"Root cause\" bullet in docs/decisions.md, the CHANGELOG entry, and the comment in run/mod.rs. Each says the guard did not cover the point between the checks and the verifier, and that the environment failure was not separated from a work failure."
+      },
+      {
+        "criterion": "run/mod.rs calls the shared disk gate (with idle-target sweep) and a workspace write probe immediately before the verifier agent runs, and on failure closes the job with an `environment: low disk` reason, no verification verdict, and the `athena retry` hint, reusing the existing LowDisk text.",
+        "status": "met",
+        "evidence": "run/mod.rs calls `crate::disk::verifier_environment_problem(&self.state, min_free_gb, &id, vsnap.dir(), ctx.ui)` after `verifier_plan` and before the verifier loop. That function calls the shared `gate` (the same code as `disk_gate`, including `sweep_idle_targets`) and then `write_probe`. It uses `LowDisk::text()`. On failure `self.failure(..before_verifier_reason..)` runs with `verification_passed = None` and an early return. The drain test asserts the reason text, the `athena retry <job>` hint and no verification record."
+      },
+      {
+        "criterion": "A new test simulating low free space only after the checks pass (e.g. via ATHENA_FREE_BYTES or a gate seam) shows the job fails with `environment: low disk` before the verifier agent is invoked and records no verifier verdict; run `cargo test --locked` and see that test fail on the base tree and pass on the change.",
+        "status": "met",
+        "evidence": "`low_disk_after_the_checks_fails_the_job_as_the_environment_before_the_verifier_runs` in crates/athena-cli/tests/drain.rs. Its free-space seam turns low only when `jobs/<id>/verify` exists, which is after the checks. It asserts state Failed, the reason text and retry hint, a `checks     ` line but no `verifier   ` line, zero verifier script calls, `verification.is_none()` and no Verifier invocation record. It passes with the change. With the call disabled it failed with `verified and landed` (Landed, expected Failed); the call is restored."
+      },
+      {
+        "criterion": "A unit test in disk.rs shows the write probe fails on an unwritable/full workspace and succeeds on a normal one, and that the failure is classified as environment, not work, for any job (not one fixed job id); run `cargo test --locked -p athena-core disk`.",
+        "status": "met",
+        "evidence": "disk.rs tests: `the_write_probe_succeeds_in_a_normal_workspace_and_leaves_nothing_behind`, `the_write_probe_fails_where_nothing_can_be_written` (a missing directory and a plain file, which fail even for root), and `the_verifier_environment_check_fails_as_the_environment_for_any_job` (loops over 3 job ids, covers low space and an unwritable workspace, checks `is_environment_reason` and the retry hint, and checks that work-failure reasons are not classed as environment). `cargo test --locked -p athena-core disk` gave 8 passed. A real ENOSPC cannot be produced in a test, so \"full\" is covered by the failing-write paths."
+      },
+      {
+        "criterion": "With sufficient simulated free space the existing drain and binary tests still pass unchanged; run `cargo test --locked`.",
+        "status": "met",
+        "evidence": "`cargo test --locked` ran the whole workspace without an error exit. Existing tests were not edited; the only change to drain.rs is the added test and its helper. The existing low-disk drain tests also pass."
+      },
+      {
+        "criterion": "`cargo fmt --check`, `cargo clippy --locked --all-targets -- -D warnings` and `cargo test --locked` all pass.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I ran `cargo fmt --all`, then clippy with -D warnings (clean) and `cargo test --locked` (no error exit)."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry for the pre-verifier environment check.",
+        "status": "met",
+        "evidence": "The first entry under Unreleased/Fixed in CHANGELOG.md, beginning \"The verifier no longer starts in an environment that cannot build or write\"."
+      }
+    ],
+    "open_issues": [
+      "The probe only catches a workspace that cannot be written. It does not catch ENOSPC that appears later during the verifier run, which is outside this change.",
+      "The check runs once, before the verifier loop. The loop's one-time rerun after a snapshot fault (fresh snapshot) is not re-gated.",
+      "A job that fails here has already run its checks, and a retry runs them again. This is the stated tradeoff in D142.",
+      "Periodic sweeps of terminal-state jobs' build directories, proposed by one introspection, are not built; they are out of scope."
+    ],
+    "mistakes": [
+      "I wrote `run::run_job` in the first draft of D142, but no such function exists. I corrected it to point at `crates/athena-core/src/run/mod.rs`.",
+      "I could not read the full test output because it was too large and saved outside the working directory. I relied on the command's exit status for the full `cargo test --locked` run."
+    ],
+    "learnings": [
+      "`Athena::disk_gate` only needs `StateDir`, so I moved its body to a free function `gate(state, ..)`. That lets disk.rs unit tests call it without building an Athena. `disk_gate` still delegates to it.",
+      "`StateDir::with_free_space` takes a plain `fn` pointer (`FreeSpace`), so closures cannot capture. A drain test can still switch the simulated free space mid-run by reading state on disk, such as the presence of `jobs/<id>/verify`.",
+      "`athena retry` accepts any failed job. An environment failure therefore needs no new retry code, only a reason that starts with `LOW_DISK`.",
+      "Bash in this environment refuses grep, tail and pipes, and Read/Grep cannot see tool-result files outside the working directory."
+    ],
+    "desires": [
+      "A read-only way to view saved tool output, or a larger Bash output limit with a summary, so I could confirm each test line of the full suite.",
+      "A way to simulate ENOSPC in unit tests."
+    ]
+  }
+}

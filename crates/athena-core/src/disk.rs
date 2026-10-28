@@ -1,15 +1,25 @@
-//! Free disk space: the check before a job is dispatched and before its checks run.
+//! Free disk space: the check before a job is dispatched, before its checks run and before its verifier runs.
 //!
 //! A full disk makes builds fail in ways that look like faults in the work. So `[disk] min_free_gb` (default
-//! [`athena_data::config::DEFAULT_MIN_FREE_GB`]) is enforced in code at two places:
+//! [`athena_data::config::DEFAULT_MIN_FREE_GB`]) is enforced in code at three places:
 //!
 //! - At dispatch, before anything is committed. If space is low, the build directories (`target/`) of idle jobs
 //!   are removed; if it is still low, the job is held: it stays queued, a local marker records the amounts,
 //!   and `go` returns [`LowDisk`]. A later drain picks up the same job.
 //! - Before the checks. If space is still low after the same cleanup, the job fails with an `environment: low
 //!   disk` reason, which `athena retry` handles. Nothing is left dispatched with a marker.
+//! - Before the verifier agent runs, after the checks. The same gate runs again, and so does a write probe in
+//!   the verifier's workspace ([`verifier_environment_problem`]). Failing either closes the job with the same
+//!   `environment: low disk` reason and no verification verdict.
 //!
-//! A free amount that cannot be read never holds or fails a job.
+//! Why the third place exists. The first two guards ran before the checks, but the checks are what fill the
+//! disk: their builds write into the verifier's snapshot and the build directories. The disk guard did not
+//! cover the point between the checks and the verifier, so the verifier started in an environment that could
+//! not build or write, its failure read as a failure of the work, and the cause was found only by reading
+//! logs. An environment failure there was not separated from a work failure. Now a verifier is never started
+//! in such an environment, and the closing reason says it is the environment ([`is_environment_reason`]).
+//!
+//! A free amount that cannot be read never holds or fails a job. A failing write probe always does.
 
 use crate::state::{StateDir, format_bytes};
 use crate::{Athena, Ui};
@@ -144,31 +154,87 @@ pub fn clear_hold(state: &StateDir, job: &JobId) {
     let _ = std::fs::remove_file(state.hold_file(job));
 }
 
-impl Athena {
-    /// Checks free disk space against `required_gb`. When low, it removes idle jobs' build directories and
-    /// reads again. Returns `None` when there is enough space (or it cannot be read), else the amounts that
-    /// are still short. `job` is the job asking; its own build directory is kept.
-    pub(crate) fn disk_gate(&self, required_gb: u64, job: &JobId, ui: &dyn Ui) -> Option<LowDisk> {
-        let required = required_gb.saturating_mul(GB);
-        let free = self.state.free_bytes()?;
-        if free >= required {
-            return None;
-        }
+/// The name of the small file [`write_probe`] writes and removes.
+pub const PROBE_FILE: &str = ".athena-write-probe";
+
+/// Writes a small file in `dir`, flushes it to the disk and removes it. A full disk, a missing or read-only
+/// directory and a broken mount all fail here, with the error the system gave. The file is gone afterwards,
+/// so a snapshot's tree is unchanged by a probe that succeeds.
+pub fn write_probe(dir: &Path) -> std::io::Result<()> {
+    use std::io::Write;
+    let path = dir.join(PROBE_FILE);
+    let mut file = std::fs::File::create(&path)?;
+    let written = file
+        .write_all(b"athena write probe\n")
+        .and_then(|()| file.sync_all());
+    drop(file);
+    let removed = std::fs::remove_file(&path);
+    written.and(removed)
+}
+
+/// The check before the verifier agent runs: the shared disk gate (with the idle-job cleanup) and then a
+/// write probe in `workspace`, the verifier's snapshot. Returns `None` when the environment can build and
+/// write, else the `environment: low disk` text that says what is wrong. `job` keeps its own build directory.
+pub(crate) fn verifier_environment_problem(
+    state: &StateDir,
+    required_gb: u64,
+    job: &JobId,
+    workspace: &Path,
+    ui: &dyn Ui,
+) -> Option<String> {
+    if let Some(low) = gate(state, required_gb, job, ui) {
+        return Some(low.text());
+    }
+    write_probe(workspace)
+        .err()
+        .map(|why| format!("{LOW_DISK}: the verifier's workspace cannot be written to ({why})"))
+}
+
+/// The closing reason for a job whose verifier did not start because of `problem`
+/// ([`verifier_environment_problem`]). It names the environment, not the work, and the retry command.
+pub fn before_verifier_reason(problem: &str, job: &JobId) -> String {
+    format!(
+        "{problem} before the verifier; this is the environment, not the work. Free disk space, then `athena retry {job}`"
+    )
+}
+
+/// True when a job's closing `reason` records a failure of the environment (low disk or an unwritable
+/// workspace), not a failure of the work. It holds for any job.
+pub fn is_environment_reason(reason: &str) -> bool {
+    reason.starts_with(LOW_DISK)
+}
+
+/// Checks free disk space against `required_gb`. When low, it removes idle jobs' build directories and
+/// reads again. Returns `None` when there is enough space (or it cannot be read), else the amounts that
+/// are still short. `job` is the job asking; its own build directory is kept.
+fn gate(state: &StateDir, required_gb: u64, job: &JobId, ui: &dyn Ui) -> Option<LowDisk> {
+    let required = required_gb.saturating_mul(GB);
+    let free = state.free_bytes()?;
+    if free >= required {
+        return None;
+    }
+    ui.line(&format!(
+        "disk       {} free, {} required; removing build directories of closed and idle jobs",
+        format_bytes(free),
+        format_bytes(required)
+    ));
+    sweep_idle_targets(state, job, ui);
+    let free = state.free_bytes()?;
+    if free >= required {
         ui.line(&format!(
-            "disk       {} free, {} required; removing build directories of closed and idle jobs",
-            format_bytes(free),
-            format_bytes(required)
+            "disk       {} free after cleanup",
+            format_bytes(free)
         ));
-        sweep_idle_targets(&self.state, job, ui);
-        let free = self.state.free_bytes()?;
-        if free >= required {
-            ui.line(&format!(
-                "disk       {} free after cleanup",
-                format_bytes(free)
-            ));
-            return None;
-        }
-        Some(LowDisk { free, required })
+        return None;
+    }
+    Some(LowDisk { free, required })
+}
+
+impl Athena {
+    /// Checks free disk space against `required_gb`: the one gate that dispatch, the checks and the verifier
+    /// all use. See [`gate`].
+    pub(crate) fn disk_gate(&self, required_gb: u64, job: &JobId, ui: &dyn Ui) -> Option<LowDisk> {
+        gate(&self.state, required_gb, job, ui)
     }
 }
 
@@ -252,6 +318,79 @@ mod tests {
         let said = ui.0.lock().unwrap().join("\n");
         assert!(said.contains(idle.as_str()), "{said}");
         assert!(!said.contains(locked.as_str()), "{said}");
+    }
+
+    fn plenty(_: &Path) -> std::io::Result<u64> {
+        Ok(500 * GB)
+    }
+
+    fn short(_: &Path) -> std::io::Result<u64> {
+        Ok(3 * GB)
+    }
+
+    #[test]
+    fn the_write_probe_succeeds_in_a_normal_workspace_and_leaves_nothing_behind() {
+        let temp = tempfile::tempdir().unwrap();
+        write_probe(temp.path()).unwrap();
+        assert!(!temp.path().join(PROBE_FILE).exists());
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn the_write_probe_fails_where_nothing_can_be_written() {
+        let temp = tempfile::tempdir().unwrap();
+        // A workspace that is gone, and one that is a file: neither can hold a new file, even for root.
+        assert!(write_probe(&temp.path().join("gone")).is_err());
+        let file = temp.path().join("plain");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(write_probe(&file).is_err());
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            b"x",
+            "nothing else is touched"
+        );
+    }
+
+    #[test]
+    fn the_verifier_environment_check_fails_as_the_environment_for_any_job() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("verify");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let roomy = StateDir::new(temp.path().to_path_buf()).with_free_space(plenty);
+        let tight = StateDir::new(temp.path().to_path_buf()).with_free_space(short);
+
+        for n in 1..=3 {
+            let job = id(n);
+            let ui = Said::default();
+            // Enough space and a writable workspace: the verifier may start.
+            assert_eq!(
+                verifier_environment_problem(&roomy, 10, &job, &workspace, &ui),
+                None
+            );
+
+            // Too little space after cleanup: the environment's fault, with the amounts.
+            let low = verifier_environment_problem(&tight, 10, &job, &workspace, &ui)
+                .expect("low space is a problem");
+            assert_eq!(low, "environment: low disk: 3.0 GB free, 10.0 GB required");
+
+            // An unwritable workspace is the environment's fault too, whatever the free space says.
+            let broken = temp.path().join("not-there");
+            let unwritable = verifier_environment_problem(&roomy, 10, &job, &broken, &ui)
+                .expect("an unwritable workspace is a problem");
+            assert!(unwritable.starts_with(LOW_DISK), "{unwritable}");
+
+            for problem in [low, unwritable] {
+                let reason = before_verifier_reason(&problem, &job);
+                assert!(is_environment_reason(&reason), "{reason}");
+                assert!(reason.contains(&format!("athena retry {job}")), "{reason}");
+                assert!(reason.contains("not the work"), "{reason}");
+            }
+        }
+        // A work failure is not mistaken for an environment one.
+        assert!(!is_environment_reason("admission refused the change: x"));
+        assert!(!is_environment_reason(
+            "the verifier returned no valid verdict"
+        ));
     }
 
     #[test]

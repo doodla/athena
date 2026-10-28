@@ -1649,6 +1649,87 @@ fn low_disk_before_the_checks_fails_the_job_retryably_and_a_retry_with_space_run
     );
 }
 
+/// Free space that drops once verification has started: plenty until a job has a verifier snapshot
+/// (`jobs/<id>/verify`), which exists only after the pre-checks gate, so the checks have run when it turns low.
+/// This is what a build filling the disk during the checks looks like to the gate.
+fn low_once_verifying(state: &Path) -> std::io::Result<u64> {
+    let verifying = std::fs::read_dir(state.join("jobs"))
+        .map(|dirs| dirs.flatten().any(|e| e.path().join("verify").exists()))
+        .unwrap_or(false);
+    Ok(if verifying {
+        3_000_000_000
+    } else {
+        500_000_000_000
+    })
+}
+
+#[test]
+fn low_disk_after_the_checks_fails_the_job_as_the_environment_before_the_verifier_runs() {
+    let fx = disk_fixture();
+    let verifier_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = verifier_calls.clone();
+    let inner = Scenario::default().script();
+    let script: Script = Box::new(move |spec| {
+        if spec.role == Role::Verifier {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        inner(spec)
+    });
+    let mut athena = fx.athena(script);
+    athena.state = athena.state.clone().with_free_space(low_once_verifying);
+    let lines = Lines::default();
+    let job = athena
+        .ask("add a greeting to the readme", &lines)
+        .unwrap()
+        .job;
+
+    let result = athena.go(job.as_str(), AcceptedBy::User, &lines).unwrap();
+    let GoResult::Finished(finished) = result else {
+        panic!("expected the job to finish");
+    };
+
+    // The environment failed, not the work: failed (retryable), not rejected, with the amounts and the hint.
+    assert_eq!(finished.state, OutcomeState::Failed, "{}", finished.reason);
+    assert!(
+        finished
+            .reason
+            .contains("environment: low disk: 3.0 GB free, 10.0 GB required before the verifier"),
+        "{}",
+        finished.reason
+    );
+    assert!(
+        finished.reason.contains(&format!("athena retry {job}")),
+        "{}",
+        finished.reason
+    );
+    // The checks ran first; the verifier agent never did.
+    let said = lines_of(&lines);
+    position(&said, "checks     ");
+    assert!(
+        !said.iter().any(|l| l.starts_with("verifier   ")),
+        "{said:#?}"
+    );
+    assert_eq!(
+        verifier_calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "the verifier agent was not invoked"
+    );
+    // No verdict was recorded.
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    let closed = &records.jobs[job.as_str()];
+    assert_eq!(closed.state(), JobState::Closed(OutcomeState::Failed));
+    assert!(closed.verification.is_none(), "no verification verdict");
+    assert!(
+        !closed.invocations.iter().any(|i| i.role == Role::Verifier),
+        "no verifier invocation is recorded"
+    );
+    assert!(
+        athena_core::disk::is_environment_reason(&finished.reason),
+        "{}",
+        finished.reason
+    );
+}
+
 /// Sets the simulated free space to `bytes`.
 fn set_free(athena: &Athena, bytes: u64) {
     std::fs::create_dir_all(athena.state.root()).unwrap();

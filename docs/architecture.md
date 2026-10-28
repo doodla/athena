@@ -37,6 +37,11 @@ athena go  ──▶ job record + producer brief, committed (prediction commit)
                fail: closing commit with the findings
 ```
 
+The core enforces `[disk] min_free_gb` at three points: at dispatch, before the checks, and immediately before
+the verifier runs (D142), where it also writes and removes a small file in the verifier's snapshot. A failure at
+the last two closes the job as failed with the `environment: low disk` reason and the `athena retry` hint, and
+the verifier gives no verdict, so a full disk is never taken for a fault in the work (`athena_core::disk`).
+
 The core checks a reading before it accepts it, at no model cost
 (`athena_core::reading::check_reading_acceptance`, for a first attempt and a retry alike). Among those checks,
 `check_governance_coverage` applies admission's definition of a governance file to the reading: a request that
