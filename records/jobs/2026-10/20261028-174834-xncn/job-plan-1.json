@@ -1,0 +1,165 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261028-174834-xncn",
+  "round": 1,
+  "at": "2026-10-28T17:50:47.022510903Z",
+  "invocation_seq": 2,
+  "approach": "Add a private helper `check_reading_size` in crates/athena-core/src/reading.rs, with a doc comment naming the root cause. Call it in `build_reading` right after `reader.validate()`, so it applies only to a reading that names a capability. It refuses when the reading's own `wall_time_s.p50` is greater than `jc.config.budget.producer_timeout_s` or `verifier_timeout_s`. The error says which timeout is exceeded and tells the reader to pick one deliverable and name the rest as follow-up requests in out_of_scope. `read_with_correction` already feeds a `ReadError::Refused` back to the reader once, so no loop change is needed. Add three unit tests in the existing `mod tests`. They call the real `build_reading` on an `Athena` from `test_support::make_athena` and a `JobConfig` parsed from the shipped athena.toml and defaults.toml. Add a CHANGELOG.md entry under [Unreleased] / Added. Leave outputs.rs and config.rs unchanged. No new config keys.",
+  "decisions": [
+    {
+      "choice": "Put the gate in `build_reading`, after `reader.validate()`, as a small helper `check_reading_size(forecast: &Forecast, budget: &Budget-like timeouts, has_capability)`.",
+      "reason": "`build_reading` is the only reading-validation step that holds both the forecast and `jc.config`. `check_reading_acceptance` runs later and has no config. The missing comparison of scope against the deadlines originates here.",
+      "rejected": [
+        {
+          "option": "Put the check in `check_reading_acceptance`",
+          "why": "It has no config access, so it would need a new parameter threaded through every caller."
+        },
+        {
+          "option": "Put the check in `Forecast::validate` in athena-data",
+          "why": "That type does not know the timeouts and is also used for records and reference forecasts."
+        },
+        {
+          "option": "Add a config key such as a size limit",
+          "why": "Out of scope. The existing timeouts are the real deadlines, so there is nothing new to tune."
+        }
+      ]
+    },
+    {
+      "choice": "Compare p50 with each timeout and strictly greater-than refuses. The message names the timeout that is exceeded. When both are exceeded, it names the smaller one.",
+      "reason": "p50 is the reading's own median estimate of dispatch-to-verdict time, which includes the producer and the verifier. The requested rule is to refuse on p50 above either timeout. Exactly equal is allowed.",
+      "rejected": [
+        {
+          "option": "Compare p90 with the timeouts",
+          "why": "The request names p50. p90 would refuse many more readings than the 3% estimate."
+        },
+        {
+          "option": "Compare p50 with the sum of the two timeouts",
+          "why": "The request names each timeout separately."
+        }
+      ]
+    },
+    {
+      "choice": "Apply the gate only when the reading names a capability, so a declined reading is not gated.",
+      "reason": "A decline starts no run, so a deadline does not apply to it. Refusing it would make the reader retry for no benefit.",
+      "rejected": [
+        {
+          "option": "Gate every reading",
+          "why": "It would refuse declines on a forecast that never runs."
+        }
+      ]
+    },
+    {
+      "choice": "Leave crates/athena-context/src/outputs.rs and crates/athena-data/src/config.rs unchanged.",
+      "reason": "The retry message already reaches the reader through the existing refusal correction. Changing a schema doc comment in outputs.rs changes the reader prompt and risks the tight reader budget (1997 of 2000 in the system facts), which a test checks. The brief calls both files unlikely to change.",
+      "rejected": [
+        {
+          "option": "Mirror the rule in the wall_time_s doc comment in outputs.rs",
+          "why": "It risks the reader budget test (`system_facts_budgets_match_computed`) for no behavior gain."
+        }
+      ]
+    },
+    {
+      "choice": "Test through `build_reading` on `test_support::make_athena` plus a `JobConfig` built from `include_str!` of athena.toml and defaults.toml. The `Athena` is a plain value and `build_reading` never uses `self`. Vary the timeouts by editing `jc.config.budget` fields on the clone.",
+      "reason": "The tests then exercise the production function and the real shipped defaults. The only double is the unused fake driver, and it holds no logic under test.",
+      "rejected": [
+        {
+          "option": "Test only a free helper function",
+          "why": "The criterion says `build_reading` returns the error. A helper test would pass even if the call were removed from `build_reading`."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Add `check_reading_size` with a doc comment naming the root cause, call it from `build_reading` after `reader.validate()`, and add unit tests for the producer-only, verifier-only and within-deadline cases.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Record the reading size gate under [Unreleased] / Added, with the root cause, the refusal message and the intended rise in refusals.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read `Quantiles::p50()` in crates/athena-data/src/records.rs and the `Budget` struct in config.rs lines ~225-235 to confirm names and types: `u64` timeouts, `f64` quantiles.",
+    "In reading.rs add `fn check_reading_size(forecast: &Forecast, producer_timeout_s: u64, verifier_timeout_s: u64) -> Result<()>` near `ensure_changelog`. Its doc comment states the root cause (reading validation never compared reading scope with the producer and verifier deadline; the fix sits in `build_reading`) and the rule. Compute `limit = producer.min(verifier)`. If `forecast.wall_time_s.p50() > limit as f64`, bail with a message naming the exceeded timeout and its seconds and the forecast p50, and saying: pick one deliverable and name the rest as follow-up requests in out_of_scope, then forecast the smaller scope.",
+    "In `build_reading`, after `reader.validate().map_err(anyhow::Error::msg)?;`, call `if out.capability.is_some() { check_reading_size(&reader, config.budget.producer_timeout_s, config.budget.verifier_timeout_s)?; }`. The name `config` is already `&jc.config`.",
+    "In `mod tests` of reading.rs add helpers: `reading_json(p50: f64) -> serde_json::Value` (copy the fake reader JSON of run/mod.rs `base_script`, with `wall_time_s` p10 100, p50 `p50`, p90 `p50 * 2.0`), and `build(p50, producer_s, verifier_s) -> Result<Reading>`. `build` creates temp dirs, calls `crate::test_support::make_athena(&Git::at(dir), state_dir, vec![], Box::new(|_| unreachable!()))`, builds `JobConfig` from the shipped athena.toml and defaults.toml, sets `jc.config.budget` timeouts, then calls `athena.build_reading(&jc, &Records::default(), &JobId::parse(\"20261012-084936-n1p0\").unwrap(), 1, 1, json, &[\"study\".into()], &Redactor::new(&athena_gate::builtin_config()).unwrap())`.",
+    "Add tests `a_reading_forecasting_more_than_the_producer_timeout_is_refused_with_advice_to_pick_one_deliverable` (p50 5000, producer 3000, verifier 10000), `a_reading_forecasting_more_than_only_the_verifier_timeout_is_refused` (p50 2700, timeouts 3000 and 2400), and `a_reading_within_both_timeouts_is_accepted` (p50 30, and p50 2400 on the boundary, plus a declined reading with an oversize forecast and null capability). Assert the error text contains \"pick one deliverable\" and \"follow-up request\" and names the timeout.",
+    "Add the CHANGELOG.md bullet at the top of `### Added` under `## [Unreleased]`: root cause, the fix in `build_reading` (`check_reading_size`), the retry message, and that refusals rise by about 3% (estimate, unmeasured) and only for readings whose p50 wall time is beyond a configured timeout.",
+    "Run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test -p athena-core`, then `cargo test --workspace`."
+  ],
+  "risks": [
+    {
+      "risk": "The gate refuses readings in existing tests or real jobs and breaks flows.",
+      "mitigation": "Gate only when a capability is named, and refuse only p50 strictly greater than the smaller timeout. The fake readers in the repo use p50 5 or 30, far below 2400. The full workspace test run checks this."
+    },
+    {
+      "risk": "The reader repeats the oversize reading after the correction and the job is refused outright.",
+      "mitigation": "Refusals are fed back to the reader once (`read_with_correction`), and the message names the exceeded timeout and the concrete action (pick one deliverable, list the rest as follow-up requests). The reader can also lower its forecast only by shrinking scope, which is the intent."
+    },
+    {
+      "risk": "Editing reader guidance breaks the prompt-budget test.",
+      "mitigation": "Do not touch outputs.rs. If the producer does touch it, run `cargo test -p athena-cli --test budgets` and update the line in the system facts, never the budget."
+    },
+    {
+      "risk": "The test setup for `build_reading` is heavy (Athena, JobConfig, Records, Redactor).",
+      "mitigation": "The test builds a full `Athena` through `test_support::make_athena`, which is used elsewhere in the crate. If it is awkward, a small local helper in `mod tests` wraps it. `build_reading` does not touch `self`."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Content check by reading the doc comment on `check_reading_size` in reading.rs and the new CHANGELOG entry (the change description). Grep, then Read the doc comment.",
+      "command": "grep -n \"never compared\\|reading scope\" crates/athena-core/src/reading.rs CHANGELOG.md",
+      "observes": "The doc comment and the CHANGELOG entry both state the root cause: reading validation never compared reading scope with the producer and verifier deadline. They also state that the fix sits in `build_reading`.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Unit test in the reading.rs `mod tests`. Entry point: private `Athena::build_reading` (same module tree, so callable). Preconditions: class \"docs\", capability \"study\" in the capabilities slice, producer model \"claude-haiku-5-5\" and a README.md deliverable, all from the existing fake reader JSON. The JSON is a generic valid reading whose forecast has wall_time_s p10 100, p50 5000, p90 9000. Seam: `crate::test_support::make_athena(&Git::at(tmp), tmp_state, vec![], script)` already exists, and the script is never invoked. `JobConfig` is built directly (its fields are pub) from `Config::parse(include_str!(\"../../../athena.toml\"))` and `DefaultsModel::parse(include_str!(\"../../../defaults.toml\"))`. The test sets `jc.config.budget.producer_timeout_s = 3000` and `verifier_timeout_s = 10_000`, so only the producer deadline is exceeded. `Records::default()` and `Redactor::new(&athena_gate::builtin_config())` are inputs.",
+      "command": "cargo test -p athena-core --lib a_reading_forecasting_more_than_the_producer_timeout_is_refused",
+      "observes": "`build_reading` returns Err. Its text contains \"pick one deliverable\", \"follow-up request\" and \"producer timeout\".",
+      "fails_without": "Without the gate, `build_reading` returns Ok and the test's `unwrap_err()` panics. With the gate removed, the test also fails on the missing message text."
+    },
+    {
+      "criterion": 3,
+      "method": "Two more unit tests in the same module, using the same helper and entry point `build_reading`. The oversize forecasts are generic (p50 2700 for the verifier-only case). The verifier-only test sets producer_timeout_s 3000 and verifier_timeout_s 2400, so p50 2700 is above only the verifier timeout. The within-deadline test uses p50 30 and a boundary case p50 exactly 2400, which is accepted. A third short check (optional, in the accepted test): the same oversize forecast with capability null and a decline_reason is accepted, because declines are not gated.",
+      "command": "cargo test -p athena-core --lib a_reading_forecasting_more_than_only_the_verifier_timeout_is_refused a_reading_within_both_timeouts_is_accepted",
+      "observes": "The verifier-only case is Err whose message names the verifier timeout and has the \"pick one deliverable\" advice. The p50 30 and p50 == 2400 cases return Ok with `forecasts.reader.wall_time_s.p50()` equal to the input.",
+      "fails_without": "Without the gate, the verifier-only test finds Ok instead of Err and fails. The accepted test passes in both worlds, so it guards against an over-eager gate: a gate that refuses everything fails it. Together they pin the threshold. Run each name as a separate `cargo test` filter or use `cargo test -p athena-core --lib reading::tests::a_reading_`."
+    },
+    {
+      "criterion": 4,
+      "method": "Run the whole workspace suite. Existing integration tests in crates/athena-core (run/mod.rs, run_pin_tests.rs, scope_guard.rs) and crates/athena-cli/tests use fake readers with wall_time_s p50 5 or 30 under the default athena.toml timeouts 3000 and 2400. The 3% figure is an estimate, not measured, so the CHANGELOG entry labels it as such: only readings forecasting a p50 beyond a timeout are newly refused.",
+      "command": "cargo test --workspace",
+      "observes": "All existing tests pass, so default readings are still accepted. The only new refusals are readings whose own p50 exceeds a configured timeout.",
+      "fails_without": "If the gate wrongly refused the shipped fake readings (p50 30 or 5 against timeouts 3000 and 2400), the existing run and lifecycle tests that go through `ask` and `go` would fail. Without the gate, the new oversize tests fail."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the three checks Athena runs. The criterion also names `cargo clippy --workspace --all-targets`, which the verifier may run as well.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "Exit code 0 for each command.",
+      "fails_without": "A formatting, lint or test regression would fail the corresponding command."
+    },
+    {
+      "criterion": 6,
+      "method": "Read CHANGELOG.md under `## [Unreleased]` / `### Added` for the new entry. It is written for an outside reader, names the root cause and the new refusal message, and says that the refusal rate rises as intended (estimate about 3% of readings, unmeasured).",
+      "command": "grep -n -i \"size gate\" CHANGELOG.md",
+      "observes": "One new bullet, as the first or latest Added item, describing the reading size gate.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Whether the Script closure type in `make_athena` needs an explicit `|_: &AgentInvocation| -> FakeTurn` annotation for a never-called closure. The producer should check the type in test_support.rs and run/mod.rs `base_script`.",
+    "Whether `Reading::validate` or `ensure_changelog` impose anything on a \"study\" reading with a README.md deliverable. The existing fake reader in run/mod.rs passes with this exact JSON, so it should be fine, but I did not run it.",
+    "The 3% figure of newly refused readings is an estimate from the request and was not measured. Nothing in the code can check it."
+  ],
+  "producer_section_sha256": "8bf2c087225c1db6590a9c76f564f1eb8deb5d3fdda345cb7971176771b99095"
+}

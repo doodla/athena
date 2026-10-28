@@ -182,6 +182,36 @@ pub(crate) fn ensure_changelog(reading: &mut Reading) {
     }
 }
 
+/// Refuses a reading whose own forecast median wall time is beyond the producer or verifier deadline.
+///
+/// Root cause: reading validation never compared the reading's scope with the producer and verifier deadlines
+/// (`budget.producer_timeout_s`, `budget.verifier_timeout_s`), so a source with many items produced a reading
+/// that no single run could finish. The scope shows up as the reader's own `wall_time_s.p50`, so the fix sits
+/// in `build_reading`, the one validation step that holds both the forecast and the configured timeouts.
+///
+/// The rule is strict: a p50 equal to the smaller timeout is allowed. The error names the smaller of the two
+/// timeouts and tells the reader to narrow the scope; `read_with_correction` feeds it back once.
+fn check_reading_size(
+    forecast: &Forecast,
+    producer_timeout_s: u64,
+    verifier_timeout_s: u64,
+) -> Result<()> {
+    let (name, limit) = if verifier_timeout_s < producer_timeout_s {
+        ("verifier_timeout_s", verifier_timeout_s)
+    } else {
+        ("producer_timeout_s", producer_timeout_s)
+    };
+    let p50 = forecast.wall_time_s.p50();
+    if p50 > limit as f64 {
+        bail!(
+            "the reading forecasts a median wall time of {p50:.0}s, beyond the configured {name} of {limit}s, \
+             so no single run can finish it: pick one deliverable and name the rest as follow-up requests in \
+             out_of_scope, then forecast the smaller scope"
+        );
+    }
+    Ok(())
+}
+
 impl Athena {
     /// Builds the invocation spec common to every role.
     #[allow(clippy::too_many_arguments)]
@@ -540,6 +570,14 @@ impl Athena {
                 .map_err(anyhow::Error::msg)?,
         };
         reader.validate().map_err(anyhow::Error::msg)?;
+        // A decline starts no run, so only a reading that names a capability has a deadline to meet.
+        if out.capability.is_some() {
+            check_reading_size(
+                &reader,
+                config.budget.producer_timeout_s,
+                config.budget.verifier_timeout_s,
+            )?;
+        }
         let (reference, _) =
             crate::scoring::reference(&config.forecast.reference, &out.class_of_work, records);
 
@@ -3022,6 +3060,107 @@ mod tests {
         ] {
             assert!(description.contains(area), "{area}: {description}");
         }
+    }
+
+    /// A valid reading of one README deliverable, with the given forecast median wall time (seconds).
+    fn sized_reading(p50: f64, capability: Option<&str>) -> serde_json::Value {
+        serde_json::json!({
+            "title": "Describe the demo",
+            "summary": "Describe the demo in README.md.",
+            "class_of_work": "docs",
+            "capability": capability,
+            "decline_reason": if capability.is_none() { Some("not a request") } else { None },
+            "producer_model": "claude-haiku-5-5",
+            "defaults_applied": [{ "id": "strangers", "how": "plain words" }],
+            "assumptions": [],
+            "question": null,
+            "acceptance_criteria": [{ "text": "README.md describes the demo.", "kind": "content" }],
+            "deliverables": [{ "path": "README.md", "action": "modify", "p": 0.9 }],
+            "out_of_scope": ["Other files"],
+            "forecast": {
+                "p_reading_accepted": 0.8,
+                "p_verification_passes": 0.7,
+                "p_user_intervenes": 0.1,
+                "cost_usd": { "p10": 0.05, "p50": 0.2, "p90": 0.8 },
+                "wall_time_s": { "p10": 5.0, "p50": p50, "p90": p50 * 2.0 },
+                "departures": null
+            }
+        })
+    }
+
+    /// Runs the real `build_reading` on `reading` with the shipped configuration, except for the two timeouts.
+    fn build_sized(
+        reading: serde_json::Value,
+        producer_timeout_s: u64,
+        verifier_timeout_s: u64,
+    ) -> Result<Reading> {
+        let repo = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        // `build_reading` never runs an agent, so the script is never called.
+        let athena = crate::test_support::make_athena(
+            &athena_git::Git::at(repo.path()),
+            state.path(),
+            vec![],
+            Box::new(|_| unreachable!("build_reading runs no agent")),
+        );
+        let mut jc = JobConfig {
+            config: athena_data::Config::parse(include_str!("../../../athena.toml")).unwrap(),
+            defaults: athena_data::DefaultsModel::parse(include_str!("../../../defaults.toml"))
+                .unwrap(),
+            commit: "0".repeat(40),
+            config_sha256: String::new(),
+            defaults_sha256: String::new(),
+        };
+        jc.config.budget.producer_timeout_s = producer_timeout_s;
+        jc.config.budget.verifier_timeout_s = verifier_timeout_s;
+        athena.build_reading(
+            &jc,
+            &Records::default(),
+            &JobId::parse("20261012-084936-n1p0").unwrap(),
+            1,
+            1,
+            reading,
+            &["study".to_string()],
+            &Redactor::new(&athena_gate::builtin_config()).unwrap(),
+        )
+    }
+
+    #[test]
+    fn a_reading_forecasting_more_than_the_producer_timeout_is_refused_with_advice_to_pick_one_deliverable()
+     {
+        // Only the producer deadline (3000s) is exceeded by the 5000s median.
+        let error = build_sized(sized_reading(5000.0, Some("study")), 3000, 10_000)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("pick one deliverable"), "{error}");
+        assert!(error.contains("follow-up request"), "{error}");
+        assert!(error.contains("producer_timeout_s of 3000s"), "{error}");
+    }
+
+    #[test]
+    fn a_reading_forecasting_more_than_only_the_verifier_timeout_is_refused() {
+        // 2700s is within the producer deadline (3000s) and beyond the verifier deadline (2400s).
+        let error = build_sized(sized_reading(2700.0, Some("study")), 3000, 2400)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("pick one deliverable"), "{error}");
+        assert!(error.contains("verifier_timeout_s of 2400s"), "{error}");
+    }
+
+    #[test]
+    fn a_reading_within_both_timeouts_is_accepted() {
+        for p50 in [30.0, 2400.0] {
+            let reading = build_sized(sized_reading(p50, Some("study")), 3000, 2400)
+                .unwrap_or_else(|e| panic!("p50 {p50} refused: {e:#}"));
+            assert_eq!(reading.forecasts.reader.wall_time_s.p50(), p50);
+        }
+    }
+
+    #[test]
+    fn a_decline_is_not_held_to_the_deadlines() {
+        // A decline starts no run, so an oversize forecast does not refuse it.
+        let reading = build_sized(sized_reading(5000.0, None), 3000, 2400).unwrap();
+        assert!(reading.capability.is_none());
     }
 
     #[test]
