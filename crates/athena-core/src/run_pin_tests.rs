@@ -1527,3 +1527,136 @@ fn a_retry_reading_resting_on_the_producers_report_comes_back_as_a_refusal_not_a
         }
     }
 }
+
+/// A reader that writes `first` as its criterion on its first read and `later` on every read after it, costs
+/// $0.02 a read, and keeps every brief it was given.
+fn reader_refused_then(
+    first: &'static str,
+    later: &'static str,
+    briefs: Arc<Mutex<Vec<String>>>,
+) -> Tweak {
+    Arc::new(move |spec, turn| {
+        if spec.role == Role::Reader {
+            let mut briefs = briefs.lock().unwrap();
+            let criterion = if briefs.is_empty() { first } else { later };
+            briefs.push(spec.user_prompt.clone());
+            turn.cost_usd = 0.02;
+            turn.structured.as_mut().unwrap()["acceptance_criteria"][0]["text"] = json!(criterion);
+        }
+    })
+}
+
+#[test]
+fn a_refused_reading_is_read_again_at_once_with_the_refusal_text_and_the_second_is_recorded() {
+    let (dir, git) = repo(&config(true));
+    let state = tempfile::tempdir().unwrap();
+    let briefs: Arc<Mutex<Vec<String>>> = Arc::default();
+    let athena = athena_with(
+        &dir,
+        &state,
+        CountingPinner::new(FAKE_SHA),
+        Arc::default(),
+        reader_refused_then(REPORT_CRITERION, GREP_CRITERION, briefs.clone()),
+    );
+    let proposal = athena.ask("study the demo", &Quiet).unwrap();
+    // The second reading is accepted, so the request does not fail.
+    assert!(proposal.reading.is_some(), "{:?}", proposal.reader_error);
+    assert_eq!(proposal.reader_error, None);
+    assert_eq!(
+        proposal.reading.as_ref().unwrap().acceptance_criteria[0].text,
+        GREP_CRITERION
+    );
+    // The reader ran twice. Only the second brief carries the refusal, with its text and the repair.
+    let briefs = briefs.lock().unwrap();
+    assert_eq!(briefs.len(), 2);
+    let heading = athena_context::briefs::REFUSAL_HEADING;
+    assert!(!briefs[0].contains(heading), "{}", briefs[0]);
+    let (_, section) = briefs[1].split_once(heading).expect("the refusal section");
+    let section = section.split("\n# ").next().unwrap();
+    assert!(section.contains("was refused"), "{section}");
+    assert!(section.contains(REPORT_CRITERION), "{section}");
+    assert!(section.contains("restate"), "{section}");
+    // Both runs are recorded, with the reading made by the second, and both are paid for.
+    let prefix = format!("{}/invocations/", proposal.job.dir());
+    let readers: Vec<_> = git
+        .ls_tree_under("HEAD", &prefix)
+        .unwrap()
+        .into_iter()
+        .filter_map(|e| {
+            let bytes = git.show_file("HEAD", &e.path).unwrap().unwrap();
+            match athena_data::records::AnyRecord::parse(&e.path, &bytes) {
+                Ok(athena_data::records::AnyRecord::Invocation(inv))
+                    if inv.role == Role::Reader =>
+                {
+                    Some(inv.seq)
+                }
+                _ => None,
+            }
+        })
+        .collect();
+    assert_eq!(readers.len(), 2, "{readers:?}");
+    assert_eq!(
+        proposal.reading.as_ref().unwrap().invocation_seq,
+        *readers.iter().max().unwrap()
+    );
+    assert!(
+        (proposal.spent_usd - 0.04).abs() < 1e-9,
+        "{}",
+        proposal.spent_usd
+    );
+}
+
+#[test]
+fn a_second_refusal_is_the_failure_and_the_reader_is_not_run_a_third_time() {
+    let (dir, _git) = repo(&config(true));
+    let state = tempfile::tempdir().unwrap();
+    let briefs: Arc<Mutex<Vec<String>>> = Arc::default();
+    let athena = athena_with(
+        &dir,
+        &state,
+        CountingPinner::new(FAKE_SHA),
+        Arc::default(),
+        reader_refused_then(REPORT_CRITERION, REPORT_CRITERION, briefs.clone()),
+    );
+    let proposal = athena.ask("study the demo", &Quiet).unwrap();
+    assert!(proposal.reading.is_none());
+    let error = proposal
+        .reader_error
+        .expect("the second refusal is reported");
+    assert!(error.contains("was refused"), "{error}");
+    assert!(error.contains(REPORT_CRITERION), "{error}");
+    assert_eq!(
+        briefs.lock().unwrap().len(),
+        2,
+        "read once more, no further"
+    );
+    assert!(
+        (proposal.spent_usd - 0.04).abs() < 1e-9,
+        "{}",
+        proposal.spent_usd
+    );
+}
+
+#[test]
+fn a_reader_that_does_not_complete_is_not_read_again() {
+    let (dir, _git) = repo(&config(true));
+    let state = tempfile::tempdir().unwrap();
+    let reads: Arc<Mutex<usize>> = Arc::default();
+    let counted = reads.clone();
+    let athena = athena_with(
+        &dir,
+        &state,
+        CountingPinner::new(FAKE_SHA),
+        Arc::default(),
+        Arc::new(move |spec, turn| {
+            if spec.role == Role::Reader {
+                *counted.lock().unwrap() += 1;
+                turn.structured = None;
+            }
+        }),
+    );
+    let proposal = athena.ask("study the demo", &Quiet).unwrap();
+    assert!(proposal.reading.is_none());
+    assert!(proposal.reader_error.is_some());
+    assert_eq!(*reads.lock().unwrap(), 1, "only a refusal is read again");
+}

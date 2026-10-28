@@ -65,6 +65,22 @@ pub struct Proposal {
     pub spent_usd: f64,
 }
 
+/// Why one run of the reader made no reading.
+enum ReadError {
+    /// The reader did not complete or returned nothing. Another run would not repair it.
+    Failed(String),
+    /// The reader returned a reading that a reading rule refused. The text says what to fix.
+    Refused(String),
+}
+
+impl ReadError {
+    fn into_text(self) -> String {
+        match self {
+            ReadError::Failed(text) | ReadError::Refused(text) => text,
+        }
+    }
+}
+
 /// The reader's system prompt: contract, frame, defaults model, capability catalog.
 pub fn reader_system_prompt(athena: &Athena, jc: &JobConfig) -> Composed {
     let cards: Vec<_> = athena
@@ -256,7 +272,12 @@ impl Athena {
         Ok(())
     }
 
-    /// Runs the reader once and builds the reading.
+    /// Runs the reader and builds the reading. When a reading rule refuses the reading (it is invalid, or
+    /// acceptance refuses it), the reader runs once more at once with the refusal text as a correction in its
+    /// brief; only a second refusal is the failure returned. Every invocation made is returned, in order, so
+    /// the caller records each and the job's spend is right; the last one made the returned reading or error.
+    ///
+    /// A reader that did not run, did not finish or returned nothing is not a refusal and is not read again.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn read_for(
         &self,
@@ -271,7 +292,67 @@ impl Athena {
         spent: f64,
         redactor: &Redactor,
         ui: &dyn Ui,
-    ) -> Result<(Option<Reading>, Invocation, Option<String>)> {
+    ) -> Result<(Option<Reading>, Vec<Invocation>, Option<String>)> {
+        let (reading, first, error) = self.read_once(
+            jc, records, job, request, attempt, history, n, seq, spent, None, redactor, ui,
+        )?;
+        let Some(ReadError::Refused(refusal)) = error else {
+            return Ok((reading, vec![first], error.map(ReadError::into_text)));
+        };
+        ui.line(&format!(
+            "reading    {} · the reading was refused; reading again once with the refusal as a correction",
+            job.as_str()
+        ));
+        let spent_after = spent + first.cost.best_lower();
+        match self.read_once(
+            jc,
+            records,
+            job,
+            request,
+            attempt,
+            history,
+            n,
+            seq + 1,
+            spent_after,
+            Some(&refusal),
+            redactor,
+            ui,
+        ) {
+            Ok((reading, second, error)) => Ok((
+                reading,
+                vec![first, second],
+                error.map(ReadError::into_text),
+            )),
+            // The first invocation was made and must be recorded, so a failure to start the second is the
+            // failure of the read, not an error that drops the first record.
+            Err(error) => Ok((
+                None,
+                vec![first],
+                Some(format!(
+                    "{refusal}; the reader could not be run again with this refusal: {error:#}"
+                )),
+            )),
+        }
+    }
+
+    /// One run of the reader: the invocation, and the reading it made or why it made none. `refusal` is the
+    /// text of the refusal of the reading made just before, given to the reader as a correction.
+    #[allow(clippy::too_many_arguments)]
+    fn read_once(
+        &self,
+        jc: &JobConfig,
+        records: &Records,
+        job: &JobId,
+        request: &Request,
+        attempt: Option<&EarlierAttempt>,
+        history: &[(Reading, Option<String>)],
+        n: u32,
+        seq: u32,
+        spent: f64,
+        refusal: Option<&str>,
+        redactor: &Redactor,
+        ui: &dyn Ui,
+    ) -> Result<(Option<Reading>, Invocation, Option<ReadError>)> {
         self.check_budget(jc, spent, jc.config.budget.reader_usd, "reader")?;
         let snapshot_dir = self.state.job_dir(job).join(format!("read-{n}"));
         if snapshot_dir.exists() {
@@ -316,6 +397,7 @@ impl Athena {
                 })
                 .collect(),
             headroom: reader_headroom(self, jc),
+            refusal: refusal.map(str::to_string),
         });
         let capability_ids: Vec<String> = self
             .capabilities
@@ -372,13 +454,15 @@ impl Athena {
                 .detail
                 .clone()
                 .unwrap_or_else(|| "the reader did not complete".into());
-            return Ok((None, record, Some(why)));
+            return Ok((None, record, Some(ReadError::Failed(why))));
         }
         let Some(structured) = output.structured.clone() else {
             return Ok((
                 None,
                 record,
-                Some("the reader returned no structured reading".into()),
+                Some(ReadError::Failed(
+                    "the reader returned no structured reading".into(),
+                )),
             ));
         };
         match self.build_reading(
@@ -397,13 +481,15 @@ impl Athena {
                 // (such as the introspections in a root-cause request) are shown to the reader, not checked.
                 match check_reading_acceptance(&reading, &request.text, attempt, &referenced_jobs) {
                     Ok(()) => Ok((Some(reading), record, None)),
-                    Err(e) => Ok((None, record, Some(format!("{e:#}")))),
+                    Err(e) => Ok((None, record, Some(ReadError::Refused(format!("{e:#}"))))),
                 }
             }
             Err(e) => Ok((
                 None,
                 record,
-                Some(format!("the reader's output was invalid: {e:#}")),
+                Some(ReadError::Refused(format!(
+                    "the reader's output was invalid: {e:#}"
+                ))),
             )),
         }
     }
@@ -697,7 +783,7 @@ impl Athena {
         let redactor = self.redactor(&jc.config, Some(&job))?;
         let attempt =
             earlier_attempt_with(records, &request.text, &redactor, &|j| self.running(j))?;
-        let (reading, invocation, error) = self.read_for(
+        let (reading, invocations, error) = self.read_for(
             jc,
             records,
             &job,
@@ -714,9 +800,9 @@ impl Athena {
         if with_request {
             files.push(NewFile::record(&AnyRecord::Request(request.clone())));
         }
-        files.push(NewFile::record(&AnyRecord::Invocation(Box::new(
-            invocation.clone(),
-        ))));
+        files.extend(invocation_files(&invocations));
+        let spent_usd = total_cost(&invocations);
+        let invocation = invocations.last().cloned().expect("a read makes one");
         if let Some(r) = &reading {
             files.push(NewFile::record(&AnyRecord::Reading(Box::new(r.clone()))));
         }
@@ -733,7 +819,7 @@ impl Athena {
             job,
             reading,
             reader_error: error,
-            spent_usd: invocation.cost.best_lower(),
+            spent_usd,
             invocation: Some(invocation),
             commit,
         })
@@ -856,7 +942,7 @@ impl Athena {
         let spent = job.spent_usd();
         let attempt =
             earlier_attempt_with(&records, &request.text, &redactor, &|j| self.running(j))?;
-        let (reading, invocation, error) = self.read_for(
+        let (reading, invocations, error) = self.read_for(
             &jc,
             &records,
             &job_id,
@@ -869,9 +955,8 @@ impl Athena {
             &redactor,
             ui,
         )?;
-        files.push(NewFile::record(&AnyRecord::Invocation(Box::new(
-            invocation.clone(),
-        ))));
+        files.extend(invocation_files(&invocations));
+        let invocation = invocations.last().cloned().expect("a read makes one");
         if let Some(r) = &reading {
             files.push(NewFile::record(&AnyRecord::Reading(Box::new(r.clone()))));
         }
@@ -893,11 +978,24 @@ impl Athena {
             job: job_id,
             reading,
             reader_error: error,
-            spent_usd: spent + invocation.cost.best_lower(),
+            spent_usd: spent + total_cost(&invocations),
             invocation: Some(invocation),
             commit,
         })
     }
+}
+
+/// The record files of the invocations one read made, in order.
+pub(crate) fn invocation_files(invocations: &[Invocation]) -> Vec<NewFile> {
+    invocations
+        .iter()
+        .map(|i| NewFile::record(&AnyRecord::Invocation(Box::new(i.clone()))))
+        .collect()
+}
+
+/// What the invocations of one read cost.
+pub(crate) fn total_cost(invocations: &[Invocation]) -> f64 {
+    invocations.iter().map(|i| i.cost.best_lower()).sum()
 }
 
 const RETRY_PREFIX: &str = "try again on ";
@@ -2106,42 +2204,16 @@ pub fn check_reading_acceptance(
     check_governance_coverage(reading, request)
 }
 
-/// Request words that imply the outcome needs a governance file. A path ending in `/` stands for any file
-/// under that directory. Each keyword is a whole-word phrase in lowercase.
-const GOVERNANCE_BY_KEYWORD: [(&str, &[&str]); 5] = [
-    (
-        ".github/workflows/",
-        &[
-            "github pages",
-            "gh-pages",
-            "deploy",
-            "deploys",
-            "deployment",
-            "workflow",
-            "workflows",
-            "github actions",
-            "ci",
-            "continuous integration",
-        ],
-    ),
-    (
-        "athena.toml",
-        &[
-            "athena.toml",
-            "routing",
-            "checks",
-            "classes",
-            "budget",
-            "budgets",
-            "gate",
-            "gates",
-            "config",
-            "configuration",
-        ],
-    ),
-    ("defaults.toml", &["defaults.toml"]),
-    ("rust-toolchain.toml", &["rust-toolchain"]),
-    ("setup.sh", &["setup.sh"]),
+/// Governance paths a request can name, and the whole-word lowercase phrase that names each. A path ending in
+/// `/` stands for any file under that directory; its phrase has no trailing `/`, so a file path under the
+/// directory (`.github/workflows/ci.yml`) matches as well as the directory. A request word such as "deploy"
+/// or "config" names no path and requires nothing.
+const GOVERNANCE_BY_NAMED_PATH: [(&str, &str); 5] = [
+    (".github/workflows/", ".github/workflows"),
+    ("athena.toml", "athena.toml"),
+    ("defaults.toml", "defaults.toml"),
+    ("rust-toolchain.toml", "rust-toolchain.toml"),
+    ("setup.sh", "setup.sh"),
 ];
 
 /// Deliverables whose change implies a governance file changes with them, and why.
@@ -2185,12 +2257,14 @@ fn governance_is_covered(reading: &Reading, path: &str) -> bool {
 /// It refuses when:
 /// - a deliverable is a governance file that no criterion names;
 /// - a deliverable in `GOVERNANCE_BY_DELIVERABLE` is listed without its governance file; or
-/// - the request contains a keyword of `GOVERNANCE_BY_KEYWORD` and the reading neither lists and names that
-///   governance file nor names it in `out_of_scope`.
+/// - the request names a path of `GOVERNANCE_BY_NAMED_PATH` (the file itself, or a file under the directory)
+///   and the reading neither lists and names that governance file nor names it in `out_of_scope`.
 ///
-/// The keyword match is a heuristic that errs toward asking for an explicit decision. The error names each
-/// missing path and why, and says to list it as a deliverable and name it in a criterion, or to name it in
-/// `out_of_scope`.
+/// A request word that only suggests a governance file (deploy, config, CI, gate) requires nothing: the
+/// earlier word table refused ordinary requests that merely used a common word, and the reader was not told
+/// why, so the next read failed the same way (`Athena::read_for` now reads once more with the refusal text).
+/// The error names each missing path and why, and says to list it as a deliverable and name it in a
+/// criterion, or to name it in `out_of_scope`.
 pub fn check_governance_coverage(reading: &Reading, request: &str) -> Result<()> {
     if reading.capability.is_none() || reading.question.is_some() || reading.deliverables.is_empty()
     {
@@ -2217,13 +2291,13 @@ pub fn check_governance_coverage(reading: &Reading, request: &str) -> Result<()>
     }
     // An underscore joins a word (`athena_gate` is one identifier), so it is not a boundary.
     let words = request.to_lowercase().replace('_', "x");
-    for (path, keywords) in GOVERNANCE_BY_KEYWORD {
-        if let Some(word) = keywords.iter().find(|k| has_phrase(&words, k))
-            && !governance_is_covered(reading, path)
-        {
+    for (path, phrase) in GOVERNANCE_BY_NAMED_PATH {
+        if has_phrase(&words, phrase) && !governance_is_covered(reading, path) {
             need(
                 path,
-                format!("the request mentions {word:?}, which needs a change to it"),
+                format!(
+                    "the request names {phrase:?}, so the reading must say whether the job changes it"
+                ),
             );
         }
     }
@@ -4304,22 +4378,44 @@ mod tests {
         reading
     }
 
-    /// For each keyword group: a request phrasing, and the governance path it needs.
-    const KEYWORD_REQUESTS: [(&str, &str); 14] = [
-        ("Publish to GitHub Pages", ".github/workflows/"),
-        ("Deploy the site on every push", ".github/workflows/"),
-        ("Add a workflow that builds the docs", ".github/workflows/"),
-        ("Run the tests in CI", ".github/workflows/"),
-        ("Add a CI job for the book", ".github/workflows/"),
-        ("Change the routing of small items", "athena.toml"),
-        ("Add a gate before merging", "athena.toml"),
-        ("Raise the budgets for retries", "athena.toml"),
-        ("Add new check classes for docs", "athena.toml"),
-        ("Make the checks configurable", "athena.toml"),
-        ("Add a configuration section for audiences", "athena.toml"),
+    /// A request phrasing that names a governance path, and the path the reading must cover.
+    const NAMED_PATH_REQUESTS: [(&str, &str); 9] = [
+        (
+            "Publish to GitHub Pages from .github/workflows/pages.yml",
+            ".github/workflows/",
+        ),
+        (
+            "Run the tests in .github/workflows/ci.yml",
+            ".github/workflows/",
+        ),
+        ("Add a job under .github/workflows", ".github/workflows/"),
+        ("Change the routing in athena.toml", "athena.toml"),
+        ("Raise the budgets in `athena.toml`.", "athena.toml"),
+        ("Add a [gate] table to ATHENA.TOML", "athena.toml"),
         ("Change defaults.toml to add a rule", "defaults.toml"),
-        ("Pin the version in rust-toolchain", "rust-toolchain.toml"),
+        (
+            "Pin the version in rust-toolchain.toml",
+            "rust-toolchain.toml",
+        ),
         ("Change what setup.sh installs", "setup.sh"),
+    ];
+
+    /// Requests that use the common words of the old keyword table and name no governance path.
+    const COMMON_WORD_REQUESTS: [&str; 14] = [
+        "Publish to GitHub Pages",
+        "Deploy the site on every push",
+        "Add a workflow that builds the docs",
+        "Run the tests in CI",
+        "Add a CI job for the book",
+        "Change the routing of small items",
+        "Add a gate before merging",
+        "Raise the budgets for retries",
+        "Add new check classes for docs",
+        "Make the checks configurable",
+        "Add a configuration section for audiences",
+        "Add a config option for the deployment gate",
+        "Pin the version in rust-toolchain",
+        "Explain how the gates and budgets work",
     ];
 
     /// A concrete governance file for a keyword path.
@@ -4332,8 +4428,8 @@ mod tests {
     }
 
     #[test]
-    fn a_request_whose_outcome_needs_a_governance_file_is_refused_until_it_is_covered() {
-        for (request, path) in KEYWORD_REQUESTS {
+    fn a_request_naming_a_governance_path_is_refused_until_it_is_covered() {
+        for (request, path) in NAMED_PATH_REQUESTS {
             let file = concrete(path);
             // Without the file listed, the reading is refused, naming the path and the repair.
             let bare = governed_reading(&["src/site.rs"], &["the site builds"], &["the logo"]);
@@ -4372,18 +4468,72 @@ mod tests {
     }
 
     #[test]
-    fn a_reading_for_publish_to_github_pages_without_a_workflow_is_refused() {
+    fn a_request_with_only_common_words_and_no_governance_path_is_accepted() {
+        // None of these words names a path, so none requires a governance file; the reading lists none.
+        let bare = governed_reading(&["src/site.rs"], &["the site builds"], &["the logo"]);
+        for request in COMMON_WORD_REQUESTS {
+            check_governance_coverage(&bare, request).unwrap_or_else(|e| panic!("{request}: {e}"));
+            check_reading_acceptance(&bare, request, None, &[])
+                .unwrap_or_else(|e| panic!("{request}: {e}"));
+        }
+    }
+
+    #[test]
+    fn a_request_naming_a_workflow_file_needs_it_listed_and_named() {
+        let request = "Publish to GitHub Pages from .github/workflows/pages.yml";
         let bare = governed_reading(&["docs/index.md"], &["the page renders"], &["other pages"]);
-        let error = check_reading_acceptance(&bare, "Publish to GitHub Pages", None, &[])
+        let error = check_reading_acceptance(&bare, request, None, &[])
             .unwrap_err()
             .to_string();
         assert!(error.contains(".github/workflows"), "{error}");
+        assert!(error.contains("names"), "{error}");
         let with_workflow = governed_reading(
             &["docs/index.md", ".github/workflows/pages.yml"],
             &["pages.yml deploys the site"],
             &[],
         );
-        check_reading_acceptance(&with_workflow, "Publish to GitHub Pages", None, &[]).unwrap();
+        check_reading_acceptance(&with_workflow, request, None, &[]).unwrap();
+    }
+
+    #[test]
+    fn a_governance_path_that_only_looks_like_a_name_is_not_named() {
+        let bare = governed_reading(&["src/site.rs"], &["the site builds"], &["x"]);
+        for request in [
+            "rename my_athena.toml_helper",
+            "fix xsetup.sh",
+            "the athena.tomls file",
+            "see .github/workflowsx",
+        ] {
+            check_governance_coverage(&bare, request).unwrap_or_else(|e| panic!("{request}: {e}"));
+        }
+    }
+
+    #[test]
+    fn a_deliverable_that_is_a_governance_file_is_still_refused_without_a_criterion_naming_it() {
+        // Whatever the request says, and for the deliverable table too: these two refusals remain.
+        let request = "add a greeting";
+        for path in [".github/workflows/ci.yml", "defaults.toml", "setup.sh"] {
+            let unnamed = governed_reading(&[path], &["the greeting prints"], &[]);
+            let error = check_governance_coverage(&unnamed, request)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(path), "{error}");
+            assert!(error.contains("no criterion names it"), "{error}");
+        }
+        let config = "crates/athena-data/src/config.rs";
+        let bare = governed_reading(&[config], &["the setting parses"], &[]);
+        let error = check_governance_coverage(&bare, request)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("athena.toml"), "{error}");
+        assert_eq!(
+            GOVERNANCE_BY_DELIVERABLE,
+            [(
+                "crates/athena-data/src/config.rs",
+                "athena.toml",
+                "a new or changed configuration section must be set in athena.toml, or its schema test fails",
+            )]
+        );
     }
 
     #[test]
@@ -4436,17 +4586,18 @@ mod tests {
         let mut declined = governed_reading(&["src/site.rs"], &[], &[]);
         declined.capability = None;
         declined.decline_reason = Some("no capability fits".into());
-        check_reading_acceptance(&declined, "Publish to GitHub Pages", None, &[]).unwrap();
+        let request = "Publish to GitHub Pages from .github/workflows/pages.yml";
+        check_reading_acceptance(&declined, request, None, &[]).unwrap();
         let mut asking = governed_reading(&["src/site.rs"], &[], &[]);
         asking.question = Some("which file?".into());
-        check_reading_acceptance(&asking, "Publish to GitHub Pages", None, &[]).unwrap();
+        check_reading_acceptance(&asking, request, None, &[]).unwrap();
         let empty = governed_reading(&[], &["x"], &[]);
-        check_reading_acceptance(&empty, "Publish to GitHub Pages", None, &[]).unwrap();
+        check_reading_acceptance(&empty, request, None, &[]).unwrap();
     }
 
     #[test]
     fn the_governance_check_applies_to_a_retry_as_to_a_first_attempt() {
-        let request = "Publish to GitHub Pages";
+        let request = "Publish to GitHub Pages from .github/workflows/pages.yml";
         let previous = prior();
         let mut retry = governed_reading(&["docs/index.md"], &["the page renders"], &["x"]);
         retry.summary = format!("Retry {PRIOR_JOB}: add the missing workflow.");

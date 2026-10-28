@@ -1124,7 +1124,7 @@ impl Athena {
             job.readings.iter().map(|r| (r.clone(), None)).collect();
         let spent = job.spent_usd();
         let attempt = crate::reading::earlier_attempt(records, &request.text, &redactor)?;
-        let (reading, invocation, error) = self.read_for(
+        let (reading, invocations, error) = self.read_for(
             jc,
             records,
             &id,
@@ -1137,9 +1137,8 @@ impl Athena {
             &redactor,
             ui,
         )?;
-        let mut files = vec![NewFile::record(&AnyRecord::Invocation(Box::new(
-            invocation.clone(),
-        )))];
+        let invocation = invocations.last().cloned().expect("a read makes one");
+        let mut files = crate::reading::invocation_files(&invocations);
         if let Some(r) = &reading {
             files.push(NewFile::record(&AnyRecord::Reading(Box::new(r.clone()))));
         }
@@ -1155,7 +1154,7 @@ impl Athena {
             job: id,
             reading,
             reader_error: error,
-            spent_usd: spent + invocation.cost.best_lower(),
+            spent_usd: spent + crate::reading::total_cost(&invocations),
             invocation: Some(invocation),
             commit,
         })
