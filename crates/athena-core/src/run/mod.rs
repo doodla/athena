@@ -38,7 +38,8 @@ use athena_data::records::{
     Critique, CritiqueVerdict, DeliverableAction, Demonstration, Finding, FindingSource,
     Invocation, InvocationOutcome, Job, JobKind, JobPlan, Outcome, OutcomeState, Owner, PinnedRepo,
     PlanDecision, PlanFile, PlanRisk, PolicyViolation, ProducerReport, Reading, RejectedOption,
-    ReportedCheck, ReportedCriterion, Role, Score, Severity, Totals, Verdict, Verification,
+    Replay, ReplayStatus, ReportedCheck, ReportedCriterion, Role, Score, Severity, Totals, Verdict,
+    Verification,
 };
 use athena_data::{JobId, sha256_hex};
 use athena_gate::redact::Redactor;
@@ -98,11 +99,28 @@ struct Closing {
     critiques: Vec<Critique>,
     /// The checks run on the base commit before the producer. Recorded only.
     baseline: Option<Baseline>,
+    /// The reading replay taken before the verifier. Written as `replay.json`.
+    replay: Option<Replay>,
+}
+
+/// The progress line for a replay: the count and total, or why none ran.
+fn replay_line(replay: &Replay) -> String {
+    match (&replay.status, &replay.reason) {
+        (ReplayStatus::NoReplay, Some(reason)) => format!("replay     {reason}"),
+        _ => format!(
+            "replay     {} of {} newly refused{} ({}s)",
+            replay.newly_refused.len(),
+            replay.total,
+            if replay.held { ", held" } else { "" },
+            replay.elapsed_s
+        ),
+    }
 }
 
 impl Closing {
     fn new() -> Closing {
         Closing {
+            replay: None,
             baseline: None,
             plans: Vec::new(),
             critiques: Vec::new(),
@@ -2101,6 +2119,24 @@ impl Athena {
             .filter(|b| b.base_commit == p.as_str());
         mark_pre_existing(&mut check_runs, usable_baseline);
 
+        // The reading replay: the newest accepted readings through the base and the candidate reading rules.
+        // It makes no model call, always runs, and its build directory is gone before the disk check below.
+        let replay = self.replay_reading_rules(
+            &crate::reading::ReplayRun {
+                job: &id,
+                base_commit: &p,
+                candidate_commit: &c,
+                criteria: &ctx.reading.acceptance_criteria,
+                job_dir: &job_dir,
+                agents: &jc.config.agents,
+                timeout: std::time::Duration::from_secs(jc.config.budget.check_timeout_s),
+                redactor: ctx.redactor,
+            },
+            ctx.ui,
+        );
+        ctx.ui.line(&replay_line(&replay));
+        closing.replay = Some(replay);
+
         let criteria = ctx.reading.acceptance_criteria.clone();
         let verifier_grant = ctx.capability.verifier_grant(jc);
         let candidate_view = CandidateView {
@@ -2135,6 +2171,7 @@ impl Athena {
             commands: athena_agent::policy::describe_commands(&verifier_grant.commands),
             tool_config_from_base: tool_config_from_base.clone(),
             pin: ctx.job.job.as_ref().and_then(|j| j.pin.clone()),
+            replay: closing.replay.clone(),
         };
         // What the producer's report still lacked after the send-back goes to the verifier as one more
         // entry under the checks. It is not a check and fails nothing; it names what the self-check
@@ -2365,7 +2402,7 @@ impl Athena {
         };
         let map_base = map_at("HEAD~1")?;
         let map_candidate = map_at("HEAD")?;
-        let judgment = judge(&VerdictInputs {
+        let mut judgment = judge(&VerdictInputs {
             criteria: &criteria,
             checks: &check_runs,
             output: verdict_output.as_ref(),
@@ -2379,6 +2416,11 @@ impl Athena {
             map_candidate: map_candidate.as_deref(),
             baseline: usable_baseline,
         });
+        // A held reading replay fails the judgment here, before the verification record is built from it, so
+        // the stored verdict, findings and the job's state agree.
+        if let Some(replay) = &closing.replay {
+            crate::verify::apply_replay_hold(&mut judgment, replay);
+        }
         let verification = Verification {
             job: id.clone(),
             candidate_commit: c.clone(),
@@ -2562,6 +2604,13 @@ impl Athena {
                 .files
                 .push(NewFile::record(&AnyRecord::Baseline(Box::new(
                     baseline.clone(),
+                ))));
+        }
+        if let Some(replay) = &closing.replay {
+            closing
+                .files
+                .push(NewFile::record(&AnyRecord::Replay(Box::new(
+                    replay.clone(),
                 ))));
         }
         if let Some(candidate) = &closing.candidate {
@@ -3369,9 +3418,19 @@ mod produce_and_verify_order_tests {
     }
 
     fn athena(repo: &tempfile::TempDir, state: &tempfile::TempDir) -> Athena {
+        athena_counting(repo, state, std::sync::Arc::default())
+    }
+
+    /// As [`athena`], with every model call the fake driver answers counted in `calls`.
+    fn athena_counting(
+        repo: &tempfile::TempDir,
+        state: &tempfile::TempDir,
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Athena {
         let state = crate::state::StateDir::new(state.path().join("repo"))
             .with_free_space(crate::test_support::plenty_of_space);
-        let script = Box::new(|spec: &AgentInvocation| {
+        let script = Box::new(move |spec: &AgentInvocation| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let mut turn = match spec.role {
                 Role::Reader => FakeTurn::output(json!({
                     "title": "Describe the demo",
@@ -3610,7 +3669,7 @@ mod produce_and_verify_order_tests {
             .map(String::as_str)
             .take_while(|l| !l.starts_with("landed "))
             .collect();
-        assert_eq!(said.len(), 6, "{said:#?}");
+        assert_eq!(said.len(), 7, "{said:#?}");
         assert!(said[0].starts_with("dispatched "), "{said:#?}");
         assert_eq!(said[1], "baseline   probe ok");
         // The producer and verifier lines carry a model, a wall time, a cost and a count or verdict.
@@ -3624,8 +3683,10 @@ mod produce_and_verify_order_tests {
             "{said:#?}"
         );
         assert!(said[4].starts_with("checks     probe ok ("), "{said:#?}");
+        // This repository holds no other accepted reading, so the replay says why it did not run.
+        assert!(said[5].starts_with("replay     no replay: "), "{said:#?}");
         assert!(
-            said[5].starts_with("verifier   ") && said[5].ends_with(" · $0.01 · pass"),
+            said[6].starts_with("verifier   ") && said[6].ends_with(" · $0.01 · pass"),
             "{said:#?}"
         );
 
@@ -3646,5 +3707,198 @@ mod produce_and_verify_order_tests {
             .expect("the job recorded its baseline");
         assert_eq!(baseline.before_invocation, 2);
         assert_eq!(baseline.checks.len(), 1);
+    }
+
+    /// Commits the stored requests, readings and jobs as records in the test repository.
+    fn commit_stored(repo: &tempfile::TempDir, items: &[crate::reading::replay_fixtures::Stored]) {
+        let git = Git::at(repo.path());
+        for s in items {
+            for record in [
+                AnyRecord::Request(s.request.clone()),
+                AnyRecord::Reading(Box::new(s.reading.clone())),
+                AnyRecord::Job(Box::new(s.job.clone())),
+            ] {
+                let full = repo.path().join(record.canonical_path());
+                std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+                std::fs::write(full, record.to_json()).unwrap();
+            }
+        }
+        git.run(["add", "-A"]).unwrap();
+        git.run([
+            "commit",
+            "-q",
+            "-m",
+            "Add earlier accepted readings\n\nAthena-Job: bootstrap",
+        ])
+        .unwrap();
+    }
+
+    /// Runs one fake job over a repository with `history` stored jobs, the candidate refusing the readings at
+    /// `refused` indexes, and returns the result, the athena, the model call count and how many times the
+    /// replay consulted the override.
+    fn run_with_candidate_refusing(
+        refused: std::ops::Range<u32>,
+    ) -> (
+        Finished,
+        Athena,
+        usize,
+        usize,
+        (tempfile::TempDir, tempfile::TempDir),
+    ) {
+        use crate::reading::replay_fixtures::{RefusesIds, plain};
+        use crate::reading::{CompiledRules, replay_override};
+        let repo = repo();
+        commit_stored(&repo, &plain(12));
+        let state = tempfile::tempdir().unwrap();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let athena = athena_counting(&repo, &state, calls.clone());
+        let ids = refused
+            .map(crate::reading::replay_fixtures::id_of)
+            .collect();
+        let guard = replay_override::set(CompiledRules, RefusesIds(ids));
+        let proposal = athena.ask("describe the demo", &Quiet).unwrap();
+        let GoResult::Finished(finished) = athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap()
+        else {
+            panic!("expected the job to finish");
+        };
+        let uses = replay_override::uses();
+        drop(guard);
+        let made = calls.load(std::sync::atomic::Ordering::SeqCst);
+        // The directories are returned so they outlive the caller's reads of the repository.
+        (*finished, athena, made, uses, (repo, state))
+    }
+
+    #[test]
+    fn replay_holds_a_candidate_in_the_pipeline() {
+        use crate::reading::replay_fixtures::id_of;
+        let (finished, athena, _, uses, _state) = run_with_candidate_refusing(0..3);
+        assert_eq!(uses, 1, "the replay consulted the override");
+        assert_eq!(
+            finished.state,
+            OutcomeState::Rejected,
+            "{}",
+            finished.reason
+        );
+        assert!(finished.landed_commit.is_none(), "a held job is not landed");
+        let verification = finished.verification.expect("the verifier ran");
+        assert_eq!(verification.final_verdict, Verdict::Fail);
+        let blocker = verification
+            .findings
+            .iter()
+            .find(|f| f.severity == Severity::Blocker && f.source == FindingSource::Athena)
+            .expect("an Athena blocker finding");
+        for i in 0..3 {
+            assert!(blocker.evidence.contains(id_of(i).as_str()), "{blocker:?}");
+        }
+        assert!(!blocker.evidence.contains(id_of(3).as_str()), "{blocker:?}");
+
+        // The typed record is committed beside the verification, with the same list.
+        let head = athena.head().unwrap();
+        let dir = finished.job.dir();
+        let bytes = athena
+            .git
+            .show_file(&head, &format!("{dir}/replay.json"))
+            .unwrap()
+            .expect("replay.json is committed");
+        let AnyRecord::Replay(replay) = AnyRecord::parse("replay.json", &bytes).unwrap() else {
+            panic!("replay.json is not a replay record");
+        };
+        assert!(replay.held);
+        assert_eq!((replay.newly_refused.len(), replay.total), (3, 12));
+        let listed: BTreeSet<String> = replay
+            .newly_refused
+            .iter()
+            .map(|r| r.request.to_string())
+            .collect();
+        assert_eq!(
+            listed,
+            (0..3)
+                .map(|i| id_of(i).to_string())
+                .collect::<BTreeSet<_>>()
+        );
+        // No free-form replay.md, and the brief the verifier read carries the summary.
+        assert!(
+            athena
+                .git
+                .show_file(&head, &format!("{dir}/replay.md"))
+                .unwrap()
+                .is_none()
+        );
+        let brief = athena
+            .git
+            .show_file(&head, &format!("{dir}/brief-verifier.md"))
+            .unwrap()
+            .expect("the verifier brief is committed");
+        let brief = String::from_utf8(brief).unwrap();
+        assert!(
+            brief.contains("Reading replay: 3 of 12 newly refused"),
+            "{brief}"
+        );
+
+        // The records check accepts the job directory, and the final commit loads without a panic.
+        let loaded = Records::load(&athena.git, &head).unwrap();
+        assert!(loaded.invalid.is_empty(), "{:?}", loaded.invalid);
+        let violations = athena_gate::reconcile::check_tree(&athena.git, &head).unwrap();
+        let ours: Vec<String> = violations
+            .iter()
+            .map(|v| format!("{v:?}"))
+            .filter(|v| v.contains(finished.job.as_str()))
+            .collect();
+        assert!(ours.is_empty(), "{ours:#?}");
+        let job = &loaded.jobs[finished.job.as_str()];
+        assert_eq!(
+            job.state(),
+            crate::store::JobState::Closed(OutcomeState::Rejected)
+        );
+    }
+
+    #[test]
+    fn replay_under_the_threshold_does_not_hold_and_is_recorded() {
+        let (finished, athena, _, uses, _state) = run_with_candidate_refusing(0..1);
+        assert_eq!(uses, 1);
+        assert_eq!(finished.state, OutcomeState::Landed, "{}", finished.reason);
+        let bytes = athena
+            .git
+            .show_file(
+                &athena.head().unwrap(),
+                &format!("{}/replay.json", finished.job.dir()),
+            )
+            .unwrap()
+            .expect("replay.json is committed");
+        let AnyRecord::Replay(replay) = AnyRecord::parse("replay.json", &bytes).unwrap() else {
+            panic!("not a replay");
+        };
+        assert!(!replay.held);
+        assert_eq!((replay.newly_refused.len(), replay.total), (1, 12));
+    }
+
+    #[test]
+    fn replay_makes_no_model_call() {
+        // Run A: the candidate's rules equal the base's. Run B: the candidate newly refuses one reading.
+        let (a, _, calls_a, uses_a, _sa) = run_with_candidate_refusing(0..0);
+        let (b, athena_b, calls_b, uses_b, _sb) = run_with_candidate_refusing(0..1);
+        assert_eq!((uses_a, uses_b), (1, 1), "the replay ran in both runs");
+        assert_eq!(a.state, OutcomeState::Landed, "{}", a.reason);
+        assert_eq!(b.state, OutcomeState::Landed, "{}", b.reason);
+        assert!(calls_a > 0);
+        assert_eq!(calls_a, calls_b, "the replay called no model");
+        let bytes = athena_b
+            .git
+            .show_file(
+                &athena_b.head().unwrap(),
+                &format!("{}/replay.json", b.job.dir()),
+            )
+            .unwrap()
+            .unwrap();
+        let AnyRecord::Replay(replay) = AnyRecord::parse("replay.json", &bytes).unwrap() else {
+            panic!("not a replay");
+        };
+        assert_eq!(
+            replay.newly_refused.len(),
+            1,
+            "run B's replay found the change"
+        );
     }
 }

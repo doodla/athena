@@ -1,8 +1,8 @@
 //! `ask` and `correct`: the reader's reading, with forecasts, committed before any work (design §3.2–3.3).
 
 use crate::admission::{governance_change_is_listed, is_governance};
-use crate::capability::{JobConfig, ToolGrant};
-use crate::checks::tail;
+use crate::capability::{CheckSpec, JobConfig, ToolGrant};
+use crate::checks::{CheckContext, run_check, tail};
 use crate::commits::{NewFile, message};
 use crate::invocation::InvocationFacts;
 use crate::plan::Priority;
@@ -24,13 +24,13 @@ use athena_data::records::{
     DefaultApplied, Deliverable, DeliverableAction, Finding, Forecast, Forecasts, Intervention,
     InterventionCategory, InterventionSource, IntrospectionRecord, IntrospectionStatus,
     IntrospectionTrigger, Invocation, OutcomeState, PreventionKind, PriorityRecord, Quantiles,
-    Reading, Request, Role,
+    Reading, Replay, ReplayRefusal, ReplayStatus, Request, Role,
 };
 use athena_data::{JobId, RecordId};
 use athena_gate::redact::Redactor;
 use athena_git::snapshot::{Snapshot, SnapshotRepo};
 use std::collections::BTreeMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Whether two readings promise the same work: the same capability, the same class of work, and the same
 /// deliverables (path and action). Probabilities, wording, criteria and forecasts may differ. A reading
@@ -2428,6 +2428,697 @@ pub fn check_criteria_evidence(reading: &Reading) -> Result<()> {
     )
 }
 
+// ---------------------------------------------------------------------------------------------------------
+// The reading replay: the newest accepted readings, checked against the base and the candidate rules.
+
+/// How many of the newest requests with an accepted reading the replay checks.
+pub const REPLAY_WINDOW: usize = 50;
+
+/// The share of replayed readings, in percent, above which newly refused readings hold the job. Exactly this
+/// share does not hold. It is a code constant on purpose: no configuration file can loosen it.
+pub const REPLAY_HOLD_PERCENT: u32 = 10;
+
+/// Whole phrases in an acceptance criterion that say the change means to refuse more readings. A candidate
+/// whose accepted reading states that intent is not held for the rise, though the replay is still recorded.
+const REFUSAL_RISE_INTENT: [&str; 5] = [
+    "refuse more",
+    "refuses more",
+    "higher refusal rate",
+    "more refusals",
+    "raise the refusal rate",
+];
+
+/// The longest line `check-reading` prints, in bytes; a longer reason is cut so the line survives the tail a
+/// check run keeps.
+const ACCEPTANCE_LINE_MAX_BYTES: usize = 3000;
+
+/// The most characters of a refusal reason the replay record keeps.
+const REPLAY_REASON_MAX_CHARS: usize = 1000;
+
+/// The directory under a job's own directory where the replay builds both trees; it is removed before the
+/// replay returns.
+const REPLAY_DIR: &str = "replay";
+
+/// Whether a stored request and reading pass the reading rules, with the same rules a new reading must pass
+/// ([`check_reading_acceptance`]). A stored reading carries no earlier attempt or referenced jobs, so the
+/// rules that need them pass; the rest apply as they do to a new reading. `Err` is the refusal reason.
+pub fn check_stored_reading(request: &Request, reading: &Reading) -> Result<(), String> {
+    check_reading_acceptance(reading, &request.text, None, &[]).map_err(|e| format!("{e:#}"))
+}
+
+/// What a checker says of one stored reading.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Acceptance {
+    Accept,
+    Refuse(String),
+}
+
+/// The line `athena check-reading` prints: `accept`, or `refuse: <reason>` on one line.
+pub fn acceptance_line(result: &Result<(), String>) -> String {
+    match result {
+        Ok(()) => "accept".to_string(),
+        Err(reason) => {
+            let flat = reason.split_whitespace().collect::<Vec<_>>().join(" ");
+            let mut end = flat.len().min(ACCEPTANCE_LINE_MAX_BYTES);
+            while !flat.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("refuse: {}", &flat[..end])
+        }
+    }
+}
+
+/// Reads the line [`acceptance_line`] prints out of a command's output. The last line that is `accept` or
+/// starts `refuse: ` counts; anything else is not an answer.
+pub fn parse_acceptance_line(output: &str) -> Option<Acceptance> {
+    output.lines().rev().find_map(|line| {
+        let line = line.trim();
+        if line == "accept" {
+            Some(Acceptance::Accept)
+        } else {
+            line.strip_prefix("refuse: ")
+                .map(|reason| Acceptance::Refuse(reason.to_string()))
+        }
+    })
+}
+
+/// Whether the criteria say the change intends to refuse more readings. Matching is on whole phrases in
+/// lowercase text with white space made single spaces.
+pub fn criteria_intend_higher_refusals(criteria: &[Criterion]) -> bool {
+    criteria.iter().any(|c| {
+        let text = c
+            .text
+            .to_lowercase()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        REFUSAL_RISE_INTENT.iter().any(|p| has_phrase(&text, p))
+    })
+}
+
+/// Whether `newly_refused` of `total` replayed readings hold the job: strictly more than
+/// [`REPLAY_HOLD_PERCENT`] percent, in integer arithmetic so there is no rounding, and not when the criteria
+/// intend a higher refusal rate.
+pub fn replay_holds(newly_refused: usize, total: usize, criteria: &[Criterion]) -> bool {
+    newly_refused * 100 > total * REPLAY_HOLD_PERCENT as usize
+        && !criteria_intend_higher_refusals(criteria)
+}
+
+/// Something that answers whether a stored reading passes one build's reading rules. The replay asks a base
+/// checker and a candidate checker the same question; neither calls a model.
+pub trait ReadingChecker {
+    /// `Err` means the checker could not answer (a build failed, a run timed out); it is never a refusal.
+    fn check(&self, request: &Request, reading: &Reading) -> Result<Acceptance, String>;
+}
+
+/// The reading rules compiled into this binary.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CompiledRules;
+
+impl ReadingChecker for CompiledRules {
+    fn check(&self, request: &Request, reading: &Reading) -> Result<Acceptance, String> {
+        Ok(match check_stored_reading(request, reading) {
+            Ok(()) => Acceptance::Accept,
+            Err(reason) => Acceptance::Refuse(reason),
+        })
+    }
+}
+
+/// One stored request with its accepted reading.
+#[derive(Debug, Clone, Copy)]
+pub struct ReplayInput<'a> {
+    pub request: &'a Request,
+    pub reading: &'a Reading,
+}
+
+/// The newest `window` requests that have an accepted reading, newest first: by when the request was
+/// received, then by id. A request with no accepted reading, no stored request or no such reading number is
+/// left out, and so is `exclude`, the job being checked.
+pub fn replay_inputs<'a>(
+    records: &'a Records,
+    window: usize,
+    exclude: &JobId,
+) -> Vec<ReplayInput<'a>> {
+    let mut found: Vec<ReplayInput<'a>> = records
+        .jobs
+        .values()
+        .filter(|j| {
+            j.id.as_ref()
+                .is_some_and(|id| id.is_request() && id != exclude)
+        })
+        .filter_map(|j| {
+            let n = j.job.as_ref()?.accepted_reading?;
+            Some(ReplayInput {
+                request: j.request.as_ref()?,
+                reading: j.reading(n)?,
+            })
+        })
+        .collect();
+    found.sort_by(|a, b| {
+        (b.request.received_at, &b.request.job).cmp(&(a.request.received_at, &a.request.job))
+    });
+    found.truncate(window);
+    found
+}
+
+/// Asks both checkers about every input and lists the requests the candidate refuses and the base accepts.
+/// A history with no inputs, or a checker that cannot answer, gives a replay that did not run, with its
+/// reason; it is never a pass. The result records the hold decision ([`replay_holds`]).
+pub fn replay_readings(
+    job: &JobId,
+    inputs: &[ReplayInput<'_>],
+    base: &dyn ReadingChecker,
+    candidate: &dyn ReadingChecker,
+    criteria: &[Criterion],
+    base_commit: &str,
+    candidate_commit: &str,
+) -> Replay {
+    let none = |reason: &str| {
+        let mut replay = Replay::none(job.clone(), base_commit, REPLAY_HOLD_PERCENT, reason);
+        replay.candidate_commit = Some(candidate_commit.to_string());
+        replay
+    };
+    if inputs.is_empty() {
+        return none("no request has an accepted reading in the records at the base commit");
+    }
+    let mut newly_refused = Vec::new();
+    for input in inputs {
+        let id = &input.request.job;
+        let was = match base.check(input.request, input.reading) {
+            Ok(a) => a,
+            Err(e) => return none(&format!("the base could not check {id}: {e}")),
+        };
+        let now = match candidate.check(input.request, input.reading) {
+            Ok(a) => a,
+            Err(e) => return none(&format!("the candidate could not check {id}: {e}")),
+        };
+        if let (Acceptance::Accept, Acceptance::Refuse(reason)) = (was, now) {
+            newly_refused.push(ReplayRefusal {
+                request: id.clone(),
+                reason: reason.chars().take(REPLAY_REASON_MAX_CHARS).collect(),
+            });
+        }
+    }
+    let held = replay_holds(newly_refused.len(), inputs.len(), criteria);
+    Replay {
+        job: job.clone(),
+        status: ReplayStatus::Replayed,
+        reason: None,
+        total: inputs.len() as u32,
+        newly_refused,
+        held,
+        threshold_percent: REPLAY_HOLD_PERCENT,
+        base_commit: base_commit.to_string(),
+        candidate_commit: Some(candidate_commit.to_string()),
+        elapsed_s: 0,
+    }
+}
+
+/// A test seam in front of tree resolution and the subcommand probe: a test sets a pair of checkers, and the
+/// replay uses them without checking out, building or probing either tree. It exists only in test builds, so a
+/// release binary has no way to fake or skip the replay.
+#[cfg(test)]
+pub(crate) mod replay_override {
+    use super::{Acceptance, ReadingChecker};
+    use athena_data::records::{Reading, Request};
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+
+    type Pair = (Rc<dyn ReadingChecker>, Rc<dyn ReadingChecker>);
+
+    thread_local! {
+        static SLOT: RefCell<Option<Pair>> = const { RefCell::new(None) };
+        static USES: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Clears the override when dropped.
+    pub(crate) struct Guard;
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            SLOT.with(|s| *s.borrow_mut() = None);
+        }
+    }
+
+    /// Sets the checkers the replay uses on this thread, and resets the use count.
+    pub(crate) fn set(
+        base: impl ReadingChecker + 'static,
+        candidate: impl ReadingChecker + 'static,
+    ) -> Guard {
+        SLOT.with(|s| *s.borrow_mut() = Some((Rc::new(base), Rc::new(candidate))));
+        USES.with(|u| u.set(0));
+        Guard
+    }
+
+    /// How many times the replay consulted the override since [`set`].
+    pub(crate) fn uses() -> usize {
+        USES.with(Cell::get)
+    }
+
+    pub(super) fn take() -> Option<(Box<dyn ReadingChecker>, Box<dyn ReadingChecker>)> {
+        let pair = SLOT.with(|s| s.borrow().clone())?;
+        USES.with(|u| u.set(u.get() + 1));
+        Some((Box::new(Shared(pair.0)), Box::new(Shared(pair.1))))
+    }
+
+    struct Shared(Rc<dyn ReadingChecker>);
+
+    impl ReadingChecker for Shared {
+        fn check(&self, request: &Request, reading: &Reading) -> Result<Acceptance, String> {
+            self.0.check(request, reading)
+        }
+    }
+}
+
+/// What the replay needs from the job being run.
+#[derive(Debug)]
+pub struct ReplayRun<'a> {
+    pub job: &'a JobId,
+    pub base_commit: &'a str,
+    pub candidate_commit: &'a str,
+    /// The accepted reading's criteria, which can state an intent to refuse more.
+    pub criteria: &'a [Criterion],
+    pub job_dir: &'a std::path::Path,
+    pub agents: &'a athena_data::config::Agents,
+    /// The longest one build may run; a probe or a check of one reading gets at most 60 seconds.
+    pub timeout: Duration,
+    pub redactor: &'a Redactor,
+}
+
+/// A built `athena` binary asked through its `check-reading` subcommand.
+struct BinaryChecker<'a> {
+    label: &'static str,
+    binary: std::path::PathBuf,
+    inputs: std::path::PathBuf,
+    ctx: &'a CheckContext<'a>,
+}
+
+impl ReadingChecker for BinaryChecker<'_> {
+    fn check(&self, request: &Request, reading: &Reading) -> Result<Acceptance, String> {
+        let id = &request.job;
+        let request_path = self.inputs.join(format!("{id}-request.json"));
+        let reading_path = self.inputs.join(format!("{id}-reading.json"));
+        let write = |path: &std::path::Path, record: AnyRecord| {
+            std::fs::write(path, record.to_json())
+                .map_err(|e| format!("could not write {}: {e}", path.display()))
+        };
+        write(&request_path, AnyRecord::Request(request.clone()))?;
+        write(&reading_path, AnyRecord::Reading(Box::new(reading.clone())))?;
+        let spec = CheckSpec {
+            name: format!("check-reading {id}"),
+            run: vec![
+                self.binary.display().to_string(),
+                "check-reading".into(),
+                "--request".into(),
+                request_path.display().to_string(),
+                "--reading".into(),
+                reading_path.display().to_string(),
+            ],
+            kind: athena_data::config::CheckKind::Command,
+            skip_when_only: None,
+        };
+        let run = run_check(&spec, self.ctx).map_err(|e| format!("{e:#}"))?;
+        if !run.passed {
+            return Err(format!(
+                "the {} build's check-reading did not complete ({})",
+                self.label,
+                run.note
+                    .unwrap_or_else(|| format!("exit {:?}", run.exit_code))
+            ));
+        }
+        parse_acceptance_line(&run.output_tail).ok_or_else(|| {
+            format!(
+                "the {} build's check-reading printed neither accept nor refuse",
+                self.label
+            )
+        })
+    }
+}
+
+impl Athena {
+    /// Replays the newest accepted readings through the base and the candidate reading rules and returns
+    /// the record. It never fails and makes no model call: any problem gives a replay that did not run, with
+    /// its reason. Its build directory is removed before it returns, so the builds are off the disk before the
+    /// verifier's environment check.
+    pub fn replay_reading_rules(&self, run: &ReplayRun<'_>, ui: &dyn Ui) -> Replay {
+        let started = Instant::now();
+        let mut replay = self.replay_inner(run, ui);
+        let _ = crate::pin::remove_tree(&run.job_dir.join(REPLAY_DIR));
+        replay.candidate_commit = Some(run.candidate_commit.to_string());
+        replay.elapsed_s = started.elapsed().as_secs();
+        replay
+    }
+
+    fn replay_inner(&self, run: &ReplayRun<'_>, ui: &dyn Ui) -> Replay {
+        let none = |reason: &str| {
+            Replay::none(
+                run.job.clone(),
+                run.base_commit,
+                REPLAY_HOLD_PERCENT,
+                reason,
+            )
+        };
+        if self.nested.is_some() {
+            return none("nested run");
+        }
+        let records = match Records::load(&self.git, run.base_commit) {
+            Ok(r) => r,
+            Err(e) => {
+                return none(&format!(
+                    "the records at the base commit did not load: {e:#}"
+                ));
+            }
+        };
+        let inputs = replay_inputs(&records, REPLAY_WINDOW, run.job);
+        if inputs.is_empty() {
+            return none("no request has an accepted reading in the records at the base commit");
+        }
+        let compare = |base: &dyn ReadingChecker, candidate: &dyn ReadingChecker| {
+            replay_readings(
+                run.job,
+                &inputs,
+                base,
+                candidate,
+                run.criteria,
+                run.base_commit,
+                run.candidate_commit,
+            )
+        };
+        // In front of tree resolution and the subcommand probe.
+        #[cfg(test)]
+        if let Some((base, candidate)) = replay_override::take() {
+            return compare(&*base, &*candidate);
+        }
+        for (label, commit) in [
+            ("base", run.base_commit),
+            ("candidate", run.candidate_commit),
+        ] {
+            match self.git.path_exists(commit, "crates/athena-cli/Cargo.toml") {
+                Ok(true) => {}
+                Ok(false) => {
+                    return none(&format!(
+                        "the {label} tree has no crates/athena-cli package, so there is no check-reading to run"
+                    ));
+                }
+                Err(e) => return none(&format!("the {label} tree could not be read: {e}")),
+            }
+        }
+        ui.line(&format!(
+            "replay     building the base and candidate to replay {} accepted readings",
+            inputs.len()
+        ));
+        self.replay_with_builds(run, &none, &compare)
+    }
+
+    /// Builds both trees into one target directory under the job's directory, probes each binary for the
+    /// `check-reading` subcommand, and replays through the two binaries. A build that fails, a binary
+    /// without the subcommand, or an answer that cannot be read gives a replay that did not run.
+    fn replay_with_builds(
+        &self,
+        run: &ReplayRun<'_>,
+        none: &dyn Fn(&str) -> Replay,
+        compare: &dyn Fn(&dyn ReadingChecker, &dyn ReadingChecker) -> Replay,
+    ) -> Replay {
+        let root = run.job_dir.join(REPLAY_DIR);
+        let target = root.join("target");
+        let bin_dir = root.join("bin");
+        let inputs_dir = root.join("inputs");
+        for dir in [&target, &bin_dir, &inputs_dir] {
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                return none(&format!("could not create {}: {e}", dir.display()));
+            }
+        }
+        let mut env = match athena_agent::env::build(
+            &EnvSpec {
+                agents: run.agents,
+                job: run.job.as_str(),
+                job_dir: run.job_dir,
+                snapshot: &root,
+                side: Side::Verify,
+                capability_env: &BTreeMap::new(),
+            },
+            |key| std::env::var(key).ok(),
+        ) {
+            Ok(env) => env,
+            Err(e) => return none(&format!("the build environment could not be made: {e}")),
+        };
+        env.insert("CARGO_TARGET_DIR".into(), target.display().to_string());
+        let registry = self.state.registry();
+        let build_spec = CheckSpec {
+            name: "build athena-cli".into(),
+            run: ["cargo", "build", "--locked", "-p", "athena-cli"]
+                .map(String::from)
+                .to_vec(),
+            kind: athena_data::config::CheckKind::Command,
+            skip_when_only: None,
+        };
+        let mut binaries: Vec<(&'static str, std::path::PathBuf)> = Vec::new();
+        for (label, commit) in [
+            ("base", run.base_commit),
+            ("candidate", run.candidate_commit),
+        ] {
+            let src = root.join(format!("{label}-src"));
+            if let Err(e) = Snapshot::create(&self.git, commit, commit, &src, SnapshotRepo::None) {
+                return none(&format!("the {label} tree could not be checked out: {e}"));
+            }
+            let ctx = CheckContext {
+                dir: &src,
+                env: &env,
+                timeout: run.timeout,
+                registry: &registry,
+                job: run.job.as_str(),
+                redactor: run.redactor,
+            };
+            let built = match run_check(&build_spec, &ctx) {
+                Ok(built) => built,
+                Err(e) => return none(&format!("the {label} build could not run: {e:#}")),
+            };
+            if !built.passed {
+                let why = built
+                    .note
+                    .unwrap_or_else(|| tail(&built.output_tail, 300).replace('\n', " "));
+                return none(&format!("the {label} build failed: {why}"));
+            }
+            let binary = bin_dir.join(label);
+            if let Err(e) = std::fs::copy(target.join("debug").join("athena"), &binary) {
+                return none(&format!("the {label} binary could not be kept: {e}"));
+            }
+            let _ = crate::pin::remove_tree(&src);
+            binaries.push((label, binary));
+        }
+        let ctx = CheckContext {
+            dir: &root,
+            env: &env,
+            timeout: run.timeout.min(Duration::from_secs(60)),
+            registry: &registry,
+            job: run.job.as_str(),
+            redactor: run.redactor,
+        };
+        for (label, binary) in &binaries {
+            let probe = CheckSpec {
+                name: format!("{label} check-reading --help"),
+                run: vec![
+                    binary.display().to_string(),
+                    "check-reading".into(),
+                    "--help".into(),
+                ],
+                kind: athena_data::config::CheckKind::Command,
+                skip_when_only: None,
+            };
+            match run_check(&probe, &ctx) {
+                Ok(r) if r.passed => {}
+                _ => {
+                    return none(&format!(
+                        "the {label} build has no check-reading subcommand"
+                    ));
+                }
+            }
+        }
+        let checker = |(label, binary): &(&'static str, std::path::PathBuf)| BinaryChecker {
+            label,
+            binary: binary.clone(),
+            inputs: inputs_dir.clone(),
+            ctx: &ctx,
+        };
+        compare(&checker(&binaries[0]), &checker(&binaries[1]))
+    }
+}
+
+/// Stored requests and readings for the replay's tests, here and in the pipeline tests.
+#[cfg(test)]
+pub(crate) mod replay_fixtures {
+    use super::{Acceptance, CompiledRules, ReadingChecker};
+    use crate::store::{JobRecords, Records};
+    use athena_data::JobId;
+    use athena_data::records::{
+        Criterion, CriterionKind, Deliverable, DeliverableAction, Forecast, Forecasts, Job,
+        JobKind, Owner, Quantiles, Reading, Request,
+    };
+    use std::collections::BTreeSet;
+
+    /// A request with its accepted reading and job record.
+    #[derive(Debug, Clone)]
+    pub(crate) struct Stored {
+        pub request: Request,
+        pub reading: Reading,
+        pub job: Job,
+    }
+
+    /// The id of the `index`th stored request; a larger index is a later one. `index` is under 1000.
+    pub(crate) fn id_of(index: u32) -> JobId {
+        JobId::parse(&format!(
+            "20260901-{:02}{:02}00-a{:03}",
+            index / 60,
+            index % 60,
+            index
+        ))
+        .unwrap()
+    }
+
+    /// The `index`th stored request, received `index` minutes after the first, with an accepted reading titled
+    /// `title` whose one criterion is `criterion`.
+    pub(crate) fn stored(index: u32, title: &str, criterion: &str) -> Stored {
+        let id = id_of(index);
+        let at = jiff::Timestamp::from_second(1_788_000_000 + i64::from(index) * 60).unwrap();
+        let forecast = Forecast {
+            p_reading_accepted: 0.8,
+            p_verification_passes: 0.7,
+            p_user_intervenes: 0.1,
+            cost_usd: Quantiles::new(0.2, 0.5, 1.5).unwrap(),
+            wall_time_s: Quantiles::new(100.0, 300.0, 900.0).unwrap(),
+        };
+        Stored {
+            request: Request {
+                job: id.clone(),
+                text: format!("Change the demo, part {index}."),
+                received_at: at,
+                channel: "cli".into(),
+            },
+            reading: Reading {
+                job: id.clone(),
+                n: 1,
+                at,
+                invocation_seq: 1,
+                base_commit: "a".repeat(40),
+                config_sha256: "b".repeat(64),
+                defaults_sha256: "c".repeat(64),
+                defaults_version: 1,
+                title: title.into(),
+                summary: "Change the demo.".into(),
+                class_of_work: "feature".into(),
+                capability: Some("change".into()),
+                decline_reason: None,
+                producer_model: "producer".into(),
+                verifier_model: "verifier".into(),
+                defaults_applied: vec![],
+                assumptions: vec![],
+                question: None,
+                acceptance_criteria: vec![Criterion {
+                    text: criterion.into(),
+                    kind: CriterionKind::Behavior,
+                }],
+                deliverables: vec![Deliverable {
+                    path: "src/demo.rs".into(),
+                    action: DeliverableAction::Modify,
+                    p: 0.9,
+                }],
+                out_of_scope: vec![],
+                forecasts: Forecasts {
+                    reader: forecast.clone(),
+                    reference: forecast,
+                },
+                departures: None,
+                urgent_reason: None,
+                hard_reason: None,
+                producer_effort: None,
+            },
+            job: Job {
+                id,
+                kind: JobKind::Request,
+                title: title.into(),
+                class_of_work: None,
+                capability: None,
+                accepted_reading: Some(1),
+                accepted_by: None,
+                owner: Owner {
+                    role: "athena".into(),
+                    capability: None,
+                    model: None,
+                    note: None,
+                },
+                verifier_model: None,
+                caps: None,
+                base_commit: None,
+                config_sha256: None,
+                defaults_sha256: None,
+                athena: None,
+                driver: None,
+                brief_sha256: None,
+                dispatched_at: None,
+                request_path: None,
+                request_sha256: None,
+                cost: None,
+                tokens: None,
+                note: None,
+                pin: None,
+            },
+        }
+    }
+
+    /// `count` stored requests with plain titles and a criterion every build accepts.
+    pub(crate) fn plain(count: u32) -> Vec<Stored> {
+        (0..count)
+            .map(|i| stored(i, &format!("Plain {i}"), "cargo test --locked passes"))
+            .collect()
+    }
+
+    /// The records those stored requests make, in memory.
+    pub(crate) fn records_of(items: &[Stored]) -> Records {
+        let mut records = Records::default();
+        for s in items {
+            records.jobs.insert(
+                s.request.job.as_str().to_string(),
+                JobRecords {
+                    id: Some(s.request.job.clone()),
+                    request: Some(s.request.clone()),
+                    readings: vec![s.reading.clone()],
+                    job: Some(s.job.clone()),
+                    ..Default::default()
+                },
+            );
+        }
+        records
+    }
+
+    /// A candidate-like rule change: the compiled rules, and a new refusal of every reading whose title
+    /// starts with `prefix`.
+    pub(crate) struct RefusesTitled(pub &'static str);
+
+    impl ReadingChecker for RefusesTitled {
+        fn check(&self, request: &Request, reading: &Reading) -> Result<Acceptance, String> {
+            if reading.title.starts_with(self.0) {
+                return Ok(Acceptance::Refuse(format!(
+                    "the title starts with {:?}",
+                    self.0
+                )));
+            }
+            CompiledRules.check(request, reading)
+        }
+    }
+
+    /// A candidate that also refuses the readings of these requests.
+    pub(crate) struct RefusesIds(pub BTreeSet<JobId>);
+
+    impl ReadingChecker for RefusesIds {
+        fn check(&self, request: &Request, reading: &Reading) -> Result<Acceptance, String> {
+            if self.0.contains(&request.job) {
+                return Ok(Acceptance::Refuse("a new rule refuses it".into()));
+            }
+            CompiledRules.check(request, reading)
+        }
+    }
+}
+
 /// The records of a job at the current commit.
 pub fn job_records(athena: &Athena, job_ref: &str) -> Result<(Records, JobRecords)> {
     let head = athena.head()?;
@@ -2440,6 +3131,204 @@ pub fn job_records(athena: &Athena, job_ref: &str) -> Result<(Records, JobRecord
 /// A reading's title: the first line of the reader's text, cut at a word boundary.
 fn reading_title(text: &str) -> String {
     crate::truncate_at_word(text.lines().next().unwrap_or(""), crate::SUBJECT_MAX)
+}
+
+#[cfg(test)]
+mod replay_tests {
+    use super::replay_fixtures::{RefusesIds, RefusesTitled, id_of, plain, records_of, stored};
+    use super::*;
+    use std::collections::BTreeSet;
+
+    const BAD_CRITERION: &str = "the producer's report lists the caller-check Grep";
+
+    fn replay_of(
+        items: &[replay_fixtures::Stored],
+        candidate: &dyn ReadingChecker,
+        criteria: &[Criterion],
+    ) -> Replay {
+        let records = records_of(items);
+        let inputs = replay_inputs(&records, REPLAY_WINDOW, &id_of(999));
+        replay_readings(
+            &id_of(999),
+            &inputs,
+            &CompiledRules,
+            candidate,
+            criteria,
+            &"a".repeat(40),
+            &"b".repeat(40),
+        )
+    }
+
+    fn refusing(indexes: impl IntoIterator<Item = u32>) -> RefusesIds {
+        RefusesIds(indexes.into_iter().map(id_of).collect::<BTreeSet<_>>())
+    }
+
+    fn criterion(text: &str) -> Vec<Criterion> {
+        vec![Criterion {
+            text: text.into(),
+            kind: CriterionKind::Behavior,
+        }]
+    }
+
+    #[test]
+    fn replay_lists_newly_refused_requests_with_the_count_and_not_those_the_base_refuses() {
+        let mut items = plain(12);
+        for i in [2, 5, 8, 10] {
+            items[i].reading.title = format!("T-{i}");
+        }
+        // The base already refuses this one, so it is not newly refused.
+        items[8].reading.acceptance_criteria[0].text = BAD_CRITERION.into();
+        let replay = replay_of(
+            &items,
+            &RefusesTitled("T-"),
+            &criterion("cargo test passes"),
+        );
+        assert_eq!(replay.status, ReplayStatus::Replayed);
+        assert_eq!(replay.total, 12);
+        let listed: Vec<JobId> = replay
+            .newly_refused
+            .iter()
+            .map(|r| r.request.clone())
+            .collect();
+        // Newest first: index 10, 5, 2.
+        assert_eq!(listed, [id_of(10), id_of(5), id_of(2)]);
+        assert_eq!(replay.newly_refused.len(), 3);
+        assert!(!listed.contains(&id_of(8)));
+        assert!(replay.newly_refused[0].reason.contains("T-"));
+        assert!(replay.held, "3 of 12 is above 10%");
+    }
+
+    #[test]
+    fn replay_window_is_the_newest_fifty_with_an_accepted_reading() {
+        let mut items = plain(65);
+        for item in items.iter_mut().skip(60) {
+            item.job.accepted_reading = None;
+        }
+        let records = records_of(&items);
+        let picked = replay_inputs(&records, REPLAY_WINDOW, &id_of(999));
+        let ids: Vec<JobId> = picked.iter().map(|i| i.request.job.clone()).collect();
+        let expected: Vec<JobId> = (10..60).rev().map(id_of).collect();
+        assert_eq!(ids.len(), REPLAY_WINDOW);
+        assert_eq!(
+            ids, expected,
+            "newest first, none without an accepted reading"
+        );
+        // The job being checked is left out.
+        let without = replay_inputs(&records, REPLAY_WINDOW, &id_of(59));
+        assert!(without.iter().all(|i| i.request.job != id_of(59)));
+    }
+
+    #[test]
+    fn replay_window_with_an_empty_history_is_no_replay_and_never_a_pass() {
+        let replay = replay_of(&[], &RefusesTitled("T-"), &[]);
+        assert_eq!(replay.status, ReplayStatus::NoReplay);
+        assert!(
+            replay
+                .reason
+                .as_deref()
+                .is_some_and(|r| r.starts_with("no replay: ")),
+            "{:?}",
+            replay.reason
+        );
+        assert_eq!(replay.total, 0);
+        assert!(!replay.held && replay.newly_refused.is_empty());
+        // Jobs without an accepted reading are an empty history too.
+        let mut items = plain(3);
+        for item in &mut items {
+            item.job.accepted_reading = None;
+        }
+        let replay = replay_of(&items, &RefusesTitled("T-"), &[]);
+        assert_eq!(replay.status, ReplayStatus::NoReplay);
+    }
+
+    #[test]
+    fn replay_hold_threshold_is_strictly_above_ten_percent_unless_the_criteria_intend_it() {
+        let items = plain(50);
+        let none = criterion("cargo test passes");
+        let six = replay_of(&items, &refusing(0..6), &none);
+        assert_eq!((six.newly_refused.len(), six.total), (6, 50));
+        assert!(six.held, "6 of 50 is 12%");
+        let five = replay_of(&items, &refusing(0..5), &none);
+        assert_eq!(five.newly_refused.len(), 5);
+        assert!(!five.held, "exactly 10% is not held");
+        let zero = replay_of(&items, &refusing(0..0), &none);
+        assert!(!zero.held && zero.newly_refused.is_empty());
+        assert_eq!(
+            zero.status,
+            ReplayStatus::Replayed,
+            "no refusals is a replay that ran"
+        );
+        // A candidate whose criteria intend more refusals is not held, and the replay is still recorded.
+        let intended = replay_of(
+            &items,
+            &refusing(0..6),
+            &criterion("the checker refuses more readings than before"),
+        );
+        assert!(!intended.held);
+        assert_eq!((intended.newly_refused.len(), intended.total), (6, 50));
+        assert_eq!(intended.status, ReplayStatus::Replayed);
+        // A small total: 3 of 10 is 30%.
+        let small = replay_of(&plain(10), &refusing(0..3), &none);
+        assert!(small.held);
+        assert_eq!(small.newly_refused.len(), 3);
+    }
+
+    #[test]
+    fn a_checker_that_cannot_answer_gives_no_replay_not_a_partial_count() {
+        struct Broken;
+        impl ReadingChecker for Broken {
+            fn check(&self, _: &Request, _: &Reading) -> Result<Acceptance, String> {
+                Err("timed out".into())
+            }
+        }
+        let replay = replay_of(&plain(5), &Broken, &[]);
+        assert_eq!(replay.status, ReplayStatus::NoReplay);
+        assert!(replay.reason.as_deref().unwrap().contains("timed out"));
+        assert!(!replay.held && replay.newly_refused.is_empty());
+    }
+
+    #[test]
+    fn check_reading_lines_round_trip_and_follow_the_acceptance_rules() {
+        let good = stored(1, "Good", "cargo test --locked passes");
+        let bad = stored(2, "Bad", BAD_CRITERION);
+        let accept = acceptance_line(&check_stored_reading(&good.request, &good.reading));
+        assert_eq!(accept, "accept");
+        let refuse = acceptance_line(&check_stored_reading(&bad.request, &bad.reading));
+        assert!(refuse.starts_with("refuse: "), "{refuse}");
+        assert!(!refuse.contains('\n'));
+        let direct = check_reading_acceptance(&bad.reading, &bad.request.text, None, &[])
+            .unwrap_err()
+            .to_string();
+        let flat = direct.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert_eq!(refuse, format!("refuse: {flat}"));
+        assert_eq!(parse_acceptance_line(&accept), Some(Acceptance::Accept));
+        assert_eq!(
+            parse_acceptance_line(&format!("noise\n{refuse}\n")),
+            Some(Acceptance::Refuse(flat))
+        );
+        assert_eq!(parse_acceptance_line("what"), None);
+        let long = acceptance_line(&Err("é".repeat(5000)));
+        assert!(long.len() <= ACCEPTANCE_LINE_MAX_BYTES + "refuse: ".len());
+    }
+
+    #[test]
+    fn the_hold_threshold_is_a_constant_and_each_intent_phrase_is_matched_whole() {
+        assert_eq!(REPLAY_HOLD_PERCENT, 10);
+        assert_eq!(REPLAY_WINDOW, 50);
+        for text in [
+            "The rule refuses more readings",
+            "a higher refusal rate is expected",
+            "it raises more refusals on purpose",
+        ] {
+            assert!(criteria_intend_higher_refusals(&criterion(text)), "{text}");
+        }
+        assert!(!criteria_intend_higher_refusals(&criterion(
+            "it refuses morels"
+        )));
+        assert!(!criteria_intend_higher_refusals(&criterion(
+            "cargo test passes"
+        )));
+    }
 }
 
 #[cfg(test)]

@@ -14,7 +14,7 @@
 use athena_context::outputs::{SeverityOutput, VerdictOutput, VerdictValue};
 use athena_data::records::{
     Baseline, CheckRun, Criterion, CriterionKind, CriterionResult, Finding, FindingSource,
-    PRE_EXISTING_NOTE, Severity, Verdict, Verification,
+    PRE_EXISTING_NOTE, Replay, Severity, Verdict, Verification,
 };
 
 /// A candidate that passed verification: the only input landing accepts.
@@ -447,6 +447,41 @@ pub fn judge(inputs: &VerdictInputs<'_>) -> Judgment {
         final_verdict: if pass { Verdict::Pass } else { Verdict::Fail },
         reasons,
     }
+}
+
+/// Applies a held reading replay to a judgment: an Athena-sourced blocker finding that names every newly
+/// refused request, a reason, and a final verdict of fail. A replay that is not held changes nothing, so a
+/// replay that did not run, or one under the threshold, never changes a verdict. Call it right after
+/// [`judge`], before the verification record is built, so the stored verdict, findings and state agree.
+pub fn apply_replay_hold(judgment: &mut Judgment, replay: &Replay) {
+    if !replay.held {
+        return;
+    }
+    let list: Vec<String> = replay
+        .newly_refused
+        .iter()
+        .map(|r| r.request.to_string())
+        .collect();
+    judgment.reasons.push(format!(
+        "the reading replay holds the job: {} of {} accepted readings are newly refused (more than {}%)",
+        replay.newly_refused.len(),
+        replay.total,
+        replay.threshold_percent
+    ));
+    judgment.findings.push(athena_finding(
+        Severity::Blocker,
+        format!(
+            "The change newly refuses {} of {} previously accepted readings, more than {}%",
+            replay.newly_refused.len(),
+            replay.total,
+            replay.threshold_percent
+        ),
+        format!(
+            "refused by the candidate and accepted by the base: {}; see replay.json for each reason",
+            list.join(", ")
+        ),
+    ));
+    judgment.final_verdict = Verdict::Fail;
 }
 
 /// Constructs [`Verified`] from a judgment: `Some` only on a final verdict of pass.
@@ -1076,6 +1111,54 @@ mod tests {
             map_candidate: None,
             baseline: None,
         })
+    }
+
+    fn replay_of(held: bool) -> Replay {
+        use athena_data::records::{ReplayRefusal, ReplayStatus};
+        Replay {
+            job: athena_data::JobId::parse("20261010-153012-k7q2").unwrap(),
+            status: ReplayStatus::Replayed,
+            reason: None,
+            total: 10,
+            newly_refused: ["20261001-100000-aaaa", "20261001-110000-bbbb"]
+                .iter()
+                .map(|id| ReplayRefusal {
+                    request: athena_data::JobId::parse(id).unwrap(),
+                    reason: "no evidence".into(),
+                })
+                .collect(),
+            held,
+            threshold_percent: 10,
+            base_commit: "a".repeat(40),
+            candidate_commit: Some("b".repeat(40)),
+            elapsed_s: 1,
+        }
+    }
+
+    #[test]
+    fn a_held_replay_fails_a_passing_judgment_with_a_blocker_that_names_the_list() {
+        let clean = judged_with_fault(None);
+        assert_eq!(clean.final_verdict, Verdict::Pass);
+        let mut not_held = clean.clone();
+        apply_replay_hold(&mut not_held, &replay_of(false));
+        assert_eq!(not_held, clean, "a replay that is not held changes nothing");
+
+        let mut held = clean.clone();
+        apply_replay_hold(&mut held, &replay_of(true));
+        assert_eq!(held.final_verdict, Verdict::Fail);
+        assert!(held.reasons.iter().any(|r| r.contains("2 of 10")));
+        let blocker = held
+            .findings
+            .iter()
+            .find(|f| f.severity == Severity::Blocker)
+            .expect("a blocker finding");
+        assert_eq!(blocker.source, FindingSource::Athena);
+        assert!(blocker.evidence.contains("20261001-100000-aaaa"));
+        assert!(blocker.evidence.contains("20261001-110000-bbbb"));
+        assert!(
+            verified(&held, "base", "cand", "fp").is_none(),
+            "a held job cannot be landed"
+        );
     }
 
     #[test]

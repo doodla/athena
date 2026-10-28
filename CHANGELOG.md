@@ -7,6 +7,34 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- A change that refuses readings the base accepted is now held. Root cause: nothing compared a change to the
+  reading rules with the readings already accepted, so a rule could start refusing ordinary requests and the
+  first sign was a stalled drain. New subcommand `athena check-reading --request <file> --reading <file>` takes
+  a stored `athena.request/1` and `athena.reading/1` record and prints `accept` or `refuse: <reason>`, using the
+  same acceptance rules as a new reading (`check_reading_acceptance`); it calls no model. Before the verifier,
+  every job now replays the newest 50 requests that have an accepted reading (`REPLAY_WINDOW`) through the base
+  build and the candidate build, each built from its commit and asked through `check-reading`, and lists the
+  requests the candidate refuses and the base accepts. More than 10% newly refused (`REPLAY_HOLD_PERCENT`, a
+  code constant; exactly 10% is not held) fails the verdict: an Athena-sourced Blocker finding names the list,
+  and the job is Rejected and not landed. A candidate whose accepted criteria state an intent to refuse more
+  ("refuses more", "higher refusal rate", "more refusals", "raise the refusal rate") is not held, and the replay
+  is still recorded. The result is a new record kind `athena.replay/1` at `<job>/replay.json` (status,
+  counts, the newly refused requests with their reasons, held, base and candidate commits, seconds taken); it
+  is listed in `docs/records.md`. The verifier's brief gains a "Reading replay" section with the newly refused
+  count, the total and up to 20 listed requests (each reason cut to 160 characters, the whole section under 4096
+  bytes, the rest counted and left to `replay.json`), or `no replay: <reason>`. An empty history, a tree with no
+  `athena-cli` package, a failed build, a build without the subcommand, a nested run or an unreadable answer
+  gives `no replay: <reason>`; it is never a pass and never a partial count. The replay makes no model call, has
+  no switch to skip it, and removes its build directory before the disk check that precedes the verifier. The
+  first landing of this change has a base without `check-reading`, so its own replay records `no replay: the
+  base build has no check-reading subcommand`. No existing reading rule changed, and `athena.toml`,
+  `defaults.toml` and the workflows are unchanged. Tests cover the subcommand's two outputs, the newly refused
+  list, the 50-request window, the empty history, the 10% boundary and the stated intent, the record's schema
+  and path, the hold in the pipeline (Rejected, the Blocker, `replay.json`, no `replay.md`, the records check),
+  equal model call counts with and without a candidate rule change, and the brief with a very long list.
+
 ### Changed
 
 - Job planning is back on for hard jobs only, and the keep rule now counts later harm as well as landed share

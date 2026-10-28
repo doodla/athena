@@ -9,7 +9,8 @@ use athena_data::DefaultsModel;
 use athena_data::JobId;
 use athena_data::records::{
     CriterionKind, DeliverableAction, Demonstration, FailureClass, Finding, FindingSource,
-    Forecast, IntrospectionRecord, IntrospectionStatus, JobPlan, PinnedRepo, Reading, Severity,
+    Forecast, IntrospectionRecord, IntrospectionStatus, JobPlan, PinnedRepo, Reading, Replay,
+    ReplayStatus, Severity,
 };
 use std::fmt::Write;
 
@@ -694,12 +695,85 @@ pub struct VerifierInputs {
     pub tool_config_from_base: Vec<String>,
     /// The repository Athena pinned for a study, when the capability pins one.
     pub pin: Option<PinnedRepo>,
+    /// The reading replay of this job, when one was taken: how many of the newest accepted readings the
+    /// candidate newly refuses. `None` leaves the brief as it was.
+    pub replay: Option<Replay>,
+}
+
+/// The most bytes the reading replay section of the verifier brief may take. The full list stays in
+/// `replay.json`; the brief shows a bounded part of it.
+pub const REPLAY_SECTION_MAX_BYTES: usize = 4096;
+
+/// The most newly refused requests the brief lists one by one.
+const REPLAY_LISTED_MAX: usize = 20;
+
+/// The most characters of a refusal reason the brief shows.
+const REPLAY_REASON_CHARS: usize = 160;
+
+/// The name of the replay among the verifier's inputs.
+pub const REPLAY_INPUT_NAME: &str = "reading replay";
+
+/// The reading replay section of the verifier brief, at most [`REPLAY_SECTION_MAX_BYTES`] bytes.
+fn replay_section(out: &mut String, replay: &Replay) {
+    let mut s = String::from("## Reading replay\n\n");
+    if replay.status == ReplayStatus::NoReplay {
+        let reason = replay
+            .reason
+            .as_deref()
+            .unwrap_or("no replay: no reason recorded");
+        let _ = writeln!(
+            s,
+            "{}\n\nThe stored accepted readings were not checked against the candidate's rules; this is not a \
+             pass. Judge the change to any reading rule from the diff.\n",
+            replay_one_line(reason, 300)
+        );
+        out.push_str(&s);
+        return;
+    }
+    let n = replay.newly_refused.len();
+    let _ = writeln!(
+        s,
+        "Reading replay: {n} of {} newly refused (refused by the candidate's reading rules, accepted by the \
+         base's). The job is {} above {}%.\n",
+        replay.total,
+        if replay.held { "held" } else { "not held" },
+        replay.threshold_percent
+    );
+    let tail_reserve = 96;
+    let mut shown = 0;
+    for r in replay.newly_refused.iter().take(REPLAY_LISTED_MAX) {
+        let line = format!(
+            "- {}: {}\n",
+            r.request,
+            replay_one_line(&r.reason, REPLAY_REASON_CHARS)
+        );
+        if s.len() + line.len() + tail_reserve > REPLAY_SECTION_MAX_BYTES {
+            break;
+        }
+        s.push_str(&line);
+        shown += 1;
+    }
+    if shown < n {
+        let _ = writeln!(s, "... and {} more (full list in replay.json)", n - shown);
+    }
+    s.push('\n');
+    out.push_str(&s);
+}
+
+/// `text` on one line, cut to `max` characters with an ellipsis.
+fn replay_one_line(text: &str, max: usize) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= max {
+        return flat;
+    }
+    let cut: String = flat.chars().take(max).collect();
+    format!("{}…", cut.trim_end())
 }
 
 impl VerifierInputs {
     /// The names of the inputs, recorded in `verification.json`.
     pub fn names(&self) -> Vec<String> {
-        [
+        let mut names: Vec<String> = [
             "request",
             "accepted reading",
             "acceptance criteria",
@@ -710,7 +784,11 @@ impl VerifierInputs {
         ]
         .into_iter()
         .map(String::from)
-        .collect()
+        .collect();
+        if self.replay.is_some() {
+            names.push(REPLAY_INPUT_NAME.into());
+        }
+        names
     }
 }
 
@@ -782,6 +860,9 @@ pub fn verifier_brief_with_plan(
         verifier_plan_section(&mut out, plan);
     }
     pin_section(&mut out, inputs.pin.as_ref());
+    if let Some(replay) = &inputs.replay {
+        replay_section(&mut out, replay);
+    }
     let c = &inputs.candidate;
     let _ = writeln!(
         out,
@@ -2087,6 +2168,7 @@ mod tests {
             commands: vec![],
             tool_config_from_base: vec![],
             pin: None,
+            replay: None,
         };
         let brief = verifier_brief(&inputs, true);
         assert!(brief.contains("## Scope"));
@@ -2112,6 +2194,7 @@ mod tests {
             commands: vec![],
             tool_config_from_base: vec![],
             pin: None,
+            replay: None,
         };
         let brief = verifier_brief(&inputs, true);
         assert!(brief.contains(
@@ -2135,6 +2218,7 @@ mod tests {
             commands: vec![],
             tool_config_from_base: vec![],
             pin: Some(pin()),
+            replay: None,
         };
         let brief = verifier_brief(&inputs, true);
         assert!(brief.contains("## Pinned source"));
@@ -2242,6 +2326,7 @@ mod tests {
             commands: vec!["cargo test".into()],
             tool_config_from_base: vec![],
             pin: None,
+            replay: None,
         };
         assert!(verifier_brief(&inputs, true).contains("+# Changelog"));
         let recorded = verifier_brief(&inputs, false);
@@ -2653,7 +2738,106 @@ mod tests {
             commands: vec!["cargo test".into()],
             tool_config_from_base: vec![],
             pin: None,
+            replay: None,
         }
+    }
+
+    fn replay_with(count: usize, reason_len: usize) -> Replay {
+        use athena_data::records::ReplayRefusal;
+        Replay {
+            job: JobId::parse("20261010-153012-k7q2").unwrap(),
+            status: ReplayStatus::Replayed,
+            reason: None,
+            total: 50,
+            newly_refused: (0..count)
+                .map(|i| ReplayRefusal {
+                    request: JobId::parse(&format!("20261001-1000{:02}-ab{:02}", i % 60, i % 100))
+                        .unwrap(),
+                    reason: "x".repeat(reason_len),
+                })
+                .collect(),
+            held: count * 100 > 50 * 10,
+            threshold_percent: 10,
+            base_commit: "1".repeat(40),
+            candidate_commit: Some("2".repeat(40)),
+            elapsed_s: 5,
+        }
+    }
+
+    fn replay_section_of(brief: &str) -> &str {
+        let start = brief.find("## Reading replay").expect("a replay section");
+        let end = brief.find("## The change").unwrap();
+        &brief[start..end]
+    }
+
+    #[test]
+    fn replay_summary_in_the_verifier_brief_has_count_total_and_each_id() {
+        let mut inputs = plain_verifier_inputs();
+        let mut replay = replay_with(3, 20);
+        replay.total = 40;
+        replay.held = false;
+        inputs.replay = Some(replay.clone());
+        let brief = verifier_brief(&inputs, true);
+        let section = replay_section_of(&brief);
+        assert!(section.contains("3 of 40 newly refused"), "{section}");
+        for r in &replay.newly_refused {
+            assert!(section.contains(r.request.as_str()), "{section}");
+        }
+        assert!(inputs.names().contains(&REPLAY_INPUT_NAME.to_string()));
+    }
+
+    #[test]
+    fn replay_that_did_not_run_shows_no_replay_and_its_reason() {
+        let mut inputs = plain_verifier_inputs();
+        inputs.replay = Some(Replay::none(
+            JobId::parse("20261010-153012-k7q2").unwrap(),
+            &"1".repeat(40),
+            10,
+            "no accepted readings at the base",
+        ));
+        let brief = verifier_brief(&inputs, true);
+        assert!(
+            replay_section_of(&brief).contains("no replay: no accepted readings at the base"),
+            "{brief}"
+        );
+        assert!(!brief.contains("newly refused ("));
+    }
+
+    #[test]
+    fn replay_section_stays_within_its_size_limit_with_a_very_long_list() {
+        let mut inputs = plain_verifier_inputs();
+        inputs.replay = Some(replay_with(50, 300));
+        let brief = verifier_brief(&inputs, true);
+        let section = replay_section_of(&brief);
+        assert!(
+            section.len() <= REPLAY_SECTION_MAX_BYTES,
+            "{} bytes",
+            section.len()
+        );
+        assert!(section.contains("50 of 50 newly refused"));
+        // The byte cap may stop the list before the 20-entry cap; the rest are counted either way.
+        assert!(
+            section.contains("... and ") && section.contains(" more (full list in replay.json)"),
+            "{section}"
+        );
+        let mut capped = plain_verifier_inputs();
+        capped.replay = Some(replay_with(50, 300));
+        let uncapped_len: usize = capped
+            .replay
+            .as_ref()
+            .unwrap()
+            .newly_refused
+            .iter()
+            .map(|r| r.request.as_str().len() + r.reason.len() + 4)
+            .sum();
+        assert!(section.len() < uncapped_len, "the list is cut");
+    }
+
+    #[test]
+    fn a_brief_without_a_replay_has_no_replay_section() {
+        let inputs = plain_verifier_inputs();
+        assert!(!verifier_brief(&inputs, true).contains("Reading replay"));
+        assert!(!inputs.names().contains(&REPLAY_INPUT_NAME.to_string()));
     }
 
     /// The verifier brief for `plain_verifier_inputs` as it was before plans existed, captured from the

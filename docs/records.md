@@ -35,6 +35,7 @@ records/
     job.json                     athena.job/1           the dispatched job: accepted reading, owner, models, caps
     brief-producer.md            the producer brief, verbatim
     baseline.json                athena.baseline/1      the configured checks run on the base commit before the producer; recorded only
+    replay.json                  athena.replay/1        the newest accepted readings checked against the base and candidate reading rules; the newly refused list and whether it held the job
     invocations/<seq>-<role>.json athena.invocation/1   one model invocation
     candidate.json               athena.candidate/2     the change list, fingerprint, admission, producer report, chain links (/1 for older jobs)
     brief-verifier.md            the verifier brief, with the diff elided
