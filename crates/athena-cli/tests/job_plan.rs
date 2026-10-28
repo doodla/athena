@@ -922,6 +922,190 @@ fn with_planning_absent_or_off_the_invocations_are_the_producer_verifier_pair_on
 }
 
 // ---------------------------------------------------------------------------------------------------------
+// Hard-jobs-only planning (D143): the repository's own `[job_plan]` plans a job whose reading is marked hard.
+
+/// [`test_config`] with the repository's own `[job_plan]` table from `athena.toml`, as the file sets it.
+fn repository_job_plan_config() -> String {
+    let raw = include_str!("../../../athena.toml");
+    let start = raw.find("[job_plan]").expect("athena.toml has [job_plan]");
+    let table: String = raw[start..]
+        .split_inclusive('\n')
+        .enumerate()
+        .take_while(|(i, line)| *i == 0 || !line.trim_start().starts_with('['))
+        .map(|(_, line)| line)
+        .collect();
+    format!("{}\n{table}", test_config())
+}
+
+/// A scripted reader that marks its reading hard, or not.
+fn reader_scenario(hard_reason: Value) -> Scenario {
+    let mut scenario = Scenario::default();
+    scenario.reading["hard_reason"] = hard_reason;
+    scenario
+}
+
+#[test]
+fn with_athena_toml_planning_hard_jobs_only_a_hard_reading_runs_the_planner_and_critic_and_an_ordinary_one_does_not()
+ {
+    let config = repository_job_plan_config();
+    let plan = athena_data::Config::parse(&config)
+        .unwrap()
+        .job_plan
+        .unwrap();
+    assert!(plan.enabled && plan.mode == athena_data::config::PlanMode::Hard);
+
+    for (hard_reason, roles, names) in [
+        (
+            json!("changes a rule that can hold a drain"),
+            vec![
+                Role::Reader,
+                Role::Planner,
+                Role::Critic,
+                Role::Producer,
+                Role::Verifier,
+            ],
+            vec![
+                "01-reader.json",
+                "02-planner.json",
+                "03-critic.json",
+                "04-producer.json",
+                "05-verifier.json",
+            ],
+        ),
+        (
+            json!(null),
+            vec![Role::Reader, Role::Producer, Role::Verifier],
+            vec!["01-reader.json", "02-producer.json", "03-verifier.json"],
+        ),
+    ] {
+        let fx = Fixture::with_config(&config);
+        let scenario = reader_scenario(hard_reason.clone());
+        let calls = scenario.invocations.clone();
+        let athena = fx.athena(scenario.script());
+        let (job, f) = run_job(&athena);
+        assert_eq!(f.state, OutcomeState::Landed, "{hard_reason}: {}", f.reason);
+        assert_eq!(*calls.lock().unwrap(), roles, "{hard_reason}");
+        let dir = job.dir();
+        assert_eq!(invocation_names(&fx, &fx.head(), &dir), names);
+        let has_plan = hard_reason != json!(null);
+        for path in ["job-plan-1.json", "critique-1.json"] {
+            assert_eq!(
+                fx.git
+                    .path_exists(&fx.head(), &format!("{dir}/{path}"))
+                    .unwrap(),
+                has_plan,
+                "{path} for {hard_reason}"
+            );
+        }
+        assert!(athena.check_history().unwrap().violations.is_empty());
+    }
+}
+
+#[test]
+fn a_hard_reading_with_planning_enabled_for_every_job_and_one_with_planning_off_follow_the_mode() {
+    // `mode = "all"` plans an ordinary reading too; `enabled = false` plans nothing, not even a hard one.
+    for (table, ordinary_planned, hard_planned) in [
+        ("[job_plan]\nenabled = true\nmode = \"all\"\n", true, true),
+        (
+            "[job_plan]\nenabled = false\nmode = \"hard\"\n",
+            false,
+            false,
+        ),
+    ] {
+        for (hard_reason, expected) in [
+            (json!(null), ordinary_planned),
+            (json!("changes landing"), hard_planned),
+        ] {
+            let fx = Fixture::with_config(&format!("{}\n{table}", test_config()));
+            let scenario = reader_scenario(hard_reason.clone());
+            let calls = scenario.invocations.clone();
+            let athena = fx.athena(scenario.script());
+            let (_, f) = run_job(&athena);
+            assert_eq!(f.state, OutcomeState::Landed, "{}", f.reason);
+            assert_eq!(
+                calls.lock().unwrap().contains(&Role::Planner),
+                expected,
+                "{table} {hard_reason}"
+            );
+        }
+    }
+}
+
+#[test]
+fn status_reports_planned_and_unplanned_landings_later_cited_as_a_revert_or_fix_beside_the_landed_share()
+ {
+    let fx = Fixture::with_config(&repository_job_plan_config());
+    // The hard job is planned and lands; the ordinary job is not planned and lands.
+    let (planned, f) = run_job(&fx.athena(reader_scenario(json!("changes landing")).script()));
+    assert_eq!(f.state, OutcomeState::Landed, "{}", f.reason);
+    // Its edit differs from the first job's, so the producer makes a change of its own.
+    let mut ordinary = reader_scenario(json!(null));
+    ordinary.edits = vec![(
+        "README.md".into(),
+        Some("# Demo\n\nHello again, reader.\n".into()),
+    )];
+    let athena = fx.athena(ordinary.script());
+    let (unplanned, f) = run_job(&athena);
+    assert_eq!(f.state, OutcomeState::Landed, "{}", f.reason);
+
+    let line_of = |text: &str, group: &str| -> String {
+        text.lines()
+            .find(|l| l.trim_start().starts_with(group))
+            .unwrap_or_else(|| panic!("no {group} line: {text}"))
+            .trim()
+            .to_string()
+    };
+    let before = athena_cli::display::status(&athena.status().unwrap());
+    assert!(
+        before.contains("landings later cited as the cause of a failure, revert or fix job:"),
+        "{before}"
+    );
+    assert_eq!(
+        line_of(&before, "planned "),
+        "planned   0 of 1 landings cited (0 failure · 0 revert · 0 fix) · 1 of 1 jobs landed (100%)"
+    );
+    assert_eq!(
+        line_of(&before, "unplanned"),
+        "unplanned 0 of 1 landings cited (0 failure · 0 revert · 0 fix) · 1 of 1 jobs landed (100%)"
+    );
+
+    // Later requests cite each landing: a fix for the planned one and a revert for the unplanned one. A request
+    // that merely names a landing is not a cause.
+    athena
+        .ask(
+            &format!("Fix the refusal rule that job {planned} landed."),
+            &Lines::default(),
+        )
+        .unwrap();
+    athena
+        .ask(
+            &format!("Revert job {unplanned}, it stopped a drain."),
+            &Lines::default(),
+        )
+        .unwrap();
+    athena
+        .ask(
+            &format!("Document how job {planned} works."),
+            &Lines::default(),
+        )
+        .unwrap();
+    let view = athena.status().unwrap();
+    let text = athena_cli::display::status(&view);
+    assert_eq!(
+        line_of(&text, "planned "),
+        "planned   1 of 1 landings cited (0 failure · 0 revert · 1 fix) · 1 of 1 jobs landed (100%)"
+    );
+    assert_eq!(
+        line_of(&text, "unplanned"),
+        "unplanned 1 of 1 landings cited (0 failure · 1 revert · 0 fix) · 1 of 1 jobs landed (100%)"
+    );
+    let json = serde_json::to_value(&view).unwrap();
+    assert_eq!(json["keep_rule"]["later_harm"]["planned"]["fixes"], 1);
+    assert_eq!(json["keep_rule"]["later_harm"]["unplanned"]["reverts"], 1);
+    assert_eq!(json["keep_rule"]["later_harm"]["unplanned"]["failures"], 0);
+}
+
+// ---------------------------------------------------------------------------------------------------------
 // Job 5a: job planning in `athena status`, and recovery of a job killed during planning.
 
 /// Asks for and runs a job to the end.

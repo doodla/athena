@@ -257,7 +257,39 @@ landed (55%), at or below the 64% baseline at the 100-job point, and cost per la
 $2.50 guard. The rule, not a person, made the call (D135); `athena.toml` now has `enabled = false` under
 `[job_plan]`. Kept: the planning code, the resume-from-kept-plan path and the status measures, so planning can be
 turned back on for a new measured trial. The earlier decision to keep planning on was taken at 51 jobs, below
-the decision point.
+the decision point. D143 turns it back on for hard jobs only; see the revision below.
+
+**Revision (D143): later harm, and planning for hard jobs only.** The day after planning was turned off, job
+20261027-054211-a2n5 ran with no planner or critic and landed a crude word-matching refusal rule that stopped
+three drains in a row. Landed share counts that landing as a success, so it could not tell a landing that worked
+from one that broke the pipeline: it was the wrong measure for a rule whose purpose is to catch such work before
+it is built. Two changes follow.
+
+- **Planning for hard jobs only.** `athena.toml` sets `[job_plan] enabled = true` and `mode = "hard"`. A job is
+  planned when its reading carries a `hard_reason`, the marking that already escalates the producer
+  (`[models] hard_producer_*`); any other job runs the reader, producer and verifier only. A job is hard when it
+  adds or changes a rule that can refuse or hold work (a check, a gate, a guard, a limit), or changes landing, the
+  history check, records, the run pipeline (how a job is read, planned, produced, verified or closed) or the
+  drain. The reader is given that definition in the `hard_reason` field of its output schema. `mode = "all"`
+  plans every change job, as before, and `enabled = false` is still a full off switch, whatever the mode. The
+  caps, timeouts and `max_rounds` are unchanged. The planning code, the resume path and the other measures stay.
+- **Later harm beside the landed share.** `athena status` reports, for planned and for unplanned dispatched
+  jobs separately, how many landings were later cited as the cause of a failure, a revert or a fix job, next to
+  that group's landed share (and as `keep_rule.later_harm` in `--json`). All three are read from records that
+  already exist; no record kind was added. *Failure:* a later introspection (its record id after the landing's)
+  about another job whose cause or account of what happened names the landing's job id. *Revert* and *fix:* a
+  later request job whose text names the job id and contains the word revert, or the word fix (or a form of
+  either). A request that names a job without asking for either, such as a retry or a citation, is not a cause.
+  Ids match as whole tokens. A landing is counted once per way it was cited, and once in the total of cited
+  landings.
+
+  The counts are measured, but matching is by words in free text, so they are a floor on later harm, not a
+  census: a failure that no record ties to a job id, or a fix request that does not cite the id, is missed, and a
+  request that cites several jobs counts for each. The keep verdict itself (share and cost, above) is unchanged;
+  the later-harm counts are reported for the person who reads the rule, and a group whose cited landings rise
+  against the other group's is a reason to review the rule, not an automatic switch. Whether a planned landing is
+  less often cited than an unplanned one is the question this measure is there to answer once there are enough
+  hard jobs to compare.
 
 ## 10. Risks
 

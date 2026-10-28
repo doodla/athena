@@ -211,6 +211,19 @@ impl Intervention {
     }
 }
 
+/// Whether `text` names the job `id` as a whole token: the full id, not preceded or followed by a letter, a
+/// digit or a hyphen, so an id that only starts with `id` (or ends with it) does not match. Used to read, from
+/// the free text of later records, which landed job they cite as a cause.
+pub fn text_cites_job(text: &str, id: &JobId) -> bool {
+    let needle = id.as_str();
+    let token = |c: char| c.is_ascii_alphanumeric() || c == '-';
+    text.match_indices(needle).any(|(at, _)| {
+        let before = text[..at].chars().next_back();
+        let after = text[at + needle.len()..].chars().next();
+        !before.is_some_and(token) && !after.is_some_and(token)
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InterventionSource {
@@ -456,8 +469,10 @@ pub struct Reading {
     /// did not. An older reading has none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub urgent_reason: Option<String>,
-    /// Why the reader judged the job hard (it changes landing, the history check or records, say); None when
-    /// it did not. A hard job gets the producer setting `[models] hard_producer_*` names. An older reading has none.
+    /// Why the reader judged the job hard (it adds or changes a rule that can refuse or hold work, or changes
+    /// landing, the history check, records, the run pipeline or the drain); None when it did not. A hard job
+    /// gets the producer setting `[models] hard_producer_*` names, and is planned when `[job_plan] mode` is
+    /// `hard`. An older reading has none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hard_reason: Option<String>,
     /// The producer effort this reading dispatches with, set when a hard job's escalation changed the
@@ -3768,6 +3783,34 @@ mod tests {
         assert_eq!(item.validate(), Ok(()));
         item.source.value = " ".into();
         assert!(item.validate().is_err());
+    }
+
+    #[test]
+    fn text_cites_a_job_only_by_its_whole_id() {
+        let id = JobId::parse("20261027-054211-a2n5").unwrap();
+        for cited in [
+            "20261027-054211-a2n5",
+            "the refusal rule from job 20261027-054211-a2n5 stopped three drains",
+            "(20261027-054211-a2n5).",
+            "first 20261027-054211-a2n5\nsecond line",
+        ] {
+            assert!(text_cites_job(cited, &id), "{cited}");
+        }
+        for not_cited in [
+            "",
+            "20261027-054211-a2n",
+            "120261027-054211-a2n5",
+            "20261027-054211-a2n5-extra",
+            "20261027-054211-a2n5x",
+            "a2n5",
+        ] {
+            assert!(!text_cites_job(not_cited, &id), "{not_cited}");
+        }
+        // A later whole-token match counts even when an earlier match is part of a longer token.
+        assert!(text_cites_job(
+            "20261027-054211-a2n5x then 20261027-054211-a2n5",
+            &id
+        ));
     }
 
     #[test]

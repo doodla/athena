@@ -7,6 +7,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- Job planning is back on for hard jobs only, and the keep rule now counts later harm as well as landed share
+  (D143; `docs/design/job-planning.md` section 9). Planning was turned off on 2026-10-26 because the keep rule
+  measured landed share and cost. The next day, job 20261027-054211-a2n5 ran with no planner or critic and landed
+  a crude word-matching refusal rule that stopped three drains; landed share counts such a landing as a success.
+  `[job_plan]` in `athena.toml` gains `mode`: `"all"` (the default, every change job is planned) or `"hard"`
+  (only a job whose reading is marked hard). `athena.toml` now sets `enabled = true` and `mode = "hard"`;
+  `enabled = false` stays a full off switch. The marking is the one that already escalates the producer
+  (`hard_reason`); the reader's schema now says a job is hard when it adds or changes a rule that can refuse or
+  hold work, or changes landing, the history check, records, the run pipeline or the drain. `athena status` adds,
+  under the keep rule, one line each for planned and unplanned jobs: how many landings were later cited as the
+  cause of a failure (a later introspection's cause), a revert or a fix job (a later request that asks for one
+  and names the job id), beside that group's landed share (`keep_rule.later_harm` in `--json`). The counts are
+  read from existing records; no record kind was added. The verdict still rests on landed share and cost.
+  Tests cover `athena.toml` planning a hard reading and not an ordinary one, the other modes, config parsing,
+  and the status counts.
+
 ### Fixed
 
 - The governance-file rule on a reading no longer refuses a request for using a common word, and a refused

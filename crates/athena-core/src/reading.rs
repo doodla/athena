@@ -2447,6 +2447,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_reader_is_told_a_job_is_hard_when_it_touches_a_refusing_rule_landing_the_history_check_records_the_pipeline_or_the_drain()
+     {
+        // Hard marking decides which jobs are planned (`[job_plan] mode = "hard"`), so the definition the reader
+        // follows is part of the behavior. It is the description of the `hard_reason` field in the reader's schema.
+        let schema = reading_schema(&ReaderChoices {
+            classes: vec!["change".into()],
+            capabilities: vec!["change".into()],
+            producer_models: vec!["m".into()],
+        });
+        let description = schema["properties"]["hard_reason"]["description"]
+            .as_str()
+            .expect("hard_reason has a description")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for area in [
+            "rule that can refuse or hold work",
+            "landing",
+            "the history check",
+            "records",
+            "the run pipeline",
+            "the drain",
+        ] {
+            assert!(description.contains(area), "{area}: {description}");
+        }
+    }
+
+    #[test]
     fn a_long_reading_title_is_cut_at_a_word_boundary() {
         let text = "Cut generated commit subjects at a word boundary and not in the middle of a word, \
                     so that the log reads cleanly\nsecond line";

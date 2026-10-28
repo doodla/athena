@@ -4,7 +4,8 @@
 use athena_core::reading::Proposal;
 use athena_core::run::Finished;
 use athena_core::status::{
-    JobTrace, KeepRule, KeepVerdict, PlanningCost, PlanningGroup, ProducerSettingStats, StatusView,
+    JobTrace, KeepRule, KeepVerdict, LaterHarm, PlanningCost, PlanningGroup, ProducerSettingStats,
+    StatusView,
 };
 use athena_data::records::{
     CriterionKind, DeliverableAction, Forecast, OutcomeState, Quantiles, Reading, Score,
@@ -158,6 +159,23 @@ fn producer_settings_lines(settings: &[ProducerSettingStats]) -> String {
     out
 }
 
+/// The landings later cited as the cause of a failure, a revert or a fix job, one line each for planned and
+/// unplanned jobs, beside the landed share of the same group (job-planning.md section 9, D143).
+fn later_harm_lines(h: &LaterHarm) -> String {
+    let mut out = String::from(
+        "            landings later cited as the cause of a failure, revert or fix job:\n",
+    );
+    for (name, g) in [("planned", &h.planned), ("unplanned", &h.unplanned)] {
+        let share = g.share.map_or("n/a".to_string(), pct);
+        let _ = writeln!(
+            out,
+            "              {name:<9} {} of {} landings cited ({} failure · {} revert · {} fix) · {} of {} jobs landed ({share})",
+            g.cited, g.landed, g.failures, g.reverts, g.fixes, g.landed, g.jobs
+        );
+    }
+    out
+}
+
 /// The job-planning keep rule (job-planning.md section 9, D110): the measures, and a BREACH line with the
 /// numbers when planning is below the baseline or is to be turned off.
 fn keep_rule_lines(k: &KeepRule) -> String {
@@ -183,6 +201,7 @@ fn keep_rule_lines(k: &KeepRule) -> String {
         out,
         "            cost per landed job {cost} · first-round accept rate {rate}"
     );
+    out.push_str(&later_harm_lines(&k.later_harm));
     let numbers = format!(
         "{} of {} planned jobs landed ({}), baseline {}, cost per landed job {cost}",
         k.landed,
@@ -1806,7 +1825,43 @@ mod tests {
             first_round_planned: 40,
             first_round_accept_rate: Some(0.5),
             verdict,
+            later_harm: LaterHarm::default(),
         }
+    }
+
+    #[test]
+    fn keep_rule_lines_show_later_cited_landings_for_planned_and_unplanned_jobs_beside_the_share() {
+        use athena_core::status::LaterHarmGroup;
+        let mut rule = keep_rule(28, 51, KeepVerdict::Keep);
+        rule.later_harm = LaterHarm {
+            planned: LaterHarmGroup {
+                jobs: 51,
+                landed: 28,
+                share: Some(28.0 / 51.0),
+                cited: 3,
+                failures: 2,
+                reverts: 0,
+                fixes: 1,
+            },
+            unplanned: LaterHarmGroup::default(),
+        };
+        let text = keep_rule_lines(&rule);
+        assert!(
+            text.contains("landings later cited as the cause of a failure, revert or fix job:"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "planned   3 of 28 landings cited (2 failure · 0 revert · 1 fix) · 28 of 51 jobs landed (55%)"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "unplanned 0 of 0 landings cited (0 failure · 0 revert · 0 fix) · 0 of 0 jobs landed (n/a)"
+            ),
+            "{text}"
+        );
     }
 
     #[test]

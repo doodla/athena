@@ -57,13 +57,29 @@ impl DiskConfig {
     }
 }
 
-/// `[job_plan]`: the planner and critic that run before the producer. Nothing reads these settings yet.
+/// Which jobs `[job_plan]` plans when planning is enabled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PlanMode {
+    /// Every change job is planned. The default, so a section that only says `enabled = true` is unchanged.
+    #[default]
+    All,
+    /// Only a job whose reading is marked hard is planned (job-planning.md section 9, D143). A hard job adds
+    /// or changes a rule that can refuse or hold work, or changes landing, the history check, records, the run
+    /// pipeline or the drain; the reader is given that definition in the `hard_reason` field of its output.
+    Hard,
+}
+
+/// `[job_plan]`: the planner and critic that run before the producer.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JobPlanConfig {
-    /// Whether jobs are planned. The default is false.
+    /// Whether jobs are planned at all; false is a full off switch whatever `mode` says. The default is false.
     #[serde(default)]
     pub enabled: bool,
+    /// Which jobs are planned when `enabled` is true: `"all"` (the default) or `"hard"`.
+    #[serde(default)]
+    pub mode: PlanMode,
     /// The most plan-and-critique rounds before a job stops in planning, at least 1.
     #[serde(default = "JobPlanConfig::default_max_rounds")]
     pub max_rounds: u32,
@@ -80,6 +96,11 @@ pub struct JobPlanConfig {
 }
 
 impl JobPlanConfig {
+    /// Whether a job is planned: planning is enabled and, in `hard` mode, the job's reading is marked hard.
+    pub fn plans(&self, hard: bool) -> bool {
+        self.enabled && (self.mode == PlanMode::All || hard)
+    }
+
     fn default_max_rounds() -> u32 {
         3
     }
@@ -95,6 +116,7 @@ impl Default for JobPlanConfig {
     fn default() -> Self {
         JobPlanConfig {
             enabled: false,
+            mode: PlanMode::All,
             max_rounds: Self::default_max_rounds(),
             planner_usd: Self::default_usd(),
             critic_usd: Self::default_usd(),
@@ -612,9 +634,12 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_repository_config_turns_job_planning_off_with_the_designs_caps() {
+    fn the_repository_config_plans_hard_jobs_only_with_the_designs_caps() {
         let plan = Config::parse(REPO_CONFIG).unwrap().job_plan.unwrap();
-        assert!(!plan.enabled);
+        assert!(plan.enabled);
+        assert_eq!(plan.mode, PlanMode::Hard);
+        assert!(plan.plans(true));
+        assert!(!plan.plans(false));
         assert_eq!(plan.planner_usd, 0.75);
         assert_eq!(plan.critic_usd, 0.75);
         assert_eq!(plan.planner_timeout_s, 600);
@@ -759,6 +784,35 @@ pub(crate) mod tests {
         assert_eq!(plan.critic_usd, 0.75);
         assert_eq!(plan.planner_timeout_s, 600);
         assert_eq!(plan.critic_timeout_s, 600);
+    }
+
+    #[test]
+    fn the_plan_mode_decides_which_jobs_are_planned_and_enabled_false_is_a_full_off_switch() {
+        let parse = |lines: &str| {
+            let text = format!("{}\n[job_plan]\n{lines}\n", unplanned(REPO_CONFIG));
+            Config::parse(&text).unwrap().job_plan.unwrap()
+        };
+        // `all` is the default: a section that only enables planning plans every job.
+        let all = parse("enabled = true");
+        assert_eq!(all.mode, PlanMode::All);
+        assert!(all.plans(false) && all.plans(true));
+        let hard = parse("enabled = true\nmode = \"hard\"");
+        assert!(hard.plans(true) && !hard.plans(false));
+        // Off wins over any mode, for a hard job too.
+        for mode in ["all", "hard"] {
+            let off = parse(&format!("enabled = false\nmode = \"{mode}\""));
+            assert!(!off.plans(true) && !off.plans(false), "{mode}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_plan_mode_is_refused() {
+        let text = format!(
+            "{}\n[job_plan]\nenabled = true\nmode = \"sometimes\"\n",
+            unplanned(REPO_CONFIG)
+        );
+        let error = Config::parse(&text).unwrap_err().to_string();
+        assert!(error.contains("sometimes"), "{error}");
     }
 
     #[test]
