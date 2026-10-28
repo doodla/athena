@@ -1,0 +1,172 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261027-054217-c896",
+  "n": 1,
+  "at": "2026-10-28T02:35:27.953905064Z",
+  "invocation_seq": 1,
+  "base_commit": "3b002a359515f3149f403b7a41d5e7876b408835",
+  "config_sha256": "b812f3c3683488bcd9485d235a6a234bc80722c9f137a6c232094fae2ee727d6",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Gate verifier start on free disk and a write probe, as an environment",
+  "summary": "Root cause: the disk gate runs only at dispatch and before the checks, but the checks' cargo builds fill the disk afterwards, so the verifier (jobs 20261016-044847-hem1 and 20261026-064950-38jx) starts in an unusable environment and its failure reads as a work failure. Fix it in athena-core by running the same `disk_gate` (idle-target sweep first) plus a write probe in the verifier workspace immediately before each verifier run, failing with the retryable `environment: low disk` reason and no work verdict.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "root-cause",
+      "how": "Fix at the gap between the check stage and the verifier, covering every job, not one instance."
+    },
+    {
+      "id": "tested",
+      "how": "New tests plus fmt, clippy and cargo test pass."
+    },
+    {
+      "id": "mechanism",
+      "how": "Enforced in code via the shared disk gate, not prose."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run cargo test and check the early environment failure happening."
+    },
+    {
+      "id": "outcome-check",
+      "how": "The check is that a full disk before verification yields a retryable environment failure rather than a work failure."
+    },
+    {
+      "id": "small",
+      "how": "One focused change reusing disk_gate and the existing threshold."
+    },
+    {
+      "id": "strangers",
+      "how": "Docs and decision entry written for an outside reader."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Audience: the maintainer reading `athena status` and retry logs, and the verifier who must be able to tell an environment failure from a work failure.",
+    "Existing state (read): disk.rs enforces `[disk] min_free_gb` at dispatch (run/mod.rs ~384) and before the checks (~1975); nothing guards the verifier agent start (~2186) after the checks have built.",
+    "Job 20261016-044847-hem1: its blocker (verifier disk full, `No space left on device`) is the class addressed by the new pre-verifier gate; its plan.rs/reading.rs/drain findings (unmet criterion 7, steward free-text refusals, broad rung word list) are unrelated to this cause and out of scope here, not re-fixed.",
+    "Job 20261026-064950-38jx: its failing `a_nested_run_works_in_a_scratch_copy_with_fake_agents` hit the 10 GB guard on a 9 GB host; the current tree already has test_config set min_free_gb = 0 and a control test (binary.rs 143-182), so that finding no longer applies; the code_health findings (extra test file, baseline file, header width) are unrelated and out of scope.",
+    "The write probe is a small file written and removed in the verifier workspace; a cargo build probe is not added because the gate must stay language-neutral and cheap.",
+    "No athena.toml or defaults.toml change: the existing `[disk] min_free_gb` threshold is reused."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "The change description and the code comment/docs (disk.rs module docs, docs/decisions.md entry) name the root cause: the disk guard did not cover the point between the checks and the verifier, and an environment failure there was not separated from a work failure.",
+      "kind": "content"
+    },
+    {
+      "text": "run/mod.rs calls the shared disk gate (with idle-target sweep) and a workspace write probe immediately before the verifier agent runs, and on failure closes the job with an `environment: low disk` reason, no verification verdict, and the `athena retry` hint, reusing the existing LowDisk text.",
+      "kind": "content"
+    },
+    {
+      "text": "A new test simulating low free space only after the checks pass (e.g. via ATHENA_FREE_BYTES or a gate seam) shows the job fails with `environment: low disk` before the verifier agent is invoked and records no verifier verdict; run `cargo test --locked` and see that test fail on the base tree and pass on the change.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A unit test in disk.rs shows the write probe fails on an unwritable/full workspace and succeeds on a normal one, and that the failure is classified as environment, not work, for any job (not one fixed job id); run `cargo test --locked -p athena-core disk`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "With sufficient simulated free space the existing drain and binary tests still pass unchanged; run `cargo test --locked`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`cargo fmt --check`, `cargo clippy --locked --all-targets -- -D warnings` and `cargo test --locked` all pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has an entry for the pre-verifier environment check.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "p": 0.25
+    },
+    {
+      "path": "docs/architecture.md",
+      "action": "modify",
+      "p": 0.15
+    }
+  ],
+  "out_of_scope": [
+    "Fixing hem1's plan.rs/reading.rs/drain.rs planning findings (unmet criterion 7, steward free-text refusals, rung word list)",
+    "Fixing 38jx's code_health findings (extra test file, baseline file location, table header width)",
+    "Adding athena.toml fields or changing the 10 GB default",
+    "Periodic sweeps of terminal-state jobs beyond the existing idle-target sweep",
+    "Running a cargo build as the probe",
+    "Editing records/ or owner files"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.68,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.2,
+        "p90": 3.0
+      },
+      "wall_time_s": {
+        "p10": 500.0,
+        "p50": 1700.0,
+        "p90": 3300.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7219653179190751,
+      "p_verification_passes": 0.6704545454545454,
+      "p_user_intervenes": 0.06666666666666667,
+      "cost_usd": {
+        "p10": 0.4980230791725342,
+        "p50": 1.0991956440935116,
+        "p90": 2.659744453984648
+      },
+      "wall_time_s": {
+        "p10": 523.3877383580382,
+        "p50": 1548.4465054549182,
+        "p90": 2978.9059408643775
+      }
+    }
+  },
+  "departures": "Slightly higher cost and lower pass probability than reference: the change touches the large run/mod.rs and needs a test that simulates disk becoming low only after the checks, and two prior jobs failed in this area.",
+  "urgent_reason": "Cuts failed and rejected verification attempts and redo-work retries caused by an unusable verifier environment.",
+  "hard_reason": "Touches the gate in run/mod.rs that decides whether verification happens and how a job closes, so a mistake could wrongly fail or skip verification.",
+  "producer_effort": "high"
+}
