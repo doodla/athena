@@ -1,0 +1,294 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261028-103330-3d47",
+  "round": 1,
+  "at": "2026-10-28T10:37:20.022429023Z",
+  "invocation_seq": 2,
+  "approach": "Add a new `replay` module in athena-core that reads the newest 50 jobs with an accepted reading from the records, judges each stored request and reading with a base judge and a candidate judge, and lists the newly refused ones (candidate refuses, base accepts). In production a judge is a built `athena` binary run as `athena check-reading`; the new subcommand wraps one pure function in reading.rs that applies the existing rules unchanged (`check_reading_acceptance`). The replay runs in `check_and_verify` after Athena's checks and before the verifier's disk gate and brief. Its result is a new typed record `athena.replay/1` at `<job>/replay.json` (same pattern as `athena.baseline/1`), a summary in the verifier brief, and, when more than 10% are newly refused and the candidate's criteria do not intend that, a Blocker finding from Athena. `verify.rs` turns that finding into a failing final verdict, so the job ends Rejected. No model is called anywhere in the replay. When nothing can be replayed (empty history, nested run, a build without the subcommand, a failed build) the result is 'no replay: <reason>', recorded and shown to the verifier, never a pass. The test override (a thread-local set only in tests) is read first, before tree resolution and the subcommand probe, so pipeline tests never build. The threshold, window size and intent phrases are code constants. No file under athena.toml, defaults.toml or .github is touched.",
+  "decisions": [
+    {
+      "choice": "New record kind `athena.replay/1` at `<job>/replay.json`, held in `Closing.replay`, written in `close_dispatched` and loaded as `JobRecords.replay`.",
+      "reason": "`athena.baseline/1` is the existing pattern for a recorded-only per-job record. It is typed, passes `check_record_file`, and needs no new Markdown file.",
+      "rejected": [
+        {
+          "option": "Add a `replay` field to `Verification`.",
+          "why": "Ten `Verification { .. }` literals across status, land, pr_check, evidence_labels, introspect, reading tests, reconcile tests and landing_tests would all need edits, and a replay can exist when no verification does."
+        },
+        {
+          "option": "Write replay.md in the job directory.",
+          "why": "Out of scope. `JOB_MARKDOWN` allows only three briefs, so the records check would refuse the file."
+        }
+      ]
+    },
+    {
+      "choice": "The hold is a function in verify.rs, `hold_on_replay(judgment, replay)`. It adds an Athena Blocker finding that names the list, sets the final verdict to Fail and adds a reason. The pipeline calls it right after `judge`.",
+      "reason": "The hold is then enforced by the verdict, not by prose, and the existing path turns a Fail into Rejected. `VerdictInputs` and its test literals stay untouched.",
+      "rejected": [
+        {
+          "option": "Add a `replay` field to `VerdictInputs`.",
+          "why": "Seven literals to edit for no gain."
+        },
+        {
+          "option": "Hold by returning early from the pipeline.",
+          "why": "It would skip the verifier and its record."
+        }
+      ]
+    },
+    {
+      "choice": "Hold rule is integer arithmetic: held iff `newly_refused * 100 > total * HOLD_PERCENT` (`HOLD_PERCENT = 10`), unless a candidate criterion states the intent. The intent is a fixed list of phrases checked on lowercased criteria text in `replay.rs`; the replay is recorded either way.",
+      "reason": "Exactly 10% is not held, with no float error. Intent uses the criteria the user accepted, with no diff matching and no flag.",
+      "rejected": [
+        {
+          "option": "Detect a refusal-rule change by diff or by a flag.",
+          "why": "Out of scope. The replay always runs and compares behavior."
+        },
+        {
+          "option": "Skip the replay when no rule file changed.",
+          "why": "That is the same diff matching, and a switch to skip is out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "A judge is a trait (`Judge::judge(request, reading) -> Accept | Refuse(reason)`). `BinaryJudge` runs `<bin> check-reading` on temp files. `replay::run` takes a thread-local test override first, before `resolve_tree` (materialize the commit, `cargo build --locked --bin athena`, shared target dir under the job dir, removed afterwards) and `probe` (`<bin> check-reading --help` must succeed).",
+      "reason": "The `Athena` struct has about 15 constructors, and a new field would touch files the brief does not list. A thread-local is safe under parallel tests, and the override comes first as the user's correction requires.",
+      "rejected": [
+        {
+          "option": "A new `Athena.replay` field like `pinner`.",
+          "why": "It touches about 15 constructors in unlisted files."
+        },
+        {
+          "option": "An environment variable override.",
+          "why": "It is process-global, so parallel tests would race."
+        },
+        {
+          "option": "Link the base and candidate rules in process.",
+          "why": "The candidate's reading.rs exists only as source, so only a build can run it."
+        }
+      ]
+    },
+    {
+      "choice": "Verifier brief gets a `## Readings replay` section built from a small typed `ReplayView` (Ran{newly_refused,total,list} or NoReplay(reason)). The list is capped at 20 entries, each entry is cut, and the section is hard-capped at `MAX_REPLAY_SECTION_BYTES`. `VerifierInputs` gets a `replay` field.",
+      "reason": "The criterion requires a bounded brief with a very long list. Only 6 literals need the new field.",
+      "rejected": [
+        {
+          "option": "Put the full list in the brief.",
+          "why": "A 500-entry list would break the size limit."
+        }
+      ]
+    },
+    {
+      "choice": "The CLI subcommand takes two paths, a stored `request.json` and a stored `reading-N.json`. It prints `accept` or `refuse: <reason>` and exits 0 when it judged. It exits non-zero only on unreadable input.",
+      "reason": "The output is easy to parse, and the replay passes the same files it reads from the records.",
+      "rejected": [
+        {
+          "option": "A `--check-reading` flag.",
+          "why": "The user corrected this to a subcommand."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/replay.rs",
+      "action": "create",
+      "purpose": "WINDOW=50, HOLD_PERCENT=10, intent phrases, `Judge` trait, `BinaryJudge`, `resolve_tree`, `probe`, test-only thread-local override, `select_window`, `compare`, `decide`, `run`, and the unit tests.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "purpose": "Declare `pub mod replay;` and add its line to the module docs.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Add `check_stored_reading(request, reading) -> Result<(), String>` that calls `check_reading_acceptance` with no attempt and no referenced jobs. Existing rules are unchanged. Add a test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "action": "modify",
+      "purpose": "Add `hold_on_replay(judgment, replay)`: an Athena Blocker finding naming the list, final verdict Fail, a reason. Add tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "Add `Closing.replay`. Call `replay::run` in `check_and_verify` after the checks and before the disk gate and the verifier brief. Pass the summary into `VerifierInputs`. Call `hold_on_replay` after `judge`. Write `AnyRecord::Replay` in `close_dispatched`. Add the pipeline tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/store.rs",
+      "action": "modify",
+      "purpose": "Add `JobRecords.replay`, load it in `add`, and add it to `job_of`, as for baseline.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "purpose": "Add `Replay` and `ReplayRefusal`, `REPLAY_SCHEMA`, `AnyRecord::Replay`, validate, canonical_path and schema. Add the round-trip and records-check tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Add `ReplayView` and `VerifierInputs.replay`. Add the capped replay section and `MAX_REPLAY_SECTION_BYTES`. Update the 5 test literals and add the tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "purpose": "Add the `CheckReading { request, reading }` subcommand and its handler, which prints accept or refuse.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/check_reading.rs",
+      "action": "create",
+      "purpose": "Fixture test that runs the real binary and shows both outputs.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased entry for the subcommand, the replay, the 10% hold, the typed record and the brief summary.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read `crates/athena-core/src/pin.rs`, `crates/athena-core/src/disk.rs` and the existing baseline code, which show how builds and records are done.",
+    "In records.rs add `Replay { job, base_commit, candidate_commit, window: u32, examined: u32, newly_refused: Vec<ReplayRefusal{job, reason}>, held: bool, intended: bool, note: Option<String> }`, `REPLAY_SCHEMA = \"athena.replay/1\"`, the `AnyRecord::Replay` variant, `validate` (counts match the list; held needs a non-empty list; examined 0 needs a note), `canonical_path` `<job>/replay.json`, `schema()`, and the tests.",
+    "In store.rs add `JobRecords.replay`, handle it in `add`, and add `AnyRecord::Replay` to `job_of`.",
+    "In reading.rs add `check_stored_reading` and its test. Change no existing rule.",
+    "Add replay.rs: constants, `Judge` and `BinaryJudge` (temp files, `check-reading` output parsing), `probe`, `resolve_tree`, the cfg(test) override and its guard, `select_window` (newest first by job id, accepted reading only, the current job excluded, at most 50), `compare`, `decide`, and `run`, which checks the override first, then resolves and probes. Write the unit tests. Declare the module in lib.rs.",
+    "In verify.rs add `hold_on_replay` and its tests.",
+    "In briefs.rs add `ReplayView`, the `VerifierInputs.replay` field, the capped section and the tests. Update the 5 test literals.",
+    "In run/mod.rs add `Closing.replay`. Call the replay in `check_and_verify` (skip it with 'no replay: nested run' when nested). Pass the view into `VerifierInputs`. Call `hold_on_replay` after `judge`. Write the record in `close_dispatched`. Add the pipeline tests for criteria 5 and 7.",
+    "In main.rs add the `CheckReading` subcommand and handler, and the check_reading.rs integration test.",
+    "Add the CHANGELOG entry.",
+    "Run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Check `git status` for athena.toml, defaults.toml, .github and replay.md."
+  ],
+  "risks": [
+    {
+      "risk": "The base commit has no `check-reading` subcommand (true for this very job), so the probe fails.",
+      "mitigation": "A failed probe on either build gives 'no replay: <which build lacks check-reading>', recorded and shown to the verifier. It is never a pass and never a hold."
+    },
+    {
+      "risk": "The two cargo builds fill the disk, which is what stopped the earlier attempt.",
+      "mitigation": "A shared target dir under the job directory removed right after the replay, and the replay runs before the verifier's disk gate, so low space is caught as an environment stop."
+    },
+    {
+      "risk": "A thread-local override left set leaks into other tests on a reused thread.",
+      "mitigation": "A RAII guard clears it on drop. The override type is `cfg(test)` only, so production code cannot set it."
+    },
+    {
+      "risk": "A binary that crashes or prints something unexpected for one record.",
+      "mitigation": "That record is reported as an unjudged record in the note, left out of `total`, and never counted as accepted or refused. If all records fail, the result is 'no replay: <reason>'."
+    },
+    {
+      "risk": "Adding the `AnyRecord::Replay` variant breaks exhaustive matches elsewhere.",
+      "mitigation": "The code read shows `store.rs::add` and `job_of` use `_`/`other` arms. The producer runs a full build and fixes any exhaustive match the compiler reports."
+    },
+    {
+      "risk": "Reader and planner budgets are exact, so an edit to a prompt-set file fails `system_facts_budgets_match_computed`.",
+      "mitigation": "The plan edits no prompt-set text. Only the verifier brief builder in briefs.rs changes, and it is outside the always-loaded sets."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "New integration test file crates/athena-cli/tests/check_reading.rs. It runs the real binary (`env!(\"CARGO_BIN_EXE_athena\")`, the pattern in tests/binary.rs) as `athena check-reading <request.json> <reading.json>`. Fixture A is a reading with a governance deliverable that no criterion names. Fixture B is a plain reading that passes.",
+      "command": "cargo test -p athena-cli --test check_reading",
+      "observes": "Fixture B prints `accept`. Fixture A prints `refuse:` followed by the governance-coverage text from `check_governance_coverage`. An unreadable file exits non-zero.",
+      "fails_without": "Without the `CheckReading` variant in main.rs, clap rejects the subcommand and both assertions fail. If the command did not call `reading::check_stored_reading`, fixture A would print accept."
+    },
+    {
+      "criterion": 2,
+      "method": "Unit test in replay.rs. It calls the production `replay::compare`. The window comes from fixture `JobRecords` built with the existing record constructors. The base judge is the real `reading::check_stored_reading`. The candidate judge is a closure that applies the real rules and also refuses readings with no out_of_scope item, standing in for a candidate rule change.",
+      "command": "cargo test -p athena-core replay::tests::newly_refused",
+      "observes": "The returned list holds exactly the fixture jobs that the candidate refuses and the base accepts, in newest-first order, and the count equals the list length. A job both refuse, and a job only the base refuses, are not listed.",
+      "fails_without": "A compare that counted any refusal, or ignored the base result, would list the wrong jobs and count."
+    },
+    {
+      "criterion": 3,
+      "method": "Unit tests in replay.rs calling `replay::select_window` and `replay::compare`. One fixture has 60 jobs with accepted readings plus jobs with only a proposed or declined reading. The other has an empty history. A resolve/probe counter proves the order of the override.",
+      "command": "cargo test -p athena-core replay::tests::window",
+      "observes": "With 60 jobs, exactly the 50 newest accepted ones are judged and `total` is 50. Unaccepted jobs are skipped. With an empty history the result is `no replay: no accepted readings in the records` with held false, and it is not an all-clear. With the override set, resolve and probe are never called.",
+      "fails_without": "Without the window cap, total would be 60. Without the empty case, an empty list would be reported as zero newly refused, a pass."
+    },
+    {
+      "criterion": 4,
+      "method": "Unit tests in replay.rs calling `replay::decide` on fixture counts. Cases: 6 of 50 newly refused, 5 of 50 (exactly 10%), 0 of 50, and 6 of 50 with a candidate criterion containing an intent phrase.",
+      "command": "cargo test -p athena-core replay::tests::hold",
+      "observes": "6 of 50 gives held true with the list in the reason. 5 of 50 gives held false. The intent case gives held false, yet the Replay record still holds the list and counts.",
+      "fails_without": "A `>=` comparison would hold 5 of 50. Dropping the intent check would hold the last case."
+    },
+    {
+      "criterion": 5,
+      "method": "Pipeline test in run/mod.rs next to the existing tests, using `athena_with`, the fake driver and the `repo()` fixture. It first seeds more than 10% of the window's fixture jobs as records. It sets the thread-local override (base = real rules, candidate = stricter closure) before calling `Athena::go` on a job. The override is read before `resolve_tree` and `probe`.",
+      "command": "cargo test -p athena-core run::produce_and_verify_order_tests::replay_over_threshold_rejects",
+      "observes": "The job ends `GoResult::Finished` with state Rejected and nothing landed. `replay.json` in the job directory holds the typed record with the list. `verification.json` has an Athena Blocker finding naming the same list. `athena_gate::records::RecordSet::load` on the closing commit reports no errors for the job directory. No file named replay.md exists.",
+      "fails_without": "Without the `hold_on_replay` call, the fake verifier passes and the job lands. Without the new `AnyRecord::Replay` kind, the records check reports replay.json as an unparseable record."
+    },
+    {
+      "criterion": 6,
+      "method": "Tests in records.rs, copying the baseline pattern. They serialize and parse a `Replay` through `AnyRecord`. They also run `check_record_file` on the canonical path and on a misplaced path, and call `validate` on a record whose counts disagree with its list.",
+      "command": "cargo test -p athena-data replay",
+      "observes": "The round trip is equal, the canonical path is `<job>/replay.json`, the schema is `athena.replay/1`, and `check_record_file` accepts the record. A misplaced or inconsistent record is refused.",
+      "fails_without": "A kind that was missing from `AnyRecord::parse` or `canonical_path` would be refused as unparseable or misplaced."
+    },
+    {
+      "criterion": 7,
+      "method": "Pipeline test reusing `Counts` and `counting` (exist today). It runs two jobs on the same fixture, one with the override's candidate rule changed and one without. The override is set first, so no build and no probe happens.",
+      "command": "cargo test -p athena-core run::produce_and_verify_order_tests::replay_makes_no_model_call",
+      "observes": "The planner, producer, reader and verifier call counts are equal in both runs. The replay record exists in the changed run.",
+      "fails_without": "A replay that invoked the driver, for example to re-read, would raise the changed run's count above the baseline."
+    },
+    {
+      "criterion": 8,
+      "method": "Tests in briefs.rs using `plain_verifier_inputs()` (exists, line 2634) with `replay` set to `Ran` with a short list, then `NoReplay`, then `Ran` with a 500-entry list of long entries.",
+      "command": "cargo test -p athena-context briefs::tests::verifier_brief_replay",
+      "observes": "The short case shows `newly refused 2 of 50` and the listed jobs. The no-replay case shows `no replay: <reason>`. The long case has a replay section of at most `MAX_REPLAY_SECTION_BYTES`, says how many entries were left out, and keeps the rest of the brief unchanged.",
+      "fails_without": "Without the section, the strings are absent. Without the caps, the long case exceeds the limit."
+    },
+    {
+      "criterion": 9,
+      "method": "Run the three commands Athena runs on the result.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0, including the budget test `system_facts_budgets_match_computed`. The reader frame is not edited, so the budgets are unchanged.",
+      "fails_without": null
+    },
+    {
+      "criterion": 10,
+      "method": "Read the diff of the file.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "One Unreleased entry names `athena check-reading`, the newest-50 replay, the 10% hold, the `athena.replay/1` record and the verifier brief summary, written for an outside reader.",
+      "fails_without": null
+    },
+    {
+      "criterion": 11,
+      "method": "Read the diff stat, then run `git diff -- athena.toml defaults.toml .github` and `git status`.",
+      "command": "git diff --stat",
+      "observes": "No change to athena.toml, defaults.toml or .github/workflows. The 10% value is `HOLD_PERCENT` in replay.rs. No existing rule function in reading.rs changes: only a new function is added. No replay.md is created anywhere.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "The code does not say how a candidate's criteria 'intend' a higher refusal rate. The plan uses a fixed phrase list that the producer writes in replay.rs, because the reader frame has no spare token budget (1997 of 2000). Does the user prefer other phrases?",
+    "`resolve_tree` builds two binaries with cargo, which costs disk and time. The plan shares one target dir under the job directory and removes it after the replay, before the verifier's disk gate. Whether `cargo build --locked --bin athena` can reuse the candidate's already built `target` in the verifier snapshot was not checked.",
+    "Stored retries need prior-job context for `check_prior_result_and_scope`. The replay judges every stored reading with no priors, so it checks only evidence and governance rules, and the same on both sides. Accepted as a limit of the replay.",
+    "The thread-local override assumes `Athena::go` runs `check_and_verify` on the calling thread. I did not confirm this in `dispatch`; if it runs on another thread, the producer must pass the override through `RunContext`."
+  ],
+  "producer_section_sha256": "e90a4a0f1336e1aa4c3f993ad28d284a7bb8076255f0337ed3b7ae782e17679f"
+}

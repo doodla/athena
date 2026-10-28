@@ -1,0 +1,30 @@
+{
+  "schema": "athena.introspection/1",
+  "id": "20261028-112744-qp0m",
+  "at": "2026-10-28T11:27:44.499409247Z",
+  "trigger": "failure",
+  "job": "20261028-103330-3d47",
+  "intervention": null,
+  "class_of_work": "code",
+  "category": "failed",
+  "what_happened": "Job 20261028-103330-3d47 (\"Replay refusal-rule changes over 50 past readings\", a retry of m6m5) failed during the producer stage. The producer's model call was refused with a 401: the OAuth access token had expired and needed re-authentication. The producer did not finish. The work was not judged and nothing was delivered. The event lists no unmet acceptance criteria, no blocker or major findings and no failed checks. This is the third failed attempt on the same replay work. The earlier attempts stopped on low disk.",
+  "failure_class": "20261028-112757-sygc",
+  "new_class": true,
+  "earlier_cases": [],
+  "decisions_matched": [],
+  "cause": "Athena treats the agent's login as a fixed precondition. It does not check that the token is valid and has enough lifetime left before dispatching a producer, so an expired token is found only when the first model call fails. It has no refresh or re-authentication path, and it does not separate an authentication failure from a work failure. The job therefore ends as an ordinary failure, spends a retry slot and counts toward the budget, though it had no chance to do the work. Retries of long jobs are especially exposed, because the operator may hold the job while an earlier token ages out.",
+  "prevention_kind": "code-check",
+  "prevention": "Add a credential preflight before every stage dispatch, and before retry and drain starts. It would make a cheap authenticated call, or read the token expiry, and require enough remaining lifetime for the stage deadline. If the check fails, the job stays queued or paused with a message to re-authenticate. It would not be marked failed, would not count as spend or an attempt, and would not count against the line. A 401 seen mid-run should be classified as an environment stop, as low disk is, so that retry resumes cleanly and the scope guard ignores it.",
+  "proposed_request": "Make Athena detect an expired or soon-to-expire agent login before it starts a stage, and treat an authentication failure as an environment stop instead of a job failure. Outcome: (1) Before dispatching a producer, verifier or planner, and before retry and drain starts, Athena checks that the agent credential is valid with enough lifetime left for the stage deadline. If not, the job is held with a clear message to re-authenticate and is not marked failed. (2) If a 401 authentication error still arrives during a run, the job ends as an environment stop, like the low-disk stop. The attempt is not counted as progress-less spend by the scope guard, and `athena retry` resumes it without rebuilding finished work. (3) Tests show that an expired credential before dispatch holds the job without a model call or spend, that a mid-run 401 yields the environment-stop state, and that retry after re-authentication continues normally. Then retry job 20261028-103330-3d47 (replay refusal-rule changes over 50 past readings).",
+  "evidence": {
+    "model": "claude-sonnet-5-5",
+    "cost_usd": 0.0775561,
+    "input_tokens": 2,
+    "output_tokens": 1202
+  },
+  "status": "recorded",
+  "failure": null,
+  "flags": [],
+  "dropped_ids": [],
+  "from_jev": false
+}

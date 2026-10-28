@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261028-065915-a41d",
+  "round": 2,
+  "at": "2026-10-28T11:35:15.372787228Z",
+  "invocation_seq": 4,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "T3 drops an environment attempt's spend for good once a resumed attempt follows it, even when that resumed attempt is rejected.",
+      "evidence": "Under `t3_basis`, an Environment attempt followed by a resumed attempt never counts toward spend, whatever the resumed attempt's verdict. When the resumed attempt is Rejected, the kept candidate was in fact wasted. Its producer spend (1.4 in the plan's own example) then never reaches T3, even after later fresh retries. T1 and T4 still see the rejection, so the line is not unguarded. Only the cost signal undercounts. Fix: Drop the environment attempt's spend only while its work is still kept: when it is the last attempt, or when the resumed attempt that follows it is not Rejected or Failed. Alternatively, state this choice in the `t3_basis` doc comment and add one test case for it.",
+      "location": "Plan Decision 4 / Step 2 (`t3_basis`: spend drops Environment attempts that are last or followed by a `resumed` attempt)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The low-disk to Environment classification is shown either end to end or by a fixture, decided during the work.",
+      "evidence": "The main criterion-1 test builds attempts with `att(Verdict::Environment, ...)`. It would still pass if `attempt_of` never produced Environment, and `attempt_of` is the root-cause change. The plan covers this with either the `rig_with_space` end-to-end test or a `JobRecords` fixture, so one of them should always ship. Both are worded as conditional. Fix: Make a test of `attempt_of` (or `request_records`) mandatory: a closed-failed job whose reason starts with `disk::LOW_DISK` gives Environment, and a closed-failed job with another reason gives Failed. Keep the end-to-end test as the optional extra.",
+      "location": "Demonstration for criterion 1 (the end-to-end test is dropped if the rig cannot reproduce the stop) and Step 6",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "PRODUCER_SHARE is defined but nothing reads it, and the plan's own criterion-4 demonstration names it as an example of dead code.",
+      "evidence": "Decision 3 says a resumed retry's forecast is p90 x VERIFIER_SHARE, and the risks section says 'Only the verifier share matters'. scope_guard is `pub mod` (lib.rs:106), so a pub const raises no dead_code warning. The criterion-4 demonstration still cites 'an unused constant such as PRODUCER_SHARE' as something clippy would catch, which contradicts the plan's own design. Fix: Remove PRODUCER_SHARE and document VERIFIER_SHARE alone as an estimate. Or keep it and use it, for example with a test that the two shares sum to 1. Then reword the criterion-4 demonstration so it does not name a constant the plan itself leaves unused.",
+      "location": "Decision 3 / Step 1 / Demonstration for criterion 4",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read scope_guard.rs, disk.rs, reading.rs and parts of run/mod.rs and checked the plan against them. The plan fixes the fault where it starts. Today `attempt_of` (scope_guard.rs:460-494) maps every `Closed(_)` that did not land and was not rejected to `Verdict::Failed`, and t1, t2, t3 and t5 count those attempts. The plan adds an Environment variant, which it sets from the `environment:` prefix of `disk::LOW_DISK` (\"environment: low disk\", disk.rs:40). The functions the plan relies on exist and behave as it says: `disk::resumable_stop` (disk.rs:221), `retried_job` (reading.rs:1202), the outcome reason that `resumable_job` reads (reading.rs:1221), `StateDir::with_free_space`, `test_support::low_once_verifying`, and the three named regression tests. Comments in run/mod.rs (lines 646-647 and 4178) confirm that a resumed retry runs the reader but not the planner or producer. So the plan's resume test (\"no Producer invocation\") holds, and the resumed job still has a reading for the p90. The plan's demonstrations use these thresholds, which I checked in scope_guard.rs: T3 flags at 1.0x and pauses at 1.5x the p90, T1 flags at attempt 3, and T5 flags at 60 minutes and pauses at 120. With those values, the criterion-2 numbers work: 0.1 against 0.3 gives no signal, the control's 1.5 against 1.0 pauses, and the over-budget resumed case pauses. Leaving run/mod.rs untouched matches criterion 6, and the plan raises the conflict with the deliverable list openly. I found no blockers or majors. My minor findings are: T3 can stop counting the producer spend of an environment-stopped attempt even when the resumed attempt is then rejected; the check that `attempt_of` turns low disk into Environment depends on which test variant is kept; and the plan defines a PRODUCER_SHARE constant that no code uses."
+}

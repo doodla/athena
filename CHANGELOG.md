@@ -27,6 +27,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- The scope guard no longer counts an attempt that ended on the environment as a failed attempt, and it forecasts a
+  retry that resumes a kept candidate on the stages left. On 2026-10-28 it paused the line of job
+  20261028-034820-v3rf after an attempt whose work was complete: it planned, built and passed every check, then
+  stopped only because the disk was 0.2 GB short before the verifier. Root cause: `attempt_of` turned every
+  closed job that did not land and was not rejected into a failed attempt, so the stop counted toward T1
+  (attempts), T2 (planning rounds and plan growth), T5 (minutes) and T3 (cost against the forecast). A job closed
+  `failed` with a reason starting `environment:` (low disk today; a usage-limit stop once it is recorded that way)
+  is now an `Environment` attempt. T1, T2 and T5 do not count it; T4 still counts only rejections, so a failed
+  verification counts as before. T3 drops its spend when its work was kept (it is the last attempt of the line, or
+  the next attempt resumed it) and keeps it when the next attempt redid the work. A retry is read as resuming a
+  kept candidate when its target stopped in a way `athena retry` resumes and the retry ran no producer; T3 then
+  compares its spend with 0.3 of the reading's cost p90 (the verifier's share, an estimate), not the whole job's.
+  The pause and flag files show the numbers the signals used. Thresholds, `athena.toml` and the records are
+  unchanged. Tests cover an environment stop against a rejection, a resumed retry against a retry that redid
+  the work, and a low-disk job run through `ask`, `go` and `retry`.
 - A job that passed its own checks no longer fails twice on disk. Once Athena's checks have all passed, the job's
   producer build directory (`target/produce`) is removed before the gate that runs before the verifier; it is
   kept when a check fails. Before, only the idle-job sweep removed it, and that sweep skips the job that asks, so a

@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261028-103330-3d47",
+  "round": 2,
+  "at": "2026-10-28T10:40:46.714899767Z",
+  "invocation_seq": 4,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "Running out of disk during the replay builds becomes 'no replay', not an environment stop.",
+      "evidence": "The reading says m6m5 stopped because free disk was 9.5 GB against 10 GB. The plan runs two `cargo build --locked --bin athena` into a target dir under the job directory, before the verifier's disk gate (run/mod.rs check_and_verify, line 2241 on). If a build runs out of space it fails, and the plan's probe/resolve failure path turns that into 'no replay: …'. The job does not stop as an environment stop, and the disk gate runs only after the target dir has been removed, so it sees space that has been freed again. Fix: Before resolving trees, run the same free-space check that disk.rs provides. If space is short, stop as an environment stop, not 'no replay'. Or treat a build failure caused by running out of space as an environment stop. Name this in step 7.",
+      "location": "Plan Risks, 'The two cargo builds fill the disk'; Decision 7 (resolve_tree)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The intent phrase list is broad enough to turn off the hold by accident.",
+      "evidence": "A broad phrase such as 'stricter' in any candidate criterion turns the hold off. The phrase can appear in criteria about unrelated strictness, for example 'stricter clippy'. That makes the mechanism easy to bypass by accident. Fix: Narrow the phrases so each must refer to refusals or readings (for example 'refuse more', 'newly refuse', 'stricter reading'). Add a negative test showing that a criterion like 'stricter clippy lints' still holds.",
+      "location": "Decision 6 (intent phrase list)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The dead-code claim is wrong: `pub` items do not trigger dead_code.",
+      "evidence": "The replay is an inline `pub mod replay` with `pub` items. In a library crate those do not trigger dead_code, so unwired code would still compile clean. What actually catches missing wiring is the criterion 5 and 7 pipeline tests. Fix: Drop the dead-code claim. Say that missing wiring is caught by replay_over_threshold_rejects and replay_makes_no_model_call.",
+      "location": "Demonstration for criterion 9, 'Fails without the behavior'",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "It is unclear how the override seam counts resolve and probe calls.",
+      "evidence": "Per Decision 7, the override replaces the judges and is read before resolve/probe. It is not clear how the same override can also count resolve and probe calls. Criterion 3 does not need this ordering check anyway; criterion 5 covers it. Fix: Either describe the override's shape so it can record whether resolve/probe were reached, or move the ordering check to criterion 5 and keep criterion 3 about the window cap and the empty history.",
+      "location": "Demonstration for criterion 3, 'counting stand-in for resolve and probe'",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan matches the request (retry m6m5 from base) and the accepted reading, including the earlier corrections: a subcommand instead of a flag, a typed `athena.replay/1` record instead of replay.md, the override read before tree resolution and the probe, and the call-count comparison. I checked its claims against the snapshot:\n- These exist: `check_reading_acceptance` (reading.rs:2228), `check_governance_coverage`, `Closing` (run/mod.rs:88), `check_and_verify`, `close_dispatched`, `verify::judge` with `FindingSource::Athena`, and the `athena.baseline/1` record pattern.\n- store.rs `add` has an `other` arm and `job_of` has `_ => None`.\n- `AnyRecord::Baseline` is matched only in store.rs, records.rs, run/mod.rs and one CLI test. The other `AnyRecord` matches must therefore use catch-all arms, so adding a `Replay` variant is safe.\n- All `VerifierInputs` literals are in briefs.rs and run/mod.rs, both deliverables.\n- athena-cli already depends on athena-data, and athena-core depends on athena-gate, so `RecordSet::load` is usable in the pipeline test.\n- No thread spawn appears in run/, so the thread-local override works for tests that call `Athena::go` directly.\n- The judgment feeds verification.json right after `judge` (run/mod.rs:2679-2721), so `hold_on_replay` placed there will reach the record and the Rejected state.\n\nEach demonstration names a production entry point and a seam the plan adds, and each would fail without the behavior. The remaining issues are minor:\n- Running out of disk during the two replay builds would show up as 'no replay' instead of an environment stop.\n- The intent phrase list is broad enough to turn off the hold by accident.\n- The criterion 9 dead-code claim is wrong.\n- The criterion 3 ordering stand-in is unclear.\n\nNone blocks the plan."
+}
