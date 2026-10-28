@@ -90,6 +90,12 @@
 //!   the job proposed or blocked, which `athena retry` refuses, so the second attempt runs the same reading
 //!   again. After a run that passed but did not land, it lands again. Two failures stop the loop, naming the
 //!   item.
+//! - **A usage limit holds the run.** When the model service refuses a call because a usage limit was reached,
+//!   the run pipeline closes the job `failed` with a reason that begins `environment: usage limit` and names
+//!   the reset time, keeping the candidate for `athena retry`. Drain reads that reason
+//!   ([`athena_core::run::usage_limit_of`]) and stops at once with [`Stop::UsageLimit`], naming the reset time
+//!   ([`Report::usage_limit`]). No failure is counted and the item is not tried again in this run, since every
+//!   call would be refused alike. Nothing waits for the reset.
 //! - **A configuration change.** A reading stays valid across a change that does not bear on it (for
 //!   example `[parallel] max_concurrency`; see `athena_core::run::GoResult::Reread`). When a relevant change
 //!   makes `athena go` read the job again, drain accepts the new reading if its scope (capability, class
@@ -470,6 +476,11 @@ pub enum Stop {
     BudgetSpent,
     /// One item failed twice.
     RepeatedFailure,
+    /// The model service refused a call because a usage limit was reached. Every later call would be
+    /// refused alike, so nothing more starts. This is the environment, not a failure of the item: the job
+    /// and its candidate are kept for `athena retry`, no failure is counted, and the report names the reset
+    /// time ([`Report::usage_limit`]).
+    UsageLimit,
     /// Nothing is queued (or everything queued was worked). This is not success.
     QueueEmpty,
     /// The job limit was reached.
@@ -486,10 +497,11 @@ pub enum Stop {
 }
 
 impl Stop {
-    pub const ALL: [Stop; 8] = [
+    pub const ALL: [Stop; 9] = [
         Stop::TargetMet,
         Stop::BudgetSpent,
         Stop::RepeatedFailure,
+        Stop::UsageLimit,
         Stop::QueueEmpty,
         Stop::JobLimit,
         Stop::Requested,
@@ -502,6 +514,7 @@ impl Stop {
             Stop::TargetMet => "target met",
             Stop::BudgetSpent => "budget spent",
             Stop::RepeatedFailure => "repeated failure",
+            Stop::UsageLimit => "usage limit",
             Stop::QueueEmpty => "queue empty",
             Stop::JobLimit => "job limit",
             Stop::Requested => "stop requested",
@@ -519,6 +532,9 @@ impl Stop {
                 "spend plus the next model call's cap would exceed the budget; the rest stays queued"
             }
             Stop::RepeatedFailure => "the same item failed twice; the item is named",
+            Stop::UsageLimit => {
+                "the model service refused a call because a usage limit was reached; the job and its candidate are kept for `athena retry`, no failure was counted, and the reset time is named"
+            }
             Stop::QueueEmpty => "nothing was left to work; this is not success",
             Stop::JobLimit => "the job limit was reached",
             Stop::Requested => {
@@ -566,6 +582,9 @@ pub struct Report {
     pub stop: Stop,
     /// The item that failed twice, when `stop` is `repeated-failure`.
     pub failed_item: Option<String>,
+    /// When `stop` is `usage-limit`, when the limit lifts: `resets at <time>`, or `reset time unknown`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage_limit: Option<String>,
     pub jobs: Vec<JobLine>,
     pub spent_usd: f64,
     pub budget_usd: f64,
@@ -628,6 +647,8 @@ struct State {
     /// item that failed twice when that is the reason. No worker starts a job once this is set; jobs already
     /// started are finished.
     stop: Option<(Stop, Option<String>)>,
+    /// When the stop is [`Stop::UsageLimit`], when the limit lifts (see [`Report::usage_limit`]).
+    usage_limit: Option<String>,
 }
 
 struct Drain<'a, S: ?Sized, U: ?Sized> {
@@ -654,6 +675,8 @@ enum ItemEnd {
     NeedsAccepting,
     /// Dispatch was held for lack of free disk space; the item stays queued, and nothing else stops.
     Held,
+    /// A model call was refused for a reached usage limit (resetting as the text says). Not a failure.
+    UsageLimit(String),
 }
 
 enum RunStep {
@@ -673,6 +696,9 @@ enum RunStep {
     /// The job was held at dispatch for lack of free disk space. It is not a failure and not tried again in
     /// this run.
     Held,
+    /// A model call was refused for a reached usage limit; the text says when it resets. The job is kept for
+    /// `athena retry`. It is not a failure and not tried again in this run, and it ends the run.
+    UsageLimit(String),
     Budget,
     JobLimit,
     /// Another worker had already ended the run.
@@ -797,11 +823,26 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
         }
         line.cost_usd += run.cost;
         line.reason = (!run.reason.is_empty()).then(|| run.reason.clone());
+        // A job closed failed for a reached usage limit: the run pipeline wrote the reason, which names the
+        // reset time. Read it back here, so that no code path counts it as a failure of the item.
+        let limit = (run.outcome == Some(OutcomeState::Failed))
+            .then(|| athena_core::run::usage_limit_of(&run.reason))
+            .flatten();
         match run.outcome {
             Some(OutcomeState::Landed) => {
                 line.outcome = "passed".into();
                 let at = self.push(line);
                 RunStep::Passed(job, at)
+            }
+            _ if limit.is_some() => {
+                let reset = limit.unwrap_or_default();
+                line.outcome = "usage limit".into();
+                self.note(format!(
+                    "item {} is left for a retry: the model usage limit was reached ({reset}); run `athena retry {job}` after that",
+                    item.job
+                ));
+                self.push(line);
+                RunStep::UsageLimit(reset)
             }
             _ if run.needs_accepting => {
                 line.outcome = "needs accepting".into();
@@ -900,6 +941,8 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                     RunStep::Ended => return ItemEnd::Idle,
                     RunStep::NeedsAccepting => return ItemEnd::NeedsAccepting,
                     RunStep::Held => return ItemEnd::Held,
+                    // Before `failures` is touched: a usage limit is not a failure of the item.
+                    RunStep::UsageLimit(reset) => return ItemEnd::UsageLimit(reset),
                     RunStep::Passed(job, at) => passed = Some((job, at)),
                     RunStep::Failed {
                         job,
@@ -1169,6 +1212,7 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 rebuild_output: None,
                 read_cost: Default::default(),
                 stop: None,
+                usage_limit: None,
             }),
             landing: Mutex::new(()),
         }
@@ -1223,6 +1267,14 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
             ItemEnd::Budget => self.set_stop(Stop::BudgetSpent, None),
             ItemEnd::JobLimit => self.set_stop(Stop::JobLimit, None),
             ItemEnd::Stop => self.set_stop(Stop::Requested, None),
+            ItemEnd::UsageLimit(reset) => {
+                // The first reason found stands, with its own reset text.
+                let mut st = self.st();
+                if st.stop.is_none() {
+                    st.stop = Some((Stop::UsageLimit, None));
+                    st.usage_limit = Some(reset);
+                }
+            }
             ItemEnd::Idle | ItemEnd::NeedsAccepting | ItemEnd::Held => {}
         }
     }
@@ -1407,6 +1459,7 @@ fn drain_with<'a, S: Steps + ?Sized, U: Ui + ?Sized>(
     Ok(Report {
         stop,
         failed_item,
+        usage_limit: st.usage_limit.clone().filter(|_| stop == Stop::UsageLimit),
         spent_usd: st.budget.spent(),
         budget_usd: limits.budget_usd,
         target_rating: limits.target_rating,
@@ -2220,6 +2273,131 @@ mod tests {
             ["backfill: summary", "evidence labels: summary"],
             "one line per pass"
         );
+    }
+
+    /// Steps with two queued items whose run is refused for a reached usage limit, as the run pipeline
+    /// closes such a job: failed, with the reason it writes. Every call is logged.
+    struct LimitedStub {
+        calls: RefCell<Vec<String>>,
+        reason: String,
+    }
+
+    impl Steps for LimitedStub {
+        fn caps(&self) -> anyhow::Result<Caps> {
+            Ok(Caps {
+                read: 0.5,
+                run: 1.0,
+                rate: 0.5,
+            })
+        }
+        fn queue(&self) -> anyhow::Result<QueueView> {
+            Ok(QueueView {
+                items: vec![Item::queued("j1", "t"), Item::queued("j2", "t")],
+                ..QueueView::default()
+            })
+        }
+        fn approve(&self, _: &str) -> Approval {
+            Approval::default()
+        }
+        fn previous_rating(&self) -> Option<u8> {
+            None
+        }
+        fn read(&self, what: ReadOf<'_>) -> Read {
+            self.calls.borrow_mut().push(format!("read {what:?}"));
+            Read {
+                job: Some("job-a".into()),
+                cost: 0.1,
+                runnable: true,
+                error: None,
+            }
+        }
+        fn run(&self, job: &str) -> Run {
+            self.calls.borrow_mut().push(format!("run {job}"));
+            Run {
+                outcome: Some(OutcomeState::Failed),
+                reason: self.reason.clone(),
+                cost: 0.0,
+                ..Run::default()
+            }
+        }
+        fn land(&self, job: &str) -> Landing {
+            self.calls.borrow_mut().push(format!("land {job}"));
+            unreachable!("a held job is never landed")
+        }
+        fn check_page(&self) -> Check {
+            Check::pass("stub")
+        }
+        fn check_cap(&self) -> f64 {
+            0.5
+        }
+        fn rate(&self) -> Rate {
+            unreachable!("nothing landed")
+        }
+    }
+
+    #[test]
+    fn a_usage_limit_stops_the_drain_with_its_reset_time_and_counts_no_failure() {
+        let job = athena_data::JobId::parse("20261027-123701-77zh").unwrap();
+        let stub = LimitedStub {
+            calls: RefCell::new(Vec::new()),
+            reason: athena_core::run::usage_limit_reason(
+                "usage limit (resets at 2026-10-29T18:00:00Z): You've hit your weekly limit",
+                &job,
+            ),
+        };
+        let report = drain(&stub, limits(10.0), &Quiet).unwrap();
+
+        // The stop is the usage limit, naming the reset time; it is not a repeated failure.
+        assert_eq!(report.stop, Stop::UsageLimit);
+        assert_eq!(report.stop.label(), "usage limit");
+        assert_eq!(
+            report.usage_limit.as_deref(),
+            Some("resets at 2026-10-29T18:00:00Z")
+        );
+        assert_eq!(report.failed_item, None, "no item is blamed");
+        let shown = crate::display::drain(&report);
+        assert!(shown.starts_with("stopped     usage limit: "), "{shown}");
+        assert!(shown.contains("resets at 2026-10-29T18:00:00Z"), "{shown}");
+        assert!(!shown.contains("repeated failure"), "{shown}");
+
+        // The counter did not move: the run was not retried, and the second item never started.
+        assert_eq!(
+            *stub.calls.borrow(),
+            ["read Queued(\"j1\")", "run job-a"],
+            "one run, no retry, no second item"
+        );
+        let [line] = report.jobs.as_slice() else {
+            panic!("one job line: {:?}", report.jobs)
+        };
+        assert_eq!(line.outcome, "usage limit");
+        assert_eq!(line.landing, "not attempted");
+        assert_eq!(report.landed, 0);
+        assert!(
+            report.notes.iter().any(|n| n.contains("athena retry")),
+            "{:?}",
+            report.notes
+        );
+        assert_eq!(report.queued.len(), 2, "both items stay queued");
+    }
+
+    #[test]
+    fn an_ordinary_failed_run_is_still_counted_and_stops_the_drain_as_a_repeated_failure() {
+        let stub = LimitedStub {
+            calls: RefCell::new(Vec::new()),
+            reason: "the producer did not complete: API Error: 500".into(),
+        };
+        let report = drain(&stub, limits(10.0), &Quiet).unwrap();
+        assert_eq!(report.stop, Stop::RepeatedFailure);
+        assert_eq!(report.failed_item.as_deref(), Some("j1"));
+        assert_eq!(report.usage_limit, None);
+        let runs = stub
+            .calls
+            .borrow()
+            .iter()
+            .filter(|c| c.starts_with("run "))
+            .count();
+        assert_eq!(runs, 2, "{:?}", stub.calls.borrow());
+        assert!(crate::display::drain(&report).contains("repeated failure"));
     }
 
     #[test]

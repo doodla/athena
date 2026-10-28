@@ -1,0 +1,163 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261027-160633-t5sh",
+  "n": 1,
+  "at": "2026-10-28T22:18:29.351101997Z",
+  "invocation_seq": 2,
+  "base_commit": "9a58cd2d0bf093dc79350580d92f61ad4831462b",
+  "config_sha256": "b812f3c3683488bcd9485d235a6a234bc80722c9f137a6c232094fae2ee727d6",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Treat a model usage limit as a hold, not a job failure",
+  "summary": "Recognise the driver's usage-limit reply (limit text plus reset time), record the invocation as limited at zero cost so the gate accepts it, keep the job and its candidate retryable, and make drain stop with 'usage limit' naming the reset time. Job 20261027-123701-77zh, which hit the limit, is retried by this fix and is not re-done; its site-rating work is out of scope.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "Fake-driver, drain and status tests plus fmt, clippy -D warnings and cargo test."
+    },
+    {
+      "id": "root-cause",
+      "how": "Handles the limit reply at the driver and record level rather than patching drain's failure count alone."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run tests that exercise the limit reply, gate, retry and stop reason."
+    },
+    {
+      "id": "mechanism",
+      "how": "The gate accepts the limited record and drain enforces the stop through code."
+    },
+    {
+      "id": "no-empty-success",
+      "how": "A limited job is never counted as success; it stays retryable."
+    },
+    {
+      "id": "thrash-stop",
+      "how": "A limit hit stops drain at once with its own reason, rather than as a repeated failure."
+    },
+    {
+      "id": "strangers",
+      "how": "CHANGELOG entry and messages are written for an outside reader."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-agent/src/claude.rs (the driver reply parse and the invocation record built from it), crates/athena-cli/src/drain.rs (Stop::RepeatedFailure maps to 'repeated failure' near line 504; the drain loop counts failures), crates/athena-core/src/run/mod.rs (run pipeline, the verifier call and the gate on invocation records) and crates/athena-core/src/status.rs. No new record or data file under crates/ is added; if the invocation record gains a 'limited' state, the existing records validation and round-trip test must still accept it.",
+    "Job 20261027-123701-77zh (site rating fixes) never got a verdict and changed no files; its candidate is kept and retried, not dropped. Its own deliverables (xtask/src/site.rs, studies/, docs/design/explainer-site.md) are not part of this change.",
+    "The audience is Athena maintainers running drain; they judge the change by the stop reason, status output and a retryable job.",
+    "The limit text has the form \"You've hit your weekly limit · resets Oct 29, 6pm (UTC)\"; the parser tolerates other limit kinds (session, daily) that carry the same 'limit' and 'resets' wording."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Run `cargo test`: a claude.rs test feeds a fake driver reply with the text \"You've hit your weekly limit · resets Oct 29, 6pm (UTC)\" and no usage, and asserts the reply is recognised as a usage limit with the reset time parsed.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`: a run-level test with a fake driver returning the limit reply asserts the invocation record is marked limited with zero cost, passes the gate, the job stays retryable with its candidate kept, and no failure is counted.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`: a drain test with a job hitting the limit asserts drain stops with stop reason 'usage limit' that names the reset time, not 'repeated failure', and the failure counter is unchanged.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`: a status.rs test asserts `athena status` output shows the usage limit and its reset time while the limit holds, and shows neither once the reset time has passed.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A genuine driver error without limit text still records as an error and counts as a failure, shown by an existing or new test, so ordinary failure handling is unchanged.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has an entry describing the usage-limit handling, with the 'usage limit' stop reason and the status display.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test`; all pass.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-agent/src/claude.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.93
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "p": 0.3
+    }
+  ],
+  "out_of_scope": [
+    "The site-rating changes of job 20261027-123701-77zh (xtask/src/site.rs, studies/, docs/design/explainer-site.md)",
+    "Automatic waiting or sleeping until the reset time",
+    "Changing the gate's rules for other records",
+    "Records under records/, athena.toml, defaults.toml and workflows"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.12,
+      "cost_usd": {
+        "p10": 0.8,
+        "p50": 1.8,
+        "p90": 4.0
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 1900.0,
+        "p90": 4000.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7212121212121212,
+      "p_verification_passes": 0.6785714285714286,
+      "p_user_intervenes": 0.07880794701986756,
+      "cost_usd": {
+        "p10": 0.5222797539224743,
+        "p50": 1.1853138272187667,
+        "p90": 2.8743760168264854
+      },
+      "wall_time_s": {
+        "p10": 523.3877383580382,
+        "p50": 1633.7951667840273,
+        "p90": 3115.2252558591745
+      }
+    }
+  },
+  "departures": "Higher cost and time than the reference: the change spans four crates' modules and touches the gate, drain and status, so more tests and review cycles.",
+  "urgent_reason": "Cuts wasted time: the limit was counted as a failure twice and drain stopped, so jobs were lost and redone.",
+  "hard_reason": "Changes the run pipeline, the drain stop rule and how the invocation gate treats records, so a mistake is costly and hard to see.",
+  "producer_effort": "high"
+}

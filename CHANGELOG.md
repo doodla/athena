@@ -9,6 +9,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- A model usage limit is now treated as the environment, not as a failure of the job. On 2026-10-27 the
+  verifier call of one job returned in 2 seconds with "You've hit your weekly limit · resets Oct 29, 6pm
+  (UTC)" and no usage. Athena recorded an error invocation with measured tokens but no usage for the requested
+  model, its own gate refused that record, the job ended with no outcome, and drain counted it as a failure
+  twice and stopped as "repeated failure". Root cause: the driver (`output_from_result` in
+  `crates/athena-agent/src/claude.rs`) took every error result for an ordinary error. Fix: it now recognises
+  the reply (an error with no model usage whose text speaks of a limit and when it `resets`; weekly, daily
+  and session limits share that wording) and returns the new invocation outcome `limited` (`Limited`), with
+  the reset time parsed from the text (UTC) and put first in the detail. A limited record has zero cost,
+  zero unmeasured usage and no model listed as used, so the gate accepts it unchanged. A planner, critic,
+  producer or verifier call that is limited closes the job `failed` with the reason
+  `environment: usage limit (resets at <time>): ...`, like low disk: the candidate and its resume mark are
+  kept, so `athena retry <job>` resumes it after the reset. `athena drain` reads that reason and stops at once
+  with the new stop reason **usage limit**, naming the reset time; it counts no failure, does not retry the
+  item and starts no other. `athena status` shows a `usage limit:` line with the job and the reset time while
+  the limit holds, and shows nothing once the reset time has passed or a later call has worked. Nothing waits
+  for the reset. A genuine driver error without limit text still records as an error and is counted as a
+  failure.
+
 - The firstmate study page was rated 3 of 5 by a newcomer for four gaps: a missing finding id, an early
   study-id paragraph, no short definition of firstmate before its terms, and no install command in Next
   steps. The base already renders all four fixes (consecutive finding ids f1 to f3, the study id under

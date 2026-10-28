@@ -244,8 +244,133 @@ fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     file.write_all(bytes)
 }
 
+/// The marker the detail of a limited invocation starts with; it is followed by the reset time.
+const LIMIT_DETAIL: &str = "usage limit";
+
+/// The longest part of the reply text kept in the detail of a limited invocation.
+const LIMIT_TEXT_MAX: usize = 200;
+
+/// True when a result is the service's refusal for a reached usage limit, such as
+/// "You've hit your weekly limit · resets Oct 29, 6pm (UTC)": an error that carries no model usage
+/// (no model ran) and whose text speaks of a limit and when it resets. Weekly, daily and session limits
+/// share that wording. An ordinary error, or a success that quotes the words, is not a limit.
+pub fn is_usage_limit(result: &ResultEvent) -> bool {
+    if !result.is_error || !result.models_used.is_empty() {
+        return false;
+    }
+    let text = result.text.as_deref().unwrap_or("").to_lowercase();
+    text.contains("limit") && text.contains("resets")
+}
+
+/// Reads the reset time out of a limit reply such as "resets Oct 29, 6pm (UTC)" or "resets 3pm (UTC)".
+/// The reply names no year, so the first such time that is not before `reference` is taken. Only UTC
+/// is understood; another zone, or text without a time, gives `None`.
+pub fn parse_reset(text: &str, reference: jiff::Timestamp) -> Option<jiff::Timestamp> {
+    const MONTHS: [&str; 12] = [
+        "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+    ];
+    let lower = text.to_lowercase();
+    let after = &lower[lower.find("resets")? + "resets".len()..];
+    let mut month: Option<i8> = None;
+    let mut day: Option<i8> = None;
+    let mut time: Option<(i8, i8)> = None;
+    let mut utc = false;
+    for word in after.split(|c: char| c.is_whitespace() || c == ',' || c == '(' || c == ')') {
+        if word.is_empty() {
+            continue;
+        }
+        if word == "utc" {
+            utc = true;
+            break;
+        }
+        if time.is_some() {
+            continue;
+        }
+        let clock = word
+            .starts_with(|c: char| c.is_ascii_digit())
+            .then(|| {
+                word.strip_suffix("am")
+                    .map(|h| (h, false))
+                    .or_else(|| word.strip_suffix("pm").map(|h| (h, true)))
+            })
+            .flatten();
+        if let Some((digits, pm)) = clock {
+            let (hour, minute) = match digits.split_once(':') {
+                Some((h, m)) => (h.parse::<i8>().ok()?, m.parse::<i8>().ok()?),
+                None => (digits.parse::<i8>().ok()?, 0),
+            };
+            if !(1..=12).contains(&hour) || !(0..60).contains(&minute) {
+                return None;
+            }
+            time = Some((hour % 12 + if pm { 12 } else { 0 }, minute));
+        } else if month.is_none()
+            && word.len() >= 3
+            && word.chars().all(|c| c.is_ascii_alphabetic())
+            && let Some(at) = MONTHS.iter().position(|m| word.starts_with(m))
+        {
+            month = Some(at as i8 + 1);
+        } else if month.is_some()
+            && day.is_none()
+            && let Ok(d) = word.parse::<i8>()
+        {
+            day = Some(d);
+        }
+    }
+    let (hour, minute) = time?;
+    if !utc {
+        return None;
+    }
+    let zone = jiff::tz::TimeZone::UTC;
+    let at = |date: jiff::civil::Date| -> Option<jiff::Timestamp> {
+        Some(
+            date.at(hour, minute, 0, 0)
+                .to_zoned(zone.clone())
+                .ok()?
+                .timestamp(),
+        )
+    };
+    let today = reference.to_zoned(zone.clone()).date();
+    match (month, day) {
+        (Some(month), Some(day)) => (0..=1).find_map(|years| {
+            let date = jiff::civil::Date::new(today.year() + years, month, day).ok()?;
+            at(date).filter(|t| *t >= reference)
+        }),
+        (None, None) => {
+            let first = at(today)?;
+            if first >= reference {
+                Some(first)
+            } else {
+                at(today.tomorrow().ok()?)
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The detail of a limited invocation: it leads with the reset time, so that cutting the reply text
+/// never loses it. [`reset_time_in`] reads it back.
+fn limit_detail(text: &str, reset: Option<jiff::Timestamp>) -> String {
+    let text: String = text.chars().take(LIMIT_TEXT_MAX).collect();
+    match reset {
+        Some(at) => format!("{LIMIT_DETAIL} (resets at {at}): {text}"),
+        None => format!("{LIMIT_DETAIL} (reset time unknown): {text}"),
+    }
+}
+
+/// The reset time a limited invocation's detail carries, if it names one.
+pub fn reset_time_in(detail: &str) -> Option<jiff::Timestamp> {
+    let rest = detail
+        .strip_prefix(LIMIT_DETAIL)?
+        .strip_prefix(" (resets at ")?;
+    rest.split_once(')')?.0.parse().ok()
+}
+
 /// The output of an invocation that ended with a result event. Its tokens are the requested model's
 /// `modelUsage` tokens (see [`ResultEvent::requested_usage`]), the quantity the gate reconciles.
+///
+/// A reply that says a usage limit was reached is [`InvocationOutcome::Limited`]: no model ran, so the
+/// usage is zero and unmeasured, the cost is a reported zero, and no model is listed as used. The gate
+/// then has no measured tokens to reconcile against a model that never ran.
 pub fn output_from_result(
     result: &ResultEvent,
     model: &str,
@@ -254,6 +379,25 @@ pub fn output_from_result(
     wall_s: f64,
     commands_run: Vec<String>,
 ) -> AgentOutput {
+    if is_usage_limit(result) {
+        let text = result.text.as_deref().unwrap_or("");
+        return AgentOutput {
+            outcome: InvocationOutcome::Limited,
+            detail: Some(limit_detail(text, parse_reset(text, ended_at))),
+            structured: None,
+            started_at,
+            ended_at,
+            wall_s,
+            usage: Default::default(),
+            usage_measured: false,
+            models_used: Default::default(),
+            cost_usd: Some(0.0),
+            turns: result.turns,
+            duration_api_ms: result.duration_api_ms,
+            commands_run,
+            denials: result.denials.clone(),
+        };
+    }
     let ok = !result.is_error && result.subtype == "success";
     AgentOutput {
         outcome: if ok {
@@ -557,6 +701,138 @@ mod tests {
         }
     }
 
+    const WEEKLY: &str = "You've hit your weekly limit · resets Oct 29, 6pm (UTC)";
+
+    fn at(text: &str) -> jiff::Timestamp {
+        text.parse().unwrap()
+    }
+
+    /// The output the driver builds from a `result` event line made of `fields`, ended at `ended`.
+    fn output_of(fields: serde_json::Value, ended: &str) -> AgentOutput {
+        let mut line = serde_json::json!({ "type": "result" });
+        line.as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        let mut state = StreamState::default();
+        state.on_line(&line.to_string());
+        let result = state.result.expect("the line is a result event");
+        output_from_result(
+            &result,
+            "claude-sonnet-5-5",
+            at("2026-10-27T11:59:58Z"),
+            at(ended),
+            2.0,
+            Vec::new(),
+        )
+    }
+
+    /// A refusal as the service sends it: an error with the text, no usage and no model usage.
+    fn refusal(text: &str) -> serde_json::Value {
+        serde_json::json!({
+            "subtype": "success", "is_error": true, "num_turns": 0, "duration_api_ms": 0,
+            "total_cost_usd": 0, "usage": {}, "modelUsage": {}, "permission_denials": [],
+            "result": text,
+        })
+    }
+
+    #[test]
+    fn a_weekly_limit_reply_is_a_usage_limit_with_its_reset_time() {
+        let out = output_of(refusal(WEEKLY), "2026-10-27T12:00:00Z");
+        assert_eq!(out.outcome, InvocationOutcome::Limited);
+        let detail = out.detail.clone().unwrap();
+        assert!(
+            detail.starts_with("usage limit (resets at 2026-10-29T18:00:00Z): "),
+            "{detail}"
+        );
+        assert!(detail.contains(WEEKLY), "{detail}");
+        assert_eq!(reset_time_in(&detail), Some(at("2026-10-29T18:00:00Z")));
+        // Nothing ran: zero cost, zero unmeasured usage, and no model listed as used.
+        assert_eq!(out.cost_usd, Some(0.0));
+        assert_eq!(out.usage, crate::Usage::default());
+        assert!(!out.usage_measured);
+        assert!(out.models_used.is_empty());
+        assert!(out.structured.is_none());
+    }
+
+    #[test]
+    fn other_limit_kinds_and_reset_forms_are_understood() {
+        let now = at("2026-10-27T10:00:00Z");
+        for (text, expected) in [
+            (
+                "You've hit your session limit · resets 3pm (UTC)",
+                Some("2026-10-27T15:00:00Z"),
+            ),
+            (
+                "5-hour limit reached ∙ resets 9:30am (UTC)",
+                Some("2026-10-28T09:30:00Z"),
+            ),
+            (
+                "daily limit · resets 12am (UTC)",
+                Some("2026-10-28T00:00:00Z"),
+            ),
+            (
+                "weekly limit · resets Jan 2, 6:30am (UTC)",
+                Some("2027-01-02T06:30:00Z"),
+            ),
+            (
+                "weekly limit · resets Oct 20, 6pm (UTC)",
+                Some("2027-10-20T18:00:00Z"),
+            ),
+            // Another zone, or no time at all, is a limit with an unknown reset.
+            ("weekly limit · resets Oct 29, 6pm (PST)", None),
+            ("weekly limit · resets soon", None),
+        ] {
+            assert_eq!(parse_reset(text, now), expected.map(at), "{text}");
+            let out = output_of(refusal(text), "2026-10-27T10:00:00Z");
+            assert_eq!(out.outcome, InvocationOutcome::Limited, "{text}");
+            assert_eq!(
+                reset_time_in(&out.detail.unwrap()),
+                expected.map(at),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_ordinary_error_stays_an_error_with_its_usage() {
+        // An API error is not a limit.
+        let out = output_of(
+            serde_json::json!({
+                "subtype": "error_during_execution", "is_error": true,
+                "usage": { "input_tokens": 1, "output_tokens": 2 },
+                "modelUsage": { "claude-sonnet-5-5": { "inputTokens": 1, "outputTokens": 2, "costUSD": 0.01 } },
+                "total_cost_usd": 0.01, "result": "API Error: 500",
+            }),
+            "2026-10-27T12:00:00Z",
+        );
+        assert_eq!(out.outcome, InvocationOutcome::Error);
+        assert_eq!(
+            out.detail.as_deref(),
+            Some("error_during_execution: API Error: 500")
+        );
+        assert!(out.usage_measured);
+        assert_eq!(out.usage.output, 2);
+        // A rate-limit error without a reset time is not a usage limit either.
+        let out = output_of(refusal("rate limit exceeded"), "2026-10-27T12:00:00Z");
+        assert_eq!(out.outcome, InvocationOutcome::Error);
+        assert_eq!(out.detail.as_deref(), Some("success: rate limit exceeded"));
+        assert!(out.usage_measured);
+        // Nor is an error from a call that ran a model, whatever words its text quotes.
+        let mut quoting = refusal(WEEKLY);
+        quoting["modelUsage"] = serde_json::json!({ "claude-sonnet-5-5": { "inputTokens": 3 } });
+        let out = output_of(quoting, "2026-10-27T12:00:00Z");
+        assert_eq!(out.outcome, InvocationOutcome::Error);
+        // A success that quotes the words is a success.
+        let out = output_of(
+            serde_json::json!({
+                "subtype": "success", "is_error": false, "result": WEEKLY,
+                "modelUsage": { "claude-sonnet-5-5": { "inputTokens": 3 } },
+            }),
+            "2026-10-27T12:00:00Z",
+        );
+        assert_eq!(out.outcome, InvocationOutcome::Success);
+    }
+
     #[test]
     fn the_hook_command_is_athena_itself() {
         let settings = ClaudeCodeDriver::settings(&spec());
@@ -590,6 +866,10 @@ if [ "$MODE" = "spill" ]; then
   d="$HOME/.claude/projects/$(pwd | sed 's/[^A-Za-z0-9]/-/g')/0c32611b-5c0a-43eb-bacb-20a90569b268/tool-results"
   mkdir -p "$d" && echo 'a large tool result' > "$d/toolu_1.txt"
   mkdir -p "$HOME/.claude/session-env/0c32611b-5c0a-43eb-bacb-20a90569b268"
+fi
+if [ "$MODE" = "limit" ]; then
+  echo '{"type":"result","subtype":"success","is_error":true,"num_turns":0,"duration_api_ms":0,"total_cost_usd":0,"usage":{},"modelUsage":{},"permission_denials":[],"result":"You'\''ve hit your weekly limit · resets Oct 29, 6pm (UTC)"}'
+  exit 1
 fi
 echo '{"type":"assistant","message":{"id":"msg_1","model":"claude-haiku-5-5","content":[{"type":"tool_use","id":"tu_1","name":"Bash","input":{"command":"cargo test"}}],"usage":{"input_tokens":3,"cache_creation_input_tokens":100,"cache_read_input_tokens":0,"output_tokens":7}}}'
 if [ "$MODE" = "hang" ]; then sleep 60; exit 0; fi
@@ -682,6 +962,31 @@ echo '{"type":"result","subtype":"success","is_error":false,"num_turns":2,"durat
         assert_eq!(out.structured.unwrap()["answer"], 42);
         assert_eq!(out.commands_run, vec!["cargo test".to_string()]);
         assert!(!sink.0.is_empty(), "usage was persisted as it accrued");
+    }
+
+    #[test]
+    fn a_usage_limit_reply_from_the_child_is_a_limited_invocation_at_zero_cost() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let driver = driver(stand_in(dir.path()), Registry::new(state.path()));
+        let out = driver
+            .invoke(
+                &spec(dir.path(), "limit", Duration::from_secs(30)),
+                &mut Recorder::default(),
+            )
+            .unwrap();
+        assert_eq!(out.outcome, InvocationOutcome::Limited, "{:?}", out.detail);
+        let detail = out.detail.unwrap();
+        assert!(detail.starts_with("usage limit (resets at "), "{detail}");
+        assert!(
+            detail.contains("You've hit your weekly limit · resets Oct 29, 6pm (UTC)"),
+            "{detail}"
+        );
+        assert!(reset_time_in(&detail).is_some(), "{detail}");
+        assert_eq!(out.cost_usd, Some(0.0));
+        assert!(!out.usage_measured);
+        assert_eq!(out.usage, Usage::default());
+        assert!(out.models_used.is_empty());
     }
 
     #[test]

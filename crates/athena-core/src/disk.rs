@@ -207,10 +207,10 @@ pub fn before_verifier_reason(problem: &str, job: &JobId) -> String {
     )
 }
 
-/// True when a job's closing `reason` records a failure of the environment (low disk or an unwritable
-/// workspace), not a failure of the work. It holds for any job.
+/// True when a job's closing `reason` records a failure of the environment (low disk, an unwritable
+/// workspace or a reached model usage limit), not a failure of the work. It holds for any job.
 pub fn is_environment_reason(reason: &str) -> bool {
-    reason.starts_with(LOW_DISK)
+    reason.starts_with(LOW_DISK) || reason.starts_with(crate::run::USAGE_LIMIT)
 }
 
 /// Whether a job that stopped is one `athena retry` may resume from its kept candidate: it closed failed
@@ -408,6 +408,16 @@ mod tests {
                 assert!(reason.contains("not the work"), "{reason}");
             }
         }
+        // A reached usage limit is the environment's too, and its job is resumable.
+        let limit = crate::run::usage_limit_reason(
+            "usage limit (resets at 2026-10-29T18:00:00Z): x",
+            &id(1),
+        );
+        assert!(is_environment_reason(&limit), "{limit}");
+        assert!(resumable_stop(
+            JobState::Closed(OutcomeState::Failed),
+            Some(&limit)
+        ));
         // A work failure is not mistaken for an environment one.
         assert!(!is_environment_reason("admission refused the change: x"));
         assert!(!is_environment_reason(

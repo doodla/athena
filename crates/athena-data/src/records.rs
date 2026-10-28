@@ -140,6 +140,9 @@ pub enum InvocationOutcome {
     TimedOut,
     /// The process and its state were lost; recorded later with bounds by `athena close`.
     Missing,
+    /// The model service refused the call because a usage limit was reached. No model ran and nothing
+    /// was spent; the detail leads with the time the limit resets. This is the environment, not the work.
+    Limited,
 }
 
 /// The brief's own intervention categories (O3), plus `other`.
@@ -2756,6 +2759,12 @@ mod tests {
             serde_json::to_string(&InvocationOutcome::TimedOut).unwrap(),
             "\"timed_out\""
         );
+        assert_eq!(
+            serde_json::to_string(&InvocationOutcome::Limited).unwrap(),
+            "\"limited\""
+        );
+        let limited: InvocationOutcome = serde_json::from_str("\"limited\"").unwrap();
+        assert_eq!(limited, InvocationOutcome::Limited);
     }
 
     fn job() -> JobId {

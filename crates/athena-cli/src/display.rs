@@ -609,6 +609,13 @@ pub fn drain(report: &crate::drain::Report) -> String {
         (crate::drain::Stop::RepeatedFailure, Some(item)) => {
             format!("stopped     repeated failure: item {item} failed twice\n")
         }
+        (crate::drain::Stop::UsageLimit, _) => format!(
+            "stopped     usage limit: the model service refused a call; {}. The job and its candidate are kept; run `athena retry <job>` after that. No failure was counted.\n",
+            report
+                .usage_limit
+                .as_deref()
+                .unwrap_or("reset time unknown")
+        ),
         (stop, _) => format!("stopped     {}: {}\n", stop.label(), stop.meaning()),
     };
     if let Some(output) = &report.rebuild_output {
@@ -953,6 +960,11 @@ fn dormant_causes_section(causes: &[athena_core::hestia::DormantCause]) -> Strin
     out
 }
 
+/// The line `athena status` prints while a model usage limit holds, or nothing once it has lifted.
+fn usage_limit_section(limit: Option<&athena_core::status::UsageLimitView>) -> String {
+    limit.map_or_else(String::new, |l| format!("{}\n", l.text()))
+}
+
 /// `athena status`.
 pub fn status(v: &StatusView) -> String {
     let mut out = String::new();
@@ -986,6 +998,7 @@ pub fn status(v: &StatusView) -> String {
             "off"
         }
     );
+    out.push_str(&usage_limit_section(v.usage_limit.as_ref()));
     let _ = writeln!(out, "bootstrap   {}", v.bootstrap.note);
     if let Some(report) = v.reconcile.as_ref().filter(|r| !r.is_quiet()) {
         for line in report.lines() {
@@ -1670,6 +1683,26 @@ mod tests {
             failing_test: test.map(str::to_string),
             warnings: Vec::new(),
         }
+    }
+
+    #[test]
+    fn status_usage_limit_line_names_the_reset_time_only_while_the_limit_holds() {
+        use athena_core::status::UsageLimitView;
+        let limit = UsageLimitView {
+            job: "20261027-123701-77zh".into(),
+            resets_at: "2026-10-29T18:00:00Z".parse().unwrap(),
+            estimated: false,
+        };
+        let shown = usage_limit_section(Some(&limit));
+        assert!(shown.starts_with("usage limit: "), "{shown}");
+        assert!(shown.contains("2026-10-29T18:00:00Z"), "{shown}");
+        assert!(
+            shown.contains("athena retry 20261027-123701-77zh"),
+            "{shown}"
+        );
+        assert!(shown.ends_with('\n'), "{shown:?}");
+        // Once the limit has lifted the view carries none, and the status shows neither.
+        assert_eq!(usage_limit_section(None), "");
     }
 
     #[test]

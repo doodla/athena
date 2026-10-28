@@ -235,6 +235,8 @@ Stop reasons:
 and the page text passed the source check
   budget spent      spend plus the next call's cap would exceed --budget; the rest stays queued
   repeated failure  the same item failed twice; it is named
+  usage limit       the model service refused a call because a usage limit was reached; the reset time is named, \
+the job and its candidate are kept for `athena retry`, and no failure is counted
   queue empty       nothing was left to work; this is not success
   job limit         --job-limit jobs were started
   stop requested    `athena drain-stop` was run; the job in progress was finished and no further job was started
