@@ -30,7 +30,9 @@
 //!   ([`PlanEntry::missing`], [`Plan::refused`]), so planning cannot be skipped. A read request whose design
 //!   names no existing code it changes or reuses, and does not say it is wholly new, is refused the same way
 //!   ([`code_reference_problem`]), so a design that does not match the repository is stopped before
-//!   production and not at the final verdict. Nothing is filled in by
+//!   production and not at the final verdict. A read request whose design edits `athena.toml` or
+//!   `defaults.toml` without listing a file under `crates/athena-data/` (the schema that parses them) is refused
+//!   too ([`schema_reference_problem`], on the rule admission and the landing gate share). Nothing is filled in by
 //!   default: acceptance comes only from explicit bullets in the request or from a reading's criteria, and
 //!   the rung only from the caller or from what the request serves in BRIEF.md and its addenda
 //!   (`reading::plan_entry`, `reading::infer_rung`); a word such as "fix" or "code" is not a rung. A request
@@ -134,6 +136,55 @@ pub struct PlanEntry {
     /// a stranger can follow; None when it does, when it states it is wholly new code, or when the request
     /// has not been read yet. Set by `reading::plan_entry`; see [`code_reference_problem`].
     pub code_problem: Option<String>,
+    /// Why the design of a read request edits `athena.toml` or `defaults.toml` without the schema that must
+    /// accept the edit, in a sentence; None otherwise. Set by `reading::plan_entry`; see
+    /// [`schema_reference_problem`].
+    pub schema_problem: Option<String>,
+}
+
+/// What `PlanEntry::missing` reports when a configuration edit has no schema change beside it.
+pub const MISSING_SCHEMA: &str = "the schema change for its configuration edit";
+
+/// The plan-time check that an edit to `athena.toml` or `defaults.toml` comes with the schema that parses it.
+/// `changes` is each path the design lists with whether the design deletes it.
+///
+/// Root cause it addresses: the configuration files and the code that parses them (`crates/athena-data/`,
+/// strict on unknown fields) are changed separately, and nothing connected a new section to the schema that
+/// must accept it before admission or landing. Jobs 20261016-071202-q0xy and 20261016-185517-qcrz planned a
+/// `[parallel]` table in `athena.toml` with the schema in the wrong crate, or not at all, and were refused
+/// there after production; 20261016-200605-xh54 was refused by the landing gate for the same cause. Admission
+/// and the landing gate already skip their own parse when the change modifies the schema
+/// ([`athena_gate::defers_to_schema_test`]); this applies that same rule one stage earlier, through
+/// [`athena_gate::config_edits_without_schema`], so there is one definition of the schema directory.
+///
+/// The check cannot see at plan time whether an edit adds a section, so it takes the narrowest sound form: any
+/// non-deleted configuration file in the design needs a non-deleted path under
+/// [`athena_gate::SCHEMA_DIR`] beside it. The returned sentence names the schema file to change.
+pub fn schema_reference_problem(changes: &[(String, bool)]) -> Option<String> {
+    let lacking = athena_gate::config_edits_without_schema(
+        changes
+            .iter()
+            .map(|(path, deleted)| (path.as_str(), *deleted)),
+    );
+    if lacking.is_empty() {
+        return None;
+    }
+    let schemas: Vec<&str> = lacking
+        .iter()
+        .map(|p| {
+            if *p == athena_gate::DEFAULTS_PATH {
+                "crates/athena-data/src/defaults.rs"
+            } else {
+                "crates/athena-data/src/config.rs"
+            }
+        })
+        .collect();
+    Some(format!(
+        "the design changes {} but lists no file under {}: the parser is strict on unknown fields, so a new section or key is refused at admission and landing unless the schema ({}) changes in the same job; list the schema file as a deliverable (modify), or drop the configuration edit",
+        lacking.join(", "),
+        athena_gate::SCHEMA_DIR,
+        schemas.join(", "),
+    ))
 }
 
 /// The changelog Athena adds to every change reading (`reading::ensure_changelog`).
@@ -197,6 +248,7 @@ impl PlanEntry {
             touches: Vec::new(),
             priority: Priority::Normal,
             code_problem: None,
+            schema_problem: None,
         }
     }
 
@@ -215,6 +267,9 @@ impl PlanEntry {
         }
         if self.code_problem.is_some() {
             lacks.push(MISSING_CODE);
+        }
+        if self.schema_problem.is_some() {
+            lacks.push(MISSING_SCHEMA);
         }
         lacks
     }
@@ -368,11 +423,19 @@ impl Plan {
             if missing.is_empty() {
                 pending.push((age, entry));
             } else {
+                let detail = [
+                    entry.code_problem.as_deref(),
+                    entry.schema_problem.as_deref(),
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join("; ");
                 plan.refused.push(Refusal::lacking_because(
                     &entry.id,
                     &entry.title,
                     missing.into_iter().map(String::from).collect(),
-                    entry.code_problem.as_deref(),
+                    Some(detail.as_str()).filter(|d| !d.is_empty()),
                 ));
             }
         }
@@ -708,6 +771,44 @@ mod tests {
         let ok = entry("ok", low, &["crates/a/src/lib.rs"], &[]);
         assert!(ok.missing().is_empty());
         assert_eq!(Plan::build(&[ok]).order, ["ok"]);
+    }
+
+    #[test]
+    fn a_config_edit_without_the_schema_is_refused_and_with_it_accepted() {
+        let change = |items: &[(&str, bool)]| -> Vec<(String, bool)> {
+            items.iter().map(|(p, d)| (p.to_string(), *d)).collect()
+        };
+        let schema = "crates/athena-data/src/config.rs";
+        let alone = schema_reference_problem(&change(&[("athena.toml", false)])).unwrap();
+        assert!(alone.contains("athena.toml"), "{alone}");
+        assert!(alone.contains(schema), "{alone}");
+        let defaults = schema_reference_problem(&change(&[("defaults.toml", false)])).unwrap();
+        assert!(
+            defaults.contains("crates/athena-data/src/defaults.rs"),
+            "{defaults}"
+        );
+        assert_eq!(
+            schema_reference_problem(&change(&[("athena.toml", false), (schema, false)])),
+            None
+        );
+        assert_eq!(schema_reference_problem(&change(&[("a.rs", false)])), None);
+
+        let (_, low) = rungs();
+        let mut bad = entry("bad", low, &["athena.toml"], &[]);
+        bad.schema_problem = Some(alone);
+        assert_eq!(bad.missing(), [MISSING_SCHEMA]);
+        // Both problems at once are both reported.
+        bad.code_problem = Some("no code".into());
+        assert_eq!(bad.missing(), [MISSING_CODE, MISSING_SCHEMA]);
+        let plan = Plan::build(&[bad, entry("ok", low, &["o"], &[])]);
+        assert_eq!(plan.order, ["ok"]);
+        assert!(
+            plan.refused[0]
+                .reason
+                .contains("no code; the design changes athena.toml"),
+            "{}",
+            plan.refused[0].reason
+        );
     }
 
     #[test]

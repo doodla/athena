@@ -55,6 +55,30 @@ pub fn defers_to_schema_test<'a>(changed: impl IntoIterator<Item = (&'a str, boo
         .any(|(path, deleted)| path.starts_with(SCHEMA_DIR) && !deleted)
 }
 
+/// The configuration files in `changed` that the running schema alone would judge: each changed, not
+/// deleted `athena.toml` or `defaults.toml`, when [`defers_to_schema_test`] is false for the same change.
+///
+/// This is the other side of [`defers_to_schema_test`]: a change it does not defer is parsed by the schema
+/// the running Athena was built with, so a new section or key in these files is refused as an unknown field
+/// unless the same change also modifies the schema under [`SCHEMA_DIR`]. Planning calls it to flag such a
+/// change before production; admission and the landing gate reach the same answer through
+/// `defers_to_schema_test`. Paths come back in the order given, once each.
+pub fn config_edits_without_schema<'a>(
+    changed: impl IntoIterator<Item = (&'a str, bool)>,
+) -> Vec<&'a str> {
+    let changed: Vec<(&str, bool)> = changed.into_iter().collect();
+    if defers_to_schema_test(changed.iter().copied()) {
+        return Vec::new();
+    }
+    let mut out: Vec<&str> = Vec::new();
+    for (path, deleted) in changed {
+        if !deleted && [CONFIG_PATH, DEFAULTS_PATH].contains(&path) && !out.contains(&path) {
+            out.push(path);
+        }
+    }
+    out
+}
+
 /// The rule a violation breaks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Rule {

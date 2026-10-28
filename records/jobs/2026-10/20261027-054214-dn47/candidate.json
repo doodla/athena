@@ -1,0 +1,141 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261027-054214-dn47",
+  "base_commit": "1df9a0183a57f1e5020328be8cbeb45486a0c863",
+  "base_fingerprint": "sha256:48c739c49d4eb5c8b665419bda972672231d972cf140e9c955d8bfd34bcb730a",
+  "previous_job": "20261027-054211-a2n5",
+  "candidate_commit": "566b6c8cb2eabdc3a71b0a761eb90d76480b1c31",
+  "candidate_tree": "794f9518e6f2a6913d0d245c367493af83c5e3db",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 186488
+    },
+    {
+      "path": "crates/athena-core/src/admission.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 32480
+    },
+    {
+      "path": "crates/athena-core/src/plan.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 48183
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 180989
+    },
+    {
+      "path": "crates/athena-gate/src/content.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 17777
+    },
+    {
+      "path": "crates/athena-gate/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 16764
+    }
+  ],
+  "fingerprint": "sha256:08877b605862f46a100f65caf296298842f1dc0338f5a2b0f3a1b75eae0e1efb",
+  "violations": [],
+  "producer_report": {
+    "summary": "Root cause: athena.toml and its parser (crates/athena-data, strict on unknown fields) are changed separately. Nothing connected a new config section to the schema that must accept it before plan time, so jobs 20261016-071202-q0xy, 20261016-185517-qcrz and 20261016-200605-xh54 died at admission or landing.\\n\\nThe fix is a plan-time rule on the same shared predicate admission and the gate already use.\\n- **Gate:** `athena_gate::config_edits_without_schema` returns the non-deleted config or defaults files in a change when `defers_to_schema_test` is false, so it shares `SCHEMA_DIR`.\\n- **Plan:** `plan::schema_reference_problem` calls it. `PlanEntry` gets a `schema_problem` field, `missing()` reports it as `MISSING_SCHEMA`, and `Plan::build` refuses the entry. The refusal names `crates/athena-data/src/config.rs` or `defaults.rs` and keeps the code-reference detail when both problems apply.\\n- **Reading:** `reading::plan_entry` computes it from the reading's deliverables (deleted ones marked) for read requests only.\\n- **Tests:** a plan unit test, an end-to-end reading test, a gate test, and an admission test that runs real admission against a temporary repo. The admission test shows the plan rule, `defers_to_schema_test` and admission's configuration violation agree on the same inputs.\\n- **Changelog:** one new entry.\\n\\nBecause plan time cannot see whether an edit adds a section, any config edit must list a schema-directory path.\\n\\nI ran fmt, clippy and the policy scan (all clean), plus the athena-core, athena-gate, athena-data and xtask tests, which all passed. I ran the full `cargo test --locked` once but could not read its output, so I did not rerun it.",
+    "files": [
+      "crates/athena-gate/src/lib.rs",
+      "crates/athena-gate/src/content.rs",
+      "crates/athena-core/src/plan.rs",
+      "crates/athena-core/src/reading.rs",
+      "crates/athena-core/src/admission.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "after cargo fmt --all"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test --locked -p athena-core -p athena-gate -- schema config_edits agree",
+        "result": "pass",
+        "note": "the 3 new tests plus deferral tests"
+      },
+      {
+        "command": "cargo test --locked --quiet -p athena-core -p athena-gate -p athena-data -p xtask --lib --tests",
+        "result": "pass",
+        "note": "544 passed in athena-core, 119 in athena-gate, plus data and xtask"
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "boundary scan"
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "not-run",
+        "note": "full suite ran once; output was too large and saved outside the working directory, which I could not read. Not rerun. The crates above were rerun separately."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "The change description names the root cause: config and parser change separately, and nothing connects a new athena.toml section to the schema that must accept it before plan time. It cites jobs 20261016-071202-q0xy, 20261016-185517-qcrz and 20261016-200605-xh54.",
+        "status": "met",
+        "evidence": "CHANGELOG.md entry and the doc comment on `schema_reference_problem` in crates/athena-core/src/plan.rs both state the root cause and cite the three jobs."
+      },
+      {
+        "criterion": "A new test in crates/athena-core (run with `cargo test -p athena-core`) shows that a plan or change which modifies athena.toml without any crates/athena-data/ path is flagged with a message that names the schema file to change. The same test shows that a change that also modifies crates/athena-data/src/config.rs is accepted. The test fails on the base commit and passes with the change.",
+        "status": "met",
+        "evidence": "New tests plan::tests::a_config_edit_without_the_schema_is_refused_and_with_it_accepted and reading::tests::a_reading_that_edits_configuration_without_the_schema_is_refused_at_plan_time pass. They cover config alone, the wrong crate, a deleted schema, and defaults.toml. They check the message names crates/athena-data/src/config.rs or defaults.rs, and that config plus the schema path is accepted. On the base commit `schema_reference_problem`, `MISSING_SCHEMA` and the `schema_problem` field do not exist, so they cannot compile. I did not run them on the base."
+      },
+      {
+        "criterion": "The plan-time rule calls `athena_gate::defers_to_schema_test`/SCHEMA_DIR rather than duplicating the path, and a test confirms that the gate, admission and the plan rule agree on the same inputs (`cargo test`).",
+        "status": "met",
+        "evidence": "`schema_reference_problem` calls `athena_gate::config_edits_without_schema`, which calls `defers_to_schema_test`; the message uses `athena_gate::SCHEMA_DIR`. The agreement test is admission::tests::plan_admission_and_the_gate_agree_on_when_the_schema_judges_a_config_edit. It runs real admission against a temporary repo and checks it against the plan rule and `defers_to_schema_test`. content::tests::config_edits_without_schema_is_the_other_side_of_the_deferral covers the gate side. Both pass."
+      },
+      {
+        "criterion": "Existing gate and admission tests (unknown-field refusal in content.rs, deferral tests) and crates/athena-data/tests/repo_config.rs still pass under `cargo test`.",
+        "status": "met",
+        "evidence": "I reran `cargo test --locked --quiet -p athena-core -p athena-gate -p athena-data -p xtask --lib --tests`; every result was ok (athena-core 544 passed, 1 ignored; athena-gate 119 passed; no failures). That run includes the athena-data tests, repo_config.rs among them. I never read the full `cargo test --locked` output."
+      },
+      {
+        "criterion": "`cargo fmt --check`, `cargo clippy` and `cargo test` all pass.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I ran fmt --check and clippy -D warnings clean, and the crate test runs above passed."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry for the new check. No changes to athena.toml, defaults.toml or .github/workflows.",
+        "status": "met",
+        "evidence": "New entry at the top of the Unreleased Fixed section in CHANGELOG.md. I edited no athena.toml, defaults.toml or workflow file."
+      }
+    ],
+    "open_issues": [
+      "The rule is deliberately narrow. A reading that only changes a value in athena.toml, with no new section, is also refused unless it lists a crates/athena-data/ path. The plan cannot tell the two apart. The refusal message says to list the schema file or drop the config edit.",
+      "Admission's own configuration loop was not refactored onto `config_edits_without_schema`. It already uses `defers_to_schema_test`, and the agreement test pins the two together."
+    ],
+    "mistakes": [
+      "My first CHANGELOG edit failed because its anchor matched 12 places. I re-anchored on the next entry's text.",
+      "I ran the full `cargo test --locked` once but could not read its saved output, so I reran the likely-affected crates in quiet mode instead."
+    ],
+    "learnings": [
+      "Plan-time checks live in plan.rs. They are computed in `reading::plan_entry`, stored on `PlanEntry`, and reported by `PlanEntry::missing()`, which makes `Plan::build` refuse the entry.",
+      "`PlanEntry` is built with `..PlanEntry::bare` everywhere, so adding a field to it is cheap.",
+      "`Refusal::lacking_because` takes a single detail, so `Plan::build` now joins `code_problem` and `schema_problem` with `; `.",
+      "The existing `check_governance_coverage` in reading.rs covers the opposite direction (a config.rs deliverable needs athena.toml). The new rule covers a config edit without a schema path."
+    ],
+    "desires": [
+      "A way to read saved tool output inside the working directory, so a large full-suite result can be inspected."
+    ]
+  }
+}

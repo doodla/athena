@@ -1,0 +1,156 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261027-054214-dn47",
+  "n": 1,
+  "at": "2026-10-28T01:40:24.623617577Z",
+  "invocation_seq": 1,
+  "base_commit": "b0669ee8e8ebc1b458516dc702497b11f7b3f98d",
+  "config_sha256": "b812f3c3683488bcd9485d235a6a234bc80722c9f137a6c232094fae2ee727d6",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Check config edits against the schema at plan time, not only at landing",
+  "summary": "Root cause: athena.toml and its parser (crates/athena-data/src/config.rs, strict on unknown fields) are changed separately, and only admission and landing check them. The gate already defers the parse when a change touches crates/athena-data/ (`defers_to_schema_test`), but a plan can still list athena.toml or defaults.toml without any schema file, or name the wrong crate (jobs 20261016-071202-q0xy and 20261016-185517-qcrz did). The fix adds one shared plan-time rule on that same predicate and tests it for the class. It addresses jobs 20261016-071202-q0xy, 20261016-185517-qcrz and 20261016-200605-xh54.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "root-cause",
+      "how": "The fix goes where the config and schema are connected, using the shared SCHEMA_DIR rule, not at one job."
+    },
+    {
+      "id": "tested",
+      "how": "Tests for the class, and fmt, clippy and test pass."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run the new test and check that it fails on the base."
+    },
+    {
+      "id": "mechanism",
+      "how": "A code rule enforces this, not prose."
+    },
+    {
+      "id": "small",
+      "how": "One focused plan-time check on the existing shared predicate."
+    },
+    {
+      "id": "rust",
+      "how": "All changes are Rust."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Goal: Athena's maintainers need a config edit that is not covered by a schema change to be refused or flagged at plan time, so jobs stop dying at admission or landing with 'unknown field'.",
+    "Job 20261016-071202-q0xy: its `[parallel]` refusal came from the schema being edited in the wrong crate (athena-core) and no check connecting the two. The plan-time rule now catches that case; the parallel feature itself has since landed (athena-data/src/config.rs has `Parallel`, and athena.toml has `[parallel]`).",
+    "Job 20261016-185517-qcrz: the same refusal. The schema deferral in athena_gate (SCHEMA_DIR = crates/athena-data/) already handles the case where the schema file is in the change. The gap that remains is a plan that edits config without a schema file, which this change closes.",
+    "Job 20261016-200605-xh54: it passed verification but the landing gate refused; its four findings (extra files, panic isolation in drain, the display label, gate refusal) concern the parallel feature, not this cause. The gate refusal is covered by the existing deferral rule and the new rule; the other findings no longer apply to this change.",
+    "The rule reuses `athena_gate::defers_to_schema_test` and `SCHEMA_DIR` so plan, admission and gate share one definition. It lives in athena-core (plan or admission module), since athena-core already depends on athena-gate.",
+    "Rule: a plan item whose deliverables modify athena.toml or defaults.toml must also list a modified path under crates/athena-data/, or the plan is flagged. The check cannot see new sections at plan time, so the producer picks the narrowest sound form and documents it.",
+    "The exact location of plan validation was not read in full. The producer should find it in crates/athena-core/src/plan.rs or admission.rs."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "The change description names the root cause: config and parser change separately, and nothing connects a new athena.toml section to the schema that must accept it before plan time. It cites jobs 20261016-071202-q0xy, 20261016-185517-qcrz and 20261016-200605-xh54.",
+      "kind": "content"
+    },
+    {
+      "text": "A new test in crates/athena-core (run with `cargo test -p athena-core`) shows that a plan or change which modifies athena.toml without any crates/athena-data/ path is flagged with a message that names the schema file to change. The same test shows that a change that also modifies crates/athena-data/src/config.rs is accepted. The test fails on the base commit and passes with the change.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The plan-time rule calls `athena_gate::defers_to_schema_test`/SCHEMA_DIR rather than duplicating the path, and a test confirms that the gate, admission and the plan rule agree on the same inputs (`cargo test`).",
+      "kind": "behavior"
+    },
+    {
+      "text": "Existing gate and admission tests (unknown-field refusal in content.rs, deferral tests) and crates/athena-data/tests/repo_config.rs still pass under `cargo test`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`cargo fmt --check`, `cargo clippy` and `cargo test` all pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has an entry for the new check. No changes to athena.toml, defaults.toml or .github/workflows.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/plan.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/admission.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-gate/src/lib.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-gate/src/content.rs",
+      "action": "modify",
+      "p": 0.15
+    }
+  ],
+  "out_of_scope": [
+    "Changes to the parallel-jobs feature itself (drain.rs, [parallel] settings)",
+    "Submit/enqueue-time config parse refusal for a config that already fails to parse",
+    "Letting admission build and run candidate code",
+    "Changes to athena.toml, defaults.toml or .github/workflows",
+    "The drain panic-isolation and display-label findings from job 20261016-200605-xh54",
+    "Threads-in-one-process spike, daemon or async runtime, automatic merging of stale jobs, run-level spend cap",
+    "Multi-job `athena go` and the --pr landing phase"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.6,
+      "p_verification_passes": 0.58,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.4,
+        "p50": 1.0,
+        "p90": 2.5
+      },
+      "wall_time_s": {
+        "p10": 400.0,
+        "p50": 1500.0,
+        "p90": 3000.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7219653179190751,
+      "p_verification_passes": 0.6692015209125475,
+      "p_user_intervenes": 0.06690391459074733,
+      "cost_usd": {
+        "p10": 0.4967601690332822,
+        "p50": 1.1004855,
+        "p90": 2.665327703595383
+      },
+      "wall_time_s": {
+        "p10": 520.5832712589577,
+        "p50": 1544.5912545749995,
+        "p90": 2979.1197710085676
+      }
+    }
+  },
+  "departures": "The mechanism is partly in place (deferral rule and repo_config test), so the remaining gap is uncertain. That widens the chance that the verifier judges the rule off target.",
+  "urgent_reason": "Repeated admission and landing refusals across three jobs cost failed attempts and retries; this check cuts those retries.",
+  "hard_reason": "Touches admission and the landing gate predicate, which decide whether other jobs are admitted or landed.",
+  "producer_effort": "high"
+}

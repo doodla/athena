@@ -1833,6 +1833,9 @@ pub fn request_text_touches(text: &str) -> Vec<String> {
 /// - A read request whose design names no existing code it changes or reuses, and does not list only files it
 ///   creates, gets `code_problem` set ([`crate::plan::code_reference_problem`]), so the plan refuses it before
 ///   production. This is the early form of the check the verifier made only at the final verdict.
+/// - A read request whose design modifies `athena.toml` or `defaults.toml` without a path under
+///   `crates/athena-data/` gets `schema_problem` set ([`crate::plan::schema_reference_problem`]), so the plan
+///   refuses it before production instead of admission refusing an unknown field after it.
 pub fn plan_entry(
     job: &JobRecords,
     rung_hint: Option<athena_data::roles::Ladder>,
@@ -1906,9 +1909,18 @@ pub fn plan_entry(
     }
     // The early check that the design names the existing code it changes or reuses (or says it is wholly
     // new): it runs here, when the plan is made, not at the final verdict. A declined reading has no design.
-    if job.latest_reading().is_some_and(|r| r.capability.is_some()) {
+    if let Some(reading) = job.latest_reading()
+        && reading.capability.is_some()
+    {
         entry.code_problem =
             crate::plan::code_reference_problem(&entry.touches, &creates, lookup.path_exists);
+        // The same stage checks that a configuration edit comes with the schema that must accept it.
+        let changes: Vec<(String, bool)> = reading
+            .deliverables
+            .iter()
+            .map(|d| (d.path.clone(), d.action == DeliverableAction::Delete))
+            .collect();
+        entry.schema_problem = crate::plan::schema_reference_problem(&changes);
     }
     for id in &entry.depends_on {
         if !(lookup.job_exists)(id) {
@@ -3372,6 +3384,69 @@ mod tests {
             &there,
         );
         assert_eq!(crate::plan::Plan::build(&[both]).order.len(), 1);
+    }
+
+    #[test]
+    fn a_reading_that_edits_configuration_without_the_schema_is_refused_at_plan_time() {
+        use DeliverableAction::{Delete, Modify};
+        let all = |_: &str| true;
+        let schema = "crates/athena-data/src/config.rs";
+        // Config alone, and config beside the wrong crate (the shape of jobs 20261016-071202-q0xy and
+        // 20261016-185517-qcrz), are refused with the schema file named.
+        for (what, deliverables) in [
+            ("athena.toml alone", vec![("athena.toml", Modify)]),
+            ("defaults.toml alone", vec![("defaults.toml", Modify)]),
+            (
+                "the wrong crate",
+                vec![
+                    ("athena.toml", Modify),
+                    ("crates/athena-core/src/config.rs", Modify),
+                ],
+            ),
+            (
+                "a deleted schema file",
+                vec![("athena.toml", Modify), (schema, Delete)],
+            ),
+        ] {
+            let entry = read_entry(&deliverables, &all);
+            assert_eq!(entry.missing(), [crate::plan::MISSING_SCHEMA], "{what}");
+            let plan = crate::plan::Plan::build(&[entry]);
+            assert!(plan.order.is_empty(), "{what}: {plan:?}");
+            let reason = &plan.refused[0].reason;
+            assert!(
+                reason.contains("crates/athena-data/src/"),
+                "{what}: {reason}"
+            );
+        }
+        // With a modified schema path, or with no configuration edit, the plan is accepted.
+        for (what, deliverables) in [
+            (
+                "config and schema",
+                vec![("athena.toml", Modify), (schema, Modify)],
+            ),
+            (
+                "config and the schema test",
+                vec![
+                    ("athena.toml", Modify),
+                    ("crates/athena-data/tests/repo_config.rs", Modify),
+                ],
+            ),
+            (
+                "no config",
+                vec![("crates/athena-core/src/plan.rs", Modify)],
+            ),
+            (
+                "config deleted",
+                vec![("athena.toml", Delete), ("a.rs", Modify)],
+            ),
+        ] {
+            let entry = read_entry(&deliverables, &all);
+            assert!(
+                entry.missing().is_empty(),
+                "{what}: {:?}",
+                entry.schema_problem
+            );
+        }
     }
 
     #[test]
