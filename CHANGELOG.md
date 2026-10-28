@@ -9,6 +9,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A check of every reading's text against the boundary words, and of its deliverables against the repository's
+  files. Root cause: a reading was checked only for the previous result and change scope, the evidence each
+  criterion rests on, the code survey and the governance files. Nothing compared its text with the boundary
+  word list or its deliverables with the files at the base commit, so a reading that held a banned word, asked
+  to modify or delete a file that does not exist, or asked to create a file that already exists was accepted,
+  and the fault showed only later in the producer's run or at verification. Fix: `check_boundary_and_repo_files`
+  in athena-core, called last from `check_reading_acceptance`, in code and not in a prompt. It scans the title,
+  summary, reasons, question, assumptions, out-of-scope items, criteria and default notes, and each
+  deliverable path, with the same boundary scan the producer is told to run, and it names the field and the
+  word. With the file list at the base commit it also refuses a `modify` or `delete` of a path that is neither
+  a file nor a directory with files under it, and a `create` of a path that is already a file. A `modify` of
+  `CHANGELOG.md` is allowed when the file is absent, because Athena adds that deliverable itself. The refusal
+  goes back to the reader once, as the other refusals do, and no model call is added. `athena check-reading`
+  replays a stored reading with no repository, so it checks the words and skips the paths. This change
+  refuses more readings, and the higher refusal rate is intended: an estimated 5% of readings are newly
+  refused (not measured).
 - A reading size gate. Root cause: reading validation never compared a reading's scope with the producer and
   verifier deadlines, so a source with many items produced a reading that no single run could finish. Fix:
   `check_reading_size` in athena-core, called from `build_reading` after the forecast is validated, refuses a

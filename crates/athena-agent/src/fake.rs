@@ -229,6 +229,13 @@ pub fn deterministic_turn(spec: &AgentInvocation) -> FakeTurn {
                     json!([format!("Anything other than {FAKE_DELIVERABLE}.")]),
                 )
             };
+            // The reader's workdir is a copy of the base commit. A file a landed fake job left there is
+            // modified, not created: a reading's deliverable actions must match the files at the base commit.
+            let action = if spec.workdir.join(FAKE_DELIVERABLE).exists() {
+                "modify"
+            } else {
+                "create"
+            };
             FakeTurn::output(json!({
                 "urgent_reason": urgent_reason,
                 "hard_reason": null,
@@ -242,7 +249,7 @@ pub fn deterministic_turn(spec: &AgentInvocation) -> FakeTurn {
                 "assumptions": ["This is a nested run with fake agents."],
                 "question": null,
                 "acceptance_criteria": [{ "text": format!("{FAKE_DELIVERABLE} contains the request"), "kind": "content" }],
-                "deliverables": [{ "path": FAKE_DELIVERABLE, "action": "create", "p": 0.9 }],
+                "deliverables": [{ "path": FAKE_DELIVERABLE, "action": action, "p": 0.9 }],
                 "out_of_scope": out_of_scope,
                 "forecast": {
                     "p_reading_accepted": 0.9,
@@ -383,6 +390,28 @@ mod tests {
             json_schema: json!({ "properties": { "class_of_work": { "enum": ["docs", "other"] }, "capability": { "enum": ["change", null] }, "producer_model": { "enum": ["claude-haiku-5-5"] } } }),
             scratch: PathBuf::from("/nonexistent"),
         }
+    }
+
+    #[test]
+    fn the_fake_reader_modifies_its_file_when_the_base_commit_already_has_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let driver = FakeAgentDriver::deterministic();
+        let action = || {
+            let turn = driver
+                .invoke(
+                    &spec(
+                        Role::Reader,
+                        "# Request (verbatim)\n\n> add a note\n",
+                        dir.path().into(),
+                    ),
+                    &mut NoSink,
+                )
+                .unwrap();
+            turn.structured.unwrap()["deliverables"][0]["action"].clone()
+        };
+        assert_eq!(action(), "create");
+        std::fs::write(dir.path().join(FAKE_DELIVERABLE), "an earlier fake job\n").unwrap();
+        assert_eq!(action(), "modify");
     }
 
     #[test]

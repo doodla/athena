@@ -2255,12 +2255,24 @@ fn the_plan_of_a_read_job_names_a_missing_path_and_an_unresolved_referenced_job_
         &[("content", "it is edited")],
     );
     let athena = fx.athena(scenario.script());
+    // A reading may only modify a file that exists at its base commit, so the file is there when the job is
+    // read and is removed afterwards: the plan, made at the later commit, finds it missing.
+    commit_files(
+        &fx,
+        &[("crates/gone/lib.rs", "pub fn gone() {}\n")],
+        "Add the file the request edits",
+    );
     let (job, _) = athena.queue(GONE_REQUEST).unwrap();
     // Read it for real first: it is in state proposed afterwards.
     athena.go(job.as_str(), AcceptedBy::Flag, &Quiet).unwrap();
     let records = Records::load(&fx.git, &fx.head()).unwrap();
     assert_eq!(records.jobs[job.as_str()].state(), JobState::Proposed);
     assert_eq!(records.jobs[job.as_str()].readings.len(), 1);
+    std::fs::remove_file(fx.root().join("crates/gone/lib.rs")).unwrap();
+    fx.git.run(["add", "-A"]).unwrap();
+    fx.git
+        .run(["commit", "-q", "-m", "Remove the file the request edits"])
+        .unwrap();
     let steps = RealSteps {
         athena: &athena,
         ui: &Quiet,
