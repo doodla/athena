@@ -538,8 +538,14 @@ impl Athena {
         // numbered after them and the budget check below counts what planning cost (review F1).
         let mut closing = Closing::new();
         let mut producer_prompt = brief.clone();
-        let planned =
-            jc.config.job_plan.as_ref().is_some_and(|p| p.enabled) && !ctx.capability.pins_repo();
+        // In `hard` mode only a reading marked hard is planned; the marking is the one that escalates the
+        // producer (job-planning.md section 9, D143).
+        let planned = jc
+            .config
+            .job_plan
+            .as_ref()
+            .is_some_and(|p| p.plans(ctx.reading.hard_reason.is_some()))
+            && !ctx.capability.pins_repo();
         if planned {
             let seed = planning_resume_seed(records, request_text).map(|s| PlanRevision {
                 previous: s.plan,

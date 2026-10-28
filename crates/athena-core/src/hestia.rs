@@ -1129,9 +1129,14 @@ mod tests {
         ] {
             git.run(["config", key, value]).unwrap();
         }
+        // These tests are about the stages a switched-off planner leaves dormant, so the repository's
+        // `[job_plan]` (planning on for hard jobs) is turned off here.
+        let repo_config = include_str!("../../../athena.toml");
+        let on = "[job_plan]\nenabled = true\nmode = \"hard\"\n";
+        assert!(repo_config.contains(on), "athena.toml plans hard jobs");
         std::fs::write(
             dir.join("athena.toml"),
-            include_str!("../../../athena.toml"),
+            repo_config.replace(on, "[job_plan]\nenabled = false\n"),
         )
         .unwrap();
         std::fs::write(

@@ -36,9 +36,12 @@ pub struct ReadingOutput {
     /// thrash, duplicated checks. A reason is required for urgent, never a bare flag: one sentence naming which of these it
     /// cuts. An ordinary request, or one that only asks for a feature, a fix or a tidy-up, is null.
     pub urgent_reason: Option<String>,
-    /// Null unless the job is hard: it changes landing, the history check, records, or the gate that judges
-    /// other jobs, so a mistake is costly or hard to see. A hard job gets a stronger producer setting. A reason
-    /// is required, never a bare flag: one sentence naming which of these it touches. An ordinary job is null.
+    /// Null unless the job is hard: it adds or changes a rule that can refuse or hold work (a check, a gate, a
+    /// guard, a limit), or it changes landing, the history check, records, the run pipeline (how a job is read,
+    /// planned, produced, verified or closed) or the drain, or the gate that judges other jobs, so a mistake is
+    /// costly or hard to see. A hard job gets a stronger producer setting, and a planner and critic when
+    /// `[job_plan] mode` is `hard`. A reason is required, never a bare flag: one sentence naming which of these
+    /// it touches. An ordinary job is null.
     #[serde(default)]
     pub hard_reason: Option<String>,
 }

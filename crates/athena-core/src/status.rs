@@ -7,7 +7,7 @@ use crate::store::{JobRecords, JobState, Records};
 use anyhow::Result;
 use athena_data::records::{
     Build, Critique, CritiqueVerdict, InterventionSource, Invocation, JobPlan, OutcomeState,
-    Reading, Role,
+    Reading, Role, text_cites_job,
 };
 use athena_gate::invariant::{BOOTSTRAP_OUTCOME, BootstrapRange, bootstrap_range};
 use athena_git::Git;
@@ -190,6 +190,134 @@ pub struct KeepRule {
     pub first_round_planned: usize,
     pub first_round_accept_rate: Option<f64>,
     pub verdict: KeepVerdict,
+    /// Landings later cited as the cause of a failure, a revert or a fix job, for planned and unplanned jobs,
+    /// reported beside the landed share. Reported only; the verdict above still rests on share and cost.
+    pub later_harm: LaterHarm,
+}
+
+/// How one later record cites a landed job as a cause of trouble (job-planning.md section 9, D143).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LaterCause {
+    /// An introspection of a later failure or rejection names the job in its cause or account of what happened.
+    Failure,
+    /// A later request that asks for a revert names the job.
+    Revert,
+    /// A later request that asks for a fix names the job.
+    Fix,
+}
+
+/// Whether `text` holds a word that is one of `words`, ignoring case; a word is a run of letters.
+fn has_word(text: &str, words: &[&str]) -> bool {
+    text.split(|c: char| !c.is_ascii_alphabetic())
+        .any(|w| words.iter().any(|x| w.eq_ignore_ascii_case(x)))
+}
+
+/// The ways later records cite the landed job `landed` as a cause, read from the records and never from the
+/// job's own: a later introspection (a record id after the job's, about another job) that names it in its
+/// cause or account of what happened; a later request job whose request text names it and asks for a revert or
+/// a fix. A request that names the job without asking for either (a retry, a follow-up, a citation) is not a
+/// cause. Whole-id matching only, so no record is ever rewritten and no new record kind is needed.
+fn later_causes(records: &Records, landed: &JobRecords) -> Vec<LaterCause> {
+    let id = landed.id();
+    let mut found = Vec::new();
+    let failed = records.introspections.iter().any(|i| {
+        i.id.as_str() > id.as_str()
+            && i.job.as_ref() != Some(id)
+            && [i.cause.as_deref(), i.what_happened.as_deref()]
+                .into_iter()
+                .flatten()
+                .any(|text| text_cites_job(text, id))
+    });
+    if failed {
+        found.push(LaterCause::Failure);
+    }
+    let mut revert = false;
+    let mut fix = false;
+    for later in records.request_jobs() {
+        if later.id().as_str() <= id.as_str() {
+            continue;
+        }
+        let Some(text) = later.request.as_ref().map(|r| r.text.as_str()) else {
+            continue;
+        };
+        if !text_cites_job(text, id) {
+            continue;
+        }
+        revert |= has_word(text, &["revert", "reverts", "reverted", "reverting"]);
+        fix |= has_word(text, &["fix", "fixes", "fixed", "fixing"]);
+    }
+    if revert {
+        found.push(LaterCause::Revert);
+    }
+    if fix {
+        found.push(LaterCause::Fix);
+    }
+    found
+}
+
+/// The landed share of one group of dispatched jobs, and how many of its landings were later cited as the
+/// cause of a failure, a revert or a fix job.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
+pub struct LaterHarmGroup {
+    /// Dispatched jobs in the group (a planned job stopped in planning counts here, not as landed).
+    pub jobs: usize,
+    pub landed: usize,
+    /// `landed / jobs`; none for an empty group.
+    pub share: Option<f64>,
+    /// Landings cited at least once, in any of the three ways below.
+    pub cited: usize,
+    /// Landings a later introspection names as the cause of a failure or rejection.
+    pub failures: usize,
+    /// Landings a later request asks to revert.
+    pub reverts: usize,
+    /// Landings a later request asks to fix.
+    pub fixes: usize,
+}
+
+/// The measure the keep rule adds to the landed share: landings that later caused harm, for planned and for
+/// unplanned jobs. Landed share counts a landing as a success even when it later stops drains or has to be
+/// reverted, as job 20261027-054211-a2n5 did; this counts those landings against the group they came from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
+pub struct LaterHarm {
+    pub planned: LaterHarmGroup,
+    pub unplanned: LaterHarmGroup,
+}
+
+/// Whether a job counts as planned for the keep rule: it has plans and was dispatched or stopped in planning.
+fn is_planned(job: &JobRecords) -> bool {
+    !job.plans.is_empty() && (job.job.is_some() || plan_state(job).is_some_and(|s| !s.accepted))
+}
+
+/// Landings that later caused harm, per planned and unplanned dispatched job. Unplanned means dispatched with
+/// no plan record, as every job is when planning is off or the job is not hard.
+pub fn later_harm(records: &Records) -> LaterHarm {
+    let mut harm = LaterHarm::default();
+    for job in records.request_jobs() {
+        let planned = is_planned(job);
+        // Not planned and not dispatched (queued, proposed, declined): in neither group.
+        if !planned && job.job.is_none() {
+            continue;
+        }
+        let group = if planned {
+            &mut harm.planned
+        } else {
+            &mut harm.unplanned
+        };
+        group.jobs += 1;
+        if !matches!(job.state(), JobState::Closed(OutcomeState::Landed)) {
+            continue;
+        }
+        group.landed += 1;
+        let causes = later_causes(records, job);
+        group.cited += usize::from(!causes.is_empty());
+        group.failures += usize::from(causes.contains(&LaterCause::Failure));
+        group.reverts += usize::from(causes.contains(&LaterCause::Revert));
+        group.fixes += usize::from(causes.contains(&LaterCause::Fix));
+    }
+    for group in [&mut harm.planned, &mut harm.unplanned] {
+        group.share = (group.jobs > 0).then(|| group.landed as f64 / group.jobs as f64);
+    }
+    harm
 }
 
 /// The verdict of the keep rule for `planned` jobs with the given share and cost per landed job.
@@ -217,9 +345,7 @@ pub fn keep_rule(records: &Records) -> Option<KeepRule> {
     let planned: Vec<&JobRecords> = records
         .request_jobs()
         .into_iter()
-        .filter(|j| {
-            !j.plans.is_empty() && (j.job.is_some() || plan_state(j).is_some_and(|s| !s.accepted))
-        })
+        .filter(|j| is_planned(j))
         .collect();
     if planned.is_empty() {
         return None;
@@ -248,6 +374,7 @@ pub fn keep_rule(records: &Records) -> Option<KeepRule> {
         first_round_accept_rate: (!rounds.is_empty())
             .then(|| first_round_accepted as f64 / rounds.len() as f64),
         verdict: keep_verdict(planned.len(), share, cost_per_landed_usd),
+        later_harm: later_harm(records),
     })
 }
 
@@ -2055,6 +2182,143 @@ mod planning_cost_tests {
             KeepVerdict::TurnOff
         );
         assert_eq!(keep_rule(&Records::default()), None);
+    }
+
+    /// A later introspection about `job`, whose cause is `cause`.
+    fn failure_cause(
+        record: &str,
+        job: &str,
+        cause: &str,
+    ) -> athena_data::records::IntrospectionRecord {
+        use athena_data::records::{
+            IntrospectionRecord, IntrospectionStatus, IntrospectionTrigger, PreventionKind,
+        };
+        IntrospectionRecord {
+            id: athena_data::RecordId::parse(record).unwrap(),
+            at: jiff::Timestamp::UNIX_EPOCH,
+            trigger: IntrospectionTrigger::Failure,
+            job: Some(id(job)),
+            intervention: None,
+            class_of_work: "change".into(),
+            category: "failed".into(),
+            what_happened: Some("a drain stopped".into()),
+            failure_class: None,
+            new_class: false,
+            earlier_cases: Vec::new(),
+            decisions_matched: Vec::new(),
+            cause: Some(cause.into()),
+            prevention_kind: Some(PreventionKind::CodeCheck),
+            prevention: Some("p".into()),
+            proposed_request: Some("r".into()),
+            evidence: None,
+            status: IntrospectionStatus::Recorded,
+            failure: None,
+            flags: Vec::new(),
+            dropped_ids: Vec::new(),
+            planning_stopped: false,
+            from_jev: false,
+            jev: None,
+        }
+    }
+
+    #[test]
+    fn later_harm_counts_landings_cited_as_a_failure_revert_or_fix_for_planned_and_unplanned_jobs()
+    {
+        const P_FAILED: &str = "20261020-100000-a1a1";
+        const P_CLEAN: &str = "20261020-110000-b2b2";
+        const U_FAILED: &str = "20261021-100000-c3c3";
+        const U_REVERTED: &str = "20261021-110000-d4d4";
+        const U_FIXED: &str = "20261021-120000-e5e5";
+        const U_CLEAN: &str = "20261021-130000-f6f6";
+        const U_NOT_LANDED: &str = "20261021-140000-g7g7";
+        let landed = OutcomeState::Landed;
+        // A dispatched job with no plan record, whose request is `request`.
+        let unplanned = |text: &str, request: &str, state| {
+            job(text, request, "2026-10-21T10:00:00Z", 0, None, state, 0.0)
+        };
+        let planned_job = |text: &str| {
+            let mut j = job(text, "tidy", "2026-10-20T10:00:00Z", 1, None, landed, 0.0);
+            j.critiques.push(critique(text, 1, CritiqueVerdict::Accept));
+            j
+        };
+        let mut records = records(vec![
+            planned_job(P_FAILED),
+            planned_job(P_CLEAN),
+            unplanned(U_FAILED, "tidy", landed),
+            unplanned(U_REVERTED, "tidy", landed),
+            unplanned(U_FIXED, "tidy", landed),
+            unplanned(U_CLEAN, "tidy", landed),
+            unplanned(U_NOT_LANDED, "tidy", OutcomeState::Failed),
+            // Later jobs: one asks to revert a landing, one to fix another. A retry of a job that did not land,
+            // and a request that cites a landing without asking for either, are no cause.
+            unplanned(
+                "20261022-100000-h8h8",
+                &format!("Revert job {U_REVERTED}: it blocks the drain."),
+                OutcomeState::Failed,
+            ),
+            unplanned(
+                "20261022-110000-j9j9",
+                &format!("Fix the rule that job {U_FIXED} landed."),
+                OutcomeState::Failed,
+            ),
+            unplanned(
+                "20261022-120000-k1k1",
+                &format!("try again on {U_NOT_LANDED}; background: {U_CLEAN}"),
+                OutcomeState::Failed,
+            ),
+        ]);
+        records.introspections = vec![
+            // A later failure names a planned landing and an unplanned one as its cause.
+            failure_cause(
+                "20261022-130000-m2m2",
+                "20261022-100000-h8h8",
+                &format!("The refusal rule landed by {P_FAILED} matched words and held the drain."),
+            ),
+            failure_cause(
+                "20261022-140000-n3n3",
+                "20261022-110000-j9j9",
+                &format!("{U_FAILED} changed the gate."),
+            ),
+            // An introspection of the landing's own job, and one older than the landing, are no later cause.
+            failure_cause(
+                "20261022-150000-p4p4",
+                P_CLEAN,
+                &format!("{P_CLEAN} itself."),
+            ),
+            failure_cause(
+                "20261019-100000-q5q5",
+                "20261022-100000-h8h8",
+                &format!("{U_CLEAN} earlier."),
+            ),
+        ];
+
+        let harm = later_harm(&records);
+        let p = harm.planned;
+        assert_eq!((p.jobs, p.landed), (2, 2), "{harm:?}");
+        assert_eq!(
+            (p.cited, p.failures, p.reverts, p.fixes),
+            (1, 1, 0, 0),
+            "{harm:?}"
+        );
+        assert_eq!(p.share, Some(1.0));
+        let u = harm.unplanned;
+        // Eight unplanned dispatched jobs: four landings, the job that did not land, and the three later jobs.
+        assert_eq!((u.jobs, u.landed), (8, 4), "{harm:?}");
+        assert_eq!(
+            (u.cited, u.failures, u.reverts, u.fixes),
+            (3, 1, 1, 1),
+            "{harm:?}"
+        );
+        assert!(close(u.share.unwrap(), 4.0 / 8.0), "{harm:?}");
+
+        // It rides on the keep rule, beside the landed share, and in its JSON.
+        let rule = keep_rule(&records).expect("planned jobs");
+        assert_eq!(rule.later_harm, harm);
+        let json = serde_json::to_value(&rule).unwrap();
+        assert_eq!(json["later_harm"]["planned"]["cited"], 1);
+        assert_eq!(json["later_harm"]["unplanned"]["reverts"], 1);
+        assert_eq!(json["later_harm"]["unplanned"]["fixes"], 1);
+        assert_eq!(json["later_harm"]["unplanned"]["failures"], 1);
     }
 }
 

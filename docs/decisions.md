@@ -3749,3 +3749,44 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Provenance:** Read: `crates/athena-core/src/disk.rs`, `crates/athena-core/src/run/mod.rs`, the three
   introspections as quoted in the request. Measured: `cargo test --locked -p athena-core disk`, `cargo test
   --locked -p athena-cli --test drain low_disk`; the new drain test fails with the call disabled.
+
+## D143 · Planning runs for hard jobs only, and the keep rule counts landings that later caused harm
+
+- **Case:** D135 turned job planning off on 2026-10-26 because the D110 keep rule, which measured landed share and
+  cost per landed job, said so. The next day, job 20261027-054211-a2n5 ran with no planner and no critic and
+  landed a crude word-matching refusal rule (a governance-file rule that refused ordinary requests for using a
+  common word). It stopped three drains in a row. Landed share counts that landing as a success.
+- **Decision:** (1) `[job_plan]` in `athena.toml` gains `mode`, `"all"` (the default, so every existing section
+  reads as before) or `"hard"`, and the repository sets `enabled = true`, `mode = "hard"`. The run plans a job
+  when `JobPlanConfig::plans` says so: enabled, and in `hard` mode the reading's `hard_reason` is set. That is
+  the marking that already escalates the producer, so no second marking exists. A job is hard when it adds or
+  changes a rule that can refuse or hold work, or changes landing, the history check, records, the run pipeline
+  or the drain; the definition is in the reader's `hard_reason` schema text and in job-planning.md section 9.
+  `enabled = false` stays a full off switch. (2) The keep rule's report gains, for planned and for unplanned
+  dispatched jobs separately, the number of landings later cited as the cause of a failure, a revert or a fix
+  job, beside the group's landed share (`athena status`, and `keep_rule.later_harm` in `--json`). It reads
+  existing records only: a later introspection's cause or account naming the job id (failure), and a later
+  request that names the job id and asks to revert or to fix. The keep verdict is unchanged; the counts are
+  reported, not yet a threshold.
+- **Alternatives:**
+  - (a) Turn planning back on for every job. Rejected: the cost per landed job of $3.43 against the $2.50 guard
+    (D135) is why it was turned off, and an ordinary job gains little from a plan.
+  - (b) Leave it off. Rejected: the work that went wrong, a rule that refuses or holds other work, is the work a
+    plan and a critic are for, and it ran without either.
+  - (c) Add a record kind for "caused" links. Rejected for now: the existing introspection and request texts
+    already name job ids, and a new kind would need a writer in every place a person notices harm.
+  - (d) Make the later-harm count a keep-rule threshold now. Rejected: there is no baseline yet, and counting by
+    words in free text is too coarse to switch planning off automatically.
+- **Tradeoff:** Hard jobs pay for planning (about $0.30 to $0.70 per round, an estimate from the design) and the
+  rest do not. The later-harm count is a floor: it misses harm no record ties to a job id, and a request that
+  cites several jobs counts for each. Whether the reader marks the right jobs hard rests on the reader following
+  the definition; a job it fails to mark runs unplanned.
+- **Reversal cost:** Low. Set `mode = "all"` or `enabled = false` under `[job_plan]`; the counts are derived
+  and write nothing.
+- **Provenance:** Read: job-planning.md section 9, D110, D135, D136, `athena.toml`, the reader's output type, the
+  run's planning gate, `status.rs`. The cause of the case is as the request gives it; job
+  20261027-054211-a2n5's records were not available in this job. Measured by tests:
+  `with_athena_toml_planning_hard_jobs_only_a_hard_reading_runs_the_planner_and_critic_and_an_ordinary_one_does_not`
+  and `status_reports_planned_and_unplanned_landings_later_cited_as_a_revert_or_fix_beside_the_landed_share`
+  (`athena-cli`, `job_plan.rs`), `later_harm_counts_landings_cited_as_a_failure_revert_or_fix_for_planned_and_unplanned_jobs`
+  (`athena-core`), and `the_repository_config_plans_hard_jobs_only_with_the_designs_caps` (`athena-data`).
