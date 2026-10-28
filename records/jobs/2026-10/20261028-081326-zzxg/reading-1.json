@@ -1,0 +1,139 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261028-081326-zzxg",
+  "n": 1,
+  "at": "2026-10-28T08:13:56.629161479Z",
+  "invocation_seq": 1,
+  "base_commit": "439a0eabd94a3e712d14ec145c008886746024e9",
+  "config_sha256": "b812f3c3683488bcd9485d235a6a234bc80722c9f137a6c232094fae2ee727d6",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Free producer build dir before verifier; resume retry from kept",
+  "summary": "Fix two gaps for operators of Athena: after Athena's own checks pass, delete the job's target/produce before the verifier starts (kept if checks fail, for send-back); and make `athena retry` resume a job stopped for an environment cause after build from the kept candidate at the stopped stage, with no planner or producer run.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "Tests added; fmt, clippy -D warnings, cargo test must pass."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check the dir removal and the retry skipping planner/producer by test."
+    },
+    {
+      "id": "root-cause",
+      "how": "Both the disk use and the resume gap are fixed."
+    },
+    {
+      "id": "outcome-check",
+      "how": "Criterion on the job finishing and retry not re-running."
+    },
+    {
+      "id": "small",
+      "how": "Limited to the named files."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Goal: Athena operators get jobs that finish and retries that resume cheaply.",
+    "The existing timed-out-producer keep/resume path can be generalized to later stages.",
+    "No governance file changes are needed."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A test in crates/athena-core shows target/produce is absent after checks pass and before the verifier runs, and still present when checks fail (send-back). Run: cargo test",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test stops a job on low disk before the verifier, then runs retry and asserts only the verifier ran on the kept candidate, with zero planner and zero producer invocations. Run: cargo test",
+      "kind": "behavior"
+    },
+    {
+      "text": "Retry resume logic in crates/athena-core/src/run/mod.rs and reading.rs treats low disk, usage limit and interrupted process after the candidate is built as resumable at the stopped stage, using the same keep mechanism as a timed-out producer.",
+      "kind": "content"
+    },
+    {
+      "text": "cargo fmt --check, cargo clippy --all-targets -- -D warnings and cargo test all pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has an entry describing both fixes.",
+      "kind": "content"
+    },
+    {
+      "text": "Outcome check: a job that passes checks with 9.5 GB free no longer stops on disk for lack of target/produce space, and its retry does not re-plan or rebuild.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "action": "modify",
+      "p": 0.2
+    }
+  ],
+  "out_of_scope": [
+    "Changing the 10 GB minimum free-disk threshold",
+    "Changing verifier behavior or prompts",
+    "Cleaning other directories"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.72,
+      "p_verification_passes": 0.58,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.4,
+        "p90": 3.2
+      },
+      "wall_time_s": {
+        "p10": 500.0,
+        "p50": 1800.0,
+        "p90": 3500.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7197740112994351,
+      "p_verification_passes": 0.6691449814126395,
+      "p_user_intervenes": 0.07569444444444445,
+      "cost_usd": {
+        "p10": 0.5020914860136547,
+        "p50": 1.1070018745952828,
+        "p90": 2.719682066924804
+      },
+      "wall_time_s": {
+        "p10": 534.2783845551245,
+        "p50": 1563.1386299054186,
+        "p90": 3061.4992102288224
+      }
+    }
+  },
+  "departures": "Higher cost and lower pass chance than reference: touches run pipeline and retry resume state, needing two integration-style tests.",
+  "urgent_reason": "Cuts wasted time: avoids a failed verifier stop on low disk and a redo-work retry that re-plans and rebuilds for about $5.",
+  "hard_reason": "Changes the run pipeline (when build output is removed before verification) and how retry resumes a stopped job, which are costly to get wrong.",
+  "producer_effort": "high"
+}

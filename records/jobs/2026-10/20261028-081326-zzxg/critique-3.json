@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261028-081326-zzxg",
+  "round": 3,
+  "at": "2026-10-28T08:21:03.894975116Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The criterion 6 test stops at the disk gate before the checks, so it fails even with the fix.",
+      "evidence": "The planned reader returns 9.5 GB whenever any jobs/*/target/produce exists. The producer Tweak creates that directory before admission, so the gate at line 1980, which uses the same `state.free_bytes()` reader (disk.rs:212), sees 9.5 GB against 10 GB. It closes the job with `environment: low disk ... before the checks`. `sweep_idle_targets` skips the asking job's own target, so nothing frees the space. Fix: Report 9.5 GB only when target/produce and target/verify (or a marker file the check command writes) both exist, and 10.5 GB otherwise. The first gate then passes, the checks push usage over the limit, and only removing target/produce lets the pre-verifier gate pass.",
+      "location": "Demonstrations, Criterion 6 (nine_and_a_half_gb_free); run/mod.rs:1980 (disk gate before the checks)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The plan drops the 'interrupted process' cause, which the request and criterion 3 both require.",
+      "evidence": "The request names three causes that must resume: low disk, usage limit and interrupted process. The plan only notes the interrupted case in the CHANGELOG. Interrupted jobs are already handled: `earlier_attempt_with` (reading.rs:1030) recognises them, and `manage.rs` `recover_interrupted` collects the invocation records they left. After step 4, job_dir/work also survives until after the pre-verifier gate. The plan does not show that resuming them is out of reach. Fix: Plan the case: for a Dispatched job with no running process, whose job_dir/work exists and whose recovered producer invocation completed, keep work under kept/<job>/work, resume at the candidate stage with the recovered report, and add a resume_stage unit test. Otherwise, raise the conflict with the user instead of shipping with criterion 3 partly unmet.",
+      "location": "Risks (interrupted process); Open questions 2; criterion 3",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The retry still runs the reader agent, and neither the plan nor its test says so.",
+      "evidence": "`Athena::retry` calls `self.ask(\"try again on <id>\")`, which invokes the reader. The test counts only Planner, Critic, Producer and Verifier, so a reader invocation is neither expected nor ruled out. Fix: State that the reader runs, as for a timed-out retry, and assert reader=1 for ask, plus planner=critic=producer=0 and verifier=1 for go.",
+      "location": "Demonstrations, Criterion 2; reading.rs:833-846",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "is_resumable_stop nearly duplicates the existing disk::is_environment_reason.",
+      "evidence": "`is_environment_reason` already exists and matches only `environment: low disk`. The new `environment: usage limit` reason would fail it, so its existing callers would treat a usage-limit stop as a failure of the work. Fix: Widen `is_environment_reason`, or share one prefix constant between both functions, and check its callers.",
+      "location": "Decision 4 / Step 1; disk.rs:203",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Counting reads of the free-space function in the criterion 2 test is fragile.",
+      "evidence": "`FreeSpace` is a plain `fn` pointer (state.rs:202). A read counter would have to be a shared static. Swapping in a different reader needs a new StateDir. The gate also reads a second time after its sweep. Fix: Make the reader report low space while a marker file exists under the state root, and have the test delete the marker before calling retry.",
+      "location": "Demonstrations, Criterion 2",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "Verdict: revise, because of two major findings. I checked the plan against the snapshot with Read and Grep only; I ran nothing. The functions, seams and helpers the plan names all exist, and the change sits where each fault starts: target/produce is deleted after the checks pass and before the pre-verifier gate (run/mod.rs:2178), and kept when a check fails. Making timeout_seed aware of the resume stage is the right fix for the retry. The first major finding: the criterion 6 test cannot pass even with the fix. Its reader reports 9.5 GB as soon as target/produce exists, so the job stops at the disk gate before the checks (line 1980), before the removal runs. The second: the plan drops the interrupted-process cause, which the request and criterion 3 both require, though interrupted jobs are already recognised and their invocation records recovered. The minor findings: the reader still runs on athena retry and the test should say so; is_environment_reason should be reused rather than a near-duplicate added; and the criterion 2 test should use a marker file instead of counting reads."
+}

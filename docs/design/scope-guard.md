@@ -107,7 +107,8 @@ assumption, and the cost was only seen afterwards.
 
 ## 5. Thrash signals
 
-A line of work is a request plus its retries and any request that quotes it. Every number is an **estimate, to
+A line of work is a request plus its retries ("try again on <job>") and any re-ask of the same request text. A
+request that only cites another line's job ids as evidence starts its own line. Every number is an **estimate, to
 be tuned** unless a basis is given.
 
 | # | Signal | Threshold | Basis | Effect |
@@ -269,7 +270,7 @@ dependency on job 4 applies when queue-time decisions exist. Job 1 is built (`sc
 in its first form, described in 13.1.
 
 1. **Line and signal types, pure functions.** Scope: a module with the "line of work" grouping (request plus
-   retries and quoting requests) and functions computing T1 to T5 from job records, with no I/O. Files: a new
+   retries and re-asks of the same text) and functions computing T1 to T5 from job records, with no I/O. Files: a new
    module in `crates/athena-core/src/` (for example `scope_guard.rs`) and its export line. Acceptance: unit
    tests build records for the trailer, speedup, prompt-budget and cut A cases and assert which signals fire
    and at which attempt, as in section 5.1; the T4 test fails if the same-criterion rule is removed.
@@ -309,7 +310,7 @@ in its first form, described in 13.1.
 
 - **When.** `Athena::go` calls `Athena::watch_line` after a job finishes (next to the introspection and the
   steward count). The watcher reads the committed records, rebuilds the `RequestRecord`s
-  (`request_records`: the retry link from "try again on <job>", quoted request ids, and each job's finished
+  (`request_records`: the retry link from "try again on <job>", the re-ask link to an earlier request with the same text, and each job's finished
   attempt from its outcome and verification), groups them with `group_lines`, and evaluates T1 to T5 with
   `evaluate_before_attempt`. A failure of the watcher is shown and ignored; it cannot change what `go` returns.
 - **p90.** The p90 passed to `t3_cost` is `forecasts.reader.cost_usd.p90()` of the latest reading of the line's

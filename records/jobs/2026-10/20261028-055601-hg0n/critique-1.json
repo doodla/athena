@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261028-055601-hg0n",
+  "round": 1,
+  "at": "2026-10-28T06:02:07.83460331Z",
+  "invocation_seq": 4,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/store.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/store.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "Seeded past jobs with a request, reading and job record but no outcome will load as Dispatched jobs, which can affect `go` or status in the fixture.",
+      "evidence": "`JobState::Dispatched` is documented as 'Dispatched with no closing record: running, or interrupted' (store.rs:53-54). The plan seeds request, accepted reading and job record only. `accepted_reading` is a field on `Job` (store.rs:524), so the job record is needed, but an outcome is not seeded. Fix: Also seed a terminal `athena.outcome/1` (for example Landed) for each past job, so the fixtures are closed jobs like real history. Assert in the test that the seeded jobs load with no `invalid` entries before `go`.",
+      "location": "Plan, Demonstrations, Criterion 5/7, step 10 `seed_past_jobs`",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The no-model-call comparison runs both repositories through the test override, so the production replay path (tree resolution, probe, build, BinaryDecide) is never run in the comparison.",
+      "evidence": "Decision 3 puts `REPLAY_OVERRIDE` in front of `resolve_tree`, `probe_subcommand` and the build. Both runs in criterion 7 install override pairs, so any model call added on the real path would not show. The criterion asks only that the replay makes no model call, and the reading accepts the override seam, so this is a gap in coverage, not a wrong design. Fix: Add a third run with no override entry and seeded history. The fixture has no `crates/athena-cli/Cargo.toml`, so `resolve_tree` records `no replay`. Assert the same fixed invocation list there too, so the non-override path is covered.",
+      "location": "Plan, Demonstrations, Criterion 7",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A new record kind is added without updating docs/records.md, which lists every job-directory record file next to its schema.",
+      "evidence": "docs/records.md:37 lists `baseline.json  athena.baseline/1 ...`, and docs/design/athena-v0.md:609 has a schema table row for it. No test enforces this (a grep for `records.md` in *.rs found only status.rs messages), so nothing fails, but the record is undocumented. Fix: Add a `replay.json  athena.replay/1` line to docs/records.md, or name it in the plan as a known follow-up. This adds one non-code doc file; say so, given the 'rust' default.",
+      "location": "Plan, Files (no docs entry)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The open question about the gate is answered by the code: the gate ignores record kinds it does not name.",
+      "evidence": "athena-gate/src/jobs.rs:54-71 parses each `.json` in the job directory, skips anything not at its canonical path, and drops unnamed kinds via `_ => {}`. Fix: Drop the open question, or cite jobs.rs:70 as the answer.",
+      "location": "Plan, Open questions, item 2 (athena-gate closing-commit check)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan fixes what sank the last attempt. The replay becomes a typed `athena.replay/1` record at `<job>/replay.json`, modelled on `Baseline`, and no `replay.md` is written. I checked its claims against the code and they hold. `job_of` in store.rs:253-270 has no arm for a new kind, and `Records::load` hits `expect(\"every other record names its job\")` at store.rs:326, so the extra store.rs line is required, which answers Athena's minor finding. `JOB_MARKDOWN` (records.rs:2604) accepts only three `.md` files, so a `.json` record is the right carrier. The gate's `JobFiles::load` (athena-gate/src/jobs.rs:61-71) ignores unknown kinds with a `_ => {}` arm, which answers the plan's open question about the gate. The existing order test does assert `said.len() == 6` (run/mod.rs:3613) and the fixed invocation list `[(1,Reader),(2,Producer),(3,Verifier)]` from `Records::load` (run/mod.rs:3634-3642), so the criterion 7 comparison uses a seam that really exists. `Judgment.final_verdict` is public and `verified()` returns Some only on Pass (verify.rs:91-97, 453-464), so `hold_for_replay` really blocks the landing. `Git::dir()` exists at athena-git/src/lib.rs:188. Every demonstration names a seam the code provides, or one the plan adds, and would fail without the behavior. The pipeline doubles only fix accept or refuse per case; the comparison, threshold, hold and record are production code. What remains is minor: the criterion 7 runs skip the real build and probe path, the seeded past jobs may sit open as Dispatched, and docs/records.md is not updated for the new kind."
+}

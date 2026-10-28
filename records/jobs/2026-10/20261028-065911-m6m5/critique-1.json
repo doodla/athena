@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261028-065911-m6m5",
+  "round": 1,
+  "at": "2026-10-28T07:06:03.287569399Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "blocker",
+      "summary": "A new Replay record kind makes Records::load panic unless store.rs's job_of names it; the plan keeps store.rs unchanged.",
+      "evidence": "In `Records::load`, any record not matched by name falls to `other => { let job = job_of(&other).expect(\"every other record names its job\") ... }`, and `job_of` ends with `_ => None`. Every tree with a replay.json would panic on load. That breaks status, land, the next job's replay (which loads records at the base head) and the criterion 5 test. The gate does ignore unknown kinds (jobs.rs:61-71 and reconcile.rs:163-173 use `_ => {}`). Fix: Add crates/athena-core/src/store.rs to the deliverables. Add `AnyRecord::Replay(r) => Some(&r.job)` to `job_of`, plus a `JobRecords` slot or an explicit ignore arm. Add a test that `Records::load` on a tree with a replay.json does not panic.",
+      "location": "Plan Decision 1; crates/athena-core/src/store.rs:253-270 and 324-331",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The criterion 7 demonstration names a counter that does not count model calls.",
+      "evidence": "`requests()` in crates/athena-core/src/fake.rs:43 belongs to `CountingPinner` and returns pinner (url, ref) pairs. The model double, `FakeAgentDriver` (crates/athena-agent/src/fake.rs:46-77), has no call counter, only a `Script` closure. Fix: Count calls with an `Arc<AtomicUsize>` that the `FakeAgentDriver::new` script closure increments, or count invocation records. In the second run, make the rule change refuse some readings but stay under 10% (for example 1 of 12), so both runs follow the same post-verify path.",
+      "location": "Demonstration for criterion 7",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The hold must be applied before the Verification literal is built, not after.",
+      "evidence": "`judgment` is bound with `let` and copied into the `Verification` literal at line 2382 before state and verified are set at 2402-2409. Applying the hold later would store Pass findings and verdict next to a Rejected state. Fix: Use `let mut judgment` and call `apply_replay_hold` immediately after `judge(...)` returns, before the `Verification` literal.",
+      "location": "Plan step 7; crates/athena-core/src/run/mod.rs:2368-2410",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Open questions 1 and 2 are already answered by the snapshot.",
+      "evidence": "`VerifierInputs {` literals appear only in run/mod.rs:2112 and briefs.rs tests (2076, 2101, 2124, 2226, 2637), all deliverables. `AnyRecord::parse(&path, &bytes)` exists and is used at athena-gate jobs.rs:55. Fix: Close both questions in the plan: parse the files with `AnyRecord::parse`; no `VerifierInputs` literal outside the deliverables needs changing.",
+      "location": "Open questions 1 and 2",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The new record kind is not documented in docs/records.md.",
+      "evidence": "docs/records.md has a row for each job-directory record kind, for example `baseline.json athena.baseline/1`. The plan adds `athena.replay/1` but does not add a row. Fix: Add docs/records.md to the deliverables with a row for replay.json / athena.replay/1.",
+      "location": "Files list; docs/records.md:37",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Two workspace builds before the verifier raise peak disk use and wall time.",
+      "evidence": "The retried job failed at 9.8 of 10 GB free, and the replay builds the workspace twice before the disk check at run/mod.rs:2173-2187. Fix: Say explicitly that the replay's target directory is removed before that check runs. Record the build's wall time in the replay record.",
+      "location": "Risks: build cost before the pre-verifier disk gate",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan fits the accepted reading. It retries the same scope, stores a typed record with no replay.md, uses code constants for the threshold and window, puts the test seam in front of tree resolution and the probe, and adds no skip switch. The functions it names exist where it says (`check_reading_acceptance`, `has_phrase`, `Baseline`/`AnyRecord`, `judge`, `VerifierInputs`, `verifier_brief_with_plan`, `Job.accepted_reading`). One blocker: the plan says store.rs stays unchanged, but `Records::load` panics through `job_of(..).expect(..)` on any job-scoped record kind it does not name, so a replay.json would break loading records. One major: the criterion 7 demonstration counts calls with the pinner's `requests()`, which does not count model calls. Smaller fixes: apply the hold before the Verification literal, close two open questions the snapshot already answers, and document the record in docs/records.md. All of these can be fixed in the plan."
+}

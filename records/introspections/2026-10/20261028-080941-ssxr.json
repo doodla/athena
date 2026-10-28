@@ -1,0 +1,32 @@
+{
+  "schema": "athena.introspection/1",
+  "id": "20261028-080941-ssxr",
+  "at": "2026-10-28T08:09:41.190815286Z",
+  "trigger": "failure",
+  "job": "20261028-065911-m6m5",
+  "intervention": null,
+  "class_of_work": "code",
+  "category": "failed",
+  "what_happened": "Job 20261028-065911-m6m5, a retry of \"replay last 50 accepted readings and hold over 10% refused\", ended failed before the verifier ran. The free-disk guard found 9.5 GB free where 10.0 GB is required before the verifier. The event says this is the environment, not the work. It lists no unmet acceptance criteria, no blocker or major findings and no failed checks. The work was not judged. The stated remedy is to free disk by hand and run `athena retry 20261028-065911-m6m5`. This is the second disk stop in a row on replay work. The previous attempt, job 20261028-055601-hg0n, stopped at 9.8 GB free.",
+  "failure_class": "20261026-140223-4xmw",
+  "new_class": false,
+  "earlier_cases": [
+    "20261028-065739-aszb"
+  ],
+  "decisions_matched": [],
+  "cause": "Athena treats free disk as a fixed precondition that it only checks. It does not reclaim its own build outputs and caches, and it does not reserve space for the verifier. The guard fires late, after the producer has already used the space. Replay jobs build old and new versions, so they need more disk than most jobs, and nothing at dispatch compares the likely need with the free space. The retry started from the same low-disk state as the failed attempt, because nothing cleaned up after the earlier stop. The disk shortfall got worse (0.2 GB, then 0.5 GB), and each stop wastes a full producer run.",
+  "prevention_kind": "design-change",
+  "prevention": "Make Athena manage its own disk. (1) Before the verifier guard, and before dispatching or retrying any job, prune Athena-owned reclaimable data: finished jobs' build targets, caches and worktrees, never records. (2) Re-check free disk after pruning, and retry the guard once. (3) Reserve the verifier's 10 GB when dispatching the producer, and pause or queue the job if the reserve cannot be met. (4) Give jobs that build two versions, such as replay jobs, a larger disk estimate at dispatch. (5) Treat a retry after a low-disk stop as a resume that runs the cleanup first. With this, an environment stop is rare and clears itself, and the operator no longer has to free disk and retry by hand.",
+  "proposed_request": "When free disk is below what a job needs, Athena should clean up by itself instead of failing the job. Before the verifier runs, and before any retry, if free disk is under the required 10 GB, Athena deletes its own reclaimable build outputs, caches and worktrees from finished or closed jobs. It never touches records or the current job's snapshot. It then re-measures the free space. Only if the space is still short does the job end with the environment message, and that message says how much was reclaimed. Athena also keeps the verifier's 10 GB free while the producer runs, and holds a job back until that space is available. Acceptance: (1) a test with a fake disk meter and stale build directories shows the cleanup frees space and the job continues to the verifier; (2) a test shows records are never deleted; (3) a test shows the job still ends failed with an environment message when cleanup cannot free enough; (4) the 20261028-065911-m6m5 retry runs to a verdict with no manual disk clearing.",
+  "evidence": {
+    "model": "claude-sonnet-5-5",
+    "cost_usd": 0.08104,
+    "input_tokens": 2,
+    "output_tokens": 1240
+  },
+  "status": "recorded",
+  "failure": null,
+  "flags": [],
+  "dropped_ids": [],
+  "from_jev": false
+}
