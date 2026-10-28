@@ -1,0 +1,160 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261028-033455-94t4",
+  "n": 1,
+  "at": "2026-10-28T03:35:34.081280146Z",
+  "invocation_seq": 1,
+  "base_commit": "10a1d48df19d197012a25ed173280d6a4b91cfad",
+  "config_sha256": "b812f3c3683488bcd9485d235a6a234bc80722c9f137a6c232094fae2ee727d6",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Narrow the governance reading rule and retry a refused reading once",
+  "summary": "Reading acceptance stops requiring a governance path for bare common words (deploy, config, ci, gate…); it requires one only when the request names the governance path or a file under it, or a deliverable implies it (GOVERNANCE_BY_DELIVERABLE stays). When any reading rule refuses a reading, the reader is run once more at once with the refusal text as a correction, only a second refusal fails, and the reader brief lists each reading rule in one line. Audience: the drain operator and the reader agent.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "Tests for the narrowed rule and the retry; fmt, clippy -D warnings and cargo test criteria."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run tests showing acceptance, refusal and the refusal text reaching the second read."
+    },
+    {
+      "id": "root-cause",
+      "how": "Fixes both the over-broad keyword rule and the missing refusal feedback to the reader."
+    },
+    {
+      "id": "small",
+      "how": "One change across the named files only."
+    },
+    {
+      "id": "mechanism",
+      "how": "The retry and rule list are enforced in code and tests."
+    },
+    {
+      "id": "verified",
+      "how": "Verifier runs cargo test, clippy, fmt --check."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "The in-run retry belongs in Athena::read_for (reading.rs), which every read path calls, so first reads, rereads after correction and config rereads all get it; drain.rs changes only as far as its failure counting or tests need.",
+    "The refusal text is passed to the reader through a new ReaderInputs field rendered as a correction section in reader_brief (briefs.rs); no prompt file under the token budget changes, since the reader prompt set has only 3 tokens left.",
+    "Rule list in the brief is one short line per rule: prior result and change scope, criteria evidence, governance coverage, and the reading-build validity checks.",
+    "The keyword table is replaced by path-naming detection: the request text contains the governance path (e.g. athena.toml, defaults.toml, setup.sh, rust-toolchain.toml) or a path under .github/workflows/.",
+    "Both invocations of the reader are recorded, or at minimum the second reading and its cost are, so budget accounting stays correct."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A unit test in crates/athena-core/src/reading.rs shows a request that only mentions words from the old keyword table (e.g. 'deploy', 'config', 'ci', 'gate') with no governance path named is accepted by check_governance_coverage; run `cargo test -p athena-core`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A unit test shows a request naming a governance path (e.g. athena.toml or .github/workflows/ci.yml) whose reading leaves it uncovered is still refused, and is accepted once it is listed and named in a criterion or named in out_of_scope; run `cargo test -p athena-core`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test with a fake reader whose first reading is refused shows the refusal text appears in the second read's brief and the second reading is accepted and recorded; a second refusal is reported as a failure. Run `cargo test`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "reader_brief names each reading rule in one line and the existing brief size test passes; run `cargo test -p athena-context`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "GOVERNANCE_BY_DELIVERABLE is unchanged and a deliverable that is a governance file with no criterion naming it is still refused.",
+      "kind": "content"
+    },
+    {
+      "text": "`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` all pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has an entry describing the narrowed governance rule and the one-time re-read with the refusal text.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "p": 0.99
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.35
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.15
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.15
+    }
+  ],
+  "out_of_scope": [
+    "athena.toml, defaults.toml and other governance files",
+    "Changing GOVERNANCE_BY_DELIVERABLE contents",
+    "Prompt files under the token budget (frame.reader, contract)",
+    "Changing admission's is_governance or governance_change_is_listed"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.75,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.4,
+        "p90": 3.2
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 1800.0,
+        "p90": 3600.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7219653179190751,
+      "p_verification_passes": 0.6716981132075471,
+      "p_user_intervenes": 0.06643109540636043,
+      "cost_usd": {
+        "p10": 0.4992892,
+        "p50": 1.1004855,
+        "p90": 2.6541729000000007
+      },
+      "wall_time_s": {
+        "p10": 526.2073135793798,
+        "p50": 1552.3113789190002,
+        "p90": 2978.6921260681233
+      }
+    }
+  },
+  "departures": "Cost and time are higher than the reference: the change spans the reading flow, the brief, and tests with a fake reader, and requires a cold full test and clippy run.",
+  "urgent_reason": "It cuts failed drains and repeated refused readings (three drains stopped, three refusals of its own fix) by retrying once with the refusal text.",
+  "hard_reason": "It changes the reading-acceptance gate that judges every other job's reading and the retry path that decides whether a drain item fails.",
+  "producer_effort": "high"
+}
