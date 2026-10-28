@@ -1,5 +1,6 @@
 //! `ask` and `correct`: the reader's reading, with forecasts, committed before any work (design §3.2–3.3).
 
+use crate::admission::{governance_change_is_listed, is_governance};
 use crate::capability::{JobConfig, ToolGrant};
 use crate::checks::tail;
 use crate::commits::{NewFile, message};
@@ -2089,7 +2090,145 @@ pub fn check_reading_acceptance(
     referenced: &[EarlierAttempt],
 ) -> Result<()> {
     check_prior_result_and_scope(reading, &continued_jobs(request, attempt, referenced))?;
-    check_criteria_evidence(reading)
+    check_criteria_evidence(reading)?;
+    check_governance_coverage(reading, request)
+}
+
+/// Request words that imply the outcome needs a governance file. A path ending in `/` stands for any file
+/// under that directory. Each keyword is a whole-word phrase in lowercase.
+const GOVERNANCE_BY_KEYWORD: [(&str, &[&str]); 5] = [
+    (
+        ".github/workflows/",
+        &[
+            "github pages",
+            "gh-pages",
+            "deploy",
+            "deploys",
+            "deployment",
+            "workflow",
+            "workflows",
+            "github actions",
+            "ci",
+            "continuous integration",
+        ],
+    ),
+    (
+        "athena.toml",
+        &[
+            "athena.toml",
+            "routing",
+            "checks",
+            "classes",
+            "budget",
+            "budgets",
+            "gate",
+            "gates",
+            "config",
+            "configuration",
+        ],
+    ),
+    ("defaults.toml", &["defaults.toml"]),
+    ("rust-toolchain.toml", &["rust-toolchain"]),
+    ("setup.sh", &["setup.sh"]),
+];
+
+/// Deliverables whose change implies a governance file changes with them, and why.
+const GOVERNANCE_BY_DELIVERABLE: [(&str, &str, &str); 1] = [(
+    "crates/athena-data/src/config.rs",
+    "athena.toml",
+    "a new or changed configuration section must be set in athena.toml, or its schema test fails",
+)];
+
+/// Whether the reading covers the governance `path` (a directory when it ends in `/`): it lists a governance
+/// deliverable there and names it in a criterion, or it names the path in `out_of_scope`.
+fn governance_is_covered(reading: &Reading, path: &str) -> bool {
+    let out_of_scope = reading
+        .out_of_scope
+        .iter()
+        .any(|item| item.contains(path.trim_end_matches('/')));
+    if out_of_scope {
+        return true;
+    }
+    if path.ends_with('/') {
+        reading
+            .deliverables
+            .iter()
+            .any(|d| d.path.starts_with(path) && governance_change_is_listed(reading, &d.path))
+    } else {
+        governance_change_is_listed(reading, path)
+    }
+}
+
+/// Refuses a reading that leaves out a governance file its outcome needs, or lists one without naming it.
+///
+/// Root cause this check removes: reading acceptance had no mapping from the request's outcome to governance
+/// files, so a reading for "publish to GitHub Pages" (which needs a workflow), a new configuration section
+/// (which needs `athena.toml`) or CI routing (which needs `athena.toml`) was accepted without them, and the
+/// omission was found only at admission, after the producer had finished. Jobs 20261014-082328-g6vy,
+/// 20261015-014012-akwq, 20261017-044557-3htd and 20261017-114155-ksq0 each failed that way. Admission has one
+/// definition of a governance file (`is_governance`) and of a listed one (`governance_change_is_listed`); this
+/// check applies the same two to the reading, where the reader can still repair it, for every reading with a
+/// capability and a deliverable, first attempt or retry. It costs no model call.
+///
+/// It refuses when:
+/// - a deliverable is a governance file that no criterion names;
+/// - a deliverable in `GOVERNANCE_BY_DELIVERABLE` is listed without its governance file; or
+/// - the request contains a keyword of `GOVERNANCE_BY_KEYWORD` and the reading neither lists and names that
+///   governance file nor names it in `out_of_scope`.
+///
+/// The keyword match is a heuristic that errs toward asking for an explicit decision. The error names each
+/// missing path and why, and says to list it as a deliverable and name it in a criterion, or to name it in
+/// `out_of_scope`.
+pub fn check_governance_coverage(reading: &Reading, request: &str) -> Result<()> {
+    if reading.capability.is_none() || reading.question.is_some() || reading.deliverables.is_empty()
+    {
+        return Ok(());
+    }
+    let mut missing: Vec<(String, String)> = Vec::new();
+    let mut need = |path: &str, why: String| {
+        if !missing.iter().any(|(p, _)| p == path) {
+            missing.push((path.to_string(), why));
+        }
+    };
+    for d in &reading.deliverables {
+        if is_governance(&d.path) && !governance_change_is_listed(reading, &d.path) {
+            need(
+                &d.path,
+                "it is listed as a deliverable but no criterion names it".into(),
+            );
+        }
+        for (trigger, path, why) in GOVERNANCE_BY_DELIVERABLE {
+            if d.path == trigger && !governance_is_covered(reading, path) {
+                need(path, format!("{trigger} is a deliverable, and {why}"));
+            }
+        }
+    }
+    // An underscore joins a word (`athena_gate` is one identifier), so it is not a boundary.
+    let words = request.to_lowercase().replace('_', "x");
+    for (path, keywords) in GOVERNANCE_BY_KEYWORD {
+        if let Some(word) = keywords.iter().find(|k| has_phrase(&words, k))
+            && !governance_is_covered(reading, path)
+        {
+            need(
+                path,
+                format!("the request mentions {word:?}, which needs a change to it"),
+            );
+        }
+    }
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let paths: Vec<String> = missing
+        .iter()
+        .map(|(path, why)| format!("{path} ({why})"))
+        .collect();
+    bail!(
+        "the reading was refused because the outcome needs governance files it does not cover: {}; \
+         list each missing path as a deliverable and name it in an acceptance criterion, or, if this job must \
+         not change it, name it in out_of_scope; admission refuses a governance change that is not both listed \
+         and named, and only after the producer has finished",
+        paths.join("; ")
+    )
 }
 
 /// Phrases that make the producer's own account the evidence for a criterion. Each is a whole-word
@@ -4071,6 +4210,176 @@ mod tests {
         reading.capability = None;
         reading.decline_reason = Some("no capability fits".into());
         check_criteria_evidence(&reading).unwrap();
+    }
+
+    /// A reading that lists these deliverables, with one criterion per text and these out-of-scope items.
+    fn governed_reading(
+        deliverables: &[&str],
+        criteria: &[&str],
+        out_of_scope: &[&str],
+    ) -> Reading {
+        let mut reading = scoped_reading("Do the work.", deliverables, out_of_scope);
+        reading.acceptance_criteria = criteria
+            .iter()
+            .map(|text| Criterion {
+                text: (*text).into(),
+                kind: CriterionKind::Content,
+            })
+            .collect();
+        reading
+    }
+
+    /// For each keyword group: a request phrasing, and the governance path it needs.
+    const KEYWORD_REQUESTS: [(&str, &str); 14] = [
+        ("Publish to GitHub Pages", ".github/workflows/"),
+        ("Deploy the site on every push", ".github/workflows/"),
+        ("Add a workflow that builds the docs", ".github/workflows/"),
+        ("Run the tests in CI", ".github/workflows/"),
+        ("Add a CI job for the book", ".github/workflows/"),
+        ("Change the routing of small items", "athena.toml"),
+        ("Add a gate before merging", "athena.toml"),
+        ("Raise the budgets for retries", "athena.toml"),
+        ("Add new check classes for docs", "athena.toml"),
+        ("Make the checks configurable", "athena.toml"),
+        ("Add a configuration section for audiences", "athena.toml"),
+        ("Change defaults.toml to add a rule", "defaults.toml"),
+        ("Pin the version in rust-toolchain", "rust-toolchain.toml"),
+        ("Change what setup.sh installs", "setup.sh"),
+    ];
+
+    /// A concrete governance file for a keyword path.
+    fn concrete(path: &str) -> String {
+        if path.ends_with('/') {
+            format!("{path}pages.yml")
+        } else {
+            path.to_string()
+        }
+    }
+
+    #[test]
+    fn a_request_whose_outcome_needs_a_governance_file_is_refused_until_it_is_covered() {
+        for (request, path) in KEYWORD_REQUESTS {
+            let file = concrete(path);
+            // Without the file listed, the reading is refused, naming the path and the repair.
+            let bare = governed_reading(&["src/site.rs"], &["the site builds"], &["the logo"]);
+            let error = check_reading_acceptance(&bare, request, None, &[])
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(path), "{request}: {error}");
+            assert!(error.contains("as a deliverable"), "{request}: {error}");
+            assert!(
+                error.contains("in an acceptance criterion"),
+                "{request}: {error}"
+            );
+            // Listed but not named in a criterion: still refused.
+            let unnamed = governed_reading(&["src/site.rs", &file], &["the site builds"], &["x"]);
+            assert!(
+                check_reading_acceptance(&unnamed, request, None, &[]).is_err(),
+                "{request}: listed but unnamed"
+            );
+            // Listed and named: accepted.
+            let named = governed_reading(
+                &["src/site.rs", &file],
+                &["the site builds", &format!("{file} runs the build")],
+                &["the logo"],
+            );
+            check_reading_acceptance(&named, request, None, &[])
+                .unwrap_or_else(|e| panic!("{request}: {e}"));
+            // Put out of scope by name: accepted without the file.
+            let excluded = governed_reading(
+                &["src/site.rs"],
+                &["the site builds"],
+                &[&format!("Editing {}", path.trim_end_matches('/'))],
+            );
+            check_reading_acceptance(&excluded, request, None, &[])
+                .unwrap_or_else(|e| panic!("{request}: {e}"));
+        }
+    }
+
+    #[test]
+    fn a_reading_for_publish_to_github_pages_without_a_workflow_is_refused() {
+        let bare = governed_reading(&["docs/index.md"], &["the page renders"], &["other pages"]);
+        let error = check_reading_acceptance(&bare, "Publish to GitHub Pages", None, &[])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(".github/workflows"), "{error}");
+        let with_workflow = governed_reading(
+            &["docs/index.md", ".github/workflows/pages.yml"],
+            &["pages.yml deploys the site"],
+            &[],
+        );
+        check_reading_acceptance(&with_workflow, "Publish to GitHub Pages", None, &[]).unwrap();
+    }
+
+    #[test]
+    fn a_listed_governance_file_must_be_named_by_a_criterion_whatever_the_request_says() {
+        let request = "add a greeting";
+        let unnamed = governed_reading(&["athena.toml"], &["the greeting prints"], &[]);
+        let error = check_reading_acceptance(&unnamed, request, None, &[])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("athena.toml"), "{error}");
+        assert!(error.contains("no criterion names it"), "{error}");
+        let named = governed_reading(&["athena.toml"], &["athena.toml sets the greeting"], &[]);
+        check_reading_acceptance(&named, request, None, &[]).unwrap();
+    }
+
+    #[test]
+    fn a_new_config_section_needs_athena_toml_listed_and_named() {
+        let request = "add an audience setting";
+        let config = "crates/athena-data/src/config.rs";
+        let without = governed_reading(&[config], &["the setting parses"], &[]);
+        let error = check_reading_acceptance(&without, request, None, &[])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("athena.toml"), "{error}");
+        assert!(error.contains(config), "{error}");
+        let with = governed_reading(
+            &[config, "athena.toml"],
+            &["the setting parses", "athena.toml sets audience"],
+            &[],
+        );
+        check_reading_acceptance(&with, request, None, &[]).unwrap();
+        let excluded = governed_reading(&[config], &["the setting parses"], &["athena.toml"]);
+        check_reading_acceptance(&excluded, request, None, &[]).unwrap();
+    }
+
+    #[test]
+    fn a_request_without_governance_keywords_or_deliverables_is_accepted_unchanged() {
+        let reading = governed_reading(&["src/greeting.rs"], &["the greeting prints"], &["x"]);
+        check_reading_acceptance(&reading, "add a greeting", None, &[]).unwrap();
+        // A word that only contains a keyword, or an identifier that joins it, is not a match.
+        for request in [
+            "fix the circle area",
+            "rename athena_gate_helper",
+            "the pagesize",
+        ] {
+            check_reading_acceptance(&reading, request, None, &[])
+                .unwrap_or_else(|e| panic!("{request}: {e}"));
+        }
+        // A reading that declines, asks, or changes nothing has no governance file to cover.
+        let mut declined = governed_reading(&["src/site.rs"], &[], &[]);
+        declined.capability = None;
+        declined.decline_reason = Some("no capability fits".into());
+        check_reading_acceptance(&declined, "Publish to GitHub Pages", None, &[]).unwrap();
+        let mut asking = governed_reading(&["src/site.rs"], &[], &[]);
+        asking.question = Some("which file?".into());
+        check_reading_acceptance(&asking, "Publish to GitHub Pages", None, &[]).unwrap();
+        let empty = governed_reading(&[], &["x"], &[]);
+        check_reading_acceptance(&empty, "Publish to GitHub Pages", None, &[]).unwrap();
+    }
+
+    #[test]
+    fn the_governance_check_applies_to_a_retry_as_to_a_first_attempt() {
+        let request = "Publish to GitHub Pages";
+        let previous = prior();
+        let mut retry = governed_reading(&["docs/index.md"], &["the page renders"], &["x"]);
+        retry.summary = format!("Retry {PRIOR_JOB}: add the missing workflow.");
+        let error = check_reading_acceptance(&retry, request, Some(&previous), &[])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(".github/workflows"), "{error}");
+        assert!(!error.contains("the previous result"), "{error}");
     }
 
     #[test]

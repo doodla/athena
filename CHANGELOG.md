@@ -9,6 +9,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- A reading is now refused when its outcome needs a governance file it does not cover. Root cause: reading
+  acceptance had no mapping from the request's outcome to governance files, so a reading for "publish to GitHub
+  Pages" without a workflow, a new configuration section without `athena.toml`, or CI routing without
+  `athena.toml` was accepted, and the omission was found only at admission, after the producer had finished. Jobs
+  20261014-082328-g6vy, 20261015-014012-akwq, 20261017-044557-3htd and 20261017-114155-ksq0 failed that way. New
+  `check_governance_coverage` in `athena-core` (`reading.rs`) runs through `check_reading_acceptance`, for a first
+  attempt and a retry alike, with no model call. It reuses admission's `is_governance` and
+  `governance_change_is_listed`. It refuses a governance deliverable no criterion names, a deliverable of
+  `crates/athena-data/src/config.rs` without `athena.toml`, and a request with a keyword from a small table
+  (workflow, deploy, CI, GitHub Pages, routing, checks, classes, budgets, gate, configuration and the like) whose
+  governance file is not listed and named, or named in `out_of_scope`. The refusal names each missing path and
+  says to list it as a deliverable and name it in a criterion. Tests in `reading.rs` are table-driven over the
+  keyword table and cover the refusal, both ways of repairing it, a retry, and requests that are accepted
+  unchanged.
 - A reading is now refused when an acceptance criterion rests on the producer's own report, summary, claims or
   statement as its evidence. Root cause: criteria were written without a defined list of what the verifier can
   observe (the candidate diff, the repository snapshot, the recorded check output and the commands it may run), and

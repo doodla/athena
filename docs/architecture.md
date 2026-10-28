@@ -37,6 +37,15 @@ athena go  ──▶ job record + producer brief, committed (prediction commit)
                fail: closing commit with the findings
 ```
 
+The core checks a reading before it accepts it, at no model cost
+(`athena_core::reading::check_reading_acceptance`, for a first attempt and a retry alike). Among those checks,
+`check_governance_coverage` applies admission's definition of a governance file to the reading: a request that
+mentions a workflow, CI, deploy, GitHub Pages, routing, checks, classes, budgets or a configuration needs the
+matching governance file (`.github/workflows/` or `athena.toml`), and a new configuration section in
+`crates/athena-data/src/config.rs` needs `athena.toml`. The reading must list the file as a deliverable and name
+it in an acceptance criterion, or name it in `out_of_scope`. Otherwise it is refused and the reader repairs it,
+instead of the job failing at admission after the producer has finished.
+
 ## Crates and dependency direction
 
 The workspace is split into crates so that Cargo enforces "no cycles". The table below is checked against
