@@ -1,0 +1,154 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261028-081201-0v8c",
+  "n": 1,
+  "at": "2026-10-28T08:12:43.373216822Z",
+  "invocation_seq": 1,
+  "base_commit": "b5225619759d6635148526f0d09bb0fedd1f4b8b",
+  "config_sha256": "b812f3c3683488bcd9485d235a6a234bc80722c9f137a6c232094fae2ee727d6",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Free producer build dir before verifier; resume retry after env stop",
+  "summary": "Goal: stop environment-caused failures (jobs 20261028-055601-hg0n and 20261028-065911-m6m5, low disk before the verifier) from costing a full re-plan and rebuild. After Athena's checks pass, remove target/produce before the verifier starts. When a job stops for an environment cause after its candidate is built, `athena retry` resumes at the stopped stage from the kept candidate, as timed-out producer work is resumed today.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "Tests for both behaviors; fmt, clippy -D warnings and cargo test pass."
+    },
+    {
+      "id": "verified",
+      "how": "Behavior criteria name cargo commands the verifier can run."
+    },
+    {
+      "id": "root-cause",
+      "how": "Fixes both the disk use and the lost work on retry, not one instance."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Tests check the directory is gone and no planner or producer runs, not that wiring exists."
+    },
+    {
+      "id": "rust",
+      "how": "All code is Rust."
+    },
+    {
+      "id": "small",
+      "how": "One focused change in run/mod.rs plus changelog."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Job 20261028-055601-hg0n: its finding (low disk 9.8 GB of 10 GB before the verifier) is fixed by removing the producer build dir after passing checks, and its re-plan cost by the resume path. Job 20261028-065911-m6m5: same finding (9.5 GB), addressed the same way; both were stopped at the environment gate, not for the work.",
+    "Audience: the Athena operator who runs `athena retry` and judges cost and time.",
+    "The existing timed-out kept-work mechanism (keep_timed_out_work, kept_work_dir, remove_kept_work in run/mod.rs) is extended rather than replaced.",
+    "The existing 10 GB low-disk gate before the verifier stays; no automatic cleanup beyond target/produce.",
+    "Checks that fail keep target/produce for the send-back.",
+    "reading.rs changes only if retry resolution of the prior job's reading or stage needs it.",
+    "No change to athena.toml, defaults.toml or workflows."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A test in crates/athena-core shows target/produce of the job is absent after checks pass and before the verifier runs, and present when checks fail (for the send-back). Run `cargo test -p athena-core`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test stops a job on low disk before the verifier, then runs athena retry and shows only the verifier runs on the kept candidate, with zero planner and zero producer invocations. Run `cargo test -p athena-core`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` all pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has an entry describing both fixes (build dir removal before verifier; resume after environment stop), citing jobs 20261028-055601-hg0n and 20261028-065911-m6m5.",
+      "kind": "content"
+    },
+    {
+      "text": "git diff shows the retry resume applies to environment causes (low disk, usage limit, interrupted process) after the candidate is built, and the timed-out producer resume still works; existing tests for it still pass.",
+      "kind": "content"
+    },
+    {
+      "text": "athena.toml, defaults.toml and .github/workflows do not appear in git diff.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "p": 0.15
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "p": 0.1
+    }
+  ],
+  "out_of_scope": [
+    "Changing athena.toml, defaults.toml or workflows",
+    "Automatic disk cleanup beyond removing target/produce, or disk reservation",
+    "Changing the 10 GB minimum free-disk threshold",
+    "Changing any existing reading rule",
+    "Changing verifier behavior or prompts"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.72,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.8,
+        "p50": 1.8,
+        "p90": 4.0
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 1900.0,
+        "p90": 3800.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7218130311614731,
+      "p_verification_passes": 0.6691449814126395,
+      "p_user_intervenes": 0.07569444444444445,
+      "cost_usd": {
+        "p10": 0.5020914860136547,
+        "p50": 1.1070018745952828,
+        "p90": 2.719682066924804
+      },
+      "wall_time_s": {
+        "p10": 534.2783845551245,
+        "p50": 1563.1386299054186,
+        "p90": 3061.4992102288224
+      }
+    }
+  },
+  "departures": "Higher cost and time than reference: the change touches run pipeline and retry logic in a very large file, and needs two new integration-style tests.",
+  "urgent_reason": "Cuts wasted time and cost from failed attempts whose retry re-plans and rebuilds from scratch ($4.92).",
+  "hard_reason": "Changes the run pipeline and how retry resumes a stopped job, so a mistake is costly and hard to see.",
+  "producer_effort": "high"
+}
