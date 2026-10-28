@@ -83,8 +83,6 @@ pub struct RequestRecord {
     pub id: String,
     /// The earlier job this one retries ("try again on <job>"), if any: the previous job of the line.
     pub retry_of: Option<String>,
-    /// Requests whose text this one quotes.
-    pub quotes: Vec<String>,
     /// The nearest earlier request with the same request text that had not been accepted: this one is a
     /// re-ask of it.
     pub same_text_as: Option<String>,
@@ -92,9 +90,9 @@ pub struct RequestRecord {
     pub attempts: Vec<AttemptRecord>,
 }
 
-/// Group requests into lines of work (section 5): a request, its retries, any request that quotes it and any
-/// re-ask of the same request text. The count of attempts is therefore per line, not per job id. Links to ids
-/// not in `requests` are ignored. Returns indices into `requests`; each line is in input order and lines are
+/// Group requests into lines of work (section 5): a request, its retries ("try again on <job>") and any re-ask
+/// of the same request text. A job id that only appears in a request's text does not join lines. The count of
+/// attempts is therefore per line, not per job id. Links to ids not in `requests` are ignored. Returns indices into `requests`; each line is in input order and lines are
 /// ordered by their first member.
 pub fn group_lines(requests: &[RequestRecord]) -> Vec<Vec<usize>> {
     let mut parent: Vec<usize> = (0..requests.len()).collect();
@@ -111,11 +109,7 @@ pub fn group_lines(requests: &[RequestRecord]) -> Vec<Vec<usize>> {
         .map(|(i, r)| (r.id.as_str(), i))
         .collect();
     for (i, r) in requests.iter().enumerate() {
-        let links = r
-            .retry_of
-            .iter()
-            .chain(r.same_text_as.iter())
-            .chain(r.quotes.iter());
+        let links = r.retry_of.iter().chain(r.same_text_as.iter());
         for target in links {
             if let Some(&j) = index.get(target.as_str()) {
                 let (a, b) = (find(&mut parent, i), find(&mut parent, j));
@@ -500,8 +494,11 @@ fn attempt_of(job: &JobRecords) -> Option<AttemptRecord> {
 }
 
 /// Rebuilds the [`RequestRecord`]s of every request job, oldest first: the retry link from "try again on
-/// <job>" (the previous job of the line), the quoted request ids, the re-ask link to an earlier request with
-/// the same text, and the finished attempt read from the job's outcome and verification.
+/// <job>" (the previous job of the line), the re-ask link to an earlier request with the same text, and the
+/// finished attempt read from the job's outcome and verification.
+///
+/// A job id that merely appears in a request's text (for example as evidence) links nothing: only the retry
+/// link and the re-ask link join a request to a line.
 ///
 /// A re-ask links to the nearest earlier request with the same normalised text ([`normalise`]) whose line has
 /// not been accepted. A request whose earlier twin landed starts a line of its own: asking the same words again
@@ -515,7 +512,6 @@ pub fn request_records(records: &Records) -> Vec<RequestRecord> {
         let at = |j: &JobRecords| j.request.as_ref().map(|r| r.received_at);
         (at(a), a.id().as_str()).cmp(&(at(b), b.id().as_str()))
     });
-    let ids: Vec<String> = jobs.iter().map(|j| j.id().as_str().to_string()).collect();
     // Normalised request text -> the latest request with it whose line is not accepted.
     let mut open_by_text: HashMap<String, String> = HashMap::new();
     // Each request's retry link, so an accepted retry closes the requests it retried.
@@ -549,11 +545,6 @@ pub fn request_records(records: &Records) -> Vec<RequestRecord> {
             }
             RequestRecord {
                 retry_of,
-                quotes: ids
-                    .iter()
-                    .filter(|other| **other != id && text.contains(other.as_str()))
-                    .cloned()
-                    .collect(),
                 same_text_as,
                 attempts,
                 id,
@@ -1086,6 +1077,49 @@ mod watcher_tests {
     }
 
     #[test]
+    fn citing_a_paused_lines_jobs_as_evidence_starts_its_own_line() {
+        let r = rig(0.8, 0.01, &[Some(0), Some(0)]);
+        let (a, b) = r.two_rejections();
+        assert!(r.pause(&a).exists(), "the line is paused naturally");
+
+        // A separate fix that only cites the paused line's jobs as evidence.
+        let c = r.ask(&format!(
+            "fix disk and resume handling; evidence: jobs {a} and {b} were paused"
+        ));
+        let records = r.records();
+        let requests = request_records(&records);
+        assert_eq!(requests[2].retry_of, None);
+        assert_eq!(requests[2].same_text_as, None);
+        assert_eq!(
+            group_lines(&requests),
+            vec![vec![0, 1], vec![2]],
+            "citing jobs as evidence is not a link"
+        );
+        assert_eq!(r.athena.line_pause(&records, c.as_str()), None);
+        match r.go(&c) {
+            Ok(_) => {}
+            Err(e) => assert!(!e.to_string().contains("paused"), "{e}"),
+        }
+        assert!(
+            r.records().jobs[c.as_str()].job.is_some(),
+            "the citing request was dispatched, not refused"
+        );
+
+        // A retry of the paused line is still part of it and is refused.
+        let d = r.ask(&format!("try again on {b}"));
+        let records = r.records();
+        let requests = request_records(&records);
+        assert_eq!(requests[3].retry_of.as_deref(), Some(b.as_str()));
+        assert_eq!(
+            group_lines(&requests),
+            vec![vec![0, 1, 3], vec![2]],
+            "the retry joins the paused line"
+        );
+        let err = r.go(&d).unwrap_err().to_string();
+        assert!(err.contains("paused") && err.contains("T4"), "{err}");
+    }
+
+    #[test]
     fn a_retry_and_a_re_ask_of_the_same_request_are_one_line_that_pauses_at_its_threshold() {
         // Criterion 0 is rejected, then criterion 1 twice. Counted per job id no request has two rejections of
         // one criterion; counted per line, the retry and the re-ask are attempts 2 and 3 of one line.
@@ -1368,11 +1402,10 @@ mod tests {
         att(Verdict::Rejected, Some(criterion), cost, minutes)
     }
 
-    fn req(id: &str, retry_of: Option<&str>, quotes: &[&str]) -> RequestRecord {
+    fn req(id: &str, retry_of: Option<&str>) -> RequestRecord {
         RequestRecord {
             id: id.to_string(),
             retry_of: retry_of.map(str::to_string),
-            quotes: quotes.iter().map(|s| s.to_string()).collect(),
             same_text_as: None,
             attempts: Vec::new(),
         }
@@ -1380,28 +1413,23 @@ mod tests {
 
     #[test]
     fn grouping_joins_a_re_ask_to_the_request_it_repeats() {
-        let mut again = req("c", None, &[]);
+        let mut again = req("c", None);
         again.same_text_as = Some("a".into());
-        let reqs = vec![
-            req("a", None, &[]),
-            req("b", Some("a"), &[]),
-            req("x", None, &[]),
-            again,
-        ];
+        let reqs = vec![req("a", None), req("b", Some("a")), req("x", None), again];
         assert_eq!(group_lines(&reqs), vec![vec![0, 1, 3], vec![2]]);
     }
 
     #[test]
-    fn grouping_joins_retries_and_quoting_requests() {
+    fn grouping_joins_retries_only() {
         let reqs = vec![
-            req("a", None, &[]),
-            req("x", None, &[]),
-            req("b", Some("a"), &[]),
-            req("c", None, &["b"]),
-            req("d", Some("missing"), &[]),
+            req("a", None),
+            req("x", None),
+            req("b", Some("a")),
+            req("c", None),
+            req("d", Some("missing")),
         ];
         let lines = group_lines(&reqs);
-        assert_eq!(lines, vec![vec![0, 2, 3], vec![1], vec![4]]);
+        assert_eq!(lines, vec![vec![0, 2], vec![1], vec![3], vec![4]]);
     }
 
     #[test]

@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261028-081329-r26g",
+  "round": 2,
+  "at": "2026-10-28T08:26:41.572464156Z",
+  "invocation_seq": 4,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "hestia.md still describes the old rule ('any request that quotes it'). After this change it would contradict the code.",
+      "evidence": "Grep finds 'the line), any request that quotes it, and any re-ask of the same request text' at docs/design/hestia.md:256. The plan raises this only as an open question. Fix: Either change that one sentence to describe the retry link plus same-text re-ask rule, as for scope-guard.md, or say in the CHANGELOG/change description that it is left for a follow-up. Don't leave it unresolved.",
+      "location": "Open questions; docs/design/hestia.md:256",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The check 'go(&c) does not return an error containing paused' is weaker than the rig allows. It would also pass if c failed for some other reason.",
+      "evidence": "In `t4_pause_via_go_and_ask` (scope_guard.rs:1082-1085), a third job after two rejections with an exhausted or None verdict lands: `assert_eq!(r.go(&c).unwrap(), OutcomeState::Landed)`. The verdict list `[Some(0), Some(0), None]` gives c a pass. Fix: Assert `r.go(&c).unwrap() == OutcomeState::Landed`, or at least that `r.records().jobs[c].job.is_some()`, so the test shows c was dispatched, not just that it wasn't refused for a pause.",
+      "location": "Demonstrations, criterion 1 (assertion on go(&c))",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The failure case given for criterion 2 (dropping retry_of) is not a change the plan makes, so the claim is hypothetical.",
+      "evidence": "`group_lines` keeps `.retry_of.iter().chain(r.same_text_as.iter())` (lines 114-117). Only the quotes chain is removed. Fix: Phrase it as a regression guard: the test fails if a future change removes or breaks the retry link. Also assert that d was not dispatched (`records.jobs[d].job.is_none()`), as `t4_pause_via_go_and_ask` does.",
+      "location": "Demonstrations, criterion 2 'Fails without the behavior'",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the code and the plan matches it. In scope_guard.rs the `quotes` field is at lines 86-87 and is used in only three places: `.chain(r.quotes.iter())` in `group_lines` (line 118), the `quotes: ids...text.contains(...)` block in `request_records` (lines 552-556), and the `req` test helper (lines 1371-1375). The `ids` binding at line 518 is used only by that block. A workspace grep finds no other code that uses `quotes`. Removing the link where it starts is the root-cause fix. The retry link (`retried_job`/`retry_reference`, which needs the 'try again on' prefix) and the same-text re-ask link are left unchanged, so retries still group. The new rig test is sound. `rig(0.8, 0.01, &[Some(0), Some(0), None])` matches how `rig` uses its verdict list: each verifier call pops one entry, and an empty list means pass. Two same-criterion rejections pause the line naturally, as in `t4_pause_via_go_and_ask`. Text that cites ids without the prefix gets no retry_of. Its normalised text differs from the other requests, so it gets no same_text_as either. The test drives the production entry points (`ask`, `go`, `request_records`, `group_lines`, `line_pause`). With the old scan it would fail, because c would join line [0,1,2] and be refused as paused. The criterion 2 part of the test and the existing `retry_refuses_paused_line` show retries are still refused. The design-doc spots the plan names exist (scope-guard.md lines 110, 272, 312), and CHANGELOG.md has an Unreleased / Fixed section at line 28. The work fits one producer run. I have only minor points: one stale doc line outside the listed files, and one assertion that could be stronger."
+}

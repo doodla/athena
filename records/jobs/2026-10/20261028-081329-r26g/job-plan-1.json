@@ -1,0 +1,144 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261028-081329-r26g",
+  "round": 1,
+  "at": "2026-10-28T08:25:20.416558114Z",
+  "invocation_seq": 2,
+  "approach": "In scope_guard.rs, drop the quotes link from grouping: remove `RequestRecord::quotes`, its computation in `request_records`, and the `.chain(r.quotes.iter())` in `group_lines`. Lines then form only from `retry_of` (the \"try again on <job>\" link) and `same_text_as` (the unchanged same-text re-ask). Update the doc comments, the `req` helper and the quote-based unit test. Add one rig test that drives a naturally paused line, a request citing its jobs, and a retry of it. Then update docs/design/scope-guard.md (sections 5, 12 item 1 and 13.1) and add a CHANGELOG.md entry.",
+  "decisions": [
+    {
+      "choice": "Remove the `quotes` field from `RequestRecord` and the id-in-text scan from `request_records`.",
+      "reason": "The field has one use, in `group_lines`. Removing it fixes the root cause (grouping by any id in the text) and leaves no dead data for clippy or readers. The id scan `text.contains(other)` is the faulty rule.",
+      "rejected": [
+        {
+          "option": "Keep `quotes` populated but skip it in `group_lines`.",
+          "why": "It leaves an unused field and a misleading doc. The brief allows it, but removal is smaller to reason about and the same size to implement."
+        },
+        {
+          "option": "Special-case the refused disk-and-resume request or require 'evidence' words around ids.",
+          "why": "This treats the symptom and adds a text heuristic. The user's default is to remove the rule at its origin."
+        },
+        {
+          "option": "Add new follow-up syntax such as 'follow up on <job>'.",
+          "why": "The reading accepted that the retry link is the explicit follow-up. New syntax is out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "Test through the real rig (`ask`/`go`, `request_records`, `group_lines`, `line_pause`, retry refusal) with a naturally paused line, rather than only synthetic `req` records.",
+      "reason": "The behavior is that the pause outcome differs for evidence-citing vs retry requests. The rig exercises the production `request_records` text scan that the bug lived in. A pure `group_lines` test could not catch it.",
+      "rejected": [
+        {
+          "option": "Only update the synthetic `grouping_joins_...` unit test.",
+          "why": "It would pass even if `request_records` still linked quoted ids, which is the faulty part, once the field is gone."
+        }
+      ]
+    },
+    {
+      "choice": "Also edit docs/design/scope-guard.md (the three places that say 'quoting requests'), as the brief lists it as a deliverable.",
+      "reason": "The design doc states the old grouping rule and would contradict the code. docs/design/hestia.md:256 also describes the old rule but is not a listed deliverable; name it in open questions.",
+      "rejected": [
+        {
+          "option": "Leave the design doc unchanged.",
+          "why": "It is a listed deliverable and would be stale."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/scope_guard.rs",
+      "action": "modify",
+      "purpose": "Remove the `quotes` field and its link in `group_lines` and `request_records`. Update the doc comments, the `req` test helper and the quote-based unit tests. Add the rig test for the evidence-citing request vs a retry of a paused line.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add a bullet under Unreleased / Fixed: citing job ids as evidence no longer groups a request into that line.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/scope-guard.md",
+      "action": "modify",
+      "purpose": "Change 'any request that quotes it' (section 5, line 110), 'retries and quoting requests' (section 12 item 1, line 272) and 'quoted request ids' (section 13.1, line 312) to the retry link plus same-text re-ask rule.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In scope_guard.rs, delete `RequestRecord::quotes` (the field at lines 86-87) and the `.chain(r.quotes.iter())` line in `group_lines` (line 118).",
+    "Rewrite the doc comment of `group_lines` to say: a request, its retries, and any re-ask of the same request text; a job id in a request's text does not join lines. Also update the `RequestRecord` and `request_records` docs (drop 'the quoted request ids'). In `request_records`, delete the `quotes: ids...` block and the `ids` binding (line 518), which is otherwise unused. Check that nothing else uses `ids`.",
+    "Update the test helper `req(id, retry_of)` and its callers. Replace `grouping_joins_retries_and_quoting_requests` with `grouping_joins_retries_only` (expected `[[0,2],[1],[3],[4]]`). Fix the call in `grouping_joins_a_re_ask_to_the_request_it_repeats`.",
+    "Add the rig test next to `retry_refuses_paused_line`: set up a naturally paused line (a, then 'try again on a' as b, via `rig(0.8, 0.01, &[Some(0), Some(0), None])`). Ask c whose text cites {a} and {b} as evidence without the retry prefix. Assert the grouping, `line_pause` None, and that `go(&c)` is not refused. Then ask d = 'try again on {b}' and assert `go(&d)` errs with 'paused' and 'T4', and that d is in line 0. Check the verdict list so the third job gets a verdict; adjust the list if the rig indexes verdicts differently.",
+    "Edit docs/design/scope-guard.md at the three places listed. Optionally add one sentence in section 5: a request that cites jobs as evidence starts its own line.",
+    "Add the CHANGELOG.md bullet under Unreleased / Fixed.",
+    "Run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`."
+  ],
+  "risks": [
+    {
+      "risk": "A genuine follow-up that only mentions the earlier job id in its text (not 'try again on') now starts a new line. It no longer inherits the attempt count, so T1/T4 fire later for it.",
+      "mitigation": "This is the requested behavior. The retry link and the same-text re-ask still cover real retries. Record it in the CHANGELOG entry."
+    },
+    {
+      "risk": "The rig verdict list for the new test may not give the third job a verdict as expected, so `go(&c)` may end in an unexpected state.",
+      "mitigation": "Assert only that the error, if any, does not contain 'paused', and that `line_pause` is None. Check how `rig` consumes `verdicts` while writing the test."
+    },
+    {
+      "risk": "Another module or test may use `RequestRecord { quotes, .. }` and break compilation.",
+      "mitigation": "A grep over crates for `quotes` found uses only in scope_guard.rs (lines 87, 118, 552, 1371-1375). Compilation of the whole workspace is checked in criterion 4."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "New rig test, e.g. `citing_a_paused_lines_jobs_as_evidence_starts_its_own_line`, in the rig tests module of scope_guard.rs (the module holding `retry_refuses_paused_line`). Setup: `rig(0.8, 0.01, &[Some(0), Some(0), None])`. This is an existing helper with a fake producer and verifier verdict list, and `ask`/`go`/`records`/`pause` helpers also exist. Ask `a` and `go` it, then `try again on {a}` as `b` and `go` it. Two same-criterion rejections pause the line naturally (T4, as in the existing re-ask test, so `r.pause(&a)` exists). Then `c = r.ask(&format!(\"fix the disk and resume handling; evidence: jobs {a} and {b} were paused\"))`. Entry points: `request_records(&r.records())`, `group_lines`, `Athena::line_pause`, `Athena::go`. Guards: the text must not start with 'try again on', so `retry_of` is None. No new seam is needed.",
+      "command": "cargo test -p athena-core scope_guard",
+      "observes": "`group_lines` gives `[[0,1],[2]]`; `line_pause(&records, c)` is None; `r.go(&c)` does not return a 'paused' error; and `requests[2].retry_of` and `same_text_as` are None.",
+      "fails_without": "With the old `quotes` scan, `c` joins line [0,1,2], `line_pause` returns Some, and `go(&c)` is refused with 'paused'. The assertions fail."
+    },
+    {
+      "criterion": 2,
+      "method": "In the same new test, after the evidence-citing request, ask `d = r.ask(&format!(\"try again on {b}\"))` and call `r.go(&d)`. Also run the existing `retry_refuses_paused_line`. Entry points: `Athena::go`, `line_pause`, `group_lines`. The pause is the natural one from the setup, so no injected double.",
+      "command": "cargo test -p athena-core scope_guard",
+      "observes": "`go(&d)` is an Err whose text contains 'paused' and 'T4'. `group_lines` puts `d` in line 0 with `a` and `b`. `retry_refuses_paused_line` still passes.",
+      "fails_without": "If grouping dropped the `retry_of` link along with `quotes`, `d` would start its own line, `go` would proceed, and the refusal assertion would fail."
+    },
+    {
+      "criterion": 3,
+      "method": "Read the diff. `RequestRecord::quotes`, the `quotes: ids.iter()...text.contains(...)` block and the unused `ids` binding in `request_records`, and `.chain(r.quotes.iter())` in `group_lines` are gone. The doc comments on `RequestRecord`, `group_lines` and `request_records` now describe the retry link and the same-text re-ask only. `grep` for `quotes` in scope_guard.rs returns nothing.",
+      "command": "git diff -- crates/athena-core/src/scope_guard.rs",
+      "observes": "The diff shows the removals and the doc text. `cargo clippy` also shows no unused `ids` variable.",
+      "fails_without": null
+    },
+    {
+      "criterion": 4,
+      "method": "Full workspace run. Rewrite `grouping_joins_retries_and_quoting_requests` as `grouping_joins_retries_only` with `req(id, retry_of)`: a, x, b (retry of a), c (no link), d (retry of 'missing'). Expected lines: `[[0,2],[1],[3],[4]]`. `grouping_joins_a_re_ask_to_the_request_it_repeats` is updated for the new `req` signature. No other test in scope_guard.rs mentions quoting; I grepped `quot` and found none. Each rig test that ran before is rerun.",
+      "command": "cargo test --locked",
+      "observes": "All workspace tests pass.",
+      "fails_without": "If the old test were left as written, it would not compile or would expect c joined to b."
+    },
+    {
+      "criterion": 5,
+      "method": "Run both. They are the commands Athena runs on the result.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings",
+      "observes": "Both exit 0. There is no dead-code or unused-variable warning from the removed field.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Read the diff. Under `## [Unreleased]` there is a new bullet in `### Fixed` (the existing section at CHANGELOG.md:28). It says that citing job ids as evidence no longer groups a request into that line; only the retry link and a same-text re-ask do. It names the 2026-10-28 refusal of the disk-and-resume fix. It also notes that docs/design/scope-guard.md is updated.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "A bullet is added under Unreleased; the diff shows only added lines.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "docs/design/hestia.md:256 describes the same old rule ('any request that quotes it'). It is not a listed deliverable. Should it be fixed in this job or a follow-up? I suggest a follow-up or a small extra edit if the producer is allowed.",
+    "The rig's verdict list semantics (`Some(0)` rejects, `None` lands) were inferred from existing tests, not from reading `rig` in full.",
+    "Whether `Records::resolve` accepts an id with trailing text is unchecked. The new test uses 'try again on {b}' with the full id only, as existing tests do."
+  ],
+  "producer_section_sha256": "f90753af0409f22e1705519442e69a4778a6054f52bc149cf7bd8e9f76499967"
+}

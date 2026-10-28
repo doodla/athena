@@ -27,6 +27,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- The scope guard no longer groups a request into another line of work because its text cites that line's job
+  ids. On 2026-10-28 a separate disk-and-resume fix that cited two jobs of a paused line as evidence was refused
+  as part of that line. Root cause: `request_records` scanned each request's text for any earlier job id and
+  `group_lines` joined the request to every job it found. That link (`RequestRecord::quotes`) is removed. A
+  request now joins a line only by the retry link ("try again on <job>") or by the unchanged same-text re-ask;
+  a request that cites jobs as evidence starts its own line and is not paused. A follow-up that only mentions
+  an earlier job id, without "try again on", is a new line and does not inherit the attempt count.
+  `docs/design/scope-guard.md` (sections 5, 12 and 13.1) states the new rule. Tests cover a request citing a
+  paused line's jobs (own line, not refused) and a retry of that line (grouped, refused).
 - The governance-file rule on a reading no longer refuses a request for using a common word, and a refused
   reading is now read once more at once with the refusal text. Root cause: `check_governance_coverage` required a
   governance path whenever the request contained a word from a table (deploy, config, CI, gate, budgets and the
