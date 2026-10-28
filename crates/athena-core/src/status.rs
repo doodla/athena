@@ -576,6 +576,59 @@ pub struct Bootstrap {
     pub note: String,
 }
 
+/// How long a usage limit is assumed to hold when its reply named no reset time that could be read.
+const UNKNOWN_RESET_HOLD_S: i64 = 3600;
+
+/// A model usage limit that holds now: calls are refused until `resets_at`, and drain stops on it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct UsageLimitView {
+    /// The job whose call was refused.
+    pub job: String,
+    /// When the limit lifts.
+    pub resets_at: jiff::Timestamp,
+    /// True when the reply named no reset time that could be read, so `resets_at` is a guess: an hour
+    /// after the refused call.
+    pub estimated: bool,
+}
+
+impl UsageLimitView {
+    /// The line `athena status` prints while the limit holds.
+    pub fn text(&self) -> String {
+        format!(
+            "usage limit: the model service refused job {} · resets {}{} · athena retry {}",
+            self.job,
+            if self.estimated { "about " } else { "at " },
+            self.resets_at,
+            self.job
+        )
+    }
+}
+
+/// The usage limit that holds at `now`, from the newest invocation recorded as limited
+/// ([`athena_data::records::InvocationOutcome::Limited`]). It holds while its reset time is after `now` and no
+/// invocation that started later succeeded (a call that worked shows the limit is lifted). `None` otherwise.
+pub fn usage_limit_hold(records: &Records, now: jiff::Timestamp) -> Option<UsageLimitView> {
+    use athena_data::records::InvocationOutcome;
+    let all = || records.jobs.values().flat_map(|j| j.invocations.iter());
+    let newest = all()
+        .filter(|i| i.outcome == InvocationOutcome::Limited)
+        .max_by_key(|i| i.ended_at)?;
+    if all().any(|i| i.outcome == InvocationOutcome::Success && i.started_at > newest.ended_at) {
+        return None;
+    }
+    let named = newest
+        .detail
+        .as_deref()
+        .and_then(athena_agent::claude::reset_time_in);
+    let resets_at =
+        named.unwrap_or(newest.ended_at + jiff::SignedDuration::from_secs(UNKNOWN_RESET_HOLD_S));
+    (resets_at > now).then(|| UsageLimitView {
+        job: newest.job.to_string(),
+        resets_at,
+        estimated: named.is_none(),
+    })
+}
+
 /// The state of the work.
 #[derive(Debug, Clone, Serialize)]
 pub struct StatusView {
@@ -589,6 +642,9 @@ pub struct StatusView {
     pub stale_build: Option<String>,
     pub driver: String,
     pub kill_switch_on: bool,
+    /// Set while a model usage limit holds ([`usage_limit_hold`]): when it lifts. Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage_limit: Option<UsageLimitView>,
     pub nested: Option<String>,
     pub bootstrap: Bootstrap,
     pub jobs_by_state: BTreeMap<String, usize>,
@@ -1316,6 +1372,7 @@ impl Athena {
             stale_build,
             driver: format!("{} {}", self.driver.info().name, self.driver.info().version),
             kill_switch_on,
+            usage_limit: usage_limit_hold(&records, crate::now()),
             nested: self.nested.clone(),
             bootstrap,
             jobs_by_state,
@@ -2319,6 +2376,117 @@ mod planning_cost_tests {
         assert_eq!(json["later_harm"]["unplanned"]["reverts"], 1);
         assert_eq!(json["later_harm"]["unplanned"]["fixes"], 1);
         assert_eq!(json["later_harm"]["unplanned"]["failures"], 1);
+    }
+
+    /// Records holding one invocation of each `(outcome, detail, start, end)`, all under one job.
+    fn with_invocations(spec: &[(InvocationOutcome, Option<&str>, &str, &str)]) -> Records {
+        let job = id("20261027-123701-77zh");
+        let mut j = JobRecords {
+            id: Some(job.clone()),
+            ..JobRecords::default()
+        };
+        for (n, (outcome, detail, start, end)) in spec.iter().enumerate() {
+            let mut i = invocation(&job, n as u32 + 1, Role::Verifier, 0.0);
+            i.outcome = *outcome;
+            i.detail = detail.map(str::to_string);
+            i.started_at = start.parse().unwrap();
+            i.ended_at = end.parse().unwrap();
+            j.invocations.push(i);
+        }
+        records(vec![j])
+    }
+
+    const LIMITED: &str =
+        "usage limit (resets at 2026-10-29T18:00:00Z): You've hit your weekly limit";
+
+    #[test]
+    fn a_usage_limit_shows_in_status_until_its_reset_time_passes() {
+        let records = with_invocations(&[(
+            InvocationOutcome::Limited,
+            Some(LIMITED),
+            "2026-10-27T11:59:58Z",
+            "2026-10-27T12:00:00Z",
+        )]);
+        let at = |t: &str| t.parse::<jiff::Timestamp>().unwrap();
+
+        // While it holds, the view carries the job and the reset time, and the line shows both.
+        let hold = usage_limit_hold(&records, at("2026-10-28T09:00:00Z")).expect("the limit holds");
+        assert_eq!(hold.job, "20261027-123701-77zh");
+        assert_eq!(hold.resets_at, at("2026-10-29T18:00:00Z"));
+        assert!(!hold.estimated);
+        let text = hold.text();
+        assert!(text.contains("usage limit"), "{text}");
+        assert!(text.contains("2026-10-29T18:00:00Z"), "{text}");
+        assert!(text.contains("athena retry 20261027-123701-77zh"), "{text}");
+        let json = serde_json::to_value(&hold).unwrap();
+        assert_eq!(json["resets_at"], "2026-10-29T18:00:00Z");
+
+        // At and after the reset time there is nothing to show.
+        assert_eq!(usage_limit_hold(&records, at("2026-10-29T18:00:00Z")), None);
+        assert_eq!(usage_limit_hold(&records, at("2026-10-30T00:00:00Z")), None);
+    }
+
+    #[test]
+    fn a_later_successful_call_or_no_limit_at_all_shows_no_usage_limit() {
+        let at = |t: &str| t.parse::<jiff::Timestamp>().unwrap();
+        let now = at("2026-10-28T09:00:00Z");
+        // A call that started after the refusal and worked shows the limit is lifted.
+        let lifted = with_invocations(&[
+            (
+                InvocationOutcome::Limited,
+                Some(LIMITED),
+                "2026-10-27T11:59:58Z",
+                "2026-10-27T12:00:00Z",
+            ),
+            (
+                InvocationOutcome::Success,
+                None,
+                "2026-10-28T08:00:00Z",
+                "2026-10-28T08:05:00Z",
+            ),
+        ]);
+        assert_eq!(usage_limit_hold(&lifted, now), None);
+        // A success before the refusal does not lift it.
+        let earlier = with_invocations(&[
+            (
+                InvocationOutcome::Success,
+                None,
+                "2026-10-27T10:00:00Z",
+                "2026-10-27T10:05:00Z",
+            ),
+            (
+                InvocationOutcome::Limited,
+                Some(LIMITED),
+                "2026-10-27T11:59:58Z",
+                "2026-10-27T12:00:00Z",
+            ),
+        ]);
+        assert!(usage_limit_hold(&earlier, now).is_some());
+        // An ordinary error is not a limit.
+        let error = with_invocations(&[(
+            InvocationOutcome::Error,
+            Some("usage limit (resets at 2026-10-29T18:00:00Z): quoted"),
+            "2026-10-27T11:59:58Z",
+            "2026-10-27T12:00:00Z",
+        )]);
+        assert_eq!(usage_limit_hold(&error, now), None);
+        assert_eq!(usage_limit_hold(&Records::default(), now), None);
+    }
+
+    #[test]
+    fn a_usage_limit_with_no_readable_reset_holds_for_an_hour() {
+        let records = with_invocations(&[(
+            InvocationOutcome::Limited,
+            Some("usage limit (reset time unknown): weekly limit, resets soon"),
+            "2026-10-27T11:59:58Z",
+            "2026-10-27T12:00:00Z",
+        )]);
+        let at = |t: &str| t.parse::<jiff::Timestamp>().unwrap();
+        let hold = usage_limit_hold(&records, at("2026-10-27T12:30:00Z")).expect("holds");
+        assert!(hold.estimated);
+        assert_eq!(hold.resets_at, at("2026-10-27T13:00:00Z"));
+        assert!(hold.text().contains("about 2026-10-27T13:00:00Z"));
+        assert_eq!(usage_limit_hold(&records, at("2026-10-27T13:00:01Z")), None);
     }
 }
 

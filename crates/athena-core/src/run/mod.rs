@@ -1044,6 +1044,11 @@ impl Athena {
             cost_text(&record)
         ));
         closing.new_invocations.push(record.clone());
+        if output.outcome == InvocationOutcome::Limited {
+            closing.happened =
+                self.usage_limit_failure(ctx, &record.detail.clone().unwrap_or_default());
+            return Ok(RoundEnd::Stopped);
+        }
         if output.outcome != InvocationOutcome::Success {
             let why = record.detail.clone().unwrap_or_default();
             self.stop_planning(
@@ -1183,6 +1188,11 @@ impl Athena {
             cost_text(&record)
         ));
         closing.new_invocations.push(record.clone());
+        if output.outcome == InvocationOutcome::Limited {
+            closing.happened =
+                self.usage_limit_failure(ctx, &record.detail.clone().unwrap_or_default());
+            return Ok(RoundEnd::Stopped);
+        }
         if output.outcome != InvocationOutcome::Success {
             let why = record.detail.clone().unwrap_or_default();
             self.stop_planning(ctx, closing, &format!("the critic did not complete: {why}"));
@@ -1663,6 +1673,32 @@ impl crate::routing::Exec for SnapExec<'_> {
     }
 }
 
+/// The start of the closing reason of a job whose model call was refused for a reached usage limit. Like
+/// [`crate::disk::LOW_DISK`] it starts with the environment prefix, so the job is resumable by
+/// `athena retry` and the failure is not taken for a fault of the work.
+pub const USAGE_LIMIT: &str = "environment: usage limit";
+
+/// The closing reason for a job whose model call was refused for a reached usage limit. `detail` is the
+/// limited invocation's detail (it leads with the reset time). The reason names the environment, not the
+/// work, and the retry command.
+pub fn usage_limit_reason(detail: &str, job: &JobId) -> String {
+    let rest = detail.strip_prefix("usage limit").unwrap_or(detail);
+    format!(
+        "{USAGE_LIMIT}{rest}; this is the environment, not the work. After the reset, `athena retry {job}`"
+    )
+}
+
+/// When `reason` is the closing reason of a job held by a usage limit ([`usage_limit_reason`]), the time
+/// the limit lifts, as text: `resets at <time>`, or `reset time unknown`. Otherwise `None`.
+pub fn usage_limit_of(reason: &str) -> Option<String> {
+    let rest = reason.strip_prefix(USAGE_LIMIT)?;
+    let detail = format!("usage limit{rest}");
+    Some(match athena_agent::claude::reset_time_in(&detail) {
+        Some(at) => format!("resets at {at}"),
+        None => "reset time unknown".into(),
+    })
+}
+
 /// How many times a report with unmet criteria goes back to the producer before the verifier judges it.
 const PRODUCER_SEND_BACKS: u32 = 1;
 
@@ -2044,6 +2080,11 @@ impl Athena {
                 record.commands_run.len()
             ));
             closing.new_invocations.push(record.clone());
+            if output.outcome == InvocationOutcome::Limited {
+                closing.happened =
+                    self.usage_limit_failure(ctx, &record.detail.clone().unwrap_or_default());
+                return Ok(closing);
+            }
             if output.outcome == InvocationOutcome::TimedOut {
                 let reason = record.detail.clone().unwrap_or_default();
                 self.keep_timed_out_work(ctx, &snapshot, &reason, &mut closing)?;
@@ -2577,6 +2618,8 @@ impl Athena {
         let mut verdict_output: Option<VerdictOutput> = None;
         let mut commands_run = Vec::new();
         let mut verifier_failure = None;
+        // Set to the limited invocation's detail when the verifier call was refused for a usage limit.
+        let mut usage_limit: Option<String> = None;
         // Set when the verifier changed its snapshot: the system failed to keep it still, so the work is
         // not at fault. The verdict is discarded and verification reruns once on a fresh snapshot.
         let mut system_fault: Option<String> = None;
@@ -2643,6 +2686,17 @@ impl Athena {
                         verifier_failure = Some(format!("the verifier could not run: {error}"))
                     }
                     Ok((voutput, vrecord)) => {
+                        if voutput.outcome == InvocationOutcome::Limited {
+                            // No verdict was asked for and none can come: the environment holds the job.
+                            ctx.ui.line(&format!(
+                                "verifier   {vmodel} · {:.0}s · {} · usage limit",
+                                voutput.wall_s,
+                                cost_text(&vrecord),
+                            ));
+                            usage_limit = Some(vrecord.detail.clone().unwrap_or_default());
+                            closing.new_invocations.push(vrecord);
+                            break;
+                        }
                         verifier_invocation = Some(vrecord.seq);
                         commands_run = voutput.commands_run.clone();
                         if voutput.outcome != InvocationOutcome::Success {
@@ -2706,6 +2760,16 @@ impl Athena {
                 }
                 vsnap = fresh;
             }
+        }
+
+        // A usage limit ends the job here, like low disk before the verifier: the candidate and the resume
+        // mark are kept, so `athena retry` verifies it once the limit resets.
+        if let Some(detail) = usage_limit {
+            let changed_paths = std::mem::take(&mut closing.happened.changed_paths);
+            closing.happened = self.usage_limit_failure(ctx, &detail);
+            closing.happened.changed_paths = changed_paths;
+            let _ = crate::pin::remove_tree(&verify_dir);
+            return Ok(closing);
         }
 
         // Redact the verifier's free text before it is recorded.
@@ -2943,6 +3007,14 @@ impl Athena {
         let tool_config = crate::toolconfig::apply_base_tool_config(&snapshot)?;
         let prepared = snapshot.work_tree_tree()?;
         Ok((snapshot, tool_config, prepared))
+    }
+
+    /// Marks a failure for a reached model usage limit: a failure of the environment, with no verdict. The
+    /// job keeps its candidate, and `athena retry` resumes it after the limit resets.
+    fn usage_limit_failure(&self, ctx: &RunContext<'_>, detail: &str) -> Happened {
+        let mut happened = self.failure(ctx, &usage_limit_reason(detail, ctx.id()));
+        happened.verification_passed = None;
+        happened
     }
 
     /// Marks a failure before verification.
@@ -4820,6 +4892,218 @@ mod produce_and_verify_order_tests {
         assert!(readme_at_head(&athena).contains("A demo."));
         assert_eq!(athena.state.read_resume(&first), None, "the mark is spent");
         assert_eq!(athena.state.read_resume(&retry.job), None);
+    }
+
+    const LIMIT_TEXT: &str = "You've hit your weekly limit · resets Oct 29, 6pm (UTC)";
+
+    /// A driver that plays every role as the base fake does except the verifier. For the verifier it
+    /// reads one `result` event, such as the service sends, through the real stream reader and the real
+    /// `output_from_result`, so no recognition logic is in the double. With `model_ran` the event carries
+    /// usage for the requested model; without it, none, as in a refused call.
+    struct ReplyingVerifier {
+        inner: FakeAgentDriver,
+        text: &'static str,
+        model_ran: bool,
+    }
+
+    impl athena_agent::AgentDriver for ReplyingVerifier {
+        fn info(&self) -> athena_data::records::DriverInfo {
+            self.inner.info()
+        }
+
+        fn invoke(
+            &self,
+            spec: &AgentInvocation,
+            sink: &mut dyn athena_agent::UsageSink,
+        ) -> Result<athena_agent::AgentOutput, athena_agent::DriverError> {
+            if spec.role != Role::Verifier {
+                return self.inner.invoke(spec, sink);
+            }
+            let mut model_usage = serde_json::Map::new();
+            if self.model_ran {
+                model_usage.insert(
+                    spec.model.clone(),
+                    json!({ "inputTokens": 5, "outputTokens": 7, "costUSD": 0.01 }),
+                );
+            }
+            let line = json!({
+                "type": "result", "subtype": "success", "is_error": true, "num_turns": 0,
+                "duration_api_ms": 0, "total_cost_usd": if self.model_ran { 0.01 } else { 0.0 },
+                "usage": if self.model_ran { json!({ "input_tokens": 5, "output_tokens": 7 }) } else { json!({}) },
+                "modelUsage": model_usage, "permission_denials": [], "result": self.text,
+            });
+            let started_at = jiff::Timestamp::now();
+            let mut state = athena_agent::stream::StreamState::default();
+            state.on_line(&line.to_string());
+            Ok(athena_agent::claude::output_from_result(
+                &state.result.expect("a result event"),
+                &spec.model,
+                started_at,
+                jiff::Timestamp::now(),
+                2.0,
+                Vec::new(),
+            ))
+        }
+    }
+
+    /// An Athena whose verifier answers with `text`, and the working driver to restore for a retry.
+    fn athena_with_replying_verifier(
+        repo: &tempfile::TempDir,
+        state: &tempfile::TempDir,
+        counts: &Arc<Counts>,
+        text: &'static str,
+        model_ran: bool,
+    ) -> (Athena, std::sync::Arc<dyn athena_agent::AgentDriver>) {
+        let mut athena = athena_with(
+            repo,
+            state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            counting(counts.clone(), None),
+        );
+        let plain = athena.driver.clone();
+        athena.driver = Arc::new(ReplyingVerifier {
+            inner: FakeAgentDriver::new(counting(counts.clone(), None))
+                .with_registry(athena.state.registry()),
+            text,
+            model_ran,
+        });
+        (athena, plain)
+    }
+
+    #[test]
+    fn a_usage_limit_at_the_verifier_holds_the_job_and_keeps_its_candidate_for_a_retry() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let counts = Arc::new(Counts::default());
+        let (mut athena, plain) =
+            athena_with_replying_verifier(&repo, &state, &counts, LIMIT_TEXT, false);
+        let proposal = athena.ask("describe the demo", &Quiet).unwrap();
+        let first = proposal.job.clone();
+        let ui = Lines::default();
+        let held = finished(athena.go(first.as_str(), AcceptedBy::User, &ui).unwrap());
+
+        // The job is held by the environment, with no verdict, not failed or rejected for its work.
+        assert_eq!(held.state, OutcomeState::Failed, "{}", held.reason);
+        assert!(held.reason.starts_with(USAGE_LIMIT), "{}", held.reason);
+        assert!(crate::disk::is_environment_reason(&held.reason));
+        assert!(
+            held.reason.contains(&format!("athena retry {first}")),
+            "{}",
+            held.reason
+        );
+        let reset = usage_limit_of(&held.reason).expect("the reason names a usage limit");
+        assert!(reset.starts_with("resets at "), "{reset}");
+        assert!(held.verification.is_none(), "no verdict was recorded");
+        let said = ui.0.lock().unwrap().clone();
+        assert!(said.iter().any(|l| l.contains("usage limit")), "{said:#?}");
+
+        // The invocation was recorded as limited, at zero cost, and passes the gate.
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        let job = &records.jobs[first.as_str()];
+        let limited: Vec<_> = job
+            .invocations
+            .iter()
+            .filter(|i| i.outcome == InvocationOutcome::Limited)
+            .collect();
+        assert_eq!(limited.len(), 1, "{:?}", job.invocations);
+        let record = limited[0];
+        assert_eq!(record.role, Role::Verifier);
+        assert_eq!(record.cost.value(), Some(0.0));
+        assert!(record.models_used.is_empty());
+        assert!(
+            record
+                .detail
+                .as_deref()
+                .is_some_and(|d| d.starts_with("usage limit (resets at ")),
+            "{:?}",
+            record.detail
+        );
+        let violations = athena_gate::reconcile::check_invocation("records/verifier", record);
+        assert!(violations.is_empty(), "{violations:?}");
+
+        // The candidate is kept at the verifier stage, ready to resume.
+        let fingerprint = job
+            .candidate
+            .as_ref()
+            .and_then(|c| c.fingerprint.clone())
+            .expect("the held job recorded its candidate");
+        assert_eq!(
+            athena.state.read_resume(&first).map(|m| m.stage),
+            Some(crate::state::ResumeStage::Verifier)
+        );
+        let (planner, producer, _, _) = counts.all();
+        assert_eq!((planner, producer), (0, 1));
+
+        // After the reset a retry resumes: no planner and no producer run, and the verifier judges the
+        // kept candidate.
+        athena.driver = plain;
+        let ui = Lines::default();
+        let (retry, _) = athena.retry(first.as_str(), &ui).unwrap();
+        assert_eq!(retry.reader_error, None);
+        let done = finished(
+            athena
+                .go(retry.job.as_str(), AcceptedBy::User, &ui)
+                .unwrap(),
+        );
+        assert_eq!(done.state, OutcomeState::Landed, "{}", done.reason);
+        let (planner, producer, _, verifier) = counts.all();
+        assert_eq!((planner, producer, verifier), (0, 1, 1));
+        assert_eq!(
+            done.verification.as_ref().unwrap().verified_fingerprint,
+            fingerprint
+        );
+    }
+
+    #[test]
+    fn an_ordinary_verifier_error_is_still_a_failure_of_the_job_not_a_usage_limit() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let counts = Arc::new(Counts::default());
+        let (athena, _) =
+            athena_with_replying_verifier(&repo, &state, &counts, "API Error: 500", true);
+        let proposal = athena.ask("describe the demo", &Quiet).unwrap();
+        let first = proposal.job.clone();
+        let done = finished(
+            athena
+                .go(first.as_str(), AcceptedBy::User, &Lines::default())
+                .unwrap(),
+        );
+        assert!(!done.reason.starts_with(USAGE_LIMIT), "{}", done.reason);
+        assert_eq!(usage_limit_of(&done.reason), None);
+        assert!(!crate::disk::is_environment_reason(&done.reason));
+        assert_eq!(athena.state.read_resume(&first), None);
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        let outcomes: Vec<_> = records.jobs[first.as_str()]
+            .invocations
+            .iter()
+            .filter(|i| i.role == Role::Verifier)
+            .map(|i| i.outcome)
+            .collect();
+        assert_eq!(outcomes, vec![InvocationOutcome::Error]);
+    }
+
+    #[test]
+    fn only_a_usage_limit_reason_names_a_usage_limit() {
+        let job = JobId::parse("20261027-123701-77zh").unwrap();
+        let reason =
+            usage_limit_reason("usage limit (resets at 2026-10-29T18:00:00Z): weekly", &job);
+        assert_eq!(
+            usage_limit_of(&reason).as_deref(),
+            Some("resets at 2026-10-29T18:00:00Z")
+        );
+        let unknown = usage_limit_reason("usage limit (reset time unknown): weekly", &job);
+        assert_eq!(
+            usage_limit_of(&unknown).as_deref(),
+            Some("reset time unknown")
+        );
+        for other in [
+            crate::disk::LOW_DISK,
+            "the verifier returned no valid verdict",
+            "the producer did not complete: usage limit",
+        ] {
+            assert_eq!(usage_limit_of(other), None, "{other}");
+        }
     }
 
     #[test]
