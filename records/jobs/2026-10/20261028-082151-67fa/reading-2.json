@@ -1,0 +1,159 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261028-082151-67fa",
+  "n": 2,
+  "at": "2026-10-28T08:22:36.225018197Z",
+  "invocation_seq": 2,
+  "base_commit": "fc179d488451ff86461c3c2843ed99e65d2e27c6",
+  "config_sha256": "b812f3c3683488bcd9485d235a6a234bc80722c9f137a6c232094fae2ee727d6",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Free target/produce before verifier; resume env-stopped jobs on retry",
+  "summary": "Retry of job 20261028-081326-zzxg (failed in planning round 3, unverified): after Athena's checks pass, delete the job's target/produce before the pre-verifier disk gate (kept if checks fail), and make `athena retry` resume low-disk, usage-limit and interrupted-process stops from the kept candidate with no planner or producer run. Audience: Athena operators. Each earlier finding is addressed by the criteria below.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "Tests added for each behavior; fmt, clippy -D warnings and cargo test must pass."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Tests exercise removal timing, send-back keep, and retry resume by counting invocations."
+    },
+    {
+      "id": "outcome-check",
+      "how": "Criterion checks that a job passing checks at 9.5 GB free reaches the verifier and its retry does not re-plan or rebuild."
+    },
+    {
+      "id": "root-cause",
+      "how": "Both the space cause (producer dir) and the resume gap are fixed."
+    },
+    {
+      "id": "rust",
+      "how": "All changes in Rust."
+    },
+    {
+      "id": "strangers",
+      "how": "CHANGELOG entry and comments written for outside readers."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Job 20261028-081326-zzxg findings: (a) criterion 6 fixture stopped at the early disk gate (run/mod.rs ~1980) -> fixed by a fixture that gives enough free space for the first gate and less for the pre-verifier gate (e.g. a marker/state-dependent reader), so the job passes the checks and stops only before the verifier; (b) interrupted-process cause dropped -> now planned explicitly, tied to earlier_attempt_with (reading.rs) and recover_interrupted in manage.rs, with a resume_stage unit test; (c) reader still runs on retry -> the test asserts reader=1; (d) is_resumable_stop near-duplicate -> disk::is_environment_reason is reused and widened for usage limit, callers checked; (e) read-counting test fragile -> a marker file under the state root is used and invocations of planner/producer are counted.",
+    "Gates are traced in order before testing: early disk gate, checks, target/produce removal, pre-verifier gate, verifier.",
+    "timeout_seed in reading.rs is made aware of the resume stage; the same keep mechanism as a timed-out producer is used.",
+    "The 10 GB threshold is unchanged.",
+    "Governance files (athena.toml, defaults.toml, workflows) need no change."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A test in crates/athena-core whose fixture passes the early disk gate and the checks shows target/produce is absent after checks pass and before the verifier runs, with the pre-verifier gate passing. Run: cargo test",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test shows target/produce is still present when a check fails (send-back). Run: cargo test",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test stops a job on low disk only at the gate before the verifier (enough free space for the first gate, marker file under the state root making the second low), deletes the marker, runs retry, and asserts reader=1 (the reader still runs), planner=0, critic=0, producer=0, verifier=1 on the kept candidate. Run: cargo test",
+      "kind": "behavior"
+    },
+    {
+      "text": "A resume_stage unit test shows low disk, usage limit and an interrupted process (Dispatched, no running process, completed recovered producer invocation) after build each resume at the stopped stage from the kept candidate, using the timed-out-producer keep mechanism. Run: cargo test",
+      "kind": "behavior"
+    },
+    {
+      "text": "disk::is_environment_reason in crates/athena-core/src/disk.rs is reused/widened for usage limit with no near-duplicate added, and timeout_seed in reading.rs takes the resume stage into account (Grep).",
+      "kind": "content"
+    },
+    {
+      "text": "cargo fmt --check, cargo clippy --all-targets -- -D warnings and cargo test all pass; the new tests fail on the old code.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has an entry describing both fixes.",
+      "kind": "content"
+    },
+    {
+      "text": "Outcome check: a job passing checks with 9.5 GB free no longer stops on disk for lack of target/produce space, and its retry does not re-plan or rebuild (shown by the tests above).",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-core/src/manage.rs",
+      "action": "modify",
+      "p": 0.25
+    }
+  ],
+  "out_of_scope": [
+    "Changing the 10 GB minimum free-disk threshold",
+    "Changing verifier behavior or prompts",
+    "Cleaning other directories",
+    "Adding a planning pre-check or partial-plan resume for the planner (the introspection's prevention proposal)"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.75,
+      "p_verification_passes": 0.5,
+      "p_user_intervenes": 0.12,
+      "cost_usd": {
+        "p10": 0.8,
+        "p50": 2.0,
+        "p90": 4.5
+      },
+      "wall_time_s": {
+        "p10": 900.0,
+        "p50": 2200.0,
+        "p90": 4500.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7205633802816902,
+      "p_verification_passes": 0.6691449814126395,
+      "p_user_intervenes": 0.0754325259515571,
+      "cost_usd": {
+        "p10": 0.5026538277554511,
+        "p50": 1.1082699,
+        "p90": 2.717826663704891
+      },
+      "wall_time_s": {
+        "p10": 515.0193380461167,
+        "p50": 1558.188456491,
+        "p90": 3060.9260398150536
+      }
+    }
+  },
+  "departures": "Higher cost and lower pass rate than reference: a hard multi-file change to the run pipeline with several tests, and the earlier attempt failed planning.",
+  "urgent_reason": "Cuts redo-work: a retry after a disk stop re-plans and rebuilds (about $5), and finished jobs fail on disk before the verifier.",
+  "hard_reason": "It changes the run pipeline (disk gate ordering, build-directory removal before the verifier) and how retry resumes stopped jobs, so mistakes are costly and hard to see.",
+  "producer_effort": "high"
+}
