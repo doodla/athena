@@ -9,8 +9,8 @@ use crate::invocation::InvocationFacts;
 use crate::land::{Plan, plan};
 use crate::pin::{is_full_sha, mount};
 use crate::reading::{
-    Proposal, TreeRetrySeed, planning_resume_seed, retried_job, retry_findings, same_scope,
-    tree_retry_seed,
+    BinaryDecide, Proposal, ReplayReport, TreeRetrySeed, planning_resume_seed, probe_subcommand,
+    replay, replay_cases, resolve_tree, retried_job, retry_findings, same_scope, tree_retry_seed,
 };
 use crate::scoring::{self, Happened, score, totals};
 use crate::store::{JobRecords, JobState, Records};
@@ -21,9 +21,9 @@ use athena_agent::env::{EnvSpec, Side};
 use athena_agent::policy::Policy;
 use athena_context::briefs::{
     AcceptedReading, CandidateView, CheckResultView, CheckView, CriticInputs, DeliverableFact,
-    LEFT_TO_ATHENA, PlanRevision, PlannerInputs, ProducerInputs, RetryFindings, RetrySeed,
-    VerifierInputs, VerifierPlan, class_summaries, critic_brief, planner_brief, producer_brief,
-    producer_prompt_with_plan, render_plan_section, verifier_brief_with_plan,
+    LEFT_TO_ATHENA, PlanRevision, PlannerInputs, ProducerInputs, ReplaySummary, RetryFindings,
+    RetrySeed, VerifierInputs, VerifierPlan, class_summaries, critic_brief, planner_brief,
+    producer_brief, producer_prompt_with_plan, render_plan_section, verifier_brief_with_plan,
 };
 use athena_context::outputs::{
     CriterionCheckOutput, CriterionStatusOutput, CriticOutput, CritiqueVerdictOutput,
@@ -1324,6 +1324,56 @@ fn plan_record(
     })
 }
 
+/// What the replay builds with: the verifier's snapshot (the candidate's tree) and the checks' environment.
+struct ReplayBuild<'a> {
+    snapshot: &'a Snapshot,
+    prepared: &'a str,
+    env: &'a std::collections::BTreeMap<String, String>,
+    registry: &'a athena_agent::procs::Registry,
+    timeout: std::time::Duration,
+    redactor: &'a Redactor,
+    /// Where the base tree, both targets and the case files go; removed when the replay ends.
+    dir: PathBuf,
+}
+
+/// The replay as the verifier brief shows it.
+fn replay_summary(report: &ReplayReport) -> ReplaySummary {
+    match report {
+        ReplayReport::Ran {
+            replayed,
+            newly_refused,
+            ..
+        } => ReplaySummary {
+            replayed: *replayed,
+            newly_refused: newly_refused
+                .iter()
+                .map(|r| (r.job.as_str().to_string(), r.reason.clone()))
+                .collect(),
+            held: report.held(),
+            note: None,
+        },
+        ReplayReport::NoReplay { reason } => ReplaySummary {
+            replayed: 0,
+            newly_refused: vec![],
+            held: false,
+            note: Some(reason.clone()),
+        },
+    }
+}
+
+/// Test seam: the deciders a replay uses for a repository, by its directory, in place of the builds. It is
+/// read before the tree is resolved and the subcommand probed, so a fixture repository replays too.
+#[cfg(test)]
+pub(crate) type ReplayDeciders = (
+    std::sync::Arc<dyn crate::reading::Decide>,
+    std::sync::Arc<dyn crate::reading::Decide>,
+);
+
+#[cfg(test)]
+pub(crate) static REPLAY_OVERRIDE: std::sync::Mutex<
+    std::collections::BTreeMap<PathBuf, ReplayDeciders>,
+> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
 /// Runs one routed check in the verifier's snapshot, then puts the snapshot back as it was prepared.
 struct SnapExec<'a> {
     athena: &'a Athena,
@@ -2102,6 +2152,39 @@ impl Athena {
         mark_pre_existing(&mut check_runs, usable_baseline);
 
         let criteria = ctx.reading.acceptance_criteria.clone();
+        // Replay the newest accepted readings through the base's reading rules and the candidate's. Only a
+        // tree whose checks passed is built; a nested run and a failed check record why no replay ran.
+        let replay_skip = if self.nested.is_some() {
+            Some("nested run")
+        } else if check_runs
+            .iter()
+            .any(|r| !r.passed && !crate::verify::is_pre_existing(r, usable_baseline))
+        {
+            Some("checks failed")
+        } else {
+            None
+        };
+        let criteria_texts: Vec<String> = criteria.iter().map(|c| c.text.clone()).collect();
+        let replay_report = self.replay_for_job(
+            &id,
+            &p,
+            &criteria_texts,
+            replay_skip,
+            &ReplayBuild {
+                snapshot: &vsnap,
+                prepared: &prepared,
+                env: &check_env,
+                registry: &registry,
+                timeout: std::time::Duration::from_secs(jc.config.budget.check_timeout_s),
+                redactor: ctx.redactor,
+                dir: job_dir.join("replay"),
+            },
+        );
+        closing
+            .files
+            .push(NewFile::record(&AnyRecord::Replay(Box::new(
+                replay_report.to_record(&id, &p, &c),
+            ))));
         let verifier_grant = ctx.capability.verifier_grant(jc);
         let candidate_view = CandidateView {
             base: p.clone(),
@@ -2135,6 +2218,7 @@ impl Athena {
             commands: athena_agent::policy::describe_commands(&verifier_grant.commands),
             tool_config_from_base: tool_config_from_base.clone(),
             pin: ctx.job.job.as_ref().and_then(|j| j.pin.clone()),
+            replay: Some(replay_summary(&replay_report)),
         };
         // What the producer's report still lacked after the send-back goes to the verifier as one more
         // entry under the checks. It is not a check and fails nothing; it names what the self-check
@@ -2365,7 +2449,7 @@ impl Athena {
         };
         let map_base = map_at("HEAD~1")?;
         let map_candidate = map_at("HEAD")?;
-        let judgment = judge(&VerdictInputs {
+        let mut judgment = judge(&VerdictInputs {
             criteria: &criteria,
             checks: &check_runs,
             output: verdict_output.as_ref(),
@@ -2379,6 +2463,12 @@ impl Athena {
             map_candidate: map_candidate.as_deref(),
             baseline: usable_baseline,
         });
+        // More past readings newly refused than the rate allows: the candidate does not land.
+        if replay_report.held() {
+            crate::verify::hold_for_replay(&mut judgment, &replay_report.list());
+            ctx.ui
+                .line(&format!("replay     held: {}", replay_report.summary()));
+        }
         let verification = Verification {
             job: id.clone(),
             candidate_commit: c.clone(),
@@ -2409,6 +2499,153 @@ impl Athena {
         closing.verified = verified(&judgment, &p, &c, &f);
         closing.verification = Some(verification);
         Ok(closing)
+    }
+
+    /// Replays the newest accepted readings through the reading rules of a base build and a candidate build
+    /// (`athena check-reading` of each). It makes no model call. Whatever stops it (no history, a tree that
+    /// is not Athena, a failed build, a base without the subcommand) is a `no replay` with the reason, never
+    /// a failure of the job.
+    fn replay_for_job(
+        &self,
+        job: &JobId,
+        base: &str,
+        criteria: &[String],
+        skip: Option<&str>,
+        build: &ReplayBuild<'_>,
+    ) -> ReplayReport {
+        let no = |reason: String| ReplayReport::NoReplay { reason };
+        if let Some(reason) = skip {
+            return no(reason.to_string());
+        }
+        let records = match self.head().and_then(|head| Records::load(&self.git, &head)) {
+            Ok(records) => records,
+            Err(e) => return no(format!("the history could not be read: {e}")),
+        };
+        let cases = replay_cases(&records, job.as_str());
+        if cases.is_empty() {
+            return no("no accepted readings in the history".into());
+        }
+        #[cfg(test)]
+        {
+            let deciders = REPLAY_OVERRIDE
+                .lock()
+                .unwrap()
+                .get(self.git.dir())
+                .map(|(b, c)| (b.clone(), c.clone()));
+            if let Some((b, c)) = deciders {
+                return replay(&cases, &*b, &*c, criteria);
+            }
+        }
+        if let Err(reason) = resolve_tree(build.snapshot.dir()) {
+            return no(reason);
+        }
+        let report = self.replay_with_builds(job, base, criteria, &cases, build);
+        let _ = crate::pin::remove_tree(&build.dir);
+        report
+    }
+
+    fn replay_with_builds(
+        &self,
+        job: &JobId,
+        base: &str,
+        criteria: &[String],
+        cases: &[crate::reading::ReplayCase],
+        build: &ReplayBuild<'_>,
+    ) -> ReplayReport {
+        let no = |reason: String| ReplayReport::NoReplay { reason };
+        let candidate_target = build
+            .env
+            .get("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| build.dir.join("target-candidate"));
+        let candidate_binary =
+            match self.build_replay_binary(build.snapshot.dir(), &candidate_target, build, job) {
+                Ok(binary) => binary,
+                Err(e) => return no(format!("the candidate build failed: {e}")),
+            };
+        // The tree has been built in; put it back as prepared, so the verifier sees what it was given.
+        let _ = build.snapshot.restore_to(build.prepared);
+        let base_dir = build.dir.join("base");
+        let base_snapshot =
+            match Snapshot::create(&self.git, base, base, &base_dir, SnapshotRepo::None) {
+                Ok(s) => s,
+                Err(e) => return no(format!("the base tree could not be made: {e}")),
+            };
+        if let Err(reason) = resolve_tree(base_snapshot.dir()) {
+            return no(format!("base: {reason}"));
+        }
+        let base_binary = match self.build_replay_binary(
+            base_snapshot.dir(),
+            &build.dir.join("target-base"),
+            build,
+            job,
+        ) {
+            Ok(binary) => binary,
+            Err(e) => return no(format!("the base build failed: {e}")),
+        };
+        if !probe_subcommand(&base_binary) {
+            return no("base lacks check-reading".into());
+        }
+        if !probe_subcommand(&candidate_binary) {
+            return no("candidate lacks check-reading".into());
+        }
+        replay(
+            cases,
+            &BinaryDecide {
+                binary: base_binary,
+                work: build.dir.join("cases-base"),
+            },
+            &BinaryDecide {
+                binary: candidate_binary,
+                work: build.dir.join("cases-candidate"),
+            },
+            criteria,
+        )
+    }
+
+    /// Builds `athena` in `tree` into `target`, bounded by the check timeout. Returns the binary.
+    fn build_replay_binary(
+        &self,
+        tree: &std::path::Path,
+        target: &std::path::Path,
+        build: &ReplayBuild<'_>,
+        job: &JobId,
+    ) -> std::result::Result<PathBuf, String> {
+        let mut env = build.env.clone();
+        env.insert("CARGO_TARGET_DIR".into(), target.display().to_string());
+        let spec = crate::capability::CheckSpec {
+            name: "replay-build".into(),
+            run: ["cargo", "build", "--locked", "-p", "athena-cli"]
+                .map(String::from)
+                .to_vec(),
+            kind: athena_data::config::CheckKind::Command,
+            skip_when_only: None,
+        };
+        let run = run_check(
+            &spec,
+            &CheckContext {
+                dir: tree,
+                env: &env,
+                timeout: build.timeout,
+                registry: build.registry,
+                job: job.as_str(),
+                redactor: build.redactor,
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        if !run.passed {
+            return Err(format!(
+                "{} {}",
+                run.note.unwrap_or_default(),
+                crate::checks::tail(&run.output_tail, 300)
+            ));
+        }
+        let binary = target.join("debug/athena");
+        if binary.is_file() {
+            Ok(binary)
+        } else {
+            Err(format!("{} was not built", binary.display()))
+        }
     }
 
     /// Creates the verifier's snapshot at `dir` (removing what is there): base then candidate as two commits,
@@ -3646,5 +3883,297 @@ mod produce_and_verify_order_tests {
             .expect("the job recorded its baseline");
         assert_eq!(baseline.before_invocation, 2);
         assert_eq!(baseline.checks.len(), 1);
+    }
+
+    /// Past request jobs with a request, an accepted reading and a job record, committed in one commit.
+    /// Returns their ids, oldest first.
+    fn seed_past_jobs(repo: &tempfile::TempDir, n: usize) -> Vec<JobId> {
+        use athena_data::records::{Criterion, CriterionKind, Forecast, Forecasts, Quantiles};
+        let forecast = Forecast {
+            p_reading_accepted: 0.8,
+            p_verification_passes: 0.7,
+            p_user_intervenes: 0.1,
+            cost_usd: Quantiles::new(0.2, 0.5, 1.5).unwrap(),
+            wall_time_s: Quantiles::new(100.0, 300.0, 900.0).unwrap(),
+        };
+        let mut ids = Vec::new();
+        let mut records = Vec::new();
+        for i in 0..n {
+            let id =
+                JobId::parse(&format!("20261001-{:02}{:02}00-a{:03}", i / 60, i % 60, i)).unwrap();
+            records.push(AnyRecord::Request(athena_data::records::Request {
+                job: id.clone(),
+                text: "describe the demo".into(),
+                received_at: jiff::Timestamp::UNIX_EPOCH,
+                channel: "cli".into(),
+            }));
+            records.push(AnyRecord::Reading(Box::new(Reading {
+                job: id.clone(),
+                n: 1,
+                at: jiff::Timestamp::UNIX_EPOCH,
+                invocation_seq: 1,
+                base_commit: "a".repeat(40),
+                config_sha256: "b".repeat(64),
+                defaults_sha256: "c".repeat(64),
+                defaults_version: 1,
+                title: "Describe the demo".into(),
+                summary: "Describe the demo.".into(),
+                class_of_work: "docs".into(),
+                capability: Some("study".into()),
+                decline_reason: None,
+                producer_model: "claude-haiku-5-5".into(),
+                verifier_model: "claude-haiku-5-5".into(),
+                defaults_applied: vec![],
+                assumptions: vec![],
+                question: None,
+                acceptance_criteria: vec![Criterion {
+                    text: CRITERION.into(),
+                    kind: CriterionKind::Content,
+                }],
+                deliverables: vec![],
+                out_of_scope: vec![],
+                forecasts: Forecasts {
+                    reader: forecast.clone(),
+                    reference: forecast.clone(),
+                },
+                departures: None,
+                urgent_reason: None,
+                hard_reason: None,
+                producer_effort: None,
+            })));
+            records.push(AnyRecord::Job(Box::new(Job {
+                id: id.clone(),
+                kind: JobKind::Request,
+                title: "Describe the demo".into(),
+                class_of_work: None,
+                capability: None,
+                accepted_reading: Some(1),
+                accepted_by: None,
+                owner: Owner {
+                    role: "athena".into(),
+                    capability: None,
+                    model: None,
+                    note: None,
+                },
+                verifier_model: None,
+                caps: None,
+                base_commit: None,
+                config_sha256: None,
+                defaults_sha256: None,
+                athena: None,
+                driver: None,
+                brief_sha256: None,
+                dispatched_at: None,
+                request_path: None,
+                request_sha256: None,
+                cost: None,
+                tokens: None,
+                note: None,
+                pin: None,
+            })));
+            ids.push(id);
+        }
+        for record in &records {
+            let full = repo.path().join(record.canonical_path());
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(full, record.to_json()).unwrap();
+        }
+        let git = Git::at(repo.path());
+        git.run(["add", "-A"]).unwrap();
+        git.run(["commit", "-q", "-m", "Add history\n\nAthena-Job: bootstrap"])
+            .unwrap();
+        ids
+    }
+
+    /// Accepts every reading except the named jobs, which it refuses.
+    struct Fixed(BTreeSet<String>);
+
+    impl crate::reading::Decide for Fixed {
+        fn decide(&self, case: &crate::reading::ReplayCase) -> Result<crate::reading::Decision> {
+            Ok(if self.0.contains(case.job.as_str()) {
+                crate::reading::Decision::Refuse("a new rule".into())
+            } else {
+                crate::reading::Decision::Accept
+            })
+        }
+    }
+
+    struct Ran {
+        _repo: tempfile::TempDir,
+        _state: tempfile::TempDir,
+        athena: Athena,
+        job: JobId,
+        state: OutcomeState,
+        refused: Vec<String>,
+    }
+
+    /// Runs one job over 12 past jobs, with a candidate that newly refuses the first `refuse` of them.
+    fn run_over_history(refuse: usize) -> Ran {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena(&repo, &state);
+        let ids = seed_past_jobs(&repo, 12);
+        let refused: Vec<String> = ids
+            .iter()
+            .take(refuse)
+            .map(|i| i.as_str().to_string())
+            .collect();
+        REPLAY_OVERRIDE.lock().unwrap().insert(
+            athena.git.dir().to_path_buf(),
+            (
+                std::sync::Arc::new(Fixed(BTreeSet::new())),
+                std::sync::Arc::new(Fixed(refused.iter().cloned().collect())),
+            ),
+        );
+        let proposal = athena.ask("describe the demo", &Quiet).unwrap();
+        let GoResult::Finished(finished) = athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap()
+        else {
+            panic!("expected the job to finish");
+        };
+        REPLAY_OVERRIDE.lock().unwrap().remove(athena.git.dir());
+        Ran {
+            _repo: repo,
+            _state: state,
+            athena,
+            job: proposal.job,
+            state: finished.state,
+            refused,
+        }
+    }
+
+    fn replay_record(ran: &Ran) -> athena_data::records::Replay {
+        let head = ran.athena.head().unwrap();
+        let path = format!("{}/replay.json", ran.job.dir());
+        let bytes = ran
+            .athena
+            .git
+            .show_file(&head, &path)
+            .unwrap()
+            .expect("the job committed replay.json");
+        match athena_data::records::check_record_file(&path, &bytes) {
+            Ok(Some(AnyRecord::Replay(r))) => *r,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_replay_over_the_threshold_is_held_and_recorded_and_the_candidate_does_not_land() {
+        let ran = run_over_history(3);
+        assert_eq!(ran.state, OutcomeState::Rejected);
+        let head = ran.athena.head().unwrap();
+        let readme = ran
+            .athena
+            .git
+            .show_file(&head, "README.md")
+            .unwrap()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&readme), "# Demo\n", "not landed");
+
+        let records = Records::load(&ran.athena.git, &head).unwrap();
+        assert!(records.invalid.is_empty(), "{:?}", records.invalid);
+        let job = &records.jobs[ran.job.as_str()];
+        let verification = job.verification.as_ref().unwrap();
+        let blocker = verification
+            .findings
+            .iter()
+            .find(|f| f.severity == Severity::Blocker && f.source == FindingSource::Athena)
+            .expect("an Athena blocker");
+        for id in &ran.refused {
+            assert!(
+                blocker.evidence.contains(id.as_str()),
+                "{}",
+                blocker.evidence
+            );
+        }
+        let record = replay_record(&ran);
+        assert_eq!(record.replayed, 12);
+        assert!(record.held);
+        let mut listed: Vec<&str> = record
+            .newly_refused
+            .iter()
+            .map(|r| r.job.as_str())
+            .collect();
+        listed.sort();
+        assert_eq!(
+            listed,
+            ran.refused.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+        assert!(
+            ran.athena
+                .git
+                .show_file(&head, &format!("{}/replay.md", ran.job.dir()))
+                .unwrap()
+                .is_none(),
+            "no replay.md"
+        );
+        assert!(job.briefs["brief-verifier"].contains("3 of 12"));
+    }
+
+    #[test]
+    fn a_replay_that_refuses_nothing_new_lands_and_is_still_recorded() {
+        let ran = run_over_history(0);
+        assert_eq!(ran.state, OutcomeState::Landed);
+        let record = replay_record(&ran);
+        assert_eq!(
+            (record.replayed, record.newly_refused.len(), record.held),
+            (12, 0, false)
+        );
+        let head = ran.athena.head().unwrap();
+        let records = Records::load(&ran.athena.git, &head).unwrap();
+        assert!(records.invalid.is_empty(), "{:?}", records.invalid);
+    }
+
+    #[test]
+    fn a_replay_with_no_history_is_recorded_as_no_replay_and_lands() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena(&repo, &state);
+        let proposal = athena.ask("describe the demo", &Quiet).unwrap();
+        let GoResult::Finished(finished) = athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap()
+        else {
+            panic!("expected the job to finish");
+        };
+        assert_eq!(finished.state, OutcomeState::Landed);
+        let head = athena.head().unwrap();
+        let path = format!("{}/replay.json", proposal.job.dir());
+        let bytes = athena.git.show_file(&head, &path).unwrap().unwrap();
+        let Ok(Some(AnyRecord::Replay(record))) =
+            athena_data::records::check_record_file(&path, &bytes)
+        else {
+            panic!("a replay record");
+        };
+        assert!(
+            record
+                .no_replay
+                .as_deref()
+                .unwrap()
+                .contains("no accepted readings")
+        );
+        assert!(!record.held);
+    }
+
+    #[test]
+    fn a_replay_makes_no_model_call() {
+        let with_change = run_over_history(3);
+        let without_change = run_over_history(0);
+        assert_eq!(with_change.state, OutcomeState::Rejected);
+        assert_eq!(without_change.state, OutcomeState::Landed);
+        let calls = |ran: &Ran| {
+            let records = Records::load(&ran.athena.git, &ran.athena.head().unwrap()).unwrap();
+            let mut calls: Vec<(u32, Role)> = records.jobs[ran.job.as_str()]
+                .invocations
+                .iter()
+                .map(|i| (i.seq, i.role))
+                .collect();
+            calls.sort();
+            calls
+        };
+        let expected = [(1, Role::Reader), (2, Role::Producer), (3, Role::Verifier)];
+        assert_eq!(calls(&with_change), expected);
+        assert_eq!(calls(&without_change), expected);
     }
 }

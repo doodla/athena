@@ -7,6 +7,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- A change to a reading rule is tried on real history before it lands. `athena check-reading --request <file>
+  --reading <file>` takes a stored request and reading and prints `accept` or `refuse: <reason>` (exit 0 or 1),
+  using the same acceptance rules as the reader's own check. After a candidate's checks pass, verification builds
+  the base and the candidate, replays the newest 50 requests that have an accepted reading through the
+  `check-reading` of each, and lists the requests the candidate refuses and the base accepted. The replay makes no
+  model call. More than 10% newly refused holds the job (the verdict becomes fail, with an Athena blocker finding
+  that names the list, so the candidate is rejected and not landed); exactly 10% or less does not. The limit is a
+  constant in code (`HOLD_PERCENT`); a candidate whose own acceptance criteria say it intends a higher refusal rate
+  (a percent above 10, the word refuse and an intent word in one criterion) is held only above that rate, and its
+  replay is still recorded. An empty history, a nested run, a failed check, a failed build or a base without the
+  subcommand gives `no replay: <reason>`, never a pass. The result is a typed record, `athena.replay/1` at
+  `<job>/replay.json`, which the records check accepts (no free-form file is added). The verifier brief carries a
+  short summary of it, bounded in size: how many were newly refused, the total, and the list, or `no replay:
+  <reason>`.
+
 ### Changed
 
 - Job planning is back on for hard jobs only, and the keep rule now counts later harm as well as landed share

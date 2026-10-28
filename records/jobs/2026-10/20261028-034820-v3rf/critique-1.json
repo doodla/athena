@@ -1,0 +1,69 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261028-034820-v3rf",
+  "round": 1,
+  "at": "2026-10-28T05:51:00.530822979Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/replay.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/replay.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "No test runs the real production replay path: the base and candidate builds, BinaryDecide, its output and exit-code parsing, and the skip rules. Criterion 6's 'using the base and candidate builds' goes unshown.",
+      "evidence": "The criterion 6 pipeline test sets a `#[cfg(test)]` thread-local override that returns two `Decide` values in place of the build step. Criteria 2–5 use in-process deciders. The plan has no test for `BinaryDecide` (running `<bin> check-reading`, reading `accept` or `refuse: ...`, treating a code other than 0 or 1 as NoReplay), and none for the 'no Cargo.toml / base lacks the subcommand' skip. The skip and failure paths all become NoReplay, which never holds (Decision 6). So if BinaryDecide always failed, the hold would never fire and no test would notice. That is the same failure mode as the incident: a protection that was never tried for real. Fix: Add (a) a unit test of `BinaryDecide` in replay.rs against small stub executables written to a tempdir. They print `accept`, print `refuse: x` with exit 1, print garbage, or exit 2. Assert Accept, Refuse(\"x\"), and NoReplay with the reason. (b) An integration test in crates/athena-cli/tests that runs `BinaryDecide` with `env!(\"CARGO_BIN_EXE_athena\")` on fixture request and reading files. This shows the real subcommand and the host's reading serialisation agree. (c) A unit test of the build-resolution step's skip rules (a tree without crates/athena-cli/Cargo.toml gives NoReplay with that reason). Keep the thread-local override for the pipeline hold test only.",
+      "location": "Demonstrations, criterion 6; Decision 2 (seam); Risks 'parse mismatch'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Running the replay only when every check passed skips it when a check fails but is marked pre-existing. Such a job can still land, with no replay.",
+      "evidence": "`mark_pre_existing` marks checks that also failed on the base. Per the comment at run/mod.rs:2200, a pre-existing failure does not fail the final verdict. Under the plan's condition, those jobs land without any replay. Fix: Run the replay when no check failed except ones marked pre-existing, using the same rule the verdict uses. Or record 'no replay: checks failed' so the skip is visible.",
+      "location": "Steps 6 ('only when every check passed'); run/mod.rs:2102 mark_pre_existing",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "`VerifierInputs::names()` is not updated, so verification.json would not list the replay among the verifier's inputs.",
+      "evidence": "`names()` returns the input names recorded in `verification.json`. The plan adds a `replay` field but does not mention `names()`. Fix: Add a 'reading-rule replay' name when `replay` is Some, and test it alongside the criterion 7 tests.",
+      "location": "Files: crates/athena-context/src/briefs.rs; briefs.rs:701 VerifierInputs::names",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The size-limit check bounds a new section constant, not an existing brief limit. The only existing verifier-brief bound found is MAX_INLINE_DIFF_BYTES.",
+      "evidence": "briefs.rs has `MAX_INLINE_DIFF_BYTES = 40 * 1024` (line 17) and no whole-brief cap. The plan invents `REPLAY_SECTION_MAX_BYTES` and asserts only on the section. Fix: State in the plan which limit the brief must stay within. Assert that the whole brief with a 400-entry replay grows by at most REPLAY_SECTION_MAX_BYTES over the same brief with `replay: None`, and set the constant well below the inline-diff limit.",
+      "location": "Demonstrations, criterion 7 ('stays within its size limit')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The test calls the extracted `check_reading` function, so the clap wiring of `Command::CheckReading` (the flag names that BinaryDecide relies on) is not shown.",
+      "evidence": "The plan says 'Without the subcommand wiring the function does not exist'. But the function can exist while the `check-reading` subcommand is misnamed or unparsed, and BinaryDecide would then get a clap error with exit 2, which becomes NoReplay. Fix: Also parse `[\"athena\",\"check-reading\",\"--request\",F,\"--reading\",F]` with the CLI parser, or cover it with the CARGO_BIN_EXE integration test from the major finding.",
+      "location": "Demonstrations, criterion 1",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The 'no rule change' test is close to true by construction: the same decider on both sides cannot produce a difference, and the replay code never touches the driver.",
+      "evidence": "Base and candidate are the identical `decide_stored` decider, and no model client is reachable from replay.rs. Fix: Keep it as a regression guard. For the empty-list half, also run a decider pair that differs only on requests absent from the fixture history, and assert the list is still empty.",
+      "location": "Demonstrations, criterion 5",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The candidate was already built by the checks in the verifier snapshot. Building it again in a separate target dir costs extra minutes.",
+      "evidence": "The checks run cargo clippy and test in `vsnap` (run/mod.rs:2039–2061) before the replay step. Fix: Consider reusing the verifier snapshot's target dir for the candidate build, and build only the base in a fresh snapshot.",
+      "location": "Risks, build cost",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan matches the request and the accepted reading. It adds a `check-reading` subcommand, replays it from base and candidate builds over the newest 50 accepted readings, holds a candidate above 10% unless its criteria state a higher rate, records `replay.md` and gives the verifier a bounded summary. The names it relies on exist in the snapshot: `check_reading_acceptance(reading, request, attempt, referenced)` (reading.rs:2196), `Records::request_jobs` (newest first, store.rs:376), `VerifierInputs` (briefs.rs:686, built once in production at run/mod.rs:2112), `plain_verifier_inputs`, `VERIFIER_BRIEF_WITHOUT_A_PLAN`, `produce_and_verify_order_tests` and `fake.rs` `requests()`. `Records::load` already reads any `<job>/*.md` as a brief (store.rs:282), and `Snapshot::create` accepts any source commit (snapshot.rs:59), so two of the open questions are answered. One major gap remains. Every test swaps out the build-and-run step, through in-process deciders or the thread-local override. No test exercises `BinaryDecide`, the output and exit-code parsing, the build-skip rules, or criterion 6's \"using the base and candidate builds\". That code fails open: any build or parse failure becomes 'no replay', which never holds a candidate. So a broken production path would silently turn the protection off while every test still passed. The minor points are listed below. Verdict: revise."
+}

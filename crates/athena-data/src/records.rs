@@ -2305,6 +2305,63 @@ impl Baseline {
 }
 
 // ---------------------------------------------------------------------------------------------------------
+// The reading-rule replay
+
+pub const REPLAY_SCHEMA: &str = "athena.replay/1";
+
+/// One past request that the candidate's reading rules refuse and the base's rules accept.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplayRefusal {
+    /// The past request job.
+    pub job: JobId,
+    /// The candidate's reason for refusing its accepted reading.
+    pub reason: String,
+}
+
+/// `athena.replay/1`: the result of replaying the newest accepted readings through the base and candidate
+/// reading rules, at `<job>/replay.json`. A replay that could not run records why in `no_replay`, with no
+/// count and no list; that is never a pass.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Replay {
+    pub job: JobId,
+    pub base_commit: String,
+    pub candidate_commit: String,
+    /// How many past readings were replayed.
+    pub replayed: u32,
+    /// Requests the candidate refuses and the base accepts.
+    pub newly_refused: Vec<ReplayRefusal>,
+    /// True when the refusal rate held the job.
+    pub held: bool,
+    /// A refusal rate, in percent, that the job's criteria intend, when they state one.
+    pub intended_percent: Option<u32>,
+    /// Why no replay ran, if none did.
+    pub no_replay: Option<String>,
+}
+
+impl Replay {
+    /// Why this record is not acceptable, if it is not.
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(reason) = &self.no_replay {
+            if reason.trim().is_empty() {
+                return Err("a skipped replay says why".into());
+            }
+            if self.replayed != 0 || !self.newly_refused.is_empty() || self.held {
+                return Err("a replay that did not run has no count, no list and no hold".into());
+            }
+        }
+        if self.newly_refused.len() as u64 > u64::from(self.replayed) {
+            return Err("a replay lists more refusals than readings it replayed".into());
+        }
+        if self.held && self.newly_refused.is_empty() {
+            return Err("a held replay lists the requests it newly refuses".into());
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------
 // The envelope
 
 /// Any record, tagged by its `schema` field.
@@ -2373,6 +2430,8 @@ pub enum AnyRecord {
     Baseline(Box<Baseline>),
     #[serde(rename = "athena.code-health-baseline/1")]
     CodeHealthBaseline(CodeHealthBaseline),
+    #[serde(rename = "athena.replay/1")]
+    Replay(Box<Replay>),
 }
 
 /// Why a file under `records/` is not acceptable.
@@ -2459,6 +2518,7 @@ impl AnyRecord {
             AnyRecord::JobPlan(p) => p.validate().map_err(invalid)?,
             AnyRecord::Critique(c) => c.validate().map_err(invalid)?,
             AnyRecord::Baseline(b) => b.validate().map_err(invalid)?,
+            AnyRecord::Replay(r) => r.validate().map_err(invalid)?,
             AnyRecord::DefaultsProposal(p) => p.validate().map_err(invalid)?, // Totals are what reconciliation checks an outcome against; only the bootstrap has none
             // (acceptance verification 2).
             AnyRecord::Outcome(o) if o.job.is_request() && o.totals.is_none() => {
@@ -2557,6 +2617,7 @@ impl AnyRecord {
             AnyRecord::JobPlan(r) => format!("{}/job-plan-{}.json", r.job.dir(), r.round),
             AnyRecord::Critique(r) => format!("{}/critique-{}.json", r.job.dir(), r.round),
             AnyRecord::Baseline(r) => format!("{}/baseline.json", r.job.dir()),
+            AnyRecord::Replay(r) => format!("{}/replay.json", r.job.dir()),
             AnyRecord::CodeHealthBaseline(r) => {
                 format!("records/code-health/{}/{}.json", r.id.month(), r.id)
             }
@@ -2595,6 +2656,7 @@ impl AnyRecord {
             AnyRecord::JobPlan(_) => JOB_PLAN_SCHEMA,
             AnyRecord::Critique(_) => CRITIQUE_SCHEMA,
             AnyRecord::Baseline(_) => BASELINE_SCHEMA,
+            AnyRecord::Replay(_) => REPLAY_SCHEMA,
             AnyRecord::CodeHealthBaseline(_) => CODE_HEALTH_BASELINE_SCHEMA,
         }
     }
@@ -3728,6 +3790,78 @@ mod tests {
         empty.base_commit = " ".into();
         for b in [bad, empty] {
             let record = AnyRecord::Baseline(Box::new(b));
+            assert!(matches!(
+                AnyRecord::parse("x", record.to_json().as_bytes()),
+                Err(RecordError::Invalid { .. })
+            ));
+        }
+    }
+
+    fn sample_replay() -> Replay {
+        Replay {
+            job: job(),
+            base_commit: "a".repeat(40),
+            candidate_commit: "b".repeat(40),
+            replayed: 12,
+            newly_refused: vec![ReplayRefusal {
+                job: job(),
+                reason: "the reading names athena.toml".into(),
+            }],
+            held: false,
+            intended_percent: Some(30),
+            no_replay: None,
+        }
+    }
+
+    #[test]
+    fn a_replay_round_trips_and_belongs_at_replay_json_and_nowhere_else() {
+        let record = AnyRecord::Replay(Box::new(sample_replay()));
+        assert_eq!(record.schema(), "athena.replay/1");
+        let json = record.to_json();
+        assert_eq!(AnyRecord::parse("x", json.as_bytes()).unwrap(), record);
+        let right = format!("{}/replay.json", job().dir());
+        assert_eq!(record.canonical_path(), right);
+        assert!(matches!(
+            check_record_file(&right, json.as_bytes()),
+            Ok(Some(AnyRecord::Replay(_)))
+        ));
+        let wrong = format!("{}/replay-1.json", job().dir());
+        assert!(matches!(
+            check_record_file(&wrong, json.as_bytes()),
+            Err(RecordError::Misplaced { .. })
+        ));
+        // A free-form Markdown replay is not an accepted file; the typed record is.
+        assert!(matches!(
+            check_record_file(&format!("{}/replay.md", job().dir()), b"x"),
+            Err(RecordError::UnknownFile { .. })
+        ));
+    }
+
+    #[test]
+    fn a_skipped_replay_round_trips_and_an_inconsistent_one_is_refused() {
+        let mut skipped = sample_replay();
+        skipped.replayed = 0;
+        skipped.newly_refused.clear();
+        skipped.intended_percent = None;
+        skipped.no_replay = Some("no accepted history".into());
+        let record = AnyRecord::Replay(Box::new(skipped.clone()));
+        assert_eq!(
+            AnyRecord::parse("x", record.to_json().as_bytes()).unwrap(),
+            record
+        );
+        let mut counted = skipped.clone();
+        counted.replayed = 3;
+        let mut listed = skipped.clone();
+        listed.newly_refused = sample_replay().newly_refused;
+        let mut blank = skipped;
+        blank.no_replay = Some(" ".into());
+        let mut too_many = sample_replay();
+        too_many.replayed = 0;
+        let mut empty_hold = sample_replay();
+        empty_hold.newly_refused.clear();
+        empty_hold.held = true;
+        for r in [counted, listed, blank, too_many, empty_hold] {
+            let record = AnyRecord::Replay(Box::new(r));
             assert!(matches!(
                 AnyRecord::parse("x", record.to_json().as_bytes()),
                 Err(RecordError::Invalid { .. })

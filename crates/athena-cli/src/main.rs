@@ -174,6 +174,17 @@ enum Command {
         #[arg(long)]
         candidate: PathBuf,
     },
+    /// Check a stored request and reading against the reading acceptance rules. Prints `accept`, or
+    /// `refuse: <reason>`. Exit 0 for accept, 1 for refuse. The run pipeline uses it to replay past readings
+    /// through a base build and a candidate build.
+    CheckReading {
+        /// The request text file.
+        #[arg(long)]
+        request: PathBuf,
+        /// The reading, as JSON.
+        #[arg(long)]
+        reading: PathBuf,
+    },
     /// Correct the latest reading in one line (or answer its question), and read again.
     Correct {
         job: String,
@@ -784,6 +795,24 @@ fn show_proposal(athena: &Athena, proposal: Proposal, yes: bool, json: bool) -> 
     Ok(0)
 }
 
+/// The `check-reading` subcommand: the line to print and the exit code. It applies the acceptance rules of
+/// `athena_core::reading` to a stored request and reading, so it answers as the build it belongs to would.
+fn check_reading(request: &std::path::Path, reading: &std::path::Path) -> Result<(String, u8)> {
+    use anyhow::Context;
+    let request = std::fs::read_to_string(request)
+        .with_context(|| format!("reading the request {}", request.display()))?;
+    let bytes = std::fs::read(reading)
+        .with_context(|| format!("reading the reading {}", reading.display()))?;
+    let reading: athena_data::records::Reading = serde_json::from_slice(&bytes)
+        .with_context(|| format!("{} is not a reading", reading.display()))?;
+    Ok(
+        match athena_core::reading::decide_stored(&request, &reading) {
+            athena_core::reading::Decision::Accept => ("accept".to_string(), 0),
+            athena_core::reading::Decision::Refuse(reason) => (format!("refuse: {reason}"), 1),
+        },
+    )
+}
+
 fn run(cli: Cli) -> Result<u8> {
     match cli.command {
         Command::Ask {
@@ -1009,6 +1038,11 @@ fn run(cli: Cli) -> Result<u8> {
                 println!("{} applies proposal {id}", candidate.display());
             }
             Ok(if problems.is_empty() { 0 } else { 2 })
+        }
+        Command::CheckReading { request, reading } => {
+            let (line, code) = check_reading(&request, &reading)?;
+            println!("{line}");
+            Ok(code)
         }
         Command::Correct { job, line, json } => {
             let athena = open(true)?;
@@ -1379,6 +1413,100 @@ mod tests {
                 )],
             )
             .unwrap();
+    }
+
+    fn bare_reading() -> athena_data::records::Reading {
+        use athena_data::records::{
+            Criterion, CriterionKind, Deliverable, DeliverableAction, Forecast, Forecasts,
+            Quantiles, Reading,
+        };
+        let forecast = Forecast {
+            p_reading_accepted: 0.8,
+            p_verification_passes: 0.7,
+            p_user_intervenes: 0.1,
+            cost_usd: Quantiles::new(0.2, 0.5, 1.5).unwrap(),
+            wall_time_s: Quantiles::new(100.0, 300.0, 900.0).unwrap(),
+        };
+        Reading {
+            job: JobId::parse("20261012-084936-n1p0").unwrap(),
+            n: 1,
+            at: jiff::Timestamp::UNIX_EPOCH,
+            invocation_seq: 1,
+            base_commit: "a".repeat(40),
+            config_sha256: "b".repeat(64),
+            defaults_sha256: "c".repeat(64),
+            defaults_version: 1,
+            title: "Change the budget".into(),
+            summary: "Change the budget.".into(),
+            class_of_work: "feature".into(),
+            capability: Some("change".into()),
+            decline_reason: None,
+            producer_model: "producer".into(),
+            verifier_model: "verifier".into(),
+            defaults_applied: vec![],
+            assumptions: vec![],
+            question: None,
+            acceptance_criteria: vec![Criterion {
+                text: "the budget is 3 dollars".into(),
+                kind: CriterionKind::Content,
+            }],
+            deliverables: vec![Deliverable {
+                path: "src/budget.rs".into(),
+                action: DeliverableAction::Modify,
+                p: 0.9,
+            }],
+            out_of_scope: vec![],
+            forecasts: Forecasts {
+                reader: forecast.clone(),
+                reference: forecast,
+            },
+            departures: None,
+            urgent_reason: None,
+            hard_reason: None,
+            producer_effort: None,
+        }
+    }
+
+    #[test]
+    fn check_reading_prints_accept_or_the_refusal_reason_with_the_exit_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let request = "Change athena.toml so the budget is 3 dollars";
+        let mut reading = bare_reading();
+        let (req_path, read_path) =
+            athena_core::reading::write_case_files(dir.path(), request, &reading).unwrap();
+        let (line, code) = check_reading(&req_path, &read_path).unwrap();
+        let expected = athena_core::reading::check_reading_acceptance(&reading, request, None, &[])
+            .unwrap_err()
+            .to_string();
+        assert_eq!(code, 1, "{line}");
+        assert_eq!(line, format!("refuse: {expected}"));
+        assert!(line.contains("athena.toml"), "{line}");
+
+        reading.out_of_scope = vec!["athena.toml".into()];
+        let (req_path, read_path) =
+            athena_core::reading::write_case_files(dir.path(), request, &reading).unwrap();
+        assert_eq!(
+            check_reading(&req_path, &read_path).unwrap(),
+            ("accept".to_string(), 0)
+        );
+        assert!(check_reading(&dir.path().join("missing"), &read_path).is_err());
+        std::fs::write(&read_path, "not json").unwrap();
+        assert!(check_reading(&req_path, &read_path).is_err());
+    }
+
+    #[test]
+    fn check_reading_parses_with_both_files() {
+        let parsed = Cli::try_parse_from([
+            "athena",
+            "check-reading",
+            "--request",
+            "r.txt",
+            "--reading",
+            "r.json",
+        ])
+        .unwrap();
+        assert!(matches!(parsed.command, Command::CheckReading { .. }));
+        assert!(Cli::try_parse_from(["athena", "check-reading"]).is_err());
     }
 
     #[test]

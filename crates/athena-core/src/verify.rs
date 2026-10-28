@@ -539,6 +539,62 @@ fn is_non_code_path(path: &str) -> bool {
     })
 }
 
+/// Holds a passing judgment because a replay of past readings found too many newly refused: the verdict
+/// becomes fail, with a blocker finding by Athena that names `list`. Any other verdict is left alone, since
+/// it already blocks landing.
+pub fn hold_for_replay(judgment: &mut Judgment, list: &str) {
+    if judgment.final_verdict != Verdict::Pass {
+        return;
+    }
+    judgment.final_verdict = Verdict::Fail;
+    let reason = format!(
+        "the reading rules newly refuse more past readings than allowed: {list}; the criteria do not \
+         intend that rate"
+    );
+    judgment.findings.push(athena_finding(
+        Severity::Blocker,
+        "the candidate's reading rules newly refuse too many past requests".to_string(),
+        list.to_string(),
+    ));
+    judgment.reasons.push(reason);
+}
+
+#[cfg(test)]
+mod replay_hold_tests {
+    use super::*;
+
+    fn judgment(verdict: Verdict) -> Judgment {
+        Judgment {
+            criteria: vec![],
+            findings: vec![],
+            agent_verdict: Some(verdict),
+            final_verdict: verdict,
+            reasons: vec![],
+        }
+    }
+
+    #[test]
+    fn a_pass_is_held_with_a_blocker_that_names_the_list_and_a_fail_is_unchanged() {
+        let mut held = judgment(Verdict::Pass);
+        hold_for_replay(&mut held, "job-a (why a); job-b (why b)");
+        assert_eq!(held.final_verdict, Verdict::Fail);
+        assert!(verified(&held, "a", "b", "c").is_none());
+        let blocker: Vec<_> = held
+            .findings
+            .iter()
+            .filter(|f| f.severity == Severity::Blocker && f.source == FindingSource::Athena)
+            .collect();
+        assert_eq!(blocker.len(), 1);
+        assert!(blocker[0].evidence.contains("job-a") && blocker[0].evidence.contains("job-b"));
+        assert!(held.reasons[0].contains("job-a (why a)"));
+
+        let mut failed = judgment(Verdict::Fail);
+        hold_for_replay(&mut failed, "job-a (why a)");
+        assert!(failed.findings.is_empty() && failed.reasons.is_empty());
+        assert_eq!(failed.final_verdict, Verdict::Fail);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
