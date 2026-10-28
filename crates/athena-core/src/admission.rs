@@ -118,6 +118,10 @@ fn violation(rule: &str, path: Option<&str>, detail: String) -> PolicyViolation 
 }
 
 /// Whether the reading lists `path` as a deliverable and names it in an acceptance criterion.
+///
+/// This is the one definition of a listed governance change. Admission applies it to the paths a candidate
+/// changed, and reading acceptance (`reading::check_governance_coverage`) applies it to the paths a request's
+/// outcome needs, so the same omission is refused at reading time and not only after the producer has finished.
 pub fn governance_change_is_listed(reading: &Reading, path: &str) -> bool {
     let listed = reading.deliverables.iter().any(|d| d.path == path);
     let named = reading
