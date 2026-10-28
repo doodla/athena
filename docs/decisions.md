@@ -3716,3 +3716,36 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Provenance:** Read: `crates/athena-cli/tests/budgets.rs`, `crates/athena-context/src/lib.rs`, the three
   introspections as quoted in the request. Measured: `cargo test -p athena-context`, `cargo test -p athena-cli
   --test budgets`.
+
+## D142 · The environment is checked again immediately before the verifier runs
+
+- **Case:** The failure class `verifier-environment-unusable-resource-exhausted` (20261016-051427-3r97) was
+  recorded three times in two jobs: introspections 20261016-051415-3nbe and 20261016-053016-cr33 (job
+  20261016-044847-hem1, whose verifier met `No space left on device`) and 20261026-074919-kcfs (job
+  20261026-064950-38jx). Each proposed a code check before verification.
+- **Root cause:** The disk guard did not cover the point between the checks and the verifier. The `[disk]
+  min_free_gb` guard ran at dispatch and before the checks, but the checks are what fill the disk: their builds
+  write into the verifier's snapshot and the build directories. The verifier then started in an environment that
+  could not build or write, and nothing separated that environment failure from a failure of the work, so it
+  read as the second.
+- **Decision:** The run in `crates/athena-core/src/run/mod.rs` calls `disk::verifier_environment_problem` after the checks and immediately
+  before the verifier agent is set up. It runs the shared gate (the same threshold and the same cleanup of idle
+  jobs' `target/` directories as the other two places) and then `disk::write_probe`: a small file written,
+  flushed and removed in the verifier's snapshot. Either failing closes the job as failed (retryable, not
+  rejected) with the existing `environment: low disk` text, `before the verifier`, the words "this is the
+  environment, not the work", and the `athena retry` hint. The verifier is not invoked, its brief is not
+  recorded, and the verification record, with its verdict, is not written. `disk::is_environment_reason`
+  classifies such a reason for any job. The tests are `the_verifier_environment_check_fails_as_the_environment_for_any_job`
+  (in `disk.rs`) and `low_disk_after_the_checks_fails_the_job_as_the_environment_before_the_verifier_runs`
+  (in `tests/drain.rs`), which turns the free space low only once the verifier's snapshot exists.
+- **Alternatives:** (a) Run a trivial cargo build as the probe, as one introspection proposed: rejected, the
+  gate stays language-neutral and cheap, and a full disk shows in the write. (b) Delete a job's build directories
+  when it reaches a terminal state, or sweep periodically: not built here; the existing idle sweep inside the
+  gate already runs when space is short, and the sweep is a separate change. (c) Check only more often before the
+  checks: rejected, the space is used up by the checks themselves.
+- **Tradeoff:** One free-space read and one tiny write per verification. A job that is only short of space by
+  the verifier's start fails after its checks ran, and a retry runs them again.
+- **Reversal cost:** Low. Remove the call and the two functions in `disk.rs`.
+- **Provenance:** Read: `crates/athena-core/src/disk.rs`, `crates/athena-core/src/run/mod.rs`, the three
+  introspections as quoted in the request. Measured: `cargo test --locked -p athena-core disk`, `cargo test
+  --locked -p athena-cli --test drain low_disk`; the new drain test fails with the call disabled.

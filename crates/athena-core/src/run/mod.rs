@@ -2163,6 +2163,28 @@ impl Athena {
         // The verifier sees the accepted plan's demonstrations and planned files, never its approach or
         // reasons (review F5). Without a plan the brief is as it always was.
         let verifier_plan = closing.plans.last().map(VerifierPlan::from_plan);
+
+        // The environment, immediately before the verifier agent runs. The checks above build and fill the
+        // disk after the earlier gate passed, and a verifier started on a full disk fails in ways that read
+        // as faults in the work. So the same gate (with its idle-build cleanup) runs again, and a small file
+        // is written and removed in the verifier's snapshot. A problem closes the job with the retryable
+        // `environment: low disk` reason and no verdict; the verifier is not started and its brief is not
+        // recorded.
+        if let Some(problem) = crate::disk::verifier_environment_problem(
+            &self.state,
+            jc.config.min_free_gb(),
+            &id,
+            vsnap.dir(),
+            ctx.ui,
+        ) {
+            let changed_paths = std::mem::take(&mut closing.happened.changed_paths);
+            closing.happened =
+                self.failure(ctx, &crate::disk::before_verifier_reason(&problem, &id));
+            closing.happened.changed_paths = changed_paths;
+            closing.happened.verification_passed = None;
+            let _ = crate::pin::remove_tree(&verify_dir);
+            return Ok(closing);
+        }
         let mut verifier_invocation = None;
         let mut verdict_output: Option<VerdictOutput> = None;
         let mut commands_run = Vec::new();
