@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261028-091836-kbnb",
+  "round": 2,
+  "at": "2026-10-28T09:25:34.575064818Z",
+  "invocation_seq": 4,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "`kept/<job>` is shared with timed-out kept work, and `remove_kept_work` removes the whole directory.",
+      "evidence": "`remove_kept_work` calls the remover on `root/kept/<job>`, not on `.../work`. close_dispatched and land_or_block already call it for `resumed.job`. A resume file in the same directory can be deleted by this path, and a careless `remove_resume` that removes the directory would delete kept work. Fix: State that a timed-out job never has a resume file. Make `remove_resume` remove only `resume.json`, then the directory only if empty. Put the step-9 removal next to the existing `remove_kept_work(&resumed.job)` calls so one hook covers both.",
+      "location": "Decision 1 / Step 2 / Step 9; crates/athena-core/src/state.rs:61-64, run/mod.rs:2695, 2873",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The producer's send-back runs before Athena's checks, so a failed check does not lead to a send-back.",
+      "evidence": "run/mod.rs:1689-1836: the single send-back (PRODUCER_SEND_BACKS) happens inside the producer loop, before the gate at 1980 and the checks at 2016-2095. After a failed check the flow goes on to the verifier gate at 2178. Fix: Correct the stated reason; keeping the directory still matches the request. In case B, assert that `target/produce` is present at the pre-verifier gate call, not 'reaches the verifier or send-back'.",
+      "location": "Decision 2 reason; Criterion 1 demonstration (case B)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The interrupt simulation depends on no registry entry being left for the job.",
+      "evidence": "`Athena::running` is true when any registry entry has the job's id. `reap` drops only entries whose process group is gone. A panic while a check or agent group is registered would leave the job counted as running, and retry would refuse it. Fix: In the test, assert `!athena.running(job)` (or that the registry is empty for the job) after catch_unwind and before retry, so a leftover entry fails clearly instead of being mistaken for a resume failure.",
+      "location": "Criterion 3 demonstration; crates/athena-core/src/status.rs:1095, crates/athena-agent/src/procs.rs:149-189",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A resumed job reaches the verifier without the accepted plan's demonstrations.",
+      "evidence": "`verifier_plan = closing.plans.last().map(VerifierPlan::from_plan)`. A resumed job has empty `closing.plans`, so when planning is on the verifier's brief silently changes on resume. Fix: Store the old job's JobPlan in the resume file (or load it from the old job's records) and set `closing.plans` in `resume_candidate`.",
+      "location": "Open questions (accepted plan); run/mod.rs:2170",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "How the candidate is rebuilt on the new base is not specified.",
+      "evidence": "The plan says 'from diff_tree(old base, old candidate)' but names no git helper for applying a tree diff. The guard already ensures only records/ differs between the old base and head. Fix: Name the method, e.g. commit the old candidate's tree with head's records/ subtree on top of the new prediction commit, and check that the resulting change list equals the old candidate's.",
+      "location": "Step 8 (resume_candidate)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan covers both parts of the request: it removes target/produce after the checks pass, before the gate that runs before the verifier, and it resumes from the kept candidate with no planner or producer run. Every function and seam it names exists: produce_and_verify, dispatch, close_dispatched, land_or_block, early_pr, StateDir::with_free_space, clean_job, kept_work_dir, is_environment_reason, retried_job, Athena::running and diff_tree. The cleanup sits where the fault starts, between the checks line (run/mod.rs:2091) and verifier_environment_problem (2178). The resume follows the existing timeout_seed and tree_seed patterns and reuses their guard that only records/ may differ. earlier_attempt_with already allows retrying an interrupted job. The demonstrations exercise the real production path: Athena::ask, go and retry with the fake driver, plus a free-space function that turns low only once the verify directory exists. That directory is created after the gate before the checks, so the test clears the first gate and stops at the second. They count planner and producer runs, not free-space reads, and each would fail without its behavior. Fingerprint equality after rebuilding the candidate is achievable, because attrs::fingerprint hashes only governed paths. The remaining issues are minor: the resume file shares kept/<job> with timed-out work, Decision 2 gives a wrong reason (the send-back runs before Athena's checks), the interrupt test should assert that no registry entry is left, and the resumed job loses the accepted plan the verifier would see."
+}

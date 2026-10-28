@@ -9,10 +9,11 @@ use crate::invocation::InvocationFacts;
 use crate::land::{Plan, plan};
 use crate::pin::{is_full_sha, mount};
 use crate::reading::{
-    Proposal, TreeRetrySeed, planning_resume_seed, retried_job, retry_findings, same_scope,
-    tree_retry_seed,
+    Proposal, TreeRetrySeed, planning_resume_seed, resumable_job, retried_job, retry_findings,
+    same_scope, tree_retry_seed,
 };
 use crate::scoring::{self, Happened, score, totals};
+use crate::state::{ResumeMark, ResumeStage};
 use crate::store::{JobRecords, JobState, Records};
 use crate::verify::{MAP_PATH, VerdictInputs, Verified, judge, mark_pre_existing, verified};
 use crate::{Athena, Ui};
@@ -98,11 +99,37 @@ struct Closing {
     critiques: Vec<Critique>,
     /// The checks run on the base commit before the producer. Recorded only.
     baseline: Option<Baseline>,
+    /// The earlier job whose kept candidate this job resumed from; its resume mark is spent when this job closes.
+    consumed_resume: Option<JobId>,
+}
+
+/// A built candidate on its way through the checks and the verifier: what [`Athena::check_and_verify`] takes
+/// from the producer half, or from a resume.
+struct Built {
+    /// The base (prediction) commit.
+    base: String,
+    /// The candidate commit, on `base`.
+    commit: String,
+    /// The candidate's fingerprint against `base`.
+    fingerprint: String,
+    /// The sequence number the next invocation gets.
+    seq: u32,
+    report_gaps: Vec<String>,
+    left_criteria: Vec<String>,
+    /// The check results of an earlier run on this very candidate: the checks do not run again.
+    recorded_checks: Option<Vec<CheckRun>>,
+}
+
+/// A stopped job's kept candidate that a retry resumes from.
+struct ResumeSeed {
+    job: JobId,
+    mark: ResumeMark,
 }
 
 impl Closing {
     fn new() -> Closing {
         Closing {
+            consumed_resume: None,
             baseline: None,
             plans: Vec::new(),
             critiques: Vec::new(),
@@ -229,6 +256,215 @@ impl Athena {
             return Ok(None);
         }
         Ok(Some(seed))
+    }
+
+    /// The kept candidate of a stopped job that a retry resumes from. The request must be "try again on <job>"
+    /// for a job that failed for an environment cause or was interrupted
+    /// ([`resumable_job`]); its resume mark must exist, and the candidate and base commits must still be in
+    /// the repository; and the files agents see at `head` must be those the job's base had (only `records/`
+    /// differs), so that resuming cannot undo later work. Otherwise `None`: the retry plans and produces.
+    fn resume_seed(
+        &self,
+        records: &Records,
+        request: &str,
+        head: &str,
+    ) -> Result<Option<ResumeSeed>> {
+        let Some(job) = resumable_job(records, request, &|j| self.running(j)) else {
+            return Ok(None);
+        };
+        let Some(mark) = self.state.read_resume(&job) else {
+            return Ok(None);
+        };
+        let Some(commit) = mark.candidate.candidate_commit.clone() else {
+            return Ok(None);
+        };
+        if !mark.candidate.violations.is_empty()
+            || self.git.rev_parse(&commit)?.is_none()
+            || self.git.rev_parse(&mark.base_commit)?.is_none()
+        {
+            return Ok(None);
+        }
+        let changed = self.git.diff_tree(&mark.base_commit, head)?;
+        if changed.iter().any(|c| !c.path.starts_with("records/")) {
+            return Ok(None);
+        }
+        Ok(Some(ResumeSeed { job, mark }))
+    }
+
+    /// Resumes a stopped job's kept candidate in this job, with no planner and no producer run. The candidate's
+    /// changes are applied again to this job's base, so the verifier's diff and the landing carry no records
+    /// noise from the older base. Admission runs again on it. At the stage `Verifier` the check results
+    /// of the earlier job are used, when the rebuilt candidate has the fingerprint the checks ran on; at any
+    /// other stage, or when it differs, the checks run.
+    fn resume_candidate(
+        &self,
+        ctx: &RunContext<'_>,
+        accepted: &AcceptedReading,
+        seed: ResumeSeed,
+        mut closing: Closing,
+    ) -> Result<Closing> {
+        let id = ctx.id().clone();
+        let p = ctx.prediction.clone();
+        let ResumeSeed { job: old_job, mark } = seed;
+        let old_commit = mark
+            .candidate
+            .candidate_commit
+            .clone()
+            .context("the resume mark has no candidate commit")?;
+        ctx.ui.line(&format!(
+            "resume     job {old_job} kept its candidate; resuming it at the {} stage, with no planner or producer run",
+            match mark.stage {
+                ResumeStage::Checks => "checks",
+                ResumeStage::Verifier => "verifier",
+            }
+        ));
+        let changes = self.git.diff_tree(&mark.base_commit, &old_commit)?;
+        let new_blobs: Vec<String> = changes
+            .iter()
+            .filter(|c| c.status != 'D')
+            .map(|c| c.new_oid.clone())
+            .collect();
+        let sizes = self.git.blob_sizes(&new_blobs)?;
+        let mut edits = Vec::new();
+        let mut changed = Vec::new();
+        for change in &changes {
+            if change.status == 'D' {
+                edits.push(IndexEdit::Remove {
+                    path: change.path.clone(),
+                });
+            } else {
+                edits.push(IndexEdit::Put {
+                    mode: change.new_mode.clone(),
+                    oid: change.new_oid.clone(),
+                    path: change.path.clone(),
+                });
+            }
+            changed.push(Changed {
+                path: change.path.clone(),
+                status: change_status(change.status),
+                mode: change.new_mode.clone(),
+                size: sizes.get(&change.new_oid).copied().unwrap_or(0),
+            });
+        }
+        let index = TempIndex::from_tree(&self.git, &p)?;
+        index.apply(&edits)?;
+        let tree = index.write_tree()?;
+        let c = self.git.commit_tree(
+            &tree,
+            &[&p],
+            &format!(
+                "Candidate for job {id}\n\nNot on any branch; landing builds its own commit.\n"
+            ),
+            false,
+        )?;
+        let f = fingerprint(&self.git, &c, &p)?;
+        let mut candidate = mark.candidate.clone();
+        candidate.job = id.clone();
+        candidate.base_commit = p.clone();
+        candidate.base_fingerprint = Some(fingerprint(&self.git, &p, &p)?);
+        candidate.previous_job = latest_landed_job(&self.git, &p)?;
+        candidate.candidate_commit = Some(c.clone());
+        candidate.candidate_tree = Some(tree);
+        candidate.fingerprint = Some(f.clone());
+        let jc = ctx.jc;
+        let mut violations: Vec<PolicyViolation> = admit(&AdmissionInput {
+            git: &self.git,
+            base: &p,
+            candidate: &c,
+            changes: &changed,
+            reading: ctx.reading,
+            max_file_bytes: jc.config.records.max_file_bytes,
+            personal_data: &jc.config.personal_data,
+            config: &jc.config,
+        })?;
+        violations.extend(ctx.capability.admit(
+            &ChangeList {
+                entries: candidate.changes.clone(),
+            },
+            jc,
+        ));
+        ctx.ui.line(&format!(
+            "candidate  {} · fingerprint {}…",
+            candidate
+                .changes
+                .iter()
+                .map(|e| e.path.clone())
+                .collect::<Vec<_>>()
+                .join(", "),
+            &f[..18.min(f.len())]
+        ));
+        closing.happened.changed_paths = changes.iter().map(|c| c.path.clone()).collect();
+        closing.consumed_resume = Some(old_job);
+        if !violations.is_empty() {
+            let summary = violations
+                .iter()
+                .map(|v| v.detail.clone())
+                .collect::<Vec<_>>()
+                .join("; ");
+            candidate.violations = violations;
+            closing.candidate = Some(candidate);
+            let changed_paths = std::mem::take(&mut closing.happened.changed_paths);
+            closing.happened =
+                self.failure(ctx, &format!("admission refused the change: {summary}"));
+            closing.happened.changed_paths = changed_paths;
+            return Ok(closing);
+        }
+        closing.candidate = Some(candidate);
+        let same_checks = mark.candidate.fingerprint.as_deref() == Some(f.as_str());
+        let built = Built {
+            base: p,
+            commit: c,
+            fingerprint: f,
+            seq: ctx.next_seq(&closing),
+            report_gaps: mark.report_gaps,
+            left_criteria: mark.left_criteria,
+            recorded_checks: (mark.stage == ResumeStage::Verifier && same_checks)
+                .then_some(mark.check_runs),
+        };
+        self.write_resume_mark(ctx, &closing, &built);
+        self.check_and_verify(ctx, accepted, closing, built)
+    }
+
+    /// Records where `built` stands, so that a job that stops (by the environment, or when its process dies)
+    /// can be resumed from this candidate. A failure to write it is a warning: it costs the resume, not the job.
+    fn write_resume_mark(&self, ctx: &RunContext<'_>, closing: &Closing, built: &Built) {
+        let Some(candidate) = closing.candidate.clone() else {
+            return;
+        };
+        let (stage, check_runs) = match &built.recorded_checks {
+            Some(runs) => (ResumeStage::Verifier, runs.clone()),
+            None => (ResumeStage::Checks, Vec::new()),
+        };
+        let mark = ResumeMark {
+            stage,
+            base_commit: built.base.clone(),
+            candidate,
+            check_runs,
+            report_gaps: built.report_gaps.clone(),
+            left_criteria: built.left_criteria.clone(),
+        };
+        if let Err(e) = self.state.write_resume(ctx.id(), &mark) {
+            ctx.ui.line(&format!(
+                "warning: could not record where this job stands, so a retry cannot resume it: {e:#}"
+            ));
+        }
+    }
+
+    /// Spends the resume marks when a job closes: the mark of the job this one resumed from, and this job's
+    /// own unless it closed failed for an environment cause (which `athena retry` resumes from).
+    fn settle_resume_marks(
+        &self,
+        id: &JobId,
+        consumed: Option<&JobId>,
+        state: OutcomeState,
+        reason: &str,
+    ) {
+        if let Some(old) = consumed {
+            self.state.remove_resume(old);
+        }
+        if !(state == OutcomeState::Failed && crate::disk::is_environment_reason(reason)) {
+            self.state.remove_resume(id);
+        }
     }
 
     /// The kept work of a timed out job that a retry resumes from: the request must be "try again on <job>"
@@ -407,6 +643,13 @@ impl Athena {
         } else {
             None
         };
+        // A job that stopped for the environment, or was interrupted, after its candidate was built resumes from
+        // that candidate: no planner and no producer run (`resume_candidate`).
+        let resume_from = if pinned.is_none() {
+            self.resume_seed(records, request_text, head)?
+        } else {
+            None
+        };
         // A retry that starts from the base still carries the blocker and major findings of the job it retries.
         let earlier_findings = if retry_seed.is_none() && resume.is_none() {
             retry_findings(records, request_text, &redactor)?
@@ -536,6 +779,10 @@ impl Athena {
         // Job planning (docs/design/job-planning.md): one accepted round, before the producer. The round
         // seeds the closing with its invocations, plan and critique, so the producer's invocation is
         // numbered after them and the budget check below counts what planning cost (review F1).
+        if let Some(seed) = resume_from {
+            let closing = self.resume_candidate(&ctx, &accepted, seed, Closing::new())?;
+            return self.close_dispatched(&ctx, closing);
+        }
         let mut closing = Closing::new();
         let mut producer_prompt = brief.clone();
         // In `hard` mode only a reading marked hard is planned; the marking is the one that escalates the
@@ -1973,11 +2220,49 @@ impl Athena {
         }
         closing.candidate = Some(candidate);
         let _ = crate::pin::remove_tree(&work);
+        let built = Built {
+            base: p,
+            commit: c,
+            fingerprint: f,
+            seq,
+            report_gaps,
+            left_criteria,
+            recorded_checks: None,
+        };
+        // The candidate is built: from here a job that stops for the environment, or whose process dies, is
+        // resumed from it by `athena retry`, with no planner and no producer run.
+        self.write_resume_mark(ctx, &closing, &built);
+        self.check_and_verify(ctx, accepted, closing, built)
+    }
+
+    /// The second half of a job: the disk gate, Athena's own checks, the gate before the verifier, the
+    /// verifier and the verdict, for a built candidate. A resumed job at the verifier stage skips the gate
+    /// and the checks and uses the recorded results.
+    fn check_and_verify(
+        &self,
+        ctx: &RunContext<'_>,
+        accepted: &AcceptedReading,
+        mut closing: Closing,
+        mut built: Built,
+    ) -> Result<Closing> {
+        let id = ctx.id().clone();
+        let jc = ctx.jc;
+        let job_dir = self.state.job_dir(&id);
+        let capability_env = ctx.capability.env(jc);
+        let p = built.base.clone();
+        let c = built.commit.clone();
+        let f = built.fingerprint.clone();
+        let mut seq = built.seq;
+        let report_gaps = built.report_gaps.clone();
+        let left_criteria = built.left_criteria.clone();
+        let recorded_checks = built.recorded_checks.take();
 
         // Free disk space, before the checks. Low space makes builds fail in ways that look like faults in the
         // work, so after the idle build directories are removed, space that is still low fails the job with a
         // retryable environment reason. Nothing is held: the job closes, and `athena retry` reads it again.
-        if let Some(low) = self.disk_gate(jc.config.min_free_gb(), &id, ctx.ui) {
+        if recorded_checks.is_none()
+            && let Some(low) = self.disk_gate(jc.config.min_free_gb(), &id, ctx.ui)
+        {
             let changed_paths = std::mem::take(&mut closing.happened.changed_paths);
             closing.happened = self.failure(
                 ctx,
@@ -2021,7 +2306,13 @@ impl Athena {
             .as_ref()
             .map(|c| c.changes.iter().map(|e| e.path.clone()).collect())
             .unwrap_or_default();
-        if self.nested.is_none() {
+        let resumed_checks = recorded_checks.is_some();
+        if let Some(runs) = recorded_checks {
+            ctx.ui.line(
+                "resume     the checks passed on this candidate in the job it resumes; they do not run again",
+            );
+            check_runs = runs;
+        } else if self.nested.is_none() {
             // The plan's kind picks the checks and where each result comes from (`routing`). A study is
             // routed by its capability. Skipping is the path rule, which the route applies.
             let kind = if ctx.capability.id() == "study" {
@@ -2080,26 +2371,46 @@ impl Athena {
                 });
             }
         }
-        let checks_line: Vec<String> = check_runs
-            .iter()
-            .map(|r| match (r.passed, r.tests_ran) {
-                (true, Some(n)) => format!("{} ok ({n} tests)", r.name),
-                (true, None) => format!("{} ok", r.name),
-                (false, _) => format!("{} FAILED", r.name),
-            })
-            .collect();
-        ctx.ui.line(&format!(
-            "checks     {} ({:.0}s)",
-            checks_line.join(" · "),
-            check_started.elapsed().as_secs_f64()
-        ));
         // A check that failed on this job's base commit and fails again is marked pre-existing. A baseline
         // taken on any other commit says nothing about this base.
         let usable_baseline = closing
             .baseline
             .as_ref()
             .filter(|b| b.base_commit == p.as_str());
-        mark_pre_existing(&mut check_runs, usable_baseline);
+        if !resumed_checks {
+            let checks_line: Vec<String> = check_runs
+                .iter()
+                .map(|r| match (r.passed, r.tests_ran) {
+                    (true, Some(n)) => format!("{} ok ({n} tests)", r.name),
+                    (true, None) => format!("{} ok", r.name),
+                    (false, _) => format!("{} FAILED", r.name),
+                })
+                .collect();
+            ctx.ui.line(&format!(
+                "checks     {} ({:.0}s)",
+                checks_line.join(" · "),
+                check_started.elapsed().as_secs_f64()
+            ));
+            mark_pre_existing(&mut check_runs, usable_baseline);
+            // Every check passed: the producer's build directory is idle, and it is the largest thing on the
+            // disk, so it goes now, before the gate that runs before the verifier. When a check failed it
+            // stays, since the work may be sent back to the producer.
+            if check_runs.iter().all(|r| r.passed) {
+                match self.state.remove_produce(&id) {
+                    Ok(0) => {}
+                    Ok(bytes) => ctx.ui.line(&format!(
+                        "disk       removed the producer's build directory: {}",
+                        crate::state::format_bytes(bytes)
+                    )),
+                    Err(why) => ctx.ui.line(&format!(
+                        "warning: could not remove the producer's build directory: {why}"
+                    )),
+                }
+                // The checks passed: a stop from here resumes at the verifier, with these results.
+                built.recorded_checks = Some(check_runs.clone());
+                self.write_resume_mark(ctx, &closing, &built);
+            }
+        }
 
         let criteria = ctx.reading.acceptance_criteria.clone();
         let verifier_grant = ctx.capability.verifier_grant(jc);
@@ -2694,6 +3005,7 @@ impl Athena {
         if let Some(resumed) = &ctx.resume {
             self.state.remove_kept_work(&resumed.job);
         }
+        self.settle_resume_marks(&id, closing.consumed_resume.as_ref(), state, &reason);
         Ok(GoResult::Finished(Box::new(Finished {
             job: id,
             state,
@@ -2867,6 +3179,7 @@ impl Athena {
             )),
             other => ctx.ui.line(&format!("{:<10} {reason}", other.as_str())),
         }
+        self.settle_resume_marks(&id, closing.consumed_resume.as_ref(), state, &reason);
         if state != OutcomeState::Blocked {
             crate::state::report_clean(ctx.ui, &self.state.clean_job(&id));
             if let Some(resumed) = &ctx.resume {
@@ -3301,12 +3614,20 @@ mod produce_and_verify_order_tests {
     use athena_git::Git;
     use serde_json::json;
     use std::collections::BTreeMap;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     const CRITERION: &str = "README.md describes the demo";
 
     /// A capability that edits files and runs one configured check, so the baseline has something to say.
-    struct Docs;
+    /// The check is the command `check` (`true` passes, `false` fails).
+    struct Docs {
+        check: &'static [&'static str],
+    }
+
+    /// A check that passes on any tree.
+    const PASSES: &[&str] = &["true"];
+    /// A check that passes on the base README and fails once the README is edited.
+    const FAILS_ON_EDIT: &[&str] = &["sh", "-c", "test \"$(cat README.md)\" = '# Demo'"];
 
     impl Capability for Docs {
         fn id(&self) -> &'static str {
@@ -3345,7 +3666,7 @@ mod produce_and_verify_order_tests {
         fn checks(&self, _: &JobConfig) -> Vec<CheckSpec> {
             vec![CheckSpec {
                 name: "probe".into(),
-                run: vec!["true".into()],
+                run: self.check.iter().map(|part| part.to_string()).collect(),
                 kind: CheckKind::Command,
                 skip_when_only: None,
             }]
@@ -3369,9 +3690,48 @@ mod produce_and_verify_order_tests {
     }
 
     fn athena(repo: &tempfile::TempDir, state: &tempfile::TempDir) -> Athena {
-        let state = crate::state::StateDir::new(state.path().join("repo"))
-            .with_free_space(crate::test_support::plenty_of_space);
-        let script = Box::new(|spec: &AgentInvocation| {
+        athena_with(
+            repo,
+            state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            base_script(),
+        )
+    }
+
+    /// An Athena over `repo` whose capability checks with the command `check`, whose free space is read by
+    /// `free_space`, and whose agents follow `script`.
+    fn athena_with(
+        repo: &tempfile::TempDir,
+        state: &tempfile::TempDir,
+        check: &'static [&'static str],
+        free_space: crate::state::FreeSpace,
+        script: athena_agent::fake::Script,
+    ) -> Athena {
+        let state =
+            crate::state::StateDir::new(state.path().join("repo")).with_free_space(free_space);
+        let driver = FakeAgentDriver::new(script).with_registry(state.registry());
+        Athena {
+            git: Git::at(repo.path()),
+            state,
+            driver: std::sync::Arc::new(driver),
+            capabilities: vec![Box::new(Docs { check })],
+            build: Build {
+                version: "0.1.0".into(),
+                source_commit: "0".repeat(40),
+                dirty: false,
+            },
+            athena_bin: "/bin/false".into(),
+            nested: None,
+            pinner: Box::new(crate::fake::CountingPinner::new(&"a".repeat(40))),
+            jev: None,
+        }
+    }
+
+    /// The fake agents of this repository: a reader, a producer that edits the README, and a verifier that
+    /// passes it.
+    fn base_script() -> athena_agent::fake::Script {
+        Box::new(|spec: &AgentInvocation| {
             let mut turn = match spec.role {
                 Role::Reader => FakeTurn::output(json!({
                     "title": "Describe the demo",
@@ -3430,23 +3790,7 @@ mod produce_and_verify_order_tests {
                 cache_write: 1,
             };
             turn
-        });
-        let driver = FakeAgentDriver::new(script).with_registry(state.registry());
-        Athena {
-            git: Git::at(repo.path()),
-            state,
-            driver: std::sync::Arc::new(driver),
-            capabilities: vec![Box::new(Docs)],
-            build: Build {
-                version: "0.1.0".into(),
-                source_commit: "0".repeat(40),
-                dirty: false,
-            },
-            athena_bin: "/bin/false".into(),
-            nested: None,
-            pinner: Box::new(crate::fake::CountingPinner::new(&"a".repeat(40))),
-            jev: None,
-        }
+        })
     }
 
     fn repo() -> tempfile::TempDir {
@@ -3646,5 +3990,304 @@ mod produce_and_verify_order_tests {
             .expect("the job recorded its baseline");
         assert_eq!(baseline.before_invocation, 2);
         assert_eq!(baseline.checks.len(), 1);
+    }
+
+    /// How many times each agent role was invoked.
+    #[derive(Default)]
+    struct Counts {
+        planner: std::sync::atomic::AtomicUsize,
+        producer: std::sync::atomic::AtomicUsize,
+        reader: std::sync::atomic::AtomicUsize,
+        verifier: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Counts {
+        fn counter(&self, role: Role) -> Option<&std::sync::atomic::AtomicUsize> {
+            match role {
+                Role::Planner => Some(&self.planner),
+                Role::Producer => Some(&self.producer),
+                Role::Reader => Some(&self.reader),
+                Role::Verifier => Some(&self.verifier),
+                _ => None,
+            }
+        }
+
+        /// The (planner, producer, reader, verifier) counts so far.
+        fn all(&self) -> (usize, usize, usize, usize) {
+            let get =
+                |c: &std::sync::atomic::AtomicUsize| c.load(std::sync::atomic::Ordering::SeqCst);
+            (
+                get(&self.planner),
+                get(&self.producer),
+                get(&self.reader),
+                get(&self.verifier),
+            )
+        }
+    }
+
+    /// The base script, counting each planner, producer, reader and verifier invocation. When `state_root` is
+    /// given, the producer also leaves a file in its job's build directory (`target/produce`), as a build would.
+    fn counting(counts: Arc<Counts>, state_root: Option<PathBuf>) -> athena_agent::fake::Script {
+        let inner = base_script();
+        Box::new(move |spec: &AgentInvocation| {
+            if let Some(counter) = counts.counter(spec.role) {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            if spec.role == Role::Producer
+                && let Some(root) = &state_root
+            {
+                let dir = root
+                    .join("jobs")
+                    .join(&spec.job)
+                    .join("target/produce/debug");
+                std::fs::create_dir_all(&dir).unwrap();
+                std::fs::write(dir.join("big"), vec![7u8; 20_000]).unwrap();
+            }
+            let mut turn = inner(spec);
+            // A reading of a retry must name the job it retries, as a reader that read the request would.
+            if spec.role == Role::Reader
+                && let Some((_, after)) = spec.user_prompt.split_once("try again on ")
+                && let Some(structured) = turn.structured.as_mut()
+            {
+                let earlier: String = after
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                    .collect();
+                structured["summary"] = json!(format!(
+                    "Describe the demo in README.md, as job {earlier} did."
+                ));
+            }
+            turn
+        })
+    }
+
+    fn finished(result: GoResult) -> Finished {
+        match result {
+            GoResult::Finished(finished) => *finished,
+            GoResult::Reread(_) => panic!("expected the job to finish"),
+        }
+    }
+
+    fn readme_at_head(athena: &Athena) -> String {
+        let bytes = athena.git.show_file("HEAD", "README.md").unwrap().unwrap();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    #[test]
+    fn produce_dir_is_removed_after_checks_pass_and_kept_when_a_check_fails() {
+        for (check, passes) in [(PASSES, true), (FAILS_ON_EDIT, false)] {
+            let repo = repo();
+            let state = tempfile::tempdir().unwrap();
+            let root = state.path().join("repo");
+            let counts = Arc::new(Counts::default());
+            let athena = athena_with(
+                &repo,
+                &state,
+                check,
+                crate::test_support::recording_plenty_space,
+                counting(counts, Some(root.clone())),
+            );
+            let proposal = athena.ask("describe the demo", &Quiet).unwrap();
+            let ui = Lines::default();
+            let done = finished(
+                athena
+                    .go(proposal.job.as_str(), AcceptedBy::User, &ui)
+                    .unwrap(),
+            );
+
+            // Every read of the free space saw the job directories as they were at that moment. The first read
+            // with the verifier's snapshot present is the gate before the verifier; the one before it is the
+            // gate before the checks.
+            let probes = crate::test_support::probes_of(&root);
+            let gate = probes
+                .iter()
+                .position(|p| p.verifying)
+                .expect("the gate before the verifier read the free space");
+            assert!(gate > 0, "{probes:?}");
+            assert!(
+                probes[gate - 1].produce_present,
+                "the producer's build directory existed when the checks started: {probes:?}"
+            );
+            if passes {
+                assert!(
+                    !probes[gate].produce_present,
+                    "the checks passed, so target/produce is gone before the verifier gate: {probes:?}"
+                );
+                assert_eq!(done.state, OutcomeState::Landed, "{}", done.reason);
+            } else {
+                assert!(
+                    probes[gate].produce_present,
+                    "a check failed, so target/produce is kept: {probes:?}"
+                );
+                assert_eq!(done.state, OutcomeState::Rejected, "{}", done.reason);
+            }
+        }
+    }
+
+    #[test]
+    fn low_disk_before_the_verifier_resumes_without_planner_or_producer() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let root = state.path().join("repo");
+        let counts = Arc::new(Counts::default());
+        // Enough free space for the gate before the checks; too little for the gate before the verifier.
+        let athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::low_once_verifying,
+            counting(counts.clone(), Some(root.clone())),
+        );
+        let proposal = athena.ask("describe the demo", &Quiet).unwrap();
+        let first = proposal.job.clone();
+        let ui = Lines::default();
+        let stopped = finished(athena.go(first.as_str(), AcceptedBy::User, &ui).unwrap());
+        assert_eq!(stopped.state, OutcomeState::Failed, "{}", stopped.reason);
+        assert!(
+            crate::disk::is_environment_reason(&stopped.reason),
+            "{}",
+            stopped.reason
+        );
+        assert!(
+            stopped.reason.contains("before the verifier"),
+            "{}",
+            stopped.reason
+        );
+        let said = ui.0.lock().unwrap().clone();
+        assert!(
+            said.iter().any(|l| l.starts_with("checks     ")),
+            "{said:#?}"
+        );
+        // The producer ran once; no planner, and no verifier.
+        let (planner, producer, read_before, verifier) = counts.all();
+        assert_eq!((planner, producer, verifier), (0, 1, 0));
+        assert!(read_before >= 1);
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        let candidate_fingerprint = records.jobs[first.as_str()]
+            .candidate
+            .as_ref()
+            .and_then(|c| c.fingerprint.clone())
+            .expect("the stopped job recorded its candidate");
+        // The job's directory is gone, but its candidate is kept, at the stage that stopped.
+        assert!(!athena.state.job_dir(&first).exists());
+        assert_eq!(
+            athena.state.read_resume(&first).map(|m| m.stage),
+            Some(crate::state::ResumeStage::Verifier)
+        );
+
+        // Space is back. The retry reads again (the reader runs), then resumes.
+        std::fs::write(root.join("freed"), b"").unwrap();
+        let ui = Lines::default();
+        let (retry, _) = athena.retry(first.as_str(), &ui).unwrap();
+        assert_eq!(retry.reader_error, None);
+        assert!(
+            ui.0.lock()
+                .unwrap()
+                .iter()
+                .any(|l| l.starts_with("resume     ")),
+            "{:#?}",
+            ui.0.lock().unwrap()
+        );
+        let (planner, producer, read_after, verifier) = counts.all();
+        assert_eq!((planner, producer, verifier), (0, 1, 0));
+        assert!(read_after > read_before, "the reader ran again");
+        let ui = Lines::default();
+        let done = finished(
+            athena
+                .go(retry.job.as_str(), AcceptedBy::User, &ui)
+                .unwrap(),
+        );
+        assert_eq!(done.state, OutcomeState::Landed, "{}", done.reason);
+        // No planner and no producer ran in the retry; only the verifier did.
+        assert_eq!(counts.all(), (0, 1, read_after, 1));
+        let said = ui.0.lock().unwrap().clone();
+        assert!(
+            !said.iter().any(|l| l.starts_with("checks     ")),
+            "the retry resumed at the verifier: {said:#?}"
+        );
+        assert!(
+            said.iter().any(|l| l.starts_with("verifier   ")),
+            "{said:#?}"
+        );
+        assert_eq!(
+            done.verification.as_ref().unwrap().verified_fingerprint,
+            candidate_fingerprint,
+            "the verifier judged the kept candidate"
+        );
+        assert!(readme_at_head(&athena).contains("A demo."));
+        assert_eq!(athena.state.read_resume(&first), None, "the mark is spent");
+        assert_eq!(athena.state.read_resume(&retry.job), None);
+    }
+
+    /// A UI that dies, as a process does, when the checks start.
+    struct DiesAtChecks;
+
+    impl Ui for DiesAtChecks {
+        fn line(&self, text: &str) {
+            if text.starts_with("checks     ") {
+                panic!("the process died");
+            }
+        }
+    }
+
+    #[test]
+    fn interrupted_job_with_a_candidate_resumes_without_planner_or_producer() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let counts = Arc::new(Counts::default());
+        let athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            counting(counts.clone(), None),
+        );
+        let proposal = athena.ask("describe the demo", &Quiet).unwrap();
+        let first = proposal.job.clone();
+        // The process dies after the candidate is built, as the checks start: the job is left dispatched.
+        let died = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            athena.go(first.as_str(), AcceptedBy::User, &DiesAtChecks)
+        }));
+        assert!(died.is_err(), "the job was cut short");
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        assert_eq!(records.jobs[first.as_str()].state(), JobState::Dispatched);
+        assert!(!athena.running(first.as_str()));
+        let (planner, producer, read_before, verifier) = counts.all();
+        assert_eq!((planner, producer, verifier), (0, 1, 0));
+        let candidate_fingerprint = athena
+            .state
+            .read_resume(&first)
+            .and_then(|m| m.candidate.fingerprint)
+            .expect("the candidate was kept");
+
+        let (retry, _) = athena.retry(first.as_str(), &Quiet).unwrap();
+        assert_eq!(retry.reader_error, None);
+        let (planner, producer, read_after, verifier) = counts.all();
+        assert_eq!((planner, producer, verifier), (0, 1, 0));
+        assert!(read_after > read_before, "the reader ran again");
+        let ui = Lines::default();
+        let done = finished(
+            athena
+                .go(retry.job.as_str(), AcceptedBy::User, &ui)
+                .unwrap(),
+        );
+        assert_eq!(done.state, OutcomeState::Landed, "{}", done.reason);
+        // No planner and no producer ran in the retry. The checks had not finished, so they ran in it.
+        assert_eq!(counts.all(), (0, 1, read_after, 1));
+        let said = ui.0.lock().unwrap().clone();
+        assert!(
+            said.iter().any(|l| l.starts_with("resume     ")),
+            "{said:#?}"
+        );
+        assert!(
+            said.iter().any(|l| l.starts_with("checks     ")),
+            "{said:#?}"
+        );
+        assert_eq!(
+            done.verification.as_ref().unwrap().verified_fingerprint,
+            candidate_fingerprint
+        );
+        assert!(readme_at_head(&athena).contains("A demo."));
+        assert_eq!(athena.state.read_resume(&first), None, "the mark is spent");
     }
 }

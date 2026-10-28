@@ -1,0 +1,149 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261028-091836-kbnb",
+  "n": 1,
+  "at": "2026-10-28T09:19:16.839993358Z",
+  "invocation_seq": 1,
+  "base_commit": "e729f12576ee4148c283e596a55e76bc7f831aea",
+  "config_sha256": "b812f3c3683488bcd9485d235a6a234bc80722c9f137a6c232094fae2ee727d6",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Remove target/produce after checks pass; resume retry from kept",
+  "summary": "Two fixes for the job pipeline. (1) After Athena's own checks pass, delete the job's target/produce before the pre-verifier disk gate, and keep it when a check fails. (2) When a job stops after its candidate is built for an environment reason (disk::is_environment_reason, or an interrupt), athena retry re-reads but skips planner and producer and resumes at the stage that stopped. The audience is Athena operators and the verifier.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "New tests for cleanup, low-disk resume, and interrupt resume; cargo test and clippy pass."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Tests count planner and producer invocations in the retry (zero) and check target/produce is absent or present."
+    },
+    {
+      "id": "verified",
+      "how": "Verifier runs cargo test, clippy and fmt."
+    },
+    {
+      "id": "mechanism",
+      "how": "Behavior is enforced in code and tests, not prose."
+    },
+    {
+      "id": "root-cause",
+      "how": "Fix both the disk retention and the redo-from-scratch retry."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Resume state is recorded with the job so the retry can find the kept candidate and the stage that stopped; reading.rs is where retry reads the earlier job.",
+    "Interrupted-process stops are treated like environment-cause stops only when a built candidate exists.",
+    "The existing test helpers can count planner and producer invocations with fake agents."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A test shows target/produce is absent after checks pass and before the verifier gate, and present when a check fails. Run: cargo test.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test stops a job on low disk at the gate before the verifier, with enough free space for the first gate and less for the second. It then shows athena retry runs zero planner and zero producer invocations and proceeds to the verifier with the kept candidate. Run: cargo test.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test shows an interrupted job with a built candidate resumes the same way: zero planner and producer runs in the retry, and the reader still runs. Run: cargo test.",
+      "kind": "behavior"
+    },
+    {
+      "text": "cargo fmt --check, cargo clippy --all-targets -- -D warnings and cargo test all pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has an entry describing the cleanup of target/produce and the resume-from-candidate retry.",
+      "kind": "content"
+    },
+    {
+      "text": "The resume tests count planner and producer invocations, not free-space function reads (check with Grep in the test code).",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/state.rs",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "crates/athena-core/src/test_support.rs",
+      "action": "modify",
+      "p": 0.2
+    }
+  ],
+  "out_of_scope": [
+    "Changing the thresholds of the disk gates",
+    "Changes to athena.toml, defaults.toml or workflows",
+    "Cleaning other target directories"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.12,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.4,
+        "p90": 3.2
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 1900.0,
+        "p90": 3600.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7201117318435755,
+      "p_verification_passes": 0.6703703703703704,
+      "p_user_intervenes": 0.07491408934707904,
+      "cost_usd": {
+        "p10": 0.5037804014102683,
+        "p50": 1.1135875,
+        "p90": 2.7141196537436745
+      },
+      "wall_time_s": {
+        "p10": 520.5832712589577,
+        "p50": 1558.188456491,
+        "p90": 3059.7800208923554
+      }
+    }
+  },
+  "departures": "Touches the run pipeline, resume state and several tests, so cost and time sit above the reference.",
+  "urgent_reason": "It cuts failed attempts and redo-work retries: a retry no longer plans and builds from scratch after a low-disk stop.",
+  "hard_reason": "It changes the run pipeline, the disk gates that can hold work, and retry/resume behavior, so mistakes are costly and hard to see.",
+  "producer_effort": "high"
+}

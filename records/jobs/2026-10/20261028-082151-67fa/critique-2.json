@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261028-082151-67fa",
+  "round": 2,
+  "at": "2026-10-28T09:17:48.352315512Z",
+  "invocation_seq": 6,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The interrupted takeover runs inside dispatch, after the head was read, not in ask as the plan says, so the retry job keeps working from a stale head.",
+      "evidence": "Athena::retry (reading.rs:833-847) only calls ask, and ask never calls timeout_seed. timeout_seed is called only at run/mod.rs:406 inside dispatch, which go_job reaches after `let head = self.head()?; let records = Records::load(..)` (lines 165-166), the pause check (339) and disk_gate (384). close_with commits the old job's Abandoned outcome (manage.rs:192-216). dispatch then still uses the old `head`: base_commit: Some(head) (line 489), Records::load(&self.git, head) (2527), plan(..., &head) and advance(&commit, &head) (2736-2839). The plan's statements 'before ask reads the head for the new job' and 'If close_with errors, ask returns the error' do not match the code. Fix: Move the takeover (try_lock_job(old), recover_interrupted, resume_stage, rename jobs/<old>/work to kept_work_dir(old), drop the lock, close_with) out of timeout_seed. Either run it in go_job before line 165 reads the head, when the job's request retries a Dispatched job that nothing runs, or reload the head and records after the close and call dispatch again, as the reread branch does at run/mod.rs:361-379. Keep timeout_seed a pure lookup that sees the old job closed with a kept dir. In resume_after_an_interrupted_process_runs_only_the_verifier, assert that the retry job's base_commit is the commit made after the old job's Abandoned outcome.",
+      "location": "Decision 5 / Step 9 / Risk 'The interrupted branch closes the old job in the middle of ask'; crates/athena-core/src/run/mod.rs:162-166, 404-406, 489",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "No send-back follows the checks, so the stated reason for keeping target/produce when a check fails is wrong.",
+      "evidence": "The only send-back is the producer-report send-back inside the producer loop (run/mod.rs:1689-1836, send_back_text at 1498), before the checks. After the checks (2085-2102) the job goes to the verifier and closes; clean_job removes the job dir at close, so keeping target/produce on a failed check holds it only until then. Fix: Restate the reason (keep the producer's build unless the candidate passed Athena's checks, so a failed check frees nothing early), or note that it is kept only until close. Criterion 2's test is unchanged.",
+      "location": "Decision 1 (rejected alternative 'a send-back would lose the producer's build') and the reading's 'kept if checks fail (send-back)'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The usage-limit stop is detected by matching guessed text, and only a test's own made-up message exercises it.",
+      "evidence": "No file in crates/ detects a usage limit (the plan says so). The end-to-end test feeds the made-up detail 'You have hit your usage limit', so it shows only that the branch matches its own fixture. Fix: Keep the matcher narrow as planned, but put the guessed matching in one named function with a unit test. State plainly in the change description and CHANGELOG that real CLI text was not confirmed, so an operator knows a real usage-limit stop may still close as an ordinary verifier failure.",
+      "location": "Decision 7 / Step 8 / Open question on usage-limit text",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan answers every earlier finding and is mostly sound. Every function it names exists: timeout_seed and keep_timed_out_work in run/mod.rs (lines 238, 277), is_environment_reason in disk.rs (203), recover_interrupted and close_with in manage.rs (238, 82), is_pre_existing in verify.rs (130), and kept_work_dir, remove_kept_work and try_lock_job in state.rs. The work-tree removal at run/mod.rs:1975, usable_baseline at line 2098 and its use in the verdict at line 2380 are as described. The arm-and-marker fixture, the role counting and the planning-enabled first run make the demonstrations fail without the new behavior. One design error needs fixing: the takeover of the interrupted job (lock, recover, rename, close_with) is planned 'at the start of timeout_seed, before ask reads the head', but timeout_seed is called from dispatch (run/mod.rs:406) on the retry job's go. go_job has already read the head and records (run/mod.rs:165-166), and dispatch has already run the pause check and the first disk gate. Closing the old job there makes a new commit, and the rest of dispatch keeps a stale head: as the new job's base_commit (line 489), for records (2527) and in the advance and landing steps (2736-2839). The plan's mitigation points at the wrong function. Minor: there is no send-back after the checks, so the reason for keeping target/produce on a failed check is wrong (the criterion is still met), and usage-limit detection by text is a guess."
+}

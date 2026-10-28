@@ -27,6 +27,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- A job that passed its own checks no longer fails twice on disk. Once Athena's checks have all passed, the job's
+  producer build directory (`target/produce`) is removed before the gate that runs before the verifier; it is
+  kept when a check fails. Before, only the idle-job sweep removed it, and that sweep skips the job that asks, so a
+  finished build stayed on disk and the job could stop before the verifier with under 10 GB free. A job that
+  then stopped planned and built again from scratch on `athena retry`. Now a job records a resume mark (outside
+  its job directory) when its candidate is built, and again when its checks have passed. When the job stops for
+  an environment cause (`disk::is_environment_reason`) or its process dies, `athena retry` still runs the reader,
+  and `athena go` on the new job resumes from the kept candidate at the stage that stopped: no planner and no
+  producer run, the candidate rebuilt on the new base, the checks skipped when they had passed on it, then the
+  verifier. A rejected job, a failure of the work, and a job closed with `athena close` are not resumed. The
+  thresholds of the disk gates are unchanged. Tests count planner and producer invocations in the retry (zero)
+  for a low-disk stop at the gate before the verifier and for an interrupted job, and check that `target/produce`
+  is gone after passing checks and kept after a failing one.
 - The scope guard no longer groups a request into another line of work because its text cites that line's job
   ids. On 2026-10-28 a separate disk-and-resume fix that cited two jobs of a paused line as evidence was refused
   as part of that line. Root cause: `request_records` scanned each request's text for any earlier job id and

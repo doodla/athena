@@ -1,0 +1,342 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261028-082151-67fa",
+  "round": 2,
+  "at": "2026-10-28T09:16:00.643805587Z",
+  "invocation_seq": 5,
+  "approach": "Two fixes in athena-core, with tests and a changelog entry. (1) In produce_and_verify, once no check has failed outside the pre-existing ones (the test the verdict uses), delete <job_dir>/target/produce with a new disk::remove_producer_build, before the pre-verifier gate. It stays when a check fails. (2) Add reading::resume_stage(job, recovered_invocations), a pure function over records. It decides whether a retry resumes at the producer stage (timed out) or at the candidate stage (the candidate was built and the stop was low disk, a usage limit, or a process that died after a completed producer run). A Failed job must satisfy disk::is_environment_reason, which is widened to cover `environment: usage limit`. At each such stop produce_and_verify keeps the work tree under kept/<job>/work through the keeper the timed-out producer uses (keep_timed_out_work split into keep_work plus a wrapper). The work tree is removed after the verifier loop and no longer right after admission, so a process that dies during the checks or the verifier still leaves it. run/mod.rs timeout_seed calls resume_stage and carries the stage. On a candidate-stage resume, dispatch skips planning and produce_and_verify skips the producer loop. The snapshot is seeded from the kept dir with the existing SnapshotRepo::BaseThenDir, and admission, both disk gates, Athena's checks and the verifier run again. An interrupted job (Dispatched, nothing running it): timeout_seed takes the old job's lock, calls the now pub(crate) manage.rs recover_interrupted for the recovered invocations, asks resume_stage, moves jobs/<old>/work to kept/<old>/work, releases the lock, then closes the old job as Abandoned through the existing Athena::close_with. That commits the recovered records and cost, and the old job no longer stays Dispatched. A usage-limit verifier failure becomes a kept-work `environment: usage limit ...` Failed stop. Tests use a one-shot arm file plus a marker file under the state root to make only the pre-verifier gate low, count agent calls by role, and plan every job with [job_plan] enabled = true, mode = \"all\".",
+  "decisions": [
+    {
+      "choice": "Remove only <job_dir>/target/produce, right after the checks, when no check failed outside the pre-existing ones, and before the pre-verifier gate. The call is disk::remove_producer_build (pin::remove_tree through the state remover; a failure only warns). The condition is `check_runs.iter().all(|r| r.passed || verify::is_pre_existing(r, baseline))`, with the same baseline value that `judge` receives (the `usable_baseline` computed at run/mod.rs ~2098, which mark_pre_existing already uses; the producer confirms it is the one passed in VerdictInputs near line 2370).",
+      "reason": "Answers finding 5. A pre-existing failure (a check that failed on the base and fails again) blocks neither the verdict nor a send-back, so keeping target/produce for it would still leave the job short of disk. The condition mirrors `blocking_checks` in verify.rs judge (line 298). After the checks nothing reads the producer's build; the checks and the verifier build in target/verify. sweep_idle_targets skips the asking job, so nothing else frees it.",
+      "rejected": [
+        {
+          "option": "`check_runs.iter().all(|r| r.passed)`",
+          "why": "Ignores pre-existing failures (finding 5)."
+        },
+        {
+          "option": "StateDir::remove_target (all of target/)",
+          "why": "Also deletes target/verify, which the checks and the verifier use."
+        },
+        {
+          "option": "Lower or bypass the 10 GB threshold",
+          "why": "Out of scope."
+        },
+        {
+          "option": "Free the space inside the gate by sweeping the asking job's own target",
+          "why": "The gate cannot know whether the checks passed; a send-back would lose the producer's build."
+        }
+      ]
+    },
+    {
+      "choice": "Widen disk::is_environment_reason to `reason.starts_with(LOW_DISK) || reason.starts_with(USAGE_LIMIT)` with a new const USAGE_LIMIT = \"environment: usage limit\". resume_stage reuses it. No is_resumable_stop function.",
+      "reason": "One predicate and no near-duplicate. Callers read earlier: only the disk.rs unit tests and athena-cli/tests/drain.rs ~1727; both stay true for low disk.",
+      "rejected": [
+        {
+          "option": "A new disk::is_resumable_stop",
+          "why": "Near-duplicate of is_environment_reason."
+        },
+        {
+          "option": "Prefix-match any `environment:` reason",
+          "why": "Would treat future environment reasons as resumable with no candidate-stage guarantee."
+        }
+      ]
+    },
+    {
+      "choice": "Keep the work tree through one shared keep_work (split from keep_timed_out_work) and delay removal of job_dir/work from just after admission to after the verifier loop. A pinned job still removes it at once and keeps nothing.",
+      "reason": "Same keep mechanism as the timed-out producer (kept_work_dir, progress-note.md, remove_kept_work at close). A process that dies during the checks or the verifier still leaves the work tree, which the interrupted case needs.",
+      "rejected": [
+        {
+          "option": "Reseed from candidate_commit in the repository, as tree_seed does",
+          "why": "The commit is dangling and may be pruned; it is a second mechanism."
+        },
+        {
+          "option": "Keep work only at the two disk gates",
+          "why": "Leaves the usage-limit and interrupted causes with no work tree."
+        }
+      ]
+    },
+    {
+      "choice": "resume_stage(job: &JobRecords, recovered: &[Invocation]) -> Option<ResumeStage> in reading.rs is pure. TimedOut gives Producer. Failed with is_environment_reason(outcome.reason) and a candidate that has a commit and a tree and no violations gives Candidate { report: candidate.producer_report }. Dispatched (the caller has checked nothing runs it) gives Candidate { report: None } only when the highest-seq Producer or Planner invocation in `recovered` is a Producer with outcome Success. Anything else gives None.",
+      "reason": "Decides from records, not prose, and is unit-testable. An interrupted job never wrote a candidate record, so its report is None, which Candidate.producer_report allows. A later or unfinished producer attempt is a partial tree and is refused. Partial-usage records that recover_interrupted adds for a dead verifier have a higher seq but are Verifier role, so they do not disqualify; a dead second producer does.",
+      "rejected": [
+        {
+          "option": "Persist a candidate record early for interrupted jobs",
+          "why": "New record timing and schema outside the named files."
+        },
+        {
+          "option": "Match reason text inside run/mod.rs",
+          "why": "Untestable without a whole run."
+        }
+      ]
+    },
+    {
+      "choice": "Interrupted resume in run/mod.rs timeout_seed, with the old job closed. For a Dispatched job that `self.running(id)` does not report: take try_lock_job(old) (skip the seed if held), call recover_interrupted for the invocations, call resume_stage, require jobs/<old>/work to be a directory and the base unchanged except under records/, rename the dir to kept_work_dir(old) while the lock is held, drop the lock, then call Athena::close_with(old, \"interrupted; its work was resumed by a retry\", false, ui). close_with takes the lock itself, runs recover_interrupted again (read-only, same result), commits the recovered invocation files with the Abandoned outcome and totals, and calls clean_job. This happens at the start of timeout_seed, before ask reads the head for the new job. If close_with errors, ask returns the error (the kept dir stays and a later `athena close` still works).",
+      "reason": "Answers finding 3. The lock is held across the move so no other process can start the job or clean it between the check and the rename. The old job's cost is committed instead of lost, it no longer stays Dispatched with its work gone, and the closing reuses one code path. The rename comes before the close because clean_job removes jobs/<old>, work included.",
+      "rejected": [
+        {
+          "option": "Leave the old job Dispatched",
+          "why": "Its work moved away, its producer cost is never committed, and it would show as stuck."
+        },
+        {
+          "option": "Close first, then move the work",
+          "why": "clean_job in close_with removes the work tree."
+        },
+        {
+          "option": "Copy the live-record parsing into run/mod.rs",
+          "why": "Two copies of the recovery logic."
+        }
+      ]
+    },
+    {
+      "choice": "On a candidate-stage resume dispatch sets planned=false and produce_and_verify takes the seed's report and skips the producer loop. Admission, both disk gates, Athena's checks and the verifier run again.",
+      "reason": "The stopped job recorded no check results; rerunning the checks costs no agent call and is the smallest correct design. The reader runs once for the ask, as for a timed-out retry; the tests assert reader=1.",
+      "rejected": [
+        {
+          "option": "Record check results at the stop and skip the checks",
+          "why": "New record types and schema."
+        },
+        {
+          "option": "A producer with a 'do nothing' brief",
+          "why": "Still costs money."
+        }
+      ]
+    },
+    {
+      "choice": "Treat a verifier failure whose detail contains 'usage limit' (ignoring case), with no snapshot fault and no verdict, as an environment stop. Keep the work and close Failed with `environment: usage limit before the verdict; this is the environment, not the work. Retry with `athena retry <job>``.",
+      "reason": "The code has no usage-limit detection; without this branch the cause could never produce a resumable reason. The branch is narrow and sits after the verifier loop; prompts and verdict logic are untouched.",
+      "rejected": [
+        {
+          "option": "Rely on the reason prefix only",
+          "why": "Nothing in the code produces that reason."
+        }
+      ]
+    },
+    {
+      "choice": "Test fixture for the gate. The marker is one-shot. The check command is `sh -c 'if [ -e ARM ] && grep -q \"A demo\" README.md; then rm -f ARM; touch MARKER; fi'` with absolute ARM and MARKER paths under the state root (state.path().join(\"repo\")). The test creates ARM before the first go and does not recreate it before the retry. The reader fn low_while_marked(root) returns 20 GB when <root>/low-disk.marker is absent and 3 GB when it is present.",
+      "reason": "Answers finding 1. Athena re-runs the checks on the resumed candidate, and that candidate still holds the 'A demo' edit. A marker made by 'grep only' would be made again on the retry and the retry would stop at the same gate. With the arm file, the first run's check consumes the arm and makes the marker; the retry's check finds no arm, makes no marker, and the gate passes once the test has deleted the marker. The baseline run on the base commit does not match 'A demo', so the early gates stay high. The check always exits 0 when the `if` condition is false.",
+      "rejected": [
+        {
+          "option": "Marker made whenever the candidate differs",
+          "why": "The retry's rerun of the check would recreate it and the retry would stop again (finding 1)."
+        },
+        {
+          "option": "Change the check command between runs",
+          "why": "Needs a mutable capability; the arm file is simpler and uses only the filesystem."
+        },
+        {
+          "option": "Count reads in a static and fail after K reads",
+          "why": "Fragile; the gate reads twice and statics are shared across tests."
+        }
+      ]
+    },
+    {
+      "choice": "Interrupted-process fixture (finding 2): run Athena::go on a normal first job (planning off) with a Verifier tweak that records the call then panics, wrapped in `std::panic::catch_unwind(AssertUnwindSafe(|| athena.go(..)))`. The tweak must not hold its Mutex guard when it panics. The test asserts the job is Dispatched (no outcome), jobs/<old>/work still exists (this needs the delayed removal of step 5), and a producer invocation record is in the live records. Then it calls Athena::retry(old) and go on the retry job.",
+      "reason": "A real state: the dispatch commit exists, the producer's completed live record was written by invocation.rs:260 (write_live) and its usage partial removed by sink.finish(), and the verifier died with its partial left. FakeAgentDriver::invoke holds no Mutex (read in fake.rs), and the process registry only lists real subprocesses, so `running(id)` is false in the test. The panic unwinds out of go, and the job lock is released on drop. Driver errors cannot do this, since run/mod.rs:2256 turns an Err into a verifier_failure and closes the job.",
+      "rejected": [
+        {
+          "option": "A verifier driver error that makes go return Err",
+          "why": "The code closes the job instead; only record-keeping errors propagate (finding 2)."
+        },
+        {
+          "option": "Rewrite git history to a Dispatched state by hand",
+          "why": "Brittle; needs many records and commits."
+        },
+        {
+          "option": "Only the pure resume_stage unit test",
+          "why": "Never touches the keep, rename and close path."
+        }
+      ]
+    },
+    {
+      "choice": "Planning tests use `[job_plan]` with enabled = true and mode = \"all\" (JobPlan::plans is `enabled && (mode == All || hard)` at athena-data/src/config.rs:100). The script's Planner and Critic arms return real fake outputs, taken from the deterministic arms in athena-agent/src/fake.rs, replacing the `unreachable!` arm at run/mod.rs:3420. No fallback to a planning-off test.",
+      "reason": "Answers finding 4. A planner=0 and critic=0 assertion on the retry means something only if the first run showed planner=1 and critic=1; a fallback would pass on the old code too.",
+      "rejected": [
+        {
+          "option": "Fall back to planning off and assert planner=0",
+          "why": "Passes on the old code."
+        }
+      ]
+    },
+    {
+      "choice": "Prove 'new tests fail on the old code' per test with a named failing assertion, and have the producer run each new test once with the new call stubbed out (the removal call deleted, resume_stage returning None) and record the failures in the change description.",
+      "reason": "Answers finding 6. The verifier can run only whole commands, so the per-test failing assertion is stated and the stub run is evidence from the producer.",
+      "rejected": [
+        {
+          "option": "Argue it only in prose",
+          "why": "Does not show it."
+        }
+      ]
+    },
+    {
+      "choice": "Demonstrate fmt, clippy and test as three separate whole commands.",
+      "reason": "The verifier can run only whole simple commands.",
+      "rejected": [
+        {
+          "option": "One chained line",
+          "why": "Denied in an earlier round."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "action": "modify",
+      "purpose": "Add const USAGE_LIMIT and widen is_environment_reason to cover it; add remove_producer_build(state, job, ui) (removes <job_dir>/target/produce, returns the bytes, warns on failure, 0 if absent); update the module doc; unit tests for both.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Add ResumeStage and resume_stage(job, recovered) with unit tests; make the earlier_attempt_with message name environment stops and interrupted jobs as resumable.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "Split keep_timed_out_work into keep_work plus a wrapper; delay removal of work to after the verifier loop (pinned: at once); keep work at the pre-checks gate, the pre-verifier gate and the usage-limit stop; remove target/produce after the checks, when no check failed outside the pre-existing ones; TimeoutSeed gains the stage; timeout_seed uses resume_stage, including the interrupted branch that moves the work and closes the old job; dispatch skips planning and the producer loop on a candidate-stage resume; end-to-end tests with an athena_with helper.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/manage.rs",
+      "action": "modify",
+      "purpose": "Make recover_interrupted pub(crate) so timeout_seed reuses the recovered invocations; no behavior change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased entry for both fixes: the cause, the removal after passing checks, and the retry resume for low disk, usage limit and interrupted process.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "disk.rs: add `pub const USAGE_LIMIT: &str = \"environment: usage limit\";` and widen is_environment_reason to `reason.starts_with(LOW_DISK) || reason.starts_with(USAGE_LIMIT)`; update its doc. Add remove_producer_build(state: &StateDir, job: &JobId, ui: &dyn Ui) -> u64: path job_dir/target/produce; absent returns 0; measure state::allocated_bytes; remove with crate::pin::remove_tree; print `disk       removed the producer's build directory: <bytes>`; on error print only a warning line. Unit tests: only target/produce goes (target/verify and work stay), absent returns 0, and is_environment_reason_covers_usage_limit (low disk and usage limit true; `admission refused ...` false).",
+    "manage.rs: change `fn recover_interrupted` to `pub(crate) fn recover_interrupted`. No other change.",
+    "reading.rs: add `pub enum ResumeStage { Producer, Candidate { report: Option<ProducerReport> } }` and `pub fn resume_stage(job: &JobRecords, recovered: &[Invocation]) -> Option<ResumeStage>` per the decisions (use disk::is_environment_reason on the outcome reason; Dispatched needs the highest-seq Producer or Planner invocation to be a Producer with InvocationOutcome::Success). Add the unit tests resume_stage_* (cases a to g of criterion 4). Adjust the earlier_attempt_with message.",
+    "run/mod.rs: factor keep_timed_out_work into `keep_work(ctx, snapshot, heading, reason, kept_text, closing)`, which renames snapshot.dir() to kept_work_dir(id) (or reports 'a pinned study keeps no work tree') and pushes progress-note.md. The timed-out wrapper calls it and sets TimedOut as before. Add a `keep_dir(from, id)` helper used by keep_work and by the interrupted branch of timeout_seed.",
+    "run/mod.rs: replace the unconditional `remove_tree(&work)` after admission (~line 1975) with: remove at once only if ctx.pin_dir.is_some(); otherwise remove after the verifier loop and before judge. Early returns need nothing: close cleans the job dir.",
+    "run/mod.rs: at the gate before the checks and the pre-verifier gate, call keep_work (note: the producer finished and Athena stopped for the environment) before setting the `environment: low disk ...` failure. The reason text and verification_passed=None stay as they are. Remove verify_dir as today.",
+    "run/mod.rs: after mark_pre_existing (~line 2102) and the checks line, call `crate::disk::remove_producer_build(&self.state, &id, ctx.ui)` when `check_runs.iter().all(|r| r.passed || crate::verify::is_pre_existing(r, usable_baseline))`, before the verifier inputs and the pre-verifier gate. A nested run's placeholder checks all pass; removing an absent dir is harmless.",
+    "run/mod.rs: after the verifier loop, if verdict_output is None, system_fault is None and verifier_failure contains 'usage limit' (ignoring case), call keep_work, set Failed with `{USAGE_LIMIT} before the verdict; this is the environment, not the work. Retry with `athena retry {id}``, verification_passed=None, remove verify_dir, and return the closing.",
+    "run/mod.rs: extend TimeoutSeed with `stage: ResumeStage` (the earlier report lives in the Candidate variant). In timeout_seed keep the retried_job lookup, the note/dir guards and the head-unchanged check for closed jobs, and use resume_stage(job, &[]) in place of the TimedOut test. Add the interrupted branch at the start of timeout_seed, before ask reads the head: job.state() == Dispatched and not self.running(id); `try_lock_job(&id)?` else skip; recover_interrupted(job, config) for the invocations; resume_stage; require job_dir(old)/work is a dir and the base is unchanged except under records/; keep_dir(old work, old) while the lock is held; drop the lock; call self.close_with(old, \"interrupted; its work was resumed by a retry\", false, ui) and propagate its error; use a fixed note text as the seed note. dispatch: planned = ... && !matches!(stage, Candidate). produce_and_verify: on a Candidate stage use its report and skip the producer loop (left_criteria empty). Keep remove_kept_work(resumed.job) at both close sites.",
+    "run/mod.rs tests: refactor the module's athena() into athena_with(repo, state, free_space, capability, tweak) and keep athena() as a thin caller. Add a Docs variant whose check is `sh -c <script>` (checks run in the verifier snapshot, which holds README.md; the producer confirms the cwd in the first run), a repo_planning() that appends `[job_plan] enabled = true, mode = \"all\"` to the stripped config, planner and critic arms with real fake outputs, and a Tweak that counts invocations by role (reader, planner, critic, producer, verifier) in Arc<Mutex<Vec<Role>>> and never holds the guard across a panic. Add tests: producer_build_dir_is_removed_after_passing_checks, producer_build_dir_is_removed_when_the_only_failing_check_was_pre_existing, producer_build_dir_is_kept_when_a_check_fails, retry_after_low_disk_before_the_verifier_runs_only_the_verifier, nine_and_a_half_gb_free_reaches_the_verifier, resume_after_an_interrupted_process_runs_only_the_verifier, and a usage-limit test (a Verifier tweak whose turn has outcome failed and detail 'You have hit your usage limit') asserting the Failed reason, the kept dir, and the resume.",
+    "CHANGELOG.md: add the Unreleased entry for an outside reader: the cause (the producer's build directory held the space the pre-verifier gate needed), the removal after passing checks (kept when a check fails), the retry that resumes low-disk, usage-limit and interrupted-process stops from the kept candidate, the old interrupted job being closed as Abandoned, and that a retry still runs the reader and Athena's checks but no planner, critic or producer. Use no banned words and no email-like text.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings`, then `cargo test --locked`, each as its own command. For each new test, run it once with the new behavior stubbed out (remove_producer_build call deleted; resume_stage returning None) and confirm the failing assertion named in the demonstrations; restore and record this in the change description."
+  ],
+  "risks": [
+    {
+      "risk": "The check command needs `sh`, `grep`, `rm` and `touch` on the sanitized PATH of the check environment, and its cwd must be the verifier snapshot that holds README.md.",
+      "mitigation": "The command is `sh -c ...` with absolute ARM and MARKER paths; the producer runs the first test early and, if PATH is the problem, uses /bin/sh. A wrong cwd shows as a FAILED check in the test output."
+    },
+    {
+      "risk": "The baseline check on the base commit could consume the arm or make the marker and trip an early gate.",
+      "mitigation": "The command acts only when README.md contains 'A demo', which the base lacks."
+    },
+    {
+      "risk": "The panic-based interrupted fixture may leave an unexpected state (the work dir cleaned on unwind, the lock or a registry entry held, or a poisoned test Mutex).",
+      "mitigation": "The tweak records the call and drops its guard before panicking. The test asserts the preconditions (job Dispatched, work dir present, producer live record present) before calling retry, so a bad fixture fails loudly at the first assertion. The producer reports the first failing precondition rather than loosening the test."
+    },
+    {
+      "risk": "The interrupted branch closes the old job in the middle of ask, and the head may then be stale.",
+      "mitigation": "The branch runs at the start of timeout_seed before the head is read for the new job; the producer verifies the order in ask and re-reads the head after the close."
+    },
+    {
+      "risk": "A partial work tree (a dead second producer run) could be resumed.",
+      "mitigation": "resume_stage requires the highest-seq producer or planner invocation to be a completed Success producer; a later partial record gives None (unit test g)."
+    },
+    {
+      "risk": "An interrupted resume has no producer report, so the closing record's report is empty.",
+      "mitigation": "Candidate.producer_report is an Option; the progress note says the producer ran in the interrupted job; the CHANGELOG notes it."
+    },
+    {
+      "risk": "Usage-limit detection by text is a guess; the repository has no such string.",
+      "mitigation": "The branch is narrow (no verdict, no snapshot fault, detail contains 'usage limit' ignoring case) and unit-tested; listed as an open question."
+    },
+    {
+      "risk": "Planner and critic fake outputs may not validate, so the planning-enabled first run fails.",
+      "mitigation": "Reuse the deterministic arms of athena-agent/src/fake.rs; if one needs adjusting, adjust the fake output in the test, not the production code."
+    },
+    {
+      "risk": "Delaying work removal leaves a mounted pin or a stale dir.",
+      "mitigation": "A pinned job removes the work tree at once and keeps nothing; a closed job's job dir is removed by clean_job; if the keep fails the retry starts from the base."
+    },
+    {
+      "risk": "The rerun of the checks on the resumed candidate can stop on disk again.",
+      "mitigation": "The removal after the checks frees target/produce on the retry; the same gates run and the job again closes with a kept candidate and a retryable reason."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "End-to-end test in the run/mod.rs test module, producer_build_dir_is_removed_after_passing_checks. Entry points: Athena::ask, then Athena::go. Preconditions: a repo fixture without [job_plan]; a test capability whose check is `sh -c 'exit 0'`; the plenty_of_space reader (test_support, exists today), so the early gate and the pre-verifier gate pass. Seam: the athena_with(repo, state, free_space, capability, tweak) helper, built from the existing athena() in that module (step 9 adds it); Tweak is an Arc<dyn Fn(&AgentInvocation, &mut FakeTurn)> as in run_pin_tests.rs. The Producer tweak creates <spec.workdir.parent()>/target/produce/big (job_dir is the parent of work). The Verifier tweak records whether <spec.workdir.parent()>/target/produce exists; that is the job dir, since the verify dir sits beside it. The production gate runs between the checks and the verifier, so the tweak sees the state after the removal.",
+      "command": "cargo test --locked -p athena-core producer_build_dir_is_removed_after_passing_checks",
+      "observes": "The producer tweak created target/produce, the verifier tweak saw it absent, the verifier ran once, and the job closed with no `environment: low disk` reason. A second test, producer_build_dir_is_removed_when_the_only_failing_check_was_pre_existing, uses a check that always fails (`sh -c 'exit 1'`; the base fails too, so it is pre-existing) and sees target/produce absent as well.",
+      "fails_without": "Without the remove_producer_build call after the checks, the verifier tweak sees target/produce present and the absence assertion fails."
+    },
+    {
+      "criterion": 2,
+      "method": "Same helper and module, test producer_build_dir_is_kept_when_a_check_fails. The test capability's check is `sh -c 'if grep -q \"A demo\" README.md; then exit 1; fi'`: it passes on the base (the baseline, so the failure is not pre-existing) and fails on the candidate. Producer and Verifier tweaks as in criterion 1. The verifier runs even when a check fails, so the tweak runs. The test also checks that a `FAILED` check line reached the Ui and that the closing reason does not start `environment: low disk`.",
+      "command": "cargo test --locked -p athena-core producer_build_dir_is_kept_when_a_check_fails",
+      "observes": "The verifier tweak saw target/produce still present after the failed check.",
+      "fails_without": "If the removal ignored the check result and always ran, the verifier tweak would see target/produce gone and the presence assertion would fail. If it used plain `all(passed)`, the criterion 1 pre-existing test would fail instead."
+    },
+    {
+      "criterion": 3,
+      "method": "End-to-end test retry_after_low_disk_before_the_verifier_runs_only_the_verifier. Entry points: Athena::ask, Athena::go on the job, then Athena::retry(job) and Athena::go on the retry job. Fixture: athena_with and a planning repo (`[job_plan] enabled = true, mode = \"all\"`; the Planner and Critic tweak arms return the fake outputs from athena-agent/src/fake.rs; these arms are added by step 9). The reader is the fn `low_while_marked(root: &Path)`: 20 GB without <root>/low-disk.marker, 3 GB with it, injected through StateDir::with_free_space (exists today). The check is `sh -c 'if [ -e ARM ] && grep -q \"A demo\" README.md; then rm -f ARM; touch MARKER; fi'`, with ARM and MARKER absolute under state.path().join(\"repo\"). The test creates ARM once, before the first go. The dispatch gate (run/mod.rs ~384) and the gate before the checks (~1980) pass; the check run consumes ARM and creates the marker; the pre-verifier gate (verifier_environment_problem) reads 3 GB and stops. A Tweak counts invocations by role. First go: assert Failed, a reason starting `environment: low disk` and containing `before the verifier`, kept_work_dir(job) exists, and reader=1, planner=1, critic=1, producer=1, verifier=0. Then delete the marker (std::fs::remove_file), do not recreate ARM, reset the counters, and call retry and go. The retry reruns the check on the resumed candidate; ARM is absent, so no marker is made and the gate passes. Assert reader=1 (retry calls ask, which invokes the reader, as for a timed-out retry), planner=0, critic=0, producer=0, verifier=1, a final state that is not Failed, that the verifier's snapshot holds the first run's README.md edit ('A demo'), and that kept_work_dir(first job) is gone once the retry closes.",
+      "command": "cargo test --locked -p athena-core retry_after_low_disk_before_the_verifier_runs_only_the_verifier",
+      "observes": "The first run stops only at the pre-verifier gate, with all agent roles but the verifier called once. The retry shows reader=1, planner=0, critic=0, producer=0, verifier=1 on the kept candidate.",
+      "fails_without": "Without the keep and the stage-aware resume there is no kept dir and the retry re-plans and re-runs the producer, so planner, critic and producer are above 0 and the verifier's snapshot may lack the edit. Without the one-shot arm the retry would stop again at the gate and verifier would be 0 (finding 1)."
+    },
+    {
+      "criterion": 4,
+      "method": "Unit tests in the reading.rs test module on its existing JobRecords builders, named resume_stage_*: (a) TimedOut gives Producer. (b) Failed with `environment: low disk ... before the verifier` and a candidate with commit, tree and report gives Candidate carrying that report. (c) The same with `environment: usage limit before the verdict` gives Candidate. (d) Failed `environment:` with no candidate record, or a candidate with violations, gives None. (e) Failed `admission refused the change` gives None, and Rejected gives None. (f) Dispatched with recovered [Producer seq 1 Success] gives Candidate { report: None }; the same plus a Verifier partial seq 2 still gives Candidate. (g) Dispatched with a later Producer seq 2 that is Missing or not Success, or with no producer invocation, gives None. End-to-end half in run/mod.rs: resume_after_an_interrupted_process_runs_only_the_verifier. First go runs on planning off with a Verifier tweak that records the call and then panics, inside std::panic::catch_unwind(AssertUnwindSafe(..)). Entry points: Athena::go (dies), then Athena::retry(old) and Athena::go. Preconditions asserted before the retry: the old job is Dispatched with no outcome, jobs/<old>/work exists, and a producer live record exists (written by invocation.rs write_live, exists today). The delayed work removal of step 5 is what leaves the work dir. Retry asserts: planner=0, critic=0, producer=0, verifier=1, the verifier snapshot holds the README.md edit, the old job is now closed Abandoned (the close_with path, with the recovered producer invocation committed), and kept/<old> is gone when the retry closes. A second end-to-end test, usage_limit_failure_keeps_the_candidate_and_the_retry_runs_only_the_verifier, covers the usage-limit cause: a Verifier tweak returns an outcome-failed turn with detail 'You have hit your usage limit'; assert the Failed reason starts with `environment: usage limit`, the kept dir exists, and the retry shows producer=0, verifier=1.",
+      "command": "cargo test --locked -p athena-core resume_stage",
+      "observes": "Each unit case returns the stated stage. The interrupted and usage-limit end-to-end tests (run with `cargo test --locked -p athena-core resume_after_an_interrupted_process` and `cargo test --locked -p athena-core usage_limit_failure`) show a resume from the kept work tree with no producer call.",
+      "fails_without": "Without resume_stage and the interrupted branch of timeout_seed, the environment and interrupted cases return None or fall back to the base, so the stage assertions fail and the retry re-runs the producer (producer=1)."
+    },
+    {
+      "criterion": 5,
+      "method": "Read the diff plus the predicate unit test. `git diff -- crates/athena-core/src/disk.rs crates/athena-core/src/reading.rs crates/athena-core/src/run/mod.rs` must show: is_environment_reason widened and no is_resumable_stop; resume_stage in reading.rs calling disk::is_environment_reason; timeout_seed (the function lives in run/mod.rs, not reading.rs) calling reading::resume_stage and carrying the stage. The brief names timeout_seed in reading.rs; the plan keeps the call in run/mod.rs and the decision in reading.rs, so the content check looks for the call in both files. The unit test is_environment_reason_covers_usage_limit asserts that `environment: low disk` and `environment: usage limit` hold and that `admission refused ...` does not.",
+      "command": "cargo test --locked -p athena-core is_environment_reason",
+      "observes": "The predicate holds for both environment reasons, and the diff shows no near-duplicate function.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Run three whole commands, each on its own, never chained: `cargo fmt --all --check`, then `cargo clippy --all-targets --locked -- -D warnings`, then `cargo test --locked`. The new tests fail on the old code, each at a named assertion: criteria 1, 2 and 8 fail at the 'target/produce absent or present' and verifier-count assertions, because the old code never removes it and the old gate sees it; criterion 3 fails at planner/producer=0 on the retry, because the old retry has no resume stage; criterion 4 fails at the stage assertions, because resume_stage does not exist and the old timeout_seed handles only TimedOut. The producer also ran each new test with the new behavior stubbed out and recorded the failure in the change description (step 12).",
+      "command": "cargo test --locked",
+      "observes": "All three exit 0: no formatting diff, no clippy warning (no dead ResumeStage variant or unused helper), and every workspace test passes, including the xtask policy tests.",
+      "fails_without": "Without the change the new tests fail at the assertions named above; code not run through cargo fmt fails the fmt check; an unused item fails clippy -D warnings."
+    },
+    {
+      "criterion": 7,
+      "method": "Read the CHANGELOG.md diff (`git diff -- CHANGELOG.md`): an Unreleased entry names the cause of job 20261028-081326-zzxg (the producer's build directory held the space the pre-verifier gate needed), the removal after passing checks (kept when a check fails), and the retry that resumes low-disk, usage-limit and interrupted-process stops from the kept candidate with no planner, critic or producer run. The policy tests that scan tracked files for banned words and email-like text run in cargo test.",
+      "command": "cargo test --locked",
+      "observes": "The entry exists, and the xtask policy tests pass on it.",
+      "fails_without": null
+    },
+    {
+      "criterion": 8,
+      "method": "Outcome test nine_and_a_half_gb_free_reaches_the_verifier. Entry point: Athena::go. Fixture: the arm-and-marker check of criterion 3 (the test creates ARM before go). The reader fn low_while_marked_and_built(root) returns 20 GB with no marker; with a marker and any <root>/jobs/*/target/produce present it returns 9.5 GB; with a marker and none present it returns 10.5 GB. The Producer tweak creates target/produce/big. The first two gates see no marker and pass. After the checks the marker exists, and the pre-verifier gate sees 9.5 GB until the removal frees target/produce. Assert exactly one Verifier invocation and that the closing reason does not start `environment: low disk`. Criterion 3 shows the retry runs no planner, critic or producer.",
+      "command": "cargo test --locked -p athena-core nine_and_a_half_gb_free_reaches_the_verifier",
+      "observes": "The job reaches the verifier with 9.5 GB before the removal and does not stop on disk.",
+      "fails_without": "Without the removal, the pre-verifier gate reads 9.5 GB (sweep_idle_targets skips the asking job), the job closes `environment: low disk ... before the verifier`, and the verifier count is 0."
+    }
+  ],
+  "open_questions": [
+    "Does the panic from the verifier tweak leave the job Dispatched with jobs/<old>/work in place, with the lock released? I read that FakeAgentDriver::invoke holds no Mutex, that the process registry lists only real subprocesses, and that invocation.rs write_live runs when the producer completes; I did not read the lock's Drop or the cleanup on unwind. The test asserts these preconditions first.",
+    "Which text does the Claude CLI emit for a usage limit, and does it reach the verifier invocation's detail? 'usage limit' ignoring case is the best guess.",
+    "The exact shape of valid fake Planner and Critic outputs; the plan reuses the deterministic arms of athena-agent/src/fake.rs, which I did not read.",
+    "The cwd and PATH of check commands: the plan assumes the verifier snapshot (it holds README.md) and a PATH with sh, grep, rm, touch.",
+    "Whether `usable_baseline` at run/mod.rs ~2098 is the same value passed in VerdictInputs.baseline near line 2370 (I read the first, not the second). The removal condition must use the one `judge` uses.",
+    "The order of timeout_seed and the head read in ask: the interrupted branch's close_with commits records, so the new job must read its head after it."
+  ],
+  "producer_section_sha256": "4ba21d9b521f78f1f683b24c946490210d9a1f1ad3c70c3b59ab1a2c371472a5"
+}
