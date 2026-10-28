@@ -394,8 +394,7 @@ impl Athena {
                 // A retry or follow-up must reflect the previous result and state the change scope. Only the
                 // retried job and the jobs the request says it follows up count; jobs it cites as evidence
                 // (such as the introspections in a root-cause request) are shown to the reader, not checked.
-                let priors = continued_jobs(&request.text, attempt, &referenced_jobs);
-                match check_prior_result_and_scope(&reading, &priors) {
+                match check_reading_acceptance(&reading, &request.text, attempt, &referenced_jobs) {
                     Ok(()) => Ok((Some(reading), record, None)),
                     Err(e) => Ok((None, record, Some(format!("{e:#}")))),
                 }
@@ -2080,6 +2079,130 @@ pub fn check_prior_result_and_scope(reading: &Reading, priors: &[&EarlierAttempt
     )
 }
 
+/// Every check a built reading must pass before it is accepted: the previous result and change scope of a
+/// retried or followed-up job ([`check_prior_result_and_scope`]), then the evidence each criterion rests on
+/// ([`check_criteria_evidence`]). It applies to a first attempt as well as a retry.
+pub fn check_reading_acceptance(
+    reading: &Reading,
+    request: &str,
+    attempt: Option<&EarlierAttempt>,
+    referenced: &[EarlierAttempt],
+) -> Result<()> {
+    check_prior_result_and_scope(reading, &continued_jobs(request, attempt, referenced))?;
+    check_criteria_evidence(reading)
+}
+
+/// Phrases that make the producer's own account the evidence for a criterion. Each is a whole-word
+/// phrase, lowercase, with a straight apostrophe.
+const REPORT_NOUNS: [&str; 5] = ["report", "summary", "claims", "statement", "account"];
+const PRODUCER_VERBS: [&str; 12] = [
+    "states",
+    "confirms",
+    "says",
+    "lists",
+    "reports",
+    "claims",
+    "attests",
+    "declares",
+    "notes",
+    "describes",
+    "asserts",
+    "writes",
+];
+const REPORT_VERBS: [&str; 13] = [
+    "lists",
+    "states",
+    "confirms",
+    "says",
+    "shows",
+    "names",
+    "records",
+    "claims",
+    "mentions",
+    "notes",
+    "describes",
+    "cites",
+    "includes",
+];
+
+/// Whether `text` contains `phrase` as whole words.
+fn has_phrase(text: &str, phrase: &str) -> bool {
+    text.match_indices(phrase).any(|(at, _)| {
+        let before = text[..at].chars().next_back();
+        let after = text[at + phrase.len()..].chars().next();
+        !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
+    })
+}
+
+/// The phrase that makes a criterion rest on the producer's own account, if it has one. Matching is on
+/// lowercase text with curly apostrophes made straight and runs of white space made single spaces.
+fn producer_evidence_phrase(criterion: &str) -> Option<String> {
+    let text = criterion
+        .to_lowercase()
+        .replace(['\u{2019}', '\u{2018}'], "'")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut phrases: Vec<String> = Vec::new();
+    for noun in REPORT_NOUNS {
+        phrases.push(format!("producer's {noun}"));
+        phrases.push(format!("producers' {noun}"));
+        phrases.push(format!("producer {noun}"));
+        phrases.push(format!("{noun} from the producer"));
+        phrases.push(format!("{noun} of the producer"));
+        phrases.push(format!("{noun} by the producer"));
+    }
+    for verb in PRODUCER_VERBS {
+        phrases.push(format!("the producer {verb}"));
+        phrases.push(format!("producer {verb}"));
+    }
+    for verb in REPORT_VERBS {
+        phrases.push(format!("the report {verb}"));
+    }
+    phrases.push("according to the producer".into());
+    phrases.push("reported by the producer".into());
+    phrases.into_iter().find(|p| has_phrase(&text, p))
+}
+
+/// Refuses a reading whose acceptance criterion rests on the producer's own report, summary, claims or
+/// statement as its evidence.
+///
+/// Root cause this check removes: criteria were written without a defined list of what the verifier can
+/// observe (the candidate diff, the repository snapshot, the recorded check output, and the commands it is
+/// allowed to run), and nothing compared the evidence a criterion requires with that list. A criterion such
+/// as "the producer's report lists the caller-check Grep" can only be satisfied by something the verifier
+/// never sees, so it was accepted and then could not be judged. Jobs 20261027-004517-gk9e,
+/// 20261027-011733-vrsk, 20261027-012938-yckz, 20261026-232402-6qme and 20261026-232423-hvyb each failed that
+/// way. The list is now the reader's brief ("What the verifier can run") and this check enforces it where
+/// criteria are first fixed, for every reading with a capability, first attempt or retry.
+///
+/// The error names each refused criterion by number and text and says to restate it as a command or Grep the
+/// verifier can run, or a file in the snapshot.
+pub fn check_criteria_evidence(reading: &Reading) -> Result<()> {
+    if reading.capability.is_none() {
+        return Ok(());
+    }
+    let refused: Vec<String> = reading
+        .acceptance_criteria
+        .iter()
+        .enumerate()
+        .filter_map(|(i, c)| {
+            producer_evidence_phrase(&c.text)
+                .map(|phrase| format!("criterion {} ({:?}) cites {phrase:?}", i + 1, c.text))
+        })
+        .collect();
+    if refused.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "the reading was refused because {}; the verifier sees the candidate diff, the repository snapshot and \
+         the recorded check output, never the producer's report, summary, claims or statement, so a criterion \
+         that rests on them cannot be judged; restate each as a command or Grep the verifier can run, or a \
+         file in the snapshot",
+        refused.join("; and ")
+    )
+}
+
 /// The records of a job at the current commit.
 pub fn job_records(athena: &Athena, job_ref: &str) -> Result<(Records, JobRecords)> {
     let head = athena.head()?;
@@ -3715,7 +3838,7 @@ mod tests {
         referenced: &[EarlierAttempt],
         reading: &Reading,
     ) -> Result<()> {
-        check_prior_result_and_scope(reading, &continued_jobs(request, attempt, referenced))
+        check_reading_acceptance(reading, request, attempt, referenced)
     }
 
     #[test]
@@ -3851,5 +3974,129 @@ mod tests {
         let mut asking = scoped_reading("Add a greeting.", &[], &[]);
         asking.question = Some("which file?".into());
         check_prior_result_and_scope(&asking, &[&prior()]).unwrap();
+    }
+
+    /// A reading with a single acceptance criterion of this text.
+    fn reading_with_criterion(text: &str) -> Reading {
+        let mut reading =
+            scoped_reading("Add a greeting.", &["src/greeting.rs"], &["the changelog"]);
+        reading.acceptance_criteria = vec![Criterion {
+            text: text.into(),
+            kind: CriterionKind::Behavior,
+        }];
+        reading
+    }
+
+    #[test]
+    fn a_criterion_resting_on_the_producers_report_is_refused_and_named() {
+        let text = "the producer's report lists the caller-check Grep";
+        let error = check_criteria_evidence(&reading_with_criterion(text))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(text), "{error}");
+        assert!(error.contains("criterion 1"), "{error}");
+        assert!(
+            error.contains("a command or Grep the verifier can run"),
+            "{error}"
+        );
+        assert!(error.contains("file in the snapshot"), "{error}");
+    }
+
+    #[test]
+    fn every_phrase_family_that_cites_the_producers_own_account_is_refused() {
+        for text in [
+            "the report lists the caller-check Grep",
+            "The producer states that no caller uses the old path",
+            "the producer confirms the tests were run",
+            "the producer\u{2019}s summary names every changed file",
+            "the Producer's claims match the diff",
+            "a producer report names the Grep it ran",
+            "the producer\nsays the Grep returned no hits",
+            "the criteria check is reported by the producer as met",
+            "the old module is gone, according to the producer",
+        ] {
+            let error = check_criteria_evidence(&reading_with_criterion(text))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("was refused"), "{text}: {error}");
+        }
+    }
+
+    #[test]
+    fn every_refused_criterion_is_named_and_the_others_are_not() {
+        let mut reading = reading_with_criterion("cargo test --locked passes");
+        reading.acceptance_criteria.extend([
+            Criterion {
+                text: "the report shows the Grep".into(),
+                kind: CriterionKind::Content,
+            },
+            Criterion {
+                text: "a Grep of crates/ for `old::` returns no hits".into(),
+                kind: CriterionKind::Behavior,
+            },
+            Criterion {
+                text: "the producer confirms the move".into(),
+                kind: CriterionKind::Content,
+            },
+        ]);
+        let error = check_criteria_evidence(&reading).unwrap_err().to_string();
+        assert!(error.contains("criterion 2"), "{error}");
+        assert!(error.contains("criterion 4"), "{error}");
+        assert!(!error.contains("criterion 1"), "{error}");
+        assert!(!error.contains("criterion 3"), "{error}");
+    }
+
+    #[test]
+    fn criteria_naming_a_command_a_grep_or_a_file_are_accepted() {
+        for text in [
+            "a Grep of crates/ for `gh::` outside gh/ returns no hits",
+            "cargo test --locked passes",
+            "Run `cargo test --locked -p athena-core reading`: the new test fails without the change",
+            "CHANGELOG.md names the root cause",
+            "README.md has a Quick start section",
+            "the doc comment on the check names the cause",
+            "the error message names the criterion and tells the reader to restate it",
+            "the producer model is on the allowed list",
+            "the summary section of docs/design/requirements-map.md is unchanged",
+            "the report page from `cargo run -p xtask -- site` contains the glossary",
+        ] {
+            check_criteria_evidence(&reading_with_criterion(text))
+                .unwrap_or_else(|e| panic!("{text}: {e}"));
+        }
+    }
+
+    #[test]
+    fn a_reading_that_declines_has_no_criterion_to_check() {
+        let mut reading = reading_with_criterion("the producer's report lists the Grep");
+        reading.capability = None;
+        reading.decline_reason = Some("no capability fits".into());
+        check_criteria_evidence(&reading).unwrap();
+    }
+
+    #[test]
+    fn the_acceptance_check_refuses_a_first_attempt_and_a_retry_alike() {
+        let bad = "the producer's report lists the caller-check Grep";
+        // A first attempt: no earlier job, so the previous-result check passes and the evidence check decides.
+        let reading = reading_with_criterion(bad);
+        let error = check_reading_acceptance(&reading, "add a greeting", None, &[])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(bad), "{error}");
+        // A retry whose reading names the previous job and states its scope is still refused for the criterion.
+        let previous = prior();
+        let mut retry = reading_with_criterion(bad);
+        retry.summary = format!("Retry {PRIOR_JOB}: fix the missing greeting.");
+        let error = check_reading_acceptance(&retry, "add a greeting", Some(&previous), &[])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(bad), "{error}");
+        assert!(!error.contains("the previous result"), "{error}");
+        // The same two readings with a criterion the verifier can run are accepted.
+        let good = "a Grep of crates/ for `old::` returns no hits";
+        check_reading_acceptance(&reading_with_criterion(good), "add a greeting", None, &[])
+            .unwrap();
+        let mut retry = reading_with_criterion(good);
+        retry.summary = format!("Retry {PRIOR_JOB}: fix the missing greeting.");
+        check_reading_acceptance(&retry, "add a greeting", Some(&previous), &[]).unwrap();
     }
 }

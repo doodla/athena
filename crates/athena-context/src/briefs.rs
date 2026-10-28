@@ -1499,7 +1499,9 @@ pub fn reader_brief(inputs: &ReaderInputs) -> String {
         let _ = writeln!(
             out,
             "# What the verifier can run\n\nThe verifier exercises behavior criteria only with these commands, from the repository root, \
-             with no environment variables of its own, no other programs, and no writes. Write behavior criteria it can check this way.\n"
+             with no environment variables of its own, no other programs, and no writes. Write behavior criteria it can check this way. \
+             It sees the candidate diff, the repository snapshot and the recorded check output, never the producer's report, summary or \
+             claims: a criterion that cites them is refused (`check_criteria_evidence` in athena-core).\n"
         );
         for (capability, lines) in &inputs.verifier_can_run {
             let _ = writeln!(out, "{capability}: {}", lines.join("; "));
@@ -2723,6 +2725,15 @@ mod tests {
         assert!(brief.contains(
             "- verifier (change): composes contract, frame.verifier; 1298 of 1300 tokens used, 2 left"
         ));
+    }
+
+    #[test]
+    fn the_reader_brief_says_the_verifier_never_sees_the_producers_report() {
+        let brief = reader_brief(&reader_inputs(&reading()));
+        let (_, section) = brief.split_once("# What the verifier can run").unwrap();
+        let section = section.split("\n# ").next().unwrap();
+        assert!(section.contains("never the producer's report"), "{section}");
+        assert!(section.contains("is refused"), "{section}");
     }
 
     #[test]
