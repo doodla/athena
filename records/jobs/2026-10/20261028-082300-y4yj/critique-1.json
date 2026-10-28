@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261028-082300-y4yj",
+  "round": 1,
+  "at": "2026-10-28T15:37:29.014022983Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The new rule will very likely make the replay hold this job, and the verifier will record that as a Blocker. The plan treats this as expected rather than as a problem.",
+      "evidence": "`replay_is_held` holds when newly refused readings exceed 10% and `criteria_intend_higher_refusal` is false. verify.rs pushes `Severity::Blocker` in that case. INTENDED_REFUSAL_PHRASES are 'refuse more', 'refuses more', 'higher refusal rate' and similar; none of the reading's six criteria contains one. No stored reading has a `Code survey:` assumption, because the convention is new. So every stored change/code reading with a behavior criterion among the newest 50 is newly refused. Class code is on the closed list (athena.toml:126), and code work is probably common, though I did not count the stored readings. Fix: Turn the open question into a required correction. Either the reading gets a criterion stating the higher refusal rate is intended (for example: 'the change refuses more readings: change/code readings with behavior criteria and no Code survey; a higher refusal rate is intended'), or the plan states the expected replay result and asks Athena or the user to amend the criteria before the producer runs. The planner cannot add criteria, so it must name this explicitly rather than let verification find it.",
+      "location": "Plan, Open questions item 3 (replay); crates/athena-core/src/verify.rs:337-355; crates/athena-core/src/reading.rs:2619-2648",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The new-output rule guesses at what a 'new output' is when the code could have been read. It misses the original failure and fires on ordinary test fixtures.",
+      "evidence": "Records validation is `check_record_file` and the `AnyRecord` schema list in crates/athena-data/src/records.rs. It accepts files under `records/` only: JSON at canonical locations plus the JOB_MARKDOWN allow-list. A reading that adds a new record kind or stored output lists deliverables such as crates/athena-data/src/records.rs (modify) or a module that writes under records/. It does not list a created `crates/**/*.json`. Meanwhile, created .json, .toml or .txt files under crates/ are mostly test fixtures, which have nothing to do with the records allow-list. The plan says it did not read the records validation code. Fix: Trigger the allow-list/round-trip requirement on the real signal: a deliverable at crates/athena-data/src/records.rs (any action), a deliverable path under `records/`, or a criterion or deliverable naming `records/`. Keep 'create a data file under crates/' only if criterion 3 needs it literally. Accept as evidence a survey that names `check_record_file`, `AnyRecord`, the allow-list, or a schema round-trip test. Base the doc comment on the code, not on an assumption.",
+      "location": "Plan, Decision 3 and Step 3 (new-output trigger); crates/athena-data/src/records.rs:2681-2710",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Limiting the trigger to class \"code\" leaves out class \"tests\" readings, which design test seams too.",
+      "evidence": "The closed class list (athena.toml:126) includes \"tests\". The second introspection's failure concerned test seams for behavior tests. A reader can classify such work as tests and avoid the check. Fix: Include class \"tests\" in the trigger, or state why it is excluded. Count any effect on the replay result under the first finding.",
+      "location": "Plan, Decision 2 (trigger on class_of_work == \"code\")",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The risk text says the CLI fixtures use class docs, but many fixtures in crates/ use class \"code\".",
+      "evidence": "`class_of_work: \"code\"` appears in crates/athena-cli/tests/backtest.rs:449,543, review.rs:99, drain.rs:2126, crates/athena-cli/src/backtest.rs:629 and elsewhere. Most are not readings run through acceptance; I did not confirm whether backtest runs check_reading_text on its fixtures. Fix: Have the producer grep for fixtures that are readings with class code, capability change and a behavior criterion, and that pass through check_reading_acceptance or check_reading_text (backtest especially). Correct the risk text.",
+      "location": "Plan, Risks item 1",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan puts the fix in the right place. It adds `check_code_survey` as a pure check inside `check_reading_acceptance` (reading.rs:2229), next to `check_criteria_evidence`, so `read_for` (reading.rs:483) and `check_reading_text` (reading.rs:2512) both run it. It adds a `READING_RULES` line and a brief section, and leaves READER_FRAME alone because that set is at 1997 of 2000 tokens. The named functions, fixtures and tests exist, and demonstrations 2 and 3 fail when the call is removed. Two major problems remain. First, the plan expects the replay to newly refuse stored readings and calls that \"working as designed\". But verify.rs:337-355 turns a replay hold into a Blocker finding. None of the six criteria contains a phrase from INTENDED_REFUSAL_PHRASES (reading.rs:2619). So if more than 10% of the newest 50 stored code readings with behavior criteria lack a `Code survey:` assumption, which is likely because the assumption is new, the job is held at verification. Second, the new-output rule rests on a guess the plan admits to (\"I did not read the code that validates records\"). Records live under `records/` and are checked by `check_record_file`/`AnyRecord` in crates/athena-data/src/records.rs (around lines 2640-2710). A new record kind enters through a code change there, not through a created .json under crates/. As planned, the rule misses the failure it is meant to prevent and catches test fixtures instead."
+}

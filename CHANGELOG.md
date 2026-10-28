@@ -9,6 +9,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A code survey requirement in reading acceptance. Root cause: the reading stage designed storage, override
+  and test seams from a general idea of the feature, without surveying what the records validation accepts or
+  where resolution and probing happen in the code (jobs 20261028-055601-hg0n and 20261028-082151-67fa;
+  introspections 20261028-055651-dhh0 and 20261028-082240-77as). Fix: `check_code_survey` in athena-core,
+  called from `check_reading_acceptance`, refuses a reading of class `code` or `tests` that has a behavior
+  criterion and no assumption that starts `Code survey:` and names a `crates/` path. When the reading also
+  creates a record or data file under `crates/` (or changes a `records.rs`), the survey must name
+  `check_record_file`, `AnyRecord` or a round-trip test; the word allow-list alone does not count. The reader
+  brief gains a rule line and `CODE_SURVEY_GUIDE`: write the survey before behavior criteria (entry point and
+  order of resolution and probing, the records validation allow-list, how to measure the property directly),
+  and write an intended-refusal criterion when a request adds or tightens a refusal rule. This change refuses
+  more readings, and the higher refusal rate is intended, so the replay of accepted readings does not hold it.
 - One soundness question in the critic's brief and in every change-verification brief (a study's verifier brief
   is unchanged). It asks whether a careful senior engineer would reject the approach as a crude heuristic, a
   special case that should be general, a guess where the code or data could be read, or a rule with obvious

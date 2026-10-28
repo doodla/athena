@@ -1457,12 +1457,25 @@ pub const READING_RULES_HEADING: &str = "# Reading rules";
 
 /// Each rule a reading must pass, one short line each, with the check that enforces it. A reading that
 /// breaks one is refused and read again once, with the refusal as a correction.
-pub const READING_RULES: [&str; 4] = [
+pub const READING_RULES: [&str; 5] = [
     "Previous result: a retry or follow-up names each earlier job, says how its result is addressed, and lists deliverables and out_of_scope (`check_prior_result_and_scope`).",
     "Criteria evidence: each criterion rests on a command, Grep or file the verifier can check, never the producer's report (`check_criteria_evidence`).",
     "Governance files: list one as a deliverable and name it in a criterion when the request names it or a deliverable implies it, or name it in out_of_scope (`check_governance_coverage`).",
+    "Code survey: a code or tests reading with a behavior criterion has a `Code survey:` assumption naming a crates/ path (`check_code_survey`).",
     "Valid reading: class, capability and producer model from the closed lists; a decline gives a reason; a capability needs a criterion; forecasts are valid (`build_reading`).",
 ];
+
+/// What the reader writes before it gives behavior criteria for a code or tests change, and when a request
+/// adds or tightens a refusal rule. Printed after the rule list in the reader brief.
+///
+/// Root cause this guidance removes: readings designed storage, override and test seams from a general idea of
+/// the feature, without surveying the records validation or where resolution and probing happen in the code
+/// (jobs 20261028-055601-hg0n and 20261028-082151-67fa). `check_code_survey` in athena-core enforces it.
+pub const CODE_SURVEY_GUIDE: &str = "Before you give behavior criteria for a code or tests change, read the code and write one assumption that starts \
+with `Code survey:` and names the crates/ paths you read. Cover: the entry point, and the order in which resolution and probing run; \
+what the records validation allow-list accepts, and, if the change adds a record or data file under crates/, name `check_record_file`, \
+`AnyRecord` or the round-trip test that covers it; and how the property is measured directly, not through a stand-in. \
+When the request adds or tightens a refusal rule, also write a criterion that says the change refuses more readings and the higher refusal rate is intended.";
 
 /// The reader brief: the request, earlier readings and corrections, the reference forecast, the closed
 /// lists, the reading rules, what the verifier can run, and the repository's top level.
@@ -1621,7 +1634,7 @@ pub fn reader_brief(inputs: &ReaderInputs) -> String {
     for rule in READING_RULES {
         let _ = writeln!(out, "- {rule}");
     }
-    out.push('\n');
+    let _ = writeln!(out, "\n{CODE_SURVEY_GUIDE}\n");
     if !inputs.verifier_can_run.is_empty() {
         let _ = writeln!(
             out,
@@ -3027,12 +3040,41 @@ mod tests {
             "check_prior_result_and_scope",
             "check_criteria_evidence",
             "check_governance_coverage",
+            "check_code_survey",
             "build_reading",
         ] {
             assert!(section.contains(check), "no rule for {check}:\n{section}");
         }
-        // The section adds little to the brief.
-        assert!(section.len() < 1200, "{} bytes", section.len());
+        // The section adds little to the brief: five rule lines and the code survey guide paragraph.
+        assert!(section.len() < 2400, "{} bytes", section.len());
+    }
+
+    #[test]
+    fn the_reader_brief_tells_the_reader_to_write_a_code_survey() {
+        let brief = reader_brief(&reader_inputs(&reading()));
+        let (_, section) = brief.split_once(READING_RULES_HEADING).unwrap();
+        let section = section.split("\n# ").next().unwrap();
+        assert!(section.contains(CODE_SURVEY_GUIDE), "{section}");
+        for phrase in [
+            "Code survey:",
+            "before you give behavior criteria",
+            "entry point",
+            "order in which resolution and probing run",
+            "allow-list",
+            "check_record_file",
+            "AnyRecord",
+            "round-trip",
+            "measured directly",
+            "refuses more readings",
+            "higher refusal rate is intended",
+        ] {
+            assert!(
+                CODE_SURVEY_GUIDE
+                    .to_lowercase()
+                    .contains(&phrase.to_lowercase()),
+                "the guide lacks {phrase:?}"
+            );
+        }
     }
 
     #[test]
