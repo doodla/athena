@@ -1637,6 +1637,128 @@ fn a_second_refusal_is_the_failure_and_the_reader_is_not_run_a_third_time() {
     );
 }
 
+/// A reader that changes its reading with `edit(read_index, reading)` on each read, costs $0.02 a read, and
+/// keeps every brief it was given. The first read has index 0.
+fn reader_edits(
+    edit: impl Fn(usize, &mut serde_json::Value) + Send + Sync + 'static,
+    briefs: Arc<Mutex<Vec<String>>>,
+) -> Tweak {
+    Arc::new(move |spec, turn| {
+        if spec.role == Role::Reader {
+            let mut briefs = briefs.lock().unwrap();
+            edit(briefs.len(), turn.structured.as_mut().unwrap());
+            briefs.push(spec.user_prompt.clone());
+            turn.cost_usd = 0.02;
+        }
+    })
+}
+
+/// The section of a reader brief that carries the refusal of the reading before it.
+fn refusal_section(brief: &str) -> String {
+    let heading = athena_context::briefs::REFUSAL_HEADING;
+    let (_, section) = brief.split_once(heading).expect("the refusal section");
+    section.split("\n# ").next().unwrap().to_string()
+}
+
+#[test]
+fn a_reading_with_a_boundary_word_is_not_accepted_and_the_word_reaches_the_caller() {
+    let word = ["oper", "ator"].concat();
+    let (dir, git) = repo(&config(true));
+    let state = tempfile::tempdir().unwrap();
+    let briefs: Arc<Mutex<Vec<String>>> = Arc::default();
+    let said = word.clone();
+    let athena = athena_with(
+        &dir,
+        &state,
+        CountingPinner::new(FAKE_SHA),
+        Arc::default(),
+        reader_edits(
+            move |_, reading| reading["summary"] = json!(format!("Ask the {said} to read it.")),
+            briefs.clone(),
+        ),
+    );
+    let proposal = athena.ask("study the demo", &Quiet).unwrap();
+    assert!(proposal.reading.is_none());
+    let error = proposal.reader_error.expect("the refusal is reported");
+    assert!(error.contains("was refused"), "{error}");
+    assert!(error.contains(&word), "{error}");
+    assert!(error.contains("summary"), "{error}");
+    // The reader was read once more with the refusal, which names the word, and then stopped.
+    let briefs = briefs.lock().unwrap();
+    assert_eq!(briefs.len(), 2);
+    assert!(!briefs[0].contains(athena_context::briefs::REFUSAL_HEADING));
+    assert!(refusal_section(&briefs[1]).contains(&word));
+    // The refusal is committed with the reader's invocations and no reading.
+    let prefix = format!("{}/", proposal.job.dir());
+    let paths: Vec<String> = git
+        .ls_tree_under("HEAD", &prefix)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.path)
+        .collect();
+    assert!(
+        paths.iter().any(|p| p.contains("invocations/")),
+        "{paths:?}"
+    );
+    assert!(!paths.iter().any(|p| p.contains("reading")), "{paths:?}");
+}
+
+#[test]
+fn a_reading_naming_a_file_absent_at_head_is_read_again_and_a_corrected_one_is_accepted() {
+    let (dir, _git) = repo(&config(true));
+    let state = tempfile::tempdir().unwrap();
+    let briefs: Arc<Mutex<Vec<String>>> = Arc::default();
+    let athena = athena_with(
+        &dir,
+        &state,
+        CountingPinner::new(FAKE_SHA),
+        Arc::default(),
+        reader_edits(
+            |n, reading| {
+                if n == 0 {
+                    reading["deliverables"][0]["path"] = json!("docs/missing.md");
+                }
+            },
+            briefs.clone(),
+        ),
+    );
+    let proposal = athena.ask("study the demo", &Quiet).unwrap();
+    assert_eq!(proposal.reader_error, None);
+    let reading = proposal.reading.expect("the second reading is accepted");
+    assert_eq!(reading.deliverables[0].path, "README.md");
+    let briefs = briefs.lock().unwrap();
+    assert_eq!(briefs.len(), 2);
+    let section = refusal_section(&briefs[1]);
+    assert!(section.contains("docs/missing.md"), "{section}");
+    assert!(section.contains("is a modify"), "{section}");
+}
+
+#[test]
+fn a_reading_that_names_an_absent_file_twice_is_the_failure_and_the_path_reaches_the_caller() {
+    let (dir, _git) = repo(&config(true));
+    let state = tempfile::tempdir().unwrap();
+    let briefs: Arc<Mutex<Vec<String>>> = Arc::default();
+    let athena = athena_with(
+        &dir,
+        &state,
+        CountingPinner::new(FAKE_SHA),
+        Arc::default(),
+        reader_edits(
+            |_, reading| {
+                reading["deliverables"][0]["path"] = json!("docs/missing.md");
+                reading["deliverables"][0]["action"] = json!("delete");
+            },
+            briefs.clone(),
+        ),
+    );
+    let proposal = athena.ask("study the demo", &Quiet).unwrap();
+    assert!(proposal.reading.is_none());
+    let error = proposal.reader_error.expect("the refusal is reported");
+    assert!(error.contains("docs/missing.md"), "{error}");
+    assert!(error.contains("is a delete"), "{error}");
+    assert_eq!(briefs.lock().unwrap().len(), 2, "read once more, no more");
+}
+
 #[test]
 fn a_reader_that_does_not_complete_is_not_read_again() {
     let (dir, _git) = repo(&config(true));

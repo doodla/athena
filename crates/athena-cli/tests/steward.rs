@@ -352,7 +352,7 @@ fn a_nested_run_makes_no_model_call() {
     // Criterion (d): nothing counts toward the cadence, nothing starts the steward, and running it does
     // nothing. The real driver also refuses under the nested marker (`athena_agent::refuse_nested`).
     let fx = Fixture::new();
-    let mut scenario = steward_scenario(vec![item(
+    let scenario = steward_scenario(vec![item(
         "blind-spot",
         "x",
         "gh could not be run",
@@ -361,7 +361,6 @@ fn a_nested_run_makes_no_model_call() {
         &[],
         None,
     )]);
-    scenario.edits = vec![("README.md".into(), None)];
     let invocations = scenario.invocations.clone();
     let mut athena = fx.athena(scenario.script());
     athena.nested = Some("20261014-120000-outr".into());

@@ -1,0 +1,227 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261028-185350-qjzx",
+  "round": 1,
+  "at": "2026-10-28T18:57:20.216556362Z",
+  "invocation_seq": 2,
+  "approach": "Add one deterministic check to the end of `check_reading_acceptance` in reading.rs. It scans every free-text field of the reading, plus deliverable paths, with the existing `athena_context::briefs::boundary_scan`. It compares deliverable actions with the set of file paths at the job's base commit. The function gets one new parameter, `repo_files: Option<&BTreeSet<String>>`. `read_once` fills it from `self.git.ls_tree(&jc.commit)`, the same git call `Snapshot::create` already makes. `check_reading_text` (the `athena check-reading` replay entry point) passes `None`. It has no repo, so it checks words only and skips paths. A refusal flows through the existing `ReadError::Refused` path. `read_for` then reads once more with the refusal text, and a second refusal reaches the caller as `Proposal.reader_error`. Tests go in reading.rs (unit) and run_pin_tests.rs (reader path with the fake driver). CHANGELOG.md gets the entry. Fixtures elsewhere that name paths absent at HEAD are fixed as the full test run shows.",
+  "decisions": [
+    {
+      "choice": "Put the check inside `check_reading_acceptance`, last, and add a fifth parameter `repo_files: Option<&BTreeSet<String>>`. `None` means no repo is available: words are still scanned, paths are skipped.",
+      "reason": "The brief wants it in that function, which is the single gate for first attempts and retries, and which `check_reading_text` (replay) also calls. Replay has no repo, so the file set must be optional. It costs about 30 mechanical `, None` edits to the existing test calls in reading.rs.",
+      "rejected": [
+        {
+          "option": "Add a second function `check_reading_acceptance_at` and keep the four-argument one as a wrapper",
+          "why": "The production path would then not call `check_reading_acceptance`, and the old entry point would silently skip paths."
+        },
+        {
+          "option": "Do the check in `read_once` or `build_reading`",
+          "why": "It would miss `check_reading_text` and replay, and it would not be the gate the brief names."
+        },
+        {
+          "option": "Add the rule to a prompt file",
+          "why": "Prompt files have almost no token headroom, and the brief says to enforce it in code."
+        }
+      ]
+    },
+    {
+      "choice": "Take the file set from `self.git.ls_tree(&jc.commit)` in `read_once`, as a `BTreeSet` of `TreeEntry.path`.",
+      "reason": "It is exact for the base commit. The reader's snapshot is a plain copy without git and is deleted at line 482, before the reading is checked. `ls_tree` is already used by `Snapshot::create`, so no new git API is needed and lib.rs is not touched.",
+      "rejected": [
+        {
+          "option": "Use the snapshot directory on disk",
+          "why": "It is removed before the check, and walking a tree is slower than one `ls-tree`."
+        },
+        {
+          "option": "Change `Athena` or lib.rs to cache the listing",
+          "why": "This is not needed for one call per read."
+        }
+      ]
+    },
+    {
+      "choice": "Scan each field separately (title, summary, decline_reason, question, departures, hard_reason, each assumption, out_of_scope item, criterion, defaults_applied how, deliverable path). The error reads `field: word`, with every hit listed and a short repair instruction.",
+      "reason": "The error names the word and where it is, so the reader's one-time correction can fix it. `boundary_scan` returns `BoundaryHit{line, term}` with public fields, so briefs.rs needs no accessor and no change.",
+      "rejected": [
+        {
+          "option": "Join all text and scan once",
+          "why": "Line numbers would not say which field holds the word."
+        },
+        {
+          "option": "Add a hit-word accessor to briefs.rs",
+          "why": "`BoundaryHit.term` is already public."
+        }
+      ]
+    },
+    {
+      "choice": "Path rule: modify or delete of a path that is neither a file at HEAD nor a directory with files under it is refused. Create of a path that exists as a file is refused. Skip a `Modify` of `CHANGELOG.md` that is absent at HEAD.",
+      "reason": "`ensure_changelog` adds `CHANGELOG.md` modify to every change reading after the reader's output is built, so the reader cannot repair it. Refusing it would block every change reading in a repo without a changelog. The directory case avoids refusing a modify of a directory name that admission already handles separately.",
+      "rejected": [
+        {
+          "option": "Refuse every absent path with no exemption",
+          "why": "Readings in repos without CHANGELOG.md could never be accepted."
+        },
+        {
+          "option": "Refuse a create whose parent directory is absent",
+          "why": "It is a semantic check and is out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "Report words and path problems together in one error, after the existing four checks.",
+      "reason": "The existing checks bail on the first failure, and the new one runs last, so earlier error texts are unchanged and existing tests that match them still pass.",
+      "rejected": [
+        {
+          "option": "Run the new check first",
+          "why": "It would change which error existing tests see."
+        }
+      ]
+    },
+    {
+      "choice": "Do not edit lib.rs or briefs.rs. Say so in the producer's `unchanged_planned_files`.",
+      "reason": "The brief said they might be needed. Reading the code shows neither is.",
+      "rejected": [
+        {
+          "option": "Make a cosmetic edit to satisfy the deliverables list",
+          "why": "It would be an unfocused change."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Add `check_boundary_and_repo_files` with a doc comment naming the root cause, and call it last from `check_reading_acceptance`, which gains `repo_files: Option<&BTreeSet<String>>`. `read_once` builds the set from `self.git.ls_tree(&jc.commit)`. `check_reading_text` passes `None`. Update the existing test calls with `None`, including the `check_reading` test helper and the call near line 5932. Add the unit tests for criteria 2 and 3.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an `[Unreleased]` / `### Added` entry. It names the root cause, the fix and where it is called, and says the refusal rate rises as intended (estimate 5%, not measured). It is written for an outside reader and has no banned word.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "action": "modify",
+      "purpose": "Add the reader-path tests for criterion 4, using the existing `athena_with` and `Tweak` seam. Banned words are built from fragments.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Only if `cargo test` shows it: the fake reading at about line 2254 names `crates/gone/lib.rs` as modify, absent at HEAD. Change it to `create`, or add the file to the fixture, so the test still checks what it was written for. Check the other `reading(...)` calls the same way.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "purpose": "Only if `cargo test` shows it: fix readings that name paths absent at HEAD (about lines 891, 934, 993 and 1019) by making the fixture hold the path or setting the action to match.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-agent/src/fake.rs",
+      "action": "modify",
+      "purpose": "Only if two fake jobs in one repo now fail: the fake reader always returns `create` for `FAKE-CHANGE.md`, which a landed fake job leaves at HEAD. `spec.workdir` is the reader's plain copy, so the fake can return `modify` when that file exists there. Leave the file alone if no test fails.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In reading.rs, import `std::collections::BTreeSet` (the file already imports `BTreeMap`). Add `fn reading_text_fields(reading: &Reading) -> Vec<(String, &str)>`, giving labelled free-text fields. Add `pub fn check_boundary_and_repo_files(reading: &Reading, repo_files: Option<&BTreeSet<String>>) -> Result<()>`. It scans each field and each deliverable path with `athena_context::briefs::boundary_scan` and collects `field: word`. It then applies the path rule, skipping a `Modify` of `CHANGELOG_PATH`. It skips readings that have no capability or have a question only for the path rule (words are always scanned). It bails with one error that lists every hit and path problem and says how to repair them. Put the root-cause doc comment above it.",
+    "Change `check_reading_acceptance` to take `repo_files: Option<&BTreeSet<String>>` and call the new check last, after `check_governance_coverage`. Update its doc comment to list the new check.",
+    "In `read_once`, before `check_reading_acceptance`, build the set from `self.git.ls_tree(&jc.commit)?` (map to `TreeEntry.path`). Pass `Some(&set)`. In `check_reading_text`, pass `None`.",
+    "Update every existing test call of `check_reading_acceptance` in reading.rs (the `check_reading` helper, the calls from line 5153 to 5352, and the one near line 5932) to pass `None`.",
+    "Add unit tests in reading.rs for criterion 2 (word in summary, title, assumption, criterion and out_of_scope, fragment, clean accepted) and criterion 3 (the path cases listed in the demonstrations). Build banned words from fragments.",
+    "Add the reader-path tests in run_pin_tests.rs: dirty summary on both reads, absent path on the first read then clean, absent path on both reads. They use the `Tweak` seam, `athena.ask` and the `Briefs` capture pattern from `reader_refused_then`.",
+    "Add the CHANGELOG.md entry under `[Unreleased]` / `### Added`: root cause, fix and where it is called, what is now refused, that no model call is added and the replay path skips path checks, and the intended higher refusal rate (an estimate of 5%, not measured).",
+    "Run `cargo fmt --all`, `cargo test --locked`, and `cargo clippy --all-targets --locked -- -D warnings`. Fix any fixture that now fails (drain.rs, lifecycle.rs, fake.rs) with the smallest change that keeps the test's purpose. Run `cargo test -p xtask --test policy` for the boundary scan. In the report, list lib.rs and briefs.rs under `unchanged_planned_files` with the reason."
+  ],
+  "risks": [
+    {
+      "risk": "Existing integration tests with fake readers that name paths absent at HEAD, or a repeated `create` of `FAKE-CHANGE.md`, start failing.",
+      "mitigation": "The producer runs the full `cargo test --locked` and fixes each fixture so its fake reading matches HEAD, or switches the action to `create`. The fake reader in fake.rs is adjusted only if a test needs it."
+    },
+    {
+      "risk": "`ensure_changelog` adds `CHANGELOG.md` modify to every change reading, which would be refused in a repo without a changelog and could not be fixed by the reader.",
+      "mitigation": "`CHANGELOG.md` modify is skipped when absent, because Athena adds that deliverable itself. This is covered by a unit test."
+    },
+    {
+      "risk": "`check_reading_text` (replay, `athena check-reading`) has no repo, so replays cannot judge paths. Replay also gets stricter on words, so a replay of old readings may now refuse some.",
+      "mitigation": "`None` skips the path rule only. The word scan still runs on replay. This is stated in the doc comment and the changelog. A test confirms `None` skips paths."
+    },
+    {
+      "risk": "The higher refusal rate (an estimate of 5%, not measured) costs a second reader call for some requests.",
+      "mitigation": "The check is deterministic, runs once per read and costs no model call. The reader gets one correction. Both effects are described in the changelog as intended."
+    },
+    {
+      "risk": "The new test, doc and changelog text contains a banned word and fails the boundary scan.",
+      "mitigation": "The producer builds words from fragments, as the existing tests do, and runs `cargo test -p xtask --test policy`."
+    },
+    {
+      "risk": "A directory path in a reading is wrongly treated as absent.",
+      "mitigation": "Treat a path as present if a file equals it or any file lies under `path/`, and use exact match only for the create-exists rule."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Content check by reading the diff. The CHANGELOG entry and the doc comment on the new check function both state the root cause. `git diff --stat` shows no prompt file changed.",
+      "command": "git diff -- CHANGELOG.md crates/athena-core/src/reading.rs",
+      "observes": "The root-cause sentence appears in both places: readings were checked only for prior-result, evidence, survey and governance rules, never against the boundary words or the repo's files at HEAD. The diff shows the new check called from the body of `check_reading_acceptance`. No file under a prompts directory appears in the diff.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "New unit test in reading.rs. It builds a reading with the existing `scoped_reading` helper, puts a boundary word in the summary (built from fragments, for example `[\"oper\",\"ator\"].concat()`, so the test file passes the scan), and calls the production `check_reading_acceptance(&reading, request, None, &[], None)`. No double is involved. It asserts the error contains the word and `summary`. It then loops over the title, an assumption, a criterion, an out_of_scope item and a fragment (a machine path fragment built from pieces). It asserts that a clean reading is accepted.",
+      "command": "cargo test -p athena-core reading",
+      "observes": "The refusal text names the word and the field. The clean reading passes.",
+      "fails_without": "`check_reading_acceptance` returns Ok for the dirty reading, so the test's `unwrap_err()` panics and the test fails."
+    },
+    {
+      "criterion": 3,
+      "method": "New unit test in reading.rs. It calls the production `check_reading_acceptance` with `Some(&files)`, a `BTreeSet` fixture holding `README.md` and `src/lib.rs`. The `scoped_reading` helper makes deliverables Modify, so the test sets `deliverables[i].action` directly. Cases: modify of `docs/missing.md` is refused, and the error names the path. Delete of `docs/missing.md` is refused. Create of `README.md` is refused. Modify of `README.md` plus create of `docs/new.md` with clean text is accepted. Modify of `src` (a directory with files) is accepted. An absent `CHANGELOG.md` modify is accepted. `None` for the file set skips the path rule. The fixture is a plain set passed in, so the rule under test is not inside the double.",
+      "command": "cargo test -p athena-core reading",
+      "observes": "The error names each offending path and its action. The valid reading is accepted.",
+      "fails_without": "Without the path rule, absent modify and delete paths and an existing create path are all accepted, so the `unwrap_err()` calls panic."
+    },
+    {
+      "criterion": 4,
+      "method": "New tests in run_pin_tests.rs. The entry point is `Athena::ask`, which runs `read_for`, `read_once`, `build_reading`, then `check_reading_acceptance` with the file set from `ls_tree` on the fixture repo's commit. The seam is the `Tweak` closure given to the existing `athena_with(dir, state, pinner, seen, tweak)`. It edits the fake `FakeTurn` structured reader output, and it exists today (see `reader_refused_then` and `reader_writes`). The repo fixture has `README.md`, `athena.toml` and `defaults.toml` at HEAD. Test A: the tweak puts a boundary word (built from fragments) into the summary on every read. It asserts `reading` is None, `reader_error` contains the word, the reader ran twice (the second brief has `REFUSAL_HEADING` and the word), and the committed job has an invocation record and no reading. Test B: the tweak sets a deliverable to `docs/missing.md` modify on the first read only. The second read is clean and accepted, and the second brief contains the path. Test C: both reads name the absent path, and the error reaches `reader_error`. The refusal logic stays in production code; the tweak only writes the reader's output.",
+      "command": "cargo test -p athena-core",
+      "observes": "The reading is not accepted, the refusal text names the word or path and reaches the caller as `reader_error`, and a clean second reading is accepted.",
+      "fails_without": "Without the check, the fake reader's dirty reading is accepted. `proposal.reading` is Some and `reader_error` is None, so the asserts on `reading.is_none()` and on the error naming the word fail."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the three Athena checks as separate whole commands. The existing prior-result, scope, evidence, survey and governance tests in reading.rs keep passing through the extra `None` argument.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three pass. Prior-result and scope tests are unchanged except for the added `None` argument.",
+      "fails_without": "If the new rule broke an existing fixture (for example a CLI test whose fake reader names a path absent at HEAD), `cargo test --locked` would fail. The producer fixes those fixtures in this change."
+    },
+    {
+      "criterion": 6,
+      "method": "The refusal tests of criteria 2 and 3 show the higher refusal rate happening. `git diff -- CHANGELOG.md` shows the entry says the refusal rate rises, that this is intended, and gives the estimate of 5% of newly refused readings, labelled as an estimate and not measured.",
+      "command": "cargo test -p athena-core reading",
+      "observes": "The tests refuse readings the old gate accepted. The changelog text states the higher refusal rate is intended and quotes the 5% estimate.",
+      "fails_without": "Without the check, readings with boundary words or absent paths are accepted, so the refusal tests of criteria 2 and 3 fail."
+    },
+    {
+      "criterion": 7,
+      "method": "Content check by reading the diff. The new `[Unreleased]` / `### Added` entry follows the style of the neighbouring entries, in plain words for an outside reader.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "The entry says readings are now refused if their text has a boundary word, or if a deliverable's action disagrees with the files at HEAD (modify or delete of an absent path, create of an existing one). It says where the check runs, and that it adds no model call. It has no boundary word and no email-like text.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Several CLI integration tests (drain.rs, lifecycle.rs, and perhaps others) have fake readings naming paths that may be absent in their fixture repos. I did not run them. The producer must run the full `cargo test --locked` and decide fixture by fixture. The drain.rs test at about line 2254 uses a missing path on purpose.",
+    "The refusal text holds the banned word and goes into the reader's correction brief and the committed invocation detail. I did not check whether `athena/records` content is scanned by `xtask/tests/policy.rs`. If it were, the refusal text would need to quote the word less directly. Criterion 2 requires the error to name the word, so I plan to name it.",
+    "lib.rs and briefs.rs were listed as possible deliverables. I plan no change to either, because `ls_tree` and the public `boundary_scan`/`BoundaryHit` are enough. The producer should list them as unchanged with this reason."
+  ],
+  "producer_section_sha256": "62fdc68adde1f2d2dfc962e9d7eadcd45696d3393e61c03aa0d5dcd04596109c"
+}

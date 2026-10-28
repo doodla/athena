@@ -29,7 +29,7 @@ use athena_data::records::{
 use athena_data::{JobId, RecordId};
 use athena_gate::redact::Redactor;
 use athena_git::snapshot::{Snapshot, SnapshotRepo};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -510,7 +510,20 @@ impl Athena {
                 // A retry or follow-up must reflect the previous result and state the change scope. Only the
                 // retried job and the jobs the request says it follows up count; jobs it cites as evidence
                 // (such as the introspections in a root-cause request) are shown to the reader, not checked.
-                match check_reading_acceptance(&reading, &request.text, attempt, &referenced_jobs) {
+                // Its deliverables are also compared with the files at the base commit.
+                let repo_files: BTreeSet<String> = self
+                    .git
+                    .ls_tree(&jc.commit)?
+                    .into_iter()
+                    .map(|entry| entry.path)
+                    .collect();
+                match check_reading_acceptance(
+                    &reading,
+                    &request.text,
+                    attempt,
+                    &referenced_jobs,
+                    Some(&repo_files),
+                ) {
                     Ok(()) => Ok((Some(reading), record, None)),
                     Err(e) => Ok((None, record, Some(ReadError::Refused(format!("{e:#}"))))),
                 }
@@ -2261,21 +2274,160 @@ pub fn check_prior_result_and_scope(reading: &Reading, priors: &[&EarlierAttempt
     )
 }
 
+/// The free-text fields of a reading, each with the label a refusal names it by. The deliverable paths are
+/// not here: [`check_boundary_and_repo_files`] scans them as paths.
+fn reading_text_fields(reading: &Reading) -> Vec<(String, &str)> {
+    let mut fields: Vec<(String, &str)> = vec![
+        ("title".into(), reading.title.as_str()),
+        ("summary".into(), reading.summary.as_str()),
+    ];
+    let optional = [
+        ("decline_reason", &reading.decline_reason),
+        ("question", &reading.question),
+        ("departures", &reading.departures),
+        ("hard_reason", &reading.hard_reason),
+        ("urgent_reason", &reading.urgent_reason),
+    ];
+    for (label, value) in optional {
+        if let Some(text) = value {
+            fields.push((label.into(), text.as_str()));
+        }
+    }
+    for (i, text) in reading.assumptions.iter().enumerate() {
+        fields.push((format!("assumptions[{i}]"), text.as_str()));
+    }
+    for (i, text) in reading.out_of_scope.iter().enumerate() {
+        fields.push((format!("out_of_scope[{i}]"), text.as_str()));
+    }
+    for (i, criterion) in reading.acceptance_criteria.iter().enumerate() {
+        fields.push((format!("acceptance_criteria[{i}]"), criterion.text.as_str()));
+    }
+    for (i, default) in reading.defaults_applied.iter().enumerate() {
+        fields.push((format!("defaults_applied[{i}]"), default.how.as_str()));
+    }
+    fields
+}
+
+/// Whether `path` is a file in `files`, or a directory with at least one file under it.
+fn path_exists_in(files: &BTreeSet<String>, path: &str) -> bool {
+    if files.contains(path) {
+        return true;
+    }
+    let prefix = format!("{}/", path.trim_end_matches('/'));
+    files
+        .range(prefix.clone()..)
+        .next()
+        .is_some_and(|f| f.starts_with(&prefix))
+}
+
+/// Refuses a reading whose text holds a word the boundary scan rejects, or whose deliverables disagree with
+/// the files at the base commit.
+///
+/// Root cause: a reading was checked only for the previous result and change scope, the evidence each
+/// criterion rests on, the code survey and the governance files. Nothing compared its text with the boundary
+/// word list or its deliverables with the repository's files at the base commit. A reading that named a
+/// banned word, a path that does not exist, or a `create` of a file that already exists was accepted, and the
+/// fault showed up only later, in the producer's run or at verification. The check is deterministic and
+/// calls no model; it runs last in [`check_reading_acceptance`], so a refusal reaches the reader as its one
+/// correction, as the other refusals do.
+///
+/// Every free-text field and every deliverable path goes through `athena_context::briefs::boundary_scan`.
+/// `repo_files` is the set of file paths at the base commit. When it is `Some`
+/// and the reading is a change with no open question, a `modify` or `delete` of a path that is neither a file
+/// nor a directory holding files is refused, and so is a `create` of a path that is already a file. A
+/// `modify` of `CHANGELOG.md` is allowed when the file is absent, because Athena adds that deliverable
+/// itself ([`ensure_changelog`]) and the reader cannot repair it. With `None` (a replay with no repository)
+/// only the words are checked.
+pub fn check_boundary_and_repo_files(
+    reading: &Reading,
+    repo_files: Option<&BTreeSet<String>>,
+) -> Result<()> {
+    let mut problems: Vec<String> = Vec::new();
+    for (label, text) in reading_text_fields(reading) {
+        for hit in athena_context::briefs::boundary_scan(text) {
+            problems.push(format!("{label}: the banned word {:?}", hit.term));
+        }
+    }
+    for d in &reading.deliverables {
+        for hit in athena_context::briefs::boundary_scan(&d.path) {
+            problems.push(format!(
+                "deliverable path {}: the banned word {:?}",
+                d.path, hit.term
+            ));
+        }
+    }
+    let mut path_problems = 0;
+    if let Some(files) = repo_files
+        && reading.capability.is_some()
+        && reading.question.is_none()
+    {
+        for d in &reading.deliverables {
+            let message = match d.action {
+                DeliverableAction::Create if files.contains(&d.path) => Some(format!(
+                    "deliverable {} is a create, but the file already exists at the base commit \
+                     (use modify)",
+                    d.path
+                )),
+                DeliverableAction::Modify | DeliverableAction::Delete
+                    if !path_exists_in(files, &d.path)
+                        && !(d.action == DeliverableAction::Modify && d.path == CHANGELOG_PATH) =>
+                {
+                    let verb = if d.action == DeliverableAction::Modify {
+                        "modify"
+                    } else {
+                        "delete"
+                    };
+                    Some(format!(
+                        "deliverable {} is a {verb}, but no such file exists at the base commit \
+                         (use create for a new file, or name the path that exists)",
+                        d.path
+                    ))
+                }
+                _ => None,
+            };
+            if let Some(message) = message {
+                problems.push(message);
+                path_problems += 1;
+            }
+        }
+    }
+    if problems.is_empty() {
+        return Ok(());
+    }
+    let word_problems = problems.len() - path_problems;
+    let repair = match (word_problems > 0, path_problems > 0) {
+        (true, true) => {
+            "reword the text without the banned words, and make each deliverable's action match the files"
+        }
+        (true, false) => "reword the text without the banned words",
+        _ => "make each deliverable's action match the files at the base commit",
+    };
+    bail!(
+        "the reading was refused because its text or deliverables fail a check Athena runs on every \
+         reading: {}; {repair}",
+        problems.join("; ")
+    )
+}
+
 /// Every check a built reading must pass before it is accepted: the previous result and change scope of a
 /// retried or followed-up job ([`check_prior_result_and_scope`]), then the evidence each criterion rests on
 /// ([`check_criteria_evidence`]), then the code survey a code or tests reading with a behavior criterion
 /// rests on ([`check_code_survey`]), then the governance files the outcome needs
-/// ([`check_governance_coverage`]). It applies to a first attempt as well as a retry.
+/// ([`check_governance_coverage`]), then the reading's text against the boundary words and its deliverables
+/// against the files at the base commit ([`check_boundary_and_repo_files`]; `repo_files` is `None` when
+/// there is no repository to compare with). It applies to a first attempt as well as a retry.
 pub fn check_reading_acceptance(
     reading: &Reading,
     request: &str,
     attempt: Option<&EarlierAttempt>,
     referenced: &[EarlierAttempt],
+    repo_files: Option<&BTreeSet<String>>,
 ) -> Result<()> {
     check_prior_result_and_scope(reading, &continued_jobs(request, attempt, referenced))?;
     check_criteria_evidence(reading)?;
     check_code_survey(reading)?;
-    check_governance_coverage(reading, request)
+    check_governance_coverage(reading, request)?;
+    check_boundary_and_repo_files(reading, repo_files)
 }
 
 /// Governance paths a request can name, and the whole-word lowercase phrase that names each. A path ending in
@@ -2674,9 +2826,10 @@ impl ReadingCheck {
 
 /// Runs the reading rules ([`check_reading_acceptance`]) on one stored reading and request. There are no
 /// earlier attempts, so the retry rule (`check_prior_result_and_scope`) sees a first attempt. This is what
-/// `athena check-reading` runs, and no model is called.
+/// `athena check-reading` runs, and no model is called. There is no repository to compare with, so the
+/// words are checked and the deliverable paths are not.
 pub fn check_reading_text(reading: &Reading, request: &str) -> ReadingCheck {
-    match check_reading_acceptance(reading, request, None, &[]) {
+    match check_reading_acceptance(reading, request, None, &[], None) {
         Ok(()) => ReadingCheck::Accept,
         Err(error) => ReadingCheck::Refuse(
             error
@@ -4843,7 +4996,7 @@ mod tests {
         referenced: &[EarlierAttempt],
         reading: &Reading,
     ) -> Result<()> {
-        check_reading_acceptance(reading, request, attempt, referenced)
+        check_reading_acceptance(reading, request, attempt, referenced, None)
     }
 
     #[test]
@@ -5150,7 +5303,7 @@ mod tests {
             let file = concrete(path);
             // Without the file listed, the reading is refused, naming the path and the repair.
             let bare = governed_reading(&["src/site.rs"], &["the site builds"], &["the logo"]);
-            let error = check_reading_acceptance(&bare, request, None, &[])
+            let error = check_reading_acceptance(&bare, request, None, &[], None)
                 .unwrap_err()
                 .to_string();
             assert!(error.contains(path), "{request}: {error}");
@@ -5162,7 +5315,7 @@ mod tests {
             // Listed but not named in a criterion: still refused.
             let unnamed = governed_reading(&["src/site.rs", &file], &["the site builds"], &["x"]);
             assert!(
-                check_reading_acceptance(&unnamed, request, None, &[]).is_err(),
+                check_reading_acceptance(&unnamed, request, None, &[], None).is_err(),
                 "{request}: listed but unnamed"
             );
             // Listed and named: accepted.
@@ -5171,7 +5324,7 @@ mod tests {
                 &["the site builds", &format!("{file} runs the build")],
                 &["the logo"],
             );
-            check_reading_acceptance(&named, request, None, &[])
+            check_reading_acceptance(&named, request, None, &[], None)
                 .unwrap_or_else(|e| panic!("{request}: {e}"));
             // Put out of scope by name: accepted without the file.
             let excluded = governed_reading(
@@ -5179,7 +5332,7 @@ mod tests {
                 &["the site builds"],
                 &[&format!("Editing {}", path.trim_end_matches('/'))],
             );
-            check_reading_acceptance(&excluded, request, None, &[])
+            check_reading_acceptance(&excluded, request, None, &[], None)
                 .unwrap_or_else(|e| panic!("{request}: {e}"));
         }
     }
@@ -5190,7 +5343,7 @@ mod tests {
         let bare = governed_reading(&["src/site.rs"], &["the site builds"], &["the logo"]);
         for request in COMMON_WORD_REQUESTS {
             check_governance_coverage(&bare, request).unwrap_or_else(|e| panic!("{request}: {e}"));
-            check_reading_acceptance(&bare, request, None, &[])
+            check_reading_acceptance(&bare, request, None, &[], None)
                 .unwrap_or_else(|e| panic!("{request}: {e}"));
         }
     }
@@ -5199,7 +5352,7 @@ mod tests {
     fn a_request_naming_a_workflow_file_needs_it_listed_and_named() {
         let request = "Publish to GitHub Pages from .github/workflows/pages.yml";
         let bare = governed_reading(&["docs/index.md"], &["the page renders"], &["other pages"]);
-        let error = check_reading_acceptance(&bare, request, None, &[])
+        let error = check_reading_acceptance(&bare, request, None, &[], None)
             .unwrap_err()
             .to_string();
         assert!(error.contains(".github/workflows"), "{error}");
@@ -5209,7 +5362,7 @@ mod tests {
             &["pages.yml deploys the site"],
             &[],
         );
-        check_reading_acceptance(&with_workflow, request, None, &[]).unwrap();
+        check_reading_acceptance(&with_workflow, request, None, &[], None).unwrap();
     }
 
     #[test]
@@ -5257,13 +5410,13 @@ mod tests {
     fn a_listed_governance_file_must_be_named_by_a_criterion_whatever_the_request_says() {
         let request = "add a greeting";
         let unnamed = governed_reading(&["athena.toml"], &["the greeting prints"], &[]);
-        let error = check_reading_acceptance(&unnamed, request, None, &[])
+        let error = check_reading_acceptance(&unnamed, request, None, &[], None)
             .unwrap_err()
             .to_string();
         assert!(error.contains("athena.toml"), "{error}");
         assert!(error.contains("no criterion names it"), "{error}");
         let named = governed_reading(&["athena.toml"], &["athena.toml sets the greeting"], &[]);
-        check_reading_acceptance(&named, request, None, &[]).unwrap();
+        check_reading_acceptance(&named, request, None, &[], None).unwrap();
     }
 
     #[test]
@@ -5271,7 +5424,7 @@ mod tests {
         let request = "add an audience setting";
         let config = "crates/athena-data/src/config.rs";
         let without = governed_reading(&[config], &["the setting parses"], &[]);
-        let error = check_reading_acceptance(&without, request, None, &[])
+        let error = check_reading_acceptance(&without, request, None, &[], None)
             .unwrap_err()
             .to_string();
         assert!(error.contains("athena.toml"), "{error}");
@@ -5281,22 +5434,22 @@ mod tests {
             &["the setting parses", "athena.toml sets audience"],
             &[],
         );
-        check_reading_acceptance(&with, request, None, &[]).unwrap();
+        check_reading_acceptance(&with, request, None, &[], None).unwrap();
         let excluded = governed_reading(&[config], &["the setting parses"], &["athena.toml"]);
-        check_reading_acceptance(&excluded, request, None, &[]).unwrap();
+        check_reading_acceptance(&excluded, request, None, &[], None).unwrap();
     }
 
     #[test]
     fn a_request_without_governance_keywords_or_deliverables_is_accepted_unchanged() {
         let reading = governed_reading(&["src/greeting.rs"], &["the greeting prints"], &["x"]);
-        check_reading_acceptance(&reading, "add a greeting", None, &[]).unwrap();
+        check_reading_acceptance(&reading, "add a greeting", None, &[], None).unwrap();
         // A word that only contains a keyword, or an identifier that joins it, is not a match.
         for request in [
             "fix the circle area",
             "rename athena_gate_helper",
             "the pagesize",
         ] {
-            check_reading_acceptance(&reading, request, None, &[])
+            check_reading_acceptance(&reading, request, None, &[], None)
                 .unwrap_or_else(|e| panic!("{request}: {e}"));
         }
         // A reading that declines, asks, or changes nothing has no governance file to cover.
@@ -5304,12 +5457,12 @@ mod tests {
         declined.capability = None;
         declined.decline_reason = Some("no capability fits".into());
         let request = "Publish to GitHub Pages from .github/workflows/pages.yml";
-        check_reading_acceptance(&declined, request, None, &[]).unwrap();
+        check_reading_acceptance(&declined, request, None, &[], None).unwrap();
         let mut asking = governed_reading(&["src/site.rs"], &[], &[]);
         asking.question = Some("which file?".into());
-        check_reading_acceptance(&asking, request, None, &[]).unwrap();
+        check_reading_acceptance(&asking, request, None, &[], None).unwrap();
         let empty = governed_reading(&[], &["x"], &[]);
-        check_reading_acceptance(&empty, request, None, &[]).unwrap();
+        check_reading_acceptance(&empty, request, None, &[], None).unwrap();
     }
 
     #[test]
@@ -5318,7 +5471,7 @@ mod tests {
         let previous = prior();
         let mut retry = governed_reading(&["docs/index.md"], &["the page renders"], &["x"]);
         retry.summary = format!("Retry {PRIOR_JOB}: add the missing workflow.");
-        let error = check_reading_acceptance(&retry, request, Some(&previous), &[])
+        let error = check_reading_acceptance(&retry, request, Some(&previous), &[], None)
             .unwrap_err()
             .to_string();
         assert!(error.contains(".github/workflows"), "{error}");
@@ -5330,7 +5483,7 @@ mod tests {
         let bad = "the producer's report lists the caller-check Grep";
         // A first attempt: no earlier job, so the previous-result check passes and the evidence check decides.
         let reading = reading_with_criterion(bad);
-        let error = check_reading_acceptance(&reading, "add a greeting", None, &[])
+        let error = check_reading_acceptance(&reading, "add a greeting", None, &[], None)
             .unwrap_err()
             .to_string();
         assert!(error.contains(bad), "{error}");
@@ -5338,18 +5491,231 @@ mod tests {
         let previous = prior();
         let mut retry = reading_with_criterion(bad);
         retry.summary = format!("Retry {PRIOR_JOB}: fix the missing greeting.");
-        let error = check_reading_acceptance(&retry, "add a greeting", Some(&previous), &[])
+        let error = check_reading_acceptance(&retry, "add a greeting", Some(&previous), &[], None)
             .unwrap_err()
             .to_string();
         assert!(error.contains(bad), "{error}");
         assert!(!error.contains("the previous result"), "{error}");
         // The same two readings with a criterion the verifier can run are accepted.
         let good = "a Grep of crates/ for `old::` returns no hits";
-        check_reading_acceptance(&reading_with_criterion(good), "add a greeting", None, &[])
-            .unwrap();
+        check_reading_acceptance(
+            &reading_with_criterion(good),
+            "add a greeting",
+            None,
+            &[],
+            None,
+        )
+        .unwrap();
         let mut retry = reading_with_criterion(good);
         retry.summary = format!("Retry {PRIOR_JOB}: fix the missing greeting.");
-        check_reading_acceptance(&retry, "add a greeting", Some(&previous), &[]).unwrap();
+        check_reading_acceptance(&retry, "add a greeting", Some(&previous), &[], None).unwrap();
+    }
+
+    // -- The boundary words and the repository's files
+
+    /// A banned word, built from pieces so this file passes the boundary scan it tests.
+    fn banned_word() -> String {
+        ["oper", "ator"].concat()
+    }
+
+    /// A banned path fragment, built from pieces for the same reason.
+    fn banned_fragment() -> String {
+        ["/ho", "me/user"].concat()
+    }
+
+    fn files_at_head() -> BTreeSet<String> {
+        ["README.md", "src/lib.rs", "src/main.rs"]
+            .iter()
+            .map(|p| p.to_string())
+            .collect()
+    }
+
+    /// A clean change reading with one deliverable, whose action and path the caller sets.
+    fn reading_with_deliverable(path: &str, action: DeliverableAction) -> Reading {
+        let mut reading = governed_reading(&[path], &["the greeting prints"], &["the logo"]);
+        reading.deliverables[0].action = action;
+        reading
+    }
+
+    #[test]
+    fn a_reading_whose_summary_holds_a_boundary_word_is_refused_and_the_word_is_named() {
+        let word = banned_word();
+        let mut reading = governed_reading(&["README.md"], &["the greeting prints"], &["x"]);
+        reading.summary = format!("Ask the {word} to approve it.");
+        let error = check_reading_acceptance(&reading, "add a greeting", None, &[], None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(&word), "{error}");
+        assert!(error.contains("summary"), "{error}");
+        // The same on the replay path and with a file set: the words do not depend on the repository.
+        assert!(matches!(
+            check_reading_text(&reading, "add a greeting"),
+            ReadingCheck::Refuse(_)
+        ));
+        let files = files_at_head();
+        let error = check_reading_acceptance(&reading, "add a greeting", None, &[], Some(&files))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(&word), "{error}");
+        // Without the word the same reading is accepted.
+        reading.summary = "Ask the owner to approve it.".into();
+        check_reading_acceptance(&reading, "add a greeting", None, &[], Some(&files)).unwrap();
+        assert!(matches!(
+            check_reading_text(&reading, "add a greeting"),
+            ReadingCheck::Accept
+        ));
+    }
+
+    #[test]
+    fn a_boundary_word_in_any_text_field_or_path_is_refused_with_the_field_named() {
+        let word = banned_word();
+        let fragment = banned_fragment();
+        type Edit = fn(&mut Reading, String);
+        let edits: [(&str, Edit); 9] = [
+            ("title", |r, t| r.title = t),
+            ("summary", |r, t| r.summary = t),
+            ("decline_reason", |r, t| r.decline_reason = Some(t)),
+            ("question", |r, t| r.question = Some(t)),
+            ("departures", |r, t| r.departures = Some(t)),
+            ("assumptions[0]", |r, t| r.assumptions = vec![t]),
+            ("out_of_scope[0]", |r, t| r.out_of_scope = vec![t]),
+            ("acceptance_criteria[0]", |r, t| {
+                r.acceptance_criteria[0].text = t
+            }),
+            ("defaults_applied[0]", |r, t| {
+                r.defaults_applied = vec![DefaultApplied {
+                    id: "tested".into(),
+                    how: t,
+                }]
+            }),
+        ];
+        for (field, edit) in edits {
+            for text in [format!("The {word} decides."), format!("See {fragment}/x.")] {
+                let mut reading =
+                    governed_reading(&["README.md"], &["the greeting prints"], &["x"]);
+                edit(&mut reading, text.clone());
+                let error = check_reading_acceptance(&reading, "add a greeting", None, &[], None)
+                    .unwrap_err()
+                    .to_string();
+                assert!(error.contains(field), "{field}: {error}");
+                let term = if text.contains(&word) {
+                    &word
+                } else {
+                    &fragment
+                };
+                assert!(error.contains(term.as_str()), "{field}: {error}");
+            }
+        }
+        // A deliverable path is scanned too, and the error names it.
+        let path = format!("docs/{word}.md");
+        let reading = reading_with_deliverable(&path, DeliverableAction::Create);
+        let error = check_reading_acceptance(&reading, "add a greeting", None, &[], None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(&path) && error.contains(&word), "{error}");
+        // Words that only contain a banned word are not hits.
+        let mut clean = governed_reading(&["README.md"], &["the greeting prints"], &["x"]);
+        clean.summary = "Cooperators accrue the opcode.".into();
+        check_reading_acceptance(&clean, "add a greeting", None, &[], None).unwrap();
+    }
+
+    #[test]
+    fn a_deliverable_that_disagrees_with_the_files_at_head_is_refused() {
+        let files = files_at_head();
+        let check = |reading: &Reading| {
+            check_reading_acceptance(reading, "add a greeting", None, &[], Some(&files))
+        };
+        // Modify and delete need a file at HEAD.
+        for (action, verb) in [
+            (DeliverableAction::Modify, "modify"),
+            (DeliverableAction::Delete, "delete"),
+        ] {
+            let reading = reading_with_deliverable("docs/missing.md", action);
+            let error = check(&reading).unwrap_err().to_string();
+            assert!(error.contains("docs/missing.md"), "{error}");
+            assert!(error.contains(&format!("is a {verb}")), "{error}");
+            assert!(error.contains("no such file"), "{error}");
+            // A file that is there is accepted.
+            check(&reading_with_deliverable("README.md", action)).unwrap();
+        }
+        // Create needs an absent path.
+        let reading = reading_with_deliverable("README.md", DeliverableAction::Create);
+        let error = check(&reading).unwrap_err().to_string();
+        assert!(error.contains("README.md"), "{error}");
+        assert!(error.contains("is a create"), "{error}");
+        assert!(error.contains("already exists"), "{error}");
+        check(&reading_with_deliverable(
+            "docs/new.md",
+            DeliverableAction::Create,
+        ))
+        .unwrap();
+        // Valid paths and clean text: one modify, one create, accepted.
+        let mut mixed = governed_reading(
+            &["README.md", "docs/new.md"],
+            &["the greeting prints"],
+            &["the logo"],
+        );
+        mixed.deliverables[1].action = DeliverableAction::Create;
+        check(&mixed).unwrap();
+        // One bad path among good ones is refused and only it is named.
+        mixed.deliverables.push(Deliverable {
+            path: "src/gone.rs".into(),
+            action: DeliverableAction::Delete,
+            p: 0.5,
+        });
+        let error = check(&mixed).unwrap_err().to_string();
+        assert!(error.contains("src/gone.rs"), "{error}");
+        assert!(!error.contains("docs/new.md"), "{error}");
+        assert!(!error.contains("deliverable README.md"), "{error}");
+    }
+
+    #[test]
+    fn the_path_rule_allows_a_directory_and_an_absent_changelog_and_skips_without_a_file_set() {
+        let files = files_at_head();
+        let check = |reading: &Reading, set: Option<&BTreeSet<String>>| {
+            check_reading_acceptance(reading, "add a greeting", None, &[], set)
+        };
+        // A directory with files under it is present; a name that only starts like one is not.
+        let dir = reading_with_deliverable("src", DeliverableAction::Modify);
+        check(&dir, Some(&files)).unwrap();
+        let prefix = reading_with_deliverable("sr", DeliverableAction::Modify);
+        assert!(check(&prefix, Some(&files)).is_err());
+        // Athena adds CHANGELOG.md itself, so its modify is not refused when the file is absent.
+        let mut change = governed_reading(&["README.md"], &["the greeting prints"], &["x"]);
+        ensure_changelog(&mut change);
+        assert!(change.deliverables.iter().any(|d| d.path == "CHANGELOG.md"));
+        check(&change, Some(&files)).unwrap();
+        // A delete of an absent CHANGELOG.md has no such exemption.
+        let delete = reading_with_deliverable("CHANGELOG.md", DeliverableAction::Delete);
+        assert!(check(&delete, Some(&files)).is_err());
+        // With no file set (the replay), the paths are not judged.
+        let absent = reading_with_deliverable("docs/missing.md", DeliverableAction::Modify);
+        check(&absent, None).unwrap();
+        assert!(matches!(
+            check_reading_text(&absent, "add a greeting"),
+            ReadingCheck::Accept
+        ));
+        // A reading that declines or asks names no change, so its paths are not judged.
+        let mut asking = reading_with_deliverable("docs/missing.md", DeliverableAction::Modify);
+        asking.question = Some("which file?".into());
+        check(&asking, Some(&files)).unwrap();
+        let mut declined = reading_with_deliverable("docs/missing.md", DeliverableAction::Modify);
+        declined.capability = None;
+        declined.decline_reason = Some("no capability fits".into());
+        check(&declined, Some(&files)).unwrap();
+    }
+
+    #[test]
+    fn the_text_and_path_problems_are_reported_together() {
+        let files = files_at_head();
+        let word = banned_word();
+        let mut reading = reading_with_deliverable("docs/missing.md", DeliverableAction::Modify);
+        reading.summary = format!("The {word} decides.");
+        let error = check_reading_acceptance(&reading, "add a greeting", None, &[], Some(&files))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(&word), "{error}");
+        assert!(error.contains("docs/missing.md"), "{error}");
     }
 
     // -- The replay of accepted readings
@@ -5929,7 +6295,7 @@ mod tests {
     }
 
     fn accept(reading: &Reading) -> Result<()> {
-        check_reading_acceptance(reading, "change the reading rules", None, &[])
+        check_reading_acceptance(reading, "change the reading rules", None, &[], None)
     }
 
     const MODIFY_READING: (&str, DeliverableAction) = (
