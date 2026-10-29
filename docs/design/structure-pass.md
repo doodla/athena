@@ -211,6 +211,11 @@ from `run/mod.rs`. The caller search found no call to `gh::land_pr` from the mov
 `Athena::land_pr` in `gh/landing.rs`), and `retry_landing` is called only from `go_job` in `run/mod.rs`.
 `cost_text` stays in `run/mod.rs` because the producer, verifier and planning code also use it.
 
+R5 is done. Stages S1-S3 are in `run/producer.rs` as `run_baseline`, `prepare_producer` and `run_producer`;
+`produce_and_verify` calls them in that order. The four early `return Ok(closing)` paths of S3 became
+`return Ok(Flow::Stop)`, and the driver returns `closing` when it sees `Flow::Stop`. `take_baseline` stays in
+`run/mod.rs` for R7.
+
 ## 5. How each move is shown to change nothing
 
 The rules below apply to every job. A job fails if any item is not met.
