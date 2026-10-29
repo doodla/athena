@@ -2,7 +2,7 @@
 //! [`GhClient`], which makes the REST calls through `gh api` for one repository.
 
 use super::transport::clock_entropy;
-use super::{EARLY_RUN_WAIT, GhFailure, HOST, HostErrorLog, Retry, Runner};
+use super::{GhFailure, HOST, HostErrorLog, Retry, Runner};
 use crate::Ui;
 use crate::pr::{Host, PrLink};
 use crate::reconcile::{CommitHost, MergedPr};
@@ -12,6 +12,10 @@ use athena_git::CommitText;
 use serde::Serialize;
 use serde_json::Value;
 use std::time::Duration;
+
+/// How long land waits, by default, for the early commit's runs (a bit under the run's own length). It stays
+/// here, beside [`PrHost::early_run_wait`], so the client does not name the early row.
+pub const EARLY_RUN_WAIT: Duration = Duration::from_secs(600);
 
 /// How a pull request's checks stand.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

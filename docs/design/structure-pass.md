@@ -92,6 +92,13 @@ Direction: `transport` and `remote` at the bottom, then `host`, then `pages`, `r
 No module in a lower row names a higher one. A circular `use` between two siblings is a sign a move was cut in
 the wrong place and the job stops.
 
+Two notes from job G6. First, `EARLY_RUN_WAIT` stays in `gh/client.rs` beside `PrHost::early_run_wait`, which
+returns it, and `gh/mod.rs` re-exports it so `gh::EARLY_RUN_WAIT` holds. Moving it into `early.rs` would make
+`client` name `early` while `early` names `client`, a cycle. Second, with the text kept unchanged, `early.rs`
+also uses `remote` (`GitRemote`, `Remote`) and the `LandPr` type that stays in `mod.rs` until G7. G7 must
+move `LandPr` to a place `early` can use without `early` naming `landing`, since `landing` depends on `early`
+and a use in the other direction would be a cycle.
+
 ### 3.2 `run/`
 
 | Module | Holds | Depends on |
