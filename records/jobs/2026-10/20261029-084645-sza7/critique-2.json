@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261029-084645-sza7",
+  "round": 2,
+  "at": "2026-10-29T10:24:06.321559475Z",
+  "invocation_seq": 5,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "The claim that clippy -D warnings would catch an unwired helper is wrong for public functions.",
+      "evidence": "The plan makes `timed_out` and `check_timeout_reason` `pub fn` in a library crate (checks.rs, disk.rs). rustc's dead_code lint does not fire on reachable public items, so leaving them unused in check_and_verify would not fail clippy. Wiring is actually proven by the criterion-2 end-to-end test. Fix: Drop the dead-code claim, or make the helpers pub(crate). Rely on the criterion-2 test through Athena::go as the proof that the classifier is wired.",
+      "location": "Plan, Demonstrations, Criterion 6 'Fails without the behavior'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A baseline check killed at its deadline is still recorded as an ordinary baseline failure. mark_pre_existing can then mark a real candidate failure of the same check as pre-existing.",
+      "evidence": "baseline_stage calls checks::baseline_runs with the same check_timeout_s and does not go through SnapExec, so the new classification never sees it. check_and_verify then calls mark_pre_existing(&mut check_runs, usable_baseline) (mod.rs:1452) using that baseline. Fix: Out of scope for this change, but name it in the plan's open questions or risks (or exclude timed-out baseline runs from pre-existing marking with checks::timed_out) so the root-cause story stays complete.",
+      "location": "Plan, Approach / Risks; crates/athena-core/src/run/mod.rs:1102-1112 (baseline_runs with check_timeout_s)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Every timeout becomes a resumable environment hold, including one where the candidate itself makes the suite hang. With no cap, such a job is held and retried forever.",
+      "evidence": "The request asks for this classification, and the plan lists the missing retry cap as an open question. Still, the closing reason text says 'this is the environment, not the work', which overstates what a timeout proves. Fix: Word the reason more neutrally, e.g. 'killed at 905s of 1800s limit; held as an environment stop', and keep the retry-cap question for the follow-up together with the status durations report.",
+      "location": "Plan, Open questions 1; Decision 2",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The plan says the new seam follows 'the replay_seam precedent' in run/mod.rs, but replay_seam lives in lib.rs.",
+      "evidence": "crates/athena-core/src/lib.rs:145 `pub(crate) mod replay_seam`. Fix: Say the pattern comes from lib.rs's replay_seam and the new module is placed in run/mod.rs because lib.rs is not a deliverable. No design change is needed.",
+      "location": "Plan, Decision 4 / Step 4",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the code the plan names and it all matches. checks.rs:198-205 writes the note 'killed at the deadline of Ns' with exit_code None. disk.rs:212 is_environment_reason checks only the LOW_DISK prefix. scope_guard's ENVIRONMENT_PREFIX \"environment:\" is a prefix of the proposed \"environment: check timed out\". The early return the plan copies exists at mod.rs:1566-1574 (failure, then verification_passed None, then remove_tree of the verify dir). SnapExec::exec (mod.rs:969) is the single place where fresh checks run, so a cfg(test) seam there leaves classification, closing and resume handling in production code. The baseline goes through run_check directly, so the seam does not intercept it. The run/mod.rs test fixture repo() loads the repository athena.toml, so the '905s of 1800s limit' assertion really exercises the new value. The timeout is detected through a shared note constant plus a function that requires passed false, exit_code None and the exact prefix. This is a sound mechanism, not a text heuristic, and a real-runner unit test ties the classifier to run_check. The end-to-end tests for timeout versus real failure go through Athena::go and would fail without the change. Splitting part (3) into a follow-up was accepted by the user in the reading. The findings are all minor: the clippy dead-code claim is inaccurate for pub items; a timed-out baseline can still feed pre-existing marking; the reason wording overstates what a timeout proves; the replay_seam location is misstated. None blocks the plan."
+}
