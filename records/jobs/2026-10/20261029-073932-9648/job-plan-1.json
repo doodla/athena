@@ -1,0 +1,227 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261029-073932-9648",
+  "round": 1,
+  "at": "2026-10-29T16:54:02.130128359Z",
+  "invocation_seq": 2,
+  "approach": "Add three string fields (mechanism, owner, measure) to every active [[requirement]] in docs/spec.toml, filled by reading the code; \"none\" where nothing meets one. The xtask spec test gains the fields on its serde struct and a rule that fails an active requirement with a blank one (superseded are exempt). In athena-core, hestia.rs gets a small toml_edit parser for docs/spec.toml (already a dependency, so Cargo.toml and Cargo.lock stay unchanged) and a pure `spec_gaps` function that flags an active requirement whose mechanism is none/blank or whose measure names no known `athena status` section. A new `Athena::spec_review` pass reads docs/spec.toml at HEAD, builds one request per gap through the existing `StewardRequest::new` (Priority::Urgent when the statement is about speed, otherwise Normal), and dedupes against open request jobs by a `Spec requirement: <id>` line. It runs in `review_passes` (so in every sweep and drain start), which avoids changing the `Check` trait that has no access to records. status.rs adds a `spec_gaps` field to StatusView and `next` lines; the CLI already prints `next`, so display.rs is untouched. CHANGELOG gets an entry.",
+  "decisions": [
+    {
+      "choice": "Run the spec check as a pass in `Athena::review_passes` (which `hestia_sweep_with` and the drain start already call), not as a `Check` in `default_checks`.",
+      "reason": "`Check::run(&self, now)` has no access to git, records or the queue, so it cannot dedupe against open requests or queue anything. The error-review backfill is the established pattern for sweep-time queueing through StewardRequest, and review_passes already runs it in every sweep. `default_checks` stays empty, so the existing test `the_skeleton_registers_no_checks` still holds.",
+      "rejected": [
+        {
+          "option": "Change the `Check` trait to take `&Athena`/records",
+          "why": "Touches every check and the CLI call site, far beyond the five named files."
+        },
+        {
+          "option": "Register a Check in default_checks that only reports findings",
+          "why": "It could not queue requests or dedupe, and would break the empty-defaults test."
+        }
+      ]
+    },
+    {
+      "choice": "Parse docs/spec.toml in athena-core with toml_edit::DocumentMut (reading `requirement` as an array of tables), no new dependency.",
+      "reason": "toml_edit is already in athena-core's Cargo.toml and used in admission.rs and toolconfig.rs. Adding `toml` would change Cargo.toml and Cargo.lock, and the checks run `--locked`. xtask tests cannot be imported, so a small mirror parser is unavoidable.",
+      "rejected": [
+        {
+          "option": "Add `toml` with serde to athena-core",
+          "why": "Lockfile edge change risks a `--locked` failure for no gain."
+        },
+        {
+          "option": "Share one parser with xtask",
+          "why": "xtask integration tests are not a library; a shared crate is out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "Dedupe by a stable body line `Spec requirement: <id>` matched as a whole line against the text of request jobs that are not Closed. A landed or closed request does not dedupe.",
+      "reason": "Matches 'none on a second run while it is open'. If a request landed but the spec still says none, the gap is real and is queued again. Whole-line match avoids OLY-A-1 matching OLY-A-14.",
+      "rejected": [
+        {
+          "option": "Treat landed requests as addressing the gap, as addressing_request does for causes",
+          "why": "Would hide a requirement whose mechanism is still none after the work landed."
+        },
+        {
+          "option": "Substring match on the id",
+          "why": "Prefix ids collide."
+        }
+      ]
+    },
+    {
+      "choice": "A 'failing measure' means the measure text does not end in `status: <section>` with <section> in a const list of athena status sections (`STATUS_MEASURE_SECTIONS` in status.rs), or names `status: none`. The spec test requires the `status:` marker on every active measure.",
+      "reason": "Gives a mechanical, testable rule for 'where in athena status' without inventing live metrics; a measure that points nowhere is flagged. One request per requirement lists all of its reasons.",
+      "rejected": [
+        {
+          "option": "Evaluate live metrics per requirement",
+          "why": "No general metric engine exists; far beyond the five files."
+        },
+        {
+          "option": "Flag only mechanism none",
+          "why": "Acceptance 3 says a failing measure is also flagged."
+        }
+      ]
+    },
+    {
+      "choice": "Speed means the statement (case-insensitive) contains faster, speed, accelerat, quicker, slower, latency, wall time or wasted time; such a gap is queued at Priority::Urgent, others Normal. A per-pass cap (SPEC_REQUESTS_PER_PASS = 5, speed gaps first, then spec order) limits new requests.",
+      "reason": "OP-23's text was not found by that name in the repo; docs/decisions.md ~3026 gives the rule (urgent when it makes Athena faster or cuts wasted time), so the keyword rule follows it and is isolated in one function. The cap stops the first run from queuing dozens of requests at once for the many requirements with mechanism none; the rest are queued by later passes (each drain start) and all stay listed in athena status.",
+      "rejected": [
+        {
+          "option": "An explicit `speed` field in the spec",
+          "why": "Adds a fourth required field the request did not ask for."
+        },
+        {
+          "option": "No cap",
+          "why": "Floods the queue on first run; the requirement list may hold many 'none'."
+        }
+      ]
+    },
+    {
+      "choice": "Do not modify steward.rs or athena-core/Cargo.toml; build the request text with the existing `StewardRequest::new`.",
+      "reason": "The builder already takes priority, title, body, acceptance and files, and checks the finished text, so no change is needed. These two files are on the expected list only as possibilities.",
+      "rejected": [
+        {
+          "option": "Add `StewardRequest::for_spec_gap`",
+          "why": "One caller; a local builder function in hestia.rs, like root_cause_request, is smaller."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "docs/spec.toml",
+      "action": "modify",
+      "purpose": "Add mechanism, owner and measure to each of the 135 active requirements, filled from the current code (a code path, role or check; the literal none where nothing meets it). The measure ends `status: <section>`. Update the header comment to define the three fields.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "xtask/tests/spec.rs",
+      "action": "modify",
+      "purpose": "Add the three fields to the Requirement struct (serde default, so a missing one is a check error and not a parse error). Add the rule for active requirements, the negative in-memory cases, the status-location test and the speed-requirement test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/hestia.rs",
+      "action": "modify",
+      "purpose": "Add `SpecRequirement`, `parse_spec`, `SpecGap`, `spec_gaps`, `spec_gaps_at(git, head)`, the speed-keyword rule, the request builder through StewardRequest, the dedupe, `Athena::spec_review` and its summary line in `review_passes`. Update the module comment. Tests in `mod tests`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "Add `STATUS_MEASURE_SECTIONS`, the `spec_gaps: Vec<SpecGap>` field on StatusView, its fill in `Athena::status`, and a `next` line per requirement without a mechanism (printed by the CLI).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an Unreleased entry describing the fields, the spec test rule, the sweep check and the status listing.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read the code that meets each requirement group (hestia.rs, steward.rs, status.rs, the crates named in docs/design/requirements-map.md) so the spec fields can be filled from the code, not from memory.",
+    "xtask/tests/spec.rs: add `mechanism`, `owner`, `measure` as `#[serde(default)] String` on Requirement. In `check`, for each active requirement push errors '<id>: no mechanism', '<id>: no owner', '<id>: no measure', or '<id>: measure names no status location' (missing `status:`). Add the negative tests, the status-location test and the speed-requirement test. The existing `an_unknown_kind_or_status_does_not_parse` helper text needs no change because the fields default.",
+    "docs/spec.toml: after each `status = \"active\"` line add `mechanism`, `owner` and `measure` (single-line basic strings; measure ends `status: <section>` with a section from the list in step 4, or `status: none`). Use `mechanism = \"none\"` where nothing meets the requirement. Update the header comment to describe the fields and say xtask/tests/spec.rs and the Hestia sweep both read them. Run `cargo test -p xtask --test spec` until it passes.",
+    "status.rs: add `pub const STATUS_MEASURE_SECTIONS: &[&str]` with names of StatusView fields that can serve as measures (for example throughput, check_durations, planning_cost, keep_rule, producer_settings, mistakes, repeated_causes, code_health, audit, audience, spec_gaps). Add its drift test.",
+    "hestia.rs: add `SpecRequirement` (id, statement, status, mechanism, owner, measure), `parse_spec(&str)` through toml_edit, `SpecGap { id, statement, reasons, speed }`, `is_speed(statement)`, `spec_gaps(&[SpecRequirement])` (active only; reasons: mechanism blank or none, owner blank, measure blank or not ending `status: <known section>`), and `spec_gaps_at(&Git, head)` returning an empty list when the file is absent. Add `spec_request(gap) -> Result<String, String>` through `StewardRequest::new` (title 'Give requirement <id> a mechanism', body with the statement, the reasons and the line `Spec requirement: <id>`, three acceptance bullets, files `docs/spec.toml, crates/`, Priority::Urgent for speed else Normal). Add `plan_spec_requests(gaps, records)` that skips a gap with a non-closed request job containing that line, orders speed first, and applies the cap.",
+    "hestia.rs: add `Athena::spec_review(&self, ui) -> Result<SpecReviewReport>` that loads records at HEAD, gets gaps, plans, and calls `self.queue(&text)` for each. Add its summary line to `review_passes` ('hestia     spec: N requirement(s) without a mechanism or measure · queued M · already open K'). Update the module comment: default_checks stays empty and the spec review is a review pass.",
+    "status.rs: add the `spec_gaps: Vec<crate::hestia::SpecGap>` field (docs comment), fill it in `Athena::status` from `spec_gaps_at` (errors become an empty list), and push one `next` line per gap: 'requirement <id> has no mechanism   # <reasons> · Athena queues a request at the next drain or sweep'.",
+    "Write the hestia tests listed in the demonstrations (parse and gap rules, queue once, none on second run, close and re-queue, urgent for speed, failing measure, superseded exempt, status listing both ways, real-spec parse via include_str!).",
+    "CHANGELOG.md: add the Unreleased entry in the neighbouring style.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`; fix anything they report."
+  ],
+  "risks": [
+    {
+      "risk": "Filling 135 requirements from the code is judgment-heavy, and a wrong mechanism looks like coverage.",
+      "mitigation": "Judge each requirement against code the producer has read; use none where unsure, never invent a path. A hestia test that every mechanism path-like token exists in the repo is out of scope; the spec test checks only presence."
+    },
+    {
+      "risk": "The first sweep queues many requests at once for the none requirements.",
+      "mitigation": "Cap new requests per pass at 5, speed first. The status listing shows all gaps, and the producer keeps 'none' honest but not inflated."
+    },
+    {
+      "risk": "A Cargo.lock change would fail `cargo test --locked`.",
+      "mitigation": "Add no dependency (toml_edit is already present), so Cargo.lock is unchanged under `--locked`."
+    },
+    {
+      "risk": "Athena runs on other repositories that have no docs/spec.toml, or whose spec is malformed.",
+      "mitigation": "Treat a missing docs/spec.toml as no gaps; an unparsable one is a line to the user and does not stop the other passes. Status ignores a parse error and shows an empty list."
+    },
+    {
+      "risk": "The const list of status sections drifts from StatusView fields.",
+      "mitigation": "A test in status.rs checks that every name in `STATUS_MEASURE_SECTIONS` appears as a `pub <name>:` field in StatusView, so a rename fails the test."
+    },
+    {
+      "risk": "The spec text (statement) put in a request body has a line starting like a bullet, which StewardRequest refuses.",
+      "mitigation": "A gap with an open request is skipped; the ids are matched by whole line. A request text that fails `StewardRequest::new` is reported in the pass line and does not stop the other gaps."
+    },
+    {
+      "risk": "The boundary scan (xtask/tests/policy.rs) rejects new text in docs/spec.toml.",
+      "mitigation": "Keep every new spec field free of banned words and email-like text; run `cargo test` which includes the boundary scan."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "The xtask test `the_real_spec_passes` runs `check()` on the real docs/spec.toml, which now rejects any active requirement with a blank mechanism, owner or measure, and a measure with no `status:` marker. Production entry point: `check(&real_spec(), &real_brief())`, an existing function in xtask/tests/spec.rs that step 2 extends. A new test `every_active_requirement_names_its_status_location` asserts the count of active requirements equals those with all three fields, and each measure contains `status:`. A hestia test parses the real file through the production `parse_spec` and asserts no requirement is blank.",
+      "command": "cargo test -p xtask --test spec",
+      "observes": "All 135 active requirements pass; the test lists the ids of those whose mechanism is the literal none.",
+      "fails_without": "If a field were missing from an active requirement, `the_real_spec_passes` would fail with a '<id>: no mechanism/owner/measure' error. The hestia test `the_real_spec_has_every_field_and_lists_its_none_requirements` (include_str! of docs/spec.toml, parsed by `parse_spec`) would fail on a blank field. Without the literal none convention, the sweep could not tell 'unmet' from 'unfilled'."
+    },
+    {
+      "criterion": 2,
+      "method": "In-memory negative cases on `check()` with the existing `real_spec()` fixture: blank mechanism, owner, measure one at a time on an active requirement each yield an error; the same blanks on a requirement set to Status::Superseded yield none; a measure without `status:` yields an error. Seam exists today: `check` is a pure function of the parsed Spec, and Requirement gains the three fields in step 2.",
+      "command": "cargo test -p xtask --test spec",
+      "observes": "The real spec passes; each negative case fails with a message naming the id and the field.",
+      "fails_without": "If the rule were absent, `an_active_requirement_missing_mechanism_owner_or_measure_fails` (clears each field in turn on an active requirement and expects an error naming the id and field) would find no error and fail. The superseded-exempt case would fail if the rule ignored status."
+    },
+    {
+      "criterion": 3,
+      "method": "Tests in hestia.rs `mod tests`, using the existing `athena_in(dir, state)` fixture (real git repo, fake driver). A helper writes a small fixture docs/spec.toml into that repo and commits it with the repo's git, as `put` does for records. Cases: (a) one active requirement with mechanism none; `athena.spec_review(&Quiet)` is called; it queues one request job. Records are reloaded and the request job's text is parsed to check it came through `StewardRequest` (has `Acceptance:` bullets, a `Files:` line, and the line `Spec requirement: <id>`). A second `spec_review` queues nothing while the job is open; after `athena.close(job, ...)` it queues one again. (b) A speed requirement (statement says Athena gets faster) gives text starting `Priority: urgent`; a non-speed one gives `Priority: normal` or no urgent line. (c) A requirement with a mechanism but a measure `status: none` is queued. (d) Superseded and complete requirements queue nothing. (e) Pure `spec_gaps`/`parse_spec` cases need no repo. Production entry points: `Athena::spec_review`, `spec_gaps`, `parse_spec`, `StewardRequest::new`. The seam (`athena_in`, `Athena::queue`, `Athena::close`) exists; `spec_review` and the helpers come from steps 3 and 4. The fixture only supplies spec text and a repo; none of the queueing or dedupe logic is in a double.",
+      "command": "cargo test -p athena-core hestia",
+      "observes": "One queued request per gap; zero on a second run while open; urgent for speed; failing measure flagged; all tests under hestia pass.",
+      "fails_without": "Without `spec_review`, the first call queues nothing and the 'exactly one request' assert fails. Without the open-request dedupe, the second call queues a second request and the 'still one' assert fails. Without the speed rule, the priority assert fails (normal not urgent). Without the measure rule, the failing-measure case queues none."
+    },
+    {
+      "criterion": 4,
+      "method": "Test `athena_status_lists_requirements_without_a_mechanism` in hestia.rs `mod tests` (matches the 'status' filter), same `athena_in` fixture as the existing `athena_status_lists_each_open_repeated_cause...` test. Commit a fixture docs/spec.toml with one mechanism-none requirement; call the production `athena.status()`; assert `spec_gaps` holds its id and that `next` has a line naming it. Commit a corrected spec (every mechanism set, measures valid); assert `spec_gaps` is empty and no such `next` line. A repo with no docs/spec.toml gives an empty list. A status.rs unit test checks that every name in `STATUS_MEASURE_SECTIONS` appears as a `pub <name>:` field of StatusView, via include_str!(\"status.rs\"). Seam: `Athena::status` exists today; `spec_gaps` and the field are added in step 5.",
+      "command": "cargo test -p athena-core status",
+      "observes": "The listing appears with the none requirement, disappears when all have mechanisms, and does not error without a spec.",
+      "fails_without": "Without the status change, `view.spec_gaps` does not exist, so the test fails to compile. If it were not filled from the spec, the list would be empty and the 'lists the requirement' assert fails. If it listed complete requirements, the 'lists none' assert fails."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the three checks Athena runs, as separate commands: `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`. Also covers the existing tests for spec.toml elsewhere (boundary scan in xtask/tests/policy.rs; no banned words or email-like text in new spec fields).",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit zero.",
+      "fails_without": "Any formatting drift, lint warning (for example a too-long fn or unused import) or failing test fails the matching command. A Cargo.lock change would fail `--locked`, which is why no dependency is added."
+    },
+    {
+      "criterion": 6,
+      "method": "Inspect the diff. The entry sits under the Unreleased heading in the style of neighbouring entries and covers the three fields and their enforcement by the spec test, the sweep's spec review (urgent for speed, one request per requirement, deduped while open, per-pass cap) and the `athena status` listing.",
+      "command": "git diff HEAD -- CHANGELOG.md",
+      "observes": "A new Unreleased entry naming mechanism, owner and measure, the sweep check and the status listing.",
+      "fails_without": "A missing entry shows an empty diff for CHANGELOG.md. If the entry omitted any of the three parts, the reviewer sees it missing."
+    },
+    {
+      "criterion": 7,
+      "method": "New xtask test finds the active requirements whose statement contains the speed words (the OLY learning-effectiveness requirement near spec.toml:928, 'cheaper, faster or more reliable', plus any other match) and asserts at least one exists and each has non-blank mechanism and owner. The hestia test asserts `spec_gaps` classes the same requirement as speed (urgent) when its mechanism is none. Seam exists today: the fixtures are `real_spec()` and the parsed real file.",
+      "command": "cargo test -p xtask --test spec",
+      "observes": "The speed requirement is present with an explicit mechanism (or none) and an owner.",
+      "fails_without": "If the speed requirement had no mechanism/owner/measure recorded, `a_requirement_about_speed_records_a_mechanism_or_none_and_an_owner` (finds active requirements whose statement matches the speed words and asserts non-blank mechanism and owner) and the general rule in `the_real_spec_passes` would fail. The test also fails if no active requirement matches (omitted)."
+    }
+  ],
+  "open_questions": [
+    "BRIEF's 'Athena owns acceleration' addendum (2026-10-13) and the 'Speed first' addendum (2026-10-25) are outside the Olympus part the spec cites, and the spec test rejects headings dated after 2026-10-24. docs/spec.toml has no requirement citing them. The plan records mechanism and owner on the existing speed-bearing requirement (cheaper, faster or more reliable). Adding a dedicated requirement would need a citable heading or widening the test's scope, which is out of scope as written. Does Sri want that as a follow-up?",
+    "The text of OP-23 was not found in the repo by that name; the urgency rule follows docs/decisions.md ~3026 (faster or cuts wasted time). Confirm the keyword list.",
+    "How many requirements end up with mechanism none is judgment-heavy and unknown until the producer reads the code. The per-pass cap of 5 is a plan choice; confirm it or drop it.",
+    "The valid owner roles are not enumerated anywhere in the spec; the plan checks only that owner is non-blank. A list of role names could be enforced later."
+  ],
+  "producer_section_sha256": "5a49918fd7198d5937250fcb7b2c0c32e505a08d50f2d2beb696fe1287e11a5e"
+}

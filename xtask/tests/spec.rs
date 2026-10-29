@@ -5,6 +5,13 @@
 //! A source quote passes only if, after whitespace is collapsed, it is a substring of the text under
 //! the heading it names (from that heading line to the next heading line of any level). The checker is
 //! a pure function of the parsed spec and the brief, so each rule has an in-memory negative case.
+//!
+//! Every active requirement also records how it is met: a `mechanism` (the code path, role or check, or the
+//! literal `none`), an `owner` (a role) and a `measure` (how it is shown, ending with `status: <label>`). A
+//! missing one fails the test. The label is checked against the labels `athena status` prints by the Hestia
+//! spec review in `crates/athena-core/src/hestia.rs`, which also queues a request for a mechanism of `none`.
+//! Two addenda outside the range above are cited too (`PINNED_HEADINGS`): the mandate to accelerate and
+//! the rule that speed comes first.
 
 use serde::Deserialize;
 use std::collections::BTreeSet;
@@ -26,6 +33,16 @@ struct Requirement {
     statement: String,
     kind: Kind,
     status: Status,
+    /// The code path, role or check that meets the requirement, or the literal `none`.
+    #[serde(default)]
+    mechanism: String,
+    /// The role responsible for the requirement.
+    #[serde(default)]
+    owner: String,
+    /// How the requirement is shown, ending with `status: <label>` (where it appears in `athena status`) or
+    /// `status: not shown` and the test or check that shows it.
+    #[serde(default)]
+    measure: String,
     #[serde(default)]
     supersedes: Vec<String>,
     #[serde(default)]
@@ -106,27 +123,41 @@ fn heading_date(heading: &str) -> Option<&str> {
     (shaped && heading[10..].starts_with(':')).then_some(date)
 }
 
+/// Two addenda the spec cites although they sit outside the range above: one stands before
+/// `# Project Olympus`, the other after the first heading dated past `LAST_DATE`. Each is kept whole, with
+/// the text under it; every other heading outside the range stays out of reach.
+const PINNED_HEADINGS: [&str; 2] = [
+    "2026-10-13: Athena owns acceleration",
+    "2026-10-25: Speed first",
+];
+
 /// Cut the Olympus part of the brief (from `# Project Olympus` through the addenda dated up to
-/// `LAST_DATE`) at every heading line, whatever its level.
+/// `LAST_DATE`, and the `PINNED_HEADINGS`) at every heading line, whatever its level.
 fn sections(brief: &str) -> Vec<Section> {
     let mut out: Vec<Section> = Vec::new();
     let mut number = None;
     let mut started = false;
+    let mut ended = false;
+    let mut pinned = false;
     for line in brief.lines() {
         if line == "# Project Olympus" {
             started = true;
         }
-        if !started {
+        let marks = line.chars().take_while(|c| *c == '#').count();
+        let is_heading = marks > 0 && line[marks..].starts_with(' ');
+        if is_heading {
+            pinned = PINNED_HEADINGS.contains(&line[marks..].trim());
+            if started
+                && !pinned
+                && heading_date(line[marks..].trim()).is_some_and(|d| d > LAST_DATE)
+            {
+                ended = true;
+            }
+        }
+        if !pinned && !(started && !ended) {
             continue;
         }
-        let marks = line.chars().take_while(|c| *c == '#').count();
-        if marks > 0
-            && line[marks..].starts_with(' ')
-            && heading_date(line[marks..].trim()).is_some_and(|d| d > LAST_DATE)
-        {
-            break;
-        }
-        if marks > 0 && line[marks..].starts_with(' ') {
+        if is_heading {
             let heading = line[marks..].trim().to_string();
             if marks == 2 {
                 // A `## Governing philosophy` or `## Addenda` heading belongs to no numbered section.
@@ -185,6 +216,37 @@ fn check_source(source: &Source, who: &str, secs: &[Section], errors: &mut Vec<S
     }
 }
 
+/// Whether a field holds nothing, or only the word `none`.
+fn blank_or_none(text: &str) -> bool {
+    let t = text.trim();
+    t.is_empty() || t.eq_ignore_ascii_case("none")
+}
+
+/// What an active requirement must record about how it is met: a mechanism (the literal `none` when nothing
+/// meets it), an owner that is a role and not `none`, and a measure that ends with `status: <label>`. The
+/// Hestia sweep (`Athena::spec_review`) queues a request for a mechanism of `none` and for a measure whose
+/// label `athena status` does not print; this test only requires that the fields are there.
+fn check_how_it_is_met(r: &Requirement, errors: &mut Vec<String>) {
+    if r.mechanism.trim().is_empty() {
+        errors.push(format!(
+            "{}: no mechanism (name the code path, role or check, or write none)",
+            r.id
+        ));
+    }
+    if blank_or_none(&r.owner) {
+        errors.push(format!("{}: no owner (name the responsible role)", r.id));
+    }
+    let label = r.measure.rsplit_once("status:").map(|(_, l)| l.trim());
+    if blank_or_none(&r.measure) {
+        errors.push(format!("{}: no measure", r.id));
+    } else if label.is_none_or(str::is_empty) {
+        errors.push(format!(
+            "{}: no measure label (end the measure with `status: <label>` or `status: not shown`)",
+            r.id
+        ));
+    }
+}
+
 /// Every rule of the spec, as a list of errors; empty means the spec passes.
 fn check(spec: &Spec, brief: &str) -> Vec<String> {
     let secs = sections(brief);
@@ -202,6 +264,9 @@ fn check(spec: &Spec, brief: &str) -> Vec<String> {
         }
         for s in &r.source {
             check_source(s, &r.id, &secs, &mut errors);
+        }
+        if matches!(r.status, Status::Active) {
+            check_how_it_is_met(r, &mut errors);
         }
     }
     for r in &spec.requirement {
@@ -438,15 +503,151 @@ fn a_missing_philosophy_or_addendum_requirement_is_a_coverage_gap() {
 #[test]
 fn a_heading_dated_after_the_last_covered_addendum_is_rejected() {
     let brief = real_brief();
-    assert!(brief.contains("### 2026-10-25: Speed first"));
+    assert!(brief.contains("### 2026-10-25: Evidence labels Jev"));
+    assert!(sections(&brief).iter().all(|s| {
+        PINNED_HEADINGS.contains(&s.heading.as_str())
+            || heading_date(&s.heading).is_none_or(|d| d <= LAST_DATE)
+    }));
+    let mut spec = real_spec();
+    spec.requirement[0].source[0].heading = "2026-10-25: Evidence labels Jev".into();
+    assert!(has_error(&check(&spec, &brief), "no heading"));
+}
+
+#[test]
+fn only_the_pinned_late_headings_are_citable() {
+    let brief = real_brief();
+    let secs = sections(&brief);
+    for pinned in PINNED_HEADINGS {
+        assert!(brief.contains(&format!("### {pinned}")), "{pinned}");
+        let kept: Vec<&Section> = secs.iter().filter(|s| s.heading == pinned).collect();
+        assert_eq!(kept.len(), 1, "{pinned}");
+        assert!(!kept[0].body.is_empty(), "{pinned} keeps its text");
+    }
+    // The pinned heading after the cut keeps its own text only: the heading after it is still out.
     assert!(
-        sections(&brief)
-            .iter()
-            .all(|s| heading_date(&s.heading).is_none_or(|d| d <= LAST_DATE))
+        secs.iter()
+            .all(|s| s.heading != "2026-10-25: Evidence labels Jev")
     );
     let mut spec = real_spec();
-    spec.requirement[0].source[0].heading = "2026-10-25: Speed first".into();
-    assert!(has_error(&check(&spec, &brief), "no heading"));
+    for (heading, quote) in [
+        (
+            "2026-10-13: Athena owns acceleration",
+            "give Athena the mandate to accelerate",
+        ),
+        (
+            "2026-10-25: Speed first",
+            "Athena should prioritize anything that'll help it move faster",
+        ),
+    ] {
+        spec.requirement[0].source[0].heading = heading.into();
+        spec.requirement[0].source[0].quote = quote.into();
+        assert!(check(&spec, &brief).is_empty(), "{heading}");
+        spec.requirement[0].source[0].quote = "words the brief never says".into();
+        assert!(
+            has_error(&check(&spec, &brief), "not verbatim"),
+            "{heading}"
+        );
+    }
+}
+
+fn find<'a>(spec: &'a Spec, id: &str) -> &'a Requirement {
+    spec.requirement
+        .iter()
+        .find(|r| r.id == id)
+        .unwrap_or_else(|| panic!("{id} is not in the spec"))
+}
+
+#[test]
+fn every_active_requirement_has_a_mechanism_an_owner_and_a_measure() {
+    let spec = real_spec();
+    let active: Vec<&Requirement> = spec
+        .requirement
+        .iter()
+        .filter(|r| matches!(r.status, Status::Active))
+        .collect();
+    assert!(active.len() >= 135, "{} active requirements", active.len());
+    let complete = active
+        .iter()
+        .filter(|r| {
+            !r.mechanism.trim().is_empty()
+                && !blank_or_none(&r.owner)
+                && !blank_or_none(&r.measure)
+                && r.measure.contains("status:")
+        })
+        .count();
+    assert_eq!(complete, active.len());
+    // The literal `none` is a recorded answer, not a gap in the file: the sweep queues a request for each.
+    let none: Vec<&str> = active
+        .iter()
+        .filter(|r| r.mechanism.trim().eq_ignore_ascii_case("none"))
+        .map(|r| r.id.as_str())
+        .collect();
+    println!(
+        "{} requirements record mechanism none: {none:?}",
+        none.len()
+    );
+}
+
+#[test]
+fn an_active_requirement_missing_mechanism_owner_or_measure_fails() {
+    let brief = real_brief();
+    type Damage = fn(&mut Requirement);
+    let cases: [(&str, Damage, &str); 7] = [
+        ("mechanism", |r| r.mechanism.clear(), "no mechanism"),
+        ("owner", |r| r.owner.clear(), "no owner"),
+        ("owner none", |r| r.owner = "none".into(), "no owner"),
+        ("measure", |r| r.measure.clear(), "no measure"),
+        ("measure none", |r| r.measure = "None".into(), "no measure"),
+        (
+            "measure without a label",
+            |r| r.measure = "shown in a test".into(),
+            "no measure label",
+        ),
+        (
+            "measure with an empty label",
+            |r| r.measure = "shown in a test; status: ".into(),
+            "no measure label",
+        ),
+    ];
+    for (name, damage, expected) in cases {
+        let mut spec = real_spec();
+        assert!(check(&spec, &brief).is_empty());
+        damage(&mut spec.requirement[0]);
+        let errors = check(&spec, &brief);
+        let id = &spec.requirement[0].id;
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.starts_with(id) && e.contains(expected)),
+            "{name}: {errors:?}"
+        );
+
+        // A superseded requirement is exempt.
+        spec.requirement[0].status = Status::Superseded;
+        assert!(check(&spec, &brief).is_empty(), "{name} when superseded");
+    }
+    // The literal `none` as a mechanism is a valid answer for the file.
+    let mut spec = real_spec();
+    spec.requirement[0].mechanism = "none".into();
+    assert!(check(&spec, &brief).is_empty());
+}
+
+#[test]
+fn the_acceleration_requirements_record_a_mechanism_and_an_owner() {
+    let spec = real_spec();
+    let a = find(&spec, "OLY-A-22");
+    assert!(matches!(a.status, Status::Active));
+    assert_eq!(a.source[0].heading, "2026-10-13: Athena owns acceleration");
+    assert!(
+        a.statement.contains("measurably faster") && a.statement.contains("owns its acceleration")
+    );
+    assert!(a.mechanism.contains("throughput_review"), "{}", a.mechanism);
+    assert_eq!(a.owner, "Hestia");
+    assert!(a.measure.contains("status: throughput"), "{}", a.measure);
+
+    let s = find(&spec, "OLY-A-23");
+    assert_eq!(s.source[0].heading, "2026-10-25: Speed first");
+    assert!(!s.mechanism.trim().is_empty() && !blank_or_none(&s.owner));
 }
 
 #[test]
