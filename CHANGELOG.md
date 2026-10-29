@@ -9,6 +9,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- D145 accepted, decided by the brain under Sri's delegation on 2026-10-29. `docs/decisions.md` also gains an
+  "A1 measurements" entry (design section 12, job 1) that is not a measurement: `sccache --show-stats`, `du`, `df` and
+  `git worktree add` were each refused by the producer shell, so the entry records the command and error for each,
+  says the cause of D84's 0 hits was not found, and gives T about 6 GB and S about 0.2 GB as the design's estimates.
+  No `athena.toml` change; with `max_in_flight = 1` the drain behaves as today.
 - `docs/spec.toml` now cites the whole of BRIEF.md, so the brief can be retired as the working copy of the
   requirements. A third layer adds 127 requirements: the opening goals (including "gets measurably faster, cheaper,
   and more correct"), who's who, settings, the operating model O1 to O5, the standards and boundaries, Part 1 items

@@ -3818,12 +3818,12 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Provenance:** read: BRIEF.md sections 7 to 10, the governing philosophy and the addenda to 2026-10-24,
   D114, `xtask/tests/spec.rs`; measured: `cargo test -p xtask --test spec`.
 
-## D145 (proposed) · The drain overlaps jobs: read-ahead, per-job worktrees, one ordered landing queue
+## D145 (accepted, decided by the brain under Sri's delegation, 2026-10-29) · The drain overlaps jobs: read-ahead, per-job worktrees, one ordered landing queue
 
 - **Case:** Over 2026-10-27 to 29, 35 of 61 jobs landed and the median job took 42 minutes (producer 15, checks 13
   to 15, landing 6 to 8, verifier 2.3, reading and planning up to 5), one job at a time. About 73 minutes of drain
   time per landed job (estimate). The build cache is off (D84), so cold builds are the cost of every job.
-- **Decision:** (proposed, not yet accepted) Adopt the design in [docs/design/async-drain.md](design/async-drain.md):
+- **Decision:** (accepted 2026-10-29, decided by the brain under Sri's delegation) Adopt the design in [docs/design/async-drain.md](design/async-drain.md):
   read-ahead and planning of the next job; the producer starts early in its own worktree, bounded by free disk;
   one ordered landing queue that rebases or returns a conflict to the producer; CI waits and self-rebuild as
   background awaits; records committed in landing order. A `[drain.pipeline]` table (`max_in_flight`,
@@ -3840,3 +3840,33 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Provenance:** Read: D46, D79, D84, D140, D142, D143, `athena.toml`, `disk.rs`, `drain.rs`. Baseline figures are as
   the request gives them; the arithmetic is in the design, section 3. Not measured here: the size of a cold build and
   two simultaneous check runs.
+
+### A1 measurements (design section 12, job 1; for D145 and D84)
+
+Recorded 2026-10-29, second attempt. The producer shell enforces a command list (`cargo`, `chmod`, `git status`,
+`git diff`, `git log`, `git show`, `ls`, `mv`, `rm`). Each measuring command was tried and refused before it ran, so
+no figure below is a measurement. Where a number appears it is the design's estimate
+(`docs/design/async-drain.md`, lines 103-104) and is labeled as one.
+
+- **`sccache --show-stats` output:** could not run. Command tried: `sccache --show-stats`. Error: "Athena policy:
+  `sccache` is not on the producer role's list (cargo, chmod, git, ls, mv, rm); use the Read, Grep, and Glob tools
+  to inspect files". The refusal came from the shell policy, so it says nothing about whether `sccache` is
+  installed. `df -h .` was refused the same way (`df` is not on the list), so free disk is also unknown.
+- **Cause of D84's 0 hits:** not found. Tried: the `sccache` command above (refused); a read of the repository,
+  where no `*.toml` names sccache (design section 2), so any wrapper setting would have to come from the build
+  job's environment. D84's "not reproduced" outcome stands.
+- **Hits across two worktrees with different target directories:** could not run. Command tried:
+  `git worktree add ../wt-a1 HEAD`. Error: "Athena policy: git worktree is not allowed; Athena owns git state.
+  Allowed: git status, diff, log, show". Without a second worktree and `sccache`, hits and misses are unknown for
+  both. Command for a later job: in each worktree set `RUSTC_WRAPPER=sccache` and a distinct `CARGO_TARGET_DIR`, run
+  `sccache --zero-stats`, `cargo build --locked`, then `sccache --show-stats`; compare the second run's hits with
+  the first run's misses.
+- **T (one cold `target/`):** could not measure. Command tried: `du -sk .` (stand-in for `du -sk "$CARGO_TARGET_DIR"`
+  after `cargo build --locked --all-targets`). Error: "Athena policy: `du` is not on the producer role's list
+  (cargo, chmod, git, ls, mv, rm)". Estimate, not measured: T about 6 GB (design, lines 103-104).
+- **S (worktree source size):** could not measure, same `du` refusal. Command for a later job:
+  `git ls-files -z | xargs -0 du -ck | tail -n 1` in a fresh worktree (kilobytes). Estimate, not measured: S about
+  0.2 GB (design, lines 103-104).
+- **Effect on D145:** none. Alternative e (re-enable a compiler cache) stays uncosted, and the disk budget still
+  rests on the estimates. A run whose shell allows `sccache`, `du` and `git worktree` should replace the estimates
+  with measurements. No `athena.toml` change was made.
