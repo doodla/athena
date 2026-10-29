@@ -1,0 +1,164 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261029-073603-7kqv",
+  "n": 1,
+  "at": "2026-10-29T14:34:24.84207157Z",
+  "invocation_seq": 2,
+  "base_commit": "1f238fffadedceefa40f54acfb905db59916fcb2",
+  "config_sha256": "4686d6918e8a389a515edf47cdcb596e2ae4a147d9ffda0816f171979db719d1",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Add throughput status section and throughput review to Athena",
+  "summary": "Athena status gains a throughput section computed from job records (landed per day, median minutes per landed job by stage, idle time, time on failed jobs). A throughput review runs every 10 landings or on a >20% worsening, asks a strong model for the biggest bottleneck and architectural fix, queues one design request via the shared steward request builder, and later records predicted vs measured minutes. Audience: Sri and the maintainers who want Athena to find its own speedups.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "All code is Rust."
+    },
+    {
+      "id": "tested",
+      "how": "Tests, fmt and clippy -D warnings are criteria."
+    },
+    {
+      "id": "verified",
+      "how": "Behavior criteria run named cargo test commands."
+    },
+    {
+      "id": "strangers",
+      "how": "Design doc and changelog written for outside readers."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria assert measured numbers and queued requests, not wiring."
+    },
+    {
+      "id": "mechanism",
+      "how": "Review cadence is enforced by code triggers, tested."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-core/src/hestia.rs (error_review, review_passes, root_cause_request, repeated_causes; review_passes is the entry point running reviews after a landing, and the new throughput review is added there beside the error review and code-health passes), crates/athena-core/src/status.rs (status rendering), crates/athena-core/src/code_health.rs (design-review cadence of 10 landings, reused for the counter), and crates/athena-data/src/records.rs (AnyRecord at line ~2386 and check_record_file at ~2686 are the records validation that accepts a new record kind by path and schema).",
+    "Throughput is computed directly from existing job records (timestamps per stage, outcomes), not a stand-in; stage durations come from the same records status already reads.",
+    "The prediction record (bottleneck, change, expected minutes saved, cited request, later measured minutes) reuses an existing record type if one fits; if a new record kind is added to crates/athena-data/src/records.rs, it gets a path, schema tag, an AnyRecord variant, check_record_file acceptance and a round-trip test in that file modelled on a_hestia_sweep_has_a_path_a_schema_and_round_trips. This is why records.rs is listed at moderate probability.",
+    "The design request goes through the existing shared steward request builder used by root_cause_request; priority maps from expected minutes saved (more minutes, higher priority). Duplicate suppression looks for an open request from a prior throughput review.",
+    "Model calls in tests use the existing fake-model facility; no real model is called.",
+    "Governance files (athena.toml, defaults.toml) do not change; the 'strong model' uses an existing configured model setting, and no cadence constant needs a config entry."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Run `cargo test -p athena-core status`: a test with fixture job records asserts status output reports landed jobs per day, median minutes per landed job with per-stage values (reading, planning, producer, checks, verifier, landing and rebuild), idle time between jobs, and time spent on non-landed jobs, with exact expected numbers.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-core hestia`: a fake-model test shows a throughput review queues exactly one design request containing the bottleneck, proposed change and predicted minutes saved, and a second review run while it is open queues none.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-core hestia`: a test shows the review triggers at 10 landings since the last review and when median minutes per landed job worsens by more than 20%, and does not trigger otherwise.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-core hestia`: a test shows that after a cited change lands, the next review records predicted against measured minutes per landed job for it.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-core hestia`: a test shows request priority rises with expected minutes saved.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` all pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has an entry for the throughput section and review, and docs/design/hestia.md states the cadence (every 10 landings or >20% worsening) and the prediction-vs-measured follow-up.",
+      "kind": "content"
+    },
+    {
+      "text": "Any new record kind is accepted by check_record_file / AnyRecord in crates/athena-data/src/records.rs and has a round-trip test there; if no new kind is added, records.rs is unchanged.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/hestia.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/code_health.rs",
+      "action": "modify",
+      "p": 0.35
+    },
+    {
+      "path": "docs/design/hestia.md",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "p": 0.5
+    }
+  ],
+  "out_of_scope": [
+    "Implementing the asynchronous-drain change itself",
+    "Changing athena.toml or defaults.toml",
+    "Changing the error review or code-health review behavior"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.8,
+        "p50": 1.8,
+        "p90": 4.0
+      },
+      "wall_time_s": {
+        "p10": 700.0,
+        "p50": 1900.0,
+        "p90": 4000.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7210810810810812,
+      "p_verification_passes": 0.67003367003367,
+      "p_user_intervenes": 0.07774294670846395,
+      "cost_usd": {
+        "p10": 0.5335220774351594,
+        "p50": 1.1875869757532709,
+        "p90": 2.9352416347775927
+      },
+      "wall_time_s": {
+        "p10": 540.1848580345153,
+        "p50": 1671.7064588518156,
+        "p90": 3184.524866464016
+      }
+    }
+  },
+  "departures": "Larger than reference: multi-file change with a new review, status computation and several tests.",
+  "urgent_reason": "Targets the biggest pipeline waits (idle time, failed-job time), cutting wasted time per landed job.",
+  "hard_reason": "Adds a review that triggers on landings and queues work requests (pipeline-shaping automation that can hold or add queue items), so mistakes are costly.",
+  "producer_effort": "high"
+}

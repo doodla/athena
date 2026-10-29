@@ -636,6 +636,275 @@ pub fn check_durations(records: &Records, limit_s: u64) -> Option<CheckDurations
     })
 }
 
+/// How many of the newest landed jobs the throughput medians read. The throughput review compares the same
+/// median from one review to the next, so the trigger and the status line share this window.
+pub const THROUGHPUT_WINDOW: usize = 20;
+
+/// Minutes a job spent in each stage. Reading is the reader's invocations; planning the planner's and the
+/// critic's; producer and verifier their own. Checks is the sum of the durations Athena measured for the
+/// job's checks. Landing and rebuild is one stage because no record separates the rebuild: it is the time
+/// from the end of the job's last invocation (the verifier, which runs after the checks) to the landing
+/// outcome, and never below zero.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
+pub struct StageMinutes {
+    pub reading: f64,
+    pub planning: f64,
+    pub producer: f64,
+    pub checks: f64,
+    pub verifier: f64,
+    pub landing_and_rebuild: f64,
+}
+
+impl StageMinutes {
+    /// The six stages, named and in pipeline order.
+    pub fn named(&self) -> [(&'static str, f64); 6] {
+        [
+            ("reading", self.reading),
+            ("planning", self.planning),
+            ("producer", self.producer),
+            ("checks", self.checks),
+            ("verifier", self.verifier),
+            ("landing and rebuild", self.landing_and_rebuild),
+        ]
+    }
+
+    /// The minutes of the whole job: the sum of the six stages.
+    pub fn total(&self) -> f64 {
+        self.named().iter().map(|(_, m)| m).sum()
+    }
+}
+
+/// One landed job with the minutes it spent in each stage.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct LandedJob {
+    pub id: String,
+    /// When the landing outcome was recorded.
+    pub landed_at: jiff::Timestamp,
+    pub stages: StageMinutes,
+}
+
+/// Landed jobs per UTC day.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DayCount {
+    /// `YYYY-MM-DD`, in UTC.
+    pub day: String,
+    pub landed: usize,
+}
+
+/// How fast jobs go through the pipeline, computed from the job records alone.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Throughput {
+    /// Request jobs that landed.
+    pub landed_total: usize,
+    /// Landed jobs per UTC day, oldest day first.
+    pub landed_per_day: Vec<DayCount>,
+    /// Landed jobs the medians cover: the newest ones with a measured stage, at most [`THROUGHPUT_WINDOW`].
+    pub window_jobs: usize,
+    /// The median of those jobs' total minutes; 0 when there are none.
+    pub median_minutes: f64,
+    /// The median of each stage over the same jobs.
+    pub median_stages: StageMinutes,
+    /// Minutes between jobs: the gaps between the merged working spans of all request jobs.
+    pub idle_minutes: f64,
+    /// Request jobs that did not land but did work: closed rejected, failed or abandoned, or stopped in planning.
+    pub unlanded_jobs: usize,
+    /// Their working minutes, from the first invocation to the closing record or the last invocation.
+    pub unlanded_minutes: f64,
+}
+
+/// The median of `values`; an even count takes the mean of the two middle values; 0 for none.
+pub fn median(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let mid = sorted.len() / 2;
+    if sorted.len() % 2 == 1 {
+        sorted[mid]
+    } else {
+        (sorted[mid - 1] + sorted[mid]) / 2.0
+    }
+}
+
+fn minutes_between(from: jiff::Timestamp, to: jiff::Timestamp) -> f64 {
+    to.duration_since(from).as_secs_f64() / 60.0
+}
+
+/// The outcome that closed a job, the later one first.
+fn closing_outcome(job: &JobRecords) -> Option<&athena_data::records::Outcome> {
+    job.later_outcome.as_ref().or(job.outcome.as_ref())
+}
+
+/// The minutes of a job's invocations in the roles `roles`.
+fn role_minutes(job: &JobRecords, roles: &[Role]) -> f64 {
+    crate::store::positive_zero(
+        job.invocations
+            .iter()
+            .filter(|i| roles.contains(&i.role))
+            .map(|i| minutes_between(i.started_at, i.ended_at).max(0.0))
+            .sum(),
+    )
+}
+
+/// The minutes the job's checks took, as measured; a check that did not run counts nothing.
+fn check_minutes(job: &JobRecords) -> f64 {
+    job.verification.as_ref().map_or(0.0, |v| {
+        crate::store::positive_zero(
+            v.checks
+                .iter()
+                .filter(|c| c.duration.basis() != "not run")
+                .filter_map(|c| c.duration.value())
+                .sum::<f64>()
+                / 60.0,
+        )
+    })
+}
+
+/// When the job began working (its first invocation) and when it stopped (its closing record, or the end of
+/// its last invocation if that is later or there is no closing record). None for a job that never ran a model.
+fn working_span(job: &JobRecords) -> Option<(jiff::Timestamp, jiff::Timestamp)> {
+    let first = job.invocations.iter().map(|i| i.started_at).min()?;
+    let last = job.invocations.iter().map(|i| i.ended_at).max()?;
+    let end = closing_outcome(job).map_or(last, |o| o.at.max(last));
+    Some((first, end))
+}
+
+/// The landed jobs whose stages were measured, oldest landing first (ties by id). A landed job that ran no
+/// model has nothing to measure and is left out.
+pub fn landed_jobs(records: &Records) -> Vec<LandedJob> {
+    let mut landed: Vec<LandedJob> = records
+        .request_jobs()
+        .into_iter()
+        .filter(|j| matches!(j.state(), JobState::Closed(OutcomeState::Landed)))
+        .filter_map(|j| {
+            let landed_at = closing_outcome(j)?.at;
+            let last_end = j.invocations.iter().map(|i| i.ended_at).max()?;
+            let checks = check_minutes(j);
+            Some(LandedJob {
+                id: j.id().as_str().to_string(),
+                landed_at,
+                stages: StageMinutes {
+                    reading: role_minutes(j, &[Role::Reader]),
+                    planning: role_minutes(j, &[Role::Planner, Role::Critic]),
+                    producer: role_minutes(j, &[Role::Producer]),
+                    checks,
+                    verifier: role_minutes(j, &[Role::Verifier]),
+                    landing_and_rebuild: minutes_between(last_end, landed_at).max(0.0),
+                },
+            })
+        })
+        .collect();
+    landed.sort_by(|a, b| (a.landed_at, &a.id).cmp(&(b.landed_at, &b.id)));
+    landed
+}
+
+impl Throughput {
+    /// Measures `records`. None when no request job landed, so a new repository shows no section.
+    pub fn compute(records: &Records) -> Option<Throughput> {
+        let landed_total = records
+            .request_jobs()
+            .into_iter()
+            .filter(|j| matches!(j.state(), JobState::Closed(OutcomeState::Landed)))
+            .count();
+        if landed_total == 0 {
+            return None;
+        }
+        let mut per_day: BTreeMap<String, usize> = BTreeMap::new();
+        for job in records.request_jobs() {
+            if matches!(job.state(), JobState::Closed(OutcomeState::Landed))
+                && let Some(outcome) = closing_outcome(job)
+            {
+                let day: String = outcome.at.to_string().chars().take(10).collect();
+                *per_day.entry(day).or_default() += 1;
+            }
+        }
+        let measured = landed_jobs(records);
+        let window = &measured[measured.len().saturating_sub(THROUGHPUT_WINDOW)..];
+        let column = |pick: fn(&StageMinutes) -> f64| -> f64 {
+            median(&window.iter().map(|j| pick(&j.stages)).collect::<Vec<_>>())
+        };
+        let median_stages = StageMinutes {
+            reading: column(|s| s.reading),
+            planning: column(|s| s.planning),
+            producer: column(|s| s.producer),
+            checks: column(|s| s.checks),
+            verifier: column(|s| s.verifier),
+            landing_and_rebuild: column(|s| s.landing_and_rebuild),
+        };
+        let median_minutes = median(&window.iter().map(|j| j.stages.total()).collect::<Vec<_>>());
+
+        let mut spans: Vec<(jiff::Timestamp, jiff::Timestamp)> = Vec::new();
+        let mut unlanded_jobs = 0;
+        let mut unlanded_minutes = 0.0;
+        for job in records.request_jobs() {
+            let Some(span) = working_span(job) else {
+                continue;
+            };
+            spans.push(span);
+            let state = job.state();
+            let stopped = plan_state(job).is_some_and(|s| !s.accepted);
+            let failed = matches!(state, JobState::Closed(s) if s != OutcomeState::Landed);
+            if failed || (stopped && state != JobState::Closed(OutcomeState::Landed)) {
+                unlanded_jobs += 1;
+                unlanded_minutes += minutes_between(span.0, span.1);
+            }
+        }
+        spans.sort();
+        let mut idle_minutes = 0.0;
+        let mut reach: Option<jiff::Timestamp> = None;
+        for (start, end) in spans {
+            if let Some(reach_end) = reach {
+                if start > reach_end {
+                    idle_minutes += minutes_between(reach_end, start);
+                }
+                reach = Some(reach_end.max(end));
+            } else {
+                reach = Some(end);
+            }
+        }
+        Some(Throughput {
+            landed_total,
+            landed_per_day: per_day
+                .into_iter()
+                .map(|(day, landed)| DayCount { day, landed })
+                .collect(),
+            window_jobs: window.len(),
+            median_minutes,
+            median_stages,
+            idle_minutes,
+            unlanded_jobs,
+            unlanded_minutes,
+        })
+    }
+
+    /// The lines `athena status` prints, and the section the throughput review is given.
+    pub fn text(&self) -> String {
+        let stages = self
+            .median_stages
+            .named()
+            .iter()
+            .map(|(name, m)| format!("{name} {m:.1}"))
+            .collect::<Vec<_>>()
+            .join(" · ");
+        let days = self
+            .landed_per_day
+            .iter()
+            .map(|d| format!("{} {}", d.day, d.landed))
+            .collect::<Vec<_>>()
+            .join(" · ");
+        format!(
+            "throughput {} landed ({days})\n           median per landed job over the last {} measured: {:.1} min ({stages})\n           idle between jobs {:.1} min · did not land: {} job(s), {:.1} min",
+            self.landed_total,
+            self.window_jobs,
+            self.median_minutes,
+            self.idle_minutes,
+            self.unlanded_jobs,
+            self.unlanded_minutes
+        )
+    }
+}
+
 /// One class's forecast headline.
 #[derive(Debug, Clone, Serialize)]
 pub struct ClassHeadline {
@@ -699,6 +968,10 @@ pub struct StatusView {
     /// when no job ran a measured test check or the configuration cannot be read.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub check_durations: Option<CheckDurations>,
+    /// Landed jobs per day, median minutes per landed job by stage, idle time between jobs and time spent on
+    /// jobs that did not land, computed from the job records; absent until a request job has landed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub throughput: Option<Throughput>,
     pub interventions_by_category: BTreeMap<String, usize>,
     pub interventions_by_class: BTreeMap<String, usize>,
     /// Mistakes per class and per cause, with the prevention proposed. Apart from `interventions_by_category`,
@@ -1421,6 +1694,7 @@ impl Athena {
             keep_rule: keep_rule(&records),
             producer_settings: producer_settings(&records),
             check_durations,
+            throughput: Throughput::compute(&records),
             interventions_by_category: by_category,
             interventions_by_class: by_class,
             mistakes: mistake_report(&records),
@@ -1696,11 +1970,11 @@ mod mistake_tests {
 }
 
 #[cfg(test)]
-mod planning_cost_tests {
+pub(crate) mod planning_cost_tests {
     use super::*;
     use athena_data::records::{
-        DriverInfo, InvocationCaps, InvocationContext, InvocationOutcome, ModelUsage, Request,
-        Tokens,
+        AnyRecord, DriverInfo, InvocationCaps, InvocationContext, InvocationOutcome, ModelUsage,
+        Request, Tokens,
     };
     use athena_data::{JobId, Quantity, Unit};
 
@@ -1708,7 +1982,7 @@ mod planning_cost_tests {
         JobId::parse(text).unwrap()
     }
 
-    fn invocation(job: &JobId, seq: u32, role: Role, usd: f64) -> Invocation {
+    pub(crate) fn invocation(job: &JobId, seq: u32, role: Role, usd: f64) -> Invocation {
         let tokens = |v: f64| Quantity::measured(v, Unit::Tokens, "result.usage");
         Invocation {
             job: job.clone(),
@@ -2507,6 +2781,232 @@ mod planning_cost_tests {
         assert_eq!(json["later_harm"]["unplanned"]["reverts"], 1);
         assert_eq!(json["later_harm"]["unplanned"]["fixes"], 1);
         assert_eq!(json["later_harm"]["unplanned"]["failures"], 1);
+    }
+
+    /// The records of one request job whose stages took the minutes in `m`, starting at `start`: the reader,
+    /// the planner (when `m.planning` is above zero), the producer, the checks (a verification with one
+    /// `test` check, when `m.checks` is above zero), the verifier, then `m.landing_and_rebuild` minutes before
+    /// the outcome `state`. A stage of zero minutes is left out, so a job can fail early.
+    pub(crate) fn timed_job(
+        text: &str,
+        start: jiff::Timestamp,
+        m: StageMinutes,
+        state: OutcomeState,
+    ) -> Vec<AnyRecord> {
+        use athena_data::records::{Outcome, Request, Verdict, Verification};
+        let job_id = id(text);
+        let after = |t: jiff::Timestamp, minutes: f64| {
+            t.checked_add(jiff::SignedDuration::from_secs_f64(minutes * 60.0))
+                .unwrap()
+        };
+        let mut records = vec![AnyRecord::Request(Request {
+            job: job_id.clone(),
+            text: "A request.".into(),
+            received_at: start,
+            channel: "cli".into(),
+        })];
+        let mut cursor = start;
+        let mut seq = 0;
+        let mut invocations: Vec<Invocation> = Vec::new();
+        let mut run = |role: Role, minutes: f64, cursor: &mut jiff::Timestamp| {
+            if minutes > 0.0 {
+                seq += 1;
+                let mut i = invocation(&job_id, seq, role, 0.0);
+                i.started_at = *cursor;
+                i.ended_at = after(*cursor, minutes);
+                *cursor = i.ended_at;
+                Some(i)
+            } else {
+                None
+            }
+        };
+        invocations.extend(run(Role::Reader, m.reading, &mut cursor));
+        invocations.extend(run(Role::Planner, m.planning, &mut cursor));
+        invocations.extend(run(Role::Producer, m.producer, &mut cursor));
+        if m.checks > 0.0 {
+            // The checks run between the producer and the verifier, outside any invocation.
+            let mut check = test_run(m.checks * 60.0, "athena monotonic clock");
+            check.name = "test".into();
+            cursor = after(cursor, m.checks);
+            records.push(AnyRecord::Verification(Box::new(Verification {
+                job: job_id.clone(),
+                candidate_commit: "0".repeat(40),
+                verified_fingerprint: String::new(),
+                tool_config_from_base: vec![],
+                checks: vec![check],
+                check_cleanup: vec![],
+                verifier_invocation: None,
+                criteria: vec![],
+                findings: vec![],
+                request_reading_mismatch: None,
+                agent_verdict: Some(Verdict::Pass),
+                final_verdict: Verdict::Pass,
+                reasons: vec![],
+                inputs: vec![],
+                summary: None,
+            })));
+        }
+        invocations.extend(run(Role::Verifier, m.verifier, &mut cursor));
+        let totals = crate::scoring::totals(&invocations, None);
+        records.extend(
+            invocations
+                .into_iter()
+                .map(|i| AnyRecord::Invocation(Box::new(i))),
+        );
+        records.push(AnyRecord::Outcome(Box::new(Outcome {
+            job: job_id,
+            state,
+            reason: "r".into(),
+            at: after(cursor, m.landing_and_rebuild),
+            totals: Some(totals),
+            branch: None,
+            base_commit: None,
+            candidate_commit: None,
+            after_blocked: false,
+            through_commit: None,
+        })));
+        records
+    }
+
+    /// The in-memory `Records` of records made by [`timed_job`].
+    fn loaded(all: Vec<AnyRecord>) -> Records {
+        let mut records = Records::default();
+        for record in all {
+            let job = match &record {
+                AnyRecord::Request(r) => &r.job,
+                AnyRecord::Invocation(r) => &r.job,
+                AnyRecord::Verification(r) => &r.job,
+                AnyRecord::Outcome(r) => &r.job,
+                other => panic!("not a timed job record: {other:?}"),
+            };
+            let entry = records.jobs.entry(job.as_str().to_string()).or_default();
+            entry.id.get_or_insert_with(|| job.clone());
+            match record {
+                AnyRecord::Request(r) => entry.request = Some(r),
+                AnyRecord::Invocation(r) => entry.invocations.push(*r),
+                AnyRecord::Verification(r) => entry.verification = Some(*r),
+                AnyRecord::Outcome(r) => entry.outcome = Some(*r),
+                _ => unreachable!(),
+            }
+        }
+        records
+    }
+
+    fn minutes(
+        reading: f64,
+        planning: f64,
+        producer: f64,
+        checks: f64,
+        verifier: f64,
+        landing: f64,
+    ) -> StageMinutes {
+        StageMinutes {
+            reading,
+            planning,
+            producer,
+            checks,
+            verifier,
+            landing_and_rebuild: landing,
+        }
+    }
+
+    #[test]
+    fn throughput_reports_landed_per_day_stage_medians_idle_time_and_time_on_jobs_that_did_not_land()
+     {
+        let t = |s: &str| -> jiff::Timestamp { s.parse().unwrap() };
+        let landed = OutcomeState::Landed;
+        let mut all = Vec::new();
+        // A lands on the 28th. B and C land on the 29th, and C ran while B ran.
+        all.extend(timed_job(
+            "20261028-230000-aaaa",
+            t("2026-10-28T23:00:00Z"),
+            minutes(2.0, 0.0, 10.0, 4.0, 6.0, 3.0),
+            landed,
+        ));
+        all.extend(timed_job(
+            "20261029-000000-aaab",
+            t("2026-10-29T00:00:00Z"),
+            minutes(4.0, 6.0, 20.0, 6.0, 8.0, 5.0),
+            landed,
+        ));
+        all.extend(timed_job(
+            "20261029-003000-aaac",
+            t("2026-10-29T00:30:00Z"),
+            minutes(3.0, 0.0, 15.0, 5.0, 5.0, 4.0),
+            landed,
+        ));
+        // Two jobs that did not land: 30 minutes and 10 minutes of work.
+        all.extend(timed_job(
+            "20261029-030000-aaad",
+            t("2026-10-29T03:00:00Z"),
+            minutes(2.0, 0.0, 20.0, 0.0, 0.0, 8.0),
+            OutcomeState::Failed,
+        ));
+        all.extend(timed_job(
+            "20261029-040000-aaae",
+            t("2026-10-29T04:00:00Z"),
+            minutes(1.0, 0.0, 0.0, 0.0, 0.0, 9.0),
+            OutcomeState::Rejected,
+        ));
+        let throughput = Throughput::compute(&loaded(all)).expect("jobs landed");
+
+        assert_eq!(throughput.landed_total, 3);
+        assert_eq!(
+            throughput.landed_per_day,
+            vec![
+                DayCount {
+                    day: "2026-10-28".into(),
+                    landed: 1
+                },
+                DayCount {
+                    day: "2026-10-29".into(),
+                    landed: 2
+                },
+            ]
+        );
+        assert_eq!(throughput.window_jobs, 3);
+        // Totals 25, 49 and 32 minutes: the median is 32, not the sum of the stage medians.
+        assert_eq!(throughput.median_minutes, 32.0);
+        assert_eq!(
+            throughput.median_stages,
+            minutes(3.0, 0.0, 15.0, 5.0, 6.0, 4.0)
+        );
+        // Gaps: A ends 23:25, B starts 00:00 (35); B and C overlap (0); C ends 01:02, D starts 03:00 (118);
+        // D ends 03:30, the rejected job starts 04:00 (30).
+        assert_eq!(throughput.idle_minutes, 183.0);
+        assert_eq!(throughput.unlanded_jobs, 2);
+        assert_eq!(throughput.unlanded_minutes, 30.0 + 10.0);
+
+        let text = throughput.text();
+        for expected in [
+            "3 landed (2026-10-28 1 · 2026-10-29 2)",
+            "median per landed job over the last 3 measured: 32.0 min",
+            "reading 3.0 · planning 0.0 · producer 15.0 · checks 5.0 · verifier 6.0 · landing and rebuild 4.0",
+            "idle between jobs 183.0 min",
+            "did not land: 2 job(s), 40.0 min",
+        ] {
+            assert!(text.contains(expected), "{expected:?} not in:\n{text}");
+        }
+    }
+
+    #[test]
+    fn throughput_is_absent_before_a_landing_and_its_medians_cover_only_the_newest_twenty() {
+        assert_eq!(Throughput::compute(&Records::default()), None);
+        let mut all = Vec::new();
+        for n in 0..22u32 {
+            // The two oldest jobs took 100 minutes; the newest twenty took 10.
+            let producer = if n < 2 { 100.0 } else { 10.0 };
+            all.extend(timed_job(
+                &format!("20261029-1000{n:02}-ab{n:02}"),
+                format!("2026-10-29T{:02}:00:00Z", n).parse().unwrap(),
+                minutes(0.0, 0.0, producer, 0.0, 0.0, 0.0),
+                OutcomeState::Landed,
+            ));
+        }
+        let throughput = Throughput::compute(&loaded(all)).unwrap();
+        assert_eq!(throughput.landed_total, 22);
+        assert_eq!(throughput.window_jobs, THROUGHPUT_WINDOW);
+        assert_eq!(throughput.median_minutes, 10.0);
     }
 }
 

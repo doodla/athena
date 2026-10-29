@@ -25,20 +25,38 @@
 //! re-queued through the same builder and the old one closed; any other cause gets a new root-cause request.
 //! The five highest-ranked causes (most occurrences, then most recent) are urgent and the rest normal. A second
 //! run finds every cause covered and changes nothing.
+//!
+//! The throughput review (`docs/design/hestia.md`, "Throughput review") asks a different question: not what
+//! failed but what the pipeline waits on. It runs in [`Athena::review_passes`] when [`throughput_due`] says so:
+//! every [`crate::code_health::REVIEW_EVERY`] landings, or when the median minutes per landed job grew by more
+//! than 20% since the previous review. A strong model is given the status throughput section
+//! ([`crate::status::Throughput`]) and `docs/design`, and names the biggest bottleneck and the architectural
+//! change that removes it, with the minutes it expects that change to save per landed job. The top proposal is
+//! queued as a design request through [`StewardRequest`], at a priority set by those minutes
+//! ([`priority_for_minutes`]), and the prediction is kept in an `athena.throughput-review/1` record. A later
+//! review compares the minutes measured after a change that cites the review with the prediction
+//! ([`throughput_followups`]).
 
+use crate::capability::{JobConfig, ToolGrant};
 use crate::commits::{NewFile, message};
 use crate::plan::Priority;
+use crate::status::{LandedJob, Throughput, landed_jobs, median};
 use crate::steward::StewardRequest;
 use crate::store::{JobRecords, JobState, Records};
 use crate::{Athena, Ui};
 use anyhow::{Context, Result, bail};
+use athena_agent::env::Side;
+use athena_context::{CONTRACT, Component, Composed, compose};
 use athena_data::records::{
-    AnyRecord, HestiaCheckResult, IntrospectionRecord, IntrospectionStatus, OutcomeState,
+    AnyRecord, HestiaCheckResult, IntrospectionRecord, IntrospectionStatus, Invocation,
+    InvocationOutcome, OutcomeState, Role, ThroughputFollowup, ThroughputProposal,
+    ThroughputReview, ThroughputTrigger,
 };
 use athena_data::{JobId, RecordId};
 use jiff::Timestamp;
-use serde::Serialize;
-use std::collections::BTreeSet;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
 pub use athena_data::records::HestiaCheckResult as CheckResult;
 pub use athena_data::records::HestiaFinding as Finding;
@@ -774,7 +792,495 @@ fn plan_backfill(records: &Records, disabled: &[Stage]) -> Vec<Planned> {
     plan
 }
 
+// ---------------------------------------------------------------------------------------------------------
+// Throughput review
+
+/// The median minutes per landed job must be more than this times the previous review's to count as worse:
+/// a rise of more than 20%.
+pub const WORSEN_RATIO: f64 = 1.2;
+
+/// The title of a throughput design request starts with this. An open request with a line that starts so
+/// means the last proposal is still being worked, and the review queues no second one.
+pub const THROUGHPUT_MARKER: &str = "Throughput design: ";
+
+/// Expected minutes saved per landed job at or above which a design request is urgent.
+pub const URGENT_MINUTES: f64 = 10.0;
+/// ... high.
+pub const HIGH_MINUTES: f64 = 5.0;
+/// ... normal. Below this a request is low.
+pub const NORMAL_MINUTES: f64 = 2.0;
+
+/// The most landed jobs after a cited change that its measured median covers (the newest of them).
+pub const FOLLOWUP_WINDOW: usize = 10;
+/// The fewest landed jobs after a cited change that a follow-up needs.
+pub const FOLLOWUP_MIN_JOBS: usize = 1;
+
+/// The file in the model's workspace that holds the throughput section.
+pub const THROUGHPUT_FILE: &str = "THROUGHPUT.md";
+/// The most characters of each design document copied into the model's workspace.
+const MAX_DOC_CHARS: usize = 60_000;
+
+/// The role prompt of the throughput review.
+const THROUGHPUT_PROMPT: &str = "You review how fast Athena's pipeline turns requests into landed changes. \
+You are given measurements of the pipeline (THROUGHPUT.md) and its design (design/). Find the one biggest \
+bottleneck: the stage or wait that costs the most minutes per landed job. Then name the architectural change \
+to the shape of the pipeline that removes it, not a tweak inside one stage, and estimate honestly how many \
+minutes per landed job that change would save. Speed comes first. Base every claim on THROUGHPUT.md or on \
+the design documents. Do not propose changes to the error review or the code-health review.";
+
+/// Why a throughput review is due, or None. A review is due when [`crate::code_health::REVIEW_EVERY`]
+/// landings stand beyond the previous review (the first ten landings when there is none), or when at least
+/// one job landed since the previous review and the median minutes per landed job is more than
+/// [`WORSEN_RATIO`] times the one that review recorded. `landed` and `median` are the status throughput
+/// section's `landed_total` and `median_minutes`.
+pub fn throughput_due(
+    landed: usize,
+    median: f64,
+    latest: Option<&ThroughputReview>,
+) -> Option<ThroughputTrigger> {
+    let every = crate::code_health::REVIEW_EVERY as usize;
+    let Some(previous) = latest else {
+        return (landed >= every).then_some(ThroughputTrigger::Cadence);
+    };
+    let before = previous.landings as usize;
+    if landed >= before + every {
+        return Some(ThroughputTrigger::Cadence);
+    }
+    let worse = previous.window_median_minutes > 0.0
+        && median / previous.window_median_minutes > WORSEN_RATIO;
+    (landed > before && worse).then_some(ThroughputTrigger::Worsened)
+}
+
+/// The priority a design request gets from the minutes per landed job it is expected to save: more minutes,
+/// higher priority (speed first).
+pub fn priority_for_minutes(expected_minutes_saved: f64) -> Priority {
+    if expected_minutes_saved >= URGENT_MINUTES {
+        Priority::Urgent
+    } else if expected_minutes_saved >= HIGH_MINUTES {
+        Priority::High
+    } else if expected_minutes_saved >= NORMAL_MINUTES {
+        Priority::Normal
+    } else {
+        Priority::Low
+    }
+}
+
+/// What the model said about the bottleneck.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThroughputOutput {
+    /// The biggest bottleneck, in one or two sentences.
+    pub bottleneck: String,
+    /// The stage it sits in.
+    pub stage: String,
+    /// The architectural change that removes it.
+    pub change: String,
+    /// Minutes saved per landed job once the change has landed.
+    pub expected_minutes_saved: f64,
+    /// Why the change removes the bottleneck, citing THROUGHPUT.md or a design document.
+    pub rationale: String,
+}
+
+impl ThroughputOutput {
+    fn validate(&self) -> Result<()> {
+        if self.bottleneck.trim().is_empty() || self.change.trim().is_empty() {
+            bail!("the throughput proposal names no bottleneck or no change");
+        }
+        if !self.expected_minutes_saved.is_finite() || self.expected_minutes_saved < 0.0 {
+            bail!("the throughput proposal's expected minutes saved is not a number of minutes");
+        }
+        Ok(())
+    }
+}
+
+/// The schema of the model's answer: every field required, none extra.
+fn throughput_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "bottleneck": { "type": "string", "description": "The biggest bottleneck, in one or two sentences." },
+            "stage": { "type": "string", "description": "The stage it sits in: reading, planning, producer, checks, verifier, landing and rebuild, or idle." },
+            "change": { "type": "string", "description": "The architectural change that removes it." },
+            "expected_minutes_saved": { "type": "number", "description": "Minutes saved per landed job once the change has landed." },
+            "rationale": { "type": "string", "description": "Why the change removes the bottleneck, citing THROUGHPUT.md or a design document." }
+        },
+        "required": ["bottleneck", "stage", "change", "expected_minutes_saved", "rationale"],
+        "additionalProperties": false
+    })
+}
+
+/// The text of the design request for a proposal, built with [`StewardRequest`] at the priority its expected
+/// minutes set. The title starts with [`THROUGHPUT_MARKER`]. The body cites the review's id and asks that a
+/// change which implements the design cites it too, so that the next review can measure the change.
+pub fn throughput_request(
+    review: &RecordId,
+    answer: &ThroughputOutput,
+    median_minutes: f64,
+) -> Result<String, String> {
+    let priority = priority_for_minutes(answer.expected_minutes_saved);
+    let body = format!(
+        "Athena's throughput review {review} named the biggest wait in the pipeline and an architectural change \
+         that would remove it. Design that change.\n\n\
+         Bottleneck: {}\n\
+         Stage: {}\n\
+         Proposed change: {}\n\
+         Predicted saving: {:.1} minutes per landed job; the median was {median_minutes:.1} minutes per landed \
+         job when the review ran.\n\
+         Why: {}\n\n\
+         A change that implements this design must cite throughput review {review} in its request text. The next \
+         throughput review then sets the minutes it measured after that change landed against this prediction.",
+        one_line(&answer.bottleneck),
+        one_line(&answer.stage),
+        one_line(&answer.change),
+        answer.expected_minutes_saved,
+        one_line(&answer.rationale),
+    );
+    let title: String = one_line(&answer.bottleneck).chars().take(100).collect();
+    let acceptance = [
+        "A design note under docs/design/ describes the change and how it removes the bottleneck".to_string(),
+        "The note states the minutes per landed job the change should save and how the next throughput review measures them".to_string(),
+    ];
+    StewardRequest::new(
+        Some(priority),
+        &format!("{THROUGHPUT_MARKER}{title}"),
+        &body,
+        &acceptance,
+        &["docs/design/".to_string()],
+    )
+    .map(|r| r.render())
+}
+
+/// The open request job, if any, whose text has a line that starts with [`THROUGHPUT_MARKER`]. A closed one
+/// (landed, rejected, failed or abandoned) does not count.
+fn open_throughput_request(records: &Records) -> Option<&JobRecords> {
+    records.request_jobs().into_iter().find(|j| {
+        !matches!(j.state(), JobState::Closed(_))
+            && j.request
+                .as_ref()
+                .is_some_and(|r| r.text.lines().any(|l| l.starts_with(THROUGHPUT_MARKER)))
+    })
+}
+
+/// The predictions of earlier reviews that a change has since closed, each set against the measured minutes.
+/// A review's prediction is closed once, by the first landed job (other than the design request itself) whose
+/// request text cites the review's id and that landed after the review. The measured median is that of the
+/// newest [`FOLLOWUP_WINDOW`] measured landed jobs that landed after the change, and needs at least
+/// [`FOLLOWUP_MIN_JOBS`]. `landed` is [`landed_jobs`], oldest first. A review whose prediction an earlier
+/// review already closed is skipped.
+pub fn throughput_followups(records: &Records, landed: &[LandedJob]) -> Vec<ThroughputFollowup> {
+    let closed: BTreeSet<&RecordId> = records
+        .throughput_reviews
+        .iter()
+        .flat_map(|r| r.followups.iter().map(|f| &f.review))
+        .collect();
+    let mut found = Vec::new();
+    for review in &records.throughput_reviews {
+        let Some(proposal) = &review.proposal else {
+            continue;
+        };
+        if closed.contains(&review.id) {
+            continue;
+        }
+        let cites = |l: &&LandedJob| {
+            l.landed_at > review.at
+                && proposal
+                    .request_job
+                    .as_ref()
+                    .is_none_or(|j| j.as_str() != l.id)
+                && records
+                    .jobs
+                    .get(&l.id)
+                    .and_then(|j| j.request.as_ref())
+                    .is_some_and(|r| r.text.contains(review.id.as_str()))
+        };
+        let Some(change) = landed.iter().find(cites) else {
+            continue;
+        };
+        let after: Vec<&LandedJob> = landed
+            .iter()
+            .filter(|l| l.landed_at > change.landed_at)
+            .collect();
+        let newest = &after[after.len().saturating_sub(FOLLOWUP_WINDOW)..];
+        if newest.len() < FOLLOWUP_MIN_JOBS {
+            continue;
+        }
+        let measured = median(&newest.iter().map(|l| l.stages.total()).collect::<Vec<_>>());
+        let Ok(change_job) = JobId::parse(&change.id) else {
+            continue;
+        };
+        found.push(ThroughputFollowup {
+            review: review.id.clone(),
+            change_job,
+            predicted_minutes_saved: proposal.expected_minutes_saved,
+            baseline_median_minutes: review.window_median_minutes,
+            measured_median_minutes: measured,
+            measured_minutes_saved: review.window_median_minutes - measured,
+            jobs_measured: newest.len() as u32,
+        });
+    }
+    found
+}
+
+/// Removes a run's directory in the state directory when the run ends, however it ends.
+struct Cleanup(PathBuf);
+
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 impl Athena {
+    /// The throughput review: when [`throughput_due`], asks the model for the biggest bottleneck and the
+    /// architectural change that removes it, queues one design request for the proposal (none while an earlier
+    /// one is open), and records the review with the prediction and the follow-ups it closes. Returns the
+    /// record, or None when the review is not due, the run is nested, or the kill switch is on. A model that
+    /// fails or answers badly still gives a record, without a proposal, so the cadence moves on; the invocation
+    /// is recorded either way, since it cost money.
+    pub fn throughput_review(&self, ui: &dyn Ui) -> Result<Option<ThroughputReview>> {
+        if self.nested.is_some() || self.state.registry().stopped() {
+            return Ok(None);
+        }
+        let head = self.head()?;
+        let records = Records::load(&self.git, &head)?;
+        let Some(measured) = Throughput::compute(&records) else {
+            return Ok(None);
+        };
+        let latest = ThroughputReview::latest(&records.throughput_reviews);
+        let Some(trigger) = throughput_due(measured.landed_total, measured.median_minutes, latest)
+        else {
+            return Ok(None);
+        };
+        let now = crate::now();
+        let mut id = RecordId::generate(now);
+        while records.has_record_id(&id) {
+            id = RecordId::generate(now);
+        }
+        let followups = throughput_followups(&records, &landed_jobs(&records));
+
+        let mut note = String::new();
+        let mut proposal = None;
+        let mut invocation: Option<Invocation> = None;
+        if let Some(open) = open_throughput_request(&records) {
+            note = format!(
+                "throughput design request {} is still open; the model was not asked for another",
+                open.id()
+            );
+        } else {
+            let (made, answer) = self.ask_throughput(&head, &measured, trigger, now)?;
+            invocation = made;
+            match answer {
+                Ok(answer) => {
+                    let priority = priority_for_minutes(answer.expected_minutes_saved);
+                    let request_job =
+                        match throughput_request(&id, &answer, measured.median_minutes) {
+                            Ok(text) => match self.queue(&text) {
+                                Ok((job, _)) => Some(job),
+                                Err(e) => {
+                                    note = format!("the design request could not be queued: {e:#}");
+                                    None
+                                }
+                            },
+                            Err(e) => {
+                                note = format!("the design request could not be built: {e}");
+                                None
+                            }
+                        };
+                    proposal = Some(ThroughputProposal {
+                        bottleneck: one_line(&answer.bottleneck),
+                        stage: one_line(&answer.stage),
+                        change: one_line(&answer.change),
+                        expected_minutes_saved: answer.expected_minutes_saved,
+                        priority: priority.as_str().to_string(),
+                        request_job,
+                    });
+                }
+                Err(e) => note = format!("no proposal: {e:#}"),
+            }
+        }
+
+        let review = ThroughputReview {
+            id,
+            at: now,
+            landings: u32::try_from(measured.landed_total).unwrap_or(u32::MAX),
+            window_median_minutes: measured.median_minutes,
+            trigger,
+            proposal,
+            followups,
+            note,
+        };
+        review.validate().map_err(|e| anyhow::anyhow!(e))?;
+        let record = AnyRecord::ThroughputReview(Box::new(review.clone()));
+        let mut files = vec![NewFile::record(&record)];
+        let mut trailers = vec![("Athena-Record", record.canonical_path())];
+        if let Some(invocation) = invocation {
+            let invocation_record = AnyRecord::Invocation(Box::new(invocation));
+            trailers.push(("Athena-Record", invocation_record.canonical_path()));
+            files.push(NewFile::record(&invocation_record));
+        }
+        let subject = match review
+            .proposal
+            .as_ref()
+            .and_then(|p| p.request_job.as_ref())
+        {
+            Some(job) => format!(
+                "Throughput review: median {:.1} min per landed job; design request {job}",
+                review.window_median_minutes
+            ),
+            None => format!(
+                "Throughput review: median {:.1} min per landed job; no request queued",
+                review.window_median_minutes
+            ),
+        };
+        self.commit_records(
+            &files,
+            &message(
+                &subject,
+                "A review of how long landed jobs take and what the pipeline waits on. It records the prediction the \
+                 proposal makes and, for an earlier proposal whose change has landed, the minutes measured since.",
+                &trailers,
+            ),
+        )?;
+        for f in &review.followups {
+            ui.line(&format!(
+                "hestia     throughput review {}: change {} landed; predicted {:.1} min saved per landed job, measured {:.1} (median {:.1} to {:.1} over {} job(s))",
+                f.review,
+                f.change_job,
+                f.predicted_minutes_saved,
+                f.measured_minutes_saved,
+                f.baseline_median_minutes,
+                f.measured_median_minutes,
+                f.jobs_measured
+            ));
+        }
+        Ok(Some(review))
+    }
+
+    /// Runs the model once over a scratch workspace holding the throughput section and the design documents.
+    /// Returns the recorded invocation (None when the model could not start) and its validated, redacted answer.
+    fn ask_throughput(
+        &self,
+        head: &str,
+        measured: &Throughput,
+        trigger: ThroughputTrigger,
+        now: Timestamp,
+    ) -> Result<(Option<Invocation>, Result<ThroughputOutput>)> {
+        let jc = JobConfig::at(&self.git, head)?;
+        let run_job = JobId::Id(RecordId::generate(now));
+        let job_dir = self.state.job_dir(&run_job);
+        let _cleanup = Cleanup(job_dir.clone());
+        let workspace = job_dir.join("workspace");
+        std::fs::create_dir_all(&workspace)?;
+        std::fs::write(
+            workspace.join(THROUGHPUT_FILE),
+            format!(
+                "# Throughput\n\nThis review ran because of: {}.\n\n```\n{}\n```\n\nThe stages are minutes of the model \
+                 invocations of that role, minutes the checks took, and, for landing and rebuild, the time from the \
+                 end of the last invocation to the landing record.\n",
+                trigger.as_str(),
+                measured.text()
+            ),
+        )?;
+        let listing = self
+            .git
+            .run(["ls-tree", "-r", "--name-only", head, "--", "docs/design"])?;
+        for path in listing.lines().filter(|p| p.ends_with(".md")) {
+            let Some(bytes) = self.git.show_file(head, path)? else {
+                continue;
+            };
+            let text: String = String::from_utf8_lossy(&bytes)
+                .chars()
+                .take(MAX_DOC_CHARS)
+                .collect();
+            let to = workspace.join(path.strip_prefix("docs/").unwrap_or(path));
+            if let Some(parent) = to.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(to, text)?;
+        }
+
+        let composed: Composed = compose(&[
+            CONTRACT.into(),
+            Component::new("throughput.prompt", 1, THROUGHPUT_PROMPT),
+        ]);
+        let grant = ToolGrant {
+            tools: vec!["Read".into(), "Grep".into(), "Glob".into()],
+            commands: BTreeMap::new(),
+            writes: false,
+            permission_mode: "dontAsk".into(),
+        };
+        let brief = format!(
+            "# Throughput review\n\nIn the current directory, `{THROUGHPUT_FILE}` holds the measurements and \
+             `design/` holds Athena's design documents. Read them with Read, Grep and Glob; nothing else is \
+             available and nothing may be changed.\n\nName the one biggest bottleneck and the architectural \
+             change to the pipeline that removes it. Return `bottleneck`, `stage`, `change`, \
+             `expected_minutes_saved` (minutes saved per landed job) and `rationale`."
+        );
+        // The review borrows the verifier's model and budget, as the steward, the audience and the auditor do.
+        let spec = self.agent_spec(
+            &jc,
+            &run_job,
+            1,
+            Role::Steward,
+            &jc.config.models.verifier,
+            &composed,
+            brief,
+            &grant,
+            &workspace,
+            Side::Read,
+            &BTreeMap::new(),
+            jc.config.budget.verifier_usd,
+            jc.config.budget.verifier_timeout_s,
+            throughput_schema(),
+        )?;
+        let facts = crate::invocation::InvocationFacts {
+            job: &run_job,
+            spec: &spec,
+            composed: &composed,
+            config: &jc.config,
+            fake: self.is_fake(),
+        };
+        let redactor = self.redactor(&jc.config, Some(&run_job))?;
+        let (output, invocation) = match self.invoke_and_record(&facts, &redactor)? {
+            Ok(done) => done,
+            Err(error) => {
+                return Ok((
+                    None,
+                    Err(anyhow::anyhow!(
+                        "the throughput review could not run: {error}"
+                    )),
+                ));
+            }
+        };
+        let answer = if output.outcome == InvocationOutcome::Success {
+            serde_json::from_value::<ThroughputOutput>(output.structured.unwrap_or_default())
+                .context("the model returned no valid throughput proposal")
+        } else {
+            Err(anyhow::anyhow!(
+                "the model did not complete: {}",
+                invocation.detail.as_deref().unwrap_or("no detail")
+            ))
+        };
+        let answer = answer.and_then(|mut a| {
+            a.validate()?;
+            // What the model wrote goes into records, so it is redacted first.
+            let mut words = vec![
+                a.bottleneck.clone(),
+                a.stage.clone(),
+                a.change.clone(),
+                a.rationale.clone(),
+            ];
+            redactor.redact_all(&mut words)?;
+            let mut words = words.into_iter();
+            a.bottleneck = words.next().unwrap_or_default();
+            a.stage = words.next().unwrap_or_default();
+            a.change = words.next().unwrap_or_default();
+            a.rationale = words.next().unwrap_or_default();
+            Ok(a)
+        });
+        Ok((Some(invocation), answer))
+    }
+
     /// The error review backfill. Athena runs it at the start of every drain and in each sweep, and
     /// `athena hestia review --backfill` runs it on request. It reviews the repeated causes already in the
     /// records, which the review that runs after each new introspection never saw. See the module comment for the rules. Safe to run
@@ -920,7 +1426,33 @@ impl Athena {
             ),
             Err(e) => format!("hestia     evidence labels: could not run: {e:#}"),
         };
-        vec![backfill, derive]
+        let mut lines = vec![backfill, derive];
+        // The throughput review is due every ten landings or on a 20% slowdown, so most calls print nothing.
+        match self.throughput_review(ui) {
+            Ok(Some(r)) => {
+                let outcome = match r.proposal.as_ref() {
+                    Some(p) => match &p.request_job {
+                        Some(job) => format!(
+                            "design request {job} queued at {} priority, predicting {:.1} min saved per landed job",
+                            p.priority, p.expected_minutes_saved
+                        ),
+                        None => format!("proposal recorded, no request queued: {}", r.note),
+                    },
+                    None => format!("no proposal: {}", r.note),
+                };
+                lines.push(format!(
+                    "hestia     throughput review ({}): median {:.1} min per landed job over {} landings · {outcome}",
+                    r.trigger.as_str(),
+                    r.window_median_minutes,
+                    r.landings
+                ));
+            }
+            Ok(None) => {}
+            Err(e) => lines.push(format!(
+                "hestia     throughput review: could not run: {e:#}"
+            )),
+        }
+        lines
     }
 
     /// Runs `checks`, commits the report as a record, and returns it. The review passes of
@@ -1119,6 +1651,18 @@ mod tests {
     }
 
     fn athena_in(dir: &std::path::Path, state: &std::path::Path) -> Athena {
+        athena_with(
+            dir,
+            state,
+            std::sync::Arc::new(FakeAgentDriver::deterministic()),
+        )
+    }
+
+    fn athena_with(
+        dir: &std::path::Path,
+        state: &std::path::Path,
+        driver: std::sync::Arc<dyn athena_agent::AgentDriver>,
+    ) -> Athena {
         let git = Git::at(dir);
         git.run(["init", "-q", "-b", "main"]).unwrap();
         for (key, value) in [
@@ -1150,7 +1694,7 @@ mod tests {
             git,
             state: StateDir::new(state.join("repo"))
                 .with_free_space(crate::test_support::plenty_of_space),
-            driver: std::sync::Arc::new(FakeAgentDriver::deterministic()),
+            driver,
             capabilities: vec![],
             build: Build {
                 version: "0.1.0".into(),
@@ -2054,5 +2598,341 @@ mod tests {
             Stage::of(&cause(None, "Plan order ignores priority.")),
             None
         );
+    }
+
+    // -----------------------------------------------------------------------------------------------------
+    // Throughput review
+
+    use crate::status::StageMinutes;
+    use crate::status::planning_cost_tests::timed_job;
+    use athena_agent::fake::FakeTurn;
+    use std::sync::{Arc, Mutex};
+
+    /// A fake model that answers every call with a proposal predicting `saving` minutes, and keeps the
+    /// THROUGHPUT.md it was given on each call.
+    fn throughput_model(saving: f64) -> (Arc<FakeAgentDriver>, Arc<Mutex<Vec<String>>>) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
+        let driver = FakeAgentDriver::new(Box::new(move |spec| {
+            assert_eq!(spec.role, Role::Steward);
+            let section =
+                std::fs::read_to_string(spec.workdir.join(THROUGHPUT_FILE)).unwrap_or_default();
+            log.lock().unwrap().push(section);
+            FakeTurn::output(serde_json::json!({
+                "bottleneck": "The producer waits for the checks of an earlier job.",
+                "stage": "producer",
+                "change": "Drain landed jobs asynchronously while the next job is already running.",
+                "expected_minutes_saved": saving,
+                "rationale": "THROUGHPUT.md shows the producer stage dominates every landed job."
+            }))
+        }));
+        (Arc::new(driver), seen)
+    }
+
+    fn producer_only(minutes: f64) -> StageMinutes {
+        StageMinutes {
+            producer: minutes,
+            ..StageMinutes::default()
+        }
+    }
+
+    /// Commits `count` landed jobs numbered from `from`, each `minutes` long, in September 2026 (before any
+    /// review the test's clock makes), two hours apart.
+    fn seed_landed(
+        dir: &std::path::Path,
+        athena: &Athena,
+        from: usize,
+        count: usize,
+        minutes: f64,
+    ) {
+        let mut all = Vec::new();
+        for g in from..from + count {
+            let (day, hour) = (1 + g / 12, (g % 12) * 2);
+            all.extend(timed_job(
+                &format!("202609{day:02}-{hour:02}0000-t{g:03}"),
+                format!("2026-09-{day:02}T{hour:02}:00:00Z")
+                    .parse()
+                    .unwrap(),
+                producer_only(minutes),
+                OutcomeState::Landed,
+            ));
+        }
+        put(dir, athena, all);
+    }
+
+    fn open_design_requests(known: &Records) -> Vec<&JobRecords> {
+        known
+            .request_jobs()
+            .into_iter()
+            .filter(|j| !matches!(j.state(), JobState::Closed(_)))
+            .filter(|j| {
+                j.request
+                    .as_ref()
+                    .is_some_and(|r| r.text.lines().any(|l| l.starts_with(THROUGHPUT_MARKER)))
+            })
+            .collect()
+    }
+
+    fn earlier_review(landings: u32, median: f64) -> ThroughputReview {
+        ThroughputReview {
+            id: rid("20260902-000000-r001"),
+            at: "2026-09-02T00:00:00Z".parse().unwrap(),
+            landings,
+            window_median_minutes: median,
+            trigger: ThroughputTrigger::Cadence,
+            proposal: None,
+            followups: vec![],
+            note: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_throughput_review_is_due_at_ten_landings_and_on_a_rise_of_more_than_twenty_percent() {
+        use ThroughputTrigger::{Cadence, Worsened};
+        // No review yet: ten landings make the first one due, nine do not, however slow they were.
+        assert_eq!(throughput_due(9, 500.0, None), None);
+        assert_eq!(throughput_due(10, 5.0, None), Some(Cadence));
+        // A review at 10 landings with a median of 10 minutes.
+        let prior = earlier_review(10, 10.0);
+        assert_eq!(throughput_due(19, 10.0, Some(&prior)), None, "nine more");
+        assert_eq!(throughput_due(20, 10.0, Some(&prior)), Some(Cadence));
+        assert_eq!(throughput_due(15, 9.0, Some(&prior)), None, "faster");
+        // Exactly 20% worse is not more than 20% worse; a little over is, once a job has landed since.
+        assert_eq!(throughput_due(15, 12.0, Some(&prior)), None);
+        assert_eq!(throughput_due(15, 12.1, Some(&prior)), Some(Worsened));
+        assert_eq!(
+            throughput_due(10, 12.1, Some(&prior)),
+            None,
+            "no new landing"
+        );
+        // Ten more landings are the cadence whatever the median did.
+        assert_eq!(throughput_due(20, 12.1, Some(&prior)), Some(Cadence));
+    }
+
+    #[test]
+    fn the_review_asks_the_model_at_ten_landings_and_not_at_nine() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let (model, seen) = throughput_model(6.0);
+        let athena = athena_with(dir.path(), state.path(), model);
+        seed_landed(dir.path(), &athena, 0, 9, 20.0);
+        assert_eq!(athena.throughput_review(&crate::Quiet).unwrap(), None);
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "no model call when not due"
+        );
+        assert!(records(&athena).throughput_reviews.is_empty());
+        assert!(open_design_requests(&records(&athena)).is_empty());
+
+        seed_landed(dir.path(), &athena, 9, 1, 20.0);
+        let review = athena.throughput_review(&crate::Quiet).unwrap().unwrap();
+        assert_eq!(review.trigger, ThroughputTrigger::Cadence);
+        assert_eq!((review.landings, review.window_median_minutes), (10, 20.0));
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "one model call");
+        // The model was given the status section: ten landed jobs of twenty minutes each.
+        assert!(seen[0].contains("10 landed"), "{}", seen[0]);
+        assert!(seen[0].contains("20.0 min"), "{}", seen[0]);
+    }
+
+    #[test]
+    fn a_review_queues_one_design_request_with_the_bottleneck_change_and_saving_and_none_while_it_is_open()
+     {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let (model, seen) = throughput_model(12.0);
+        let athena = athena_with(dir.path(), state.path(), model);
+        seed_landed(dir.path(), &athena, 0, 10, 20.0);
+
+        let first = athena.throughput_review(&crate::Quiet).unwrap().unwrap();
+        let known = records(&athena);
+        let open = open_design_requests(&known);
+        assert_eq!(open.len(), 1, "exactly one design request");
+        let text = &open[0].request.as_ref().unwrap().text;
+        for expected in [
+            "Throughput design: The producer waits for the checks of an earlier job.",
+            "Bottleneck: The producer waits for the checks of an earlier job.",
+            "Proposed change: Drain landed jobs asynchronously while the next job is already running.",
+            "Predicted saving: 12.0 minutes per landed job",
+            first.id.as_str(),
+            "Acceptance:\n- ",
+        ] {
+            assert!(text.contains(expected), "{expected:?} not in:\n{text}");
+        }
+        assert!(!crate::reading::request_text_acceptance(text).is_empty());
+        let proposal = first.proposal.as_ref().expect("a proposal is recorded");
+        assert_eq!(proposal.request_job.as_ref(), Some(open[0].id()));
+        assert_eq!(proposal.expected_minutes_saved, 12.0);
+        assert_eq!(proposal.priority, "urgent");
+        assert_eq!(known.throughput_reviews, vec![first.clone()]);
+        assert_eq!(known.steward_runs.len(), 1, "the invocation is recorded");
+
+        // Ten more landings make a second review due while the request is still open: no second request,
+        // and the model is not asked again.
+        seed_landed(dir.path(), &athena, 10, 10, 20.0);
+        let second = athena.throughput_review(&crate::Quiet).unwrap().unwrap();
+        assert_eq!(second.proposal, None);
+        assert!(second.note.contains("still open"), "{}", second.note);
+        let known = records(&athena);
+        assert_eq!(open_design_requests(&known).len(), 1, "still one request");
+        assert_eq!(known.throughput_reviews.len(), 2);
+        assert_eq!(seen.lock().unwrap().len(), 1, "the model was called once");
+    }
+
+    #[test]
+    fn a_model_that_fails_still_gives_a_review_record_so_the_cadence_moves_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let driver = FakeAgentDriver::new(Box::new(|_| {
+            FakeTurn::output(serde_json::json!({ "unexpected": true }))
+        }));
+        let athena = athena_with(dir.path(), state.path(), Arc::new(driver));
+        seed_landed(dir.path(), &athena, 0, 10, 20.0);
+        let review = athena.throughput_review(&crate::Quiet).unwrap().unwrap();
+        assert_eq!(review.proposal, None);
+        assert!(review.note.starts_with("no proposal"), "{}", review.note);
+        let known = records(&athena);
+        assert!(open_design_requests(&known).is_empty());
+        assert_eq!(known.throughput_reviews.len(), 1);
+        assert_eq!(known.steward_runs.len(), 1, "the invocation cost money");
+        assert_eq!(
+            athena.throughput_review(&crate::Quiet).unwrap(),
+            None,
+            "not due again"
+        );
+    }
+
+    /// An earlier review R (10 landings, 20 minutes each, predicting 6 minutes saved by the request `J`),
+    /// then `J` itself landing (its text cites R), the cited change `C` landing, and eight faster jobs.
+    fn history_after_a_review(dir: &std::path::Path, athena: &Athena, change_lands: bool) {
+        seed_landed(dir, athena, 0, 10, 20.0);
+        let r = earlier_review(10, 20.0);
+        let design = JobId::parse("20260902-020000-w000").unwrap();
+        let mut review = r.clone();
+        review.proposal = Some(ThroughputProposal {
+            bottleneck: "The producer waits.".into(),
+            stage: "producer".into(),
+            change: "Drain asynchronously.".into(),
+            expected_minutes_saved: 6.0,
+            priority: "high".into(),
+            request_job: Some(design),
+        });
+        let mut all = vec![AnyRecord::ThroughputReview(Box::new(review))];
+        let minutes = [15.0, 15.0, 16.0, 14.0, 15.0, 16.0, 14.0, 15.0, 16.0, 14.0];
+        for (i, m) in minutes.iter().enumerate() {
+            let hour = 2 + 2 * i;
+            let mut job = timed_job(
+                &format!("20260902-{hour:02}0000-w{i:03}"),
+                format!("2026-09-02T{hour:02}:00:00Z").parse().unwrap(),
+                producer_only(*m),
+                OutcomeState::Landed,
+            );
+            let text = match i {
+                0 => format!(
+                    "{THROUGHPUT_MARKER}Producer waits\n\nThroughput review {}.",
+                    r.id
+                ),
+                1 => format!(
+                    "Implement the asynchronous drain.\n\nCites throughput review {}.",
+                    r.id
+                ),
+                _ => "An unrelated change.".to_string(),
+            };
+            let AnyRecord::Request(request) = &mut job[0] else {
+                panic!("a job starts with its request");
+            };
+            request.text = text;
+            if i == 1 && !change_lands {
+                job.truncate(1);
+            }
+            all.extend(job);
+        }
+        put(dir, athena, all);
+    }
+
+    #[test]
+    fn after_a_cited_change_lands_the_next_review_records_predicted_against_measured_minutes() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let (model, _) = throughput_model(3.0);
+        let athena = athena_with(dir.path(), state.path(), model);
+        history_after_a_review(dir.path(), &athena, true);
+
+        // Pure: the design request J is not the change; C is, and the eight jobs after it are measured.
+        let known = records(&athena);
+        let followups = throughput_followups(&known, &landed_jobs(&known));
+        assert_eq!(followups.len(), 1);
+        let f = &followups[0];
+        assert_eq!(f.review, rid("20260902-000000-r001"));
+        assert_eq!(f.change_job.as_str(), "20260902-040000-w001");
+        assert_eq!(f.predicted_minutes_saved, 6.0);
+        assert_eq!(f.baseline_median_minutes, 20.0);
+        assert_eq!(f.jobs_measured, 8);
+        // 14, 14, 14, 15, 15, 16, 16, 16: the median is 15 minutes, so 5 minutes were saved.
+        assert_eq!(f.measured_median_minutes, 15.0);
+        assert_eq!(f.measured_minutes_saved, 5.0);
+
+        // Twenty landings stand, ten beyond the earlier review: the next review is due and records it.
+        let review = athena.throughput_review(&crate::Quiet).unwrap().unwrap();
+        assert_eq!(review.followups, followups);
+        let known = records(&athena);
+        assert_eq!(known.throughput_reviews.len(), 2);
+        assert_eq!(known.throughput_reviews[1].followups, followups);
+
+        // The prediction is closed once: a third review records none for it.
+        seed_landed(dir.path(), &athena, 10, 10, 15.0);
+        let third = athena.throughput_review(&crate::Quiet).unwrap().unwrap();
+        assert!(third.followups.is_empty(), "{:?}", third.followups);
+    }
+
+    #[test]
+    fn a_cited_change_that_has_not_landed_records_no_follow_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let (model, _) = throughput_model(3.0);
+        let athena = athena_with(dir.path(), state.path(), model);
+        history_after_a_review(dir.path(), &athena, false);
+        let known = records(&athena);
+        assert!(throughput_followups(&known, &landed_jobs(&known)).is_empty());
+    }
+
+    #[test]
+    fn request_priority_rises_with_the_expected_minutes_saved() {
+        assert_eq!(priority_for_minutes(0.5), Priority::Low);
+        assert_eq!(priority_for_minutes(2.0), Priority::Normal);
+        assert_eq!(priority_for_minutes(5.0), Priority::High);
+        assert_eq!(priority_for_minutes(10.0), Priority::Urgent);
+        assert_eq!(priority_for_minutes(25.0), Priority::Urgent);
+        let rank = |p: Priority| match p {
+            Priority::Low => 0,
+            Priority::Normal => 1,
+            Priority::High => 2,
+            Priority::Urgent => 3,
+        };
+        let series: Vec<i32> = [0.0, 1.9, 2.0, 4.9, 5.0, 9.9, 10.0, 60.0]
+            .iter()
+            .map(|m| rank(priority_for_minutes(*m)))
+            .collect();
+        assert!(series.windows(2).all(|w| w[0] <= w[1]), "{series:?}");
+        assert!(series.first() < series.last());
+
+        // The queued request carries the priority its prediction set.
+        for (saving, level, expected) in [
+            (12.0, "urgent", Priority::Urgent),
+            (1.0, "low", Priority::Low),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let state = tempfile::tempdir().unwrap();
+            let (model, _) = throughput_model(saving);
+            let athena = athena_with(dir.path(), state.path(), model);
+            seed_landed(dir.path(), &athena, 0, 10, 20.0);
+            athena.throughput_review(&crate::Quiet).unwrap().unwrap();
+            let known = records(&athena);
+            let open = open_design_requests(&known);
+            assert_eq!(open.len(), 1);
+            let text = &open[0].request.as_ref().unwrap().text;
+            assert!(text.starts_with(&format!("Priority: {level}\n")), "{text}");
+            assert_eq!(open[0].priority(), expected);
+        }
     }
 }

@@ -1,0 +1,282 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261029-073603-7kqv",
+  "round": 2,
+  "at": "2026-10-29T14:39:23.120569664Z",
+  "invocation_seq": 4,
+  "approach": "Split the work into a pure measurement, a pure trigger and one model call. (1) status.rs gets `Throughput::compute(&Records)`, which reads only job records. Per landed job it takes stage minutes from Reader (reading), Planner+Critic (planning), Producer and Verifier invocations (ended_at minus started_at), from verification.checks[].duration (checks), and from the tail between the last invocation's end and the landing outcome time (landing and rebuild, one stage, because no record separates a rebuild). It reports landed jobs per UTC day, median total and per-stage minutes over the newest THROUGHPUT_WINDOW=20 landed jobs, idle time (gaps between merged job intervals), and minutes spent on closed non-landed and plan-stopped jobs. It is `StatusView.throughput` with a `text()` method. (2) records.rs gets one new kind, `athena.throughput-review/1`, at `records/throughput-reviews/<YYYY-MM>/<id>.json`, modelled on CodeHealthBaseline: landings, window median, trigger, optional proposal (bottleneck, change, expected_minutes_saved, priority, request_job) and followups (predicted vs measured). (3) hestia.rs gets pure `throughput_due`, `priority_for_minutes`, `throughput_followups`, a request builder through `StewardRequest::new`, and `Athena::throughput_review(ui)`, called from `review_passes`. The review writes the section and a copy of docs/design into a scratch workspace, asks the model via agent_spec/invoke_and_record (Role::Steward, models.verifier, as steward/auditor/audience do), validates the JSON, queues one design request unless an open one carries the marker, and commits the review record and invocation together. A model failure still commits a no-proposal review record so cadence advances. (4) code_health.rs: doc comment on `REVIEW_EVERY` names it as the shared cadence; no behavior change. (5) hestia.md holds the cadence, prediction, follow-up and the new record's path/schema (so docs/records.md is not touched); CHANGELOG.md gets the entry. Two files outside the brief's list stay, each with a stated reason: store.rs (Records is a struct with one typed Vec per kind, and the new record cannot be read without a Vec and a load arm; no way around it short of not adding a record kind, which would lose the durable cadence point and prediction) and display.rs (athena status text is built only there, with each section hand-printed; no generic field carries text; without a 3-line print the section would exist in the JSON view only). docs/records.md is dropped from the plan.",
+  "decisions": [
+    {
+      "choice": "Compute throughput purely from Records (job records), with no git history; the trigger and the status median share THROUGHPUT_WINDOW.",
+      "reason": "Records hold invocation started_at/ended_at, verification check durations and outcome.at, so status and the review share one number; tests build Records in memory or commit them with the existing `put` helper.",
+      "rejected": [
+        {
+          "option": "Count landings from git first-parent history like code_health::landings",
+          "why": "Needs a git fixture per test and can disagree with the records-based median it is compared against."
+        },
+        {
+          "option": "Use job.wall_time_execution totals from Outcome",
+          "why": "No per-stage split; omits reading, planning and landing."
+        }
+      ]
+    },
+    {
+      "choice": "Fold landing and rebuild into one stage: outcome.at (later_outcome first) minus the end of the job's last invocation, floored at 0.",
+      "reason": "No record separates the post-landing rebuild (drain.rs Steps::rebuild). The doc and text() label say what is measured.",
+      "rejected": [
+        {
+          "option": "Add a rebuild-duration record",
+          "why": "Widens the change into drain.rs and the job record schema; out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "New record kind athena.throughput-review/1 holding cadence state, prediction and follow-ups; touch store.rs only to add `Records.throughput_reviews`, its load arm and sort.",
+      "reason": "Cadence needs a durable last-review point; the prediction must outlive the request. Records is a typed struct, so store.rs must change for the record to be read. The brief's records.rs deliverable already presumes a new kind.",
+      "rejected": [
+        {
+          "option": "Reuse CodeHealthBaseline",
+          "why": "No median, prediction or follow-up fields, and the design review must not change."
+        },
+        {
+          "option": "Keep the prediction only in request text",
+          "why": "The follow-up would parse prose and a closed request would lose it."
+        },
+        {
+          "option": "Read throughput-review files directly in hestia.rs, bypassing Records and store.rs",
+          "why": "Duplicates the loader, skips path/schema validation and makes tests diverge from how every other record is read."
+        }
+      ]
+    },
+    {
+      "choice": "Print the section in display.rs with `if let Some(t) = &v.throughput { writeln!(out, \"{}\", t.text()) }` beside check_durations (about 3 lines), and do not touch docs/records.md.",
+      "reason": "athena status text is hand-built in display.rs; the request is for a section in athena status. docs/records.md is not read by any test (grep of *.rs found only message strings in status.rs), so the layout line moves into hestia.md, a listed deliverable.",
+      "rejected": [
+        {
+          "option": "Leave display.rs unchanged and expose the section only in the JSON StatusView",
+          "why": "Users running athena status would not see it."
+        },
+        {
+          "option": "Edit docs/records.md for the layout line",
+          "why": "Outside the deliverables and not required by any test; hestia.md can carry the path and schema."
+        }
+      ]
+    },
+    {
+      "choice": "A cited change is a landed request job, other than the design request itself, whose text contains the review's record id; the request body tells authors to cite that id. Measured minutes = window median of landed jobs landing after the cited job, capped at the newest 10, needing at least 1. A follow-up is written once per review.",
+      "reason": "Deterministic and testable from records. The design request lands a note, not the speedup.",
+      "rejected": [
+        {
+          "option": "Treat the design request's own landing as the cited change",
+          "why": "It changes no pipeline timing."
+        }
+      ]
+    },
+    {
+      "choice": "Priority from expected minutes saved: >=10 urgent, >=5 high, >=2 normal, else low, as named consts in a pure `priority_for_minutes`.",
+      "reason": "Speed first (OP-23): monotonic and unit-testable.",
+      "rejected": [
+        {
+          "option": "Always urgent like the root-cause request",
+          "why": "Brief says priority is set by expected minutes saved."
+        }
+      ]
+    },
+    {
+      "choice": "Duplicate suppression: a non-Closed request job with a line starting 'Throughput design: ' means no new request; the review still writes its record with request_job empty and a note.",
+      "reason": "Matches structural_pass_open; independent of the record having committed, so a crash cannot cause a duplicate.",
+      "rejected": [
+        {
+          "option": "Skip the whole review while a request is open",
+          "why": "Cadence would stall and a follow-up could not be recorded."
+        }
+      ]
+    },
+    {
+      "choice": "Call throughput_review from review_passes with a third summary line; it never fails the caller.",
+      "reason": "review_passes is the existing housekeeping at drain start and in sweeps; the pure trigger means normal drains make no model call.",
+      "rejected": [
+        {
+          "option": "Call from code_health_after_landing",
+          "why": "Puts a strong-model wait inside the landing path the review exists to shorten."
+        }
+      ]
+    },
+    {
+      "choice": "Use Role::Steward and models.verifier with no new Role and no config change.",
+      "reason": "A new Role ripples through Role::as_str, budgets and match arms; athena.toml is out of scope.",
+      "rejected": [
+        {
+          "option": "Add Role::Throughput",
+          "why": "Wide ripple for no gain."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "purpose": "Add THROUGHPUT_REVIEW_SCHEMA, ThroughputReview/ThroughputProposal/ThroughputFollowup (deny_unknown_fields), `latest`, `validate`, AnyRecord variant, canonical_path, schema, parse validation arm, round-trip test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/store.rs",
+      "action": "modify",
+      "purpose": "Not in the brief's list but unavoidable: add `Records.throughput_reviews`, load arm and (at, id) sort, as code_health_baselines does; without it the new record cannot be read.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "Add Throughput (compute, per-day counts, stage medians, idle, failed minutes, text), StatusView.throughput set in Athena::status, and the exact-number test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "purpose": "Not in the brief's list but needed so athena status prints the section: about 3 lines beside check_durations.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/hestia.rs",
+      "action": "modify",
+      "purpose": "Add pure throughput_due, priority_for_minutes, throughput_followups, StewardRequest builder, model schema/brief, Athena::throughput_review, the review_passes call and the tests for criteria 2 to 5.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/code_health.rs",
+      "action": "modify",
+      "purpose": "Doc comment on REVIEW_EVERY names it as the cadence the throughput review shares; value and design-review code unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/hestia.md",
+      "action": "modify",
+      "purpose": "New 'Throughput review' section: measures, cadence, request and priority mapping, prediction record path/schema, predicted-vs-measured follow-up.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased entry for the throughput section and the throughput review.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "records.rs: add THROUGHPUT_REVIEW_SCHEMA, the three types, `latest`, `validate` (finite non-negative numbers, non-empty bottleneck and change), the AnyRecord variant, canonical_path, schema, the parse validation arm, and the round-trip test. Run cargo test -p athena-data records.",
+    "store.rs: add `throughput_reviews` to Records, the load arm and the (at, id) sort, mirroring code_health_baselines.",
+    "status.rs: implement `Throughput::compute(&Records)` (stage sums per role, checks from verification.checks skipping 'not run', landing/rebuild tail floored at 0, median over the newest 20 landed jobs, per-UTC-day counts over all landings, idle as the sum of gaps between merged intervals, failed minutes for non-Landed closed and plan-stopped jobs), `text()`, `StatusView.throughput` set in Athena::status, and the exact-number test.",
+    "display.rs: print `throughput.text()` beside check_durations.",
+    "hestia.rs pure parts: constants WORSEN_RATIO=1.2, THROUGHPUT_MARKER='Throughput design: ' and priority thresholds; `throughput_due`; `priority_for_minutes`; `throughput_followups`; and the request builder via StewardRequest::new (marker title, body with bottleneck, change, predicted saving, a line asking authors to cite the review id; acceptance is a design note under docs/design/).",
+    "hestia.rs model part: `throughput_schema()`, prompt and brief, and `Athena::throughput_review(ui)`: return early if nested or not due; load Records; compute Throughput; write throughput.md and a copy of docs/design/*.md into a scratch job dir with a Cleanup guard; call agent_spec(Role::Steward, models.verifier, read-only) and invoke_and_record; validate; apply duplicate suppression; queue via self.queue; commit the ThroughputReview (with followups) and invocation record in one commit with Athena-Record trailers; any failure commits a no-proposal record.",
+    "hestia.rs: add the third summary line in `review_passes`, change `athena_in` to take a driver, and add the tests for criteria 2 to 5. Grep test_support for existing Invocation/Verification builders before writing one.",
+    "code_health.rs: update the doc comment on REVIEW_EVERY only.",
+    "docs/design/hestia.md: add the Throughput review section including the record path and schema. CHANGELOG.md: add the Unreleased entry.",
+    "Run cargo fmt --all, cargo clippy --all-targets --locked -- -D warnings and cargo test --locked; fix failures."
+  ],
+  "risks": [
+    {
+      "risk": "A model call in review_passes fires in existing drain or sweep tests that script the fake driver.",
+      "mitigation": "The call runs only when throughput_due is true, which needs at least 10 landed request jobs. Run the full cargo test; if a fixture reaches 10 landings, give it a prior review record."
+    },
+    {
+      "risk": "Model failure or malformed answer retries and spends money on every drain.",
+      "mitigation": "A no-proposal review record with a note is committed on any failure, which advances the cadence; the invocation record is always committed."
+    },
+    {
+      "risk": "Median over a small window is noisy and triggers 'worsened' spuriously.",
+      "mitigation": "The window is 20 landed jobs, the trigger needs at least one new landing, and each review stores the current median as the next baseline."
+    },
+    {
+      "risk": "A crash between queuing the request and committing the review record leaves an open request with no record.",
+      "mitigation": "Suppression looks at the open request's marker line, not the record, so no second request is queued. That review gets no follow-up, which is noted as acceptable."
+    },
+    {
+      "risk": "Model text with bullet-like lines is refused by StewardRequest::new.",
+      "mitigation": "Flatten model text with `one_line` before it enters the body; if the builder still errors, record the proposal without a request and a note."
+    },
+    {
+      "risk": "Adding a StatusView field or AnyRecord variant breaks exhaustive matches or struct literals elsewhere.",
+      "mitigation": "Grep showed AnyRecord::CodeHealthBaseline handled only in records.rs, store.rs and code_health.rs; cargo clippy --all-targets finds any other site."
+    },
+    {
+      "risk": "Touching store.rs and display.rs widens scope beyond the brief's list.",
+      "mitigation": "Both edits are minimal and mechanical (one Vec, one load arm, one sort; one print block), each tied to a stated need; docs/records.md was removed from the plan."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit test in status.rs over an in-memory `Records` (JobRecords fields are pub): 3 landed jobs on two UTC days with Reader/Planner/Critic/Producer/Verifier invocations of known started_at/ended_at, verification checks of known durations, outcome.at at known offsets; one Rejected job and one plan-stopped job with known spans; gaps between job intervals and one overlap. Calls `Throughput::compute(&records)` (pure, no seam needed; added by step 3) and asserts the struct fields and the `text()` string that display.rs prints.",
+      "command": "cargo test -p athena-core status",
+      "observes": "Exact numbers: landed per day (e.g. 2 and 1), median total minutes, medians for reading, planning, producer, checks, verifier and landing/rebuild, idle minutes (overlap gives 0), minutes on non-landed jobs.",
+      "fails_without": "Without Throughput::compute the test does not compile; a mis-attributed stage (planner counted as producer) or wrong idle merging fails the exact per-stage assertions."
+    },
+    {
+      "criterion": 2,
+      "method": "Test in hestia.rs using the existing temp-repo helper `athena_in`, changed to take a driver. Entry point `Athena::throughput_review(&TestUi)`; guards: not nested and `throughput_due` true. Seam: `FakeAgentDriver::new(script)` (exists today; used in run/mod.rs and test_support.rs; hestia.rs athena_in uses `FakeAgentDriver::deterministic()`), script returns `FakeTurn::output(json!({bottleneck, stage, change, expected_minutes_saved, rationale}))` and counts calls. Seed 10 landed jobs with `put`. Run the review, then seed 10 more landings and run again. The double only returns canned JSON; request building, validation and suppression are production code.",
+      "command": "cargo test -p athena-core hestia",
+      "observes": "After the first run exactly one open request job whose text has the marker line, bottleneck, proposed change and predicted minutes; one throughput-review record with the proposal and request job id. After the second run still one request, a second review record with request_job None and a note; model called once per review.",
+      "fails_without": "Without duplicate suppression the second run queues a second request and the open-request count fails; without the StewardRequest call no request exists."
+    },
+    {
+      "criterion": 3,
+      "method": "Table test of pure `throughput_due(landed_count, window_median, latest_review)` with constructed review records, plus a test through `Athena::throughput_review` with a counting fake driver (same seam as criterion 2).",
+      "command": "cargo test -p athena-core hestia",
+      "observes": "No prior review: 9 landed gives None, 10 gives Cadence. Prior review at 10 landings: 19 landed and equal median None, 20 landed Cadence. Prior median 10.0: current 12.0 None (20% is not more than 20%), 12.1 with a new landing Worsened, 12.1 with no new landing None, improved median None. Zero model calls and nothing queued when not due; one call when due.",
+      "fails_without": "A cadence of 9 or 11, a >= comparison at 20%, or firing on every drain fails a boundary assertion or the call-count assertion."
+    },
+    {
+      "criterion": 4,
+      "method": "Test in hestia.rs. Commit with `put` a first review record R (median 20.0, proposal predicted saving 6.0, request_job J), a landed request job C whose text contains R and lands later than R, and 3 later landed jobs with known shorter spans. Run `Athena::throughput_review` with the fake driver past the 10-landing mark; also call pure `throughput_followups`. Seam as criterion 2.",
+      "command": "cargo test -p athena-core hestia",
+      "observes": "The new review record's followups holds one entry for R: predicted 6.0, baseline 20.0, measured window median (e.g. 15.0) and measured saving 5.0. A third review adds no second follow-up for R. A cited change not yet landed records none. J itself, once landed, is not treated as the cited change.",
+      "fails_without": "Without the follow-up step, followups is empty and the predicted-against-measured assertion fails."
+    },
+    {
+      "criterion": 5,
+      "method": "Test pure `priority_for_minutes` at 0.5, 2.0, 5.0, 10.0 and 25.0, and run `Athena::throughput_review` in two temp repos with the fake model predicting 12.0 and 1.0 (seam as criterion 2), reading the queued request text and `Records::priority()`.",
+      "command": "cargo test -p athena-core hestia",
+      "observes": "Mapping low, normal, high, urgent, urgent; the 12.0 request carries `Priority: urgent` and the 1.0 request `Priority: low`; priority is non-decreasing over an increasing series.",
+      "fails_without": "A constant priority gives both requests the same level and the assertion fails."
+    },
+    {
+      "criterion": 6,
+      "method": "Run the three Athena checks as separate simple commands: the one listed here is the test run; fmt and clippy are run the same way (`cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`). The tests that carry the behavior are those of criteria 1 to 5 and 8, so the full run also proves that the new StatusView field, AnyRecord variant, Records field and review_passes call break no existing status, display, records, drain, sweep, code_health or steward test.",
+      "command": "cargo test --locked",
+      "observes": "All three exit 0. Existing drain and sweep tests still pass because throughput_due needs 10 landed jobs and fixtures that reach 10 get a prior review record.",
+      "fails_without": "A new AnyRecord variant left unhandled in a match, a missing StatusView field in a struct literal, a clippy warning, unformatted code, or a drain/sweep test hitting the model call through review_passes makes the corresponding command exit non-zero."
+    },
+    {
+      "criterion": 7,
+      "method": "Read the diff: CHANGELOG.md Unreleased entry naming the status throughput section and the throughput review; hestia.md 'Throughput review' section stating every 10 landings (`code_health::REVIEW_EVERY`) or a median worse by more than 20% than the previous review, the priority mapping, the prediction record (path and schema), and the follow-up of predicted against measured minutes.",
+      "command": "git diff -- CHANGELOG.md docs/design/hestia.md",
+      "observes": "The changelog entry exists; the design text contains 'every 10 landings', '20%', 'measured' and 'athena.throughput-review/1'.",
+      "fails_without": null
+    },
+    {
+      "criterion": 8,
+      "method": "New records.rs test modelled on `a_hestia_sweep_has_a_path_a_schema_and_round_trips`: build a ThroughputReview with a proposal and a follow-up, wrap in `AnyRecord::ThroughputReview`, assert schema, canonical_path `records/throughput-reviews/<month>/<id>.json`, and a JSON round trip through `check_record_file(path, bytes)`; a misplaced path gives Misplaced; NaN median or empty bottleneck is refused by validate.",
+      "command": "cargo test -p athena-data records",
+      "observes": "The kind parses, validates, sits at its canonical path and round-trips.",
+      "fails_without": "Without the AnyRecord variant the schema tag does not parse and check_record_file refuses the file."
+    }
+  ],
+  "open_questions": [
+    "No record separates the rebuild after a landing from the landing, so 'landing and rebuild' is one measured tail. Splitting it needs a new timing record in drain.rs, out of scope. Is the combined stage acceptable?",
+    "The strong model is models.verifier, as for steward, auditor and audience; athena.toml has no separate strong-model setting. Confirm that is meant.",
+    "throughput_review runs in review_passes (drain start and sweeps), so the model wait falls at the next drain start, not at the landing. Is that acceptable?",
+    "Whether test_support already has an Invocation or Verification fixture builder was not checked; the producer should grep before writing one.",
+    "Whether any other integration test (crates/athena-cli/tests) builds a StatusView literal or matches AnyRecord exhaustively was not fully checked; cargo clippy --all-targets will show it."
+  ],
+  "producer_section_sha256": "048d6c13e6fd29781329462ed5911fc9e8f19a7bb7604901ed95e1362bebe050"
+}
