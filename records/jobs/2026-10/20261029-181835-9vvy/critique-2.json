@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261029-181835-9vvy",
+  "round": 2,
+  "at": "2026-10-29T18:27:48.340348829Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The exemption ignores user corrections, so the gate refuses a reading that defers a part because the user asked it to.",
+      "evidence": "The read path calls check_reading_acceptance(&reading, &request.text, attempt, &referenced_jobs, Some(&repo_files)) (reading.rs:520-526). The current job's corrections (job.corrections, gathered into `history` at 994-1006) are not passed in. The earlier jobs' corrections are carried in EarlierAttempt.corrections (1136-1137, 1739-1741), but decision 5 reads only 'its source text or the new request'. Suppose a user corrects a reading with 'drop (3), do it in a later job'. The reader complies, the gate refuses the result, and after the one re-read the job fails. The same happens on a retry whose earlier job's user narrowed it by correction. Criterion 3's 'a request that itself says a part is a follow-up still accepts a reading deferring it' is meant to keep the request owner's own deferrals legal, and a correction is the request owner speaking. Fix: Treat correction text as a request-side source for the exemption. Read EarlierAttempt.corrections for each continued job. Also pass the current job's correction lines into check_reading_acceptance: add a parameter, or append them to the request text at the call site at 520, with the replay call at 3012 passing none. Apply the same affirmative-pattern and cue rules to them. Add a test: a reading that defers (3) is refused with no correction and accepted when a correction says '(3) is a follow-up'.",
+      "location": "Plan decision 5 (request-side exemption) and decision 1 / step 5 (check_reading_acceptance call); reading.rs:520-526, 994-1010, 1122-1138",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Free text quoted into Steward requests can turn into parts that the request never asked for.",
+      "evidence": "root_cause_request_at writes each introspection's line as 'Introspection {id} (job {job}); prevention it proposed: {prevention}' (hestia.rs:343-345). A prevention written as '(1) add X; (2) add Y' matches the plan's `(N)`-after-':' rule and becomes required parts. A root-cause fix is free to reject those proposals. The fixture count in decision 8 uses ordinary renderer inputs, so it would not catch this. Fix: When a request has an `Acceptance:` section, take only its bullets as parts. Alternatively, skip lines the renderer marks as quoted evidence, such as lines starting 'Introspection '. Add a fixture of a root-cause request whose prevention text holds '(1) ... (2) ...'.",
+      "location": "Plan decision 2 (parts parser: `(N)` after ':' plus whitespace) and decision 8; hestia.rs:343-345",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan says existing tests both 'run unchanged' and have their fixtures fixed, which contradict each other and can hide false refusals.",
+      "evidence": "Step 6 says 'fix a fixture's criteria, not the check'. The Criterion 6 demonstration says 'All existing reading, replay and acceptance tests run unchanged'. If a fixture is edited, the false-refusal constant can be 0 while real refusals happened. Fix: Keep the original (request, reading) pair of every edited fixture in FIXTURES, so the false-refusal count includes it. List each edited test by name in the CHANGELOG next to the count.",
+      "location": "Plan step 6 and decision 8(iii) vs Criterion 6 demonstration",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "An out_of_scope item that overlaps a part and contains a deferral phrase is a deferral even when it narrows something else, such as 'the display polish is a follow-up'.",
+      "evidence": "covers(part, stems(item)) at s>=2 needs only one shared specific stem, so an item about a related but different detail matches the part. Fix: For rule (c), require the stricter threshold (two shared specific stems), or add a test showing a narrowing item that names a related detail is accepted.",
+      "location": "Plan decision 4(c)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the code at every point the plan depends on, and it matches. check_reading_acceptance (reading.rs:2599) is the single gate, and it already computes continued_jobs at 2606. The retry carries the original request even for a retry of a retry (reading.rs:1122-1138). The `prior()` helper exists at 5047 with end_state \"rejected\". replay_declaration is at 3220. The briefs.rs rule-section test (3172-3194) has the checks array and the 2400-byte cap the plan describes. The round-2 answers fix the earlier findings: retries are now covered, the SPECIFIC/GENERIC rule stops generic words from covering a part, the false-refusal count runs over the existing fixtures, and a bare label is not a deferral. Every demonstration calls the real gate. One design gap remains. The only place the plan lets a part be deferred is the request text (and the earlier request's text). It ignores the user's corrections. A user who corrects a reading with \"leave (3) for a follow-up\" gets a reading the gate refuses. The corrections never reach check_reading_acceptance today: the read path passes only &request.text, the attempt and the referenced jobs (reading.rs:520-526). The earlier job's corrections sit in EarlierAttempt.corrections, and the plan does not read them. This blocks the user's own scope decision, so the verdict is revise. The smaller findings are about free text in Steward requests being parsed as parts and about fixture edits during the measurement."
+}
