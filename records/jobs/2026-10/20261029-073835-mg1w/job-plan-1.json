@@ -1,0 +1,148 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261029-073835-mg1w",
+  "round": 1,
+  "at": "2026-10-29T16:02:21.406739737Z",
+  "invocation_seq": 2,
+  "approach": "Fix the scan at its source. In reading.rs, make `scan_request_input` take only the request text and scan only that, returning `Vec<InputFinding>` (no git, no treeish, no named files). `refuse_banned_input` drops its git parameters, and its message and the doc comments say request-only. Both callers (`ask`, `queue`) are updated. The old run/mod.rs test is replaced by two tests: a request naming a file full of boundary words is admitted, and a request whose own text has one is still refused naming source `request`. Add a CHANGELOG entry under Unreleased > Changed. No change to word lists, `boundary_scan` or the candidate-file scan.",
+  "decisions": [
+    {
+      "choice": "Drop the git and treeish parameters from `scan_request_input` and `refuse_banned_input`; the scan becomes infallible and returns `Vec<InputFinding>`.",
+      "reason": "Nothing but the named-file loop used them. Keeping unused parameters would make clippy complain and would leave the old reach look possible. The only external caller is the run/mod.rs test, which is being replaced.",
+      "rejected": [
+        {
+          "option": "Keep the signature and skip the file loop",
+          "why": "Leaves unused parameters (clippy -D warnings), and an `unused` fix would need underscores that hide the intent."
+        },
+        {
+          "option": "Exempt only BRIEF.md from the named-file scan",
+          "why": "Fixes the one instance, not the cause. Other docs with boundary words would still refuse a request, and the files are scanned when a candidate changes them anyway."
+        }
+      ]
+    },
+    {
+      "choice": "Keep `InputFinding` and its `source` field (always `request` now); only update its doc comments.",
+      "reason": "The brief says the type stays and the existing refusal test asserts the `request:2: word` format.",
+      "rejected": [
+        {
+          "option": "Replace InputFinding with the raw `boundary_scan` hit",
+          "why": "Changes the message format for no gain."
+        }
+      ]
+    },
+    {
+      "choice": "Leave crates/athena-core/src/admission.rs unmodified.",
+      "reason": "I grepped it for boundary, banned and InputFinding and found none; the scan lives in reading.rs. Editing it only to match the deliverables list would be churn.",
+      "rejected": [
+        {
+          "option": "Add a comment or a test in admission.rs",
+          "why": "It has no relation to the scan, so it would add noise. The open question below flags it."
+        }
+      ]
+    },
+    {
+      "choice": "Do not edit the older CHANGELOG entry at line ~457; add a new entry under Unreleased > Changed that supersedes it.",
+      "reason": "The changelog is history. The new entry states the new behavior and the reason (the owner's brief uses boundary words legitimately; named files are still scanned when a candidate changes them).",
+      "rejected": [
+        {
+          "option": "Rewrite the old entry",
+          "why": "It would falsify the record of what a past release did."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "`scan_request_input(text) -> Vec<InputFinding>` scans only the request text; remove the named-file loop. `refuse_banned_input(text)` drops git parameters; reword its doc comment and bail message to request-only. Update the `InputFinding` and `scan_request_input` doc comments. Update both callers at ~715 (`ask`) and ~740 (`queue`).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "Delete the test `a_named_file_with_a_banned_word_is_flagged_with_path_and_line_and_a_clean_one_is_not` (~2443-2484). Add the admitted-when-naming-a-file test and the refused-on-own-text test, with banned words built by concat.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One entry under Unreleased > Changed: admission scans only the request's own text, and why.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Grep all .rs files for `scan_request_input` and `refuse_banned_input` to confirm the callers (reading.rs ~715, ~740, ~2067; run/mod.rs ~2466).",
+    "In reading.rs, rewrite `scan_request_input(text: &str) -> Vec<InputFinding>`: keep the `boundary_scan(text)` mapping to `source: \"request\"` and remove the `request_text_touches` loop. Update the `InputFinding` and `scan_request_input` doc comments to say only the request's own text is scanned and that files a candidate changes are scanned later by the policy check.",
+    "Change `refuse_banned_input(text: &str) -> Result<()>`: call the new scan, keep the list format, and reword the bail message to 'the request was not admitted: its own text holds words Athena's boundary scan rejects (source:line: word). Reword them and ask again:'. Update its doc comment. Fix both callers.",
+    "In run/mod.rs tests, delete `a_named_file_with_a_banned_word_is_flagged_...`. Add `a_request_naming_a_file_with_a_boundary_word_is_admitted` (commit BRIEF.md and docs/dirty.md with a banned word via commit_file; assert the direct scan finds nothing, `ask` is admitted and head moves; also a `queue` call). Add `a_request_whose_own_text_has_a_boundary_word_is_refused` (the request names BRIEF.md and has the banned word on line 2; assert the 'not admitted' error, `request:2: word`, head unchanged, and the direct scan returns one finding with source `request`). Build all banned words by concat.",
+    "Add the CHANGELOG bullet under Unreleased > Changed (no banned words, no email).",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked` (including `cargo test -p xtask --test policy`) and fix any finding."
+  ],
+  "risks": [
+    {
+      "risk": "The xtask policy scan covers tracked files, including the new tests and CHANGELOG, so a literal banned word fails `cargo test`.",
+      "mitigation": "Build banned words with `[\"sand\",\"box\"].concat()` as the neighbouring tests do. Write the changelog without naming them."
+    },
+    {
+      "risk": "Another caller of the three-argument `scan_request_input` or `refuse_banned_input` breaks the build.",
+      "mitigation": "A grep of all .rs files found only run/mod.rs:2466 and the two reading.rs callers. The producer reruns the grep after the edit."
+    },
+    {
+      "risk": "A test fixture's neighbouring fake-model set-up differs from what the new admitted test needs.",
+      "mitigation": "Copy the set-up from the existing clean-request admit at run/mod.rs ~2436 and ~2482, which already ask with `Quiet` and get a proposal."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "New test in run/mod.rs tests module. It uses the existing fixtures `repo()`, `athena(&repo,&state)` and `commit_file`, all present today at ~2255, 2359 and 2403. It commits BRIEF.md and docs/dirty.md, each with a banned word built with `[\"sand\",\"box\"].concat()` so the source stays clean. First it proves the old reach is gone by calling `crate::reading::scan_request_input(\"map the requirements in BRIEF.md and docs/dirty.md\")` and asserting no findings. Then it calls the production entry point `athena.ask(\"map the requirements in BRIEF.md and docs/dirty.md\", &Quiet)`, with the usual fake-model setup of the neighbouring tests.",
+      "command": "cargo test -p athena-core a_request_naming_a_file_with_a_boundary_word_is_admitted",
+      "observes": "`ask` returns Ok with `proposal.reading.is_some()`, and `athena.head()` differs from the head before (a job was recorded).",
+      "fails_without": "With the old file loop, `ask` returns the 'not admitted' error listing `BRIEF.md:N: word` and `docs/dirty.md:N: word`, so the unwrap fails."
+    },
+    {
+      "criterion": 2,
+      "method": "Test in run/mod.rs, kept from the first half of the old test and the existing banned-in-request test (~2400-2441). It calls `athena.ask` and `athena.queue` with request text holding a banned word on line 2, built by concatenation. It also names BRIEF.md, a clean file, to show the naming does not matter. It asserts on the error. It also calls `scan_request_input` directly, as in the old test.",
+      "command": "cargo test -p athena-core a_request_whose_own_text_has_a_boundary_word_is_refused",
+      "observes": "The error string contains 'not admitted' and `request:2: <word>`, and `athena.head()` is unchanged (nothing recorded). The direct call returns exactly one `InputFinding{source:\"request\",line:2,term}`.",
+      "fails_without": "If the request-text scan were removed or broken when the file loop was dropped, `ask` would return Ok and the `unwrap_err` would fail."
+    },
+    {
+      "criterion": 3,
+      "method": "Content criterion. The test above calls `scan_request_input` with one argument, which compiles only if the git and treeish parameters are gone, so no file read can happen. The old test `a_named_file_with_a_banned_word_is_flagged_with_path_and_line_and_a_clean_one_is_not` is deleted and its replacements are named differently. A reviewer can also run `git diff` to read the doc comments and the message.",
+      "command": "cargo test -p athena-core a_request_naming_a_file_with_a_boundary_word_is_admitted",
+      "observes": "The tests compile and pass against the one-argument signature. The `git diff` of reading.rs shows doc comments that say 'the request's own text' and a bail message such as 'the request was not admitted: its own text holds words Athena's boundary scan rejects (source:line: word)', with no 'or a file it names'.",
+      "fails_without": null
+    },
+    {
+      "criterion": 4,
+      "method": "Run the three checks Athena runs, in order. Whole commands are run separately by the verifier if chaining is not allowed.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0. This includes the xtask policy test, which scans the new test source and CHANGELOG for banned words; the test strings must be built with concat and the changelog must not name the banned words.",
+      "fails_without": "An unused import or parameter fails clippy, a leftover caller of the old three-argument form fails compile, and a literal banned word in the new test or changelog fails the policy test."
+    },
+    {
+      "criterion": 5,
+      "method": "Content check by reading the diff.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "One new bullet under `## [Unreleased]` > `### Changed` says that admission (`athena ask`, including `--later`) scans only the request's own text, not the files it names; why (the owner's brief legitimately uses boundary words, and a request to map it was refused on 2026-10-29); and that files are still scanned when a candidate changes them. It does not spell out the banned words.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Review of the diff plus the tests: the change only deletes the file loop. `boundary_scan` and the word lists are untouched, and no new `bail!` or refusal rule is added. The criterion-2 test proves the request-text refusal still works with the same term list.",
+      "command": "cargo test -p athena-core a_request_whose_own_text_has_a_boundary_word_is_refused",
+      "observes": "The diff has no added refusal condition. The refusal set is a strict subset of the old one: every request refused now was refused before.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "crates/athena-core/src/admission.rs holds no boundary scan (grep for boundary, banned and InputFinding found nothing), so the plan leaves it unmodified though the brief lists it as a deliverable. If Athena requires every listed deliverable to change, the producer would need a reason to touch it.",
+    "Does any other place (docs, `athena ask --help` text in crates/athena-cli) say that named files are scanned at admission? A grep of .rs and .md for 'a file it names' found only reading.rs and the old CHANGELOG line; the producer should also grep the CLI help text once."
+  ],
+  "producer_section_sha256": "e95b39990e997d27e36986076c714bd70d29eba505f020263c0f3f244b9bb9c0"
+}

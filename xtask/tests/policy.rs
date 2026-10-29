@@ -232,7 +232,7 @@ fn the_producer_brief_lists_exactly_the_scanners_terms() {
 
 #[test]
 fn the_admission_scan_finds_what_the_policy_scan_finds() {
-    // M19 (blocks): Athena scans a request and the files it names with `athena_context::briefs::boundary_scan`
+    // M19 (blocks): Athena scans a request's own text with `athena_context::briefs::boundary_scan`
     // before admitting a job. It must agree with this scanner on every line, so a word the policy scan would
     // reject is never admitted. Tested on each term in both lists, in both cases, inside longer words, and
     // with hyphens.

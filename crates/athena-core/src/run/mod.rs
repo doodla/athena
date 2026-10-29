@@ -2441,46 +2441,64 @@ mod produce_and_verify_order_tests {
     }
 
     #[test]
-    fn a_named_file_with_a_banned_word_is_flagged_with_path_and_line_and_a_clean_one_is_not() {
+    fn a_request_naming_a_file_with_a_boundary_word_is_admitted() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena(&repo, &state);
+        // Built from fragments so this file passes the scan it tests.
+        let banned = ["sand", "box"].concat();
+        let dirty = format!("# Notes\n\nIt ran in a {banned}.\n");
+        commit_file(&repo, "BRIEF.md", &dirty);
+        commit_file(&repo, "docs/dirty.md", &dirty);
+        let before = athena.head().unwrap();
+
+        // The named files hold the word, but the request's own text does not: the scan finds nothing.
+        let text = "map the requirements in BRIEF.md and docs/dirty.md";
+        assert!(crate::reading::scan_request_input(text).is_empty());
+
+        // `ask --later` admits it.
+        athena.queue(text).unwrap();
+        let queued = athena.head().unwrap();
+        assert_ne!(queued, before);
+
+        // `ask` admits it and reads it.
+        let proposal = athena.ask(text, &Quiet).unwrap();
+        assert!(proposal.reading.is_some());
+        assert_ne!(athena.head().unwrap(), queued);
+    }
+
+    #[test]
+    fn a_request_whose_own_text_has_a_boundary_word_is_refused() {
         let repo = repo();
         let state = tempfile::tempdir().unwrap();
         let athena = athena(&repo, &state);
         let banned = ["sand", "box"].concat();
-        commit_file(
-            &repo,
-            "docs/dirty.md",
-            &format!("# Notes\n\nIt ran in a {banned}.\n"),
-        );
-        commit_file(&repo, "docs/clean.md", "# Notes\n\nNothing to see.\n");
+        commit_file(&repo, "BRIEF.md", "# Brief\n\nNothing to see.\n");
         let before = athena.head().unwrap();
 
-        let err = athena
-            .ask("tidy up docs/dirty.md", &Quiet)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("not admitted"), "{err}");
-        assert!(err.contains(&format!("docs/dirty.md:3: {banned}")), "{err}");
+        // The request names a clean file; the word is in its own text, on line 2.
+        let text = format!("map the requirements in BRIEF.md\nit ran in a {banned}");
+        for refused in [
+            athena.ask(&text, &Quiet).unwrap_err().to_string(),
+            athena.queue(&text).unwrap_err().to_string(),
+        ] {
+            assert!(refused.contains("not admitted"), "{refused}");
+            assert!(
+                refused.contains(&format!("request:2: {banned}")),
+                "{refused}"
+            );
+        }
         assert_eq!(athena.head().unwrap(), before);
 
-        // The scan itself: request text first, then each named file; a path that does not exist is skipped.
-        let findings = crate::reading::scan_request_input(
-            &athena.git,
-            &before,
-            "tidy docs/clean.md and docs/dirty.md and docs/missing.md",
-        )
-        .unwrap();
+        // The scan itself reports one finding, from the request.
         assert_eq!(
-            findings,
+            crate::reading::scan_request_input(&text),
             vec![crate::reading::InputFinding {
-                source: "docs/dirty.md".into(),
-                line: 3,
+                source: "request".into(),
+                line: 2,
                 term: banned
             }]
         );
-
-        // A clean named file is admitted.
-        let proposal = athena.ask("tidy up docs/clean.md", &Quiet).unwrap();
-        assert!(proposal.reading.is_some());
     }
 
     #[test]

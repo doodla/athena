@@ -31,6 +31,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- Admission (`athena ask`, including `--later`) scans only the request's own text for boundary words, not the
+  files the request names. It used to read each named file too, so any request that named `BRIEF.md` was refused:
+  the owner's brief is the owner's own words and legitimately uses boundary words (a request to map its
+  requirements was refused on 2026-10-29 for words on lines it did not contain). A named file is still scanned
+  when a candidate changes it, as before. This supersedes the earlier entry that added the named-file scan; no
+  new refusal rule is added, and the word lists are unchanged.
 - A check killed at its deadline no longer rejects the job (job 20261026-232434-6wfq was rejected because the
   test check ran past the 900 s limit on a loaded machine). Three parts:
   - `check_timeout_s` in `athena.toml` is 1800 (was 900). The schema and validation in `config.rs` are unchanged.
