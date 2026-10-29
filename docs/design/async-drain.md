@@ -1,6 +1,6 @@
 # Async drain: several jobs in flight, one ordered landing queue
 
-Status: proposed (D145). Nothing here is built. Written for Sri and for the verifier of the build jobs in section 12.
+Status: accepted (D145, decided by the brain under Sri's delegation, 2026-10-29). Nothing here is built. Written for Sri and for the verifier of the build jobs in section 12.
 
 The drain runs one job at a time today (`[parallel] max_concurrency = 1` in `athena.toml`). Over 2026-10-27 to 29, 35 of
 61 jobs landed and the median job took 42 minutes. This design overlaps the stages of different jobs so that the
