@@ -9,6 +9,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- Structure pass R3: the planning code (`stop_planning`, `plan_round`, `planning_round`, `end_round`,
+  `RoundEnd`, `findings_line`, `plan_record`, `redacted`, `planning_grant` and its `planning_grant_tests`)
+  moved from `run/mod.rs` to `run/planning.rs`, and the pin and reread code (`pin_repo`, `study_pin`,
+  `reread_after_configuration_change`) to `run/pin.rs`. No caller outside `run/` named these items, so no
+  re-export was needed. No behavior change.
 - Structure pass R2: the send-back code (`unmet_criteria`, `left_to_athena`, `send_back_text` and their
   helpers) and its `left_to_athena_tests` moved from `run/mod.rs` to `run/send_back.rs`, re-exported so
   `crate::run` paths are unchanged. No behavior change.
