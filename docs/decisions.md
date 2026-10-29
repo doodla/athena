@@ -3790,3 +3790,30 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   and `status_reports_planned_and_unplanned_landings_later_cited_as_a_revert_or_fix_beside_the_landed_share`
   (`athena-cli`, `job_plan.rs`), `later_harm_counts_landings_cited_as_a_failure_revert_or_fix_for_planned_and_unplanned_jobs`
   (`athena-core`), and `the_repository_config_plans_hard_jobs_only_with_the_designs_caps` (`athena-data`).
+
+## D144 · The second layer of the cohesive spec: sections 7 to 10, the philosophy and the addenda to 2026-10-24
+
+- **Case:** Decision 3C (BRIEF.md addendum "2026-10-17: Olympus") asks for one cohesive spec that cites the
+  owner's words. D114 built the first layer for "Project Olympus" sections 1 to 6 and left the rest for a second
+  job. Several addenda also hold words that pull against each other, for example "No further exemption is added
+  without Sri's yes" (2026-10-18) and "Don't involve me unless you have to" (2026-10-23).
+- **Decision:** `docs/spec.toml` gains requirements for sections 7 to 10, the governing philosophy and the
+  addenda dated 2026-10-17 to 2026-10-24, in the D114 format. Ids are `OLY-7-nn` to `OLY-10-nn`, `OLY-GP-nn` and
+  `OLY-A-nn`. Three `[[open_question]]` tables record the pairs of statements that conflict, each quoting both
+  sides and resolving neither; no status is changed to superseded, since the brief supersedes nothing here.
+  `xtask/tests/spec.rs` stops cutting the brief at the first heading dated after 2026-10-24 (so 2026-10-25 and
+  later cannot be cited), and its coverage rule now needs a requirement under each of sections 1 to 5 and 7 to 10,
+  the governing philosophy and every addendum heading in that range. A cited heading ending in "…" names the
+  start of one brief heading and must match exactly one; it exists because one addendum heading holds a word the
+  boundary scan rejects. Quotes stop before such words too. Sections 1 to 6 entries are unchanged.
+- **Alternatives:** (a) Wait until the whole brief is stable and cover everything at once: the later addenda
+  keep arriving, so the spec would never start. (b) Cover every addendum to date: the request names 2026-10-17
+  to 2026-10-24. (c) Resolve the conflicts in the requirements (mark one superseded): that is Sri's call, and 3C
+  says Sri approves each change. (d) Skip the addendum whose heading holds a rejected word: leaves a gap in the
+  coverage rule. (e) Exempt `docs/spec.toml` from the boundary scan: widens a governance rule for convenience.
+- **Tradeoff:** Statements are our wording and unchecked; only the quotes are. The "…" heading form is a looser
+  match than an exact heading, limited by the uniqueness rule. Each new addendum needs a later job to extend
+  `LAST_DATE`.
+- **Reversal cost:** Low: delete the added tables, restore the section cut in the test.
+- **Provenance:** read: BRIEF.md sections 7 to 10, the governing philosophy and the addenda to 2026-10-24,
+  D114, `xtask/tests/spec.rs`; measured: `cargo test -p xtask --test spec`.
