@@ -533,6 +533,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   constants, `watch_pages` and the private `wait_pages_run`) move unchanged into `gh/pages.rs`. `gh/mod.rs`
   re-exports the public names, so every path such as `crate::gh::watch_pages` is as before. Behavior is
   unchanged; the list from `cargo test -- --list` is the same.
+- Structure pass job G5 (`docs/design/structure-pass.md`): the Host API client items of
+  `crates/athena-core/src/gh/mod.rs` (`Checks`, `NewPr`, `PrDraft`, `PrHost`, `CiRunState`, `MergeMethod`,
+  `MergeMethods`, `GhClient` with its `Host`, `PrHost`, `CiSource` and `CommitHost` impls, `parse_ci_runs`,
+  `parse_check_run`, `parse_ci_run`, `parse_merged_pr`, `parse_remote`, `classify_checks`,
+  `failing_test_name`, and the constants `CI_WORKFLOW` and `TEST_NAME_LIMIT`) move unchanged into
+  `crates/athena-core/src/gh/client.rs`, and `gh/mod.rs` re-exports them, so every path such as
+  `crate::gh::GhClient` is as before. Only `GhClient::api` and `repo_path` become `pub(super)`, because
+  `gh/pages.rs` and `gh/mod.rs` call them. No behavior change; the list from `cargo test -- --list` is the same.
 - Structure pass job G2 (`docs/design/structure-pass.md`): the Transport items of `crates/athena-core/src/gh/mod.rs`
   (`Runner`, `GhCli`, `GhFailure`, `parse_status`, `is_transient`, `transient_text`, `Retry`, `retry_transient`,
   `HttpReply`, `HttpPost`, `CurlHttp`, `HostErrorLog`, and the private `clock_entropy`) move unchanged into

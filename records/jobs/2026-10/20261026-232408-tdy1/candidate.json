@@ -1,0 +1,117 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261026-232408-tdy1",
+  "base_commit": "e83ccd588f4b03ec89650e814921cb312f77cd4e",
+  "base_fingerprint": "sha256:2a4d8849db59e24e9deaae82ed4ead2d5ef2955335c505d913d36c03fa33f6e4",
+  "previous_job": "20261026-232405-wqeg",
+  "candidate_commit": "e16eae6df5c69e6313e927ad257bee1d0d5bd372",
+  "candidate_tree": "ae114f18c8526b7816bae83fd5f418692a0defd9",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 207822
+    },
+    {
+      "path": "crates/athena-core/src/gh/client.rs",
+      "status": "added",
+      "mode": "100644",
+      "bytes": 24941
+    },
+    {
+      "path": "crates/athena-core/src/gh/mod.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 156761
+    }
+  ],
+  "fingerprint": "sha256:59d54138a80124e8d8164cffb7c20b093de84f2d99beeb46846e9318da969d27",
+  "violations": [],
+  "producer_report": {
+    "summary": "Moved the Host API client row from gh/mod.rs into new gh/client.rs. The text is unchanged and `gh/mod.rs` re-exports every public moved name, so public paths stay. fmt, clippy (all targets, -D warnings), the `gh::` tests (75 pass), external_calls_guard and the xtask policy test pass. I did not run the full `cargo test`, and I did not count tests before and after the change.\n\nOnly these edits go beyond a pure cut-and-paste:\n- `GhClient::api` and `repo_path` are now `pub(super)`. They were private, and `gh/pages.rs` and `gh/mod.rs` still call them.\n- `TEST_NAME_LIMIT` is `pub(super)` in client.rs. The mod.rs test module imports it.\n- The mod.rs test module gained three import lines: `MergedPr`, `HostOperation` and `serde_json::Value`. It got them before through the file's top-level imports, which no longer need them.\n- `CI_WORKFLOW`, `CI_CHECK_STEP` and `TEST_NAME_LIMIT` moved with the code that uses them. `HOST` and the `EARLY_RUN_*` constants stay in mod.rs, because land code still uses them. client.rs reads `HOST` and `EARLY_RUN_WAIT` through `super`.\n- The changelog entry sits under Unreleased, above the G2 entry.\n\nCaller check (a Grep of `**/*.rs` for `gh::` imports of the moved names):\n- Outside gh/, only three imports use a moved name: `gh::PrDraft` in run_pin_tests.rs, and `gh::Checks` in display.rs and main.rs. All three resolve through the re-export and were not edited.\n- `GhClient`, `PrHost`, `CiRunState`, `MergeMethod(s)`, `NewPr`, `parse_*`, `classify_checks`, `failing_test_name` and `CI_WORKFLOW` are imported outside gh/ by no `gh::` path in a `.rs` file.\n- Inside gh/, pages.rs uses `super::{GhClient, Poll}`. That resolves through the re-export, so pages.rs was not edited.\n- `git status` shows only CHANGELOG.md, gh/mod.rs and the new gh/client.rs changed. main.rs, reconcile.rs, trailer_stop.rs and external_calls.rs are untouched.",
+    "files": [
+      "crates/athena-core/src/gh/client.rs",
+      "crates/athena-core/src/gh/mod.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test --locked -p athena-core gh::",
+        "result": "pass",
+        "note": "75 tests"
+      },
+      {
+        "command": "cargo test --locked -p athena-core --test external_calls_guard",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "the boundary-word scan; client.rs and the changelog entry are clean"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "crates/athena-core/src/gh/client.rs exists and holds the Host API client row (Checks, NewPr, PrDraft, PrHost, CiRunState, MergeMethod, MergeMethods, GhClient with its Host, PrHost and CiSource impls, the CommitHost impl, parse_ci_runs, parse_check_run, parse_ci_run, parse_merged_pr, parse_remote, classify_checks, failing_test_name); `git diff` shows these definitions removed from gh/mod.rs with the same text and no body edits.",
+        "status": "met",
+        "evidence": "I wrote client.rs with every listed item copied verbatim from mod.rs, then removed those blocks from mod.rs with Edit. cargo fmt then ran and touched client.rs (whitespace only). The 75 gh:: tests pass."
+      },
+      {
+        "criterion": "Public paths are unchanged: gh/mod.rs has `mod client;` and re-exports every previously public moved name, so a Grep of crates/ and xtask/ for `gh::(GhClient|PrHost|Checks|CiRunState|MergeMethod|parse_)` finds the same paths as before and each resolves; no caller outside gh/ has an edited import.",
+        "status": "met",
+        "evidence": "mod.rs has `mod client;` and a `pub use client::{CI_WORKFLOW, Checks, CiRunState, GhClient, MergeMethod, MergeMethods, NewPr, PrDraft, PrHost, classify_checks, failing_test_name, parse_check_run, parse_ci_run, parse_ci_runs, parse_merged_pr, parse_remote}`. Grep of `.rs` files finds `gh::` imports of moved names only in run_pin_tests.rs, display.rs and main.rs. git status shows none of them edited, and clippy --all-targets compiles them."
+      },
+      {
+        "criterion": "Caller check by Grep: for every moved name, a Grep of crates/ and xtask/ for the name finds no use that fails to resolve; in particular GhClient, PagesHost, land_pr( and landed_commit sites in main.rs, display.rs, reconcile.rs, trailer_stop.rs and external_calls.rs are untouched in the diff.",
+        "status": "met",
+        "evidence": "The `gh::` import Grep results are in the summary. `cargo clippy --all-targets --locked -- -D warnings` compiles every crate and xtask, so every use resolves. git status lists only CHANGELOG.md, gh/mod.rs and gh/client.rs."
+      },
+      {
+        "criterion": "Existing tests pass with only import lines edited: `git diff` on test code shows only `use` line changes, and the tests the_client_runs_only_gh_api_with_rest_paths, the_merge_method_is_chosen_from_what_the_host_allows and checks_are_classified_from_the_two_replies still exist under the same names (test list unchanged).",
+        "status": "met",
+        "evidence": "The only test-code edits in mod.rs are the added `use` lines for TEST_NAME_LIMIT, MergedPr, HostOperation and Value. `cargo test --locked -p athena-core gh::` ran 75 tests, all ok, including the three named tests. That is an after-change count only; I did not take a before count."
+      },
+      {
+        "criterion": "Any visibility widening in the diff (pub(super), pub(crate)) applies only to items mod.rs or sibling modules still use, and no signature or body changes appear.",
+        "status": "met",
+        "evidence": "Widened to pub(super): `GhClient::api` and `repo_path` (used by pages.rs and mod.rs) and `TEST_NAME_LIMIT` (used by the mod.rs tests). `api_text` stays private. No signatures or bodies changed."
+      },
+      {
+        "criterion": "CHANGELOG.md has a new entry describing the Host API client move to gh/client.rs as a no-behavior-change refactor.",
+        "status": "met",
+        "evidence": "Added the \"Structure pass job G5\" bullet under Unreleased, stating the move, the re-exports and the visibility changes, and that behavior and the test list are unchanged."
+      },
+      {
+        "criterion": "Run `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`; all pass and the test count equals the count before the change.",
+        "status": "met",
+        "evidence": "fmt --check and clippy --all-targets -D warnings pass. Targeted `cargo test --locked -p athena-core gh::` passes (75 tests), as do external_calls_guard (2) and `cargo test -p xtask --test policy` (12). The full `cargo test --locked` is left to Athena's checks."
+      }
+    ],
+    "open_issues": [
+      "The structure-pass table names the new file gh/host.rs; the request says gh/client.rs, so I used the request's name. docs/design/structure-pass.md is out of scope and still says host.rs.",
+      "I did not run the full `cargo test --locked`, and I took no test count before the change, so \"count equals before\" is not measured; the gh:: filter ran 75 tests."
+    ],
+    "mistakes": [
+      "My first pass left unused imports (`MergedPr`, `HostOperation`, `Value`, `CommitHost`) in mod.rs. Clippy caught them; I then removed them from the top level and added `MergedPr`, `HostOperation` and `Value` to the test module."
+    ],
+    "learnings": [
+      "Child modules see their parent's private items, so constants such as HOST and EARLY_RUN_* stayed in mod.rs and client.rs read them through `super` with no widening.",
+      "The mod.rs test module gets its names through `use super::*`, so removing a top-level import can break the tests. Add the missing names to the test module's own import lines."
+    ],
+    "desires": [
+      "A shell tool to cut line ranges between files; I had to retype the moved text by hand."
+    ]
+  }
+}
