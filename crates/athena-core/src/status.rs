@@ -550,6 +550,92 @@ pub fn producer_settings(records: &Records) -> Vec<ProducerSettingStats> {
         .collect()
 }
 
+/// How many of the newest jobs with a measured test check the durations report reads.
+pub const CHECK_DURATION_JOBS: usize = 20;
+
+/// The share of the check time limit above which the slowest test check is flagged.
+pub const CHECK_DURATION_FLAG: f64 = 0.8;
+
+/// How long the `test` check took over the newest jobs, against the limit a check is killed at. A suite that
+/// creeps toward the limit shows here before a run is killed.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CheckDurations {
+    /// The configured `check_timeout_s`.
+    pub limit_s: u64,
+    /// Jobs counted: the newest ones with a measured `test` run, at most [`CHECK_DURATION_JOBS`].
+    pub jobs: usize,
+    pub median_s: f64,
+    pub slowest_s: f64,
+    /// The job of the slowest run.
+    pub slowest_job: String,
+    /// True when the slowest run took more than [`CHECK_DURATION_FLAG`] of the limit.
+    pub flagged: bool,
+}
+
+impl CheckDurations {
+    /// The line `athena status` prints.
+    pub fn text(&self) -> String {
+        let mut line = format!(
+            "checks     test: median {:.0}s · slowest {:.0}s ({}) of {}s limit over last {} jobs",
+            self.median_s, self.slowest_s, self.slowest_job, self.limit_s, self.jobs
+        );
+        if self.flagged {
+            line.push_str(&format!(
+                " · over {:.0}% of the limit",
+                CHECK_DURATION_FLAG * 100.0
+            ));
+        }
+        line
+    }
+}
+
+/// The seconds the `test` check took in a job, or none when the job ran no such check. A check that did not
+/// run (a skipped check or the placeholder of a nested run, both measured as `not run`) has no duration.
+fn test_check_seconds(job: &JobRecords) -> Option<f64> {
+    let check = job
+        .verification
+        .as_ref()?
+        .checks
+        .iter()
+        .find(|c| c.name == "test")?;
+    if check.duration.basis() == "not run" {
+        return None;
+    }
+    check.duration.value()
+}
+
+/// Median and slowest `test` check duration over the newest [`CHECK_DURATION_JOBS`] request jobs that ran
+/// one, against `limit_s`. Jobs with no measured `test` run are skipped and do not use up the window. None
+/// when no job qualifies. An even count takes the mean of the two middle values.
+pub fn check_durations(records: &Records, limit_s: u64) -> Option<CheckDurations> {
+    let runs: Vec<(&JobRecords, f64)> = records
+        .request_jobs()
+        .into_iter()
+        .filter_map(|j| test_check_seconds(j).map(|s| (j, s)))
+        .take(CHECK_DURATION_JOBS)
+        .collect();
+    let (slowest_job, slowest_s) = runs
+        .iter()
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(j, s)| (j.id().as_str().to_string(), *s))?;
+    let mut seconds: Vec<f64> = runs.iter().map(|(_, s)| *s).collect();
+    seconds.sort_by(f64::total_cmp);
+    let mid = seconds.len() / 2;
+    let median_s = if seconds.len() % 2 == 1 {
+        seconds[mid]
+    } else {
+        (seconds[mid - 1] + seconds[mid]) / 2.0
+    };
+    Some(CheckDurations {
+        limit_s,
+        jobs: runs.len(),
+        median_s,
+        slowest_s,
+        slowest_job,
+        flagged: slowest_s > CHECK_DURATION_FLAG * limit_s as f64,
+    })
+}
+
 /// One class's forecast headline.
 #[derive(Debug, Clone, Serialize)]
 pub struct ClassHeadline {
@@ -609,6 +695,10 @@ pub struct StatusView {
     /// when no dispatched job ran a producer.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub producer_settings: Vec<ProducerSettingStats>,
+    /// Median and slowest `test` check duration over the newest jobs, against the check time limit; absent
+    /// when no job ran a measured test check or the configuration cannot be read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub check_durations: Option<CheckDurations>,
     pub interventions_by_category: BTreeMap<String, usize>,
     pub interventions_by_class: BTreeMap<String, usize>,
     /// Mistakes per class and per cause, with the prevention proposed. Apart from `interventions_by_category`,
@@ -1258,9 +1348,14 @@ impl Athena {
                 .collect();
         // The stages athena.toml switches off are read from the configuration at HEAD; an unreadable
         // configuration leaves every cause live.
-        let disabled = crate::capability::JobConfig::at(&self.git, &head)
+        let job_config = crate::capability::JobConfig::at(&self.git, &head).ok();
+        let disabled = job_config
+            .as_ref()
             .map(|jc| crate::hestia::Stage::disabled(&jc.config))
             .unwrap_or_default();
+        let check_durations = job_config
+            .as_ref()
+            .and_then(|jc| check_durations(&records, jc.config.budget.check_timeout_s));
         let (repeated_causes, dormant_causes) =
             crate::hestia::split_dormant(open_causes, &disabled);
         for c in repeated_causes.iter().filter(|c| c.request.is_none()) {
@@ -1325,6 +1420,7 @@ impl Athena {
             planning_cost: planning_cost(&records),
             keep_rule: keep_rule(&records),
             producer_settings: producer_settings(&records),
+            check_durations,
             interventions_by_category: by_category,
             interventions_by_class: by_class,
             mistakes: mistake_report(&records),
@@ -2151,6 +2247,98 @@ mod planning_cost_tests {
         assert_eq!(high.first_pass_rate, Some(0.0));
         // A producer invocation recorded before effort was kept gets its own bucket.
         assert_eq!(get(EFFORT_UNRECORDED).landed, 1);
+    }
+
+    fn test_run(seconds: f64, basis: &str) -> athena_data::records::CheckRun {
+        athena_data::records::CheckRun {
+            name: "test".into(),
+            command: vec!["cargo".into(), "test".into()],
+            exit_code: Some(0),
+            passed: true,
+            tests_ran: Some(10),
+            duration: Quantity::measured(seconds, Unit::Seconds, basis),
+            output_tail: String::new(),
+            note: None,
+        }
+    }
+
+    /// 24 request jobs, oldest first: the 2 oldest took 5000 s (outside the window of 20); job 12 has no test
+    /// check; the newest has the 0 s placeholder of a check that did not run; job 15 took `slowest` s; the
+    /// others took 100 s plus their number.
+    fn seeded_durations(slowest: f64) -> Records {
+        let jobs = (0..24)
+            .map(|n: u32| {
+                let text = format!("20261026-1000{n:02}-aa{n:02}");
+                let mut j = producer_job(
+                    &text,
+                    "s",
+                    None,
+                    OutcomeState::Landed,
+                    athena_data::records::Verdict::Pass,
+                    0.0,
+                );
+                let checks = match n {
+                    0 | 1 => vec![test_run(5000.0, "athena monotonic clock")],
+                    12 => vec![],
+                    15 => vec![test_run(slowest, "athena monotonic clock")],
+                    23 => vec![test_run(0.0, "not run")],
+                    _ => vec![test_run(100.0 + n as f64, "athena monotonic clock")],
+                };
+                j.verification.as_mut().unwrap().checks = checks;
+                j
+            })
+            .collect();
+        records(jobs)
+    }
+
+    #[test]
+    fn check_durations_report_median_slowest_and_the_eighty_percent_flag() {
+        let limit = 1800;
+        // The 20 counted jobs are numbers 2 to 22 but 12: durations 102 to 111, 113 to 122 with job 15 slow.
+        // The median is the mean of 111 and 113. The placeholder, the missing check and the two old jobs are out.
+        let over = check_durations(&seeded_durations(1500.0), limit).unwrap();
+        assert_eq!(over.jobs, 20);
+        assert!(close(over.median_s, 112.0), "{over:?}");
+        assert!(close(over.slowest_s, 1500.0));
+        assert_eq!(over.slowest_job, "20261026-100015-aa15");
+        assert_eq!(over.limit_s, limit);
+        assert!(over.flagged, "1500 s is over 80% of 1800 s");
+        let line = over.text();
+        assert!(line.contains("median 112s"), "{line}");
+        assert!(
+            line.contains("slowest 1500s (20261026-100015-aa15)"),
+            "{line}"
+        );
+        assert!(line.contains("of 1800s limit over last 20 jobs"), "{line}");
+        assert!(line.contains("over 80% of the limit"), "{line}");
+
+        // Under the threshold: reported, not flagged.
+        let under = check_durations(&seeded_durations(1000.0), limit).unwrap();
+        assert!(!under.flagged);
+        assert!(close(under.slowest_s, 1000.0));
+        assert!(!under.text().contains("80%"), "{}", under.text());
+
+        // Exactly 80% of the limit is not over it.
+        let edge = check_durations(&seeded_durations(1440.0), limit).unwrap();
+        assert!(!edge.flagged);
+    }
+
+    #[test]
+    fn check_durations_need_a_measured_test_run() {
+        assert_eq!(check_durations(&Records::default(), 1800), None);
+        let mut only_placeholder = producer_job(
+            "20261026-100000-aaaa",
+            "s",
+            None,
+            OutcomeState::Landed,
+            athena_data::records::Verdict::Pass,
+            0.0,
+        );
+        only_placeholder.verification.as_mut().unwrap().checks = vec![test_run(0.0, "not run")];
+        assert_eq!(
+            check_durations(&records(vec![only_placeholder]), 1800),
+            None
+        );
     }
 
     #[test]

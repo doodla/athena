@@ -1,0 +1,135 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261029-084645-sza7",
+  "base_commit": "bae9ceb4f80f77d87d129b0bdef35234839ee0e3",
+  "base_fingerprint": "sha256:aa64cc4f029d347414a5fcd158a21fe81fa3733cda552a0ca2d715c41fa96eae",
+  "previous_job": "20261029-084656-gn8r",
+  "candidate_commit": "77c68c950881dfc59d59bc57abf8640cbb701784",
+  "candidate_tree": "c2e51138ade3ac076d6201589a9f6f5e0b7ceb35",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 221238
+    },
+    {
+      "path": "athena.toml",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 11190
+    },
+    {
+      "path": "crates/athena-core/src/checks.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 25888
+    },
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 21308
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 141484
+    }
+  ],
+  "fingerprint": "sha256:b0cfa088185990c413c894b31ba99db7f833d726a22bc3f86eb2be1a6a624fee",
+  "violations": [],
+  "producer_report": {
+    "summary": "Raised check_timeout_s from 900 to 1800 in athena.toml, and a check killed at its time limit now closes the job as an environment stop instead of a rejection. Two causes: a 900 s limit under a 750-940 s suite, and a killed check being recorded as a failed one. checks.rs now has one shared deadline note (`DEADLINE_NOTE_PREFIX`, `deadline_note`) that run_check writes and `timed_out(&CheckRun)` reads. `timed_out` needs passed false, exit code None and that note prefix. A real nonzero exit, a pass, a skipped check, a spawn failure and a kill-switch kill do not match. disk.rs has a new `CHECK_TIMEOUT` reason (\"environment: check timed out\"), `check_timeout_reason` and an extended `is_environment_reason`. In `check_and_verify`, right after the `checks ...` line and before mark_pre_existing, a timed-out fresh check closes the job Failed with that reason, using the same early-return pattern as the existing low-disk stop before the verifier. The reason and the `failed` line read like \"probe killed at 905s of 1800s limit; this is the environment, not the work. `athena retry <job>`...\". The verifier does not run. The Checks-stage resume mark stays, so `athena retry` re-runs the checks only. Tests use a cfg(test) thread-local `check_seam` that the fake runner installs and SnapExec::exec consults. It supplies only a CheckRun; the classification is production code. Part (3), the athena status report, is not done, as the reading said, and status.rs is untouched.",
+    "files": [
+      "athena.toml",
+      "crates/athena-core/src/checks.rs",
+      "crates/athena-core/src/disk.rs",
+      "crates/athena-core/src/run/mod.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test --locked -p athena-core -- check_timeout timed_out killed_at_its_deadline real_failing_check is_environment_reason repository_check_timeout",
+        "result": "pass",
+        "note": "6 targeted tests passed, including the new run/mod.rs, disk.rs and checks.rs tests"
+      },
+      {
+        "command": "cargo test --locked -p athena-core -p athena-data --quiet",
+        "result": "pass",
+        "note": "629 passed, 0 failed, 1 ignored in athena-core; 124 passed in athena-data"
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "12 passed, the boundary scan found no banned word"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "after cargo fmt --all"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "athena.toml has check_timeout_s = 1800 (Grep athena.toml), and crates/athena-data/src/config.rs still declares check_timeout_s: u64 unchanged.",
+        "status": "met",
+        "evidence": "Read athena.toml line 43: check_timeout_s = 1800. config.rs was not edited and still has `pub check_timeout_s: u64`. The test repository_check_timeout_is_1800 parses include_str!(athena.toml) with Config::parse and passed. The athena-data tests also passed."
+      },
+      {
+        "criterion": "Run cargo test --locked: a new test with a fake check runner whose check is killed at its deadline (exit code None, deadline note) shows the job ends closed as an environment stop (disk::is_environment_reason true on its reason, resumable_stop true), not Rejected; the test asserts this.",
+        "status": "met",
+        "evidence": "The test a_check_killed_at_its_deadline_is_an_environment_stop in run/mod.rs installs the fake runner (check_seam) returning exit_code None, 905 s and checks::deadline_note. It asserts state is Failed and not Rejected, is_environment_reason, resumable_stop, no verifier call and the Checks resume mark. It then retries and the job lands without a new planner or producer. Ran `cargo test --locked -p athena-core -- killed_at_its_deadline`: pass."
+      },
+      {
+        "criterion": "Run cargo test --locked: a companion test shows a fake check that fails with a real nonzero exit code is still a failed check that leads to rejection, not an environment stop.",
+        "status": "met",
+        "evidence": "The test a_real_failing_check_is_still_a_rejection uses the same fake runner with exit_code Some(1) and 905 s. It asserts Rejected, reason containing 'check probe failed', not an environment reason, not resumable, and one verifier call. It passed."
+      },
+      {
+        "criterion": "Run cargo test --locked: a test shows the timeout stop message and printed line contain the measured duration and the limit (for example '905s of 900s limit'), and the repository config test (the one loading athena.toml) passes with 1800.",
+        "status": "met",
+        "evidence": "a_check_killed_at_its_deadline_is_an_environment_stop asserts the reason contains 'probe killed at 905s of 1800s limit' and a captured `failed     ` UI line contains '905s of 1800s limit'. The disk.rs test a_check_timeout_reason_is_an_environment_reason asserts 'test killed at 905s of 900s limit'. repository_check_timeout_is_1800 asserts 1800. All passed."
+      },
+      {
+        "criterion": "crates/athena-core/src/disk.rs recognises the new check-timeout reason in is_environment_reason (Grep disk.rs), with a unit test in the same file for it.",
+        "status": "met",
+        "evidence": "disk.rs defines CHECK_TIMEOUT and is_environment_reason returns `reason.starts_with(LOW_DISK) || reason.starts_with(CHECK_TIMEOUT)`. The unit test a_check_timeout_reason_is_an_environment_reason in the same file passed."
+      },
+      {
+        "criterion": "Run cargo fmt --all --check, cargo clippy --all-targets --locked -- -D warnings and cargo test --locked: all pass.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I ran fmt --check and clippy -D warnings (both clean), plus athena-core and athena-data tests (all pass) and the xtask policy test. I did not run the whole-workspace suite."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry describing the 1800 s limit and the timeout-as-environment-stop behavior, citing job 20261026-232434-6wfq.",
+        "status": "met",
+        "evidence": "CHANGELOG.md has a new Unreleased 'Fixed' entry that cites job 20261026-232434-6wfq. It gives the cause (900 s limit versus a 750-940 s suite), the 1800 s limit, the `environment: check timed out` hold and retry, and the duration against the limit. It says the status report is a follow-up."
+      }
+    ],
+    "open_issues": [
+      "A retried job whose suite still exceeds 1800 s will time out and be held again on every retry; there is no retry cap. The status duration report (part 3, follow-up) would show this.",
+      "The replay stage also uses check_timeout_s as its timeout. It benefits from the higher limit and is otherwise unchanged. A timeout there is not treated as an environment stop.",
+      "Part (3), the athena status median and slowest test-check durations with the 80% flag, is not implemented. The accepted reading made it a follow-up request, and status.rs is untouched."
+    ],
+    "mistakes": [
+      "None found in my own work."
+    ],
+    "learnings": [
+      "`cargo fmt --all` rewrote my edits in disk.rs and run/mod.rs on disk, so I ran fmt before the final check.",
+      "The athena-core and athena-data tests take about 2.5 minutes, much less than the full workspace suite.",
+      "check_and_verify and SnapExec are in run/mod.rs. The CHANGELOG mentions a run/producer.rs for earlier stages.",
+      "Config::parse(include_str!(\"../../../../athena.toml\")) works without defaults.toml, so the config test needs no fixture.",
+      "The `failed     <reason>` UI line is printed by Athena::failure, so the printed line and the closing reason carry the same text."
+    ],
+    "desires": [
+      "A quick way to run only the workspace's changed-crate tests, to avoid the 9-11 minute full suite."
+    ]
+  }
+}

@@ -9,6 +9,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- A check killed at its deadline no longer rejects the job (job 20261026-232434-6wfq was rejected because the
+  test check ran past the 900 s limit on a loaded machine). Three parts:
+  - `check_timeout_s` in `athena.toml` is 1800 (was 900). The schema and validation in `config.rs` are unchanged.
+  - A job whose only new failures are checks killed at the deadline closes as an environment stop, reason
+    `environment: check timed out: <check> ran <N>s of <M>s limit; ...`, before the verifier runs, and
+    `athena retry` resumes it. A check that fails with its own exit code, or one that fails for real beside a
+    timed-out one, is still rejected. A failure that already failed on the base commit does not count either
+    way, as in the verdict. `checks::deadline_note`, `checks::timed_out` and `checks::held_for_timeout` decide
+    it, and `disk::check_timeout_reason` and `disk::is_environment_reason` name it. A held job writes no check
+    record, so the duration is in the closing reason only.
+  - `athena status` prints one `checks     test:` line with the median and the slowest `test` check duration
+    over the newest 20 jobs that ran one, against the limit, and adds "over 80% of the limit" when the
+    slowest is above 80% of it. Checks that did not run (measured as `not run`) are left out. The same
+    numbers are in `athena status --json` as `check_durations`.
 - Structure pass R5: the baseline, the producer snapshot and the producer loop with its send-back (stages S1
   to S3 of `produce_and_verify`) moved from `run/mod.rs` to the new `run/producer.rs` as three stage methods
   (`baseline_stage`, `producer_snapshot`, `producer_loop`), which `produce_and_verify` calls in that order.

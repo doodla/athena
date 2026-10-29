@@ -11,7 +11,7 @@ use crate::ci_result::{CiRecord, Source};
 use anyhow::Result;
 use athena_agent::procs::{GRACE, Registry, isolate, kill_group};
 use athena_data::config::CheckKind;
-use athena_data::records::CheckRun;
+use athena_data::records::{Baseline, CheckRun};
 use athena_data::{Quantity, Unit};
 use athena_gate::redact::Redactor;
 use regex::Regex;
@@ -144,6 +144,48 @@ const POLL_START: Duration = Duration::from_millis(5);
 /// The longest wait between polls.
 const POLL_CAP: Duration = Duration::from_millis(200);
 
+/// The note of a check killed at its deadline. [`run_check`] writes it and [`timed_out`] reads it, so the two
+/// cannot drift apart.
+pub fn deadline_note(limit_s: u64) -> String {
+    format!("{DEADLINE_NOTE_START}{limit_s}s")
+}
+
+/// What every deadline note starts with.
+const DEADLINE_NOTE_START: &str = "killed at the deadline of ";
+
+/// True when `run` was killed at its deadline: not passed, no exit code, and the deadline note (which a
+/// `pre-existing` prefix does not hide). A check killed by the kill switch or one that ran zero tests is not.
+pub fn timed_out(run: &CheckRun) -> bool {
+    !run.passed
+        && run.exit_code.is_none()
+        && run
+            .note
+            .as_deref()
+            .is_some_and(|n| n.contains(DEADLINE_NOTE_START))
+}
+
+/// The check that holds the job for a timeout, if one does. Only new failures count (failed and not
+/// pre-existing on the base): the hold applies when there is at least one and every one of them timed out.
+/// A new failure that did not time out means the work failed for real, and the job goes on to be judged and
+/// rejected. A pre-existing failure never counts either way, as in the verdict. Returns the longest-running
+/// timed-out check.
+pub fn held_for_timeout<'a>(
+    checks: &'a [CheckRun],
+    baseline: Option<&Baseline>,
+) -> Option<&'a CheckRun> {
+    let new_failures: Vec<&CheckRun> = checks
+        .iter()
+        .filter(|c| !c.passed && !crate::verify::is_pre_existing(c, baseline))
+        .collect();
+    if new_failures.is_empty() || !new_failures.iter().all(|c| timed_out(c)) {
+        return None;
+    }
+    new_failures.into_iter().max_by(|a, b| {
+        let secs = |c: &CheckRun| c.duration.value().unwrap_or(0.0);
+        secs(a).total_cmp(&secs(b))
+    })
+}
+
 /// Runs one check.
 pub fn run_check(spec: &CheckSpec, ctx: &CheckContext<'_>) -> Result<CheckRun> {
     let started = Instant::now();
@@ -196,10 +238,7 @@ pub fn run_check(spec: &CheckSpec, ctx: &CheckContext<'_>) -> Result<CheckRun> {
             break Some(status);
         }
         if Instant::now() >= deadline {
-            note = Some(format!(
-                "killed at the deadline of {}s",
-                ctx.timeout.as_secs()
-            ));
+            note = Some(deadline_note(ctx.timeout.as_secs()));
         } else if ctx.registry.stopped() {
             note = Some("killed by the kill switch".to_string());
         }
@@ -447,6 +486,148 @@ mod tests {
         let run = run_check(&slow, &ctx).unwrap();
         assert!(!run.passed);
         assert!(run.note.unwrap().contains("deadline"));
+    }
+
+    #[test]
+    fn a_real_deadline_kill_is_classified_as_a_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let registry = Registry::new(state.path());
+        let redactor = Redactor::new(&athena_gate::builtin_config()).unwrap();
+        let env = BTreeMap::from([("PATH".to_string(), std::env::var("PATH").unwrap())]);
+        let ctx = |timeout| CheckContext {
+            dir: dir.path(),
+            env: &env,
+            timeout,
+            registry: &registry,
+            job: "j",
+            redactor: &redactor,
+        };
+        let killed = run_check(
+            &sh_spec("slow", "sleep 30"),
+            &ctx(Duration::from_millis(300)),
+        )
+        .unwrap();
+        assert!(timed_out(&killed));
+        let failed = run_check(&sh_spec("bad", "exit 1"), &ctx(Duration::from_secs(30))).unwrap();
+        assert!(!timed_out(&failed));
+    }
+
+    fn fake_run(
+        name: &str,
+        passed: bool,
+        exit_code: Option<i32>,
+        note: Option<String>,
+    ) -> CheckRun {
+        CheckRun {
+            name: name.into(),
+            command: vec!["x".into()],
+            exit_code,
+            passed,
+            tests_ran: None,
+            duration: Quantity::measured(10.0, Unit::Seconds, "athena monotonic clock"),
+            output_tail: String::new(),
+            note,
+        }
+    }
+
+    fn timeout_run(name: &str) -> CheckRun {
+        fake_run(name, false, None, Some(deadline_note(900)))
+    }
+
+    fn real_failure(name: &str) -> CheckRun {
+        fake_run(name, false, Some(1), None)
+    }
+
+    fn passing(name: &str) -> CheckRun {
+        fake_run(name, true, Some(0), None)
+    }
+
+    fn baseline_failing(names: &[&str]) -> Baseline {
+        Baseline {
+            job: athena_data::JobId::parse("20260101-000000-aaaa").unwrap(),
+            base_commit: "0".repeat(40),
+            before_invocation: 1,
+            checks: names.iter().map(|n| real_failure(n)).collect(),
+            note: None,
+        }
+    }
+
+    #[test]
+    fn only_a_deadline_kill_reads_as_a_timeout() {
+        assert!(timed_out(&timeout_run("test")));
+        let marked = fake_run(
+            "test",
+            false,
+            None,
+            Some(format!(
+                "{}; {}",
+                athena_data::records::PRE_EXISTING_NOTE,
+                deadline_note(900)
+            )),
+        );
+        assert!(timed_out(&marked), "a pre-existing prefix does not hide it");
+        let switched = fake_run(
+            "test",
+            false,
+            None,
+            Some("killed by the kill switch".into()),
+        );
+        assert!(!timed_out(&switched));
+        let zero = fake_run(
+            "test",
+            false,
+            Some(0),
+            Some("ran zero tests; a test check must run at least one".into()),
+        );
+        assert!(!timed_out(&zero));
+        assert!(!timed_out(&real_failure("test")));
+        assert!(!timed_out(&passing("test")));
+    }
+
+    #[test]
+    fn held_for_timeout_needs_a_new_failure_and_every_new_failure_timed_out() {
+        // A timeout alone is held.
+        let only = [passing("fmt"), timeout_run("test")];
+        assert_eq!(held_for_timeout(&only, None).unwrap().name, "test");
+        // Nothing failed: nothing to hold.
+        assert!(held_for_timeout(&[passing("fmt"), passing("test")], None).is_none());
+        // A real failure alone, or beside a timeout in either order, is rejected as today.
+        assert!(held_for_timeout(&[real_failure("test")], None).is_none());
+        assert!(held_for_timeout(&[timeout_run("test"), real_failure("clippy")], None).is_none());
+        assert!(held_for_timeout(&[real_failure("clippy"), timeout_run("test")], None).is_none());
+        // A failure that was not a deadline kill is not a timeout.
+        let switched = fake_run(
+            "test",
+            false,
+            None,
+            Some("killed by the kill switch".into()),
+        );
+        assert!(held_for_timeout(&[switched], None).is_none());
+        // Pre-existing failures are judged by the baseline, as the verdict does.
+        let base = baseline_failing(&["test"]);
+        assert!(
+            held_for_timeout(&[timeout_run("test")], Some(&base)).is_none(),
+            "a timeout that also failed on the base passes today, so it is not held"
+        );
+        let base = baseline_failing(&["clippy"]);
+        assert!(
+            held_for_timeout(&[real_failure("clippy"), timeout_run("test")], Some(&base)).is_some(),
+            "a pre-existing real failure beside a new timeout does not count as a real failure"
+        );
+        let base = baseline_failing(&["test"]);
+        assert!(
+            held_for_timeout(&[timeout_run("test"), real_failure("clippy")], Some(&base)).is_none(),
+            "a pre-existing timeout beside a new real failure is rejected"
+        );
+    }
+
+    #[test]
+    fn the_longest_timed_out_check_is_the_one_held() {
+        let mut long = timeout_run("test");
+        long.duration = Quantity::measured(905.0, Unit::Seconds, "athena monotonic clock");
+        let runs = [timeout_run("clippy"), long];
+        assert_eq!(held_for_timeout(&runs, None).unwrap().name, "test");
     }
 
     #[test]

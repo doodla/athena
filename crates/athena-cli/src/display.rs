@@ -1030,6 +1030,9 @@ pub fn status(v: &StatusView) -> String {
     if !v.producer_settings.is_empty() {
         out.push_str(&producer_settings_lines(&v.producer_settings));
     }
+    if let Some(durations) = &v.check_durations {
+        let _ = writeln!(out, "{}", durations.text());
+    }
     for (i, j) in v.open.iter().enumerate() {
         let label = if i == 0 { "open" } else { "" };
         let _ = writeln!(

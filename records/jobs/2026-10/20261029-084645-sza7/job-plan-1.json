@@ -1,0 +1,206 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261029-084645-sza7",
+  "round": 1,
+  "at": "2026-10-29T10:22:22.567281807Z",
+  "invocation_seq": 3,
+  "approach": "Fix both root causes. (a) athena.toml: check_timeout_s 900 -> 1800; the schema is already u64, so config.rs is untouched. (b) checks.rs gets one shared definition of \"killed at its deadline\": a note-prefix constant used by run_check when it writes the deadline note, plus a pub fn `timed_out(&CheckRun)` (passed false, exit_code None, note starts with that prefix; the kill-switch note and a spawn failure do not match). disk.rs gets a CHECK_TIMEOUT reason prefix (\"environment: check timed out\"), is_environment_reason accepts it, and `check_timeout_reason(name, secs, limit_s, job)` builds the closing text (\"<name> killed at 905s of 1800s limit; this is the environment, not the work ..., `athena retry <job>`\"). In `check_and_verify` (run/mod.rs), right after the `checks ...` line is printed and before mark_pre_existing, if any fresh check run is `timed_out`, close via `self.failure(ctx, reason)` with verification_passed None, remove the verify dir and return, exactly like the existing low-disk-before-verifier early return. Because the closing is Failed with an environment reason, settle_resume_marks keeps the Checks-stage resume mark and resumable_stop / `athena retry` treat the job as held, not rejected. A real nonzero exit stays a failed check and goes on to verification and rejection as today. Tests use a cfg(test) thread-local check seam in run/mod.rs (same pattern as replay_seam) that SnapExec::exec consults first, so the fake runner supplies the CheckRun while all classification code is production code. Part (3), the athena status durations report, and status.rs are out of scope and not touched.",
+  "decisions": [
+    {
+      "choice": "Detect a timeout with a shared helper in checks.rs over the existing deadline note (`timed_out(&CheckRun)`), with run_check building its note from the same constant.",
+      "reason": "No new CheckRun field or record change is allowed. Sharing the constant keeps the classifier and the producer of the note in step; a real-runner test in checks.rs proves a genuinely killed check satisfies it. Requiring exit_code None and passed false keeps a passing check, a real failure and a kill-switch kill out.",
+      "rejected": [
+        {
+          "option": "Add a `timed_out: bool` field to CheckRun",
+          "why": "Changes a record type and its serialisation; the brief forbids it."
+        },
+        {
+          "option": "Match the text 'killed at the deadline' inline in run/mod.rs",
+          "why": "A second copy of the string can drift from the one in run_check and silently turn timeouts back into rejections."
+        },
+        {
+          "option": "Treat any exit_code None as a timeout",
+          "why": "Spawn failures, the kill switch and skipped/reused checks also have no exit code."
+        }
+      ]
+    },
+    {
+      "choice": "Reuse the environment-reason path with a new prefix `environment: check timed out`, accepted by disk::is_environment_reason.",
+      "reason": "resumable_stop, settle_resume_marks (keeps the resume mark) and retry already key on is_environment_reason, so the job is held and retried with no new state.",
+      "rejected": [
+        {
+          "option": "Close the job as OutcomeState::TimedOut",
+          "why": "TimedOut means the producer or verifier agent timed out and is handled by timeout_seed and is not resumable by resumable_stop."
+        },
+        {
+          "option": "A separate resumable list for check timeouts",
+          "why": "Duplicates the mechanism and requires touching scope_guard and reading.rs."
+        }
+      ]
+    },
+    {
+      "choice": "Stop in check_and_verify before mark_pre_existing and before the replay and the verifier, on a fresh (not resumed) set of check runs.",
+      "reason": "A timeout says nothing about the work, so no verifier cost should be spent and no pre-existing marking applies. Resumed recorded checks all passed, so they cannot hold a timeout. The resume mark already written at stage Checks is kept, so retry re-runs only the checks.",
+      "rejected": [
+        {
+          "option": "Let verification run and filter the 'check test failed' reason afterward",
+          "why": "Spends a verifier run and still ends in a verdict-based rejection path."
+        }
+      ]
+    },
+    {
+      "choice": "Fake runner = cfg(test) thread-local seam inside run/mod.rs consulted at the top of SnapExec::exec (after refuse_if_stopped).",
+      "reason": "The brief lists no lib.rs, so the seam lives in a listed file, following the replay_seam precedent. The fake returns only a CheckRun; classification, closing, resume mark and retry eligibility are production code.",
+      "rejected": [
+        {
+          "option": "Real `sleep` check with check_timeout_s=1",
+          "why": "Needs config rewrites and slows the suite; the real kill is still covered at unit level in checks.rs."
+        },
+        {
+          "option": "A trait-object runner field on Athena",
+          "why": "Touches lib.rs and every Athena constructor, which is more than this change needs."
+        }
+      ]
+    },
+    {
+      "choice": "Print the limit actually applied (jc.config.budget.check_timeout_s) with the measured run.duration, whole seconds, in the closing reason (shown on the `failed` line) and keep the existing `checks ... (Ns)` line.",
+      "reason": "The failure reason is recorded and shown, so a stranger sees '905s of 1800s limit' without reading code.",
+      "rejected": [
+        {
+          "option": "Parse the limit from the note",
+          "why": "Fragile; the config value is the source."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "athena.toml",
+      "action": "modify",
+      "purpose": "check_timeout_s = 900 -> 1800 (line 43 of [budget]).",
+      "governance": true,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/checks.rs",
+      "action": "modify",
+      "purpose": "Add DEADLINE_NOTE_PREFIX, `deadline_note(Duration)` and `pub fn timed_out(&CheckRun) -> bool`; run_check builds its deadline note through deadline_note. Unit tests: real run_check killed at a short deadline satisfies timed_out; a failing exit, a pass, the kill-switch note, a spawn failure and a skipped run do not.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "action": "modify",
+      "purpose": "Add CHECK_TIMEOUT = \"environment: check timed out\", `check_timeout_reason(name, duration_s, limit_s, job)`, extend is_environment_reason to accept it, update module docs, and add unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "In check_and_verify, stop on a timed-out fresh check run as an environment stop; add the cfg(test) check_seam consulted by SnapExec::exec; add tests for timeout vs real failure, message contents and the repository config value.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased entry: 1800 s limit, timeout as environment stop with measured duration vs limit, cites job 20261026-232434-6wfq; status report noted as follow-up.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "athena.toml: set check_timeout_s = 1800.",
+    "checks.rs: add `DEADLINE_NOTE_PREFIX = \"killed at the deadline of \"`, `deadline_note(timeout: Duration) -> String` (format!(\"{PREFIX}{}s\", secs)) and `pub fn timed_out(run: &CheckRun) -> bool`; replace the inline format! in run_check with deadline_note(ctx.timeout). Extend the existing baseline timeout test, or add one, asserting timed_out on a real killed `sleep` check; add negative-case unit tests (exit 3, pass, kill-switch note, spawn failure, skipped_run).",
+    "disk.rs: add `pub const CHECK_TIMEOUT: &str = \"environment: check timed out\"`; add `pub fn check_timeout_reason(name: &str, duration_s: f64, limit_s: u64, job: &JobId) -> String` giving \"environment: check timed out: {name} killed at {duration:.0}s of {limit}s limit; this is the environment, not the work. `athena retry {job}`, or raise [budget] check_timeout_s\"; make is_environment_reason `reason.starts_with(LOW_DISK) || reason.starts_with(CHECK_TIMEOUT)`; update the module docs and the is_environment_reason doc comment; add unit test `a_check_timeout_reason_is_an_environment_reason` (see demonstration 5) and a text test.",
+    "run/mod.rs: add module-level `#[cfg(test)] mod check_seam` (thread_local RefCell<Option<Rc<dyn Fn(&CheckSpec) -> CheckRun>>>, `install` returning a Drop guard, `current`), modelled on lib.rs replay_seam; in SnapExec::exec, after refuse_if_stopped, `#[cfg(test)] if let Some(run) = check_seam::run(spec) { return Ok(run); }`.",
+    "run/mod.rs check_and_verify: after the `checks     ...` ui line and only inside `if !resumed_checks`, find the first run with crate::checks::timed_out; if found, take closing.happened.changed_paths, set closing.happened = self.failure(ctx, &crate::disk::check_timeout_reason(&run.name, run.duration.value().unwrap_or(0.0), jc.config.budget.check_timeout_s, &id)), restore changed_paths, set verification_passed = None, remove verify_dir with crate::pin::remove_tree, and return Ok(closing). Place it before mark_pre_existing, the produce-dir removal, the replay stage and the verifier gate. Keep the `built.recorded_checks` mark unset so the Checks-stage resume mark stays.",
+    "run/mod.rs tests (in produce_and_verify_order_tests): (a) `a_check_killed_at_its_deadline_is_an_environment_stop` using the seam with the 905 s timed-out CheckRun built with checks::deadline_note; assert Failed, is_environment_reason, resumable_stop, not Rejected, no verifier call, resume mark at Checks, reason and a captured `failed     ` UI line contain '905s of 1800s limit'. (b) `a_real_failing_check_is_still_a_rejection` with a seam run having exit_code Some(1): assert Rejected and not an environment reason. (c) `repository_check_timeout_is_1800` parsing include_str!(athena.toml). Optionally (d) retry after the timeout (athena.retry with the seam removed so the check passes) resumes without planner or producer, modelled on low_disk_before_the_verifier_resumes_without_planner_or_producer.",
+    "CHANGELOG.md: add under [Unreleased] a Changed/Fixed entry: cause (900 s limit under a 750-940 s suite, job 20261026-232434-6wfq rejected with 'check test failed' after 591 tests, exit code none, 905 s, while the verifier's own run passed), the 1800 s limit, the timed-out check now closing as `environment: check timed out` (held, resumable by `athena retry`) with the measured duration against the limit, and that the athena status duration report is a separate follow-up.",
+    "Run cargo fmt --all, then cargo fmt --all --check, cargo clippy --all-targets --locked -- -D warnings and cargo test --locked."
+  ],
+  "risks": [
+    {
+      "risk": "A non-timeout failure is misread as a timeout and a rejection becomes a hold.",
+      "mitigation": "timed_out requires passed == false, exit_code == None and the exact note prefix, which only run_check's deadline branch writes (via the shared constant); the ran-zero-tests note uses get_or_insert_with and so cannot overwrite a deadline note. Unit tests cover the negative cases."
+    },
+    {
+      "risk": "The note text changes in run_check later and the classifier silently stops matching.",
+      "mitigation": "The real-runner unit test in checks.rs (short deadline, real `sleep`) asserts timed_out(&run) on the actual output of run_check, so the constant and the classifier cannot drift apart."
+    },
+    {
+      "risk": "The early return leaves state that retry cannot resume from, or leaves the verify directory behind.",
+      "mitigation": "The production early return mirrors the existing before-verifier one (failure, clear verification_passed, remove verify dir); the test asserts the resume mark remains and resumable_stop is true."
+    },
+    {
+      "risk": "The test seam leaks into production or between parallel tests.",
+      "mitigation": "The seam is #[cfg(test)] only, per-thread, cleared by a Drop guard, and returns early only when installed; non-test builds contain no branch."
+    },
+    {
+      "risk": "Slow or flaky tests.",
+      "mitigation": "Tests set no timing; the fake returns a fixed 905.0 s; the real-runner test uses a ~300 ms deadline like the existing baseline timeout test."
+    },
+    {
+      "risk": "The printed limit differs from the one applied.",
+      "mitigation": "The limit printed is read from jc.config.budget.check_timeout_s, the same value passed to the runner; the test config is the repository athena.toml (1800)."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Content check plus a config test. Grep athena.toml for `check_timeout_s = 1800`; Grep crates/athena-data/src/config.rs for `pub check_timeout_s: u64` (file unchanged, git diff shows no change). A new test in run/mod.rs parses the repository file with `athena_data::Config::parse(include_str!(\"../../../../athena.toml\"))` and asserts budget.check_timeout_s == 1800.",
+      "command": "cargo test --locked -p athena-core repository_check_timeout_is_1800 && cargo test --locked -p athena-data",
+      "observes": "The test passes with 1800 and the existing athena-data config tests still pass, so the schema accepts it unchanged.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "New test in produce_and_verify_order_tests, run through the production entry point `Athena::go` (-> produce_and_verify -> check_and_verify) with the existing athena_with/base_script/Docs fixtures (fake agent driver, temp git repo, plenty_of_space gate). Precondition: planning is off and the disk gate passes. The fake check runner is a thread-local seam (new cfg(test) module `check_seam` in run/mod.rs, added in step 3, consulted at the top of SnapExec::exec; it does not exist today) installed with a guard; it returns a CheckRun with passed false, exit_code None, duration measured 905.0 s, note = checks::deadline_note(900s) built by the production helper. The seam holds no classification logic. After go, the test reads Finished and asserts state == Failed, disk::is_environment_reason(&reason), resumable_stop(JobState::Closed(Failed), Some(&reason)), state != Rejected, no verifier invocation (Counts via counting()), and that athena.state.read_resume(job) is still Some at ResumeStage::Checks.",
+      "command": "cargo test --locked -p athena-core a_check_killed_at_its_deadline_is_an_environment_stop",
+      "observes": "The job closes Failed with a `environment: check timed out` reason, is resumable, kept its resume mark, and the verifier never ran.",
+      "fails_without": "If check_and_verify did not classify a timed-out run, the job would reach verification and end Rejected ('check probe failed'); the assertions on Failed state, is_environment_reason and resumable_stop would fail."
+    },
+    {
+      "criterion": 3,
+      "method": "Companion tests via `Athena::go`. (a) Uses the seam to return a failed CheckRun with exit_code Some(1), passed false, an ordinary note, and asserts state == Rejected and !is_environment_reason(reason) and !resumable_stop. (b) A second seam run with exit_code None and note 'killed by the kill switch' is also not classified as an environment stop by `checks::timed_out` (unit assertion in checks.rs). The existing test produce_dir_is_removed_after_checks_pass_and_kept_when_a_check_fails already shows the real `sh -c test` failure ends Rejected and is re-run as a regression guard.",
+      "command": "cargo test --locked -p athena-core a_real_failing_check_is_still_a_rejection",
+      "observes": "A genuine nonzero-exit check still produces the Rejected outcome with reason 'check probe failed'.",
+      "fails_without": "If the classifier treated every failed check (or every exit_code None) as a timeout, this job would end Failed with an environment reason instead of Rejected, and the test would fail."
+    },
+    {
+      "criterion": 4,
+      "method": "In the criterion-2 test, additionally assert the Finished reason and a line captured by the Lines UI (starting `failed     `) contain `905s of 1800s limit` (the test config comes from the repository athena.toml via repo(), now 1800; duration 905 from the fake). A disk.rs unit test checks `check_timeout_reason` text directly: contains the check name, '905s of 900s limit', 'not the work' and `athena retry <job>`. The config test of criterion 1 covers the 1800 load.",
+      "command": "cargo test --locked -p athena-core check_timeout",
+      "observes": "Both the closing reason and the printed `failed` line carry the measured duration against the limit; the config loads with 1800.",
+      "fails_without": "Without the duration and limit in the reason, the substring assertions on the closing reason and the UI line would fail."
+    },
+    {
+      "criterion": 5,
+      "method": "Grep disk.rs for `CHECK_TIMEOUT` and its use in is_environment_reason. New unit test in disk.rs `a_check_timeout_reason_is_an_environment_reason`: builds `check_timeout_reason(\"test\", 905.0, 900, &id(1))`, asserts is_environment_reason true, resumable_stop(Closed(Failed), Some(&r)) true, resumable_stop(Closed(Rejected), ...) false, and that 'check test failed' and an admission-refused reason are not environment reasons.",
+      "command": "cargo test --locked -p athena-core is_environment_reason",
+      "observes": "The reason is classified as environment and only a Failed close is resumable.",
+      "fails_without": "Without the new prefix in is_environment_reason, the unit test asserting it (and resumable_stop for a Failed job with the timeout reason) fails."
+    },
+    {
+      "criterion": 6,
+      "method": "Run the three Athena checks in order.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0; no unused-code warning for the cfg(test) seam (guarded by cfg(test) on definition and use).",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Content check: CHANGELOG.md [Unreleased] has an entry under Changed/Fixed naming the 1800 s limit, the timeout-as-environment-stop (`environment: check timed out`, held and `athena retry`), the printed duration against the limit, the root cause (900 s limit below the 750-940 s suite time and a killed check recorded as a failed one), and job 20261026-232434-6wfq; it notes the status report is a follow-up.",
+      "command": "cargo test --locked -p athena-core; then Grep CHANGELOG.md for `20261026-232434-6wfq`",
+      "observes": "The entry exists and cites the job.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "A retried job whose suite still exceeds 1800 s will time out again and be held again each time; no retry cap exists in this change. Is that acceptable until the status report (follow-up) shows the durations?",
+    "On retry the resume mark is at stage Checks, so all checks re-run from scratch; the code read does not show whether retry also re-runs the baseline. That is existing behavior and is not changed here.",
+    "The replay stage (run/mod.rs ~1844) also uses check_timeout_s as its timeout; it benefits from the higher limit and is left as is."
+  ],
+  "producer_section_sha256": "e2584fde7f15f7d5bd2b90bd608824d2d6c676898440781f9e6b59d570024b12"
+}

@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261029-110953-bw7k",
+  "round": 3,
+  "at": "2026-10-29T11:20:48.396864629Z",
+  "invocation_seq": 7,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/src/display.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/src/display.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "The classifier must match the fixed, limit-free start of the note, not `deadline_note(current limit)`.",
+      "evidence": "run_check writes `killed at the deadline of {N}s` with N taken from the context timeout (checks.rs:199-202). Step 2 says only that the note 'contains the deadline text'. If the producer matches `deadline_note(jc.config.budget.check_timeout_s)`, a run killed at another limit would not count as a timeout. That covers runs reused from CI records and records written before the limit changed (900 vs 1800). It would also tie classification to the configured value. Fix: Split the text: `pub const DEADLINE_NOTE_PREFIX: &str = \"killed at the deadline of \"`. Build `deadline_note(limit)` from it, and have `timed_out` test `note.contains(DEADLINE_NOTE_PREFIX)`. Add a unit case where a note with a different limit is still classified as a timeout.",
+      "location": "Plan step 2 (`timed_out`) and decision 1",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The display tests have no StatusView fixture, so the fallback of seeding `Athena::status()` from athena-cli is heavy and unspecified.",
+      "evidence": "Grep finds the only `StatusView {` literal at status.rs:1311. The display.rs status tests (lines 1905-1980) test section helpers such as `code_health_section(&health)` directly, without building a StatusView. Fix: Follow the `code_health_section` pattern. Add a small display.rs function, e.g. `check_durations_line(Option<&CheckDurations>) -> String`, that `status()` calls. Test it with a `CheckDurations` literal: the line appears for Some and the output is empty for None. All formatting logic stays in `CheckDurations::text()`.",
+      "location": "Demonstration for criterion 5, display.rs test `status_prints_the_check_durations_line`",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A candidate that hangs its own tests (a deadlock or infinite loop) becomes a repeated environment stop that the watcher thresholds never count.",
+      "evidence": "scope_guard.rs:71-73 says T1, T2 and T5 do not count Verdict::Environment, and T4 sees only rejections. A retry reruns all checks (the resume mark stays at Checks), so the same hang repeats as another environment stop with no escalation. Retries are manual (reading.rs:1262-1274), which limits the damage but does not surface the pattern. Fix: Keep the design the reading asked for, but name this gap in the change description and in open_questions. A concrete follow-up: treat a repeated timeout of the same check on a resumed retry of the same candidate as a real failure, or compare against the baseline's duration for that check. Do not add it in this job.",
+      "location": "Risks, first bullet (a hung check is held, never rejected); decision 2",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The window counts the 20 newest jobs that qualify, not the 20 newest jobs. The criterion says 'over the last 20 jobs'.",
+      "evidence": "Decision 7: 'the 20-job window counts jobs that qualify'. The printed text says 'over last {n} jobs'. Fix: Either is defensible. Make the printed n the number of jobs actually counted (the plan already does this) and state the rule in the CheckDurations doc comment so readers are not misled.",
+      "location": "Decision 7 / step 7, the 20-job window",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the code in the snapshot, and its claims hold. run_check writes \"killed at the deadline of {N}s\" and returns exit_code None (checks.rs:198-217). verify::is_pre_existing depends only on `passed` and the baseline (verify.rs:134). mark_pre_existing only adds a prefix to the note. check_and_verify computes usable_baseline and calls mark_pre_existing inside `if !resumed_checks` (run/mod.rs:1434-1452). The low-disk early return the plan copies is at run/mod.rs:1568-1574. SnapExec::exec is at run/mod.rs:969. is_environment_reason and resumable_stop are at disk.rs:212/221. Records::request_jobs sorts newest first (store.rs:380). Placeholder runs carry basis \"not run\" (checks.rs:95, 258; run/mod.rs:1423). The only StatusView literal is at status.rs:1311, and display::status at display.rs:957 is the only printer. Resuming is manual: resumable_job is only used for \"try again on\" requests. The plan does all three parts. It fixes the fault where it starts, by telling a deadline kill apart from a real failure and not only raising the limit. It now handles the baseline cases correctly. Each demonstration exercises production code: the seam replaces only the process run, and a real-kill test ties the shared note to `timed_out`. Each would fail without the behavior. Athena already flagged display.rs as outside the listed deliverables. The plan's reason for the edit is sound, since no other path prints `athena status`, and it says to stop rather than work around a refusal. I found no blocker or major issue. My remaining findings: how the classifier should match the note, a fixture gap in the display test, and a known weak spot (a test that truly hangs is never rejected)."
+}
