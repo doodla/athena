@@ -1,0 +1,157 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261029-084645-sza7",
+  "n": 1,
+  "at": "2026-10-29T10:19:31.047536016Z",
+  "invocation_seq": 2,
+  "base_commit": "a998f8cf439addb5595e5fffa7b32bf3c4367daa",
+  "config_sha256": "b812f3c3683488bcd9485d235a6a234bc80722c9f137a6c232094fae2ee727d6",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Raise check timeout to 1800s; treat a timed-out check as an environment",
+  "summary": "Goal: stop random rejections of jobs (such as 20261026-232434-6wfq) whose full test check is killed near the 900 s limit. This change does parts (1) and (2): raise check_timeout_s to 1800 in athena.toml, and make a check killed at its deadline an environment stop (held and retried, not rejected) that prints the measured duration against the limit. Part (3), the athena status durations report, is a follow-up request.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "Criteria require new tests plus cargo test, clippy -D warnings and fmt to pass."
+    },
+    {
+      "id": "small",
+      "how": "Status reporting split into a follow-up so this is one focused change."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria exercise timeout versus real failure with a fake runner rather than checking wiring."
+    },
+    {
+      "id": "root-cause",
+      "how": "Fixes both the limit and the misclassification of a killed check as a failed one."
+    },
+    {
+      "id": "mechanism",
+      "how": "The classification is enforced in code and tests, not prose."
+    },
+    {
+      "id": "strangers",
+      "how": "CHANGELOG entry and printed message name the duration and limit for outside readers."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-core/src/checks.rs (run_check polls to a deadline, kills the process group and sets note 'killed at the deadline of Ns', exit_code None, passed false), crates/athena-core/src/disk.rs (is_environment_reason matches a reason prefix; resumable_stop resumes only Failed with an environment reason), crates/athena-core/src/run/mod.rs (line ~554 holds only Failed plus environment reason; checks run via SnapExec with timeout from budget.check_timeout_s at ~1107 and ~1395; the check summary line prints 'checks ... (Ns)' at ~1447), crates/athena-data/src/config.rs (check_timeout_s: u64, so 1800 needs no schema change). Entry point is produce_and_verify; baseline, then checks, then verification. The duration is measured directly from CheckRun.duration, not a stand-in. No new record or data file is added, so no AnyRecord or check_record_file change.",
+    "The timeout is detected from the CheckRun the runner returns: a check killed at its deadline is told apart from a real failure by a single shared marker or helper in checks.rs (the existing deadline note), not by a new record field. The fake-runner test supplies such a CheckRun.",
+    "The environment stop reuses the existing environment-reason path: the job closes Failed with a reason that disk.rs is_environment_reason accepts (a new reason prefix for 'check timed out'), so resumable_stop and athena retry treat it as held and resumable.",
+    "Rejected job 20261026-232434-6wfq is not re-run by this change; it is addressed by fixing the root cause (limit and classification) so its failure mode no longer rejects. Its own candidate was a different refactor and is not touched.",
+    "Part (3), status median and slowest durations with an 80% flag, is a separate follow-up so one run fits inside verifier_timeout_s."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "athena.toml has check_timeout_s = 1800 (Grep athena.toml), and crates/athena-data/src/config.rs still declares check_timeout_s: u64 unchanged.",
+      "kind": "content"
+    },
+    {
+      "text": "Run cargo test --locked: a new test with a fake check runner whose check is killed at its deadline (exit code None, deadline note) shows the job ends closed as an environment stop (disk::is_environment_reason true on its reason, resumable_stop true), not Rejected; the test asserts this.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run cargo test --locked: a companion test shows a fake check that fails with a real nonzero exit code is still a failed check that leads to rejection, not an environment stop.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run cargo test --locked: a test shows the timeout stop message and printed line contain the measured duration and the limit (for example '905s of 900s limit'), and the repository config test (the one loading athena.toml) passes with 1800.",
+      "kind": "behavior"
+    },
+    {
+      "text": "crates/athena-core/src/disk.rs recognises the new check-timeout reason in is_environment_reason (Grep disk.rs), with a unit test in the same file for it.",
+      "kind": "content"
+    },
+    {
+      "text": "Run cargo fmt --all --check, cargo clippy --all-targets --locked -- -D warnings and cargo test --locked: all pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has an entry describing the 1800 s limit and the timeout-as-environment-stop behavior, citing job 20261026-232434-6wfq.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "athena.toml",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-core/src/checks.rs",
+      "action": "modify",
+      "p": 0.55
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    }
+  ],
+  "out_of_scope": [
+    "Part (3): the athena status report of median and slowest test-check durations over the last 20 jobs with an 80% flag, and crates/athena-core/src/status.rs; submit as a follow-up request",
+    "Changing the schema or validation of check_timeout_s in crates/athena-data/src/config.rs",
+    "Speeding up the test suite or changing other timeouts (reader, producer, verifier)",
+    "Re-running or reopening job 20261026-232434-6wfq",
+    "Adding a new field to CheckRun or other records",
+    "Editing defaults.toml, workflows, or records/"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.75,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.2,
+        "p90": 2.8
+      },
+      "wall_time_s": {
+        "p10": 500.0,
+        "p50": 1500.0,
+        "p90": 2300.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7215258855585831,
+      "p_verification_passes": 0.6711864406779661,
+      "p_user_intervenes": 0.0750788643533123,
+      "cost_usd": {
+        "p10": 0.5300199390027948,
+        "p50": 1.1854406388912941,
+        "p90": 2.9019441037908007
+      },
+      "wall_time_s": {
+        "p10": 539.0830900658711,
+        "p50": 1666.566021577301,
+        "p90": 3174.467666356861
+      }
+    }
+  },
+  "departures": "Wall time p90 is held under verifier_timeout_s 2400 by scoping to parts (1) and (2); the full suite takes 750 to 940 s, so verification is slow.",
+  "urgent_reason": "Cuts failed or rejected attempts: jobs whose test check is killed by the time limit are wrongly rejected and redone.",
+  "hard_reason": "Changes how a failed check is classified (rejection versus environment hold) and the retry/hold path, which gates whether jobs are rejected.",
+  "producer_effort": "high"
+}

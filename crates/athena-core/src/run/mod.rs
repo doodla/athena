@@ -953,6 +953,42 @@ impl RunContext<'_> {
     }
 }
 
+/// Test seam: a fake check runner for the routed checks of [`SnapExec`]. When one is installed on the
+/// thread, it returns the [`CheckRun`] for a spec in place of running the command; everything done with the
+/// run afterwards is the production code.
+#[cfg(test)]
+mod check_seam {
+    use crate::capability::CheckSpec;
+    use athena_data::records::CheckRun;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    type Fake = Rc<dyn Fn(&CheckSpec) -> CheckRun>;
+
+    thread_local! {
+        static SEAM: RefCell<Option<Fake>> = const { RefCell::new(None) };
+    }
+
+    /// Clears the seam when dropped.
+    pub struct Guard;
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            SEAM.with(|s| *s.borrow_mut() = None);
+        }
+    }
+
+    pub fn install(fake: impl Fn(&CheckSpec) -> CheckRun + 'static) -> Guard {
+        SEAM.with(|s| *s.borrow_mut() = Some(Rc::new(fake)));
+        Guard
+    }
+
+    pub fn run(spec: &CheckSpec) -> Option<CheckRun> {
+        let fake = SEAM.with(|s| s.borrow().clone())?;
+        Some(fake(spec))
+    }
+}
+
 /// Runs one routed check in the verifier's snapshot, then puts the snapshot back as it was prepared.
 struct SnapExec<'a> {
     athena: &'a Athena,
@@ -969,6 +1005,10 @@ struct SnapExec<'a> {
 impl crate::routing::Exec for SnapExec<'_> {
     fn exec(&self, spec: &crate::capability::CheckSpec) -> Result<CheckRun> {
         self.athena.refuse_if_stopped()?;
+        #[cfg(test)]
+        if let Some(run) = check_seam::run(spec) {
+            return Ok(run);
+        }
         let run = run_check(
             spec,
             &CheckContext {
@@ -1449,6 +1489,23 @@ impl Athena {
                 checks_line.join(" · "),
                 check_started.elapsed().as_secs_f64()
             ));
+            // A check the clock killed says nothing about the work: it is the environment (a busy machine, or
+            // a limit set too low). The job is held for `athena retry`, not rejected, and no verifier runs.
+            // The resume mark from the build stays, so a retry runs the checks again and nothing before them.
+            if let Some(run) = check_runs.iter().find(|r| crate::checks::timed_out(r)) {
+                let reason = crate::disk::check_timeout_reason(
+                    &run.name,
+                    run.duration.value().unwrap_or(0.0),
+                    jc.config.budget.check_timeout_s,
+                    &id,
+                );
+                let changed_paths = std::mem::take(&mut closing.happened.changed_paths);
+                closing.happened = self.failure(ctx, &reason);
+                closing.happened.changed_paths = changed_paths;
+                closing.happened.verification_passed = None;
+                let _ = crate::pin::remove_tree(&verify_dir);
+                return Ok(closing);
+            }
             mark_pre_existing(&mut check_runs, usable_baseline);
             // Every check passed: the producer's build directory is idle, and it is the largest thing on the
             // disk, so it goes now, before the gate that runs before the verifier. When a check failed it
@@ -2962,6 +3019,151 @@ mod produce_and_verify_order_tests {
                 assert_eq!(done.state, OutcomeState::Rejected, "{}", done.reason);
             }
         }
+    }
+
+    /// A fake check runner's result for `spec`: not passed, after `seconds`, with `exit_code` and `note`.
+    fn failed_run(
+        spec: &CheckSpec,
+        exit_code: Option<i32>,
+        seconds: f64,
+        note: Option<String>,
+    ) -> CheckRun {
+        CheckRun {
+            name: spec.name.clone(),
+            command: spec.run.clone(),
+            exit_code,
+            passed: false,
+            tests_ran: None,
+            duration: athena_data::Quantity::measured(
+                seconds,
+                athena_data::Unit::Seconds,
+                "athena monotonic clock",
+            ),
+            output_tail: String::new(),
+            note,
+        }
+    }
+
+    #[test]
+    fn repository_check_timeout_is_1800() {
+        let config = athena_data::Config::parse(include_str!("../../../../athena.toml")).unwrap();
+        assert_eq!(config.budget.check_timeout_s, 1800);
+    }
+
+    #[test]
+    fn a_check_killed_at_its_deadline_is_an_environment_stop() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let counts = Arc::new(Counts::default());
+        let athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            counting(counts.clone(), None),
+        );
+        let proposal = athena.ask("describe the demo", &Quiet).unwrap();
+        let job = proposal.job.clone();
+        let ui = Lines::default();
+        // The fake runner reports the check as killed at the limit, 905 s in.
+        let seam = check_seam::install(|spec| {
+            failed_run(
+                spec,
+                None,
+                905.0,
+                Some(crate::checks::deadline_note(
+                    std::time::Duration::from_secs(1800),
+                )),
+            )
+        });
+        let stopped = finished(athena.go(job.as_str(), AcceptedBy::User, &ui).unwrap());
+        drop(seam);
+
+        // Held for a retry, not rejected, and the verifier never ran.
+        assert_eq!(stopped.state, OutcomeState::Failed, "{}", stopped.reason);
+        assert_ne!(stopped.state, OutcomeState::Rejected);
+        assert!(
+            crate::disk::is_environment_reason(&stopped.reason),
+            "{}",
+            stopped.reason
+        );
+        assert!(crate::disk::resumable_stop(
+            JobState::Closed(OutcomeState::Failed),
+            Some(&stopped.reason)
+        ));
+        let (planner, producer, _, verifier) = counts.all();
+        assert_eq!((planner, producer, verifier), (0, 1, 0));
+        // The measured time and the limit are in the reason and in the printed line.
+        assert!(
+            stopped
+                .reason
+                .contains("probe killed at 905s of 1800s limit"),
+            "{}",
+            stopped.reason
+        );
+        assert!(
+            stopped.reason.contains(&format!("athena retry {job}")),
+            "{}",
+            stopped.reason
+        );
+        let said = ui.0.lock().unwrap().clone();
+        assert!(
+            said.iter()
+                .any(|l| l.starts_with("failed     ") && l.contains("905s of 1800s limit")),
+            "{said:#?}"
+        );
+        // The candidate is kept, at the checks stage, so a retry runs the checks again.
+        assert_eq!(
+            athena.state.read_resume(&job).map(|m| m.stage),
+            Some(crate::state::ResumeStage::Checks)
+        );
+
+        // The retry (the checks run for real now and pass) resumes without a planner or a producer.
+        let (retry, _) = athena.retry(job.as_str(), &Quiet).unwrap();
+        assert_eq!(retry.reader_error, None);
+        let done = finished(
+            athena
+                .go(retry.job.as_str(), AcceptedBy::User, &Lines::default())
+                .unwrap(),
+        );
+        assert_eq!(done.state, OutcomeState::Landed, "{}", done.reason);
+        let (planner, producer, _, verifier) = counts.all();
+        assert_eq!((planner, producer, verifier), (0, 1, 1));
+    }
+
+    #[test]
+    fn a_real_failing_check_is_still_a_rejection() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let counts = Arc::new(Counts::default());
+        let athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            counting(counts.clone(), None),
+        );
+        let proposal = athena.ask("describe the demo", &Quiet).unwrap();
+        // A nonzero exit code after 905 s: slow, but the check itself failed.
+        let _seam = check_seam::install(|spec| failed_run(spec, Some(1), 905.0, None));
+        let done = finished(
+            athena
+                .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
+                .unwrap(),
+        );
+        assert_eq!(done.state, OutcomeState::Rejected, "{}", done.reason);
+        assert!(
+            done.reason.contains("check probe failed"),
+            "{}",
+            done.reason
+        );
+        assert!(!crate::disk::is_environment_reason(&done.reason));
+        assert!(!crate::disk::resumable_stop(
+            JobState::Closed(done.state),
+            Some(&done.reason)
+        ));
+        // The verifier still judged the work.
+        assert_eq!(counts.all().3, 1);
     }
 
     #[test]
