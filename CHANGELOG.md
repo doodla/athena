@@ -7,6 +7,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- `docs/spec.toml` second layer (decision 3C, D144): sourced requirements for BRIEF.md "Project Olympus" sections 7
+  to 10, the governing philosophy and the addenda of 2026-10-17 to 2026-10-24, plus three open questions that
+  record conflicting words of the owner. `xtask/tests/spec.rs` reads through those addenda, stops before
+  2026-10-25, requires coverage of each part, and has negative cases for the new reach.
+
 ### Changed
 
 - A check killed at its deadline no longer rejects the job (job 20261026-232434-6wfq was rejected because the
