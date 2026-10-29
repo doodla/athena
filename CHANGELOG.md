@@ -46,6 +46,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- Findings from Athena's own plan rules (`plan_findings`, no critic call) now go back to the planner for an
+  immediate revision that does not use a planning round and calls no critic, at most twice per round
+  (`MAX_MECHANICAL_PASSES`). Only critic reviews count toward `max_rounds`, and the critic's first review is
+  round 1. Before, each such finding ended a round: on 2026-10-28 a hard job spent round 1 on a missing
+  `fails_without` and round 2 on a grouped command line, so the critic judged the design once, in round 3, and
+  its two real findings stopped the job at the cap. A plan that still breaks a rule after two revisions stops
+  planning with that finding. Plans and critiques are filed only for critic-reviewed plans and for that final
+  stop, so `critique-N` of an accepted job is always the critic's; the mechanical attempts remain as planner
+  invocation records.
 - Admission (`athena ask`, including `--later`) scans only the request's own text for boundary words, not the
   files the request names. It used to read each named file too, so any request that named `BRIEF.md` was refused:
   the owner's brief is the owner's own words and legitimately uses boundary words (a request to map its

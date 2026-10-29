@@ -1,0 +1,141 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261028-082419-d9y7",
+  "base_commit": "459389ba4514d1a8ffdf49a72e484c6750c2857d",
+  "base_fingerprint": "sha256:6b83a3745672e10ca35b1c4eb414047105608ffb30495e8de71e186fb66945a3",
+  "previous_job": "20261029-073932-9648",
+  "candidate_commit": "e36c7a8f1acd1c7f3599aa68438acff6dc76aa9e",
+  "candidate_tree": "b91bf5a491b46cdd542f053dde63126bd5ce26f7",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 226552
+    },
+    {
+      "path": "crates/athena-cli/tests/job_plan.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 51929
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 150206
+    },
+    {
+      "path": "crates/athena-core/src/run/planning.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 23090
+    },
+    {
+      "path": "docs/design/job-planning.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 27787
+    }
+  ],
+  "fingerprint": "sha256:388e12022d90ab16243bb49784433c3fa3f82c8898ba47239424a5af7fb342c6",
+  "violations": [],
+  "producer_report": {
+    "summary": "Findings from Athena's own plan rules (plan_findings) now go back to the planner in the same round, with no critic call, and they no longer count toward max_rounds. A round is now only a critic review. The cap is `MAX_MECHANICAL_PASSES = 2` per critic round. A plan that still breaks a rule after two passes is filed with an Athena-only critique, and the job stops in planning. The stop reason is 'the plan still broke Athena's own plan rules after 2 mechanical revisions (round r of M). Findings: ...'. It does not use the cap reason, so the retry logic does not offer it as a resume seed. Three new tests in mod.rs cover the three behaviors. The critic's first review is labelled round 1, so five CLI tests that read an Athena-only critique-1 were adjusted to assert on the planner's second brief and on critique-1 being the critic's. Both docs are updated: CHANGELOG.md and docs/design/job-planning.md.\n\nThe full `cargo test --locked` returned no error status, but its output was too large to display and I could not read the saved copy.",
+    "files": [
+      "crates/athena-core/src/run/planning.rs",
+      "crates/athena-core/src/run/mod.rs",
+      "crates/athena-cli/tests/job_plan.rs",
+      "CHANGELOG.md",
+      "docs/design/job-planning.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-core --locked mechanical",
+        "result": "pass",
+        "note": "the three new tests"
+      },
+      {
+        "command": "cargo test -p athena-cli --locked --test job_plan --test lifecycle",
+        "result": "pass",
+        "note": "26 job_plan and 68 lifecycle tests, after adjusting five job_plan tests"
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "after the final cargo fmt --all"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "run after removing the unused Finding import; later edits were rustfmt only"
+      },
+      {
+        "command": "cargo test -p xtask --locked --test policy",
+        "result": "pass",
+        "note": "boundary word scan, 12 tests"
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "full suite, run once; the command returned no error status. The output was too large to display and I could not read the saved copy."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A new test in crates/athena-core/src/run/mod.rs uses a fake planner whose first plan breaks a deterministic plan rule (e.g. missing fails_without); run `cargo test -p athena-core`: the planner is invoked again with the finding, the critic is first called on the fixed plan labelled round 1, and no critic call precedes it.",
+        "status": "met",
+        "evidence": "Added a_mechanical_finding_is_revised_before_the_critic_and_the_critic_sees_round_1. Its fake planner first returns a README.md create plan, which breaks the rule 'creates a file that exists'. Passes via `cargo test -p athena-core --locked mechanical`. It asserts the role order [Reader, Planner, Planner, Critic, Producer, Verifier], that the second planner prompt contains 'already exists in the base', and that the first critic prompt contains '## Plan under review (round 1)'. The rule broken is not fails_without; the test uses the 'create an existing file' rule."
+      },
+      {
+        "criterion": "A test with max_rounds = 3 shows that after one mechanical revision the critic can still review in rounds 1, 2 and 3 (three critic calls) before the cap stops the job; run `cargo test -p athena-core`.",
+        "status": "met",
+        "evidence": "Added after_a_mechanical_revision_the_critic_still_reviews_in_three_rounds with repo_with_planning(3). It asserts the role order Reader, Planner, Planner, Critic, Planner, Critic, Planner, Critic, no Producer or Verifier, critic prompts naming rounds 1, 2 and 3, and a failed job whose reason has the planning-stopped prefix, PLANNING_CAP_REASON and 'round 3 of 3'. Passes."
+      },
+      {
+        "criterion": "A test shows a plan that still breaks a rule after two mechanical passes stops planning (job failed with the planning-stopped prefix) with that finding in the reason, and the critic is never called; run `cargo test -p athena-core`.",
+        "status": "met",
+        "evidence": "Added a_plan_that_still_breaks_a_rule_after_two_mechanical_passes_stops_without_the_critic with max_rounds = 5. The critic queue is empty, so any critic call panics. It asserts exactly 3 planner calls, no critic, producer or verifier call, a Failed job, and a reason with the prefix, 'already exists in the base' and 'after 2 mechanical revisions', without PLANNING_CAP_REASON. Passes."
+      },
+      {
+        "criterion": "The planning loop in crates/athena-core/src/run/planning.rs no longer ends a round on Blocker/Major plan_findings by consuming a round; the cap of two mechanical passes is a named constant or documented, and the plan_round doc comment states that only critic reviews count toward max_rounds.",
+        "status": "met",
+        "evidence": "Read the diff. A Blocker/Major plan_findings result now returns RoundEnd::Mechanical, which plan_round handles in an inner loop without advancing the round, and no longer calls end_round. `pub(super) const MAX_MECHANICAL_PASSES: u32 = 2` has a doc comment. The plan_round doc comment says only critic reviews count toward max_rounds."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry describing that deterministic plan-rule findings are revised without using a planning round or a critic call, at most twice.",
+        "status": "met",
+        "evidence": "Read the diff. There is a new first entry under [Unreleased] / Changed. It says findings from Athena's own plan rules go back to the planner without using a round or a critic call, at most twice per round. It gives the 2026-10-28 cause, names MAX_MECHANICAL_PASSES, and says the critic's first review is round 1."
+      },
+      {
+        "criterion": "`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` all pass.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I ran fmt --check, clippy -D warnings and the full `cargo test --locked`, and none reported an error."
+      },
+      {
+        "criterion": "Existing planning tests (soundness findings, revise in last round, resume with seed revision) still pass unchanged in behavior; run `cargo test -p athena-core`.",
+        "status": "met",
+        "evidence": "The cli job_plan tests for revise, reject, last-round revise, retry carry and status pass, as do the lifecycle tests, including a_retry_of_a_job_stopped_at_the_planning_cap_resumes_from_the_kept_plan. Five job_plan tests that read an Athena-only critique-1 were adjusted. They now assert on the planner's second brief and on critique-1 being the critic's. The full suite passes."
+      }
+    ],
+    "open_issues": [
+      "The two-pass cap is per critic round, as the accepted reading says. Worst case adds 2 planner calls per round, each checked by check_budget. Making it job-wide would be a small change.",
+      "crates/athena-cli/tests/job_plan.rs is outside the listed deliverables. The edit is test-only and forced by the new round numbering, as the plan says.",
+      "The mechanical attempts' plans and findings are not filed as records. They survive only as planner invocation records and as findings in the next planner brief. Filing them would need a record schema change.",
+      "A final mechanical stop files the plan and an Athena-only critique at the current round number. That round has no critic record yet, so there is no collision.",
+      "The first criterion's example (missing fails_without) is covered by the existing rule tests in job_plan.rs, which now run through the mechanical path. The new mod.rs test uses the create-an-existing-file rule."
+    ],
+    "mistakes": [
+      "I first left an unused `Finding` import in job_plan.rs after the test edits. Compiling showed the warning and I removed it before clippy."
+    ],
+    "learnings": [
+      "Plan and critique records are keyed by round, and nothing checks that rounds are contiguous. Mechanical attempts can therefore go unfiled while the critic's first review is round 1.",
+      "Five tests in crates/athena-cli/tests/job_plan.rs read an Athena-only critique-1. They are the governance file, command outside the grant, criterion count and fails_without, file existence, and directory tests. They had to change once the critic's first review became round 1.",
+      "The test repo() helper strips [job_plan] from athena.toml. repo_with_config(extra) now appends a table for tests that need planning.",
+      "planning_resume_seed matches only PLANNING_CAP_REASON, so a mechanical stop is not offered as a resume seed."
+    ],
+    "desires": [
+      "A way to read a saved tool-result file inside the working directory, so a large cargo test output can be searched for failures."
+    ]
+  }
+}
