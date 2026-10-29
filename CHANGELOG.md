@@ -520,6 +520,39 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `crates/athena-core/src/run.rs` became `crates/athena-core/src/run/mod.rs` (structure pass job R1), so later
   jobs can add submodules beside it. The `run` module path is unchanged. The only text edits are the two test
   `include_str!` paths, which gain one `../`. No behavior change.
+- Structure pass job G7 (`docs/design/structure-pass.md`): the Landing row of
+  `crates/athena-core/src/gh/mod.rs` moves unchanged into `crates/athena-core/src/gh/landing.rs`. The moved
+  names are `work_branch`, `landed_commit`, `landed_commit_from_records`, `landed_commit_for`,
+  `squash_text_for`, `Poll` with its `Debug` impl, `LandPr` with its `Debug` impl, `PrReport`, `land_pr`,
+  `confirm_existing_merge`, the private `refusal_text` and `publish`, and the `Athena` methods `land_pr` and
+  `after_merge`. `get_args` and the `early_seam` test seam stay in `gh/mod.rs`. `gh/mod.rs` declares
+  `mod landing;` and re-exports every public moved name (`LandPr`, `Poll`, `PrReport`,
+  `confirm_existing_merge`, `land_pr`, `landed_commit`, `landed_commit_for`, `landed_commit_from_records`,
+  `squash_text_for`, `work_branch`), so every path such as `crate::gh::land_pr` is as before and no caller is
+  edited. No visibility changes: `replace_early` and `wait_for_checks` were already `pub(super)` and are now
+  imported by `landing.rs` from `super::early`; `refusal_text` and `publish` stay private; `after_merge` keeps
+  its `pub(crate)`. Import changes in `gh/mod.rs`: the `use early::{replace_early, wait_for_checks}` line is
+  gone, and the `crate::pr`, `crate::state`, `crate::Ui`, `anyhow`, `athena_data`, `athena_git` and `std::time`
+  imports that only the moved code used are now `#[cfg(test)]` (kept for the tests left there), except those
+  no test needs, which are dropped (`GitContent`, `PushRequest`, `check_push`, `clear_early`,
+  `load_link_or_adopt_early`, `observe_merge`, `store_link`, `Verdict`, `Athena`, `Context`, `Serialize`).
+  `landing.rs` imports only from `crate::pr` and the sibling modules `client`, `early`, `pages`, `records`,
+  `remote` and `transport` (through the `super` re-exports, plus `super::early` directly). One dependency
+  runs both ways: `early.rs` uses `LandPr` and `work_branch` through the `super` re-export, and `landing.rs`
+  calls `replace_early` and `wait_for_checks` from `early.rs`; `LandPr` is the only item `early.rs` takes from
+  the landing row. Caller check, per moved name, of the files outside `gh/mod.rs` and `gh/landing.rs` that
+  name it: `work_branch`: `gh/early.rs`, `run_pin_tests.rs`, `test_support.rs`; `landed_commit`: `run/mod.rs`,
+  `run_pin_tests.rs`, `test_support.rs`, `athena-cli/src/main.rs`, and the cli tests `lifecycle.rs`,
+  `trailer_stop.rs`, `history_pr_head.rs`; `landed_commit_for`: the cli test `trailer_stop.rs`;
+  `landed_commit_from_records`: none; `squash_text_for`: `test_support.rs`; `Poll`: `gh/pages.rs`,
+  `checks.rs`, `run_pin_tests.rs`, `test_support.rs`, `athena-cli/src/wiring.rs`, the cli test
+  `external_calls.rs`; `LandPr`: `gh/early.rs`, `run_pin_tests.rs`, `test_support.rs`, `external_calls.rs`;
+  `PrReport`: `pr_check.rs`, `run_pin_tests.rs`, `test_support.rs`, `athena-cli/src/display.rs`,
+  `athena-cli/src/main.rs`, `external_calls.rs`; `land_pr`: `land.rs`, `run_pin_tests.rs`, `test_support.rs`,
+  `athena-cli/src/display.rs`, `main.rs`, `drain.rs`, the cli tests `trailer_stop.rs` and `external_calls.rs`
+  (and doc mentions in `code_health.rs` and `gh/records.rs`); `confirm_existing_merge`, `refusal_text`,
+  `publish`: none; `Athena::after_merge`: the tests left in `gh/mod.rs`. No behavior change; the list from
+  `cargo test -- --list` is the same.
 - Structure pass job G4 (`docs/design/structure-pass.md`): the Records-branch writes row of
   `crates/athena-core/src/gh/mod.rs` (`LandingRecords`, `LandingFacts`, `verification_id`, `history_method`,
   `GitLandingRecords` with its impls, `CutoverRun`, `cutover_job_for`, `run_cutover`, `cutover_catch_up` and the

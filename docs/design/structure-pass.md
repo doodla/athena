@@ -99,6 +99,11 @@ also uses `remote` (`GitRemote`, `Remote`) and the `LandPr` type that stays in `
 move `LandPr` to a place `early` can use without `early` naming `landing`, since `landing` depends on `early`
 and a use in the other direction would be a cycle.
 
+Note from job G7. `LandPr` moved with the rest of the Landing row into `gh/landing.rs`, text unchanged, and
+`early.rs` still reaches `LandPr` and `work_branch` through the `mod.rs` re-export. So one two-way link remains
+between `early` and `landing`: `landing` calls `replace_early` and `wait_for_checks`, and `early` names `LandPr`.
+Splitting `LandPr` out to a lower module is a text change, not a move, so it is left to a later job.
+
 ### 3.2 `run/`
 
 | Module | Holds | Depends on |
