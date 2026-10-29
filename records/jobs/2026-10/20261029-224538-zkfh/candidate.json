@@ -1,0 +1,127 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261029-224538-zkfh",
+  "base_commit": "507d69e6599eb8d5ffbbf6ec524c3d5e2d6dc6ac",
+  "base_fingerprint": "sha256:8310c427131b84e6e9685ee666e9d5d1bb969daf660b5892ba1395d960f4f3f6",
+  "previous_job": "20261029-212620-qqf0",
+  "candidate_commit": "4ee576bd4720de17a57f3ed1025feb3b436dd49a",
+  "candidate_tree": "de41ccba839e9c9e7be40c3011bc0f7417412752",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 229667
+    },
+    {
+      "path": "crates/athena-core/src/hestia.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 149195
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 132233
+    },
+    {
+      "path": "crates/athena-core/src/store.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 27161
+    }
+  ],
+  "fingerprint": "sha256:8cb3641959dfc82488a43ece180e7a28f238ddde9c4ad30b4d33c3ede1c50a4d",
+  "violations": [],
+  "producer_report": {
+    "summary": "The landing stage now ends at the landing record, not at host refusals. Root cause: the Landed outcome is set right after verification, so measuring to it gave about 0.1 minute and hid the CI wait, push and merge. `Records` had no landings field, so nothing read `landings/`. Changes: (1) store.rs: `Records.landings` is loaded from `landings/` in the loaded tree and from the local records branch tip, deduplicated by id. A missing or unreadable one counts as none. (2) status.rs: the landing end is max(outcome time, `created_at` of the Landing whose job-landing commit names the job). A landed job with no such record ends at its outcome. \"Did not land\" is time spent (invocation wall times plus measured check durations). Idle time is the gap between merged busy intervals (invocations, checks, landing wait), so a job left open for days adds only the time it was worked. Checks have no timestamps, so they are placed by estimate: they end when the verifier starts. `Throughput::text` prints a basis line under each figure. The landing basis names `landings/` and says when no record was found, or that only some were found. (3) hestia.rs: the throughput prompt describes the landing record and the time-spent bases. (4) CHANGELOG.md: new Changed entry. The existing throughput test's expected idle and unlanded numbers moved from 183 and 40 minutes to 191 and 23, because closing-record time no longer counts.",
+    "files": [
+      "crates/athena-core/src/status.rs",
+      "crates/athena-core/src/store.rs",
+      "crates/athena-core/src/hestia.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-core status",
+        "result": "pass",
+        "note": "33 passed, including 6 new tests"
+      },
+      {
+        "command": "cargo fmt --all",
+        "result": "pass",
+        "note": "applied formatting"
+      },
+      {
+        "command": "cargo clippy -p athena-core --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "12 passed"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A test in crates/athena-core/src/status.rs builds fixtures of real record kinds: a landed job with invocations, a verifier ending at T, a Landed outcome set at about T+0.1 min, and an athena_data::history::Landing record (commits[].job = the job) with created_at several minutes later, and no HostError. `cargo test -p athena-core status` shows the landing stage equals the minutes from the verifier's end to the later of the outcome and landing.created_at.",
+        "status": "met",
+        "evidence": "Ran `cargo test -p athena-core status`. `the_landing_stage_runs_to_the_landing_record_written_after_the_outcome` passed: the verifier ends 10:17, the outcome is at +0.1 min, the Landing is at 10:23, and the stage is 6.0 min. No HostError is used."
+      },
+      {
+        "criterion": "A test shows that a landed job with no landing record reports the outcome-based landing figure and that the printed basis says no landing record was found. Run `cargo test -p athena-core status`.",
+        "status": "met",
+        "evidence": "`a_landed_job_with_no_landing_record_reports_the_outcome_time_and_says_so` passed: the stage is 0.1 min and the text says \"no landing record (landings/) found\"."
+      },
+      {
+        "criterion": "A test dispatches a job, runs it 20 minutes and closes it days later. `cargo test -p athena-core status` shows 'did not land' reports 20 minutes, not the multi-day span.",
+        "status": "met",
+        "evidence": "`did_not_land_counts_the_time_spent_not_the_days_the_job_stayed_open` passed: the job runs 20 min and closes 3 days later, and unlanded_minutes is 20.0."
+      },
+      {
+        "criterion": "A test shows idle time between jobs is computed from time spent: a job open for days does not hide or inflate the gap. Run `cargo test -p athena-core status`.",
+        "status": "met",
+        "evidence": "`idle_time_is_the_gap_between_time_spent_whatever_stays_open` passed: a job open for 3 days sits between two jobs and idle is 90.0 min (50 plus 40). Also `the_landing_stage_runs_to_the_landing_record_written_after_the_outcome` asserts that the landing wait is not idle."
+      },
+      {
+        "criterion": "A test on `Throughput::text` shows every figure (landed per day, median per landed job and its stages, idle between jobs, did not land) states its basis, and the landing basis names the landing record (landings/) and no longer says the CI wait and rebuild have no record. `athena status` prints that text.",
+        "status": "met",
+        "evidence": "`every_printed_figure_states_its_basis_and_the_landing_basis_names_the_landing_record` passed. It checks that each figure line is followed by a basis line, that the text contains \"landing record (landings/) found for each\" and \"placed by estimate\", and that it never says \"have no record\". The status view's `throughput` field was already printed from `Throughput::text`; I did not change that wiring."
+      },
+      {
+        "criterion": "Grep of crates/athena-core/src/status.rs, crates/athena-core/src/hestia.rs and CHANGELOG.md finds no claim that the CI wait and rebuild have no record, and the hestia.rs throughput prompt and the CHANGELOG entry say they are measured from the landing record.",
+        "status": "met",
+        "evidence": "I removed the old doc comment on StageMinutes (\"no record separates the rebuild\") and wrote the landing-record wording instead. The hestia.rs prompt and the new CHANGELOG entry both name the landing record (landings/)."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry describing the corrected landing, unlanded and idle figures and the printed bases.",
+        "status": "met",
+        "evidence": "A new first entry under Unreleased > Changed covers the landing figure, the unlanded and idle time-spent bases, the printed bases and the estimate for check placement."
+      },
+      {
+        "criterion": "`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` all pass.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I ran `cargo fmt --all` (it applied formatting), clippy on athena-core with `--all-targets --locked -D warnings` (clean), and the targeted tests plus the policy test (pass). I did not run the full suite."
+      },
+      {
+        "criterion": "No governance file (athena.toml, defaults.toml, workflows) changes. Only the listed deliverables change.",
+        "status": "met",
+        "evidence": "I edited only status.rs, store.rs, hestia.rs and CHANGELOG.md."
+      }
+    ],
+    "open_issues": [
+      "If the local athena/records branch lags the remote, landing records not yet fetched are missing. The affected jobs fall back to the outcome time, and the basis says so. This reader does not sync the branch."
+    ],
+    "mistakes": [
+      "My first test job ids used letters that Crockford base32 excludes, which panicked the tests. I fixed them before reporting."
+    ],
+    "learnings": [
+      "Records::load reads a tree's `records/` directory. Landing records live on the athena/records branch under `landings/`, so a loaded main tree has none. The landings reader therefore also reads the local records branch tip.",
+      "Job ids need a four-character lowercase Crockford base32 suffix, which excludes i, l, o and u, so test ids like `-lnd1` are rejected.",
+      "A Landing fixture needs `RecordId::generate` for its id and intent, 40-character sha strings, and a `LandingCommit` of kind JobLanding with `job` set."
+    ],
+    "desires": []
+  }
+}

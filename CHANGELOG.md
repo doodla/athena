@@ -66,6 +66,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- The throughput section of `athena status` now measures landing and rebuild from the verifier's end to the
+  landing record (`landings/`, matched to the job by its job-landing commit), or to the landing outcome if that
+  is later. The outcome is set right after verification, so it alone gave about 0.1 minute and hid the CI wait,
+  push and merge. `Records` now loads the landing records. A job with no landing record ends at its outcome,
+  and the printed basis says so. "Did not land" and idle time use time spent (invocation wall times, measured
+  check durations, and for landed jobs the wait for the landing record), not the days a job stayed open: a job
+  run for 20 minutes and closed days later counts 20 minutes, and idle time is the gap between merged busy
+  intervals. Each figure prints its basis under it; check durations are placed in idle time by estimate (they
+  end when the verifier starts).
 - Findings from Athena's own plan rules (`plan_findings`, no critic call) now go back to the planner for an
   immediate revision that does not use a planning round and calls no critic, at most twice per round
   (`MAX_MECHANICAL_PASSES`). Only critic reviews count toward `max_rounds`, and the critic's first review is
