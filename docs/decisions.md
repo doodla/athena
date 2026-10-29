@@ -3817,3 +3817,26 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Reversal cost:** Low: delete the added tables, restore the section cut in the test.
 - **Provenance:** read: BRIEF.md sections 7 to 10, the governing philosophy and the addenda to 2026-10-24,
   D114, `xtask/tests/spec.rs`; measured: `cargo test -p xtask --test spec`.
+
+## D145 (proposed) · The drain overlaps jobs: read-ahead, per-job worktrees, one ordered landing queue
+
+- **Case:** Over 2026-10-27 to 29, 35 of 61 jobs landed and the median job took 42 minutes (producer 15, checks 13
+  to 15, landing 6 to 8, verifier 2.3, reading and planning up to 5), one job at a time. About 73 minutes of drain
+  time per landed job (estimate). The build cache is off (D84), so cold builds are the cost of every job.
+- **Decision:** (proposed, not yet accepted) Adopt the design in [docs/design/async-drain.md](design/async-drain.md):
+  read-ahead and planning of the next job; the producer starts early in its own worktree, bounded by free disk;
+  one ordered landing queue that rebases or returns a conflict to the producer; CI waits and self-rebuild as
+  background awaits; records committed in landing order. A `[drain.pipeline]` table (`max_in_flight`,
+  `max_check_slots`, `read_ahead`, `reserve_disk_gb`) ships at today's behavior; ten build jobs follow, and the
+  tenth raises `max_in_flight` to 3 with Sri's yes. Target: about 25 minutes per landed job with one check slot
+  (estimate).
+- **Alternatives:** (a) Raise `[parallel] max_concurrency` only. (b) Several check slots at once. (c) A forge merge
+  queue. (d) Fail on conflict instead of returning to the producer. (e) Re-enable a shared compiler cache: a
+  separate option after the first build job measures why D84 saw 0 hits. (f) One shared `target/`. Reasons are in
+  the design, section 9.
+- **Tradeoff:** Disk use grows by about one cold build per in-flight job (estimate, 6 GB, unmeasured). The target
+  rests on estimates until the first build job measures sizes and cache hits. Returned conflicts cost producer runs.
+- **Reversal cost:** Low until the tenth build job: nothing changes by default. After it, set `max_in_flight = 1`.
+- **Provenance:** Read: D46, D79, D84, D140, D142, D143, `athena.toml`, `disk.rs`, `drain.rs`. Baseline figures are as
+  the request gives them; the arithmetic is in the design, section 3. Not measured here: the size of a cold build and
+  two simultaneous check runs.
