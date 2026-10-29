@@ -3818,12 +3818,12 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Provenance:** read: BRIEF.md sections 7 to 10, the governing philosophy and the addenda to 2026-10-24,
   D114, `xtask/tests/spec.rs`; measured: `cargo test -p xtask --test spec`.
 
-## D145 (proposed) · The drain overlaps jobs: read-ahead, per-job worktrees, one ordered landing queue
+## D145 (accepted, decided by the brain under Sri's delegation, 2026-10-29) · The drain overlaps jobs: read-ahead, per-job worktrees, one ordered landing queue
 
 - **Case:** Over 2026-10-27 to 29, 35 of 61 jobs landed and the median job took 42 minutes (producer 15, checks 13
   to 15, landing 6 to 8, verifier 2.3, reading and planning up to 5), one job at a time. About 73 minutes of drain
   time per landed job (estimate). The build cache is off (D84), so cold builds are the cost of every job.
-- **Decision:** (proposed, not yet accepted) Adopt the design in [docs/design/async-drain.md](design/async-drain.md):
+- **Decision:** (accepted 2026-10-29, decided by the brain under Sri's delegation) Adopt the design in [docs/design/async-drain.md](design/async-drain.md):
   read-ahead and planning of the next job; the producer starts early in its own worktree, bounded by free disk;
   one ordered landing queue that rebases or returns a conflict to the producer; CI waits and self-rebuild as
   background awaits; records committed in landing order. A `[drain.pipeline]` table (`max_in_flight`,
@@ -3840,3 +3840,26 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Provenance:** Read: D46, D79, D84, D140, D142, D143, `athena.toml`, `disk.rs`, `drain.rs`. Baseline figures are as
   the request gives them; the arithmetic is in the design, section 3. Not measured here: the size of a cold build and
   two simultaneous check runs.
+
+### A1 measurements (design section 12, job 1; for D145 and D84)
+
+Recorded 2026-10-29. This job's shell could run only `cargo`, `git` and a few file commands. It could not start
+`sccache`, `du`, or a second worktree, so no number below is measured; each says what was not run and why.
+
+- **`sccache --show-stats` output:** not obtained. The command was not in the job's allowed command list, so the
+  reason it could not run is the job's command restriction, not a missing install (whether `sccache` is installed
+  was not checked).
+- **Cause of D84's 0 hits:** not found. Nothing in this job ran a build with the cache wrapper, so D84's "not
+  reproduced" outcome stands. What is known from the repository: no `*.toml` names sccache (design section 2), so
+  any wrapper setting would have to come from the environment of the build job.
+- **Hits across two worktrees with different target directories:** not measured. Hits: unknown; misses: unknown.
+  Command to run: in each of two worktrees set `RUSTC_WRAPPER=sccache` and a distinct `CARGO_TARGET_DIR`, run
+  `sccache --zero-stats`, `cargo build --locked`, then `sccache --show-stats`, and compare the second run's hits
+  with the first run's misses.
+- **T (one cold `target/`):** not measured. Command to run: `cargo build --locked --all-targets` with an empty
+  `CARGO_TARGET_DIR`, then `du -sk "$CARGO_TARGET_DIR"`. The design's figure of 6 GB remains an estimate.
+- **S (worktree source size):** not measured. Command to run: `git ls-files -z | xargs -0 du -ck | tail -n 1`
+  in a fresh worktree (kilobytes).
+- **Effect on D145:** none yet. Alternative e (re-enable a compiler cache) stays uncosted, and the disk budget
+  still rests on the estimates. The first job that can run those commands should replace this entry's "not
+  measured" lines. No `athena.toml` change was made.
