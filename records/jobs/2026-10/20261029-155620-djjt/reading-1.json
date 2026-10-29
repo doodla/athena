@@ -1,0 +1,150 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261029-155620-djjt",
+  "n": 1,
+  "at": "2026-10-29T22:07:15.27214896Z",
+  "invocation_seq": 1,
+  "base_commit": "918cbe8272e3a35139e82599457f04e9700ae08b",
+  "config_sha256": "4686d6918e8a389a515edf47cdcb596e2ae4a147d9ffda0816f171979db719d1",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Fix throughput figures: landing time, time spent, and stated bases",
+  "summary": "The throughput section of `athena status` misreports two figures. \"Landing and rebuild\" is measured only to the outcome record, so it misses the CI wait and the rebuild. \"Did not land\" is a first-call-to-close wall span, so it counts days a job sat open. I'll measure landing through the recorded CI wait, push and rebuild end, measure unlanded and idle time as time spent, and print each figure's basis. The audience is the throughput review and whoever reads `athena status`.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "Changes are Rust in the athena-core crate."
+    },
+    {
+      "id": "tested",
+      "how": "New fixture tests are required, with fmt, clippy -D warnings and the test suite passing."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check the printed or computed figures from fixtures, not that fields exist."
+    },
+    {
+      "id": "root-cause",
+      "how": "The measurement basis is fixed for both figures and for idle time, not only the one instance."
+    },
+    {
+      "id": "small",
+      "how": "The change is limited to status.rs and the changelog."
+    },
+    {
+      "id": "strangers",
+      "how": "Each printed figure states its basis in plain words."
+    },
+    {
+      "id": "outcome-check",
+      "how": "Success is that the figures match time actually spent, shown by tests."
+    },
+    {
+      "id": "verified",
+      "how": "The verifier runs cargo test, clippy and fmt --check."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: I read crates/athena-core/src/status.rs. `Throughput::compute` (about line 804) builds the section. `landed_jobs` (about line 775) sets `landing_and_rebuild` to the time from the last invocation's end to the closing outcome's `at`. The unlanded figure sums `working_span` (first invocation start to closing outcome or last invocation end). Idle time is the gaps between those merged spans. `Throughput::text` prints the lines. I also read crates/athena-data/src/records.rs (Outcome, Verification, CheckRun, Intervention) and crates/athena-core/src/store.rs (`JobRecords`). Landing writes the early-run wait as a warning string (crates/athena-core/src/gh/early.rs) and writes landing records under landings/ (crates/athena-core/src/gh/records.rs). I did not confirm whether `JobRecords` or `Records` exposes either.",
+    "Time spent for a job is the sum of its invocation wall times, its measured check durations, and its recorded waits. The unlanded figure and the idle-time computation both use that sum instead of the first-to-close span.",
+    "The CI wait and rebuild are read from whatever records already carry them, such as the outcome's time, landing records, or the 'waited Ns' note. If one is not reachable from `JobRecords`, the producer adds the smallest reader inside status.rs and states the basis. If the rebuild's end is not recorded, the stage reports what is recorded and its basis says so. Changes stay within status.rs and CHANGELOG.md.",
+    "Idle time is the time between jobs that no job spent working: the gaps between merged spans, where a span covers only recorded invocation, check and wait intervals rather than first call to close.",
+    "No new record type or file under crates/ is added, so the record validation allow-list is untouched. No refusal rule is added or tightened.",
+    "The existing test throughput_reports_landed_per_day_stage_medians_idle_time_and_time_on_jobs_that_did_not_land (about line 2966) and the helper `timed_job` will need updating for the new bases."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new test in crates/athena-core/src/status.rs builds fixture records for a landed job with a CI wait and a rebuild. Running `cargo test -p athena-core status` shows the landing stage reports their duration (it covers the wait and the rebuild, not just verifier end to outcome).",
+      "kind": "behavior"
+    },
+    {
+      "text": "A new test dispatches a job, runs it 20 minutes, and closes it days later. `cargo test -p athena-core status` shows it contributes 20 minutes to the 'did not land' figure, not the multi-day span.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test shows idle time between jobs is computed from time spent, so a job left open for days does not hide the gap. Run `cargo test -p athena-core status`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test on `Throughput::text` output shows each figure in the section (landed per day, median per landed job and its stages, idle between jobs, did not land) states its basis, naming the records it was measured from. `athena status` prints that text, so the basis shows there.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has an entry describing the corrected landing, unlanded and idle figures and the printed bases.",
+      "kind": "content"
+    },
+    {
+      "text": "`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` all pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "No path other than crates/athena-core/src/status.rs and CHANGELOG.md changes. No governance file (athena.toml, defaults.toml, workflows) changes.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "p": 0.99
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/hestia.rs",
+      "action": "modify",
+      "p": 0.12
+    }
+  ],
+  "out_of_scope": [
+    "Changing how landing or the rebuild records are written (crates/athena-core/src/gh, land.rs) beyond reading what exists.",
+    "Re-ranking or changing the throughput review's proposals or its trigger.",
+    "Changing athena.toml, defaults.toml or workflow files."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.2,
+        "p90": 3.0
+      },
+      "wall_time_s": {
+        "p10": 450.0,
+        "p50": 1700.0,
+        "p90": 3400.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.721832884097035,
+      "p_verification_passes": 0.6744186046511628,
+      "p_user_intervenes": 0.07938461538461539,
+      "cost_usd": {
+        "p10": 0.5441679488882005,
+        "p50": 1.194743764052125,
+        "p90": 2.9781801069369935
+      },
+      "wall_time_s": {
+        "p10": 537.4767397421234,
+        "p50": 1684.837367837853,
+        "p90": 3264.7771409575
+      }
+    }
+  },
+  "departures": "The landing figure depends on whether the CI wait and rebuild end are recorded at all in `JobRecords`. That makes verification riskier than the reference, and the cost slightly higher."
+}
