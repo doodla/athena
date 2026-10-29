@@ -9,6 +9,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `docs/spec.toml` now cites the whole of BRIEF.md, so the brief can be retired as the working copy of the
+  requirements. A third layer adds 127 requirements: the opening goals (including "gets measurably faster, cheaper,
+  and more correct"), who's who, settings, the operating model O1 to O5, the standards and boundaries, Part 1 items
+  A1 to A13, the study items S1 to S7, the deliverables D1 to D3, the order and judging sections, the Olympus
+  purpose and the opening of section 4, and every addendum dated before 2026-10-17 (among them 2026-10-12
+  "Chunking and parallel work") or after 2026-10-24. The 2026-10-13 "Athena owns acceleration" addendum was already
+  cited by `OLY-A-22`. Each new requirement has verbatim quotes and a mechanism, owner and measure; where nothing
+  meets one the mechanism is `none`, and the Hestia sweep queues a request for it. Eight new open questions
+  (`OQ-4` to `OQ-11`) record where Sri's words conflict, each quoting both sides and none resolving it.
+- The spec test is stricter. `xtask/tests/spec.rs` now reads the whole brief and fails when any heading with text
+  under it, or any dated addendum, is not the first source heading of a requirement (`coverage_gaps`); the title,
+  part and group headings with no text are exempt and pinned by a test. The earlier cut at 2026-10-24 and the two
+  pinned late headings are gone. New negative tests remove the requirements of one heading (A6, the 2026-10-12
+  chunking addendum, a late addendum, the Goal) and assert that exactly that heading is reported. The floor of
+  active requirements, in the spec test and in the Hestia test over the real spec, is raised to 264.
 - Every active requirement in `docs/spec.toml` now says how it is met: a `mechanism` (the code path, role or check
   that meets it, or the literal `none`), an `owner` (the role responsible) and a `measure` (how it is shown,
   ending with `status: <label>` for the line of `athena status` that shows it, or `status: not shown` with the

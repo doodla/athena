@@ -2502,7 +2502,7 @@ mod tests {
     fn the_real_spec_records_every_field_and_classes_the_acceleration_requirements_as_speed() {
         let requirements = parse_spec(include_str!("../../../docs/spec.toml")).unwrap();
         let active: Vec<&SpecRequirement> = requirements.iter().filter(|r| r.active).collect();
-        assert!(active.len() >= 137, "{} active", active.len());
+        assert!(active.len() >= 264, "{} active", active.len());
         for r in &active {
             assert!(!r.mechanism.trim().is_empty(), "{}: no mechanism", r.id);
             assert!(!blank_or_none(&r.owner), "{}: no owner", r.id);
