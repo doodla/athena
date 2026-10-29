@@ -21,6 +21,11 @@
 //!
 //! A free amount that cannot be read never holds or fails a job. A failing write probe always does.
 //!
+//! A check killed at its time limit (`[budget] check_timeout_s`) is an environment stop too: a busy or slow
+//! machine can push a long suite past the limit, and that says nothing about the work. The job closes with an
+//! `environment: check timed out` reason ([`check_timeout_reason`]) that names the measured time and the
+//! limit, and `athena retry` resumes it. A check that fails with an exit code is still a failure of the work.
+//!
 //! Freeing and resuming. The producer's build directory (`target/produce`) is idle once Athena's checks have
 //! passed, since the checks build in their own directory; it is removed then, before the gate that runs
 //! before the verifier, and kept when a check fails (the send-back needs it). A job that stops for an
@@ -38,6 +43,9 @@ use std::path::Path;
 
 /// The status text of a job held for lack of disk space.
 pub const LOW_DISK: &str = "environment: low disk";
+
+/// The status text of a job stopped because one of its checks was killed at its time limit.
+pub const CHECK_TIMEOUT: &str = "environment: check timed out";
 
 /// Bytes in one gigabyte as `[disk] min_free_gb` counts them.
 pub const GB: u64 = 1_000_000_000;
@@ -207,10 +215,19 @@ pub fn before_verifier_reason(problem: &str, job: &JobId) -> String {
     )
 }
 
-/// True when a job's closing `reason` records a failure of the environment (low disk or an unwritable
-/// workspace), not a failure of the work. It holds for any job.
+/// The closing reason for a job whose check `name` was killed at its time limit: it ran `duration_s`
+/// seconds against a limit of `limit_s` (`[budget] check_timeout_s`). A check cut off by the clock says
+/// nothing about the work, so the reason names the environment, the measured time and the way forward.
+pub fn check_timeout_reason(name: &str, duration_s: f64, limit_s: u64, job: &JobId) -> String {
+    format!(
+        "{CHECK_TIMEOUT}: {name} killed at {duration_s:.0}s of {limit_s}s limit; this is the environment, not the work. `athena retry {job}`, or raise [budget] check_timeout_s"
+    )
+}
+
+/// True when a job's closing `reason` records a failure of the environment (low disk, an unwritable
+/// workspace, or a check killed at its time limit), not a failure of the work. It holds for any job.
 pub fn is_environment_reason(reason: &str) -> bool {
-    reason.starts_with(LOW_DISK)
+    reason.starts_with(LOW_DISK) || reason.starts_with(CHECK_TIMEOUT)
 }
 
 /// Whether a job that stopped is one `athena retry` may resume from its kept candidate: it closed failed
@@ -413,6 +430,31 @@ mod tests {
         assert!(!is_environment_reason(
             "the verifier returned no valid verdict"
         ));
+    }
+
+    #[test]
+    fn a_check_timeout_reason_is_an_environment_reason() {
+        let job = id(1);
+        let reason = check_timeout_reason("test", 905.0, 900, &job);
+        assert!(reason.starts_with(CHECK_TIMEOUT), "{reason}");
+        assert!(is_environment_reason(&reason), "{reason}");
+        assert!(
+            reason.contains("test killed at 905s of 900s limit"),
+            "{reason}"
+        );
+        assert!(reason.contains("not the work"), "{reason}");
+        assert!(reason.contains(&format!("athena retry {job}")), "{reason}");
+        assert!(resumable_stop(
+            JobState::Closed(OutcomeState::Failed),
+            Some(&reason)
+        ));
+        assert!(!resumable_stop(
+            JobState::Closed(OutcomeState::Rejected),
+            Some(&reason)
+        ));
+        // A failed check is a failure of the work, not the environment.
+        assert!(!is_environment_reason("check test failed"));
+        assert!(!is_environment_reason("admission refused the change: x"));
     }
 
     #[test]

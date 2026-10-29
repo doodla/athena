@@ -7,6 +7,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+- A check killed by its time limit no longer rejects a job. Cause: `[budget] check_timeout_s` was 900 s, and
+  the full suite (1617 tests) takes 750 to 940 s, so a run near the limit was killed partway and recorded as
+  a failed check. Job 20261026-232434-6wfq was rejected with `check test failed` after 591 tests, exit code
+  none, 905 s, while the verifier's own full run of the same tree passed. Two changes:
+  - `check_timeout_s` in `athena.toml` is now 1800 s. The setting is a whole number of seconds, so the schema
+    accepts it unchanged.
+  - A check killed at its deadline (`checks::timed_out`, which reads the note `run_check` writes) now closes
+    the job as an environment stop: `environment: check timed out`. The job is held, not rejected, no verifier
+    runs, and `athena retry` resumes it from the kept candidate, running the checks again. The reason and the
+    `failed` line print the measured time against the limit, for example `test killed at 905s of 1800s limit`.
+    A check that fails with an exit code is still a failed check and still leads to rejection.
+  - Not in this change: the `athena status` report of the median and slowest test-check durations against the
+    limit is a separate follow-up.
+
 ### Changed
 
 - Structure pass R5: the baseline, the producer snapshot and the producer loop with its send-back (stages S1

@@ -139,6 +139,27 @@ pub struct CheckContext<'a> {
     pub redactor: &'a Redactor,
 }
 
+/// How the note of a check killed at its time limit begins. [`run_check`] writes it and [`timed_out`]
+/// reads it, so the two cannot drift apart.
+pub const DEADLINE_NOTE_PREFIX: &str = "killed at the deadline of ";
+
+/// The note recorded on a check killed at its time limit `timeout`.
+pub fn deadline_note(timeout: Duration) -> String {
+    format!("{DEADLINE_NOTE_PREFIX}{}s", timeout.as_secs())
+}
+
+/// True when `run` is a check that [`run_check`] killed because it ran past its time limit. Such a run says
+/// nothing about the work: a slow or busy machine produces it. A check that failed with an exit code, one
+/// stopped by the kill switch, one that could not start and one that was skipped are not timeouts.
+pub fn timed_out(run: &CheckRun) -> bool {
+    !run.passed
+        && run.exit_code.is_none()
+        && run
+            .note
+            .as_deref()
+            .is_some_and(|note| note.starts_with(DEADLINE_NOTE_PREFIX))
+}
+
 /// The first wait between polls of a running check.
 const POLL_START: Duration = Duration::from_millis(5);
 /// The longest wait between polls.
@@ -196,10 +217,7 @@ pub fn run_check(spec: &CheckSpec, ctx: &CheckContext<'_>) -> Result<CheckRun> {
             break Some(status);
         }
         if Instant::now() >= deadline {
-            note = Some(format!(
-                "killed at the deadline of {}s",
-                ctx.timeout.as_secs()
-            ));
+            note = Some(deadline_note(ctx.timeout));
         } else if ctx.registry.stopped() {
             note = Some("killed by the kill switch".to_string());
         }
@@ -447,6 +465,58 @@ mod tests {
         let run = run_check(&slow, &ctx).unwrap();
         assert!(!run.passed);
         assert!(run.note.unwrap().contains("deadline"));
+    }
+
+    #[test]
+    fn only_a_check_killed_at_its_deadline_is_timed_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let registry = Registry::new(state.path());
+        let redactor = Redactor::new(&athena_gate::builtin_config()).unwrap();
+        let env = BTreeMap::from([("PATH".to_string(), std::env::var("PATH").unwrap())]);
+        let ctx = |timeout| CheckContext {
+            dir: dir.path(),
+            env: &env,
+            timeout,
+            registry: &registry,
+            job: "j",
+            redactor: &redactor,
+        };
+        // The real runner's own output for a check past its limit is a timeout, for both check kinds.
+        for kind in [CheckKind::Command, CheckKind::Test] {
+            let mut spec = sh_spec("hung", "sleep 30");
+            spec.kind = kind;
+            let hung = run_check(&spec, &ctx(Duration::from_millis(300))).unwrap();
+            assert!(timed_out(&hung), "{hung:?}");
+        }
+        // A real failure, a pass, a skipped check and a start failure are not.
+        let long = Duration::from_secs(30);
+        let failed = run_check(&sh_spec("bad", "exit 3"), &ctx(long)).unwrap();
+        assert_eq!(failed.exit_code, Some(3));
+        assert!(!timed_out(&failed));
+        let passed = run_check(&sh_spec("good", "exit 0"), &ctx(long)).unwrap();
+        assert!(!timed_out(&passed));
+        assert!(!timed_out(&skipped_run(
+            &sh_spec("skip", "exit 0"),
+            deadline_note(long)
+        )));
+        let missing = CheckSpec {
+            name: "missing".into(),
+            run: vec!["/nonexistent/athena-timeout-check".into()],
+            kind: CheckKind::Command,
+            skip_when_only: None,
+        };
+        assert!(!timed_out(&run_check(&missing, &ctx(long)).unwrap()));
+        // A check stopped by the kill switch is not a timeout either.
+        let mut stopped = failed.clone();
+        stopped.exit_code = None;
+        stopped.note = Some("killed by the kill switch".into());
+        assert!(!timed_out(&stopped));
+        // The note carries the limit.
+        assert_eq!(
+            deadline_note(Duration::from_secs(900)),
+            "killed at the deadline of 900s"
+        );
     }
 
     #[test]
