@@ -7,6 +7,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- Structure pass R2: the send-back code (`unmet_criteria`, `left_to_athena`, `send_back_text` and their
+  helpers) and its `left_to_athena_tests` moved from `run/mod.rs` to `run/send_back.rs`, re-exported so
+  `crate::run` paths are unchanged. No behavior change.
+
 ### Fixed
 
 - The firstmate study page was rated 3 of 5 by a newcomer for four gaps: a missing finding id, an early
