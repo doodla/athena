@@ -9,6 +9,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `docs/design/async-drain.md` and proposed decision D145: a design for several jobs in flight with read-ahead,
+  early producer start in a per-job worktree bounded by disk, one ordered landing queue, background CI and
+  self-rebuild waits, and ordered records commits. It states that the build cache is off (D84), computes the disk
+  budget and a per-landed-job time target without it, and lists ten build jobs, the first of which measures cache
+  hits across worktrees. Design only; no code or config changes.
 - `docs/spec.toml` second layer (decision 3C, D144): sourced requirements for BRIEF.md "Project Olympus" sections 7
   to 10, the governing philosophy and the addenda of 2026-10-17 to 2026-10-24, plus three open questions that
   record conflicting words of the owner. `xtask/tests/spec.rs` reads through those addenda, stops before
