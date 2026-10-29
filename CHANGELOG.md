@@ -520,6 +520,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `crates/athena-core/src/run.rs` became `crates/athena-core/src/run/mod.rs` (structure pass job R1), so later
   jobs can add submodules beside it. The `run` module path is unchanged. The only text edits are the two test
   `include_str!` paths, which gain one `../`. No behavior change.
+- Structure pass job G8 (`docs/design/structure-pass.md`): the test modules of
+  `crates/athena-core/src/gh/mod.rs` move out of it. `mod tests` (with its nested `records_flow`) moves to
+  `gh/tests.rs`, and `mod after_merge_tests` moves to `gh/after_merge_tests.rs`. `gh/mod.rs` now holds only
+  `#[cfg(test)] mod tests;` and `#[cfg(test)] mod after_merge_tests;`; its `use` lines, `pub use`
+  re-exports and the `early_seam` test seam are unchanged. Both modules keep their names, so a test is still
+  `gh::tests::...`, `gh::tests::records_flow::...` or `gh::after_merge_tests::...`, and `use super::*` still
+  reaches the same names. The module bodies lose one level of indentation because they are now file-level
+  items; rustfmt also re-joined some lines that the lower indent let fit on one line, and no test text
+  changed otherwise. The test list from `cargo test --locked -p athena-core -- --list` is the same before and after
+  (75 tests under `gh::`). Caller check: `gh::tests` appears 11 times and `gh::after_merge_tests` 0 times
+  over `crates/` before and after; every hit is a string in `crates/athena-cli/src/display.rs` or in the
+  moved test text, and no code names either module. The two sibling links stay as G7 left them: `early`
+  uses `LandPr` and `work_branch` from `landing`, and `pages` uses `Poll` from `landing` while `landing`
+  uses `pages` items. No behavior change.
 - Structure pass job G7 (`docs/design/structure-pass.md`): the Landing row of
   `crates/athena-core/src/gh/mod.rs` moves unchanged into `crates/athena-core/src/gh/landing.rs`. The moved
   names are `work_branch`, `landed_commit`, `landed_commit_from_records`, `landed_commit_for`,
