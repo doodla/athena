@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261029-110953-bw7k",
+  "round": 2,
+  "at": "2026-10-29T11:17:56.643245469Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/src/display.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/src/display.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The timeout hold ignores pre-existing check failures, so it can turn a passing job into an environment stop that fails on every retry, or still reject a job because of a timeout.",
+      "evidence": "check_and_verify calls `mark_pre_existing` (verify.rs:140) before the planned hold. A pre-existing failure keeps `passed: false` and only gets a 'pre-existing' prefix on its note. `judge` still passes the job (verify.rs test near line 939: `judge_against(Some(&base), &now)` gives `Verdict::Pass`). The plan's `timed_out` matches when the note *contains* the deadline text, so it still matches after the prefix. Two results: (a) when the test check also timed out on the base (likely on the slow machine this job is about), a job that passes today becomes a Failed environment stop, and every retry fails the same way; (b) a pre-existing real failure next to a new timeout counts as a 'real failure', so the job goes on to rejection because of the timeout. Fix: Have `held_for_timeout` (or its caller) ignore checks that `verify::is_pre_existing` marks, using the same baseline `check_and_verify` already passes to `mark_pre_existing`. Hold only when at least one non-pre-existing check failed and every such check timed out. Add unit cases for: a pre-existing timeout alone (not held), and a pre-existing real failure plus a new timeout (held).",
+      "location": "Plan step 2 / Decision 2: `held_for_timeout` ('at least one check failed and every failed check timed out'); run/mod.rs check_and_verify lines 1432-1452",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The status durations count 0-second 'not run' test entries and duplicate code_health::suite_seconds.",
+      "evidence": "Skipped checks (`skipped_run`, checks.rs:88) and nested-run placeholders (run/mod.rs:1414) store a `test` CheckRun with duration 0 and source 'not run'. Counting them pulls the median down and can hide a near-limit trend. code_health.rs:427 `suite_seconds` already pulls the latest `test` duration from the same records, so the plan adds a second extractor for the same data. Fix: Count only runs that actually ran: skip entries whose duration source is 'not run', or that passed with no exit code. Share one extraction helper with `code_health::suite_seconds`. Add a seeded skipped/0-second job to the status test and show it is excluded.",
+      "location": "Plan step 7: `check_durations` over `verification.checks` named `test`",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The job-level demonstration for the mixed timeout + real failure case is conditional; state the function-level decision outright.",
+      "evidence": "The criterion asks for a job-level run where one check timed out and another failed for real, and the plan makes that test conditional on `Docs` holding two checks. The plan's own reasoning holds: `run_local` stops at the first failure, so a mixed set comes only from reused records, and the unit test on `held_for_timeout` (the function `check_and_verify` calls) is real production code. Fix: State the decision outright: the mixed case is shown at `held_for_timeout`, because `run_local` stops at the first failure. Drop the conditional job test, or add it only if the harness has a two-check capability. Include the pre-existing cases from the major finding in that unit test.",
+      "location": "Demonstration for criterion 3 (mixed timeout + real failure)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the snapshot code: checks.rs run_check (deadline note at line 200, exit_code None on kill), run/mod.rs check_and_verify (low-disk early return at 1321-1335, mark_pre_existing at 1452, SnapExec::exec at 969), verify.rs (mark_pre_existing, judge), display.rs status (957) and code_health.rs suite_seconds. The plan does all three parts. It fixes the classification where the fault starts, with one shared note builder. It reuses the existing Failed + environment-reason path, so resume works unchanged, and its seam swaps only the process run, with a real-kill test kept in checks.rs. The display.rs edit is justified: display::status is the only code that prints `athena status`. Athena has already flagged that file. One soundness gap needs a revision. The hold ignores pre-existing marks, so a test check that also timed out on the base turns a job that passes today into an environment stop that fails the same way on every retry. A pre-existing real failure next to a new timeout still leads to rejection. The fix is easy: leave out checks that `is_pre_existing` marks. Two minor points: the status durations should skip 0-second 'not run' entries and share extraction with code_health::suite_seconds, and the mixed-case demonstration should be stated as function-level outright rather than made conditional."
+}

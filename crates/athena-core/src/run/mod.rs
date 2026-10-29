@@ -966,20 +966,63 @@ struct SnapExec<'a> {
     cleanup: std::cell::RefCell<Vec<String>>,
 }
 
+/// The seam tests use to give a routed check a ready-made result in place of a process. It is read first in
+/// `SnapExec::exec`, so classification, the closing reason and the job state all stay in production code. It
+/// is per thread, so parallel tests do not see each other's results.
+#[cfg(test)]
+pub(crate) mod check_seam {
+    use crate::capability::CheckSpec;
+    use athena_data::records::CheckRun;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// Builds the result of one check from its spec.
+    pub type Fake = Rc<dyn Fn(&CheckSpec) -> CheckRun>;
+
+    thread_local! {
+        static SEAM: RefCell<Option<Fake>> = const { RefCell::new(None) };
+    }
+
+    /// Clears the seam when dropped.
+    pub struct Guard;
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            SEAM.with(|s| *s.borrow_mut() = None);
+        }
+    }
+
+    pub fn install(fake: Fake) -> Guard {
+        SEAM.with(|s| *s.borrow_mut() = Some(fake));
+        Guard
+    }
+
+    pub fn current() -> Option<Fake> {
+        SEAM.with(|s| s.borrow().clone())
+    }
+}
+
 impl crate::routing::Exec for SnapExec<'_> {
     fn exec(&self, spec: &crate::capability::CheckSpec) -> Result<CheckRun> {
         self.athena.refuse_if_stopped()?;
-        let run = run_check(
-            spec,
-            &CheckContext {
-                dir: self.snapshot.dir(),
-                env: self.env,
-                timeout: self.timeout,
-                registry: self.registry,
-                job: self.job,
-                redactor: self.redactor,
-            },
-        )?;
+        #[cfg(test)]
+        let seamed = check_seam::current().map(|fake| fake(spec));
+        #[cfg(not(test))]
+        let seamed: Option<CheckRun> = None;
+        let run = match seamed {
+            Some(run) => run,
+            None => run_check(
+                spec,
+                &CheckContext {
+                    dir: self.snapshot.dir(),
+                    env: self.env,
+                    timeout: self.timeout,
+                    registry: self.registry,
+                    job: self.job,
+                    redactor: self.redactor,
+                },
+            )?,
+        };
         self.cleanup
             .borrow_mut()
             .extend(self.snapshot.restore_to(self.prepared)?);
@@ -1450,6 +1493,25 @@ impl Athena {
                 check_started.elapsed().as_secs_f64()
             ));
             mark_pre_existing(&mut check_runs, usable_baseline);
+            // A check killed at its deadline, with no new failure of any other kind, says nothing about the
+            // work: a loaded machine does the same. The job closes as an environment stop that `athena
+            // retry` resumes, and the verifier is not started. A real failure in another check still goes
+            // on to be judged and rejected.
+            if let Some(slow) = crate::checks::held_for_timeout(&check_runs, usable_baseline) {
+                let took = slow.duration.value().unwrap_or(0.0).round() as u64;
+                let reason = crate::disk::check_timeout_reason(
+                    &slow.name,
+                    took,
+                    jc.config.budget.check_timeout_s,
+                    &id,
+                );
+                let changed_paths = std::mem::take(&mut closing.happened.changed_paths);
+                closing.happened = self.failure(ctx, &reason);
+                closing.happened.changed_paths = changed_paths;
+                closing.happened.verification_passed = None;
+                let _ = crate::pin::remove_tree(&verify_dir);
+                return Ok(closing);
+            }
             // Every check passed: the producer's build directory is idle, and it is the largest thing on the
             // disk, so it goes now, before the gate that runs before the verifier. When a check failed it
             // stays, since the work may be sent back to the producer.
@@ -2962,6 +3024,113 @@ mod produce_and_verify_order_tests {
                 assert_eq!(done.state, OutcomeState::Rejected, "{}", done.reason);
             }
         }
+    }
+
+    /// A check result as a run killed at its deadline leaves it: no exit code, the deadline note, not passed.
+    fn killed_at_the_deadline(spec: &CheckSpec, took_s: f64, limit_s: u64) -> CheckRun {
+        CheckRun {
+            name: spec.name.clone(),
+            command: spec.run.clone(),
+            exit_code: None,
+            passed: false,
+            tests_ran: None,
+            duration: athena_data::Quantity::measured(
+                took_s,
+                athena_data::Unit::Seconds,
+                "athena monotonic clock",
+            ),
+            output_tail: String::new(),
+            note: Some(crate::checks::deadline_note(limit_s)),
+        }
+    }
+
+    #[test]
+    fn a_check_killed_at_its_deadline_closes_as_an_environment_stop() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let counts = Arc::new(Counts::default());
+        let athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            counting(counts.clone(), None),
+        );
+        // The limit is the one athena.toml sets; the run took a little longer than it.
+        let limit = JobConfig::at(&athena.git, "HEAD")
+            .unwrap()
+            .config
+            .budget
+            .check_timeout_s;
+        assert_eq!(limit, 1800);
+        let _seam = check_seam::install(std::rc::Rc::new(move |spec: &CheckSpec| {
+            killed_at_the_deadline(spec, limit as f64 + 5.2, limit)
+        }));
+        let proposal = athena.ask("describe the demo", &Quiet).unwrap();
+        let ui = Lines::default();
+        let done = finished(
+            athena
+                .go(proposal.job.as_str(), AcceptedBy::User, &ui)
+                .unwrap(),
+        );
+        assert_eq!(done.state, OutcomeState::Failed, "{}", done.reason);
+        assert!(
+            crate::disk::is_environment_reason(&done.reason),
+            "{}",
+            done.reason
+        );
+        assert!(
+            crate::disk::resumable_stop(
+                crate::store::JobState::Closed(done.state),
+                Some(&done.reason)
+            ),
+            "{}",
+            done.reason
+        );
+        assert!(
+            done.reason.contains("1805s of 1800s limit"),
+            "{}",
+            done.reason
+        );
+        let said = ui.0.lock().unwrap().clone();
+        assert!(
+            said.iter()
+                .any(|l| l.starts_with("failed     ") && l.contains("1805s of 1800s limit")),
+            "{said:#?}"
+        );
+        // The verifier never ran: the stop came before it.
+        let (planner, producer, _, verifier) = counts.all();
+        assert_eq!((planner, producer, verifier), (0, 1, 0));
+    }
+
+    #[test]
+    fn a_real_nonzero_check_failure_is_still_rejected() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let counts = Arc::new(Counts::default());
+        // No seam: the check is a real process that exits 1 once the producer edits the README.
+        let athena = athena_with(
+            &repo,
+            &state,
+            FAILS_ON_EDIT,
+            crate::test_support::plenty_of_space,
+            counting(counts.clone(), None),
+        );
+        let proposal = athena.ask("describe the demo", &Quiet).unwrap();
+        let ui = Lines::default();
+        let done = finished(
+            athena
+                .go(proposal.job.as_str(), AcceptedBy::User, &ui)
+                .unwrap(),
+        );
+        assert_eq!(done.state, OutcomeState::Rejected, "{}", done.reason);
+        assert!(
+            !crate::disk::is_environment_reason(&done.reason),
+            "{}",
+            done.reason
+        );
+        // The verifier ran: a failed check is judged, not held.
+        assert_eq!(counts.all().3, 1);
     }
 
     #[test]
