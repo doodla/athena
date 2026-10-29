@@ -1,0 +1,154 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261028-082419-d9y7",
+  "n": 1,
+  "at": "2026-10-29T18:31:24.505235962Z",
+  "invocation_seq": 1,
+  "base_commit": "553b05559381696133a055043cd1c9c5972ac426",
+  "config_sha256": "4686d6918e8a389a515edf47cdcb596e2ae4a147d9ffda0816f171979db719d1",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Make Athena's deterministic plan findings not count as planning rounds",
+  "summary": "Findings from Athena's own plan rules (plan_findings, no critic call) go back to the planner for an immediate revision that does not use a planning round, up to two such passes per round; only critic reviews count toward max_rounds. Audience: maintainers and the job pipeline, whose hard jobs lose critic rounds to mechanical findings.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "Change and tests are Rust in athena-core."
+    },
+    {
+      "id": "tested",
+      "how": "New tests plus fmt, clippy -D warnings and cargo test criteria."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check the planner re-invocation and critic round numbering by test, not wiring."
+    },
+    {
+      "id": "verified",
+      "how": "Verifier runs cargo test, clippy and fmt --check."
+    },
+    {
+      "id": "root-cause",
+      "how": "Fixes the round accounting rather than raising max_rounds."
+    },
+    {
+      "id": "small",
+      "how": "One focused change in the planning loop."
+    },
+    {
+      "id": "mechanism",
+      "how": "The two-pass cap is enforced in code and tested."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-core/src/run/planning.rs (plan_round loops rounds 1..=max_rounds; planning_round runs the planner, then plan_findings, and on a Blocker/Major finding calls end_round with a Revise critique and no critic call, consuming the round) and grep of crates/athena-core/src/run/mod.rs (existing planning tests, plan_verdict at ~210, plan_round call at ~892). The loop change lands in planning.rs though the request names only mod.rs; tests go in mod.rs.",
+    "Plan records and critiques are keyed by job and round; the mechanical pass must not collide with the critic's round numbering (e.g. mechanical plans are not filed as records, or are filed without a critique, but the final stop must still record the finding). The producer must check how closing.plans/critiques are validated and persisted; records validation allow-list is unchanged because no new record or data file is added.",
+    "The two-pass cap applies per critic round (each critic round gets up to two mechanical passes); a plan still breaking a rule after two passes stops planning with that finding. If this should be a job-wide cap instead, that is a small change.",
+    "Mechanical passes need planner budget; the existing check_budget before each planner call applies, and a budget stop ends planning as today.",
+    "No new refusal reading rule is added to readings; this changes planning flow, so no refusal-rate criterion applies.",
+    "Governance files (athena.toml, defaults.toml, workflows) are not changed; max_rounds config semantics stay the same."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new test in crates/athena-core/src/run/mod.rs uses a fake planner whose first plan breaks a deterministic plan rule (e.g. missing fails_without); run `cargo test -p athena-core`: the planner is invoked again with the finding, the critic is first called on the fixed plan labelled round 1, and no critic call precedes it.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test with max_rounds = 3 shows that after one mechanical revision the critic can still review in rounds 1, 2 and 3 (three critic calls) before the cap stops the job; run `cargo test -p athena-core`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test shows a plan that still breaks a rule after two mechanical passes stops planning (job failed with the planning-stopped prefix) with that finding in the reason, and the critic is never called; run `cargo test -p athena-core`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The planning loop in crates/athena-core/src/run/planning.rs no longer ends a round on Blocker/Major plan_findings by consuming a round; the cap of two mechanical passes is a named constant or documented, and the plan_round doc comment states that only critic reviews count toward max_rounds.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has an entry describing that deterministic plan-rule findings are revised without using a planning round or a critic call, at most twice.",
+      "kind": "content"
+    },
+    {
+      "text": "`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` all pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Existing planning tests (soundness findings, revise in last round, resume with seed revision) still pass unchanged in behavior; run `cargo test -p athena-core`.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/run/planning.rs",
+      "action": "modify",
+      "p": 0.93
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "docs/design/job-planning.md",
+      "action": "modify",
+      "p": 0.25
+    }
+  ],
+  "out_of_scope": [
+    "Changing max_rounds defaults or [job_plan] values in athena.toml",
+    "Changing what the plan rules or the critic flag",
+    "Changing the planner or critic prompts"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.72,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.7,
+        "p50": 1.5,
+        "p90": 3.5
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 1900.0,
+        "p90": 3800.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7210810810810812,
+      "p_verification_passes": 0.6733333333333333,
+      "p_user_intervenes": 0.07654320987654321,
+      "cost_usd": {
+        "p10": 0.5423789983441935,
+        "p50": 1.1917796999999997,
+        "p90": 2.988315791802839
+      },
+      "wall_time_s": {
+        "p10": 536.6753604381123,
+        "p50": 1672.763914056,
+        "p90": 3198.9363075002575
+      }
+    }
+  },
+  "departures": "Hard job touching the planning pipeline with round accounting and record keying, so higher cost and time than the reference.",
+  "urgent_reason": "Cuts wasted time: mechanical plan findings burn planning rounds and stop hard jobs at the cap, causing failed attempts.",
+  "hard_reason": "Changes the run pipeline's planning loop (how a job's plan is revised, reviewed and stopped), so a mistake is costly and hard to see.",
+  "producer_effort": "high"
+}
