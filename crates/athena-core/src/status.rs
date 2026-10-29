@@ -7,7 +7,7 @@ use crate::store::{JobRecords, JobState, Records};
 use anyhow::Result;
 use athena_data::records::{
     Build, Critique, CritiqueVerdict, InterventionSource, Invocation, JobPlan, OutcomeState,
-    Reading, Role, text_cites_job,
+    Reading, Role, WorkPhase, text_cites_job,
 };
 use athena_gate::invariant::{BOOTSTRAP_OUTCOME, BootstrapRange, bootstrap_range};
 use athena_git::Git;
@@ -642,9 +642,9 @@ pub const THROUGHPUT_WINDOW: usize = 20;
 
 /// Minutes a job spent in each stage. Reading is the reader's invocations; planning the planner's and the
 /// critic's; producer and verifier their own. Checks is the sum of the durations Athena measured for the
-/// job's checks. Landing and rebuild is one stage because no record separates the rebuild: it is the time
-/// from the end of the job's last invocation (the verifier, which runs after the checks) to the landing
-/// outcome, and never below zero.
+/// job's checks. Landing and rebuild is one stage because no record separates the CI wait, the push or the
+/// rebuild: it is the time from the end of the job's last invocation (the verifier, which runs after the
+/// checks) to the latest record that marks the landing (see [`landing_end`]), and never below zero.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
 pub struct StageMinutes {
     pub reading: f64,
@@ -704,11 +704,12 @@ pub struct Throughput {
     pub median_minutes: f64,
     /// The median of each stage over the same jobs.
     pub median_stages: StageMinutes,
-    /// Minutes between jobs: the gaps between the merged working spans of all request jobs.
+    /// Minutes between jobs that no job spent working: the gaps between the merged busy intervals (see
+    /// [`busy_intervals`]) of all request jobs. A job left open for days adds only the time it was busy.
     pub idle_minutes: f64,
     /// Request jobs that did not land but did work: closed rejected, failed or abandoned, or stopped in planning.
     pub unlanded_jobs: usize,
-    /// Their working minutes, from the first invocation to the closing record or the last invocation.
+    /// Their time spent: invocation wall times plus check durations, not the span from first call to close.
     pub unlanded_minutes: f64,
 }
 
@@ -761,13 +762,70 @@ fn check_minutes(job: &JobRecords) -> f64 {
     })
 }
 
-/// When the job began working (its first invocation) and when it stopped (its closing record, or the end of
-/// its last invocation if that is later or there is no closing record). None for a job that never ran a model.
-fn working_span(job: &JobRecords) -> Option<(jiff::Timestamp, jiff::Timestamp)> {
-    let first = job.invocations.iter().map(|i| i.started_at).min()?;
-    let last = job.invocations.iter().map(|i| i.ended_at).max()?;
-    let end = closing_outcome(job).map_or(last, |o| o.at.max(last));
-    Some((first, end))
+/// When a landed job's landing ended: the later of its closing outcome and the newest landing-phase host
+/// refusal recorded for it. The CI wait, the push and the rebuild have no record of their own (the wait is
+/// only printed, and the landing records are not part of the job records), so only these two mark their end.
+fn landing_end(records: &Records, job: &JobRecords) -> Option<jiff::Timestamp> {
+    let closed = closing_outcome(job)?.at;
+    let refused = records
+        .host_errors
+        .iter()
+        .filter(|h| h.phase == WorkPhase::Landing && Some(&h.job) == job.id.as_ref())
+        .map(|h| h.at)
+        .max();
+    Some(refused.map_or(closed, |r| r.max(closed)))
+}
+
+/// The end of the job's last invocation, or None for a job that never ran a model.
+fn last_invocation_end(job: &JobRecords) -> Option<jiff::Timestamp> {
+    job.invocations.iter().map(|i| i.ended_at).max()
+}
+
+/// The minutes the job spent working: the wall times of its invocations plus the durations of its checks.
+fn time_spent(job: &JobRecords) -> f64 {
+    let invocations: f64 = job
+        .invocations
+        .iter()
+        .map(|i| minutes_between(i.started_at, i.ended_at).max(0.0))
+        .sum();
+    crate::store::positive_zero(invocations + check_minutes(job))
+}
+
+/// The intervals in which the job was busy: each invocation, its checks (placed to end where the first
+/// verifier began, or to start where the last invocation ended when there is no verifier), and, for a landed
+/// job, the landing from the last invocation's end to [`landing_end`]. The days a job sat open are in none.
+fn busy_intervals(records: &Records, job: &JobRecords) -> Vec<(jiff::Timestamp, jiff::Timestamp)> {
+    let mut intervals: Vec<_> = job
+        .invocations
+        .iter()
+        .map(|i| (i.started_at, i.ended_at.max(i.started_at)))
+        .collect();
+    let Some(last_end) = last_invocation_end(job) else {
+        return intervals;
+    };
+    let checks = jiff::SignedDuration::from_secs_f64(check_minutes(job) * 60.0);
+    if !checks.is_zero() {
+        let verifier_start = job
+            .invocations
+            .iter()
+            .filter(|i| i.role == Role::Verifier)
+            .map(|i| i.started_at)
+            .min();
+        if let Some(start) = verifier_start {
+            if let Ok(from) = start.checked_sub(checks) {
+                intervals.push((from, start));
+            }
+        } else if let Ok(to) = last_end.checked_add(checks) {
+            intervals.push((last_end, to));
+        }
+    }
+    if matches!(job.state(), JobState::Closed(OutcomeState::Landed))
+        && let Some(end) = landing_end(records, job)
+        && end > last_end
+    {
+        intervals.push((last_end, end));
+    }
+    intervals
 }
 
 /// The landed jobs whose stages were measured, oldest landing first (ties by id). A landed job that ran no
@@ -779,7 +837,8 @@ pub fn landed_jobs(records: &Records) -> Vec<LandedJob> {
         .filter(|j| matches!(j.state(), JobState::Closed(OutcomeState::Landed)))
         .filter_map(|j| {
             let landed_at = closing_outcome(j)?.at;
-            let last_end = j.invocations.iter().map(|i| i.ended_at).max()?;
+            let last_end = last_invocation_end(j)?;
+            let landing_end = landing_end(records, j)?;
             let checks = check_minutes(j);
             Some(LandedJob {
                 id: j.id().as_str().to_string(),
@@ -790,7 +849,7 @@ pub fn landed_jobs(records: &Records) -> Vec<LandedJob> {
                     producer: role_minutes(j, &[Role::Producer]),
                     checks,
                     verifier: role_minutes(j, &[Role::Verifier]),
-                    landing_and_rebuild: minutes_between(last_end, landed_at).max(0.0),
+                    landing_and_rebuild: minutes_between(last_end, landing_end).max(0.0),
                 },
             })
         })
@@ -838,16 +897,16 @@ impl Throughput {
         let mut unlanded_jobs = 0;
         let mut unlanded_minutes = 0.0;
         for job in records.request_jobs() {
-            let Some(span) = working_span(job) else {
+            if job.invocations.is_empty() {
                 continue;
-            };
-            spans.push(span);
+            }
+            spans.extend(busy_intervals(records, job));
             let state = job.state();
             let stopped = plan_state(job).is_some_and(|s| !s.accepted);
             let failed = matches!(state, JobState::Closed(s) if s != OutcomeState::Landed);
             if failed || (stopped && state != JobState::Closed(OutcomeState::Landed)) {
                 unlanded_jobs += 1;
-                unlanded_minutes += minutes_between(span.0, span.1);
+                unlanded_minutes += time_spent(job);
             }
         }
         spans.sort();
@@ -894,7 +953,7 @@ impl Throughput {
             .collect::<Vec<_>>()
             .join(" · ");
         format!(
-            "throughput {} landed ({days})\n           median per landed job over the last {} measured: {:.1} min ({stages})\n           idle between jobs {:.1} min · did not land: {} job(s), {:.1} min",
+            "throughput {} landed ({days})\n           basis: landed per UTC day, counted from the landing outcome records\n           median per landed job over the last {} measured: {:.1} min ({stages})\n           basis: stages are minutes of the job's invocation records by role, plus the durations measured in its verification record; landing and rebuild runs from the end of the last invocation to the landing outcome record or the newest landing-phase host refusal recorded for the job, because the CI wait and the rebuild have no record of their own\n           idle between jobs {:.1} min\n           basis: gaps between the intervals in which any job was busy (invocation records, check durations, landing), not the days a job sat open\n           did not land: {} job(s), {:.1} min\n           basis: time spent by jobs closed without landing or stopped in planning: invocation wall times plus check durations, not the span from first call to close",
             self.landed_total,
             self.window_jobs,
             self.median_minutes,
@@ -2987,7 +3046,7 @@ pub(crate) mod planning_cost_tests {
             minutes(3.0, 0.0, 15.0, 5.0, 5.0, 4.0),
             landed,
         ));
-        // Two jobs that did not land: 30 minutes and 10 minutes of work.
+        // Two jobs that did not land: 22 minutes and 1 minute spent (the minutes before the closing record are not).
         all.extend(timed_job(
             "20261029-030000-aaad",
             t("2026-10-29T03:00:00Z"),
@@ -3024,21 +3083,128 @@ pub(crate) mod planning_cost_tests {
             minutes(3.0, 0.0, 15.0, 5.0, 6.0, 4.0)
         );
         // Gaps: A ends 23:25, B starts 00:00 (35); B and C overlap (0); C ends 01:02, D starts 03:00 (118);
-        // D ends 03:30, the rejected job starts 04:00 (30).
-        assert_eq!(throughput.idle_minutes, 183.0);
+        // D's last invocation ends 03:22, the rejected job starts 04:00 (38).
+        assert_eq!(throughput.idle_minutes, 35.0 + 118.0 + 38.0);
         assert_eq!(throughput.unlanded_jobs, 2);
-        assert_eq!(throughput.unlanded_minutes, 30.0 + 10.0);
+        assert_eq!(throughput.unlanded_minutes, 22.0 + 1.0);
 
         let text = throughput.text();
         for expected in [
             "3 landed (2026-10-28 1 · 2026-10-29 2)",
             "median per landed job over the last 3 measured: 32.0 min",
             "reading 3.0 · planning 0.0 · producer 15.0 · checks 5.0 · verifier 6.0 · landing and rebuild 4.0",
-            "idle between jobs 183.0 min",
-            "did not land: 2 job(s), 40.0 min",
+            "idle between jobs 191.0 min",
+            "did not land: 2 job(s), 23.0 min",
         ] {
             assert!(text.contains(expected), "{expected:?} not in:\n{text}");
         }
+    }
+
+    fn landing_refusal(job: &str, at: jiff::Timestamp) -> athena_data::records::HostError {
+        use athena_data::records::{HostError, HostOperation, MessageClass};
+        HostError {
+            id: athena_data::RecordId::generate(at),
+            at,
+            status_code: Some(405),
+            operation: HostOperation::Merge,
+            job: id(job),
+            phase: WorkPhase::Landing,
+            message_class: MessageClass::of_status(Some(405)),
+            derived: false,
+            source_intervention: None,
+        }
+    }
+
+    #[test]
+    fn the_landing_stage_covers_the_wait_and_rebuild_recorded_after_the_outcome() {
+        let t = |s: &str| -> jiff::Timestamp { s.parse().unwrap() };
+        let job = "20261029-100000-bbbb";
+        // The outcome is written 0.1 minute after the verifier; the landing went on for 9 minutes more.
+        let mut records = loaded(timed_job(
+            job,
+            t("2026-10-29T10:00:00Z"),
+            minutes(1.0, 0.0, 5.0, 0.0, 2.0, 0.1),
+            OutcomeState::Landed,
+        ));
+        // Verifier ends 10:08; the last landing record is at 10:17.
+        records
+            .host_errors
+            .push(landing_refusal(job, t("2026-10-29T10:17:00Z")));
+        let landed = landed_jobs(&records);
+        assert_eq!(landed.len(), 1);
+        assert!(
+            close(landed[0].stages.landing_and_rebuild, 9.0),
+            "{:?}",
+            landed[0].stages
+        );
+        // Without that record the stage is only verifier end to outcome.
+        records.host_errors.clear();
+        let landed = landed_jobs(&records);
+        assert!(close(landed[0].stages.landing_and_rebuild, 0.1));
+    }
+
+    #[test]
+    fn a_job_run_for_twenty_minutes_and_closed_days_later_spent_twenty_minutes() {
+        let t = |s: &str| -> jiff::Timestamp { s.parse().unwrap() };
+        let mut all = timed_job(
+            "20261029-100000-cccc",
+            t("2026-10-29T10:00:00Z"),
+            minutes(0.0, 0.0, 10.0, 0.0, 0.0, 0.0),
+            OutcomeState::Landed,
+        );
+        // Dispatched, run for 20 minutes, closed three days later.
+        all.extend(timed_job(
+            "20261029-110000-cccd",
+            t("2026-10-29T11:00:00Z"),
+            minutes(0.0, 0.0, 20.0, 0.0, 0.0, 3.0 * 24.0 * 60.0),
+            OutcomeState::Abandoned,
+        ));
+        // A landed job on the day the abandoned one closed, so a gap follows it.
+        all.extend(timed_job(
+            "20261101-120000-ccce",
+            t("2026-11-01T12:00:00Z"),
+            minutes(0.0, 0.0, 10.0, 0.0, 0.0, 0.0),
+            OutcomeState::Landed,
+        ));
+        let throughput = Throughput::compute(&loaded(all)).unwrap();
+        assert_eq!(throughput.unlanded_jobs, 1);
+        assert_eq!(throughput.unlanded_minutes, 20.0);
+        // Idle: 10:10 to 11:00 (50), then 11:20 on the 29th to 12:00 on 1 Nov (3 days 40 min = 4360).
+        // Measured from the closing record, that gap would be 40 minutes: the days the job stayed open
+        // do not hide it.
+        assert_eq!(throughput.idle_minutes, 50.0 + 4360.0);
+    }
+
+    #[test]
+    fn every_throughput_figure_prints_the_records_it_was_measured_from() {
+        let t = |s: &str| -> jiff::Timestamp { s.parse().unwrap() };
+        let throughput = Throughput::compute(&loaded(timed_job(
+            "20261029-100000-dddd",
+            t("2026-10-29T10:00:00Z"),
+            minutes(1.0, 0.0, 5.0, 0.0, 2.0, 1.0),
+            OutcomeState::Landed,
+        )))
+        .unwrap();
+        let text = throughput.text();
+        let lines: Vec<&str> = text.lines().collect();
+        for (figure, basis) in [
+            ("throughput 1 landed", "landing outcome records"),
+            ("median per landed job", "invocation records by role"),
+            ("idle between jobs", "intervals in which any job was busy"),
+            ("did not land", "invocation wall times plus check durations"),
+        ] {
+            let at = lines
+                .iter()
+                .position(|l| l.contains(figure))
+                .unwrap_or_else(|| panic!("{figure:?} not in:\n{text}"));
+            assert!(
+                lines
+                    .get(at + 1)
+                    .is_some_and(|l| l.contains("basis:") && l.contains(basis)),
+                "{figure:?} has no basis mentioning {basis:?} in:\n{text}"
+            );
+        }
+        assert!(text.contains("landing-phase host refusal"), "{text}");
     }
 
     #[test]

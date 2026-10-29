@@ -1505,7 +1505,9 @@ impl Athena {
             format!(
                 "# Throughput\n\nThis review ran because of: {}.\n\n```\n{}\n```\n\nThe stages are minutes of the model \
                  invocations of that role, minutes the checks took, and, for landing and rebuild, the time from the \
-                 end of the last invocation to the landing record.\n",
+                 end of the last invocation to the landing record or the newest landing-phase host refusal recorded \
+                 for the job. Idle and did-not-land minutes are time spent (invocation wall times and check \
+                 durations), not the span from first call to close. Each figure has a basis line.\n",
                 trigger.as_str(),
                 measured.text()
             ),

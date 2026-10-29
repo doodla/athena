@@ -160,6 +160,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- The throughput section of `athena status` measured two figures wrongly. Landing and rebuild now runs from
+  the end of the last invocation to the later of the landing outcome and the newest landing-phase host
+  refusal recorded for the job, instead of only to the outcome (which is written within seconds of the
+  verifier, so the CI wait and rebuild were missed; they have no record of their own). Did not land is the
+  time spent (invocation wall times plus check durations), not the span from first call to close, which
+  counted days a job sat open. Idle between jobs is the gaps between busy intervals (invocations, checks,
+  landing) in the same way. Each figure now prints a `basis:` line naming the records it was measured from.
 - The firstmate study page was rated 3 of 5 by a newcomer for four gaps: a missing finding id, an early
   study-id paragraph, no short definition of firstmate before its terms, and no install command in Next
   steps. The base already renders all four fixes (consecutive finding ids f1 to f3, the study id under
