@@ -257,3 +257,58 @@ the line), any request that quotes it, and any re-ask of the same request text (
 `introspect::normalise`) whose earlier twin was not accepted. The guard's thresholds are unchanged. A re-ask
 after the earlier request landed starts a new line. The chain link `previous_job` of `athena.candidate/2` is not
 used: it names the latest job landed in the base's history, which every job on that base shares.
+
+## 12. Throughput review: what the pipeline waits on
+
+Built in `crates/athena-core/src/status.rs` (`Throughput`) and `crates/athena-core/src/hestia.rs`
+(`Athena::throughput_review`, `throughput_due`, `priority_for_minutes`, `throughput_followups`). Enforced by code.
+
+**Why.** The error review covers failures, the code-health review covers file and function size and structure.
+Nothing measured speed or asked what change to the shape of the pipeline would remove the biggest wait. The
+velocity analysis and the asynchronous-drain idea (`async-drain.md`) came from people. This review lets Athena
+find such changes itself.
+
+**Measurement** (`athena status`, section "throughput"). Computed from the job records alone, with no git history:
+landed jobs per UTC day; the median minutes per landed job with a median per stage over the newest 20 landed jobs
+(`THROUGHPUT_WINDOW`); idle time between jobs; and the minutes spent on jobs that did not land. A stage is
+reading (reader invocations), planning (planner and critic), producer, checks (the durations Athena measured for
+the job's checks), verifier, and landing and rebuild. Landing and rebuild is one stage, because no record
+separates the rebuild: it is the time from the end of the job's last invocation to the landing outcome. Idle time
+is the sum of the gaps between the merged working spans of all request jobs, so overlapping jobs leave none. Time
+on jobs that did not land counts each closed, non-landed job, and each job stopped in planning, from its first
+invocation to its closing record.
+
+**Cadence.** `Athena::review_passes` runs the review at the start of every drain and in each sweep. It is due
+**every 10 landings** (`code_health::REVIEW_EVERY`, the cadence of the design review) after the previous
+throughput review, or the first 10 landings when there is none, **or when the median minutes per landed job is
+worse by more than 20%** than the median the previous review recorded (`WORSEN_RATIO`), once at least one job
+has landed since. Exactly 20% worse is not more than 20%. When it is not due, nothing runs and no model is called.
+
+**The question.** A strong model (the verifier's model, as for the steward, the audience and the auditor) is
+given the status section (`THROUGHPUT.md`) and a copy of `docs/design/` in a read-only workspace. It names the
+biggest bottleneck, the architectural change that removes it (a change to the shape of the pipeline, not a tweak
+inside one stage), and the minutes per landed job it expects the change to save.
+
+**Request and priority.** The top proposal is queued as a design request through the shared steward request
+builder (`steward::StewardRequest`), so `athena plan` accepts it. Its title starts `Throughput design: `, its body
+carries the bottleneck, the proposed change, the predicted saving and the review's id, and it asks that a change
+which implements the design cites that id. The priority follows the predicted saving, speed first: at least 10
+minutes per landed job is urgent, at least 5 high, at least 2 normal, and less is low
+(`priority_for_minutes`). While a request with that title is open (not closed), a later review queues no second
+one and does not ask the model; it still writes its record so the cadence moves on.
+
+**Prediction record.** Each review is an `athena.throughput-review/1` record at
+`records/throughput-reviews/<YYYY-MM>/<id>.json`. It holds the landings counted and the window median (the
+baseline the next review compares with), the trigger (`cadence` or `worsened`), the proposal (bottleneck, stage,
+change, expected minutes saved, priority, request job) and the follow-ups it closes. A model that fails or answers
+badly still leaves a record, with no proposal and a note. The model's invocation is recorded either way.
+
+**Prediction against measurement.** A change is cited when a landed request job, other than the design request,
+has the review's id in its text and landed after the review. When one has landed, the next review records a
+follow-up for it once: the predicted minutes saved, the baseline median, the median minutes per landed job over
+the (at most 10) newest jobs that landed after the change, and the difference, which is the measured saving. The
+review prints a line for each follow-up. A change that has not landed, or that no job has followed, records none.
+
+**Not covered.** The review does not change the error review or the code-health review, and it does not
+implement any change. A crash between queuing the request and committing the review record leaves an open
+request with no record: the open request still prevents a second one, and that prediction gets no follow-up.

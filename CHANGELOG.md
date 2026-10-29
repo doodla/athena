@@ -9,6 +9,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Throughput section in `athena status` and a throughput review (`docs/design/hestia.md` section 12). The section
+  is computed from the job records: landed jobs per UTC day, median minutes per landed job over the newest 20 with
+  a median per stage (reading, planning, producer, checks, verifier, landing and rebuild), idle time between jobs,
+  and the minutes spent on jobs that did not land. The review runs from the drain-start and sweep review passes
+  every 10 landings, or when the median minutes per landed job is more than 20% worse than at the previous
+  review. A strong model is given the section and `docs/design` and names the biggest bottleneck, the
+  architectural change that removes it and the minutes per landed job it expects to save. The top proposal is
+  queued as one design request through the steward request builder (none while one is open), at a priority set by
+  the expected minutes saved. The prediction is kept in a new record, `athena.throughput-review/1`, and a later
+  review records the minutes measured after a change that cites the review beside the prediction.
 - `docs/design/async-drain.md` and proposed decision D145: a design for several jobs in flight with read-ahead,
   early producer start in a per-job worktree bounded by disk, one ordered landing queue, background CI and
   self-rebuild waits, and ordered records commits. It states that the build cache is off (D84), computes the disk

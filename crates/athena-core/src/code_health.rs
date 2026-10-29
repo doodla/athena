@@ -42,7 +42,9 @@ pub const BUSY_FILE_LINES: u32 = 1500;
 pub const BUSY_WEEKLY_LANDINGS: u32 = 5;
 /// The window of the churn count, in days.
 pub const WINDOW_DAYS: i64 = 7;
-/// Landings after a baseline that make a design review due.
+/// Landings after a baseline that make a design review due. The throughput review
+/// (`crate::hestia::throughput_due`) uses the same number as its cadence: it is due every `REVIEW_EVERY`
+/// landings after the previous throughput review.
 pub const REVIEW_EVERY: u32 = 10;
 /// How many files the status table shows besides those that are over.
 pub const SHOWN_FILES: usize = 12;

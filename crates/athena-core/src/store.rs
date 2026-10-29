@@ -249,6 +249,8 @@ pub struct Records {
     pub auditor_runs: Vec<Invocation>,
     /// Every code-health baseline (`crate::code_health`), oldest first; the last is the latest.
     pub code_health_baselines: Vec<athena_data::records::CodeHealthBaseline>,
+    /// Every throughput review (`crate::hestia`), oldest first; the last is the latest.
+    pub throughput_reviews: Vec<athena_data::records::ThroughputReview>,
     /// Files that are not acceptable records, by path.
     pub invalid: Vec<String>,
 }
@@ -316,6 +318,7 @@ impl Records {
                 AnyRecord::Audit(a) => records.audits.push(*a),
                 AnyRecord::HestiaSweep(s) => records.hestia_sweeps.push(*s),
                 AnyRecord::CodeHealthBaseline(b) => records.code_health_baselines.push(b),
+                AnyRecord::ThroughputReview(t) => records.throughput_reviews.push(*t),
                 AnyRecord::Invocation(i) if i.role == Role::Auditor => {
                     records.auditor_runs.push(*i);
                 }
@@ -352,6 +355,9 @@ impl Records {
             .sort_by(|a, b| (a.at, &a.id).cmp(&(b.at, &b.id)));
         records
             .code_health_baselines
+            .sort_by(|a, b| (a.at, &a.id).cmp(&(b.at, &b.id)));
+        records
+            .throughput_reviews
             .sort_by(|a, b| (a.at, &a.id).cmp(&(b.at, &b.id)));
         records.interventions.sort_by_key(|i| i.at);
         records.restarts.sort_by_key(|r| r.at);
@@ -441,6 +447,7 @@ impl Records {
             || self.work_items.iter().any(|r| &r.id == id)
             || self.work_decisions.iter().any(|r| &r.id == id)
             || self.hestia_sweeps.iter().any(|r| &r.id == id)
+            || self.throughput_reviews.iter().any(|r| &r.id == id)
     }
 
     /// The current state of each decision, folded from its append-only state records.

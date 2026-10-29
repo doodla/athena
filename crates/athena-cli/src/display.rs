@@ -1033,6 +1033,9 @@ pub fn status(v: &StatusView) -> String {
     if let Some(durations) = &v.check_durations {
         let _ = writeln!(out, "{}", durations.text());
     }
+    if let Some(throughput) = &v.throughput {
+        let _ = writeln!(out, "{}", throughput.text());
+    }
     for (i, j) in v.open.iter().enumerate() {
         let label = if i == 0 { "open" } else { "" };
         let _ = writeln!(

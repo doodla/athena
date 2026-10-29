@@ -1252,7 +1252,10 @@ fn an_unplanned_jobs_status_text_and_json_gain_nothing() {
         "landed", view.recent[0].cost_usd, view.recent[0].title
     );
     assert!(text.contains(&expected), "{text}");
-    assert!(!text.contains("plan"), "{text}");
+    // The throughput section names a "planning" stage for every job; it is not plan state, so it is set aside.
+    let throughput = view.throughput.as_ref().expect("a landed job").text();
+    assert!(text.contains(&throughput), "{text}");
+    assert!(!text.replace(&throughput, "").contains("plan"), "{text}");
     let json = serde_json::to_value(&view).unwrap();
     assert!(json.get("planning").is_none());
     assert!(json["recent"][0].get("plan").is_none());

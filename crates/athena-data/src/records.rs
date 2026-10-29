@@ -2000,6 +2000,132 @@ impl CodeHealthBaseline {
     }
 }
 
+/// The schema tag of a throughput review.
+pub const THROUGHPUT_REVIEW_SCHEMA: &str = "athena.throughput-review/1";
+
+/// Why a throughput review ran.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThroughputTrigger {
+    /// Ten more landings since the previous review (or the first ten ever).
+    Cadence,
+    /// The median minutes per landed job grew by more than 20% against the previous review.
+    Worsened,
+}
+
+impl ThroughputTrigger {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ThroughputTrigger::Cadence => "cadence",
+            ThroughputTrigger::Worsened => "worsened",
+        }
+    }
+}
+
+/// The top proposal of a throughput review: the biggest wait and the change that removes it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThroughputProposal {
+    /// The biggest bottleneck, in one or two sentences.
+    pub bottleneck: String,
+    /// The stage it sits in (reading, planning, producer, checks, verifier, landing or idle).
+    pub stage: String,
+    /// The architectural change that removes it.
+    pub change: String,
+    /// The prediction: minutes saved per landed job once the change lands.
+    pub expected_minutes_saved: f64,
+    /// The request priority the prediction set (`urgent`, `high`, `normal` or `low`).
+    pub priority: String,
+    /// The design request this review queued; None when an earlier one was still open.
+    pub request_job: Option<JobId>,
+}
+
+/// What a later review measured for a change an earlier review cited: the prediction set against the minutes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThroughputFollowup {
+    /// The review whose prediction this closes.
+    pub review: RecordId,
+    /// The landed job that cited the review.
+    pub change_job: JobId,
+    /// Minutes saved per landed job that review predicted.
+    pub predicted_minutes_saved: f64,
+    /// The median minutes per landed job when that review ran.
+    pub baseline_median_minutes: f64,
+    /// The median minutes per landed job over the jobs that landed after the change.
+    pub measured_median_minutes: f64,
+    /// Baseline minus measured: positive is faster.
+    pub measured_minutes_saved: f64,
+    /// How many landed jobs the measured median covers.
+    pub jobs_measured: u32,
+}
+
+/// `athena.throughput-review/1`: one throughput review. `landings` and `window_median_minutes` are the
+/// cadence point the next review counts from; the proposal is the prediction; `followups` close earlier
+/// predictions. Reviews are never edited; the latest is the newest.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThroughputReview {
+    pub id: RecordId,
+    pub at: Timestamp,
+    /// Landed request jobs counted when the review ran.
+    pub landings: u32,
+    /// The median minutes per landed job over the newest landed jobs when the review ran.
+    pub window_median_minutes: f64,
+    pub trigger: ThroughputTrigger,
+    /// None when the model gave no usable proposal or an earlier request was still open.
+    pub proposal: Option<ThroughputProposal>,
+    /// Predictions this review closed.
+    pub followups: Vec<ThroughputFollowup>,
+    /// Why there is no proposal or no request, or any other remark; empty when there is nothing to say.
+    pub note: String,
+}
+
+impl ThroughputReview {
+    /// The most recent of `reviews`, by time and then id; None when there are none.
+    pub fn latest(reviews: &[ThroughputReview]) -> Option<&ThroughputReview> {
+        reviews
+            .iter()
+            .max_by(|a, b| (a.at, &a.id).cmp(&(b.at, &b.id)))
+    }
+
+    /// Why this record is not acceptable, if it is not.
+    pub fn validate(&self) -> Result<(), String> {
+        let good = |v: f64| v.is_finite() && v >= 0.0;
+        if !good(self.window_median_minutes) {
+            return Err("a throughput review's median is a finite, non-negative number".into());
+        }
+        if let Some(p) = &self.proposal {
+            if p.bottleneck.trim().is_empty() || p.change.trim().is_empty() {
+                return Err("a throughput proposal names its bottleneck and its change".into());
+            }
+            if !good(p.expected_minutes_saved) {
+                return Err("expected minutes saved is a finite, non-negative number".into());
+            }
+            if !PRIORITY_LEVELS.contains(&p.priority.as_str()) {
+                return Err(format!(
+                    "priority {:?} is not one of {}",
+                    p.priority,
+                    PRIORITY_LEVELS.join(", ")
+                ));
+            }
+        }
+        for f in &self.followups {
+            if !good(f.predicted_minutes_saved)
+                || !good(f.baseline_median_minutes)
+                || !good(f.measured_median_minutes)
+                || !f.measured_minutes_saved.is_finite()
+            {
+                return Err("a throughput follow-up holds finite minutes".into());
+            }
+            if f.jobs_measured == 0 {
+                return Err("a throughput follow-up measures at least one landed job".into());
+            }
+        }
+        Ok(())
+    }
+}
+
 /// The schema tag of a Hestia sweep.
 pub const HESTIA_SWEEP_SCHEMA: &str = "athena.hestia-sweep/1";
 
@@ -2448,6 +2574,8 @@ pub enum AnyRecord {
     Replay(Box<Replay>),
     #[serde(rename = "athena.code-health-baseline/1")]
     CodeHealthBaseline(CodeHealthBaseline),
+    #[serde(rename = "athena.throughput-review/1")]
+    ThroughputReview(Box<ThroughputReview>),
 }
 
 /// Why a file under `records/` is not acceptable.
@@ -2535,6 +2663,7 @@ impl AnyRecord {
             AnyRecord::Critique(c) => c.validate().map_err(invalid)?,
             AnyRecord::Baseline(b) => b.validate().map_err(invalid)?,
             AnyRecord::Replay(r) => r.validate().map_err(invalid)?,
+            AnyRecord::ThroughputReview(r) => r.validate().map_err(invalid)?,
             AnyRecord::DefaultsProposal(p) => p.validate().map_err(invalid)?, // Totals are what reconciliation checks an outcome against; only the bootstrap has none
             // (acceptance verification 2).
             AnyRecord::Outcome(o) if o.job.is_request() && o.totals.is_none() => {
@@ -2637,6 +2766,9 @@ impl AnyRecord {
             AnyRecord::CodeHealthBaseline(r) => {
                 format!("records/code-health/{}/{}.json", r.id.month(), r.id)
             }
+            AnyRecord::ThroughputReview(r) => {
+                format!("records/throughput-reviews/{}/{}.json", r.id.month(), r.id)
+            }
         }
     }
 
@@ -2674,6 +2806,7 @@ impl AnyRecord {
             AnyRecord::Baseline(_) => BASELINE_SCHEMA,
             AnyRecord::Replay(_) => REPLAY_SCHEMA,
             AnyRecord::CodeHealthBaseline(_) => CODE_HEALTH_BASELINE_SCHEMA,
+            AnyRecord::ThroughputReview(_) => THROUGHPUT_REVIEW_SCHEMA,
         }
     }
 }
@@ -3591,6 +3724,90 @@ mod tests {
             Some(&baseline)
         );
         assert!(CodeHealthBaseline::latest(&[]).is_none());
+    }
+
+    fn throughput_review_with(id: &str) -> ThroughputReview {
+        ThroughputReview {
+            id: RecordId::parse(id).unwrap(),
+            at: ts(),
+            landings: 20,
+            window_median_minutes: 31.5,
+            trigger: ThroughputTrigger::Cadence,
+            proposal: Some(ThroughputProposal {
+                bottleneck: "The verifier waits for checks that the producer already ran.".into(),
+                stage: "verifier".into(),
+                change: "Run the verifier while the checks run.".into(),
+                expected_minutes_saved: 6.5,
+                priority: "high".into(),
+                request_job: Some(JobId::parse("20261026-090000-5abc").unwrap()),
+            }),
+            followups: vec![ThroughputFollowup {
+                review: RecordId::parse("20261020-090000-4abc").unwrap(),
+                change_job: JobId::parse("20261021-090000-6abc").unwrap(),
+                predicted_minutes_saved: 5.0,
+                baseline_median_minutes: 40.0,
+                measured_median_minutes: 34.0,
+                measured_minutes_saved: 6.0,
+                jobs_measured: 4,
+            }],
+            note: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_throughput_review_has_a_path_a_schema_and_round_trips() {
+        let review = throughput_review_with("20261026-090000-5abc");
+        let record = AnyRecord::ThroughputReview(Box::new(review.clone()));
+        assert_eq!(record.schema(), "athena.throughput-review/1");
+        assert_eq!(
+            record.canonical_path(),
+            "records/throughput-reviews/2026-10/20261026-090000-5abc.json"
+        );
+        let json = record.to_json();
+        let parsed = AnyRecord::parse(&record.canonical_path(), json.as_bytes()).unwrap();
+        assert_eq!(parsed, record);
+        let AnyRecord::ThroughputReview(parsed) = parsed else {
+            panic!("a throughput review parses as one");
+        };
+        assert_eq!(*parsed, review);
+        assert!(check_record_file(&record.canonical_path(), json.as_bytes()).is_ok());
+        assert!(matches!(
+            check_record_file(
+                "records/code-health/2026-10/20261026-090000-5abc.json",
+                json.as_bytes()
+            ),
+            Err(RecordError::Misplaced { .. })
+        ));
+        assert_eq!(
+            ThroughputReview::latest(std::slice::from_ref(&review)),
+            Some(&review)
+        );
+        assert!(ThroughputReview::latest(&[]).is_none());
+    }
+
+    #[test]
+    fn a_throughput_review_with_bad_numbers_or_an_empty_proposal_is_refused() {
+        let mut nan = throughput_review_with("20261026-090000-5abc");
+        nan.window_median_minutes = f64::NAN;
+        assert!(nan.validate().is_err());
+        let mut negative = throughput_review_with("20261026-090000-5abc");
+        negative.proposal.as_mut().unwrap().expected_minutes_saved = -1.0;
+        assert!(negative.validate().is_err());
+        let mut no_bottleneck = throughput_review_with("20261026-090000-5abc");
+        no_bottleneck.proposal.as_mut().unwrap().bottleneck = "  ".into();
+        assert!(no_bottleneck.validate().is_err());
+        let mut bad_priority = throughput_review_with("20261026-090000-5abc");
+        bad_priority.proposal.as_mut().unwrap().priority = "asap".into();
+        assert!(bad_priority.validate().is_err());
+        let mut no_jobs = throughput_review_with("20261026-090000-5abc");
+        no_jobs.followups[0].jobs_measured = 0;
+        assert!(no_jobs.validate().is_err());
+        let record = AnyRecord::ThroughputReview(Box::new(nan));
+        assert!(AnyRecord::parse("x", record.to_json().as_bytes()).is_err());
+        let mut none = throughput_review_with("20261026-090000-5abc");
+        none.proposal = None;
+        none.followups.clear();
+        assert!(none.validate().is_ok());
     }
 
     #[test]
