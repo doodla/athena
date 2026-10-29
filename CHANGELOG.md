@@ -9,6 +9,46 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- Structure pass R5: the baseline, the producer snapshot and the producer loop with its send-back (stages S1
+  to S3 of `produce_and_verify`) moved from `run/mod.rs` to the new `run/producer.rs` as three stage methods
+  (`baseline_stage`, `producer_snapshot`, `producer_loop`), which `produce_and_verify` calls in that order.
+  No behavior change. Bodies are the old text; the only differences are listed here.
+  - New types in `producer.rs`: `Flow<T>` (`Go(T)` or `Stop`) and `Reported`, plus `ProducerWork`, which
+    carries the S2 values to S3. The design doc names the stop value `Flow::Stop`, the same as the code.
+  - Changed lines, each with its reason: `job_dir` is passed as `&Path`, so `&job_dir` became `job_dir` in
+    the `take_baseline` call; `&mut closing` became `closing` in the `keep_timed_out_work` call, because
+    `closing` is now a `&mut Closing` parameter and clippy rejects the extra borrow; `let mut seq` became a
+    `mut seq` parameter of `producer_loop`; `let p`, `let jc` and `let id` are declared again where a stage
+    uses them; the grant, composed brief, environment and model are bound from `ProducerWork`; `snapshot`
+    and `work` are returned in `Reported` because the later stages read them.
+  - Early returns, old line in the base `run/mod.rs` to new line: the producer could not run, 1223 to
+    `producer.rs:188`; timed out, 1236 to `producer.rs:201`; did not complete, 1246 to `producer.rs:211`;
+    returned no valid report, 1256 to `producer.rs:221`. Each is now `return Ok(Flow::Stop)`, and the driver
+    returns `closing` on it (`run/mod.rs:1141`). The S4 idle-producer `return Ok(closing)` (1364 before, 1178
+    now) is unchanged. The `baseline   ` ui line (1135 before) is at `producer.rs:60`; the
+    `producer   sent back:` line (1326 before) is at `producer.rs:291`.
+  - Locals that crossed the S1-S3 seam and what carries them now: `seq` goes into `producer_loop` by value
+    and comes back in `Reported.seq` (it was `let mut seq` in the driver; the baseline reads a copy);
+    `closing` is `&mut Closing` in `baseline_stage` and `producer_loop`; `report`, `report_gaps`,
+    `report_kept_in` and `left_criteria` are `Reported` fields, destructured in the driver under the same
+    names; `snapshot` and `work` are `Reported` fields and `ProducerWork` fields; `grant`, `composed`,
+    `capability_env` and `model` are `ProducerWork` fields. `attempt_brief`, `send_backs` and `planned` live
+    only inside the loop and moved with it.
+  - Whole-word searches over `crates/`, counting files that name each, excluding the new `run/producer.rs`
+    (which holds the moved text and is the only file added). "Before" is the base tree; "after" is this tree
+    without `producer.rs`, so the counts are equal.
+    - `report_kept_in`: 1 before, 1 after (`run/mod.rs`); `producer.rs` also names it, as a `Reported` field.
+    - `report_gaps`: 2 before, 2 after (`run/mod.rs`, `state.rs`).
+    - `left_criteria`: 2 before, 2 after (`run/mod.rs`, `state.rs`).
+    - `capability_env`: 5 before, 5 after (`run/mod.rs`, `reading.rs`, `introspect.rs`, `athena-cli/tests/live.rs`,
+      `athena-agent/src/env.rs`).
+    - `take_baseline`, `keep_timed_out_work`, `PRODUCER_SEND_BACKS`, `planned_paths`,
+      `unchanged_planned_files` together: 7 before, 7 after (`run/mod.rs`, `run_pin_tests.rs`,
+      `run/send_back.rs`, `outputs.rs`, `briefs.rs`, the CLI test helper, `fake.rs`).
+    - New names `Flow`, `ProducerWork` and `Reported`: 0 files before; after, only `producer.rs` and the
+      `run/mod.rs` driver that uses them.
+    No name is lost from any file outside `producer.rs`.
+  - No test line changed. The test run is recorded in the job report.
 - Structure pass R4: the Close and land row (`close_dispatched`, `land_or_block`, `retry_landing`,
   `closing_subject`, `landing_body`, `build_text`, `provenance_word`, `branch_suffix`) moved from
   `run/mod.rs` to `run/close.rs`, text unchanged; `closing_subject` and `build_text` are re-exported from
