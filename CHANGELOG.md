@@ -9,6 +9,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `docs/design/async-drain.md` and proposed decision D145: a design for an asynchronous, pipelined drain
+  (read-ahead, early producer start in its own worktree, one ordered landing queue, background CI and
+  self-rebuild awaits, one ordered records writer), with the measured 42-minute median per landed job, an
+  estimated target of about 20, a disk budget, failure handling and ten build jobs. Docs only; nothing is built.
 - `docs/spec.toml` second layer (decision 3C, D144): sourced requirements for BRIEF.md "Project Olympus" sections 7
   to 10, the governing philosophy and the addenda of 2026-10-17 to 2026-10-24, plus three open questions that
   record conflicting words of the owner. `xtask/tests/spec.rs` reads through those addenda, stops before

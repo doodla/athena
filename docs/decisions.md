@@ -3817,3 +3817,30 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 - **Reversal cost:** Low: delete the added tables, restore the section cut in the test.
 - **Provenance:** read: BRIEF.md sections 7 to 10, the governing philosophy and the addenda to 2026-10-24,
   D114, `xtask/tests/spec.rs`; measured: `cargo test -p xtask --test spec`.
+
+## D145 · (proposed) Drain runs as an asynchronous pipeline with one ordered landing queue
+
+- **Case:** Drain runs each job start to finish before the next begins, so every wait blocks the queue. The user
+  measured 2026-10-27 to 29: a landed job takes a median 42 minutes (producer 15, checks 13 to 15, landing about
+  6 to 8, verifier 2.3, reading and planning up to 5), and drain landed 35 of 61 jobs in two days.
+- **Decision:** Proposed, for Sri to accept before any build. Drain becomes a pipeline, described in
+  [docs/design/async-drain.md](design/async-drain.md): (1) reading and hard-job planning run ahead for the next
+  items; (2) the next producer starts when the current one leaves its producer stage, in its own worktree and
+  build directory, bounded by free disk and one shared sccache; (3) verified candidates enter one landing queue,
+  each rebased onto the latest main and landed if clean, returned to its producer if it conflicts; (4) CI waits
+  and the self-rebuild become background awaits; (5) one writer commits records in sequence order. The target is
+  about 20 minutes per landed job (an estimate) against 42, with a disk budget of about 9 GB per in-flight job
+  (an estimate to be measured in the first build jobs). Default `max_in_flight = 1` keeps today's behaviour. The
+  design lists ten build jobs, each sized for one producer run.
+- **Alternatives:** (a) Parallel drains on separate queues: no order at landing. (b) Keep serial and speed up
+  each stage: cuts the largest stage only in part. (c) Batch landings: one failure holds the rest. (d) Let the
+  lander resolve conflicts: it has no tests or design context. (e) One shared target directory: lock
+  contention. (f) Stack candidates: one failure forces rework. Detail in the design, section 11.
+- **Tradeoff:** Throughput rises; the latency of one job does not, and the landed share (35 of 61) is not
+  improved. More moving parts: state to resume after a crash, a conflict return path, and a paused queue on red
+  main. Disk and CPU become the limits, and the 20-minute target rests on estimates for check contention.
+- **Reversal cost:** Low until job 10 sets the default above 1: set `max_in_flight = 1`. After that, medium: the
+  records writer and the state file remain, and are harmless in serial mode.
+- **Provenance:** read: D98, D105, D112, D140, D111, D46, D10, D72, D87, D79, D84, D142, D143. Baseline figures are the
+  user's measurement over 2026-10-27 to 29 as given in the request; all target and disk figures are estimates.
+  Nothing was run beyond the repository's doc tests.
