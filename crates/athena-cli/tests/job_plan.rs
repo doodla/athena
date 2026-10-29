@@ -10,8 +10,8 @@ mod common;
 use athena_context::briefs::render_plan_section;
 use athena_core::run::GoResult;
 use athena_data::records::{
-    AcceptedBy, AnyRecord, Critique, CritiqueVerdict, Finding, FindingSource, JobPlan,
-    OutcomeState, Role, Severity,
+    AcceptedBy, AnyRecord, Critique, CritiqueVerdict, FindingSource, JobPlan, OutcomeState, Role,
+    Severity,
 };
 use athena_data::sha256_hex;
 use common::*;
@@ -592,7 +592,8 @@ fn a_plan_that_edits_an_unlisted_governance_file_gets_an_athena_critique_and_no_
             .unwrap(),
     );
     assert_eq!(f.state, OutcomeState::Landed, "{}", f.reason);
-    // Round 1 went back to the planner without the critic; only round 2 reached it.
+    // The first plan went back to the planner without the critic and without using a round; only the
+    // revised plan reached the critic, as round 1.
     assert_eq!(
         *calls.lock().unwrap(),
         [
@@ -604,24 +605,18 @@ fn a_plan_that_edits_an_unlisted_governance_file_gets_an_athena_critique_and_no_
             Role::Verifier
         ]
     );
+    // Critique 1 is the critic's own, of the revised plan.
     let first = critique_at(&fx, &proposal.job.dir(), 1);
-    assert_eq!(first.invocation_seq, None, "no critic invocation");
-    assert_eq!(first.agent_verdict, None);
-    assert_eq!(first.final_verdict, CritiqueVerdict::Revise);
-    let major: Vec<&Finding> = first
-        .findings
-        .iter()
-        .filter(|f| f.severity == Severity::Major)
-        .collect();
-    assert_eq!(major.len(), 1, "{:?}", first.findings);
-    assert_eq!(major[0].source, FindingSource::Athena);
     assert!(
-        major[0].summary.contains("athena.toml"),
-        "{}",
-        major[0].summary
+        first.invocation_seq.is_some(),
+        "the critic reviewed round 1"
     );
-    // The planner is shown Athena's finding in its revision brief.
-    assert!(briefs.lock().unwrap()[1].contains("athena.toml is a governance file"));
+    assert_eq!(first.final_verdict, CritiqueVerdict::Accept);
+    // The planner is shown Athena's finding in its second brief.
+    let briefs = briefs.lock().unwrap();
+    assert_eq!(briefs.len(), 2);
+    assert!(!briefs[0].contains("athena.toml is a governance file"));
+    assert!(briefs[1].contains("athena.toml is a governance file"));
 }
 
 #[test]
@@ -640,6 +635,7 @@ fn a_plan_citing_a_command_outside_the_verifiers_grant_gets_an_athena_critique_a
         good_plan(),
     ];
     let calls = scenario.invocations.clone();
+    let briefs = scenario.seen_by_planner.clone();
     let athena = fx.athena(scenario.script());
     let proposal = athena.ask("tidy the readme", &Lines::default()).unwrap();
     let f = finished(
@@ -653,14 +649,19 @@ fn a_plan_citing_a_command_outside_the_verifiers_grant_gets_an_athena_critique_a
         1,
         "only the second plan reached the critic"
     );
+    // Critique 1 is the critic's own; Athena's finding went to the planner's second brief.
     let first = critique_at(&fx, &proposal.job.dir(), 1);
-    assert_eq!(first.invocation_seq, None);
     assert!(
-        first.findings.iter().any(|f| f.severity == Severity::Major
-            && f.source == FindingSource::Athena
-            && f.summary.contains("python3 check_greeting.py")),
-        "{:?}",
-        first.findings
+        first.invocation_seq.is_some(),
+        "the critic reviewed round 1"
+    );
+    let briefs = briefs.lock().unwrap();
+    assert!(!briefs[0].contains("cites a command the verifier may not run"));
+    assert!(
+        briefs[1].contains("cites a command the verifier may not run")
+            && briefs[1].contains("python3 check_greeting.py"),
+        "{}",
+        briefs[1]
     );
 }
 
@@ -686,6 +687,7 @@ fn athena_checks_a_demonstration_for_every_criterion_and_a_fails_without_for_beh
         good_plan(),
     ];
     let calls = scenario.invocations.clone();
+    let briefs = scenario.seen_by_planner.clone();
     let athena = fx.athena(scenario.script());
     let proposal = athena.ask("tidy the readme", &Lines::default()).unwrap();
     let f = finished(
@@ -694,34 +696,32 @@ fn athena_checks_a_demonstration_for_every_criterion_and_a_fails_without_for_beh
             .unwrap(),
     );
     assert_eq!(f.state, OutcomeState::Landed, "{}", f.reason);
+    // Two mechanical revisions, then the third plan reaches the critic, as round 1.
+    assert_eq!(count(&calls, Role::Planner), 3);
     assert_eq!(count(&calls, Role::Critic), 1);
-    let dir = proposal.job.dir();
-    let summaries = |round| -> Vec<String> {
-        critique_at(&fx, &dir, round)
-            .findings
-            .into_iter()
-            .map(|f| f.summary)
-            .collect()
-    };
-    let first = summaries(1);
     assert!(
-        first
-            .iter()
-            .any(|s| s.contains("Criterion 1 has 2 demonstrations")),
-        "{first:?}"
+        critique_at(&fx, &proposal.job.dir(), 1)
+            .invocation_seq
+            .is_some(),
+        "critique 1 is the critic's"
+    );
+    // Each revision brief carries the findings on the plan before it.
+    let briefs = briefs.lock().unwrap();
+    assert_eq!(briefs.len(), 3);
+    assert!(
+        briefs[1].contains("Criterion 1 has 2 demonstrations"),
+        "{}",
+        briefs[1]
     );
     assert!(
-        first
-            .iter()
-            .any(|s| s.contains("does not say what fails without")),
-        "{first:?}"
+        briefs[1].contains("does not say what fails without"),
+        "{}",
+        briefs[1]
     );
-    let second = summaries(2);
     assert!(
-        second
-            .iter()
-            .any(|s| s.contains("Criterion 2 has 0 demonstrations")),
-        "{second:?}"
+        briefs[2].contains("Criterion 2 has 0 demonstrations"),
+        "{}",
+        briefs[2]
     );
 }
 
@@ -739,6 +739,7 @@ fn athena_checks_that_files_to_modify_exist_and_files_to_create_do_not() {
         ),
         good_plan(),
     ];
+    let briefs = scenario.seen_by_planner.clone();
     let athena = fx.athena(scenario.script());
     let proposal = athena.ask("tidy the readme", &Lines::default()).unwrap();
     let f = finished(
@@ -747,24 +748,21 @@ fn athena_checks_that_files_to_modify_exist_and_files_to_create_do_not() {
             .unwrap(),
     );
     assert_eq!(f.state, OutcomeState::Landed, "{}", f.reason);
-    let first = critique_at(&fx, &proposal.job.dir(), 1);
-    let majors: Vec<&str> = first
-        .findings
-        .iter()
-        .filter(|f| f.severity == Severity::Major)
-        .map(|f| f.summary.as_str())
-        .collect();
+    // Critique 1 is the critic's own; both of Athena's findings went to the planner's second brief.
     assert!(
-        majors
-            .iter()
-            .any(|s| s.contains("NOPE.md") && s.contains("does not exist")),
-        "{majors:?}"
+        critique_at(&fx, &proposal.job.dir(), 1)
+            .invocation_seq
+            .is_some(),
+        "critique 1 is the critic's"
+    );
+    let second = briefs.lock().unwrap()[1].clone();
+    assert!(
+        second.contains("The plan changes NOPE.md, which does not exist"),
+        "{second}"
     );
     assert!(
-        majors
-            .iter()
-            .any(|s| s.contains("README.md") && s.contains("already exists")),
-        "{majors:?}"
+        second.contains("The plan creates README.md, which already exists"),
+        "{second}"
     );
 }
 
@@ -785,6 +783,7 @@ fn a_plan_that_lists_a_directory_gets_a_major_athena_finding_and_the_job_goes_to
             good_plan(),
         ];
         let calls = scenario.invocations.clone();
+        let briefs = scenario.seen_by_planner.clone();
         let athena = fx.athena(scenario.script());
         let proposal = athena.ask("tidy the readme", &Lines::default()).unwrap();
         let f = finished(
@@ -795,15 +794,17 @@ fn a_plan_that_lists_a_directory_gets_a_major_athena_finding_and_the_job_goes_to
         assert_eq!(f.state, OutcomeState::Landed, "{dir_path}: {}", f.reason);
         assert_eq!(count(&calls, Role::Planner), 2, "{dir_path}");
         assert_eq!(count(&calls, Role::Critic), 1, "{dir_path}");
+        // Critique 1 is the critic's own; Athena's finding went to the planner's second brief.
         let first = critique_at(&fx, &proposal.job.dir(), 1);
-        assert_eq!(first.invocation_seq, None, "no critic invocation");
-        assert_eq!(first.final_verdict, CritiqueVerdict::Revise);
         assert!(
-            first.findings.iter().any(|f| f.severity == Severity::Major
-                && f.source == FindingSource::Athena
-                && f.summary.contains(dir_path)),
-            "{dir_path}: {:?}",
-            first.findings
+            first.invocation_seq.is_some(),
+            "the critic reviewed round 1"
+        );
+        assert_eq!(first.final_verdict, CritiqueVerdict::Accept);
+        let second = briefs.lock().unwrap()[1].clone();
+        assert!(
+            second.contains(&format!("The plan lists {dir_path:?}")),
+            "{dir_path}: {second}"
         );
     }
 }

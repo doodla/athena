@@ -65,7 +65,9 @@ every criterion has exactly one demonstration; every behavior demonstration has 
 the verifier's grant allows (`athena_agent::policy::evaluate`); files to modify exist and files to create do
 not; a governance path (`admission::is_governance`) must pass `governance_change_is_listed`, else a major
 finding; any other path outside the deliverables is a minor finding. A major finding sends the plan back to the
-planner with no model call.
+planner with no critic call and without using a round, up to two times per round (the revisions that follow
+are the planner's, the critic sees only the plan that passes). A plan that still breaks a rule after the
+second revision stops the job with those findings.
 
 **The critic (design)** works in the same snapshot with the same grant. It checks the plan against the request
 and the reading, that the code the plan names exists, that the change is made where the fault starts, that each
@@ -74,8 +76,10 @@ that the work fits one producer run. It returns accept, revise or reject, findin
 evidence, fix), and whether the reading misread the request. Athena decides the verdict as `verify::judge` does:
 accept only when neither source has a blocker or major finding. Reject, or a misread reading, stops the job.
 
-**Rounds and cost (design).** At most three rounds (two revisions). A revision brief quotes the previous plan and
-every finding. Caps: `planner_usd` 0.75 and `critic_usd` 0.75, 600 s timeouts (**estimate**: the reader's p90 is
+**Rounds and cost (design).** At most three rounds (two revisions). Only a critic's review counts as a round:
+the mechanical revisions above call no critic and use none, so a job whose first plans break Athena's own
+rules still has all its critic rounds (each costs a planner call, each checked against the cap). A revision
+brief quotes the previous plan and every finding. Caps: `planner_usd` 0.75 and `critic_usd` 0.75, 600 s timeouts (**estimate**: the reader's p90 is
 $0.14 and the verifier's p50 $0.33 **(read)**). At dispatch, one round plus the producer and verifier caps must
 fit `job_usd`; before each planning call, that call's cap plus the producer and verifier caps must still fit.
 
@@ -202,7 +206,11 @@ one producer run; review 1 split jobs 3 and 5.
    unlisted `athena.toml`, or cites a command outside the verifier's grant, gets an Athena critique with no
    critic call.
    *Built as:* `plan_round` in `run.rs` loops over `planning_round` up to `max_rounds`; `admission::plan_findings`
-   holds Athena's checks; `end_round` files each plan and critique and decides accept, revise or stop. A job
+   holds Athena's checks; `end_round` files each critic-reviewed plan and critique and decides accept, revise or
+   stop. A major finding from Athena's checks is a mechanical pass: `planning_round` returns it to `plan_round`,
+   which asks the planner again in the same round with no critic call, up to `MAX_MECHANICAL_PASSES` (2) per
+   round. Nothing is filed for such a plan; the stop after the second pass files that plan with an Athena-only
+   critique and fails the job with the findings. Only critic reviews count toward `max_rounds`. A job
    stopped in planning scores `verification_passes` as unknown in `athena-score` (a job with planner or critic
    invocations and no producer or verifier), and `reading::carry` quotes the stopping critique's findings.
    Tests are in `crates/athena-cli/tests/job_plan.rs`.

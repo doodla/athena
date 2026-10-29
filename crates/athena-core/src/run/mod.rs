@@ -2357,7 +2357,21 @@ mod produce_and_verify_order_tests {
     }
 
     fn repo() -> tempfile::TempDir {
-        // Without `[job_plan]` (a job with no planning round) and without a pinned repository.
+        repo_with_config("")
+    }
+
+    /// A repository whose planning is on for every job, with these many critic rounds.
+    fn repo_with_planning(max_rounds: u32) -> tempfile::TempDir {
+        repo_with_config(&format!(
+            "\n[job_plan]\nenabled = true\nmode = \"all\"\nplanner_usd = 0.75\ncritic_usd = 0.75\n\
+             planner_timeout_s = 600\ncritic_timeout_s = 600\nmax_rounds = {max_rounds}\n"
+        ))
+    }
+
+    /// The test repository with `extra` appended to its `athena.toml`.
+    fn repo_with_config(extra: &str) -> tempfile::TempDir {
+        // Without `[job_plan]` (a job with no planning round) and without a pinned repository, unless
+        // `extra` adds them.
         let raw = include_str!("../../../../athena.toml");
         let mut in_job_plan = false;
         let config: String = raw
@@ -2370,6 +2384,7 @@ mod produce_and_verify_order_tests {
                 !(in_job_plan || key.starts_with("repo_url") || key.starts_with("repo_ref"))
             })
             .collect();
+        let config = format!("{config}{extra}");
         let dir = tempfile::tempdir().unwrap();
         let git = Git::at(dir.path());
         git.run(["init", "-q", "-b", "main"]).unwrap();
@@ -2573,6 +2588,241 @@ mod produce_and_verify_order_tests {
             .expect("the job recorded its baseline");
         assert_eq!(baseline.before_invocation, 2);
         assert_eq!(baseline.checks.len(), 1);
+    }
+
+    /// A plan for the one criterion of `base_script`'s reading that creates README.md, which exists in the base:
+    /// it breaks Athena's plan rule that a file to create must not exist.
+    fn bad_plan() -> serde_json::Value {
+        plan_with_action("create")
+    }
+
+    /// A plan that passes Athena's plan rules: it modifies README.md.
+    fn good_plan() -> serde_json::Value {
+        plan_with_action("modify")
+    }
+
+    fn plan_with_action(action: &str) -> serde_json::Value {
+        json!({
+            "approach": "Edit README.md to describe the demo.",
+            "decisions": [],
+            "files": [{ "path": "README.md", "action": action, "purpose": "Describe the demo." }],
+            "steps": ["Edit README.md."],
+            "risks": [],
+            "demonstrations": [{
+                "criterion": 1,
+                "method": "read the file",
+                "command": "cat README.md",
+                "observes": "README.md describes the demo",
+                "fails_without": null
+            }],
+            "open_questions": []
+        })
+    }
+
+    fn accepting_critique() -> serde_json::Value {
+        json!({
+            "verdict": "accept", "findings": [], "request_reading_mismatch": null,
+            "summary": "The plan is sound."
+        })
+    }
+
+    fn revising_critique() -> serde_json::Value {
+        json!({
+            "verdict": "revise",
+            "findings": [{
+                "severity": "major",
+                "summary": "The demonstration shows nothing the file does not already say",
+                "location": "demonstrations",
+                "evidence": "It only reads the file.",
+                "fix": "Name a check that fails without the change."
+            }],
+            "request_reading_mismatch": null,
+            "summary": "The critic asks for a revision."
+        })
+    }
+
+    /// What a scripted job saw: the role and prompt of every invocation, in order.
+    type Calls = Arc<Mutex<Vec<(Role, String)>>>;
+
+    /// `base_script` with the planner and critic answering from queues. The last answer of a queue repeats;
+    /// an empty critic queue fails the test on the first critic call.
+    fn planning_script(
+        planner: Vec<serde_json::Value>,
+        critic: Vec<serde_json::Value>,
+        calls: Calls,
+    ) -> athena_agent::fake::Script {
+        let inner = base_script();
+        let (planner, critic) = (Mutex::new((planner, 0)), Mutex::new((critic, 0)));
+        Box::new(move |spec: &AgentInvocation| {
+            calls
+                .lock()
+                .unwrap()
+                .push((spec.role, spec.user_prompt.clone()));
+            let queue = match spec.role {
+                Role::Planner => &planner,
+                Role::Critic => &critic,
+                _ => return inner(spec),
+            };
+            let (answers, next) = &mut *queue.lock().unwrap();
+            assert!(!answers.is_empty(), "unexpected {:?} call", spec.role);
+            let answer = answers[(*next).min(answers.len() - 1)].clone();
+            *next += 1;
+            let mut turn = FakeTurn::output(answer);
+            turn.cost_usd = 0.01;
+            turn.usage = Usage {
+                input: 1,
+                output: 1,
+                cache_read: 1,
+                cache_write: 1,
+            };
+            turn
+        })
+    }
+
+    /// Runs a job over `repo` with these planner and critic answers; returns the outcome and every call.
+    fn run_planned(
+        repo: &tempfile::TempDir,
+        planner: Vec<serde_json::Value>,
+        critic: Vec<serde_json::Value>,
+    ) -> (Box<Finished>, Vec<(Role, String)>) {
+        let state = tempfile::tempdir().unwrap();
+        let calls = Calls::default();
+        let athena = athena_with(
+            repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            planning_script(planner, critic, calls.clone()),
+        );
+        let (_, finished) = finished_job(&athena);
+        let calls = calls.lock().unwrap().clone();
+        (finished, calls)
+    }
+
+    fn prompts_of(calls: &[(Role, String)], role: Role) -> Vec<&str> {
+        calls
+            .iter()
+            .filter(|(r, _)| *r == role)
+            .map(|(_, p)| p.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn a_mechanical_finding_is_revised_before_the_critic_and_the_critic_sees_round_1() {
+        let repo = repo_with_planning(3);
+        let (finished, calls) = run_planned(
+            &repo,
+            vec![bad_plan(), good_plan()],
+            vec![accepting_critique()],
+        );
+        assert_eq!(finished.state, OutcomeState::Landed, "{}", finished.reason);
+        let roles: Vec<Role> = calls.iter().map(|(r, _)| *r).collect();
+        assert_eq!(
+            roles,
+            [
+                Role::Reader,
+                Role::Planner,
+                Role::Planner,
+                Role::Critic,
+                Role::Producer,
+                Role::Verifier
+            ]
+        );
+        let planner = prompts_of(&calls, Role::Planner);
+        assert!(!planner[0].contains("already exists in the base"));
+        assert!(
+            planner[1].contains("already exists in the base"),
+            "the planner is shown Athena's finding: {}",
+            planner[1]
+        );
+        let critic = prompts_of(&calls, Role::Critic);
+        assert!(
+            critic[0].contains("## Plan under review (round 1)"),
+            "the first plan the critic sees is round 1: {}",
+            critic[0]
+        );
+    }
+
+    #[test]
+    fn after_a_mechanical_revision_the_critic_still_reviews_in_three_rounds() {
+        let repo = repo_with_planning(3);
+        let (finished, calls) = run_planned(
+            &repo,
+            vec![bad_plan(), good_plan()],
+            vec![revising_critique()],
+        );
+        assert_eq!(finished.state, OutcomeState::Failed);
+        assert!(
+            finished
+                .reason
+                .starts_with(athena_data::records::PLANNING_STOPPED_PREFIX),
+            "{}",
+            finished.reason
+        );
+        assert!(
+            finished
+                .reason
+                .contains(athena_data::records::PLANNING_CAP_REASON),
+            "{}",
+            finished.reason
+        );
+        assert!(
+            finished.reason.contains("round 3 of 3"),
+            "{}",
+            finished.reason
+        );
+        let roles: Vec<Role> = calls.iter().map(|(r, _)| *r).take(8).collect();
+        assert_eq!(
+            roles,
+            [
+                Role::Reader,
+                Role::Planner,
+                Role::Planner,
+                Role::Critic,
+                Role::Planner,
+                Role::Critic,
+                Role::Planner,
+                Role::Critic
+            ]
+        );
+        assert!(
+            !calls
+                .iter()
+                .any(|(r, _)| matches!(r, Role::Producer | Role::Verifier)),
+            "nothing was built"
+        );
+        let critic = prompts_of(&calls, Role::Critic);
+        assert_eq!(critic.len(), 3);
+        for (prompt, round) in critic.iter().zip(1..) {
+            assert!(
+                prompt.contains(&format!("## Plan under review (round {round})")),
+                "round {round}: {prompt}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_plan_that_still_breaks_a_rule_after_two_mechanical_passes_stops_without_the_critic() {
+        let repo = repo_with_planning(5);
+        // The critic queue is empty, so any critic call fails the test.
+        let (finished, calls) = run_planned(&repo, vec![bad_plan()], vec![]);
+        assert_eq!(finished.state, OutcomeState::Failed);
+        let reason = &finished.reason;
+        assert!(
+            reason.starts_with(athena_data::records::PLANNING_STOPPED_PREFIX),
+            "{reason}"
+        );
+        assert!(reason.contains("already exists in the base"), "{reason}");
+        assert!(reason.contains("after 2 mechanical revisions"), "{reason}");
+        assert!(
+            !reason.contains(athena_data::records::PLANNING_CAP_REASON),
+            "{reason}"
+        );
+        // The first plan and two mechanical passes; no critic, producer or verifier.
+        assert_eq!(prompts_of(&calls, Role::Planner).len(), 3);
+        for role in [Role::Critic, Role::Producer, Role::Verifier] {
+            assert!(prompts_of(&calls, role).is_empty(), "{role:?} was called");
+        }
     }
 
     const MARKER: &str = "MARKER";

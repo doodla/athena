@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261029-181835-9vvy",
+  "round": 1,
+  "at": "2026-10-29T18:23:48.162085763Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "Retries are not checked: the gate sees only the retry's own text, not the earlier request that holds the parts.",
+      "evidence": "At reading.rs:520 the gate gets `&request.text`, which for a retry is the retry's own text, e.g. 'try again on 20261029-111202-2bpc'. The numbered parts are in the earlier job's request, held in `EarlierAttempt.request` (briefs.rs:1320). `continued_jobs(request, attempt, referenced)` (reading.rs:2235) already collects the retried and followed-up jobs, and check_reading_acceptance already calls it (2606). The plan never looks at `attempt` or `referenced`, so a retry of a numbered-parts job yields no parts and can drop part (3) unchecked. No demonstration covers a retry. Fix: Pass the continued jobs into the check, e.g. `check_request_coverage(reading, request, &continued_jobs(request, attempt, referenced))`. Take parts from the request and from each continued job's `request`, and apply exemptions from the text where each part appears and from the new request. Add a test: request 'try again on <id>' with an `EarlierAttempt` whose request is the sza7 (1)/(2)/(3) text. A reading that defers (3) is refused, and the test returns Ok without the change.",
+      "location": "Plan Decision 1 and Step 4/5: `check_request_coverage(reading, request)` called with only `request`",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "For longer parts, generic stems count toward coverage, so the usual fmt/clippy/test criterion covers almost any part.",
+      "evidence": "Parts with 3 or fewer stems exclude GENERIC stems, but parts with 4 or more count any 2 shared stems, generic ones included. The usual criterion 'cargo fmt --check, cargo clippy ... and cargo test --locked: all pass' gives test, pass and check. So '(3) add a status test that checks the timeout passes' ({status, test, check, timeout, pass}) is covered without being addressed. The criterion 2 demonstration uses 'add X/Y/Z' and would not show this. Fix: Apply the generic rule at every length: shared GENERIC stems count only when the part has at most one non-generic stem (this keeps Steward bullet A covered). Otherwise require at least one shared non-generic stem. Add a criterion 2 case with a mixed generic/specific part 3, and show that a reading with only the fmt/clippy/test criterion for it is refused.",
+      "location": "Plan Decision 3, coverage rule `covers` for n >= 4",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The false-refusal count is set by a self-built table that must show 0, not measured over the existing fixtures the reading names.",
+      "evidence": "The reading says the count is measured over 'the Steward-bullet requests and existing reading-test fixtures in reading.rs'. The plan builds a new table from criteria it picks itself and asserts refused == 0. Fix: Run the count over the existing fixture requests and readings (reading.rs tests 5901-6893) and the Steward/Hestia/code_health renderers. Write the measured count into the CHANGELOG and explain any non-zero cases.",
+      "location": "Plan Decision 8 / Criterion 6 demonstration",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "An out_of_scope item that only names a label such as '(3)' counts as a deferral.",
+      "evidence": "Retry readings often number an earlier job's findings in out_of_scope (this job's reading numbers findings (1)-(4)). Such an item would be refused as a drop of request part (3). Fix: Count a label-only mention as a deferral only in the form 'part (N)' or 'item N', or when the item also has a deferral phrase. Add a test where out_of_scope says 'finding (3) of job X is not touched' and the request's part (3) is covered, and show it is accepted.",
+      "location": "Plan Decision 4, deferral by label",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The rationale says normalising makes 'name/names/named' agree, but the stem step drops all three.",
+      "evidence": "Each becomes 'nam' (3 letters) and the 4+ letters rule drops it. The trace of bullet B leaves out 'named' and 'fixed' for this reason. Fix: Say these words are dropped, or keep 3-letter stems that came from longer words.",
+      "location": "Plan Decision 3 rationale",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan's anchors in the snapshot and they match: is_bullet (1992), request_text_acceptance (2002), check_reading_acceptance (2599, calls at 520 and 3012), check_governance_coverage (2674), scoped_reading (4992), READING_RULES as [&str; 5] (briefs.rs 1557), and the rule-section test (3172, 220-byte line cap and 2400-byte section cap). The demonstrations call the real gate. Two soundness problems remain, so the verdict is revise. First, the check reads only the retry's own request text. The parts live in `EarlierAttempt.request`, which `continued_jobs` already collects, so a retry that drops a part passes unchecked. Second, generic stems count toward the 2-stem threshold for longer parts, so the usual fmt/clippy/test criterion covers almost any part that mentions tests or checks. Smaller issues: the false-refusal count comes from a self-built table rather than the existing fixtures, and a label-only out_of_scope mention counts as a deferral."
+}
