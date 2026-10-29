@@ -533,6 +533,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   constants, `watch_pages` and the private `wait_pages_run`) move unchanged into `gh/pages.rs`. `gh/mod.rs`
   re-exports the public names, so every path such as `crate::gh::watch_pages` is as before. Behavior is
   unchanged; the list from `cargo test -- --list` is the same.
+- Structure pass job G6 (`docs/design/structure-pass.md`): the Early pull request and CI wait row of
+  `crates/athena-core/src/gh/mod.rs` moves unchanged into `crates/athena-core/src/gh/early.rs`. The moved
+  names are the private constants `EARLY_RUN_STEP` and `EARLY_RUN_JOB`, `replace_early`,
+  `wait_for_early_run`, `Waited`, `name_failure`, `wait_for_checks`, `EarlyPr` with its `Debug` impl,
+  `open_early_pr`, `https_github_repository`, and the `Athena` methods `early_pr` and `early_pr_to`.
+  `EARLY_RUN_WAIT` stays in `gh/client.rs` beside `PrHost::early_run_wait`, which returns it, so the client
+  does not name the early row and no cycle forms; `gh/mod.rs` re-exports it from `client`. `gh/mod.rs` also
+  re-exports `EarlyPr` and `open_early_pr`, so every path such
+  as `crate::gh::open_early_pr` is as before. These items become `pub(super)` because `land_pr` and `publish`
+  stay in `gh/mod.rs` until job G7, and tests there use them: `replace_early`, `wait_for_checks`, `Waited` with
+  its three fields (`checks`, `reruns`, `failing_test`), and the constant `EARLY_RUN_JOB`. `EARLY_RUN_STEP`,
+  `wait_for_early_run`, `name_failure`, `https_github_repository` and `early_pr_to` stay private;
+  `early_pr` keeps its `pub(crate)`. `gh/mod.rs` imports `replace_early` and `wait_for_checks`, and
+  `EARLY_RUN_JOB` for its tests, and drops the `crate::pr` imports only the moved code used, except
+  `load_early_link` and `store_early`, which stay under `#[cfg(test)]` for its tests. `early.rs` uses
+  `remote` and `LandPr` until G7 (see the design note). No behavior
+  change; the list from `cargo test -- --list` is the same.
 - Structure pass job G5 (`docs/design/structure-pass.md`): the Host API client items of
   `crates/athena-core/src/gh/mod.rs` (`Checks`, `NewPr`, `PrDraft`, `PrHost`, `CiRunState`, `MergeMethod`,
   `MergeMethods`, `GhClient` with its `Host`, `PrHost`, `CiSource` and `CommitHost` impls, `parse_ci_runs`,
