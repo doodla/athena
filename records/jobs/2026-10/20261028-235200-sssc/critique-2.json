@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261028-235200-sssc",
+  "round": 2,
+  "at": "2026-10-28T23:58:21.146585359Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/drain.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/drain.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The reset time is parsed from reply text twice: once in the driver, then again from `detail` inside athena-core. This breaks 'recognised once in the driver layer and carried as a typed result'.",
+      "evidence": "Read claude.rs: `output_from_result` builds `detail` as `format!(\"{subtype}: {text}\")` with the text cut to 300 characters. The plan has `parse_usage_limit` work out the reset Timestamp in that function, then throw it away. `invoke_and_record` later calls `usage_limit_reset(detail, ended_at)` to parse the formatted, truncated detail string a second time. So the core crate depends on the text layout of `detail`, and the value the driver already computed is lost. The only reason given is that athena-agent/src/lib.rs is not a listed deliverable. Yet the plan already goes outside the list for crates/athena-cli/tests/drain.rs. And the root-cause default says to name an out-of-scope fix and make it, not work around it. Fix: Add one typed field to `AgentOutput` in crates/athena-agent/src/lib.rs, for example `limit_resets_at: Option<jiff::Timestamp>`. Set it in `claude::output_from_result` from the single `parse_usage_limit` call, and in fake.rs through the same function. Copy it straight onto `Invocation.limit_resets_at` in `invoking.invocation_record`/`invoke_and_record`. Drop `usage_limit_reset(detail, ..)`. List lib.rs as a needed extra file and say why: the root cause sits in the driver's output type.",
+      "location": "Plan decision 1 and Risks (last item); crates/athena-agent/src/claude.rs:249-295; crates/athena-core/src/invocation.rs:230-263",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "docs/records.md documents the record fields and outcome values but is not updated for the new `limited` outcome and `limit_resets_at` field.",
+      "evidence": "Grep found `timed_out` documented in docs/records.md lines 131-136 as an invocation outcome, with notes on how old records are read. The plan adds `InvocationOutcome::Limited` and `Invocation.limit_resets_at` but changes no record docs. Fix: Add docs/records.md to the files. Document the `limited` outcome (cost reported 0, empty models_used, lower-bound tokens) and the optional `limit_resets_at` field, and note that older records load unchanged.",
+      "location": "Files list; docs/records.md (invocation record row and outcome text near lines 84-136)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan does not check whether any doc or policy test lists `InvocationOutcome` values or `Stop` labels outside the Rust code.",
+      "evidence": "The plan says it did not search for other places that list `Stop::ALL`. Outcome values are also listed in prose in docs/records.md and docs/enforcement.md (Grep for `timed_out`). Fix: In step 1, Grep docs/ and xtask/ for the existing stop labels (for example 'repeated failure') and for outcome names, and update every list found.",
+      "location": "Open questions (last item); Step 10",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Writing the account-wide hold file inside `invoke_and_record` mixes recording with a side effect that only status reads.",
+      "evidence": "`invoke_and_record`'s doc says it runs one agent and mirrors its record to the state directory. The plan adds a second, global write there. Fix: Acceptable as planned. Optionally, put the hold write in a small `disk::record_usage_limit` helper called from that spot, and update the doc comment.",
+      "location": "Plan decision 4; crates/athena-core/src/invocation.rs invoke_and_record",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "Basis: I read claude.rs, fake.rs, stream.rs, reconcile.rs, invocation.rs, disk.rs and parts of tests/drain.rs and docs/records.md; I ran nothing. The plan's main claims hold. `output_from_result` (claude.rs:249) turns every non-success result into `Error`. `check_invocation` (reconcile.rs:56) skips the cost check when `models_used` is empty and the token check when tokens are not measured, so a zero-cost Limited record with lower-bound tokens passes the gate unchanged. `is_environment_reason`/`resumable_stop` (disk.rs:212-227) give an existing path that keeps the candidate and allows retry. `FakeTurn` and the claude.rs stand-in `MODE` script with its `driver(...)` helper exist. `ResultEvent` has public fields, so fake.rs can send its text through `output_from_result`. tests/drain.rs has the low-disk `RealSteps` tests the plan cites. The demonstrations exercise real stage entry points and would fail without the behaviour. Athena's finding on tests/drain.rs is fair, but the test-only extension is justified. The one major problem is soundness: the reset time is worked out in the driver, dropped, then parsed again from the formatted and truncated `detail` string in athena-core. That goes against the reading's 'recognised once, carried typed', and exists only to avoid a one-line lib.rs change. Carry it as a typed `AgentOutput` field instead. Smaller points: the record docs in docs/records.md need the new outcome and field, and the plan should search for doc lists of stop and outcome names."
+}

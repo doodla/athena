@@ -1,0 +1,195 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261027-160633-t5sh",
+  "base_commit": "8c98795e50ad94c9d3a4b0741551e194a27b7d5d",
+  "base_fingerprint": "sha256:d683791ec9bcc7ff4d4b9758e2e84ad53173c92ea5c1b364f80d091e1325772a",
+  "previous_job": "20261028-213554-pnjn",
+  "candidate_commit": "e944256123466f17ef6143deb18ab29f53ccf3c3",
+  "candidate_tree": "87d44018ddcd40254f9252b84ff9f451aced6b56",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 208092
+    },
+    {
+      "path": "crates/athena-agent/src/claude.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 45989
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 72992
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 105725
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 68747
+    },
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 19506
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 218728
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 98689
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 153478
+    }
+  ],
+  "fingerprint": "sha256:836af08809420697dbebc396ff6354e1ad9f4ec88bf2424441bd75f3ef79063a",
+  "violations": [],
+  "producer_report": {
+    "summary": "A model usage limit is now handled as the environment, not a job failure. Root cause: `output_from_result` in claude.rs turned every error result into an `Error` invocation with measured tokens, so a limit reply with no model usage tripped the gate's \"measured tokens, but no usage for the requested model\" rule. Drain then counted the unfinished job as a failure twice.\n\nDriver and records: the driver now recognises a limit reply (an error result with no model usage whose text has both \"limit\" and \"resets\"). It returns a new `InvocationOutcome::Limited` with the reset time parsed from the text (UTC only; the year is inferred from the call's end time) and placed first in the detail as `usage limit (resets at <ts>): <text>`. The record has zero cost, zero unmeasured usage and no model listed as used, so the gate accepts it unchanged.\n\nRun pipeline: a limited planner, critic, producer or verifier call closes the job `Failed` with the reason `environment: usage limit (resets at ...)`, the same path low disk uses. The candidate and resume mark are kept, `is_environment_reason` accepts the reason, and `athena retry` resumes the job.\n\nDrain and status: `athena_core::run::usage_limit_of(reason)` reads the reset text back. Drain stops at once with the new `Stop::UsageLimit` (label \"usage limit\"), names the reset time, counts no failure, does not retry the item and starts no other. `athena status` shows a `usage limit:` line with the job and reset time while the limit holds. Nothing waits for the reset.\n\nVerification: the targeted tests for each criterion pass, and the background full `cargo test --locked` run finished with exit code 0 (the completion notice arrived after my first report). Athena reruns fmt, clippy and the full suite itself.",
+    "files": [
+      "CHANGELOG.md",
+      "crates/athena-agent/src/claude.rs",
+      "crates/athena-data/src/records.rs",
+      "crates/athena-core/src/disk.rs",
+      "crates/athena-core/src/run/mod.rs",
+      "crates/athena-core/src/status.rs",
+      "crates/athena-cli/src/drain.rs",
+      "crates/athena-cli/src/display.rs",
+      "crates/athena-cli/src/main.rs"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "Clean after the last edit."
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "Ran after the drain.rs and display.rs edits and the CHANGELOG entry. Only a comment line in disk.rs changed afterwards."
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "Started once in the background; its completion notice reported exit code 0. It began before the comment-only disk.rs edit, and I reran the core tests after that edit."
+      },
+      {
+        "command": "cargo test -p athena-agent --locked claude",
+        "result": "pass",
+        "note": "16 passed, including the three new limit tests and the stand-in driver-process test."
+      },
+      {
+        "command": "cargo test -p athena-core -p athena-data --locked --lib",
+        "result": "pass",
+        "note": "631 core tests plus the data tests. These include the new run, status and disk tests and the extended records round-trip test."
+      },
+      {
+        "command": "cargo test -p athena-core --locked --lib usage_limit",
+        "result": "pass",
+        "note": "6 passed: the run-level hold-and-retry test, the ordinary-error control, the reason helper test and the three status tests."
+      },
+      {
+        "command": "cargo test -p athena-cli --locked --lib",
+        "result": "pass",
+        "note": "50 passed, including the drain usage-limit test, the ordinary-failure control, the status line test and the Stop::ALL label/meaning test."
+      },
+      {
+        "command": "cargo test -p athena-cli --locked --test drain -q",
+        "result": "pass",
+        "note": "100 integration tests passed, including the Stop::ALL loops."
+      },
+      {
+        "command": "cargo test -p athena-gate -p athena-context --locked --lib",
+        "result": "pass",
+        "note": "gate: 121 passed. context: 88 passed."
+      },
+      {
+        "command": "cargo test -p xtask --locked --test policy",
+        "result": "pass",
+        "note": "The boundary scan passed with all my edits in place."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Run `cargo test`: a claude.rs test feeds a fake driver reply with the text \"You've hit your weekly limit · resets Oct 29, 6pm (UTC)\" and no usage, and asserts the reply is recognised as a usage limit with the reset time parsed.",
+        "status": "met",
+        "evidence": "claude::tests::a_weekly_limit_reply_is_a_usage_limit_with_its_reset_time feeds the result line through StreamState::on_line and output_from_result. It asserts Limited, the detail `usage limit (resets at 2026-10-29T18:00:00Z): ...`, reset_time_in parsing it, cost Some(0.0), zero unmeasured usage and empty models_used. claude::stand_in_tests::a_usage_limit_reply_from_the_child_is_a_limited_invocation_at_zero_cost does the same through ClaudeCodeDriver::invoke and the stand-in child. `cargo test -p athena-agent --locked claude` passed, 16 tests."
+      },
+      {
+        "criterion": "Run `cargo test`: a run-level test with a fake driver returning the limit reply asserts the invocation record is marked limited with zero cost, passes the gate, the job stays retryable with its candidate kept, and no failure is counted.",
+        "status": "met",
+        "evidence": "run::..::a_usage_limit_at_the_verifier_holds_the_job_and_keeps_its_candidate_for_a_retry wraps FakeAgentDriver in a verifier that gets the limit reply through the real StreamState and output_from_result. It asserts a Failed outcome with reason `environment: usage limit`, is_environment_reason true and usage_limit_of returning the reset text. The stored invocation has outcome Limited, cost 0 and empty models_used, and athena_gate::reconcile::check_invocation returns no violations. The candidate fingerprint is recorded and the resume mark is at the Verifier stage. `athena retry` then resumes, with planner and producer counts staying (0, 1) and the retry landing the kept candidate. The drain half, no failure counted, is in the next criterion. Passes under `cargo test -p athena-core --locked --lib usage_limit`."
+      },
+      {
+        "criterion": "Run `cargo test`: a drain test with a job hitting the limit asserts drain stops with stop reason 'usage limit' that names the reset time, not 'repeated failure', and the failure counter is unchanged.",
+        "status": "met",
+        "evidence": "drain::tests::a_usage_limit_stops_the_drain_with_its_reset_time_and_counts_no_failure uses a LimitedStub that returns the reason built by athena_core::run::usage_limit_reason. It asserts Stop::UsageLimit with label 'usage limit', report.usage_limit == 'resets at 2026-10-29T18:00:00Z' and failed_item None. display::drain output starts `stopped     usage limit:`, contains the reset time and does not contain 'repeated failure'. The calls are exactly [read Queued(j1), run job-a], so there was no retry and the second item never started. The job line outcome is 'usage limit'. `cargo test -p athena-cli --locked --lib` passed, 50 tests."
+      },
+      {
+        "criterion": "Run `cargo test`: a status.rs test asserts `athena status` output shows the usage limit and its reset time while the limit holds, and shows neither once the reset time has passed.",
+        "status": "met",
+        "evidence": "status::planning_cost_tests::a_usage_limit_shows_in_status_until_its_reset_time_passes calls usage_limit_hold with now before the reset. It gets the job and reset time, and the rendered text() contains 'usage limit', '2026-10-29T18:00:00Z' and the retry command. At and after the reset it gets None. Two sibling tests cover a later success (None) and an unreadable reset (one-hour hold). display::tests::status_usage_limit_line_names_the_reset_time_only_while_the_limit_holds checks the line `display::status` prints, and that nothing is printed for None. `status()` wires the hold with `crate::now()`. Caveat: the display test renders the helper `display::status` calls rather than a full StatusView."
+      },
+      {
+        "criterion": "A genuine driver error without limit text still records as an error and counts as a failure, shown by an existing or new test, so ordinary failure handling is unchanged.",
+        "status": "met",
+        "evidence": "claude::tests::an_ordinary_error_stays_an_error_with_its_usage covers `API Error: 500` with usage (Error, measured), 'rate limit exceeded' without 'resets' (Error), a limit-worded error from a call that ran a model (Error) and a success that quotes the words (Success). run::..::an_ordinary_verifier_error_is_still_a_failure_of_the_job_not_a_usage_limit shows an Error verifier turn does not close with the usage-limit reason, is not an environment reason and leaves no resume mark. drain::tests::an_ordinary_failed_run_is_still_counted_and_stops_the_drain_as_a_repeated_failure shows two runs, Stop::RepeatedFailure and failed_item j1. The 100 existing drain integration tests also pass."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry describing the usage-limit handling, with the 'usage limit' stop reason and the status display.",
+        "status": "met",
+        "evidence": "CHANGELOG.md, under Unreleased > Fixed, now leads with an entry covering the incident, the root cause, the `limited` outcome, the retryable job, the new **usage limit** stop reason with the reset time, and the `usage limit:` line in `athena status`."
+      },
+      {
+        "criterion": "Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test`; all pass.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I ran `cargo fmt --all --check` (clean) and `cargo clippy --all-targets --locked -- -D warnings` (clean), and the full `cargo test --locked` run I started finished with exit code 0."
+      }
+    ],
+    "open_issues": [
+      "The shape of Claude Code's real limit result event is assumed (is_error true, empty or absent modelUsage, text with 'limit' and 'resets'). The only evidence is the incident report (2 s, no usage). A captured line would confirm it.",
+      "Reader, steward, auditor, audience, introspection and pin calls check `outcome != Success` and are outside the changed files. A limit there is recorded as Limited (the gate accepts it) but surfaces as that stage's own error, not as a drain hold. A follow-up could route those calls to the same hold.",
+      "Files changed beyond the brief's list: crates/athena-data/src/records.rs (the Limited variant), crates/athena-core/src/disk.rs (so `athena retry` can resume the held job) and crates/athena-cli/src/display.rs (the stop line and status line are rendered only there). The plan named these three and recorded why each is necessary.",
+      "docs/records.md does not describe the `limited` outcome. The README drain row may need 'usage limit' added to its stop-reason list. Both were outside the listed files.",
+      "I did not confirm that a later `athena drain` re-queues a job closed Failed with the usage-limit reason. The plan relied on the low-disk path, whose drain test passes. The stop message names `athena retry <job>`.",
+      "Only UTC reset times are understood. Another zone gives 'reset time unknown' and a one-hour hold in `athena status`.",
+      "The reply names no year, so a reset date already past in the current year is read as next year. A stale limited record cannot hold past that estimate unless its date is wrong."
+    ],
+    "mistakes": [
+      "My first stand-in script had an unescaped apostrophe, which made the limit stand-in a shell syntax error and failed 7 stand-in tests. I fixed it with the `'\\''` idiom and all 16 pass.",
+      "I first wrote a display test calling a drain helper that did not exist; I removed it and covered the drain rendering in the drain.rs test instead.",
+      "I misplaced a comment in a disk.rs test when adding the usage-limit assertions; I fixed it."
+    ],
+    "learnings": [
+      "The edit tool turns the escape `'` in file content into a literal apostrophe. A shell stand-in script needs the `'\\''` idiom for an apostrophe inside a single-quoted JSON string.",
+      "`disk::is_environment_reason` decides what `athena retry` may resume (`resumable_stop`) and whether the resume mark is kept (`settle_resume_marks`). Any new retryable closing reason must be accepted there.",
+      "The gate's token reconciliation (`check_invocation`) runs only when all four token quantities are Measured, so an unmeasured zero record with `models_used` empty passes with no gate change.",
+      "Bash policy in this environment blocks cat, grep and reading files outside the working directory, including background-task output files, so a background `cargo test` result can only be learned from the completion notice.",
+      "Several stand-in driver tests in claude.rs, including the existing ones, fail with a misleading 'Error vs Success' assertion when the stand-in shell script has a syntax error; the detail field of the output shows the shell's message."
+    ],
+    "desires": [
+      "A way to read a background command's output from inside the working directory, to see the full suite's results and not just its exit code.",
+      "A captured real limit result event (stream-json line) to use as a fixture."
+    ]
+  }
+}

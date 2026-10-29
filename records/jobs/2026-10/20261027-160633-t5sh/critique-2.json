@@ -1,0 +1,62 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261027-160633-t5sh",
+  "round": 2,
+  "at": "2026-10-28T22:25:28.128120663Z",
+  "invocation_seq": 5,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-data/src/records.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-data/src/records.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/disk.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/disk.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/src/display.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/src/display.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "Two definitions of an environment stop: `is_environment_reason` should use the existing `ENVIRONMENT_PREFIX`",
+      "evidence": "scope_guard.rs already defines `ENVIRONMENT_PREFIX = \"environment:\"`. Its doc comment says \"A usage-limit stop is read as an environment stop once it is recorded with this prefix.\" Line 530 treats any reason with that prefix as an environment stop. In disk.rs, `is_environment_reason` (line 212) checks only the narrower `LOW_DISK` prefix. Fix: Make `is_environment_reason` check `ENVIRONMENT_PREFIX`, or make `USAGE_LIMIT` start with it and add a unit test like the one at scope_guard.rs line 1693 that ties the two together. Then the scope guard, `resumable_stop` and drain all use one definition of an environment stop, not two.",
+      "location": "Decision 3 / crates/athena-core/src/scope_guard.rs line 50-53",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan does not say what drain shows when the reset time does not parse",
+      "evidence": "If the reset text does not parse, status falls back to a hold of one hour from the record's end time. The drain stop reason still has to 'name the reset time', and the plan does not say what drain shows in that case. Fix: When the reset does not parse, have the drain stop line and the status line show the raw reply text and say the reset time is unknown. Use the same fallback in drain and status, and test it with one case.",
+      "location": "Decision 6 / Decision 8 (reset parse fallback)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "No evidence that planner-stage or producer-stage limits can be retried",
+      "evidence": "For planner and producer limits the plan says only that the job closes 'through `self.failure` with the same reason'. It shows only the verifier path keeping the resume mark, and only the verifier path is demonstrated. A planner limit may hit before any job state exists that `athena retry` can resume. Fix: In step 1, confirm that `self.failure` with an environment reason leaves a job that `resumable_stop` accepts. Add one assertion, or a short note, that a producer-stage limit can also be retried.",
+      "location": "Step 4 (planner and producer limit sites)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The three files outside the deliverables list are justified",
+      "evidence": "Athena already raised these three files as being outside the deliverables. The code confirms the plan's reasons: the `InvocationOutcome` enum exists only in records.rs, `resumable_stop` depends on disk.rs, and the drain and status text is rendered in display.rs. Fix: No change needed beyond what the plan already explains. List the three files in the change description so the reviewer sees why each is there.",
+      "location": "Decision 1 / Athena findings on records.rs, disk.rs, display.rs",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the code at the sites the plan names, and they match it. `output_from_result` (claude.rs line 249) currently returns Error with `usage_measured: true`, and that is what triggers the gate's 'measured tokens but no usage for the requested model' rule (reconcile.rs lines 78-99). That rule fires only when all four token counts are measured, and the cost rule is skipped when `models_used` is empty. So an unmeasured, zero-cost Limited record passes the gate with the gate unchanged. `resumable_stop` (disk.rs line 221) depends on `is_environment_reason`, which today checks only LOW_DISK, so the disk.rs edit is needed. Drain's `work()` adds to `failures` at line 926, after `run_job` returns, so returning a new `ItemEnd` first leaves the count unchanged. `Athena.driver` is a public `Arc<dyn AgentDriver>` (lib.rs line 181), so the run test can swap in its own driver. The fix starts where the fault does, in the driver's parse of the result. The recogniser is a word match, but it is tightly gated: it fires only on an error result with no usage for the requested model, and the reply text must contain both 'limit' and 'resets'. Criterion 5 covers the near misses. Each demonstration runs the production functions: `output_from_result`, the real stand-in process, `go` and `retry`, `drain_with` with a stub that returns the real reason string, and `usage_limit_hold` with an injected `now`. Each would fail without the new behaviour. My remaining findings are all minor. The main one: scope_guard.rs already defines `ENVIRONMENT_PREFIX` and expects usage-limit stops to use it, so `is_environment_reason` should key on that prefix rather than gain a second prefix check. The others are the fallback when the reset time does not parse, and confirming that planner-stage and producer-stage limits can be retried."
+}

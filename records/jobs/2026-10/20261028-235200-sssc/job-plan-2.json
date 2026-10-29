@@ -1,0 +1,303 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261028-235200-sssc",
+  "round": 2,
+  "at": "2026-10-28T23:56:55.94371058Z",
+  "invocation_seq": 3,
+  "approach": "Recognise the limit once, where the driver reply becomes an AgentOutput, and carry it as typed data. (1) claude.rs: a pure `parse_usage_limit(text, now)` returns the reset Timestamp when the text matches \"hit your ... limit ... resets <Mon D, H[:MM]am/pm> (UTC)\". `output_from_result` uses it only when the result has no model usage, and returns `InvocationOutcome::Limited` (new variant in records.rs), cost `Some(0.0)`, zero usage with `usage_measured: false`, empty `models_used`, and the reply text in `detail`. `AgentOutput` stays unchanged, so athena-agent/src/lib.rs is not touched. A second pure function in claude.rs, `usage_limit_reset(detail, now)`, is the one place the reset time is read from that text. It is called only when the outcome is already `Limited`, and only in `invoke_and_record`. (2) records.rs: `Invocation.limit_resets_at: Option<Timestamp>` (serde default, skipped when None). A Limited record has reported cost 0 and empty `models_used`, so `check_invocation` passes with no gate change. (3) athena-core: `invoke_and_record` stores `limit_resets_at` on the record and writes one global hold file when a Limited output has a parseable reset. disk.rs holds `USAGE_LIMIT = \"environment: usage limit\"`, the hold helpers, and an `is_environment_reason` extension so the candidate is kept and `athena retry` resumes. Each model-call stage (reading, planning, critic, producer, verifier) tests `outcome == Limited` before its generic failure branch. The stage returns a typed `UsageLimit { resets_at: Option<Timestamp> }` in its result beside the existing reason text. (4) drain: `Read` and `Run` gain `limited`, set from the typed field. `run_job` handles it before the failure branches and returns a new `RunStep::Limited` / `ItemEnd::Limited`. `finish` calls `set_stop(Stop::UsageLimit, ..)` without touching `failures`. The label is \"usage limit\" and the report carries the reset time. (5) status.rs: `StatusView.usage_limit`, read from the hold and shown only while the reset is after `now`. display.rs and main.rs print the stop and the status line. (6) CHANGELOG entry.\n\nRevision answers: finding 1: criterion 8 now has a `fails_without`. Finding 2: athena-agent/src/lib.rs is dropped from the plan; the typed carrier is the new outcome variant plus the record field, not a new `AgentOutput` field. Finding 3: crates/athena-cli/tests/drain.rs is kept as a test-only file, with the reason under decision 6 and a fallback in open_questions.",
+  "decisions": [
+    {
+      "choice": "Add `InvocationOutcome::Limited`, set in `claude::output_from_result` via `parse_usage_limit`. Do not add a field to `AgentOutput` (lib.rs stays untouched). The reset time reaches the record through `claude::usage_limit_reset(detail, ended_at)` in `invoke_and_record`, which runs only for a Limited output.",
+      "reason": "Root cause: the limit reply is parsed in the driver layer and today becomes an `Error` with free text, so every stage counts it as a failure. Recognising it once there fixes all five stages. The typed outcome is the signal; stages, drain and status read the outcome, the record field and the hold, never reason text. Avoiding a lib.rs edit keeps the change inside the listed deliverables.",
+      "rejected": [
+        {
+          "option": "Add `AgentOutput.limit: Option<UsageLimit>` in athena-agent/src/lib.rs",
+          "why": "Cleaner carrier, but lib.rs is outside the listed deliverables (finding 2) and the same information is derivable from the outcome plus detail. If the reviewer prefers the field, it is a one-line addition (see open_questions)."
+        },
+        {
+          "option": "Match 'usage limit' text in drain.rs or in each stage",
+          "why": "This is the per-stage patch and the text parsing criterion 6 forbids."
+        },
+        {
+          "option": "Keep outcome Error and add a detail prefix",
+          "why": "The record would not be limited and the failure paths would still fire."
+        }
+      ]
+    },
+    {
+      "choice": "Zero cost is reported cost 0.0 with empty `models_used` and lower-bound zero tokens (`usage_measured: false`).",
+      "reason": "`check_invocation` compares costs only when `models_used` is non-empty and checks measured tokens only against `models_used`, so the record passes with the gate's rules unchanged.",
+      "rejected": [
+        {
+          "option": "Measured zero tokens with a models_used entry",
+          "why": "Invents usage the model never reported."
+        },
+        {
+          "option": "Special-case Limited in reconcile.rs",
+          "why": "Out of scope: the gate's rules for other records stay unchanged."
+        }
+      ]
+    },
+    {
+      "choice": "Reuse the `environment:` reason family: add `environment: usage limit` and extend `is_environment_reason`.",
+      "reason": "The candidate-keeping and retry path already exists for low disk, so the job stays retryable and keeps its candidate with the smallest change. Drain decides on the typed `limited` field, never on this text.",
+      "rejected": [
+        {
+          "option": "A new job state for limited jobs",
+          "why": "Touches many records and gate rules for no gain over the reason prefix."
+        }
+      ]
+    },
+    {
+      "choice": "One global hold file in the state dir (reset time), written by `invoke_and_record`, read by `status()` and shown only while the reset is after `now`. If the reset cannot be parsed, record the limited invocation but write no hold.",
+      "reason": "A usage limit belongs to the account, not a job. Hiding it after the reset needs no cleanup. Inventing a reset time would be worse than showing none.",
+      "rejected": [
+        {
+          "option": "A per-job hold file like `hold_file`",
+          "why": "One account-wide condition would show as one line per job."
+        },
+        {
+          "option": "Sleep until the reset",
+          "why": "Out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "Drain ends with a new `Stop::UsageLimit` and never uses the item-failure path; the item stays queued.",
+      "reason": "Criterion 3 needs the stop reason 'usage limit' naming the reset time and an unchanged failure counter, for both the reading and run steps.",
+      "rejected": [
+        {
+          "option": "Treat it as `ItemEnd::Held` and keep draining",
+          "why": "Every later item would hit the same limit; the loop should stop."
+        }
+      ]
+    },
+    {
+      "choice": "Put the two end-to-end drain tests (reading step and run step) and the ordinary-error drain test in the existing crates/athena-cli/tests/drain.rs. Unit tests with a Stub `Steps` go in src/drain.rs.",
+      "reason": "tests/drain.rs holds the only harness that runs `RealSteps` with a fake driver against a real repository (see the low-disk tests near lines 1541-1790). A new harness in src/drain.rs would duplicate it. It is a test file, not governance, and the change to it is test-only.",
+      "rejected": [
+        {
+          "option": "Only Stub-`Steps` unit tests in src/drain.rs",
+          "why": "They would not exercise `RealSteps` filling `Read.limited` and `Run.limited` from the real stage results, so a break in that mapping would pass."
+        },
+        {
+          "option": "Build a new RealSteps harness inside src/drain.rs tests",
+          "why": "Duplicates a large fixture for the sake of file-count."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "purpose": "Add `InvocationOutcome::Limited` (snake_case `limited`) and `Invocation.limit_resets_at: Option<Timestamp>` (serde default, skipped when None). Update fixtures and extend the round-trip tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-agent/src/claude.rs",
+      "action": "modify",
+      "purpose": "Add pure `parse_usage_limit(text, now)` and `usage_limit_reset(detail, now)`. `output_from_result` returns Limited (cost 0.0, zero lower-bound usage, no models_used, reply in detail) for a no-usage limit reply. Add the `limit` mode to the stand-in and the criterion 1 tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-agent/src/fake.rs",
+      "action": "modify",
+      "purpose": "Add an optional reply text to `FakeTurn`, routed through `claude::output_from_result`/`parse_usage_limit`, so scripts can inject the limit reply without the fake owning any limit logic.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/invocation.rs",
+      "action": "modify",
+      "purpose": "In `invoke_and_record`, set `limit_resets_at` from `claude::usage_limit_reset` for a Limited output and write the global hold. Fix `Invocation` literals such as `interrupted_record`. Add record and gate tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "action": "modify",
+      "purpose": "Add `USAGE_LIMIT`, the hold write/read helpers (one global file in the state dir) and the `is_environment_reason` extension.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Check Limited before the generic reader failure. Return a typed limit on the reading result, carried beside `reader_error`. Add the reading-stage tests and the ordinary-error test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "Planner, critic, producer and verifier non-success branches check Limited first, close with `environment: usage limit`, keep the candidate, and return the typed limit on the finished-run result. Add the stage tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/plan.rs",
+      "action": "modify",
+      "purpose": "Only if the planning stage's stop path needs the typed limit threaded through; otherwise untouched.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "action": "modify",
+      "purpose": "Only if the verifier handles the outcome here rather than in run/mod.rs; otherwise untouched.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "Add `StatusView.usage_limit`, read from the hold and shown only while the reset is after `now`, through a pure view function taking `now`. Add the tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Add `limited` to `Read` and `Run`, `RunStep::Limited`, `ItemEnd::Limited`, `Stop::UsageLimit` (label 'usage limit') and `Report.usage_limit`. Fill them in `RealSteps` from the typed field. Leave `failures` alone. Update `Stop::ALL`, `meaning` and the module docs. Add Stub unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "purpose": "Print the 'usage limit' stop with its reset time, and the status line for the hold.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "purpose": "Update the drain stop help text and any stop-reason mapping for the new variant.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Test-only, not a listed deliverable. The existing RealSteps fake-driver harness is the only place for end-to-end drain tests of the reading step, the run step and the ordinary error (criteria 3 and 5). No other change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased entry: usage-limit recognition as a hold at zero cost, the 'usage limit' stop reason with its reset time, and the status display.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read the definitions the plan could not settle: `output_from_result` in claude.rs, the reading result struct and callers in reading.rs, `GoResult`/finished-run struct and the non-success branches in run/mod.rs, `FakeTurn` handling in fake.rs, and the existing run/mod.rs and tests/drain.rs fixtures.",
+    "records.rs: add `InvocationOutcome::Limited` and `Invocation.limit_resets_at` (serde default, skipped when None). Fix every `Invocation` literal and extend the round-trip test.",
+    "claude.rs: add `parse_usage_limit(text, now)` (phrase match, month, day, 12-hour time, UTC only, next occurrence at or after `now`) and `usage_limit_reset(detail, now)`. Update `output_from_result` for the no-usage limit reply. Add the `limit` stand-in mode and the criterion 1 tests plus the negative tests.",
+    "fake.rs: add the optional reply text to `FakeTurn`, routed through the claude.rs functions, keeping cost 0 and no models_used for Limited.",
+    "disk.rs: add `USAGE_LIMIT`, hold write/read helpers and the `is_environment_reason` extension. invocation.rs: set `limit_resets_at` and write the hold in `invoke_and_record`. Add a record test that `check_invocation` passes and the JSON round-trips.",
+    "Stages: reading.rs and run/mod.rs check Limited ahead of the generic failure, close with `environment: usage limit`, keep the candidate and return the typed limit. Touch plan.rs and verify.rs only if needed. Write one test per stage and the ordinary-error test.",
+    "status.rs: add `StatusView.usage_limit` with a pure function taking `now`, and the tests for shown while holding and absent after reset.",
+    "drain.rs: add `limited` to `Read` and `Run`, fill them in `RealSteps`, add `RunStep::Limited`, `ItemEnd::Limited`, `Stop::UsageLimit` and `Report.usage_limit`. Do not touch `failures`. Update docs, `Stop::ALL` and `meaning`. Add Stub unit tests.",
+    "display.rs and main.rs: print the stop with its reset time, show the status line, update help text. Add the two end-to-end drain tests and the ordinary-error drain test to tests/drain.rs.",
+    "Add the CHANGELOG.md Unreleased entry. Run `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Fix what fails, including any test or doc check that enumerates `Stop::ALL`, and confirm drain.rs has no 'environment: usage limit' match."
+  ],
+  "risks": [
+    {
+      "risk": "New `Invocation` field and `InvocationOutcome::Limited` break struct literals and exhaustive matches across crates.",
+      "mitigation": "Serde default on the field so old records load. Let the compiler find every site; run `cargo clippy --all-targets`."
+    },
+    {
+      "risk": "A false positive turns an ordinary reply that mentions a limit into a hold.",
+      "mitigation": "Recognise only a result with no model usage whose text matches both 'hit your ... limit' and 'resets'. Negative tests: an ordinary error and a successful reply that quotes the phrase."
+    },
+    {
+      "risk": "The reset text has no year and names a zone, so it can be mis-parsed.",
+      "mitigation": "Parse UTC only, infer the next occurrence at or after `now`, and test with a fixed `now` including year rollover. Any other format leaves the reset None: the record is still Limited and no hold is written."
+    },
+    {
+      "risk": "The fake driver and the real driver diverge.",
+      "mitigation": "The fake routes the reply text through the same claude.rs function. Criterion 1 exercises the real driver through the stand-in script."
+    },
+    {
+      "risk": "A stage still counts the limit as a failure because the generic failure branch comes first.",
+      "mitigation": "Check Limited first in every non-success branch; one test per stage; the ordinary-error test (criterion 5) runs beside them."
+    },
+    {
+      "risk": "Deriving the reset from `detail` in `invoke_and_record` is a second read of the reply text.",
+      "mitigation": "It runs only for an already-Limited output, uses the same claude.rs parser, and stores the result as the typed record field, so stages, drain and status never read text."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Test through the real driver. In claude.rs `stand_in_tests`, add a `MODE=limit` branch to the existing shell stand-in script. It emits a `system` init line, then a `result` line with `is_error` true, result text \"You've hit your weekly limit · resets Oct 29, 6pm (UTC)\", empty `modelUsage` and zero usage. The test calls `ClaudeCodeDriver::invoke` through the existing `driver(...)` helper (which sets `refuse_nested_runs: false`), with the existing `spec(...)` and `Recorder`. Both seams exist today; the new pieces are the `limit` mode in the script, `parse_usage_limit` and `usage_limit_reset`. A pure test calls `parse_usage_limit(text, now)` with a fixed `now` of 2026-10-28 and expects 2026-10-29T18:00:00Z. A second pure test uses a `now` after the date to check the year rollover. Negative tests: a reply with model usage, and an ordinary error text, are not limits.",
+      "command": "cargo test -p athena-agent usage_limit",
+      "observes": "The driver output has `outcome == Limited`, `cost_usd == Some(0.0)`, zero usage and `usage_measured == false`. `usage_limit_reset(detail, ended_at)` gives 18:00 UTC on Oct 29. The pure test gives the exact timestamp for the fixed `now`. The negative cases are not Limited.",
+      "fails_without": "Without recognition in `output_from_result` the outcome stays `Error`, so the `Limited` assertion fails. Without the parser the reset is None, so the timestamp assertion (month, day, hour, minute) fails. Without the zero cost the `Some(0.0)` assertion fails."
+    },
+    {
+      "criterion": 2,
+      "method": "One test per stage, each driving the real stage entry point against `FakeAgentDriver::new(script)`. The script returns a `FakeTurn` carrying the limit reply text for that stage's `Role`. The fake has no limit logic: it passes the text through `claude::output_from_result`/`parse_usage_limit`, the same code the real driver uses. Reading uses `read_request` in reading.rs. Planner, critic, producer and verifier use `Athena::go` (run/mod.rs) with the fixtures that already build an `Athena` with a fake driver in run/mod.rs tests. The seam `FakeAgentDriver::new(Script)` exists today; step 4 adds the optional reply-text field to `FakeTurn` in fake.rs. Each test loads the invocation record from the state files or the closing result, then asserts: `outcome == Limited`; reported cost 0.0; `check_invocation(...)` returns no violations; an `AnyRecord` JSON round trip; the stage result carries the typed limit; the closing reason is `environment: usage limit` and `is_environment_reason` accepts it; no failure reason is recorded; and, for producer and verifier, the candidate still exists and `resumable_stop` is true so `athena retry` accepts the job.",
+      "command": "cargo test -p athena-core usage_limit",
+      "observes": "For the five stages: Limited, zero-cost, gate-clean records, a typed limit on the stage result, the job retryable with its candidate kept, and no failure counted.",
+      "fails_without": "If a stage keeps the generic `outcome != Success` branch, reading returns `ReadError::Failed` and planner, critic, producer and verifier close with a work-failure reason. The typed-limit and `environment: usage limit` assertions then fail. If the record were not Limited or not zero cost, the Limited or `check_invocation` assertion fails."
+    },
+    {
+      "criterion": 3,
+      "method": "Two end-to-end tests in crates/athena-cli/tests/drain.rs, in the style of the existing low-disk `RealSteps` tests (around lines 1541-1790), which already run `RealSteps` with a fake driver on a real repository. Test A: the script returns the limit reply for `Role::Reader` on a queued item. Test B: the reading succeeds and the script returns it for `Role::Producer`. Each calls the production drain entry those tests use, then asserts `report.stop == Stop::UsageLimit`, the label 'usage limit', that the rendered stop line names the reset time, `report.usage_limit` is set, there is no failed item, the failure count is unchanged, and the fake driver was called once for the item. Unit tests in src/drain.rs use a Stub `Steps` with `limited` set to check the loop makes no second attempt and leaves `failures` alone. The harness exists today; step 8 adds `Read.limited`, `Run.limited`, `Stop::UsageLimit` and `Report.usage_limit`.",
+      "command": "cargo test -p athena-cli usage_limit",
+      "observes": "The stop is 'usage limit' with the reset time, not 'repeated failure'. The failure counter and failed-item are unchanged. One attempt is made. Both the reading step and the run step behave this way.",
+      "fails_without": "If drain mapped the limit onto the failure path, the report would stop with 'repeated failure' or the failure count would rise, failing the `Stop::UsageLimit`, label and failures-unchanged assertions."
+    },
+    {
+      "criterion": 4,
+      "method": "status.rs tests using the existing status fixture. Write the hold with the new `disk` helper, resetting after `now`; call `status()` and render with `display::status`. Then write a hold whose reset is before `now` and call again. A pure view function that takes `now` explicitly is also tested, so no clock is mocked. The fixture exists today; step 5 adds the helpers and `StatusView.usage_limit`.",
+      "command": "cargo test -p athena-core status::tests::usage_limit",
+      "observes": "While holding, `view.usage_limit` is Some and the rendered text contains 'usage limit' and the reset time. After the reset time, `view.usage_limit` is None and the text contains neither.",
+      "fails_without": "If `status()` ignored the hold, the 'shown while holding' assertion fails. If it ignored the reset time, a stale limit would still show and the 'after reset' assertion fails."
+    },
+    {
+      "criterion": 5,
+      "method": "The script returns a `FakeTurn` with `outcome: Error` and `detail: Some(\"boom\")` (no limit text) for `Role::Reader`. A core test calls `read_request`; a drain test in tests/drain.rs attempts the same item twice through the RealSteps harness. Both use seams that exist today.",
+      "command": "cargo test -p athena-core -p athena-cli ordinary_driver_error",
+      "observes": "The invocation record has `outcome == Error`. The reading result carries the error text with no typed limit. The failure counter rises, and drain stops with 'repeated failure' naming the item.",
+      "fails_without": "If the new branch caught every error, or reading stopped returning `ReadError::Failed`, the record would not be Error and the failure count would not rise, so the assertions fail."
+    },
+    {
+      "criterion": 6,
+      "method": "Content check. Grep drain.rs for the environment reason text and for reason-string parsing. Drain reads only `read.limited` and `run.limited`, `Stop::UsageLimit` and the stop label.",
+      "command": "grep -n \"environment: usage limit\" crates/athena-cli/src/drain.rs",
+      "observes": "No match for the string 'environment: usage limit' in drain.rs. The match arms use the typed `limited` fields.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Content check. Grep CHANGELOG.md for the Unreleased entry.",
+      "command": "grep -n \"usage limit\" CHANGELOG.md",
+      "observes": "An Unreleased entry covering the recognition of the limit reply as a hold at zero cost, the 'usage limit' drain stop reason with its reset time, and the status display.",
+      "fails_without": null
+    },
+    {
+      "criterion": 8,
+      "method": "Run the three checks Athena runs on the result as whole commands. They include the existing `system_facts_budgets_match_computed` budget test and the records round-trip tests that cover the new optional `limit_resets_at` field.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0: formatting is clean, there are no clippy warnings, and every test passes, including the new limit tests and all existing tests.",
+      "fails_without": "Missed constructor updates for the new `Invocation` field, a non-exhaustive match on `InvocationOutcome` or `Stop`, an unformatted file or any failing new test makes one of the three commands exit non-zero."
+    }
+  ],
+  "open_questions": [
+    "How the reading result and the finished-run result carry the typed limit is not settled; I did not read those struct definitions. A new field on each beside `reader_error` and the reason is the plan, kept minimal.",
+    "Which existing run/mod.rs and tests/drain.rs fixtures build an `Athena` with a fake driver for the planner, critic, producer and verifier was not read. The producer must reuse them.",
+    "If the reviewer prefers a typed `AgentOutput.limit` field to the detail re-read, it needs a one-line change in athena-agent/src/lib.rs, which is outside the listed deliverables. This plan keeps lib.rs untouched.",
+    "If crates/athena-cli/tests/drain.rs must stay out of the change, criterion 3 falls back to Stub unit tests in drain.rs plus a pure mapping function for the `RealSteps` fill. That gives weaker evidence for the real mapping.",
+    "When the reset is not UTC or cannot be parsed, no hold is written, so status shows nothing and the drain stop says the reset time is unknown. A fallback hold duration would be a separate decision.",
+    "Whether a second drain should refuse to start while a hold with a future reset stands is left out because no criterion asks for it.",
+    "Whether anything beyond `cargo test` enumerates `Stop::ALL` (docs checks) was not searched."
+  ],
+  "producer_section_sha256": "d8ee70e669bf20b1e2197f815bf59414c446bb7c07d1bdacbad959eb5339a750"
+}

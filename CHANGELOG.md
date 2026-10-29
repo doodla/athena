@@ -520,6 +520,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `crates/athena-core/src/run.rs` became `crates/athena-core/src/run/mod.rs` (structure pass job R1), so later
   jobs can add submodules beside it. The `run` module path is unchanged. The only text edits are the two test
   `include_str!` paths, which gain one `../`. No behavior change.
+- Structure pass job G4 (`docs/design/structure-pass.md`): the Records-branch writes row of
+  `crates/athena-core/src/gh/mod.rs` (`LandingRecords`, `LandingFacts`, `verification_id`, `history_method`,
+  `GitLandingRecords` with its impls, `CutoverRun`, `cutover_job_for`, `run_cutover`, `cutover_catch_up` and the
+  `ReconcileRecords` impl) moves unchanged into `gh/records.rs`. `gh/mod.rs` re-exports the public names, so
+  every path such as `crate::gh::LandingRecords` is as before. Behavior is unchanged; the list from
+  `cargo test -- --list` is the same. The only edits to existing code are import lines, and the private
+  `GitLandingRecords::commits` is now `pub(super)` so a test left in `gh/mod.rs` can still call it.
 - Structure pass job G3 (`docs/design/structure-pass.md`): the Git remote items of
   `crates/athena-core/src/gh/mod.rs` (`Remote`, `GitRemote`) move unchanged into `gh/remote.rs`, and the Pages
   items (`PAGES_WORKFLOW`, `PagesRun`, `PagesHost` and its `GhClient` impl, `PagesReport`, the `PAGES_WAIT_*`
