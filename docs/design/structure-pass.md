@@ -206,6 +206,11 @@ in this plan; a later pass can use the same method.
 `gh` jobs and `run` jobs are independent until R4, which uses `gh::land_pr`: run R4 after G7 has landed or before
 G1 starts, never between, so its caller check is made against one layout.
 
+R4 is done. The Close and land row is in `run/close.rs`; `closing_subject` and `build_text` are re-exported
+from `run/mod.rs`. The caller search found no call to `gh::land_pr` from the moved row (it is reached through
+`Athena::land_pr` in `gh/landing.rs`), and `retry_landing` is called only from `go_job` in `run/mod.rs`.
+`cost_text` stays in `run/mod.rs` because the producer, verifier and planning code also use it.
+
 ## 5. How each move is shown to change nothing
 
 The rules below apply to every job. A job fails if any item is not met.

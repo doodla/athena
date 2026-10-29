@@ -9,6 +9,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- Structure pass R4: the Close and land row (`close_dispatched`, `land_or_block`, `retry_landing`,
+  `closing_subject`, `landing_body`, `build_text`, `provenance_word`, `branch_suffix`) moved from
+  `run/mod.rs` to `run/close.rs`, text unchanged; `closing_subject` and `build_text` are re-exported from
+  `run/mod.rs`, so `crate::run` paths are unchanged. No behavior change. Callers found by search over
+  `crates/` and `xtask/`: `close_dispatched` is called four times from `dispatch` in `run/mod.rs` and
+  calls `land_or_block`, `landing_body` and `closing_subject`; `land_or_block` only from
+  `close_dispatched`; `retry_landing` only from `go_job` in `run/mod.rs` (`main.rs` does not name it, and
+  `crates/athena-cli/tests/trailer_stop.rs` reaches it through the CLI); `closing_subject` from
+  `crates/athena-core/src/manage.rs` as `crate::run::closing_subject`, and inside `close.rs`;
+  `landing_body`, `provenance_word` and `branch_suffix` only inside `close.rs`; `build_text` has no caller
+  outside its definition. `gh::land_pr` is not called from the moved row: it is reached through
+  `Athena::land_pr` in `gh/landing.rs` and in `run_pin_tests.rs`, neither edited. `cost_text` stays in
+  `run/mod.rs` because producer, verifier and planning code use it. Moved methods are `pub(super)` only
+  where `run/mod.rs` calls them.
 - Structure pass R3: the planning code (`stop_planning`, `plan_round`, `planning_round`, `end_round`,
   `RoundEnd`, `findings_line`, `plan_record`, `redacted`, `planning_grant` and its `planning_grant_tests`)
   moved from `run/mod.rs` to `run/planning.rs`, and the pin and reread code (`pin_repo`, `study_pin`,
