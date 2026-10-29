@@ -251,8 +251,35 @@ pub struct Records {
     pub code_health_baselines: Vec<athena_data::records::CodeHealthBaseline>,
     /// Every throughput review (`crate::hestia`), oldest first; the last is the latest.
     pub throughput_reviews: Vec<athena_data::records::ThroughputReview>,
+    /// Landing records (`landings/`, written after each merge), oldest first. Read from the tree itself and
+    /// from the local records branch; one that cannot be read is left out, so a missing branch reads as none.
+    pub landings: Vec<athena_data::history::Landing>,
     /// Files that are not acceptable records, by path.
     pub invalid: Vec<String>,
+}
+
+/// The landing records under `landings/` in `treeish`; an absent directory or an unreadable file counts nothing.
+fn landings_in(git: &Git, treeish: &str) -> Vec<athena_data::history::Landing> {
+    let Ok(entries) = git.ls_tree_under(treeish, "landings") else {
+        return Vec::new();
+    };
+    let oids: Vec<String> = entries
+        .into_iter()
+        .filter(|e| e.kind == "blob")
+        .map(|e| e.oid)
+        .collect();
+    let Ok(blobs) = git.cat_blobs(&oids) else {
+        return Vec::new();
+    };
+    blobs
+        .iter()
+        .filter_map(|bytes| {
+            match athena_data::history::HistoryRecord::parse(&String::from_utf8_lossy(bytes)) {
+                Ok(athena_data::history::HistoryRecord::Landing(l)) => Some(l),
+                _ => None,
+            }
+        })
+        .collect()
 }
 
 fn job_of(record: &AnyRecord) -> Option<&JobId> {
@@ -341,6 +368,13 @@ impl Records {
         for job in records.jobs.values_mut() {
             job.sort();
         }
+        let mut landings = landings_in(git, treeish);
+        if let Ok(Some(tip)) = athena_git::records_branch::RecordsWriter::new(git).tip() {
+            landings.extend(landings_in(git, &tip));
+        }
+        landings.sort_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)));
+        landings.dedup_by(|a, b| a.id == b.id);
+        records.landings = landings;
         records.steward_runs.sort_by_key(|i| i.started_at);
         records.audience_runs.sort_by_key(|i| i.started_at);
         records.auditor_runs.sort_by_key(|i| i.started_at);

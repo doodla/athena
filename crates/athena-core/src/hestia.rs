@@ -1505,7 +1505,10 @@ impl Athena {
             format!(
                 "# Throughput\n\nThis review ran because of: {}.\n\n```\n{}\n```\n\nThe stages are minutes of the model \
                  invocations of that role, minutes the checks took, and, for landing and rebuild, the time from the \
-                 end of the last invocation to the landing record.\n",
+                 end of the last invocation (the verifier) to the later of the landing outcome and the landing \
+                 record (landings/), which is written after the CI wait, push and merge. Idle time and the time on \
+                 jobs that did not land are time spent (invocation wall times, check durations and the landing \
+                 wait), not the time a job stayed open. Each figure's basis is printed under it.\n",
                 trigger.as_str(),
                 measured.text()
             ),
