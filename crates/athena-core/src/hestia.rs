@@ -11,6 +11,15 @@
 //! This skeleton ships no checks. [`default_checks`] is empty, and the checks of the design's rows 1 to 8 are
 //! later jobs that add themselves to it.
 //!
+//! The sweep also reads Athena's own spec. Every active requirement in `docs/spec.toml` records a mechanism, an
+//! owner and a measure. [`Athena::spec_review`] (a review pass, see [`Athena::review_passes`], because a [`Check`]
+//! cannot reach the records or the queue) queues one request through [`StewardRequest`] for each active
+//! requirement whose mechanism is `none` or whose measure is blank or names a label `athena status` does not
+//! print ([`measure_problem`]). The request is urgent when the requirement is about speed ([`is_speed`]), and an
+//! open request that holds the line `Spec requirement: <id>` stops a second one. At most
+//! [`SPEC_REQUESTS_PER_PASS`] are queued in one pass, speed first. `athena status` lists the same gaps
+//! ([`spec_gaps`]).
+//!
 //! Hestia also reviews errors across jobs (`docs/design/hestia.md`, "Error review"). Every failure gets an
 //! introspection with a cause, but each one is written about one job. After an introspection is recorded,
 //! [`Athena::error_review`] groups it with the earlier ones by cause ([`cause_key`]). A cause that has occurred
@@ -350,6 +359,326 @@ fn root_cause_request_at(
         &["crates/".to_string()],
     )
     .map(|r| r.render())
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Spec review
+
+/// The spec Athena reads its own requirements from, at HEAD.
+pub const SPEC_FILE: &str = "docs/spec.toml";
+
+/// The most requests one spec review queues. The rest wait for a later pass and stay in `athena status`.
+pub const SPEC_REQUESTS_PER_PASS: usize = 5;
+
+/// The line that ties a request to its requirement. A request job that is not closed and holds this exact
+/// line, followed by the requirement id, is the open request for that requirement.
+const SPEC_LINE: &str = "Spec requirement: ";
+
+/// The status labels whose measures are about time, so a requirement measured by them is about speed.
+const SPEED_LABELS: &[&str] = &["throughput", "checks"];
+
+/// One `[[requirement]]` of `docs/spec.toml`, with the fields the spec review reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpecRequirement {
+    pub id: String,
+    pub statement: String,
+    /// True for `status = "active"`; a superseded requirement is exempt from the review.
+    pub active: bool,
+    /// The code path, role or check that meets the requirement, or `none`.
+    pub mechanism: String,
+    /// The role responsible for the requirement.
+    pub owner: String,
+    /// How the requirement is shown, ending with `status: <label>` (see [`crate::status::STATUS_MEASURE_LABELS`])
+    /// or `status: not shown` and the test or check that shows it.
+    pub measure: String,
+}
+
+/// Parses the requirements of `docs/spec.toml`. A file with none gives an empty list.
+pub fn parse_spec(text: &str) -> Result<Vec<SpecRequirement>> {
+    let doc: toml_edit::DocumentMut = text.parse().context("docs/spec.toml is not valid TOML")?;
+    let Some(tables) = doc
+        .get("requirement")
+        .and_then(toml_edit::Item::as_array_of_tables)
+    else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for table in tables {
+        let field = |key: &str| {
+            table
+                .get(key)
+                .and_then(toml_edit::Item::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        };
+        let id = field("id");
+        if id.is_empty() {
+            bail!("a requirement in docs/spec.toml has no id");
+        }
+        out.push(SpecRequirement {
+            statement: field("statement"),
+            active: field("status") == "active",
+            mechanism: field("mechanism"),
+            owner: field("owner"),
+            measure: field("measure"),
+            id,
+        });
+    }
+    Ok(out)
+}
+
+fn blank_or_none(text: &str) -> bool {
+    let t = text.trim();
+    t.is_empty() || t.eq_ignore_ascii_case("none")
+}
+
+/// The label a measure ends with: the text after its last `status:`.
+fn measure_label(measure: &str) -> Option<&str> {
+    let (_, label) = measure.rsplit_once("status:")?;
+    Some(label.trim().trim_end_matches('.').trim())
+}
+
+/// What is wrong with a measure, or `None` when it is valid: it is not blank or `none`, and it ends with
+/// `status: not shown` or `status: <label>` with a label `athena status` prints.
+pub fn measure_problem(measure: &str) -> Option<String> {
+    if blank_or_none(measure) {
+        return Some("the measure is blank or none".into());
+    }
+    let Some(label) = measure_label(measure) else {
+        return Some("the measure does not end with `status: <label>`".into());
+    };
+    if label.is_empty() {
+        return Some("the measure has `status:` with no label".into());
+    }
+    if label.starts_with("not shown")
+        || crate::status::STATUS_MEASURE_LABELS
+            .iter()
+            .any(|(known, _)| *known == label)
+    {
+        return None;
+    }
+    Some(format!(
+        "the measure names `{label}`, which `athena status` does not print"
+    ))
+}
+
+/// Whether a requirement is about speed: its measure is shown in a status section about time. Such a
+/// requirement's request is urgent.
+pub fn is_speed(requirement: &SpecRequirement) -> bool {
+    measure_label(&requirement.measure).is_some_and(|label| SPEED_LABELS.contains(&label))
+}
+
+/// An active requirement that has no mechanism or a failing measure.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SpecGap {
+    pub id: String,
+    pub statement: String,
+    /// The role named as owner; empty when the spec names none.
+    pub owner: String,
+    /// The mechanism is blank or `none`.
+    pub no_mechanism: bool,
+    /// Why the measure fails, when it does.
+    pub measure_problem: Option<String>,
+    /// The requirement is about speed ([`is_speed`]).
+    pub speed: bool,
+}
+
+impl SpecGap {
+    /// What is missing, in words.
+    pub fn what(&self) -> String {
+        let mut parts = Vec::new();
+        if self.no_mechanism {
+            parts.push("has no mechanism".to_string());
+        }
+        if let Some(problem) = &self.measure_problem {
+            parts.push(format!("has a failing measure: {problem}"));
+        }
+        parts.join(" and ")
+    }
+
+    /// The `next` line of `athena status` for this gap.
+    pub fn next_line(&self) -> String {
+        let owner = if self.owner.is_empty() {
+            "no owner named"
+        } else {
+            &self.owner
+        };
+        format!(
+            "requirement {} {}   # owner: {owner} · Athena queues a request at the next drain or sweep",
+            self.id,
+            self.what()
+        )
+    }
+}
+
+/// The active requirements with no mechanism or a failing measure, in spec order.
+pub fn spec_gaps(requirements: &[SpecRequirement]) -> Vec<SpecGap> {
+    requirements
+        .iter()
+        .filter(|r| r.active)
+        .filter_map(|r| {
+            let no_mechanism = blank_or_none(&r.mechanism);
+            let measure_problem = measure_problem(&r.measure);
+            (no_mechanism || measure_problem.is_some()).then(|| SpecGap {
+                id: r.id.clone(),
+                statement: one_line(&r.statement),
+                owner: r.owner.clone(),
+                no_mechanism,
+                measure_problem,
+                speed: is_speed(r),
+            })
+        })
+        .collect()
+}
+
+/// The gaps of the spec committed at `head`. A repository with no spec has none.
+pub fn spec_gaps_at(git: &athena_git::Git, head: &str) -> Result<Vec<SpecGap>> {
+    let Some(bytes) = git.show_file(head, SPEC_FILE)? else {
+        return Ok(Vec::new());
+    };
+    let text = String::from_utf8(bytes).context("docs/spec.toml is not UTF-8")?;
+    Ok(spec_gaps(&parse_spec(&text)?))
+}
+
+/// The request that asks for a requirement's mechanism or measure, built with [`StewardRequest`]. It is
+/// urgent for a requirement about speed and normal otherwise.
+pub fn spec_request(gap: &SpecGap) -> Result<String, String> {
+    let title = if gap.no_mechanism {
+        format!("Give requirement {} a mechanism", gap.id)
+    } else {
+        format!("Give requirement {} a valid measure", gap.id)
+    };
+    let owner = if gap.owner.is_empty() {
+        "none named"
+    } else {
+        &gap.owner
+    };
+    let body = format!(
+        "Requirement {id} in docs/spec.toml is active and {what}.\n\
+         Requirement: {statement}\n\
+         Owner: {owner}\n\n\
+         Build the code path, role or check that meets the requirement, and record it as the mechanism in \
+         docs/spec.toml. Write a measure that says how the requirement is shown and ends with \
+         `status: <label>`, where the label is a line `athena status` prints, or `status: not shown` and the \
+         test that shows it.\n\n\
+         {SPEC_LINE}{id}\n\n\
+         This request is queued again at each drain while the requirement is active and its mechanism or \
+         measure is missing; to stop it, fill the mechanism and measure in docs/spec.toml or mark the \
+         requirement superseded.",
+        id = gap.id,
+        what = gap.what(),
+        statement = gap.statement,
+    );
+    let acceptance = [
+        format!(
+            "Requirement {} names a mechanism that exists in the code, an owner and a measure",
+            gap.id
+        ),
+        "A test fails without the mechanism and passes with it".to_string(),
+        "fmt, clippy and test pass".to_string(),
+    ];
+    let priority = if gap.speed {
+        Priority::Urgent
+    } else {
+        Priority::Normal
+    };
+    StewardRequest::new(
+        Some(priority),
+        &title,
+        &body,
+        &acceptance,
+        &["docs/spec.toml".to_string(), "crates/".to_string()],
+    )
+    .map(|r| r.render())
+}
+
+/// Whether a request job that is not closed already asks for this requirement.
+fn spec_request_is_open(records: &Records, id: &str) -> bool {
+    let line = format!("{SPEC_LINE}{id}");
+    records.request_jobs().iter().any(|job| {
+        !matches!(job.state(), JobState::Closed(_))
+            && job
+                .request
+                .as_ref()
+                .is_some_and(|r| r.text.lines().any(|l| l.trim() == line))
+    })
+}
+
+/// What a spec review would do over the records.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct SpecPlan {
+    /// The gaps to queue now and the request text for each, speed first, then in spec order.
+    pub queue: Vec<(String, Result<String, String>)>,
+    /// Gaps an open request already covers.
+    pub already_open: usize,
+    /// Gaps past the per-pass cap, left for a later pass.
+    pub deferred: usize,
+}
+
+/// Decides which gaps get a request: none that an open request covers, at most
+/// [`SPEC_REQUESTS_PER_PASS`], speed first.
+pub fn plan_spec_requests(gaps: &[SpecGap], records: &Records) -> SpecPlan {
+    let mut plan = SpecPlan::default();
+    let mut ordered: Vec<&SpecGap> = gaps.iter().collect();
+    ordered.sort_by_key(|g| !g.speed);
+    for gap in ordered {
+        if spec_request_is_open(records, &gap.id) {
+            plan.already_open += 1;
+        } else if plan.queue.len() >= SPEC_REQUESTS_PER_PASS {
+            plan.deferred += 1;
+        } else {
+            plan.queue.push((gap.id.clone(), spec_request(gap)));
+        }
+    }
+    plan
+}
+
+/// What one spec review did.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct SpecReport {
+    /// How many active requirements lack a mechanism or a valid measure.
+    pub gaps: usize,
+    /// The requests queued: requirement id and job.
+    pub queued: Vec<(String, JobId)>,
+    pub already_open: usize,
+    pub deferred: usize,
+    /// Requests that could not be built or queued, with the reason.
+    pub failed: Vec<String>,
+}
+
+impl Athena {
+    /// The spec review: for each active requirement of `docs/spec.toml` at HEAD that has no mechanism or a
+    /// failing measure, queues one request through the steward request builder, urgent when the requirement is
+    /// about speed. A requirement that an open request already covers gets none, so a second run changes
+    /// nothing. Athena runs it in [`Athena::review_passes`], at the start of every drain and in each sweep.
+    pub fn spec_review(&self, ui: &dyn Ui) -> Result<SpecReport> {
+        let head = self.head()?;
+        let gaps = spec_gaps_at(&self.git, &head)?;
+        let records = Records::load(&self.git, &head)?;
+        let plan = plan_spec_requests(&gaps, &records);
+        let mut report = SpecReport {
+            gaps: gaps.len(),
+            already_open: plan.already_open,
+            deferred: plan.deferred,
+            ..SpecReport::default()
+        };
+        for (id, text) in plan.queue {
+            let queued = text
+                .map_err(|e| anyhow::anyhow!("the request for {id}: {e}"))
+                .and_then(|text| self.queue(&text));
+            match queued {
+                Ok((job, _)) => {
+                    ui.line(&format!(
+                        "hestia     requirement {id} has no mechanism or a failing measure; request {job} queued"
+                    ));
+                    report.queued.push((id, job));
+                }
+                Err(e) => report.failed.push(format!("{id}: {e:#}")),
+            }
+        }
+        Ok(report)
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -1426,7 +1755,23 @@ impl Athena {
             ),
             Err(e) => format!("hestia     evidence labels: could not run: {e:#}"),
         };
-        let mut lines = vec![backfill, derive];
+        let spec = match self.spec_review(ui) {
+            Ok(r) => {
+                let mut line = format!(
+                    "hestia     spec: {} requirement(s) without a mechanism or a valid measure · queued {} · already open {} · left for a later pass {}",
+                    r.gaps,
+                    r.queued.len(),
+                    r.already_open,
+                    r.deferred
+                );
+                if !r.failed.is_empty() {
+                    line.push_str(&format!(" · could not queue: {}", r.failed.join("; ")));
+                }
+                line
+            }
+            Err(e) => format!("hestia     spec: could not run: {e:#}"),
+        };
+        let mut lines = vec![backfill, derive, spec];
         // The throughput review is due every ten landings or on a 20% slowdown, so most calls print nothing.
         match self.throughput_review(ui) {
             Ok(Some(r)) => {
@@ -1832,6 +2177,354 @@ mod tests {
 
     fn records(athena: &Athena) -> Records {
         Records::load(&athena.git, &athena.head().unwrap()).unwrap()
+    }
+
+    /// One `[[requirement]]` of a fixture spec, owned by Hestia.
+    fn req(id: &str, statement: &str, status: &str, mechanism: &str, measure: &str) -> String {
+        format!(
+            "[[requirement]]\nid = \"{id}\"\nstatement = \"{statement}\"\nkind = \"requirement\"\nstatus = \"{status}\"\nmechanism = \"{mechanism}\"\nowner = \"Hestia\"\nmeasure = \"{measure}\"\n\n"
+        )
+    }
+
+    /// Commits a fixture `docs/spec.toml`.
+    fn put_spec(dir: &std::path::Path, athena: &Athena, text: &str) {
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(dir.join(SPEC_FILE), text).unwrap();
+        athena.git.run(["add", "-A"]).unwrap();
+        athena
+            .git
+            .run(["commit", "-q", "-m", "Spec for the test"])
+            .unwrap();
+    }
+
+    /// The text of the one request that cites the requirement, when exactly one does.
+    fn spec_request_text(athena: &Athena, id: &str) -> String {
+        let known = records(athena);
+        let line = format!("{SPEC_LINE}{id}");
+        let found: Vec<String> = known
+            .request_jobs()
+            .iter()
+            .filter_map(|j| j.request.as_ref())
+            .filter(|r| r.text.lines().any(|l| l == line))
+            .map(|r| r.text.clone())
+            .collect();
+        assert_eq!(found.len(), 1, "requests for {id}: {found:?}");
+        found[0].clone()
+    }
+
+    #[test]
+    fn the_gap_rules_flag_no_mechanism_and_a_failing_measure_and_exempt_superseded() {
+        let text = [
+            req("R-1", "s", "active", "none", "a test; status: repeated"),
+            req("R-2", "s", "active", "a path", "a test; status: nowhere"),
+            req("R-3", "s", "active", "a path", "None"),
+            req("R-4", "s", "active", "a path", "a test; status: not shown"),
+            req("R-5", "s", "superseded", "none", "none"),
+            req(
+                "R-6",
+                "s",
+                "active",
+                "a path",
+                "a figure; status: throughput",
+            ),
+            req("R-7", "s", "active", "", "how it is shown"),
+        ]
+        .concat();
+        let requirements = parse_spec(&text).unwrap();
+        assert_eq!(requirements.len(), 7);
+        assert!(!requirements[4].active);
+        let gaps = spec_gaps(&requirements);
+        let ids: Vec<&str> = gaps.iter().map(|g| g.id.as_str()).collect();
+        assert_eq!(ids, ["R-1", "R-2", "R-3", "R-7"]);
+        assert!(gaps[0].no_mechanism && gaps[0].measure_problem.is_none());
+        assert!(!gaps[1].no_mechanism);
+        assert!(
+            gaps[1]
+                .measure_problem
+                .as_ref()
+                .unwrap()
+                .contains("nowhere")
+        );
+        assert!(
+            gaps[2]
+                .measure_problem
+                .as_ref()
+                .unwrap()
+                .contains("blank or none")
+        );
+        assert!(gaps[3].no_mechanism && gaps[3].measure_problem.is_some());
+        assert!(
+            gaps[0]
+                .next_line()
+                .starts_with("requirement R-1 has no mechanism   # owner: Hestia")
+        );
+        assert!(
+            gaps[1]
+                .next_line()
+                .starts_with("requirement R-2 has a failing measure: ")
+        );
+        assert!(parse_spec("this is not = = toml").is_err());
+        assert_eq!(parse_spec("").unwrap(), Vec::new());
+    }
+
+    #[test]
+    fn the_spec_review_queues_one_request_for_a_requirement_with_no_mechanism_and_none_while_it_is_open()
+     {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_in(dir.path(), state.path());
+        let spec = [
+            req(
+                "R-1",
+                "Athena checks the thing.",
+                "active",
+                "none",
+                "a test; status: not shown",
+            ),
+            req(
+                "R-2",
+                "Another one.",
+                "active",
+                "a path",
+                "a test; status: not shown",
+            ),
+        ]
+        .concat();
+        put_spec(dir.path(), &athena, &spec);
+
+        let first = athena.spec_review(&crate::Quiet).unwrap();
+        assert_eq!(first.gaps, 1);
+        assert_eq!(first.queued.len(), 1, "{first:?}");
+        assert_eq!(first.queued[0].0, "R-1");
+        assert_eq!(records(&athena).request_jobs().len(), 1);
+        // Built through the steward builder: priority, acceptance bullets and a files line.
+        let text = spec_request_text(&athena, "R-1");
+        assert!(text.starts_with("Priority: normal\n"), "{text}");
+        assert!(text.contains("Acceptance:\n- "), "{text}");
+        assert!(text.contains("\nFiles: docs/spec.toml, crates/"), "{text}");
+        assert!(text.contains("Athena checks the thing."), "{text}");
+        assert_eq!(crate::reading::request_text_acceptance(&text).len(), 3);
+        assert!(spec_request_is_open(&records(&athena), "R-1"));
+        assert!(!spec_request_is_open(&records(&athena), "R"));
+
+        // A second run while the request is open queues nothing, and the pass line says so.
+        let second = athena.spec_review(&crate::Quiet).unwrap();
+        assert!(second.queued.is_empty(), "{second:?}");
+        assert_eq!(second.already_open, 1);
+        assert_eq!(records(&athena).request_jobs().len(), 1);
+        let lines = athena.review_passes(&crate::Quiet);
+        assert!(
+            lines.iter().any(|l| l.starts_with(
+                "hestia     spec: 1 requirement(s) without a mechanism or a valid measure · queued 0 · already open 1"
+            )),
+            "{lines:?}"
+        );
+        assert_eq!(records(&athena).request_jobs().len(), 1);
+
+        // Once the request is closed the gap is still there, so it is asked for again.
+        let job = first.queued[0].1.clone();
+        athena
+            .close(job.as_str(), "not wanted", &crate::Quiet)
+            .unwrap();
+        let third = athena.spec_review(&crate::Quiet).unwrap();
+        assert_eq!(third.queued.len(), 1, "{third:?}");
+        assert_eq!(records(&athena).request_jobs().len(), 2);
+
+        // Filling the mechanism ends it: nothing is queued once the requirement has one.
+        let fixed = spec.replace("\"none\"", "\"a path\"");
+        put_spec(dir.path(), &athena, &(fixed + "\n"));
+        let fourth = athena.spec_review(&crate::Quiet).unwrap();
+        assert_eq!((fourth.gaps, fourth.queued.len()), (0, 0));
+    }
+
+    #[test]
+    fn a_speed_requirement_is_urgent_and_a_statement_with_faster_is_not_enough() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_in(dir.path(), state.path());
+        let spec = [
+            req(
+                "R-1",
+                "Athena gets measurably faster.",
+                "active",
+                "none",
+                "minutes; status: throughput",
+            ),
+            req(
+                "R-2",
+                "Athena learns faster from its mistakes.",
+                "active",
+                "none",
+                "causes; status: repeated",
+            ),
+            req(
+                "R-3",
+                "Checks run quickly.",
+                "active",
+                "none",
+                "durations; status: checks",
+            ),
+        ]
+        .concat();
+        put_spec(dir.path(), &athena, &spec);
+        let report = athena.spec_review(&crate::Quiet).unwrap();
+        assert_eq!(report.queued.len(), 3);
+        assert!(spec_request_text(&athena, "R-1").starts_with("Priority: urgent\n"));
+        assert!(spec_request_text(&athena, "R-3").starts_with("Priority: urgent\n"));
+        assert!(spec_request_text(&athena, "R-2").starts_with("Priority: normal\n"));
+        let known = records(&athena);
+        let urgent = known
+            .request_jobs()
+            .iter()
+            .filter(|j| j.priority() == Priority::Urgent)
+            .count();
+        assert_eq!(urgent, 2);
+    }
+
+    #[test]
+    fn a_failing_measure_is_flagged_and_a_valid_one_or_a_superseded_requirement_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_in(dir.path(), state.path());
+        // No spec at all: nothing to review, no error.
+        let none = athena.spec_review(&crate::Quiet).unwrap();
+        assert_eq!((none.gaps, none.queued.len()), (0, 0));
+
+        let spec = [
+            req("R-1", "A.", "active", "a path", "a test; status: nowhere"),
+            req("R-2", "B.", "active", "a path", "a test; status: not shown"),
+            req("R-3", "C.", "superseded", "none", "none"),
+            req(
+                "R-4",
+                "D.",
+                "active",
+                "a path",
+                "a figure; status: keep rule",
+            ),
+        ]
+        .concat();
+        put_spec(dir.path(), &athena, &spec);
+        let report = athena.spec_review(&crate::Quiet).unwrap();
+        assert_eq!(report.queued.len(), 1, "{report:?}");
+        assert_eq!(report.queued[0].0, "R-1");
+        let text = spec_request_text(&athena, "R-1");
+        assert!(
+            text.contains("Give requirement R-1 a valid measure"),
+            "{text}"
+        );
+        assert!(text.contains("nowhere"), "{text}");
+        assert!(text.starts_with("Priority: normal\n"), "{text}");
+    }
+
+    #[test]
+    fn one_pass_queues_at_most_five_requests_and_speed_comes_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_in(dir.path(), state.path());
+        let mut spec = String::new();
+        for n in 1..=5 {
+            spec += &req(
+                &format!("G-{n}"),
+                "Plain.",
+                "active",
+                "none",
+                "x; status: repeated",
+            );
+        }
+        spec += &req("G-6", "Quick.", "active", "none", "x; status: checks");
+        spec += &req("G-7", "Quicker.", "active", "none", "x; status: throughput");
+        put_spec(dir.path(), &athena, &spec);
+
+        let first = athena.spec_review(&crate::Quiet).unwrap();
+        let ids: Vec<&str> = first.queued.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, ["G-6", "G-7", "G-1", "G-2", "G-3"]);
+        assert_eq!((first.gaps, first.deferred), (7, 2));
+        let second = athena.spec_review(&crate::Quiet).unwrap();
+        let ids: Vec<&str> = second.queued.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, ["G-4", "G-5"]);
+        assert_eq!(second.already_open, 5);
+        let third = athena.spec_review(&crate::Quiet).unwrap();
+        assert!(third.queued.is_empty() && third.deferred == 0);
+        assert_eq!(records(&athena).request_jobs().len(), 7);
+    }
+
+    #[test]
+    fn athena_status_lists_requirements_without_a_mechanism() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_in(dir.path(), state.path());
+        // A repository with no spec lists nothing and does not fail.
+        assert!(athena.status().unwrap().spec_gaps.is_empty());
+
+        let spec = [
+            req("R-1", "A.", "active", "none", "a test; status: not shown"),
+            req("R-2", "B.", "active", "a path", "a test; status: nowhere"),
+            req("R-3", "C.", "active", "a path", "a test; status: not shown"),
+        ]
+        .concat();
+        put_spec(dir.path(), &athena, &spec);
+        let view = athena.status().unwrap();
+        let ids: Vec<&str> = view.spec_gaps.iter().map(|g| g.id.as_str()).collect();
+        assert_eq!(ids, ["R-1", "R-2"]);
+        let none: Vec<&str> = view
+            .spec_gaps
+            .iter()
+            .filter(|g| g.no_mechanism)
+            .map(|g| g.id.as_str())
+            .collect();
+        assert_eq!(none, ["R-1"]);
+        assert!(
+            view.next
+                .iter()
+                .any(|l| l.starts_with("requirement R-1 has no mechanism")),
+            "{:?}",
+            view.next
+        );
+        assert!(
+            view.next
+                .iter()
+                .any(|l| l.starts_with("requirement R-2 has a failing measure")),
+            "{:?}",
+            view.next
+        );
+        assert!(!view.next.iter().any(|l| l.contains("R-2 has no mechanism")));
+
+        let fixed = spec
+            .replace("none", "a path")
+            .replace("nowhere", "repeated");
+        put_spec(dir.path(), &athena, &fixed);
+        let view = athena.status().unwrap();
+        assert!(view.spec_gaps.is_empty(), "{:?}", view.spec_gaps);
+        assert!(!view.next.iter().any(|l| l.starts_with("requirement ")));
+    }
+
+    #[test]
+    fn the_real_spec_records_every_field_and_classes_the_acceleration_requirements_as_speed() {
+        let requirements = parse_spec(include_str!("../../../docs/spec.toml")).unwrap();
+        let active: Vec<&SpecRequirement> = requirements.iter().filter(|r| r.active).collect();
+        assert!(active.len() >= 137, "{} active", active.len());
+        for r in &active {
+            assert!(!r.mechanism.trim().is_empty(), "{}: no mechanism", r.id);
+            assert!(!blank_or_none(&r.owner), "{}: no owner", r.id);
+            assert_eq!(measure_problem(&r.measure), None, "{}: {}", r.id, r.measure);
+        }
+        let by = |id: &str| requirements.iter().find(|r| r.id == id).unwrap();
+        assert!(is_speed(by("OLY-A-22")) && is_speed(by("OLY-A-23")));
+        assert!(
+            !is_speed(by("OLY-7-04")),
+            "its statement says faster in passing"
+        );
+        assert!(by("OLY-7-04").statement.contains("faster"));
+        assert!(by("OLY-A-22").mechanism.contains("throughput_review"));
+
+        // If the acceleration requirement ever had no mechanism, its request would be urgent.
+        let mut acceleration = by("OLY-A-22").clone();
+        acceleration.mechanism = "none".into();
+        let gaps = spec_gaps(&[acceleration]);
+        assert_eq!(gaps.len(), 1);
+        let text = spec_request(&gaps[0]).unwrap();
+        assert!(text.starts_with("Priority: urgent\n"), "{text}");
+        assert!(text.contains("Spec requirement: OLY-A-22\n"), "{text}");
     }
 
     fn landed(job: &JobId) -> AnyRecord {
@@ -2413,7 +3106,7 @@ mod tests {
         assert_eq!(second.request_jobs().len(), requests, "nothing queued");
         assert_eq!(second.class_labels.len(), labels, "no label written");
         assert_eq!(second.hestia_sweeps.len(), sweeps + 1, "only the report");
-        assert_eq!(ui.0.lock().unwrap().len(), 2, "one line per pass");
+        assert_eq!(ui.0.lock().unwrap().len(), 3, "one line per pass");
     }
 
     #[test]

@@ -931,6 +931,25 @@ pub struct Bootstrap {
     pub note: String,
 }
 
+/// Where a requirement's measure can appear in `athena status`: the label `athena status` prints at the start
+/// of a line, and the [`StatusView`] field that holds what it prints. A measure in `docs/spec.toml` ends with
+/// `status: <label>` using one of these, or with `status: not shown` and names the test or check that shows
+/// it. The Hestia spec pass flags a measure whose label is not here, and the `xtask` spec test requires the
+/// marker.
+pub const STATUS_MEASURE_LABELS: &[(&str, &str)] = &[
+    ("throughput", "throughput"),
+    ("checks", "check_durations"),
+    ("planning", "planning_cost"),
+    ("keep rule", "keep_rule"),
+    ("producers", "producer_settings"),
+    ("mistakes", "mistakes"),
+    ("repeated", "repeated_causes"),
+    ("code health", "code_health"),
+    ("audit", "audit"),
+    ("audience", "audience"),
+    ("requirement", "spec_gaps"),
+];
+
 /// The state of the work.
 #[derive(Debug, Clone, Serialize)]
 pub struct StatusView {
@@ -1009,6 +1028,11 @@ pub struct StatusView {
     /// The open repeated causes whose stage (planner or critic) `athena.toml` has switched off: listed apart,
     /// never queued by the error review backfill that Athena runs at drain start and in each sweep.
     pub dormant_causes: Vec<crate::hestia::DormantCause>,
+    /// The active requirements of `docs/spec.toml` with no mechanism, or with a measure that is blank or names
+    /// a label `athena status` does not print (`crate::hestia::spec_gaps`). Empty when every active requirement
+    /// has both, or when the repository has no spec. Athena queues one request for each at the next drain or
+    /// sweep.
+    pub spec_gaps: Vec<crate::hestia::SpecGap>,
     pub invalid_records: Vec<String>,
     pub next: Vec<String>,
     /// The reconciliation that ran before this view was built (`Athena::status_with_reconcile`); absent from
@@ -1638,6 +1662,11 @@ impl Athena {
                 c.cause
             ));
         }
+        // A spec that cannot be read or parsed lists nothing here; the sweep's spec pass reports it.
+        let spec_gaps = crate::hestia::spec_gaps_at(&self.git, &head).unwrap_or_default();
+        for g in &spec_gaps {
+            next.push(g.next_line());
+        }
         let open_interventions = open_interventions(&records);
         for i in &open_interventions {
             next.push(format!(
@@ -1711,6 +1740,7 @@ impl Athena {
             lines,
             repeated_causes,
             dormant_causes,
+            spec_gaps,
             invalid_records: records.invalid.clone(),
             next,
             reconcile: None,
@@ -1966,6 +1996,28 @@ mod mistake_tests {
     #[test]
     fn the_report_is_empty_with_no_mistakes() {
         assert_eq!(mistake_report(&Records::default()).total, 0);
+    }
+
+    #[test]
+    fn every_measure_label_names_a_status_view_field_and_a_printed_line() {
+        let here = include_str!("status.rs");
+        let display = include_str!("../../athena-cli/src/display.rs");
+        // The `requirement` line is a next step built where the spec gaps are found.
+        let hestia = include_str!("hestia.rs");
+        for (label, field) in STATUS_MEASURE_LABELS {
+            assert!(
+                here.contains(&format!("    pub {field}:")),
+                "StatusView has no field {field} for the label {label:?}"
+            );
+            let printed = format!("\"{label} ");
+            let is_printed = [here, display, hestia]
+                .iter()
+                .any(|source| source.contains(&printed));
+            assert!(
+                is_printed,
+                "`athena status` prints no line starting {label:?}"
+            );
+        }
     }
 }
 

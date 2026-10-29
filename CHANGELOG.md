@@ -9,6 +9,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Every active requirement in `docs/spec.toml` now says how it is met: a `mechanism` (the code path, role or check
+  that meets it, or the literal `none`), an `owner` (the role responsible) and a `measure` (how it is shown,
+  ending with `status: <label>` for the line of `athena status` that shows it, or `status: not shown` with the
+  test that does). `xtask/tests/spec.rs` fails an active requirement that lacks any of the three; a superseded
+  one is exempt. The existing requirements are filled from the code, with `none` where nothing meets one, and two
+  requirements the spec lacked are added: `OLY-A-22` (Athena gets measurably faster and owns its acceleration,
+  met by the throughput review in `hestia.rs`) and `OLY-A-23` (speed comes first), whose brief headings sit
+  outside the range the spec test reads, so the test now keeps exactly those two headings citable.
+- The Hestia sweep checks the spec (`Athena::spec_review`, run with the other review passes at every drain start
+  and in each sweep). It queues one request, built by the shared steward request builder, for each active
+  requirement whose mechanism is `none` or whose measure is blank or names a label `athena status` does not
+  print. The request is urgent when the requirement is about speed (its measure is shown in the throughput or
+  checks section), normal otherwise; an open request that holds the line `Spec requirement: <id>` stops a second
+  one, and at most five are queued in one pass, speed first. `athena status` lists the same requirements in its
+  next steps, each with its true reason (no mechanism, or a failing measure) and its owner.
 - Throughput section in `athena status` and a throughput review (`docs/design/hestia.md` section 12). The section
   is computed from the job records: landed jobs per UTC day, median minutes per landed job over the newest 20 with
   a median per stage (reading, planning, producer, checks, verifier, landing and rebuild), idle time between jobs,
