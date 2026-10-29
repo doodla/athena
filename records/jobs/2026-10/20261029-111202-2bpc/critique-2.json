@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261029-111202-2bpc",
+  "round": 2,
+  "at": "2026-10-29T18:14:56.279694342Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The request-side exemption ignores negation, so a request that insists a part must not be deferred switches the check off for that part.",
+      "evidence": "Decision 4 exempts a part when 'its own text, or another request sentence naming it, holds a deferral phrase, out of scope or not in this job'. Requests in this exact failure class use those words to forbid deferral, for example '(3) add the status test; do not leave it for a follow-up', or a retry request saying 'the reading deferred part (3) to a follow-up'. Under the plan's rule both exempt part (3), and the reading that drops it is accepted. That is the failure the job exists to prevent (jobs 20261029-084645-sza7 and 20261029-110953-bw7k). No demonstration exercises a negated or complaining mention, so the hole would ship unseen. Fix: Narrow the exemption to the user actually deferring the part. Exempt only on affirmative patterns in the part's own clause, such as '(N) is out of scope', '(N) is a follow-up', '(N) can wait for a later job' or 'leave (N) for later'. Treat a clause with a negation (not, don't, do not, must not, never) before the deferral phrase as not exempt. Drop the 'another request sentence naming it' path, or limit it to the same affirmative pattern. Add two tests under criterion 3: a request whose part (3) says 'do not defer this to a follow-up', and a request quoting an earlier reading that 'deferred part (3) to a follow-up'. In both, a reading that defers (3) is refused.",
+      "location": "Plan Decision 4 (exemption rule); Demonstration for criterion 3",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Sequential '(1) (2) (3)' inside quoted or descriptive text becomes request parts. Combined with 'out_of_scope naming (N) is always a drop', this gives false parts and false refusals.",
+      "evidence": "This job's own request quotes an introspection: 'such as (1), (2) and (3). It requires each part to map to...'. That is a sequential run of at least two markers starting at (1), so the plan's parser takes it as three parts. Parts (1) and (2) have no distinctive words and are skipped. Part (3) becomes the rest of the paragraph, and any out_of_scope item containing '(3)' would refuse the reading. The lone-'(1)' test does not cover this shape. Fix: Count a marker as a part only at the start of a line or after sentence punctuation or a colon, and only when its text has distinctive words. Do not take markers that sit in a comma-separated run with no text between them. Add a test built from this job's request text: it yields no parts from the quoted '(1), (2) and (3)'.",
+      "location": "Plan Decision 2 (parts parser); Risks: '(1)' in prose",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The five-letter test and the suffix stripping are ordered inconsistently, so related forms fail to match.",
+      "evidence": "The plan requires 5+ letters, then strips a trailing ing/ed/es/s. So 'names' becomes 'nam' and 'named' becomes 'nam', while 'name' (4 letters) is dropped; 'tests' becomes 'test' while 'test' itself is excluded. Whether two forms match then depends on which one the reader happened to write, which drives false refusals. Fix: Normalise first (strip the suffix), then apply the length test to the stem with a threshold of 4 or more. Apply the same function to both the part and the criterion. Include a reworded-but-covered test that uses different inflections, such as 'named' and 'names'.",
+      "location": "Plan Decision 3 (distinctive words)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A new Acceptance-bullet parser sits beside the existing one that athena plan uses.",
+      "evidence": "reading.rs already has pub fn request_text_acceptance(text), which is the parse athena plan uses and is tested against Steward requests (steward.rs:1358-1378). The plan adds a second parser of its own that takes bullets under 'Acceptance:' only, so two parsers would disagree about what the request's acceptance is. Fix: Either derive the Acceptance parts from request_text_acceptance limited to the Acceptance section, or factor one shared helper that both use. Name the deliberate difference (bullets outside the heading are ignored) in the doc comment.",
+      "location": "Plan Step 2 (request_parts); crates/athena-core/src/reading.rs:2002 request_text_acceptance",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The existing unit fixtures stand in for the replay of past readings, and that replay can hold the job.",
+      "evidence": "run/mod.rs reports 'N of M accepted readings newly refused' and holds the job above the declared share plus 5 points. The corpus is in records/, not in the snapshot. Every Steward and Hestia request has an Acceptance: section (steward.rs:450-496), so the check reaches most past readings. Passing the replay_case and base_checker fixtures does not show that the newly refused share is at most 5%. Fix: Say plainly that (ii) shows only that the fixtures stay green, and that the real share is measured by Athena's replay at verification. To lower the risk of a hold, check the new rule by hand against the standard Steward bullets ('fmt, clippy and test pass', 'The root cause is named…', 'A test fails without the change…') with a typical reading's criteria, and add that as a unit test.",
+      "location": "Demonstration for criterion 6 (ii)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan puts the fix where the fault starts. check_reading_acceptance (reading.rs:2599) is the single gate for first reads, retries and replay. It already takes the request text, and check_governance_coverage (reading.rs:2674) gives the guard and doc-comment pattern to follow. The files and seams the plan names exist: scoped_reading at about line 4992, prior_result_refusal_is_declared_intended at 5530, and READING_RULES [&str; 5] with its rule-section test in briefs.rs at 1557 and 3172. My estimate is that the sixth rule line fits under the 2400-byte section cap. The demonstrations call the production gate and would fail without the check. One soundness problem needs revision: the request-side exemption fires on any deferral words near a part, including negated or complaining ones such as 'do not leave (3) for a follow-up'. That turns the check off in the exact failure class it targets, and no test would catch it. Smaller issues: quoted '(1), (2) and (3)' runs become false parts, the word normalisation is inconsistent, a second Acceptance parser duplicates request_text_acceptance, and the replay claim leans on unit fixtures while Athena's real replay can hold the job. Verdict: revise, to tighten the exemption and add the negation tests."
+}
