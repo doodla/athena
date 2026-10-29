@@ -1,17 +1,20 @@
-//! The cohesive spec (decision D114, enforcement row M33): `docs/spec.toml` turns BRIEF.md
-//! "Project Olympus" sections 1 to 10, the governing philosophy and the addenda dated 2026-10-17 to
-//! 2026-10-24 into sourced requirements, and this test checks it.
+//! The cohesive spec (decision D114, enforcement row M33): `docs/spec.toml` turns every part of BRIEF.md
+//! (the opening goals and operating model, Part 1, Parts 2 and 3, "Project Olympus" sections 1 to 10, the
+//! governing philosophy and every dated addendum) into sourced requirements, and this test checks it.
 //!
 //! A source quote passes only if, after whitespace is collapsed, it is a substring of the text under
 //! the heading it names (from that heading line to the next heading line of any level). The checker is
 //! a pure function of the parsed spec and the brief, so each rule has an in-memory negative case.
 //!
+//! Coverage: every heading of the brief that has text under it must be the heading of the first source of
+//! some requirement (`coverage_gaps`). A heading with nothing under it (the title, the part and group
+//! headings, `Addenda`) has nothing to cite and is exempt; `the_exempt_headings_are_only_structural` pins
+//! that list so a heading cannot drop out of coverage by losing its text unnoticed.
+//!
 //! Every active requirement also records how it is met: a `mechanism` (the code path, role or check, or the
 //! literal `none`), an `owner` (a role) and a `measure` (how it is shown, ending with `status: <label>`). A
 //! missing one fails the test. The label is checked against the labels `athena status` prints by the Hestia
 //! spec review in `crates/athena-core/src/hestia.rs`, which also queues a request for a mechanism of `none`.
-//! Two addenda outside the range above are cited too (`PINNED_HEADINGS`): the mandate to accelerate and
-//! the rule that speed comes first.
 
 use serde::Deserialize;
 use std::collections::BTreeSet;
@@ -102,16 +105,11 @@ fn collapse(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// One heading of the Olympus part of the brief with the collapsed text under it.
+/// One heading of the brief with the collapsed text under it.
 struct Section {
     heading: String,
-    /// The number of the `## N.` section it falls in, or `None` before section 1.
-    number: Option<u32>,
     body: String,
 }
-
-/// The last addendum date the spec covers; a heading dated later ends the text the spec may cite.
-const LAST_DATE: &str = "2026-10-24";
 
 /// The `YYYY-MM-DD` a heading starts with, if it starts with one.
 fn heading_date(heading: &str) -> Option<&str> {
@@ -123,49 +121,16 @@ fn heading_date(heading: &str) -> Option<&str> {
     (shaped && heading[10..].starts_with(':')).then_some(date)
 }
 
-/// Two addenda the spec cites although they sit outside the range above: one stands before
-/// `# Project Olympus`, the other after the first heading dated past `LAST_DATE`. Each is kept whole, with
-/// the text under it; every other heading outside the range stays out of reach.
-const PINNED_HEADINGS: [&str; 2] = [
-    "2026-10-13: Athena owns acceleration",
-    "2026-10-25: Speed first",
-];
-
-/// Cut the Olympus part of the brief (from `# Project Olympus` through the addenda dated up to
-/// `LAST_DATE`, and the `PINNED_HEADINGS`) at every heading line, whatever its level.
+/// Cut the whole brief at every heading line, whatever its level. Text before the first heading belongs to
+/// no section.
 fn sections(brief: &str) -> Vec<Section> {
     let mut out: Vec<Section> = Vec::new();
-    let mut number = None;
-    let mut started = false;
-    let mut ended = false;
-    let mut pinned = false;
     for line in brief.lines() {
-        if line == "# Project Olympus" {
-            started = true;
-        }
         let marks = line.chars().take_while(|c| *c == '#').count();
         let is_heading = marks > 0 && line[marks..].starts_with(' ');
         if is_heading {
-            pinned = PINNED_HEADINGS.contains(&line[marks..].trim());
-            if started
-                && !pinned
-                && heading_date(line[marks..].trim()).is_some_and(|d| d > LAST_DATE)
-            {
-                ended = true;
-            }
-        }
-        if !pinned && !(started && !ended) {
-            continue;
-        }
-        if is_heading {
-            let heading = line[marks..].trim().to_string();
-            if marks == 2 {
-                // A `## Governing philosophy` or `## Addenda` heading belongs to no numbered section.
-                number = heading.split('.').next().and_then(|n| n.parse().ok());
-            }
             out.push(Section {
-                heading,
-                number,
+                heading: line[marks..].trim().to_string(),
                 body: String::new(),
             });
         } else if let Some(last) = out.last_mut() {
@@ -201,7 +166,7 @@ fn check_source(source: &Source, who: &str, secs: &[Section], errors: &mut Vec<S
         .collect();
     match under.as_slice() {
         [] => errors.push(format!(
-            "{who}: no heading {:?} in the Olympus part of the brief",
+            "{who}: no heading {:?} in the brief",
             source.heading
         )),
         [one] => {
@@ -299,45 +264,46 @@ fn check(spec: &Spec, brief: &str) -> Vec<String> {
     errors
 }
 
-/// Which of R1 to R8, sections 1 to 5 and 7 to 10, the governing philosophy, and each addendum dated
-/// up to `LAST_DATE` have no requirement citing text under them.
+/// The headings of the brief that have text under them, each paired with whether it is a dated addendum.
+fn citable_headings(brief: &str) -> Vec<(String, bool)> {
+    sections(brief)
+        .into_iter()
+        .filter(|s| !s.body.is_empty())
+        .map(|s| {
+            let dated = heading_date(&s.heading).is_some();
+            (s.heading, dated)
+        })
+        .collect()
+}
+
+/// The headings of the brief with nothing under them, which have nothing to cite.
+fn exempt_headings(brief: &str) -> Vec<String> {
+    sections(brief)
+        .into_iter()
+        .filter(|s| s.body.is_empty())
+        .map(|s| s.heading)
+        .collect()
+}
+
+/// Every heading of the brief that has text under it (a numbered section, a part item such as A6 or S3, a
+/// requirement R1 to R8, the governing philosophy, a dated addendum, and so on) and is not the heading of the
+/// first source of any requirement. A dated addendum is reported as `addendum <heading>`, any other heading
+/// as `heading <heading>`.
 fn coverage_gaps(spec: &Spec, brief: &str) -> Vec<String> {
-    let secs = sections(brief);
-    let cites = |pred: &dyn Fn(&Section) -> bool| {
-        spec.requirement
-            .iter()
-            .filter_map(|r| r.source.first())
-            .any(|s| {
-                secs.iter()
-                    .any(|sec| names_heading(&s.heading, &sec.heading) && pred(sec))
-            })
-    };
-    let mut missing = Vec::new();
-    for n in (1..=5u32).chain(7..=10) {
-        if !cites(&|sec| sec.number == Some(n)) {
-            missing.push(format!("section {n}"));
-        }
-    }
-    if !cites(&|sec| sec.heading == "Governing philosophy") {
-        missing.push("Governing philosophy".to_string());
-    }
-    for addendum in secs.iter().filter(|s| heading_date(&s.heading).is_some()) {
-        if !cites(&|sec| sec.heading == addendum.heading) {
-            missing.push(format!("addendum {}", addendum.heading));
-        }
-    }
-    for n in 1..=8 {
-        let prefix = format!("R{n} ");
-        let covered = spec
-            .requirement
-            .iter()
-            .filter_map(|r| r.source.first())
-            .any(|s| s.heading.starts_with(&prefix));
-        if !covered {
-            missing.push(format!("R{n}"));
-        }
-    }
-    missing
+    let cited: Vec<&str> = spec
+        .requirement
+        .iter()
+        .filter_map(|r| r.source.first())
+        .map(|s| s.heading.as_str())
+        .collect();
+    citable_headings(brief)
+        .into_iter()
+        .filter(|(heading, _)| !cited.iter().any(|c| names_heading(c, heading)))
+        .map(|(heading, dated)| {
+            let kind = if dated { "addendum" } else { "heading" };
+            format!("{kind} {heading}")
+        })
+        .collect()
 }
 
 fn has_error(errors: &[String], needle: &str) -> bool {
@@ -351,11 +317,53 @@ fn the_real_spec_passes() {
 }
 
 #[test]
-fn the_real_spec_covers_r1_to_r8_and_sections_1_to_5() {
-    // The name is cited by docs/enforcement.md; the coverage now also spans sections 7 to 10, the
-    // governing philosophy and every addendum heading up to LAST_DATE.
+fn the_real_spec_covers_every_heading_and_addendum_of_the_brief() {
+    // The name is cited by docs/enforcement.md.
     let gaps = coverage_gaps(&real_spec(), &real_brief());
     assert!(gaps.is_empty(), "no requirement for: {gaps:?}");
+}
+
+#[test]
+fn the_exempt_headings_are_only_structural() {
+    // These have nothing under them to cite. A heading that loses its text drops out of coverage, so the
+    // list is pinned: a change to it is a decision, not an accident.
+    let exempt = exempt_headings(&real_brief());
+    assert_eq!(
+        exempt,
+        [
+            "Athena",
+            "The operating model (your requirements)",
+            "Part 1: Athena (the main deliverable)",
+            "Part 2: The first big task: the study",
+            "Part 3: Deliverables",
+            "Addenda",
+            "6. Requirements for systemic learning",
+            "9. Implementation plan",
+            "Addenda",
+        ]
+    );
+}
+
+#[test]
+fn the_coverage_reads_the_whole_brief_including_early_and_late_addenda() {
+    let headings = citable_headings(&real_brief());
+    let has = |h: &str| headings.iter().any(|(x, _)| x == h);
+    for h in [
+        "Goal",
+        "A6. Efficiency",
+        "2026-10-12: Chunking and parallel work",
+        "2026-10-13: Athena owns acceleration",
+        "2026-10-26: Written for agents",
+        "Project Olympus",
+    ] {
+        assert!(has(h), "{h}");
+    }
+    assert!(
+        headings
+            .iter()
+            .any(|(h, dated)| *dated && h.starts_with("2026-10-10:"))
+    );
+    assert!(!has("Addenda"));
 }
 
 #[test]
@@ -455,11 +463,62 @@ fn a_missing_requirement_for_a_section_or_r_fails() {
     let mut spec = real_spec();
     spec.requirement
         .retain(|r| !r.source.iter().any(|s| s.heading.starts_with("R3 ")));
-    assert_eq!(coverage_gaps(&spec, &brief), vec!["R3".to_string()]);
+    assert_eq!(
+        coverage_gaps(&spec, &brief),
+        vec!["heading R3 — Generalizable prevention".to_string()]
+    );
 
     let mut spec = real_spec();
     spec.requirement.retain(|r| !r.id.starts_with("OLY-2-"));
-    assert!(coverage_gaps(&spec, &brief).contains(&"section 2".to_string()));
+    assert!(coverage_gaps(&spec, &brief).contains(&"heading 2. The Pantheon".to_string()));
+}
+
+#[test]
+fn removing_the_requirements_of_one_brief_heading_reports_exactly_that_heading() {
+    let brief = real_brief();
+    // The negative case for the new coverage: a part item (A6), a pre-Olympus addendum (the chunking note of
+    // 2026-10-12), a late addendum, and the opening goal about getting measurably faster.
+    for (heading, expected) in [
+        ("A6. Efficiency", "heading A6. Efficiency"),
+        (
+            "2026-10-12: Chunking and parallel work",
+            "addendum 2026-10-12: Chunking and parallel work",
+        ),
+        (
+            "2026-10-26: Written for agents",
+            "addendum 2026-10-26: Written for agents",
+        ),
+        ("Goal", "heading Goal"),
+        ("How I'll judge it", "heading How I'll judge it"),
+    ] {
+        let mut spec = real_spec();
+        let before = spec.requirement.len();
+        spec.requirement
+            .retain(|r| r.source.first().is_none_or(|s| s.heading != heading));
+        assert!(
+            spec.requirement.len() < before,
+            "{heading} had requirements"
+        );
+        assert_eq!(coverage_gaps(&spec, &brief), vec![expected.to_string()]);
+    }
+}
+
+#[test]
+fn a_heading_cited_only_by_a_later_source_is_still_a_coverage_gap() {
+    // Coverage looks at the first source, as the earlier layers do: a requirement that cites a heading only
+    // as a second source does not cover it.
+    let brief = real_brief();
+    let mut spec = real_spec();
+    for r in &mut spec.requirement {
+        if r.source[0].heading == "A6. Efficiency" {
+            r.source[0].heading = "A7. Adversarial verification".into();
+            r.source[0].quote = "Everything substantive is verified before it's accepted".into();
+        }
+    }
+    assert_eq!(
+        coverage_gaps(&spec, &brief),
+        vec!["heading A6. Efficiency".to_string()]
+    );
 }
 
 #[test]
@@ -478,7 +537,7 @@ fn a_missing_section_8_requirement_is_a_coverage_gap() {
     spec.requirement.retain(|r| !r.id.starts_with("OLY-8-"));
     assert_eq!(
         coverage_gaps(&spec, &real_brief()),
-        vec!["section 8".to_string()]
+        vec!["heading 8. Coordination and authority".to_string()]
     );
 }
 
@@ -489,7 +548,7 @@ fn a_missing_philosophy_or_addendum_requirement_is_a_coverage_gap() {
     spec.requirement.retain(|r| !r.id.starts_with("OLY-GP-"));
     assert_eq!(
         coverage_gaps(&spec, &brief),
-        vec!["Governing philosophy".to_string()]
+        vec!["heading Governing philosophy".to_string()]
     );
 
     let mut spec = real_spec();
@@ -501,33 +560,28 @@ fn a_missing_philosophy_or_addendum_requirement_is_a_coverage_gap() {
 }
 
 #[test]
-fn a_heading_dated_after_the_last_covered_addendum_is_rejected() {
+fn a_heading_that_is_not_in_the_brief_is_rejected_even_when_it_is_dated() {
     let brief = real_brief();
-    assert!(brief.contains("### 2026-10-25: Evidence labels Jev"));
-    assert!(sections(&brief).iter().all(|s| {
-        PINNED_HEADINGS.contains(&s.heading.as_str())
-            || heading_date(&s.heading).is_none_or(|d| d <= LAST_DATE)
-    }));
     let mut spec = real_spec();
-    spec.requirement[0].source[0].heading = "2026-10-25: Evidence labels Jev".into();
+    spec.requirement[0].source[0].heading = "2026-10-27: Not in the brief".into();
     assert!(has_error(&check(&spec, &brief), "no heading"));
 }
 
 #[test]
-fn only_the_pinned_late_headings_are_citable() {
+fn early_and_late_headings_and_the_goal_are_citable() {
     let brief = real_brief();
     let secs = sections(&brief);
-    for pinned in PINNED_HEADINGS {
-        assert!(brief.contains(&format!("### {pinned}")), "{pinned}");
-        let kept: Vec<&Section> = secs.iter().filter(|s| s.heading == pinned).collect();
-        assert_eq!(kept.len(), 1, "{pinned}");
-        assert!(!kept[0].body.is_empty(), "{pinned} keeps its text");
+    for heading in [
+        "2026-10-13: Athena owns acceleration",
+        "2026-10-25: Speed first",
+        "2026-10-25: Evidence labels Jev",
+        "2026-10-12: Chunking and parallel work",
+        "Goal",
+    ] {
+        assert_eq!(secs.iter().filter(|s| s.heading == heading).count(), 1);
+        let kept = secs.iter().find(|s| s.heading == heading).unwrap();
+        assert!(!kept.body.is_empty(), "{heading} keeps its text");
     }
-    // The pinned heading after the cut keeps its own text only: the heading after it is still out.
-    assert!(
-        secs.iter()
-            .all(|s| s.heading != "2026-10-25: Evidence labels Jev")
-    );
     let mut spec = real_spec();
     for (heading, quote) in [
         (
@@ -537,6 +591,18 @@ fn only_the_pinned_late_headings_are_citable() {
         (
             "2026-10-25: Speed first",
             "Athena should prioritize anything that'll help it move faster",
+        ),
+        (
+            "2026-10-25: Evidence labels Jev",
+            "Evidence should label jev",
+        ),
+        (
+            "2026-10-12: Chunking and parallel work",
+            "Do we chunk and parallelize today?",
+        ),
+        (
+            "Goal",
+            "gets measurably faster, cheaper, and more correct at work it has done before",
         ),
     ] {
         spec.requirement[0].source[0].heading = heading.into();
@@ -565,7 +631,7 @@ fn every_active_requirement_has_a_mechanism_an_owner_and_a_measure() {
         .iter()
         .filter(|r| matches!(r.status, Status::Active))
         .collect();
-    assert!(active.len() >= 135, "{} active requirements", active.len());
+    assert!(active.len() >= 264, "{} active requirements", active.len());
     let complete = active
         .iter()
         .filter(|r| {
