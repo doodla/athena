@@ -9,6 +9,58 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- Structure pass R5: the first three stages of `produce_and_verify` moved from `run/mod.rs` to the new
+  `run/producer.rs` as `Athena` methods, bodies unchanged: `run_baseline` (the baseline checks and the
+  `baseline` ui line), `prepare_producer` (work directory, snapshot, mount, grant, composed context,
+  environment, model) and `run_producer` (the producer loop with its send-back). `produce_and_verify` now
+  calls them in that order. The stage methods are `pub(super)`; no `crate::run` path changed and no
+  re-export was added. No behavior change.
+  - Tests: `cargo test --locked -p athena-core -- --list` gives 627 tests before and after, in a list of the
+    same size and the same names (no test was added, removed or edited; the R0 test
+    `produce_and_verify_order_tests::a_fake_job_takes_its_baseline_before_the_producer_and_numbers_the_invocations_in_order`
+    passes unchanged and is the behavior proof).
+  - Early returns. The four `return Ok(closing);` in the producer loop became `return Ok(Flow::Stop);`, and
+    the stage sets `closing` through its `&mut Closing` parameter before returning. The driver returns
+    `closing` when it sees `Stop` (`let Flow::Go(..) = .. else { return Ok(closing); };`, `run/mod.rs` line
+    1139). Old line in `run/mod.rs` to new line in `run/producer.rs`: 1223 (the producer could not run) to
+    188; 1236 (timed out, after `keep_timed_out_work`) to 201; 1246 (did not complete) to 211; 1256 (returned
+    no valid report) to 221. The `return Ok(closing);` at the idle-producer check (the start of the candidate
+    stage) is unchanged and stays in `run/mod.rs`, old line 1364, now 1176; it moves with R6.
+  - Locals that crossed the seam and what carries them now: `closing` is a `&mut Closing` parameter of
+    `run_baseline` and `run_producer` (the driver passes `&mut closing` and keeps the value); `seq` goes into
+    `run_producer` by value and comes back as `Reported::seq`; `brief` and `accepted` are parameters of
+    `run_producer`; `work`, `snapshot`, `grant`, `composed`, `capability_env` and `model` go from the
+    snapshot stage to the loop in `ProducerSnapshot`, and `snapshot` and `work` go on to the candidate stage
+    in `Reported`; `report`, `report_gaps`, `report_kept_in` and `left_criteria` come out of the loop in
+    `Reported`. `id`, `jc`, `p` and `job_dir` are not passed: each stage that needs one derives it with the
+    driver's own `let` text, and the driver no longer derives `job_dir` because nothing after the loop uses it.
+    `baseline`, `repo`, `planned`, `attempt_brief` and `send_backs` were used only inside their own stage.
+  - Lines that are not moved text, each with its reason: `mod producer;` and `use producer::{Flow,
+    Reported};` in `run/mod.rs` (the new module); the `//!` header, the `use` lines and the `Flow`,
+    `ProducerSnapshot` and `Reported` types in `run/producer.rs` (the seam values); the three method
+    signatures and, in each, the `let` lines that derive `id`, `jc`, `job_dir` and `p` and the one `let
+    ProducerSnapshot { .. } = prepared;` (the locals above); the four `return Ok(Flow::Stop);` lines; the
+    closing `Ok(ProducerSnapshot { .. })` and `Ok(Flow::Go(Reported { .. }))`; in the driver, `let seq`
+    instead of `let mut seq` (it is no longer changed there), the dropped `let job_dir`, the three calls and
+    the `let-else`. Two moved statements changed: `self.keep_timed_out_work(ctx, &snapshot, &reason, &mut
+    closing)?` became `.., closing)?` because `closing` is already a `&mut Closing` and clippy
+    (`needless_borrow`) rejects the extra borrow, and the parameter is therefore `closing: &mut Closing`
+    without `mut`. No line was rewrapped by rustfmt: `cargo fmt --all` changed no moved line. No `#[allow]`
+    was added.
+  - Caller check, run with the Grep tool over `crates/`, as occurrences in files, before then after. Nothing
+    but the move changed these, so an occurrence count stays equal; a file count rises by one where a call
+    moved into the new file: `take_baseline` 2 in 1 file, then 2 in 2 files (definition stays in `run/mod.rs`,
+    the call is in `producer.rs`); `agent_spec` 10 in 7, then 10 in 8; `invoke_and_record` 10 in 8, then 10 in
+    9; `keep_timed_out_work` 2 in 1, then 2 in 2; `cost_text` 5 in 2, then 5 in 3; `self.failure(` 10 in 2,
+    then 10 in 3; `unmet_criteria` 14 in 3, then 14 in 4; `left_to_athena` 9 in 2, then 9 in 3;
+    `send_back_text` 5 in 3, then 5 in 4; `planned_paths` 7 in 2, then 7 in 3; `produce_and_verify` 4 in 1,
+    then 4 in 1 (unchanged). New names: `run_baseline`, `prepare_producer` and `run_producer` 0, then 2 in 2
+    files each (one definition in `run/producer.rs`, one call in `run/mod.rs`); `Flow`, `Reported` and
+    `ProducerSnapshot` as Rust names 0, then only in `run/producer.rs` and `run/mod.rs`. The `baseline   `
+    and `producer   sent back:` ui lines are now only in `producer.rs` (the string `baseline   ` also appears
+    in `run/mod.rs` as an expected value in the R0 test). `take_baseline` and the candidate stage stay in
+    `run/mod.rs` until R7 and R6. This entry states the test count, the per-name file counts and the
+    rewraps that the R4 entry left out.
 - Structure pass R4: the Close and land row (`close_dispatched`, `land_or_block`, `retry_landing`,
   `closing_subject`, `landing_body`, `build_text`, `provenance_word`, `branch_suffix`) moved from
   `run/mod.rs` to `run/close.rs`, text unchanged; `closing_subject` and `build_text` are re-exported from
