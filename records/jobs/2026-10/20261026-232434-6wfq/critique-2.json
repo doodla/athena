@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261026-232434-6wfq",
+  "round": 2,
+  "at": "2026-10-29T07:24:09.350167558Z",
+  "invocation_seq": 4,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "The pattern also matches the R0 test, so the expected result 'appears once, in producer.rs' is false as written.",
+      "evidence": "The Grep I ran found `crates/athena-core/src/run/mod.rs:2646: assert_eq!(said[1], \"baseline   probe ok\");` alongside the ui format line at mod.rs:1135. That test line stays in mod.rs, so a search for `baseline   ` over run/ reports two files after the change. Fix: Search for the format string itself, for example `\"baseline   \\{\\}\\{\\}`, or state that the only other match is the R0 assertion in the test module.",
+      "location": "Demonstration for criterion 7 (Grep pattern `baseline   `)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "`Flow` and `Reported` already match existing code, and the pattern `failure(` is not a valid regex.",
+      "evidence": "A Grep for `Flow|\\bReported\\b` over crates/ found 9 matches in 6 files today (quantity.rs has 4, plus records.rs, close.rs, status.rs, scoring.rs and reconcile.rs). Bare `Reported` would also match `ReportedCheck` and `ReportedCriterion` in athena-data records.rs:693 and 702. An unescaped `(` makes `failure(` an invalid regex in ripgrep. Fix: Use word-bounded patterns (`\\bFlow\\b`, `\\bReported\\b`, `\\bProducerSnapshot\\b`) and `self\\.failure\\(`. Record the before counts as measured instead of assuming 0.",
+      "location": "Decision 8, Step 1 and the demonstration for criterion 6 (caller-check patterns)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The tests that exercise the early-return paths are not named, and only two of the four paths are visibly covered.",
+      "evidence": "run_pin_tests.rs:839 and 859 assert on \"could not run\" and \"did not complete\". I found no test there for the timed-out or 'no valid report' paths. They may be covered elsewhere, for example in athena-cli/tests/lifecycle.rs, but the plan does not say. Fix: Name the tests that cover each of the four Stop paths, starting with the ones in run_pin_tests.rs. For any path without a test, say that the diff reading and the `let Flow::Go ... else` type check are the proof.",
+      "location": "Risks item 2 and the demonstration for criterion 4 ('existing producer failure tests')",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "`run_producer` sits exactly at clippy's too_many_arguments threshold.",
+      "evidence": "`&self, ctx, brief, accepted, closing, seq, prepared` is 7 inputs. Clippy's default limit is 7 and the lint fires above it, so adding one more parameter would fail `-D warnings`, and `#[allow]` is ruled out. Fix: Note the limit. If another value is needed, put it inside `ProducerSnapshot` rather than adding a parameter.",
+      "location": "Step 5 (`run_producer` signature)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read run/mod.rs (produce_and_verify at 1112-1480, keep_timed_out_work at 599, take_baseline at 1048, the imports, and the test modules at 2222 and 2293), and I grepped the crates for the names the plan uses. The plan's line numbers match the code: S1 is 1126-1147, S2 is 1149-1176, S3 is 1177-1328, the four early returns are at 1223, 1236, 1246 and 1256, and the idle return is at 1364. The seam analysis is right. `job_dir` is not used after S3 in produce_and_verify; the `job_dir` at 1494 is in check_and_verify. `work` is used at 1466, and `seq`, `report_gaps` and `left_criteria` go into `Built`, so the plan is right to carry `work` and `snapshot` back in `Reported`. Passing `mut closing: &mut Closing` keeps `closing.x = ...` and `&mut closing` compiling unchanged, because `&mut &mut Closing` coerces to `&mut Closing`. The `use super::*` precedent exists in close.rs, pin.rs and planning.rs. The design is sound: `Flow::Stop` plus `let ... else { return Ok(closing) }` in the driver returns the same value at the same point as before. Re-deriving `id`, `jc`, `job_dir` and `p` avoids rewriting moved statements, and the plan states the conflict with criterion 6's equal file counts openly instead of hiding it. The remaining problems are in how some demonstrations are worded, not in the design. One grep would match a test line, the \"new names start at 0\" claim is false for `Flow` and `Reported`, one grep pattern is not a valid regex, and the early-return tests are not named. None of these leaves a criterion unshown, so the verdict is accept."
+}

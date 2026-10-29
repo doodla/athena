@@ -122,13 +122,13 @@ Splitting `LandPr` out to a lower module is a text change, not a move, so it is 
 
 The function already marks its stages with comments. These are the seams, with their line numbers at the base
 commit. Each stage becomes a method returning a small enum, so the early `return Ok(closing)` paths become
-`Stage::Stop` and the driver returns when it sees one.
+`Flow::Stop` (the enum is `Flow<T>`, with `Go(T)` and `Stop`) and the driver returns `closing` when it sees one.
 
 | Stage | Lines | Reads from the driver | Returns |
 | --- | --- | --- | --- |
 | S1 baseline | 1556-1584 | `ctx`, `seq`, `closing` | nothing; sets `closing.baseline` |
 | S2 producer snapshot | 1586-1612 | `ctx`, base commit | the `Snapshot`, grant, composed brief, env |
-| S3 producer loop with send-back | 1614-1739 | S2 output, `seq`, `closing`, `accepted` | `Stop`, or `Reported { report, report_gaps, report_kept_in, left_criteria }`; the timed-out and failure returns stay inside as `Stop` |
+| S3 producer loop with send-back | 1614-1739 | S2 output, `seq`, `closing`, `accepted` | `Flow::Stop`, or `Flow::Go(Reported { report, report_gaps, report_kept_in, left_criteria, seq, snapshot, work })`; the timed-out and failure returns stay inside as `Stop` |
 | S4 candidate | 1741-1828 | snapshot, report | `Stop` (idle producer), or `Built { candidate, changed }` |
 | S5 admission | 1830-1875 | candidate | `Stop`, or admitted |
 | S6 disk gate and early pull request | 1876-1896 | `ctx` | `Stop`, or continue |
@@ -138,7 +138,8 @@ commit. Each stage becomes a method returning a small enum, so the early `return
 | S10 redact and assemble | 2205-2293 | S9 output | the `Closing` |
 
 Values that live across stages (`seq`, `closing`, `report_gaps`, `report_kept_in`, `left_criteria`) are the
-reason for the `Reported` struct and for passing `&mut Closing` and `&mut u32`. Stage code is moved line for line;
+reason for the `Reported` struct and for passing `&mut Closing`. `seq` goes into S3 by value and comes back
+in `Reported`, because S3 counts it up and no other stage runs in between. Stage code is moved line for line;
 only the local names that cross a seam change into struct fields. A stage whose body would need a changed
 statement, not just a changed name, is split further and reported, not guessed at.
 
@@ -247,7 +248,7 @@ The rules below apply to every job. A job fails if any item is not met.
 
 For R5-R8, which change control flow, two more checks apply:
 
-- The job's report places each early `return Ok(closing)` of the old function beside the `Stage::Stop` that
+- The job's report places each early `return Ok(closing)` of the old function beside the `Flow::Stop` that
   replaced it, with the old and new line numbers. A missing pair fails the job.
 - The job's report lists every local that crossed a seam and the field that carries it now.
 

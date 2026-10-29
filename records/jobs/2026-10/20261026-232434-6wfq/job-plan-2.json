@@ -1,0 +1,258 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261026-232434-6wfq",
+  "round": 2,
+  "at": "2026-10-29T07:22:40.124228344Z",
+  "invocation_seq": 3,
+  "approach": "Add run/producer.rs with three `impl Athena` stage methods that hold the S1, S2 and S3 text of `produce_and_verify` unchanged: `run_baseline` (S1), `prepare_producer` (S2, returns a `ProducerSnapshot` struct) and `run_producer` (S3, returns `Result<Flow<Reported>>`). Each of the four early `return Ok(closing)` lines in S3 becomes `return Ok(Flow::Stop)`. `closing` is passed as `&mut Closing`, so the stage's edits to it are the ones the driver sees. `seq` goes in by value and comes back inside `Reported`, so `seq += 1` and the `seq` uses stay textually identical. In mod.rs the driver keeps its prelude, calls the three methods in order, and on `Flow::Stop` runs `return Ok(closing)`. S4 onward stays in mod.rs, including the idle-producer return. The R0 ordering test and the existing tests are the behavior proof, and none is edited. CHANGELOG gets an R5 entry with the pairings, seam locals, non-moved lines, counts and caller greps. The design doc gets a short \"R5 is done\" note. All demonstrations use only cargo and git commands; any text search is done with the Grep tool, not a shell grep.",
+  "decisions": [
+    {
+      "choice": "The stage result is a new two-variant enum `Flow<T> { Stop, Go(T) }`. The methods return `Result<Flow<T>>`, so the `?` operators in the body are unchanged.",
+      "reason": "The design doc (3.3) asks for each early `return Ok(closing)` to become a Stop the driver acts on. A bare marker keeps `closing` in the driver, so the driver's `return Ok(closing)` has the same value and drop timing as before. `Flow` avoids `Stage`, which already exists in plan.rs and hestia.rs.",
+      "rejected": [
+        {
+          "option": "Return `Closing` by value inside `Stop(Closing)`",
+          "why": "`Closing` would then also have to come back on the success path, adding moved state and non-moved lines."
+        },
+        {
+          "option": "`Result<Option<Reported>>` or a `bool`",
+          "why": "The Stop becomes invisible in the type, and the CHANGELOG pairing would have no named value to point at."
+        },
+        {
+          "option": "Name the enum `Stage`",
+          "why": "`Stage` already exists in plan.rs and hestia.rs and would confuse a reader grepping for it."
+        }
+      ]
+    },
+    {
+      "choice": "`closing` is a `mut closing: &mut Closing` parameter in the methods that need it. `seq` is passed by value, and `run_producer` returns its final value in `Reported.seq`. The driver assigns `seq = reported.seq`.",
+      "reason": "With a by-value `mut seq: u32`, `seq += 1` and `seq` as an argument keep the same text. `&mut closing` passed to `keep_timed_out_work` needs a `mut` binding to compile, and `mut closing: &mut Closing` is a signature line, so the body line stays unchanged. If clippy flags `needless_borrow` on that one argument, only that argument changes and is listed as a non-moved line.",
+      "rejected": [
+        {
+          "option": "`seq: &mut u32`",
+          "why": "It forces `*seq` at every use, changing several moved statements."
+        },
+        {
+          "option": "Pass `closing` by value and return it",
+          "why": "It changes the return lines and the success type, and is not what the design doc says."
+        },
+        {
+          "option": "Add `#[allow(clippy::needless_borrow)]`",
+          "why": "No `#[allow]` may be added (criterion 2)."
+        }
+      ]
+    },
+    {
+      "choice": "S2 returns `pub(super) struct ProducerSnapshot { work, snapshot, grant, composed, capability_env, model }`. S3 takes it by value, destructures it with one new `let` line, and returns `snapshot` and `work` inside `Reported`.",
+      "reason": "The body then uses owned locals named as before (`&composed`, `&grant`, `snapshot.dir()`), with no `&&T`. `snapshot` and `work` are needed by S4 and S5 in mod.rs, so they must come back. `Snapshot` has no Drop impl, so moving it does not change when cleanup happens.",
+      "rejected": [
+        {
+          "option": "Pass `&ProducerSnapshot` to S3",
+          "why": "Destructuring a reference gives `&Composed` locals, so `&composed` becomes `&&Composed`: a text change and a clippy risk."
+        },
+        {
+          "option": "Merge S2 into S3",
+          "why": "The brief and design doc ask for three stage methods."
+        }
+      ]
+    },
+    {
+      "choice": "Locals `id`, `jc`, `job_dir` and `p` are re-derived at the top of each stage that uses them, with the same `let` text as the driver's prelude. The driver drops `let job_dir` if nothing after S3 uses it; `id`, `jc` and `p` stay for S4 onward.",
+      "reason": "Passing them as parameters would turn `&id` into `&&JobId` in moved statements. Each re-derivation is a pure path or clone with no side effect. The prelude lines are listed in the CHANGELOG as non-moved lines.",
+      "rejected": [
+        {
+          "option": "Pass `id`, `jc` and `p` as parameters",
+          "why": "It creates double-reference borrows in moved statements."
+        }
+      ]
+    },
+    {
+      "choice": "S1 is an `Athena` method `run_baseline` returning `()`, calling `self.take_baseline`, which stays in mod.rs until R7.",
+      "reason": "Only the S1 block moves in R5; the design doc moves `take_baseline` in R7.",
+      "rejected": [
+        {
+          "option": "Move `take_baseline` now",
+          "why": "Out of scope; R7 owns it."
+        }
+      ]
+    },
+    {
+      "choice": "mod.rs imports stay as they are. producer.rs uses `use super::*;` plus `use crate::capability::ToolGrant;`, `use athena_context::Composed;` and `use std::collections::BTreeMap;`.",
+      "reason": "close.rs already uses `use super::*`. Names used only through the glob still count as used. An import in mod.rs is tidied only if the compiler or clippy flags it.",
+      "rejected": [
+        {
+          "option": "Rewrite import lists in mod.rs",
+          "why": "Adds diff noise outside the move."
+        }
+      ]
+    },
+    {
+      "choice": "Edit docs/design/structure-pass.md to add a short R5-done note after the R4-done paragraph (section 4.2).",
+      "reason": "It is in Expected deliverables and matches the doc's rule that a pointer marks the job done; documentation only.",
+      "rejected": [
+        {
+          "option": "Skip the doc",
+          "why": "The deliverables list names it and the R4 precedent updated it."
+        }
+      ]
+    },
+    {
+      "choice": "Report caller-check counts honestly: for names whose call site moved into producer.rs, occurrences are unchanged but the file count is one higher; new names show before 0.",
+      "reason": "Criterion 6 says counts are equal, but a file count cannot stay equal when a call moves to a new file without misreporting. The entry gives both file and occurrence counts and explains the rise.",
+      "rejected": [
+        {
+          "option": "Report only occurrence counts",
+          "why": "It hides the file-count change the brief asks to see."
+        }
+      ]
+    },
+    {
+      "choice": "Check for added `#[allow]` and for test-module edits with the Grep tool on files and by reading `git diff -U0` output, not with a shell pipe to grep.",
+      "reason": "The verifier may run only cargo, git and ls commands; Grep is a tool, not a command in that list. `git diff -U0` plus Grep over the new file covers both checks.",
+      "rejected": [
+        {
+          "option": "Pipe `git diff` into `grep`",
+          "why": "`grep` is not a command the verifier may run."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "action": "create",
+      "purpose": "Holds `Flow<T>`, `Reported`, `ProducerSnapshot` and an `impl Athena` block with `run_baseline` (S1), `prepare_producer` (S2) and `run_producer` (S3), all `pub(super)`. S1-S3 body text moved unchanged from `produce_and_verify`. Short `//!` header as close.rs has.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "Add `mod producer;` and `use producer::{Flow, Reported};` if the driver names them. Cut S1-S3 out of `produce_and_verify` and replace with the three calls, `let Flow::Go(reported) = ... else { return Ok(closing); };`, `seq = reported.seq` and a destructuring of `Reported`. Drop `let job_dir` if unused afterwards. S4 onward and the idle-producer `return Ok(closing)` stay. No test line is edited.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add the R5 bullet at the top of `### Changed` under `[Unreleased]`, above the R4 bullet, with the facts in demonstration 8.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/structure-pass.md",
+      "action": "modify",
+      "purpose": "Add a short R5-done paragraph after the R4-done paragraph in section 4.2: the three stage names, early returns became `Flow::Stop`, `take_baseline` stays for R7.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Measure first: run `cargo test --locked -p athena-core -- --list`, sort it and save it with its count outside the repo (for example /tmp). With the Grep tool over crates/, note file and occurrence counts for `take_baseline`, `agent_spec`, `invoke_and_record`, `keep_timed_out_work`, `cost_text`, `self.failure`, `unmet_criteria`, `left_to_athena`, `send_back_text`, `planned_paths`, `produce_and_verify`, `run_baseline`, `prepare_producer`, `run_producer`, `ProducerSnapshot`, `Reported`, `Flow`. Re-measure the current line numbers of S1, S2, S3 and the four early returns.",
+    "Create run/producer.rs: a `//!` header, `use super::*;` plus `use crate::capability::ToolGrant;`, `use athena_context::Composed;` and `use std::collections::BTreeMap;`. Define `pub(super) enum Flow<T> { Stop, Go(T) }`, `pub(super) struct ProducerSnapshot { work, snapshot, grant, composed, capability_env, model }` and `pub(super) struct Reported { report, seq, report_gaps, report_kept_in, left_criteria, snapshot, work }`, with real types fixed from the code (the `report` type is `Option<ProducerReport>` from the loop's `break`). Short doc comment on each.",
+    "Add `impl Athena` with `pub(super) fn run_baseline(&self, ctx, closing: &mut Closing, seq: u32)`. Prelude `let id = ctx.id().clone(); let job_dir = self.state.job_dir(&id);`. Body is old S1 verbatim. Add `mut` to `closing` only if a moved `&mut closing` needs it.",
+    "Add `prepare_producer(&self, ctx) -> Result<ProducerSnapshot>` with the `id`, `jc`, `job_dir`, `p` prelude lets, body old S2 verbatim, ending `Ok(ProducerSnapshot { work, snapshot, grant, composed, capability_env, model })`.",
+    "Add `run_producer(&self, ctx, brief, accepted, mut closing: &mut Closing, mut seq: u32, prepared: ProducerSnapshot) -> Result<Flow<Reported>>`. Prelude: `id` and `jc` lets and `let ProducerSnapshot {..} = prepared;`. Body old S3 verbatim except the four `return Ok(closing);` lines become `return Ok(Flow::Stop);`. Ends with `Ok(Flow::Go(Reported { .. }))`.",
+    "In mod.rs add `mod producer;` and the `use producer::...` line. Cut old S1-S3 out of `produce_and_verify`; keep the prelude (`id`, `jc`, `p`, `let mut seq = ctx.next_seq(&closing);`), drop `let job_dir` if unused. Insert the three calls, `let Flow::Go(reported) = ... else { return Ok(closing); };`, `seq = reported.seq;` and a destructuring of the remaining `Reported` fields into the same names S4 onward uses. Leave S4 onward untouched.",
+    "Run `cargo build --locked`, then `cargo fmt --all` and `cargo clippy --all-targets --locked -- -D warnings`. Fix findings without touching a moved statement and without `#[allow]`: `needless_borrow` (change that one argument and list it), `large_enum_variant` (box the `Go` payload), unused import (remove only the flagged line).",
+    "Run `git diff --color-moved=zebra --color-moved-ws=ignore-all-space`. Confirm every S1-S3 body line is marked moved. Record each non-moved line with its reason, the new line numbers of the four `return Ok(Flow::Stop);` lines in producer.rs, and the new line of the S4 idle `return Ok(closing)` in mod.rs.",
+    "Re-run `cargo test --locked -p athena-core -- --list`, sort and diff against the saved list. Run the full `cargo test --locked`, `cargo fmt --all --check` and the clippy command. Re-run the Grep counts and record the after values.",
+    "Write the CHANGELOG bullet under `[Unreleased]` / `### Changed`, above R4's, in R2's and R4's style: 'Structure pass R5: ...; No behavior change.' State: test count and unchanged list; four pairings with old and new lines and that the driver returns `closing` on `Flow::Stop`; the S4 idle return unchanged; table of crossing locals and carriers; non-moved lines with reasons including rewraps (or none); Grep counts before and after with the note on file counts rising by one where a call moved; that `take_baseline` and the S4 return stay in mod.rs until R7 and R6.",
+    "Add the R5-done paragraph to docs/design/structure-pass.md section 4.2 after the R4 paragraph. Run `git diff --stat` to confirm only the four allowed paths, read `git diff -U0` to confirm no added `allow(` and no test line changed, and use the Grep tool on producer.rs for `allow\\(`."
+  ],
+  "risks": [
+    {
+      "risk": "`seq` or `closing` is lost across the seam, so a later invocation gets a wrong number or the closing record loses the baseline or failure reason.",
+      "mitigation": "The R0 ordering test fails if `seq` or `closing` is wrong (`baseline.before_invocation == 2`, ui line order). Carry `seq` in `Reported`, assign it before building `Built`, and leave the `Built` literal alone."
+    },
+    {
+      "risk": "An early return that used to hand back a mutated `closing` now returns an unmutated one.",
+      "mitigation": "The driver's else branch is `return Ok(closing);` and the stage mutates `closing` through `&mut` before returning Stop. Existing producer-failure and timed-out tests cover it; the CHANGELOG pairs all four returns."
+    },
+    {
+      "risk": "A moved statement is silently edited while fixing a compile error (borrow, double reference, unused binding).",
+      "mitigation": "Re-measure line numbers, cut S1-S3 as one contiguous block, and have the verifier read `git diff --color-moved` for any plain added or removed line inside the block."
+    },
+    {
+      "risk": "A `pub(super)` method taking a private type triggers a private-in-public error.",
+      "mitigation": "Use `pub(super)` on the methods and the new types as close.rs did; `Closing` is private to `run`, the same visibility. The compiler is the check."
+    },
+    {
+      "risk": "An import in mod.rs becomes unused and `-D warnings` fails.",
+      "mitigation": "Run cargo build and clippy after the cut; delete an import line only if flagged and list it as a non-moved line."
+    },
+    {
+      "risk": "rustfmt rewraps moved lines after the move, so `--color-moved` marks a block as not moved.",
+      "mitigation": "Use `--color-moved-ws=ignore-all-space`, and list any rewrapped line in the CHANGELOG with its reason."
+    },
+    {
+      "risk": "The CHANGELOG's equal-counts claim for criterion 6 is untrue for names whose callers moved.",
+      "mitigation": "State the measured counts and why file counts rise by one for moved call sites; do not claim equality where it cannot hold."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Before editing, the producer runs the --list command and saves the sorted output outside the repo (for example /tmp/tests-before.txt) with its count. After the change it runs the same command, diffs the sorted lists and compares counts. The count goes in the CHANGELOG. Entry point: `Athena::produce_and_verify`, reached by the R0 test through `go_job`/`dispatch`. Preconditions: a git repo fixture and the fake agent driver. Seam: the existing `FakeAgentDriver` and `FakeTurn` injected by the R0 test, which exists today (run/mod.rs near lines 2293-2310 and 2611). No seam is added; the stages are not inside the fake. The verifier confirms no test line changed by reading `git diff -U0` hunk positions against the start of the test modules.",
+      "command": "cargo test --locked -p athena-core -- --list",
+      "observes": "The --list output is identical in names and count to the base list (no `producer::` test names). Then `cargo test --locked -p athena-core produce_and_verify_order_tests` passes, including `a_fake_job_takes_its_baseline_before_the_producer_and_numbers_the_invocations_in_order`.",
+      "fails_without": "The ordering test asserts the ui lines in order (`baseline   probe ok`, then the `producer   ...` line, checks, replay), `baseline.before_invocation == 2` and the stages `[\"dispatched\",\"landed\"]`, all through the real `produce_and_verify`. It fails if the stages are called in a different order, if `seq` is not carried back through `Reported`, or if the baseline is recorded after the producer. Existing early-return tests fail if the `Flow::Stop` mapping is wrong."
+    },
+    {
+      "criterion": 2,
+      "method": "Run the three Athena check commands on the whole workspace (real commands, no seam). Then check that no `#[allow]` was added: read `git diff -U0` for mod.rs and CHANGELOG.md and look for added lines containing `allow(`, and use the Grep tool (not a shell command) with pattern `allow\\(` on crates/athena-core/src/run/producer.rs, which is a new file so every line is added.",
+      "command": "cargo test --locked",
+      "observes": "`cargo test --locked`, `cargo fmt --all --check` and `cargo clippy --all-targets --locked -- -D warnings` each exit 0. The Grep tool finds no `allow(` in producer.rs, and `git diff -U0 -- crates/athena-core/src/run/mod.rs` shows no added line with `allow(`.",
+      "fails_without": "A non-compiling split, a visibility mistake (a private method not visible to the driver), an unapplied rustfmt rewrap, or a clippy `large_enum_variant` or `needless_borrow` finding fails one of the three commands. If clippy trips, the producer boxes the payload or edits the single argument instead of adding `#[allow]`, and the allow check would catch a shortcut."
+    },
+    {
+      "criterion": 3,
+      "method": "Read the colour-moved diff of mod.rs and producer.rs. All of the old S1-S3 body lines (other than the prelude `let` lines) must be marked moved. Each line not marked moved must be on the CHANGELOG list with its reason. Expected set: `mod producer;` and `use` lines; the three method signatures; the `Flow`, `Reported` and `ProducerSnapshot` types; the prelude `let id`/`jc`/`job_dir`/`p` lines; the destructuring line in `run_producer`; the four `return Ok(Flow::Stop);` lines; the `Reported`/`ProducerSnapshot` construction lines at the stage ends; the driver's calls; and any rustfmt rewrap. Entry point is the diff itself; no seam.",
+      "command": "git diff --color-moved=zebra --color-moved-ws=ignore-all-space -- crates/athena-core/src/run/mod.rs crates/athena-core/src/run/producer.rs",
+      "observes": "All S1-S3 body text appears as moved; every non-moved line is in the CHANGELOG list.",
+      "fails_without": "A reworded, reordered or dropped statement would show as a plain added or removed line instead of a moved one, and the verifier would find an unlisted line. This is the mechanism that proves the text is the same, since the compiler alone would accept a reworded body."
+    },
+    {
+      "criterion": 4,
+      "method": "Read the removed return lines at old mod.rs 1223, 1236, 1246 and 1256 in the diff and the four `return Ok(Flow::Stop);` lines in producer.rs. The CHANGELOG pairs each, with old and new line numbers, in the order: could not run, timed out, did not complete, returned no valid report. Check the driver has `let Flow::Go(reported) = ... else { return Ok(closing); };` and that the idle-producer `return Ok(closing)` (old 1364) is still in mod.rs with unchanged text, only shifted by a known offset. Behavior is covered by the full test run of demonstration 2.",
+      "command": "git diff -U0 -- crates/athena-core/src/run/mod.rs crates/athena-core/src/run/producer.rs CHANGELOG.md",
+      "observes": "Four pairs, with numbers that match the diff. The driver returns `closing` on Stop. The S4 idle return is untouched.",
+      "fails_without": "If a path were left as a value the driver ignores, or a Stop turned into a continue, the existing producer failure tests and the pairing check would fail. If the driver stopped returning `closing` on Stop, the `closing.happened` set in the stage would be lost and a failing-producer job would close with the wrong state."
+    },
+    {
+      "criterion": 5,
+      "method": "Read the CHANGELOG list against the code. Every local declared in S1-S3 and read after the stage must be listed with its new carrier: `Reported.seq`, `.snapshot`, `.work`, `.report`, `.report_gaps`, `.report_kept_in`, `.left_criteria`; `ProducerSnapshot.*` for S2 to S3; the `&mut Closing` parameter; `brief` and `accepted` as parameters; `job_dir` as dropped from the driver. Cross-check by reading which names the driver uses after the three calls.",
+      "command": "git diff -- CHANGELOG.md crates/athena-core/src/run/mod.rs crates/athena-core/src/run/producer.rs",
+      "observes": "The listed locals equal the locals the driver uses after the calls (`snapshot`, `report`, `work`, `report_gaps`, `report_kept_in`, `left_criteria`, `seq`, `closing`), and each has a carrier.",
+      "fails_without": "A crossing local missing from the list would compile but leave the entry incomplete; the check fails when the list does not match the used-after set."
+    },
+    {
+      "criterion": 6,
+      "method": "Check `git diff --stat` lists only the four allowed paths. Read `git diff -U0` for mod.rs and confirm every hunk header lies inside `produce_and_verify` or the `mod` lines at the top, with none inside `mod critic_soundness_tests` or `mod produce_and_verify_order_tests` (R0 test module starts near line 2293) and no changed line outside `use` lines in test modules. The verifier re-runs, with the Grep tool over crates/, the patterns listed in the entry (`take_baseline`, `agent_spec`, `invoke_and_record`, `keep_timed_out_work`, `cost_text`, `failure(`, `unmet_criteria`, `left_to_athena`, `send_back_text`, `planned_paths`, `produce_and_verify`, `run_baseline`, `prepare_producer`, `run_producer`, `ProducerSnapshot`, `Reported`, `Flow`) and compares file and occurrence counts with the entry. Entry point is the diff and Grep; no seam.",
+      "command": "git diff --stat",
+      "observes": "Four paths in the stat. mod.rs hunks fall outside the test modules. Grep counts match the entry: occurrence counts unchanged for existing names, file counts one higher where a call moved to producer.rs (explained in the entry), new names show before 0.",
+      "fails_without": "A changed path outside the allowed set or an edit to a test body shows in the stat or hunks; a path change or missed caller breaks `cargo test --locked`. Without the counts in the entry, there is no record of the caller check."
+    },
+    {
+      "criterion": 7,
+      "method": "Read the new `produce_and_verify` body in mod.rs: the calls are `run_baseline`, then `prepare_producer`, then `run_producer`. Use the Grep tool over crates/athena-core/src/run with the patterns `baseline   `, `producer   sent back:` and `fn (run_baseline|prepare_producer|run_producer)`. The ordering behavior is shown by the R0 test in demonstration 1. Entry point `produce_and_verify`; no new seam.",
+      "command": "git diff -- crates/athena-core/src/run/mod.rs",
+      "observes": "`baseline   ` appears once, in producer.rs. `producer   sent back:` appears once, in producer.rs. Each of the three `fn` names has exactly one definition. The driver's call order is baseline, snapshot, producer loop.",
+      "fails_without": "If S1-S3 text were copied rather than moved, the two ui strings would also appear in mod.rs and the Grep would report two files. If the driver called the stages out of order, the R0 ordering test would fail, since the baseline line must come first and the baseline's `before_invocation` must be 2."
+    },
+    {
+      "criterion": 8,
+      "method": "Content check: read the diff of CHANGELOG.md for a bullet under `## [Unreleased]` / `### Changed`, above the R4 bullet, starting \"Structure pass R5:\" in the style of R2 and R4. It covers: S1-S3 moved to `run/producer.rs` as `run_baseline`, `prepare_producer`, `run_producer`; no behavior change; the test count and that the list is unchanged; the early-return pairings with old and new lines; seam locals and carriers; non-moved lines with reasons, including rewraps; caller-check counts before and after; the note that `take_baseline` and the S4 idle return stay in mod.rs; and what the R4 entry left out, now stated.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "The R5 bullet exists in the right place and states each required fact.",
+      "fails_without": "A missing or misplaced entry, one that does not say \"No behavior change\", or one that omits the test count, pairings, seam locals, rewraps or counts."
+    }
+  ],
+  "open_questions": [
+    "Criterion 6 says Grep file counts are equal before and after. For names whose call site moved into producer.rs the file count must rise by one, and new names have before 0. The plan reports both file and occurrence counts and explains it; the verifier should read criterion 6 as occurrence counts equal with file-count change explained.",
+    "Whether `needless_borrow` fires on `&mut closing` when `closing: &mut Closing`, and whether `large_enum_variant` fires on `Flow<Reported>`, was not settled by reading. The producer runs clippy and handles each without `#[allow]`: boxing the `Go` payload, or changing only that one argument and listing it as a non-moved line.",
+    "The design doc's line numbers are stale. The plan uses the current 1126-1328 for S1-S3; the producer re-measures before cutting.",
+    "The test count at the base commit was not measured, because the planner cannot run cargo. The producer measures it before editing and records it in the CHANGELOG."
+  ],
+  "producer_section_sha256": "5a4d6a6e2670f9e805afb15dab0705327d1ecd1f5fc63eee1d42abfad9f1f6bd"
+}
