@@ -18,6 +18,21 @@
 //!   starts another job, jobs already started are finished (a failure or a refusal stops no sibling that is
 //!   in flight), and the first reason found is the one reported. A worker that panics is not isolated: the
 //!   drain ends with the panic once the other workers have finished.
+//! - **Read-ahead.** When more than one job may run at once and [`Steps::read_ahead`] is above 0,
+//!   [`drain_concurrent`] also reads, and for a hard job plans ([`Steps::plan_ahead`]), the next items up to
+//!   `read_ahead` of them ahead of the batch that is running (`docs/design/async-drain.md` section 4). It
+//!   reads an item ahead only when the paths the plan says it touches are disjoint from every job of the
+//!   running batch that has not finished, by the rule the plan groups by: a path equals another or lies inside
+//!   it as a directory, and the shared append-only files (`CHANGELOG.md`, `docs/decisions.md`, `README.md`)
+//!   are ignored. An item whose touched paths are unknown is not read ahead. Reads and plans made ahead are
+//!   charged to the budget like any other, start only when a read and a run both fit it, count against the
+//!   job limit, and a reading is run as it is,
+//!   never read a second time. *Stale readings:* a landing may change what a reading assumed. When the job
+//!   starts, the paths landed since its reading began are compared with the paths the reading touches by the
+//!   same rule; on a hit the drain notes it ([`Report::notes`]) and asks [`Steps::recheck`]. If the reading no
+//!   longer holds, [`Steps::reread`] makes a fresh one, and a reading whose paths no landing touched is used
+//!   as it is. With one job at a time (`max_in_flight` 1, so [`drain`] or a bound of 1), or `read_ahead` 0,
+//!   nothing is read ahead and the drain behaves as it always did. The real steps do not turn this on yet.
 //! - **The pass reads unread requests that are underspecified.** An unread request whose own words give no
 //!   acceptance (or no rung) is read first, within the budget and job limit, and planned again from its
 //!   reading. If the plan is still incomplete it is refused with the reason, so the queue
@@ -125,8 +140,9 @@ use athena_core::store::Records;
 use athena_core::{Athena, Ui, steward, work_decisions};
 use athena_data::records::{AcceptedBy, OutcomeState};
 use serde::Serialize;
-use std::collections::VecDeque;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 /// The rating at which the page counts as good enough, unless the user says otherwise.
 pub const DEFAULT_TARGET_RATING: u8 = 4;
@@ -446,6 +462,112 @@ pub trait Steps {
     fn review_passes(&self) -> Vec<String> {
         Vec::new()
     }
+    /// How many items ahead of the running batch [`drain_concurrent`] may read (and plan, for hard jobs) while
+    /// more than one job runs at once. 0 (the default) reads nothing ahead. The real steps keep the default
+    /// until the drain's pipeline settings are wired in.
+    fn read_ahead(&self) -> u32 {
+        0
+    }
+    /// The most one [`Steps::plan_ahead`] call may cost; held against the budget while it runs.
+    fn plan_cap(&self) -> f64 {
+        0.0
+    }
+    /// Plans `job` after it was read ahead, if it is a hard job. `Some` means it is hard and was planned (with
+    /// what that cost); `None` (the default) means there is nothing to plan.
+    fn plan_ahead(&self, _job: &str) -> Option<Planned> {
+        None
+    }
+    /// Whether the reading of `job`, made ahead, still holds now that the landings in `changed` touched paths
+    /// it touches. Asked when the job starts. `true` (the default) keeps the reading.
+    fn recheck(&self, _job: &str, _changed: &[String]) -> bool {
+        true
+    }
+    /// A fresh reading of `job` whose earlier reading [`Steps::recheck`] said no longer holds. It must not run
+    /// the job. The default refuses, so steps that override `recheck` to say no but cannot read again fail the
+    /// job with that reason and never run it on a reading that was found stale.
+    fn reread(&self, _job: &str) -> Read {
+        Read {
+            job: None,
+            cost: 0.0,
+            runnable: false,
+            error: Some("this Steps cannot read an already-read job again".into()),
+        }
+    }
+}
+
+/// What planning a hard job ahead of its turn did ([`Steps::plan_ahead`]).
+#[derive(Debug, Clone, Default)]
+pub struct Planned {
+    pub cost: f64,
+    /// Why the job could not be planned. The reading made ahead is then dropped and the job is read again
+    /// when it starts.
+    pub error: Option<String>,
+}
+
+/// A reading made ahead of its job's turn, kept until the job starts.
+#[derive(Debug, Clone)]
+struct Ahead {
+    read: Read,
+    /// How many landings had been recorded when its reading began; only later ones can make it stale.
+    seen: usize,
+}
+
+/// Where the reading of a job comes from when it starts.
+#[derive(Default)]
+enum Source {
+    /// Read it as the drain always did.
+    #[default]
+    Read,
+    /// A reading made ahead, which is run as it is.
+    Given(Read),
+    /// A reading made ahead that no longer holds: read the job again with [`Steps::reread`].
+    Reread,
+}
+
+/// The shared append-only files that many jobs edit. The plan does not group by them
+/// (`athena_core::plan`'s `SHARED_APPEND_ONLY`), so neither does read-ahead.
+const SHARED_APPEND_ONLY: [&str; 3] = ["CHANGELOG.md", "docs/decisions.md", "README.md"];
+
+/// The paths that count when comparing two sets: without the shared append-only files.
+fn group_paths(paths: &[String]) -> Vec<&str> {
+    paths
+        .iter()
+        .map(String::as_str)
+        .filter(|p| !SHARED_APPEND_ONLY.contains(p))
+        .collect()
+}
+
+/// Whether two paths overlap: equal, or one is a directory holding the other.
+fn overlap(a: &str, b: &str) -> bool {
+    let inside = |dir: &str, path: &str| {
+        let dir = dir.trim_end_matches('/');
+        path == dir || path.strip_prefix(dir).is_some_and(|r| r.starts_with('/'))
+    };
+    inside(a, b) || inside(b, a)
+}
+
+/// Whether two jobs may be in play side by side: both name some path besides the shared append-only files,
+/// and nothing of that overlaps. This is the rule of `athena_core::plan` (`disjoint`, `overlap` and
+/// `SHARED_APPEND_ONLY`), copied because those are private to that crate; a test checks the copy against
+/// `Plan::build` so the two cannot drift apart.
+fn paths_disjoint(a: &[String], b: &[String]) -> bool {
+    let (pa, pb) = (group_paths(a), group_paths(b));
+    !pa.is_empty() && !pb.is_empty() && !pa.iter().any(|x| pb.iter().any(|y| overlap(x, y)))
+}
+
+/// The paths in `changed` (what landings changed) that can make a reading that touches `touches` stale: the
+/// ones that overlap a touched path, by the rule of [`paths_disjoint`]. A reading with no touched paths besides
+/// the shared files is of unknown scope, so any landed path besides those counts. Sorted, without repeats.
+fn stale_paths(touches: &[String], changed: &[String]) -> Vec<String> {
+    let mine = group_paths(touches);
+    let mut hit: Vec<String> = group_paths(changed)
+        .into_iter()
+        .filter(|p| mine.is_empty() || mine.iter().any(|m| overlap(m, p)))
+        .map(String::from)
+        .collect();
+    hit.sort();
+    hit.dedup();
+    hit
 }
 
 /// The file whose presence asks a running drain to stop at the next job boundary, inside the repository's
@@ -628,6 +750,53 @@ struct State {
     /// item that failed twice when that is the reason. No worker starts a job once this is set; jobs already
     /// started are finished.
     stop: Option<(Stop, Option<String>)>,
+    // Read-ahead. All of this stays empty unless more than one job runs at once and `Steps::read_ahead` is
+    // above 0.
+    /// Readings made ahead and not yet claimed by a job that starts.
+    ahead: BTreeMap<String, Ahead>,
+    /// Items the read-ahead is reading or planning right now.
+    reading: BTreeSet<String>,
+    /// Items the read-ahead has already tried once, so a dropped reading is not made again.
+    pumped: BTreeSet<String>,
+    /// Items that have started a job, so the money their job needs is held.
+    begun: BTreeSet<String>,
+    /// Items whose work is over (landed, failed or left queued).
+    done: BTreeSet<String>,
+    /// The paths of each landing in this run, in order.
+    landings: Vec<Vec<String>>,
+    /// The paths each item's plan entry says it touches.
+    touches: BTreeMap<String, Vec<String>>,
+    /// The index of the batch that is running.
+    batch: usize,
+    /// The batches are over (or the run is ending): the read-ahead stops.
+    pump_done: bool,
+    /// The read-ahead has ended, so no worker waits on a reading that will not finish.
+    pump_gone: bool,
+}
+
+/// Sets a flag of the shared state and wakes every waiter when it is dropped, so it happens on every way out
+/// of a scope, a panic included.
+struct FlagOnDrop<'a> {
+    state: &'a Mutex<State>,
+    wake: &'a Condvar,
+    set: fn(&mut State),
+}
+
+impl Drop for FlagOnDrop<'_> {
+    fn drop(&mut self) {
+        (self.set)(&mut self.state.lock().unwrap_or_else(PoisonError::into_inner));
+        self.wake.notify_all();
+    }
+}
+
+/// What the read-ahead does next.
+enum Pick {
+    /// Nothing is left to read ahead.
+    Done,
+    /// Something could be read, but not yet.
+    Wait,
+    /// Read the item at this index of the upcoming items.
+    Start(usize),
 }
 
 struct Drain<'a, S: ?Sized, U: ?Sized> {
@@ -639,6 +808,8 @@ struct Drain<'a, S: ?Sized, U: ?Sized> {
     /// Held while a job is landed and while the page is rated: landings and ratings go one at a time even
     /// when jobs run side by side, because each pushes a branch and rates the page as it then stands.
     landing: Mutex<()>,
+    /// Woken when a reading made ahead is stored, a job ends or a landing is recorded.
+    wake: Condvar,
 }
 
 enum ItemEnd {
@@ -712,11 +883,12 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
 
     /// Reads and runs one job. Starts only when the reading and the run both fit the budget, counting the
     /// caps that jobs already in flight hold.
-    fn run_job(&self, item: &Item, from: ReadOf<'_>) -> RunStep {
-        // An approved job was read when it was approved; its first attempt is only a run.
+    fn run_job(&self, item: &Item, from: ReadOf<'_>, source: Source) -> RunStep {
+        // An approved job was read when it was approved; its first attempt is only a run. So is a job whose
+        // reading was made ahead and still holds.
         let pre_read = item.read && matches!(from, ReadOf::Queued(_));
         let (ReadOf::Queued(target) | ReadOf::Retry(target)) = from;
-        let needed = if pre_read {
+        let needed = if pre_read || matches!(source, Source::Given(_)) {
             self.caps.run
         } else {
             self.caps.read + self.caps.run
@@ -733,17 +905,19 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 return RunStep::Budget;
             }
             st.started += 1;
+            st.begun.insert(item.job.clone());
             st.budget.hold(needed);
         }
-        let read = if pre_read {
-            Read {
+        let read = match source {
+            Source::Given(read) => read,
+            Source::Reread => self.steps.reread(target),
+            Source::Read if pre_read => Read {
                 job: Some(target.to_string()),
                 cost: 0.0,
                 runnable: true,
                 error: None,
-            }
-        } else {
-            self.steps.read(from)
+            },
+            Source::Read => self.steps.read(from),
         };
         let runnable = matches!(
             (&read.job, &read.error, read.runnable),
@@ -857,7 +1031,9 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                     if outcome {
                         st.outcome_landings += 1;
                     }
+                    st.landings.push(changed);
                 }
+                self.wake.notify_all();
                 if !outcome {
                     self.ui.line(&format!(
                         "drain      {job} landed but changed nothing the explainer is built from"
@@ -874,7 +1050,9 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
     }
 
     /// Works one item through its attempts: read and run, land, and on a failure try once more.
-    fn work(&self, item: &Item) -> ItemEnd {
+    ///
+    /// `ahead` is the reading the read-ahead made of this item, if it did; it is used by the first attempt.
+    fn work(&self, item: &Item, mut ahead: Option<Ahead>) -> ItemEnd {
         // Once the job is read, an attempt that is not a retry only runs it.
         let mut item = item.clone();
         let item = &mut item;
@@ -894,7 +1072,11 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 } else {
                     ReadOf::Queued(&last_job)
                 };
-                match self.run_job(item, from) {
+                let source = match ahead.take() {
+                    Some(made) => self.vet(item, made),
+                    None => Source::Read,
+                };
+                match self.run_job(item, from, source) {
                     RunStep::Budget => return ItemEnd::Budget,
                     RunStep::JobLimit => return ItemEnd::JobLimit,
                     RunStep::Ended => return ItemEnd::Idle,
@@ -927,6 +1109,55 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
             if failures >= ATTEMPTS {
                 return ItemEnd::Failed;
             }
+        }
+    }
+
+    /// The stale-reading re-check, made when the job of a reading made ahead starts. A landing since the
+    /// reading began may have changed a path the reading touches; if none did, the reading is used as it is.
+    /// Otherwise the drain notes which paths and asks [`Steps::recheck`]: a reading that still holds is kept,
+    /// and one that does not is replaced by [`Steps::reread`].
+    fn vet(&self, item: &Item, made: Ahead) -> Source {
+        // The plan entry as the records stand now, else the one the queue view carried.
+        let touches = match self.steps.plan_entry(&item.job) {
+            Some(entry) => entry.touches,
+            None => self
+                .st()
+                .touches
+                .get(&item.job)
+                .cloned()
+                .unwrap_or_default(),
+        };
+        let landed: Vec<String> = {
+            let st = self.st();
+            st.landings
+                .iter()
+                .skip(made.seen)
+                .flatten()
+                .cloned()
+                .collect()
+        };
+        // What was paid for the reading was charged when it was made.
+        let read = Read {
+            cost: 0.0,
+            ..made.read
+        };
+        let hit = stale_paths(&touches, &landed);
+        if hit.is_empty() {
+            return Source::Given(read);
+        }
+        self.note(format!(
+            "the reading of {} is stale: it was made before a landing changed {}, which it touches; checking that it still holds",
+            item.job,
+            hit.join(", ")
+        ));
+        if self.steps.recheck(&item.job, &hit) {
+            Source::Given(read)
+        } else {
+            self.note(format!(
+                "the reading of {} no longer holds; reading it again",
+                item.job
+            ));
+            Source::Reread
         }
     }
 
@@ -1169,8 +1400,19 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 rebuild_output: None,
                 read_cost: Default::default(),
                 stop: None,
+                ahead: BTreeMap::new(),
+                reading: BTreeSet::new(),
+                pumped: BTreeSet::new(),
+                begun: BTreeSet::new(),
+                done: BTreeSet::new(),
+                landings: Vec::new(),
+                touches: BTreeMap::new(),
+                batch: 0,
+                pump_done: false,
+                pump_gone: false,
             }),
             landing: Mutex::new(()),
+            wake: Condvar::new(),
         }
     }
 
@@ -1238,9 +1480,31 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 .unwrap_or_else(PoisonError::into_inner)
                 .pop_front();
             let Some(item) = next else { return };
-            let end = self.work(&item);
+            let made = self.claim(&item);
+            let end = self.work(&item, made);
+            self.st().done.insert(item.job.clone());
+            self.wake.notify_all();
             self.finish(&item, end);
         }
+    }
+
+    /// A worker takes `item`. If the read-ahead is reading it right now, waits for that reading to end (it is
+    /// never read twice), then takes the reading made ahead, if there is one.
+    fn claim(&self, item: &Item) -> Option<Ahead> {
+        let mut st = self.st();
+        while st.reading.contains(&item.job) && !st.pump_gone {
+            st = self.pause(st);
+        }
+        st.ahead.remove(&item.job)
+    }
+
+    /// Waits a short while for a change of the shared state. Waiters check their condition again afterwards, so
+    /// a wake-up that comes early or not at all costs only a few milliseconds.
+    fn pause<'g>(&self, guard: MutexGuard<'g, State>) -> MutexGuard<'g, State> {
+        self.wake
+            .wait_timeout(guard, Duration::from_millis(20))
+            .unwrap_or_else(PoisonError::into_inner)
+            .0
     }
 
     /// One job at a time, in order, on the calling thread.
@@ -1254,11 +1518,38 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
 impl<S: Steps + Sync + ?Sized, U: Ui + Sync + ?Sized> Drain<'_, S, U> {
     /// Runs each batch with up to `workers` jobs at once; the next batch starts when the batch before it is
     /// done. A batch holds items that no dependency links and whose touched paths are disjoint.
+    ///
+    /// With [`Steps::read_ahead`] above 0, one more thread reads (and plans) the items of the batches to come
+    /// while the batch runs; see the module text.
     fn run_parallel(&self, batches: Vec<Vec<Item>>, workers: usize) {
-        for batch in batches {
+        let window = self.steps.read_ahead() as usize;
+        if window == 0 || workers < 2 {
+            return self.run_batches(batches, workers);
+        }
+        let upcoming: Vec<(usize, Item)> = batches
+            .iter()
+            .enumerate()
+            .flat_map(|(n, batch)| batch.iter().cloned().map(move |item| (n, item)))
+            .collect();
+        std::thread::scope(|scope| {
+            scope.spawn(|| self.read_ahead_pump(&upcoming, window));
+            // However the batches end (all run, a reason to stop, a worker's panic), the read-ahead is told to
+            // end, so the scope can close.
+            let _end = FlagOnDrop {
+                state: &self.state,
+                wake: &self.wake,
+                set: |st| st.pump_done = true,
+            };
+            self.run_batches(batches, workers);
+        });
+    }
+
+    fn run_batches(&self, batches: Vec<Vec<Item>>, workers: usize) {
+        for (n, batch) in batches.into_iter().enumerate() {
             if self.stopped() {
                 return;
             }
+            self.st().batch = n;
             let count = workers.min(batch.len()).max(1);
             let queue = Mutex::new(VecDeque::from(batch));
             std::thread::scope(|scope| {
@@ -1266,6 +1557,141 @@ impl<S: Steps + Sync + ?Sized, U: Ui + Sync + ?Sized> Drain<'_, S, U> {
                     scope.spawn(|| self.take_until_done(&queue));
                 }
             });
+        }
+    }
+
+    /// What the read-ahead does next. It considers the items of the batches after the running one, in plan
+    /// order, that it has not tried and that are not read already (nor interrupted). It starts one only when
+    /// every job of the running batch has started, fewer than `window` readings are held or being made, the job limit leaves room for another job and the
+    /// budget fits a read and a run (as a job is started only when both fit, so nothing is read for want of
+    /// money to run it), and the item's touched paths are disjoint from every job of the running batch that has
+    /// not finished (an item whose paths are unknown is not read ahead beside a job in flight).
+    fn pick_ahead(&self, st: &State, upcoming: &[(usize, Item)], window: usize) -> Pick {
+        let touches = |item: &Item| st.touches.get(&item.job).map_or(&[][..], Vec::as_slice);
+        let held = st.ahead.len() + st.reading.len();
+        // The running batch starts its own jobs first: a read made ahead must not take the money, or the
+        // place in the job limit, that one of them has not yet held.
+        let unstarted = upcoming.iter().any(|(b, i)| {
+            *b <= st.batch && !st.begun.contains(&i.job) && !st.done.contains(&i.job)
+        });
+        let no_room = unstarted
+            || held >= window
+            || st.started as usize + held >= self.limits.max_jobs as usize
+            || !st.budget.fits(self.caps.read + self.caps.run);
+        let mut any = false;
+        for (at, (batch, item)) in upcoming.iter().enumerate() {
+            if *batch <= st.batch || item.read || item.interrupted || st.pumped.contains(&item.job)
+            {
+                continue;
+            }
+            any = true;
+            if no_room {
+                break;
+            }
+            let clear = upcoming
+                .iter()
+                .filter(|(b, other)| *b <= st.batch && !st.done.contains(&other.job))
+                .all(|(_, other)| paths_disjoint(touches(item), touches(other)));
+            if clear {
+                return Pick::Start(at);
+            }
+        }
+        if any { Pick::Wait } else { Pick::Done }
+    }
+
+    /// The read-ahead thread: reads, and for a hard job plans, items of the batches to come while the running
+    /// batch works, never holding more than `window` readings that no job has claimed. Every read and plan
+    /// holds its cap against the budget while it runs and adds what it cost, as any other call does, and no
+    /// lock is held across a call into [`Steps`]. It ends when there is nothing left to read ahead, a stop was
+    /// asked for, or the batches are over.
+    fn read_ahead_pump(&self, upcoming: &[(usize, Item)], window: usize) {
+        // If this thread ends in any way, a worker must not wait for a reading it will never finish.
+        let _gone = FlagOnDrop {
+            state: &self.state,
+            wake: &self.wake,
+            set: |st| st.pump_gone = true,
+        };
+        loop {
+            let (at, seen) = {
+                let mut st = self.st();
+                loop {
+                    if st.pump_done || st.stop.is_some() {
+                        return;
+                    }
+                    match self.pick_ahead(&st, upcoming, window) {
+                        Pick::Done => return,
+                        Pick::Wait => st = self.pause(st),
+                        Pick::Start(at) => {
+                            let job = upcoming[at].1.job.clone();
+                            st.pumped.insert(job.clone());
+                            st.reading.insert(job);
+                            st.budget.hold(self.caps.read);
+                            break (at, st.landings.len());
+                        }
+                    }
+                }
+            };
+            let job = upcoming[at].1.job.as_str();
+            if self.steps.stop_requested() {
+                let mut st = self.st();
+                st.reading.remove(job);
+                st.budget.release(self.caps.read);
+                drop(st);
+                self.wake.notify_all();
+                return;
+            }
+            let read = self.steps.read(ReadOf::Queued(job));
+            let usable = matches!(
+                (&read.job, &read.error, read.runnable),
+                (Some(_), None, true)
+            );
+            {
+                let mut st = self.st();
+                st.budget.release(self.caps.read);
+                st.budget.add(read.cost);
+                *st.read_cost.entry(job.to_string()).or_insert(0.0) += read.cost;
+            }
+            let mut problem = (!usable).then(|| {
+                read.error
+                    .clone()
+                    .unwrap_or_else(|| "no capability fits the request".into())
+            });
+            if usable {
+                // A hard job is planned too. The plan is paid for like the reading; with no room for its cap
+                // it is left for when the job starts.
+                let cap = self.steps.plan_cap();
+                let room = {
+                    let mut st = self.st();
+                    let room = st.budget.fits(cap);
+                    if room {
+                        st.budget.hold(cap);
+                    }
+                    room
+                };
+                if room {
+                    let planned = self.steps.plan_ahead(job);
+                    let mut st = self.st();
+                    st.budget.release(cap);
+                    if let Some(planned) = planned {
+                        st.budget.add(planned.cost);
+                        *st.read_cost.entry(job.to_string()).or_insert(0.0) += planned.cost;
+                        problem = planned.error;
+                    }
+                }
+            }
+            {
+                let mut st = self.st();
+                match problem {
+                    None => {
+                        st.ahead.insert(job.to_string(), Ahead { read, seen });
+                    }
+                    Some(why) => st.notes.push(format!(
+                        "the reading made ahead of {job} was dropped ({why}); it is read again when it starts"
+                    )),
+                }
+                st.reading.remove(job);
+            }
+            self.wake.notify_all();
         }
     }
 }
@@ -1373,8 +1799,21 @@ fn drain_with<'a, S: Steps + ?Sized, U: Ui + ?Sized>(
             plan.cyclic.join(", ")
         ));
     }
+    {
+        let mut st = d.st();
+        for entry in &view.plan {
+            st.touches.insert(entry.id.clone(), entry.touches.clone());
+        }
+    }
     run(d, batches);
-    let st = d.st();
+    let mut st = d.st();
+    // A reading made ahead that no job used (the run ended first) was paid for; say so.
+    for (item, made) in std::mem::take(&mut st.ahead) {
+        let job = made.read.job.as_deref().unwrap_or("?");
+        st.notes.push(format!(
+            "the reading of {item} (job {job}) was made ahead but not used: the run ended first"
+        ));
+    }
     let (mut stop, failed_item) = st.stop.clone().unwrap_or((Stop::QueueEmpty, None));
     // A rebuilt Athena carries on with what is left, unless there is nothing left or a stop was asked for.
     let mut restart = None;
@@ -2349,5 +2788,589 @@ mod tests {
             assert!(!stop.label().is_empty() && !stop.meaning().is_empty());
         }
         assert!(Stop::QueueEmpty.meaning().contains("not success"));
+    }
+}
+
+/// Read-ahead and the stale-reading re-check, driven through the real entry points ([`drain_concurrent`] and
+/// [`drain`]) with a fake [`Steps`] that only logs calls and supplies data. The pump, the window, the claim and
+/// the order of the drain's calls are the production code. The tests assert on the order of the log, which the
+/// dependency chain and the window force, and not on elapsed time; the fake's waits are capped, so a missing
+/// behavior fails an assertion instead of hanging.
+#[cfg(test)]
+mod read_ahead_tests {
+    use super::*;
+    use athena_core::Quiet;
+    use athena_data::roles::Ladder;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Instant;
+
+    fn own(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn entry(id: &str, touches: &[&str], deps: &[&str]) -> PlanEntry {
+        PlanEntry {
+            goal: format!("goal of {id}"),
+            rung: Some(Ladder::Implementation),
+            acceptance: vec![format!("{id} works")],
+            depends_on: own(deps),
+            touches: own(touches),
+            ..PlanEntry::bare(id, &format!("title of {id}"))
+        }
+    }
+
+    fn limits(budget: f64) -> Limits {
+        Limits {
+            budget_usd: budget,
+            target_rating: 4,
+            max_jobs: 20,
+        }
+    }
+
+    /// Steps that log every call. Reading costs 0.1, a run 0.3, a plan made ahead 0.2.
+    struct World {
+        log: Mutex<Vec<String>>,
+        /// Each item with the paths its plan says it touches and what it depends on, oldest first.
+        items: Vec<(String, Vec<String>, Vec<String>)>,
+        window: u32,
+        /// Items whose `plan_ahead` says they are hard and were planned.
+        hard: Vec<String>,
+        /// What a landing of a job changed; by default its own source file and the changelog.
+        landed: BTreeMap<String, Vec<String>>,
+        /// The job a reading names, when it is not the item.
+        named: BTreeMap<String, String>,
+        /// `run(job)` waits (at most 5 s) until these log entries exist, then keeps running for 200 ms.
+        gate: BTreeMap<String, Vec<String>>,
+        recheck_holds: bool,
+        stop_after: Option<String>,
+        reads: AtomicUsize,
+        ended: AtomicUsize,
+        /// The most readings made but not yet through a run, seen when a read started.
+        widest: AtomicUsize,
+    }
+
+    impl World {
+        fn new(window: u32, items: &[(&str, &[&str], &[&str])]) -> World {
+            World {
+                log: Mutex::new(Vec::new()),
+                items: items
+                    .iter()
+                    .map(|(id, touches, deps)| (id.to_string(), own(touches), own(deps)))
+                    .collect(),
+                window,
+                hard: Vec::new(),
+                landed: BTreeMap::new(),
+                named: BTreeMap::new(),
+                gate: BTreeMap::new(),
+                recheck_holds: true,
+                stop_after: None,
+                reads: AtomicUsize::new(0),
+                ended: AtomicUsize::new(0),
+                widest: AtomicUsize::new(0),
+            }
+        }
+
+        /// a, then b, then c, each touching only its own file and the changelog.
+        fn chain(window: u32) -> World {
+            World::new(
+                window,
+                &[
+                    ("a", &["src/a.rs", "CHANGELOG.md"], &[]),
+                    ("b", &["src/b.rs", "CHANGELOG.md"], &["a"]),
+                    ("c", &["src/c.rs", "CHANGELOG.md"], &["b"]),
+                ],
+            )
+        }
+
+        fn gate(mut self, job: &str, until: &[&str]) -> World {
+            self.gate.insert(job.into(), own(until));
+            self
+        }
+
+        fn hard(mut self, item: &str) -> World {
+            self.hard.push(item.into());
+            self
+        }
+
+        fn lands(mut self, job: &str, changed: &[&str]) -> World {
+            self.landed.insert(job.into(), own(changed));
+            self
+        }
+
+        fn names(mut self, item: &str, job: &str) -> World {
+            self.named.insert(item.into(), job.into());
+            self
+        }
+
+        fn log(&self, entry: String) {
+            self.log.lock().unwrap().push(entry);
+        }
+
+        fn entries(&self) -> Vec<String> {
+            self.log.lock().unwrap().clone()
+        }
+
+        fn logged(&self, entry: &str) -> bool {
+            self.log.lock().unwrap().iter().any(|e| e == entry)
+        }
+
+        fn count(&self, entry: &str) -> usize {
+            self.entries().iter().filter(|e| *e == entry).count()
+        }
+
+        /// The place of `entry` in the log; fails the test when it was never logged.
+        fn at(&self, entry: &str) -> usize {
+            self.entries()
+                .iter()
+                .position(|e| e == entry)
+                .unwrap_or_else(|| panic!("{entry:?} was never logged: {:?}", self.entries()))
+        }
+    }
+
+    impl Steps for World {
+        fn caps(&self) -> anyhow::Result<Caps> {
+            Ok(Caps {
+                read: 0.5,
+                run: 1.0,
+                rate: 0.5,
+            })
+        }
+        fn queue(&self) -> anyhow::Result<QueueView> {
+            Ok(QueueView {
+                items: self
+                    .items
+                    .iter()
+                    .map(|(id, _, _)| Item::queued(id, "t"))
+                    .collect(),
+                plan: self
+                    .items
+                    .iter()
+                    .map(|(id, touches, deps)| PlanEntry {
+                        touches: touches.clone(),
+                        depends_on: deps.clone(),
+                        ..entry(id, &[], &[])
+                    })
+                    .collect(),
+                ..QueueView::default()
+            })
+        }
+        fn previous_rating(&self) -> Option<u8> {
+            None
+        }
+        fn approve(&self, _: &str) -> Approval {
+            Approval::default()
+        }
+        fn read(&self, what: ReadOf<'_>) -> Read {
+            let ReadOf::Queued(item) = what else {
+                panic!("only a first reading is expected, got {what:?}");
+            };
+            self.log(format!("read {item}"));
+            let made = self.reads.fetch_add(1, Ordering::SeqCst) + 1;
+            let open = made.saturating_sub(self.ended.load(Ordering::SeqCst));
+            self.widest.fetch_max(open, Ordering::SeqCst);
+            Read {
+                job: Some(
+                    self.named
+                        .get(item)
+                        .map_or(item, String::as_str)
+                        .to_string(),
+                ),
+                cost: 0.1,
+                runnable: true,
+                error: None,
+            }
+        }
+        fn run(&self, job: &str) -> Run {
+            self.log(format!("start {job}"));
+            if let Some(until) = self.gate.get(job) {
+                let give_up = Instant::now() + Duration::from_secs(5);
+                while !until.iter().all(|e| self.logged(e)) && Instant::now() < give_up {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            self.log(format!("end {job}"));
+            self.ended.fetch_add(1, Ordering::SeqCst);
+            Run {
+                outcome: Some(OutcomeState::Landed),
+                cost: 0.3,
+                ..Run::default()
+            }
+        }
+        fn land(&self, job: &str) -> Landing {
+            self.log(format!("land {job}"));
+            Landing::Landed {
+                changed: self
+                    .landed
+                    .get(job)
+                    .cloned()
+                    .unwrap_or_else(|| vec![format!("src/{job}.rs"), "CHANGELOG.md".into()]),
+            }
+        }
+        fn rate(&self) -> Rate {
+            Rate {
+                rating: Some(1),
+                ..Rate::default()
+            }
+        }
+        fn check_page(&self) -> Check {
+            Check::pass("fake")
+        }
+        fn check_cap(&self) -> f64 {
+            0.5
+        }
+        fn stop_requested(&self) -> bool {
+            self.stop_after
+                .as_ref()
+                .is_some_and(|job| self.logged(&format!("end {job}")))
+        }
+        fn read_ahead(&self) -> u32 {
+            self.window
+        }
+        fn plan_cap(&self) -> f64 {
+            0.2
+        }
+        fn plan_ahead(&self, item: &str) -> Option<Planned> {
+            self.log(format!("plan_ahead {item}"));
+            self.hard.iter().any(|h| h == item).then(|| {
+                self.log(format!("plan {item}"));
+                Planned {
+                    cost: 0.2,
+                    error: None,
+                }
+            })
+        }
+        fn recheck(&self, item: &str, changed: &[String]) -> bool {
+            self.log(format!("recheck {item} [{}]", changed.join(",")));
+            self.recheck_holds
+        }
+        fn reread(&self, item: &str) -> Read {
+            self.log(format!("reread {item}"));
+            Read {
+                job: Some(format!("{item}-fresh")),
+                cost: 0.1,
+                runnable: true,
+                error: None,
+            }
+        }
+    }
+
+    fn concurrent(world: &World, bound: u32) -> Report {
+        drain_concurrent(world, limits(20.0), &Quiet, bound).unwrap()
+    }
+
+    #[test]
+    fn read_ahead_reads_and_plans_the_next_hard_job_while_the_current_one_runs() {
+        // a runs until b has been read and planned; b runs until c has been read, and c is not hard.
+        let world = World::chain(1)
+            .hard("b")
+            .gate("a", &["read b", "plan b"])
+            .gate("b", &["read c", "plan_ahead c"]);
+        let report = concurrent(&world, 2);
+        assert_eq!(report.landed, 3, "{:?} {:?}", report.jobs, report.notes);
+        assert_eq!(report.stop, Stop::QueueEmpty);
+        // b is read and planned while a runs.
+        assert!(world.at("start a") < world.at("end a"));
+        assert!(world.at("read b") < world.at("plan_ahead b"));
+        assert!(world.at("plan_ahead b") < world.at("plan b"));
+        assert!(world.at("plan b") < world.at("end a"));
+        // c is read only after b took b's place in the window (a ended), and while b runs.
+        assert!(world.at("end a") < world.at("read c"));
+        assert!(world.at("read c") < world.at("end b"));
+        // c is not hard: the drain asked, and nothing was planned for it.
+        assert!(world.logged("plan_ahead c"));
+        assert!(!world.logged("plan c"));
+        // Each item is read once; the ahead readings were run as they were.
+        for item in ["a", "b", "c"] {
+            assert_eq!(world.count(&format!("read {item}")), 1, "{item}");
+        }
+        // The running job plus one reading ahead is the most there ever is.
+        assert!(world.widest.load(Ordering::SeqCst) <= 2);
+        // The money: three readings, three runs, and the plan of b only.
+        let expected = 3.0 * 0.1 + 3.0 * 0.3 + 0.2;
+        assert!(
+            (report.spent_usd - expected).abs() < 1e-9,
+            "{} vs {expected}",
+            report.spent_usd
+        );
+        // The ahead cost is on the job's line.
+        assert!((report.jobs[1].cost_usd - (0.1 + 0.2 + 0.3)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn read_ahead_never_runs_further_ahead_than_the_window() {
+        let world = World::new(
+            2,
+            &[
+                ("a", &["src/a.rs"], &[]),
+                ("b", &["src/b.rs"], &["a"]),
+                ("c", &["src/c.rs"], &["b"]),
+                ("d", &["src/d.rs"], &["c"]),
+            ],
+        )
+        .gate("a", &["read b", "read c"]);
+        let report = concurrent(&world, 2);
+        assert_eq!(report.landed, 4);
+        // b and c are read while a runs; d waits for a place in the window, which b gives up once it starts.
+        assert!(world.at("read b") < world.at("end a"));
+        assert!(world.at("read c") < world.at("end a"));
+        assert!(world.at("end a") < world.at("read d"));
+        // Running job plus two readings ahead.
+        assert!(world.widest.load(Ordering::SeqCst) <= 3);
+    }
+
+    #[test]
+    fn read_ahead_is_not_skipped_for_jobs_that_share_only_changelog() {
+        // Every job edits the changelog; that must not stop the next one from being read.
+        let world = World::chain(1).gate("a", &["read b"]);
+        let report = concurrent(&world, 2);
+        assert_eq!(report.landed, 3);
+        assert!(world.at("read b") < world.at("end a"));
+    }
+
+    #[test]
+    fn read_ahead_skips_an_item_that_shares_paths_with_a_job_in_flight() {
+        // b is inside the directory a edits and e's paths are unknown: neither is read beside a. c is clear.
+        let world = World::new(
+            1,
+            &[
+                ("a", &["src/shared"], &[]),
+                ("b", &["src/shared/x.rs"], &["a"]),
+                ("c", &["src/c.rs"], &["a"]),
+                ("e", &[], &["a"]),
+            ],
+        )
+        .gate("a", &["read c"]);
+        let report = concurrent(&world, 2);
+        assert_eq!(report.landed, 4, "{:?} {:?}", report.jobs, report.notes);
+        assert!(world.at("read c") < world.at("end a"));
+        assert!(world.at("end a") < world.at("read b"));
+        assert!(world.at("end a") < world.at("read e"));
+        for item in ["a", "b", "c", "e"] {
+            assert_eq!(world.count(&format!("read {item}")), 1, "{item}");
+        }
+    }
+
+    #[test]
+    fn read_ahead_paths_rule_matches_the_plan_grouping() {
+        let cases: [(&[&str], &[&str]); 11] = [
+            (&["src/x"], &["src/x/y.rs"]),
+            (&["src/x/y.rs"], &["src/x"]),
+            (&["src/x/"], &["src/x/y.rs"]),
+            (&["src/x"], &["src/xy.rs"]),
+            (&["src/a.rs"], &["src/a.rs"]),
+            (&["src/a.rs"], &["src/b.rs"]),
+            (&["CHANGELOG.md"], &["src/b.rs"]),
+            (&["CHANGELOG.md", "src/a.rs"], &["CHANGELOG.md", "src/b.rs"]),
+            (&["docs/decisions.md"], &["README.md"]),
+            (&[], &["src/b.rs"]),
+            (
+                &["README.md", "src/a/"],
+                &["src/a/b.rs", "docs/decisions.md"],
+            ),
+        ];
+        for (a, b) in cases {
+            // Plan::build puts two items with no dependency in one group exactly when it finds them disjoint.
+            let plan = Plan::build(&[entry("x", a, &[]), entry("y", b, &[])]);
+            assert_eq!(
+                paths_disjoint(&own(a), &own(b)),
+                plan.groups.len() == 1,
+                "{a:?} against {b:?}: {:?}",
+                plan.groups
+            );
+        }
+    }
+
+    #[test]
+    fn read_ahead_ends_with_the_drain_when_a_stop_is_requested() {
+        let mut world = World::new(
+            2,
+            &[
+                ("a", &["src/a.rs"], &[]),
+                ("b", &["src/b.rs"], &["a"]),
+                ("c", &["src/c.rs"], &["b"]),
+                ("d", &["src/d.rs"], &["c"]),
+            ],
+        )
+        .gate("a", &["read b", "read c"]);
+        world.stop_after = Some("a".into());
+        let started = Instant::now();
+        let report = concurrent(&world, 2);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the drain did not end promptly"
+        );
+        assert_eq!(report.stop, Stop::Requested);
+        assert_eq!(report.landed, 1);
+        // Nothing is read once the stop was asked for (a ended, then the stop was seen), and b never ran.
+        let end = world.at("end a");
+        assert!(
+            world
+                .entries()
+                .iter()
+                .enumerate()
+                .all(|(at, e)| !e.starts_with("read ") || at < end),
+            "{:?}",
+            world.entries()
+        );
+        assert!(!world.logged("start b"));
+        // The readings made ahead and never used are reported.
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|n| n.contains("made ahead but not used")),
+            "{:?}",
+            report.notes
+        );
+    }
+
+    #[test]
+    fn read_ahead_is_off_with_a_bound_of_one() {
+        // One job at a time, through both entry points, and a window of 0 with two jobs at a time.
+        let runs: [(&str, u32, u32); 3] = [
+            ("drain_concurrent 1", 1, 1),
+            ("drain", 1, 1),
+            ("window 0", 0, 2),
+        ];
+        for (how, window, bound) in runs {
+            let world = World::chain(window);
+            let report = if how == "drain" {
+                drain(&world, limits(20.0), &Quiet).unwrap()
+            } else {
+                concurrent(&world, bound)
+            };
+            assert_eq!(report.landed, 3, "{how}");
+            // Each item is read when its turn comes, after the job before it ended and was landed.
+            assert!(world.at("land a") < world.at("read b"), "{how}");
+            assert!(world.at("land b") < world.at("read c"), "{how}");
+            assert_eq!(world.count("plan_ahead b"), 0, "{how}");
+            assert!(
+                report.notes.iter().all(|n| !n.contains("stale")),
+                "{how}: {:?}",
+                report.notes
+            );
+        }
+    }
+
+    #[test]
+    fn read_ahead_must_fit_the_budget() {
+        // 1.5 is exactly what a's reading and run cap (0.5 + 1.0) need. While a runs, another reading and run
+        // do not fit beside the run's held cap, and after a they do not fit what is left either, so b is
+        // never read and the drain stops for lack of budget.
+        let world = World::chain(1).gate("a", &[]);
+        let report = drain_concurrent(&world, limits(1.5), &Quiet, 2).unwrap();
+        assert_eq!(report.stop, Stop::BudgetSpent, "{:?}", report.notes);
+        assert_eq!(report.landed, 1);
+        assert_eq!(world.count("read b"), 0, "{:?}", world.entries());
+    }
+
+    /// a, then b which depends on it. The plan says a touches only src/a.rs, and b only src/b.rs.
+    fn pair() -> World {
+        World::new(
+            1,
+            &[
+                ("a", &["src/a.rs", "CHANGELOG.md"], &[]),
+                ("b", &["src/b.rs", "CHANGELOG.md"], &["a"]),
+            ],
+        )
+        .gate("a", &["read b"])
+    }
+
+    fn stale_notes(report: &Report) -> Vec<&String> {
+        report
+            .notes
+            .iter()
+            .filter(|n| n.contains("stale"))
+            .collect()
+    }
+
+    #[test]
+    fn stale_reading_is_rechecked_when_its_job_starts() {
+        // The plan underestimated a: it changed src/b.rs, which b's reading touches.
+        let mut world = pair().lands("a", &["src/b.rs", "CHANGELOG.md"]);
+        world.recheck_holds = false;
+        let report = concurrent(&world, 2);
+        assert_eq!(report.landed, 2, "{:?} {:?}", report.jobs, report.notes);
+        assert!(
+            world.at("read b") < world.at("land a"),
+            "read ahead of a's landing"
+        );
+        assert!(world.at("land a") < world.at("recheck b [src/b.rs]"));
+        assert!(world.at("recheck b [src/b.rs]") < world.at("reread b"));
+        assert!(world.at("reread b") < world.at("start b-fresh"));
+        assert_eq!(world.count("recheck b [src/b.rs]"), 1);
+        assert_eq!(world.count("read b"), 1, "the drain never reads b again");
+        assert!(!world.logged("start b"), "the stale reading is not run");
+        let notes = stale_notes(&report);
+        assert_eq!(notes.len(), 1, "{:?}", report.notes);
+        assert!(notes[0].contains("reading of b") && notes[0].contains("src/b.rs"));
+        // The job line is the fresh job's, and carries both readings and the run.
+        assert_eq!(report.jobs[1].item, "b");
+        assert_eq!(report.jobs[1].job, "b-fresh");
+        assert!((report.jobs[1].cost_usd - (0.1 + 0.1 + 0.3)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn stale_reading_kept_when_recheck_says_it_holds() {
+        let world = pair().lands("a", &["src/b.rs", "CHANGELOG.md"]);
+        let report = concurrent(&world, 2);
+        assert_eq!(report.landed, 2);
+        assert_eq!(world.count("recheck b [src/b.rs]"), 1);
+        assert_eq!(world.count("reread b"), 0);
+        assert!(world.logged("start b"));
+        assert_eq!(world.count("read b"), 1);
+        assert_eq!(stale_notes(&report).len(), 1, "{:?}", report.notes);
+    }
+
+    #[test]
+    fn stale_reading_not_marked_when_paths_are_untouched() {
+        // a changed only what the plan said it would.
+        let world = pair().lands("a", &["src/a.rs", "CHANGELOG.md"]);
+        let report = concurrent(&world, 2);
+        assert_eq!(report.landed, 2);
+        assert!(world.at("read b") < world.at("land a"));
+        assert!(!world.entries().iter().any(|e| e.starts_with("recheck")));
+        assert_eq!(world.count("reread b"), 0);
+        assert!(stale_notes(&report).is_empty(), "{:?}", report.notes);
+        assert_eq!(world.count("read b"), 1);
+        assert!(world.logged("start b"));
+    }
+
+    #[test]
+    fn stale_reading_not_marked_when_only_shared_files_landed() {
+        // Both the landing and the reading touch the changelog; every job does, so it is not a clash.
+        let world = pair().lands("a", &["CHANGELOG.md"]);
+        let report = concurrent(&world, 2);
+        assert_eq!(report.landed, 2);
+        assert!(!world.entries().iter().any(|e| e.starts_with("recheck")));
+        assert_eq!(world.count("reread b"), 0);
+        assert!(stale_notes(&report).is_empty(), "{:?}", report.notes);
+        assert!(world.logged("start b"));
+    }
+
+    #[test]
+    fn stale_reading_runs_the_job_the_reading_named() {
+        let world = pair().names("b", "b-2");
+        let report = concurrent(&world, 2);
+        assert_eq!(report.landed, 2);
+        assert!(world.logged("start b-2"));
+        assert!(!world.logged("start b"));
+        assert_eq!(report.jobs[1].item, "b");
+        assert_eq!(report.jobs[1].job, "b-2");
+    }
+
+    #[test]
+    fn a_reading_with_unknown_paths_is_stale_for_any_landing_but_the_shared_files() {
+        let p = |paths: &[&str]| own(paths);
+        assert_eq!(
+            stale_paths(&p(&[]), &p(&["src/a.rs", "CHANGELOG.md", "src/a.rs"])),
+            ["src/a.rs"]
+        );
+        assert!(stale_paths(&p(&["CHANGELOG.md"]), &p(&["README.md"])).is_empty());
+        assert_eq!(
+            stale_paths(&p(&["src/dir/"]), &p(&["src/dir/x.rs", "src/other.rs"])),
+            ["src/dir/x.rs"]
+        );
     }
 }

@@ -9,6 +9,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Read-ahead and the stale-reading re-check in the drain (async drain build job 5, `docs/design/async-drain.md`
+  section 4 and decision D145). When more than one job runs at once, `drain_concurrent` now also reads, and for a
+  hard job plans, up to `read_ahead` items ahead of the running batch, on one extra thread. An item is read ahead
+  only when the paths its plan says it touches are disjoint from every unfinished job of the running batch, by
+  the rule the plan groups by (a path equals another or lies inside it; `CHANGELOG.md`, `docs/decisions.md` and
+  `README.md` are ignored; unknown paths count as a clash). Reads and plans made ahead hold their caps against the
+  budget, start only when a read and a run both fit and the job limit has room, and are run as they are, never
+  read a second time. When a job starts, the paths landed since its reading began are compared with the paths
+  the reading touches; on a hit the drain notes the reading as stale and asks the new `Steps::recheck`, and
+  `Steps::reread` makes a fresh reading if it no longer holds. A reading no landing touched is used as it is.
+  The new `Steps` methods (`read_ahead`, `plan_cap`, `plan_ahead`, `recheck`, `reread`) have defaults that turn it
+  off, and the real steps keep them, so nothing reads ahead in production until the pipeline settings are wired in
+  (build job 10). With `max_in_flight = 1` (a bound of 1, or `athena drain`) the drain is unchanged: no thread is
+  added and nothing is read ahead.
 - `[drain.pipeline]` config table (async drain build job 2, `docs/design/async-drain.md` sections 11 and 12) in
   `athena-data`: `max_in_flight`, `max_check_slots`, `read_ahead`, `reserve_disk_gb` and `max_conflict_returns`,
   defaulting to 1, 1, 1, 10 and 2 when the table or `[drain]` is absent. `max_in_flight` must be 1 to 8,
