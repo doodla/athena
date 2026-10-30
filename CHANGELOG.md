@@ -9,6 +9,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A read-only evidence snapshot for each job, and `athena status --snapshot <dir>`. A job's working copy has no
+  `records/` and one commit, so a producer or verifier could not check a change against the real records or
+  main's history. At dispatch Athena now writes `jobs/<id>/evidence` in the state directory, outside the working
+  copy: a copy of `records/` (byte for byte, same layout), the `landings/` files that `Records::load` reads, and
+  `history.json`, the first-parent log of the base commit (hash, commit time, subject and trailers, newest first,
+  at most 200 commits). The snapshot is read-only: modes 0555 and 0444 plus the immutable attribute, because mode
+  bits do not stop a process that runs as root, and dispatch fails if a write probe still succeeds. The producer
+  and verifier briefs name the path and say that checks against the real records use it; their policy lets them
+  read it (never write it), and the agent settings list it as an additional directory. The briefs are stored with
+  `<state>` in place of the state directory path, and `brief_sha256` is the hash of the stored text.
+  `athena status --snapshot <dir>` reads the records and history from such a directory instead of the checkout,
+  which needs no `records/`; the throughput section and the other sections computed from records are the same
+  code and give the same figures. Parts that need the live repository or process state (branch, stale build, kill
+  switch, scope-guard lines, code health, spec gaps) are left out, and the output names them. It cannot be given
+  with a job id. The new `Records::from_set` shares the loading of records with `Records::load`.
 - The drain's in-flight table (async drain build job 3, `docs/design/async-drain.md` sections 7 and 12 and decision
   D145). The real steps keep a local file, `in-flight.json` in the state directory, with a row of job id, stage and
   worktree for each job being worked. The run reports the stage itself: the new `Athena::go_with_stages` tells a

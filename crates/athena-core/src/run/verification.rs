@@ -50,6 +50,10 @@ impl Athena {
             .as_ref()
             .filter(|b| b.base_commit == p.as_str());
 
+        // The evidence snapshot written at dispatch, when it is still there (a resumed job's may be gone).
+        let evidence_path: Option<String> = Some(crate::snapshot::evidence_dir(&self.state, &id))
+            .filter(|dir| dir.exists())
+            .map(|dir| dir.display().to_string());
         let criteria = ctx.reading.acceptance_criteria.clone();
         let verifier_grant = ctx.capability.verifier_grant(jc);
         let candidate_view = CandidateView {
@@ -155,7 +159,12 @@ impl Athena {
             ctx.stages.enter(&id, Stage::Verifier);
             closing.files.push(NewFile::text(
                 format!("{}/brief-verifier.md", id.dir()),
-                verifier_brief_with_plan(&inputs, verifier_plan.as_ref(), false),
+                self.with_state_placeholder(&verifier_brief_with_evidence(
+                    &inputs,
+                    verifier_plan.as_ref(),
+                    false,
+                    evidence_path.as_deref(),
+                )),
             ));
             let vcomposed = compose(&[
                 CONTRACT.into(),
@@ -173,7 +182,12 @@ impl Athena {
                     verifier_failure = Some(format!("{e}"));
                     break;
                 }
-                let vbrief = verifier_brief_with_plan(&inputs, verifier_plan.as_ref(), true);
+                let vbrief = verifier_brief_with_evidence(
+                    &inputs,
+                    verifier_plan.as_ref(),
+                    true,
+                    evidence_path.as_deref(),
+                );
                 let vspec = self.agent_spec(
                     jc,
                     &id,

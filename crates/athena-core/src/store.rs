@@ -260,21 +260,36 @@ pub struct Records {
     pub invalid: Vec<String>,
 }
 
-/// The landing records under `landings/` in `treeish`; an absent directory or an unreadable file counts nothing.
-fn landings_in(git: &Git, treeish: &str) -> Vec<athena_data::history::Landing> {
+/// The files under `landings/` in `treeish`, as (path, bytes); an absent directory or an unreadable tree
+/// counts nothing.
+fn landing_blobs_in(git: &Git, treeish: &str) -> Vec<(String, Vec<u8>)> {
     let Ok(entries) = git.ls_tree_under(treeish, "landings") else {
         return Vec::new();
     };
-    let oids: Vec<String> = entries
-        .into_iter()
-        .filter(|e| e.kind == "blob")
-        .map(|e| e.oid)
-        .collect();
+    let entries: Vec<_> = entries.into_iter().filter(|e| e.kind == "blob").collect();
+    let oids: Vec<String> = entries.iter().map(|e| e.oid.clone()).collect();
     let Ok(blobs) = git.cat_blobs(&oids) else {
         return Vec::new();
     };
-    blobs
-        .iter()
+    entries.into_iter().map(|e| e.path).zip(blobs).collect()
+}
+
+/// The landing files `Records::load` reads at `treeish`: those in the tree itself and those on the local
+/// records branch. The evidence snapshot copies exactly these.
+pub(crate) fn landing_files(git: &Git, treeish: &str) -> Vec<(String, Vec<u8>)> {
+    let mut files = landing_blobs_in(git, treeish);
+    if let Ok(Some(tip)) = athena_git::records_branch::RecordsWriter::new(git).tip() {
+        files.extend(landing_blobs_in(git, &tip));
+    }
+    files
+}
+
+/// The landing records among `files`; a file that is not a landing counts nothing.
+pub(crate) fn parse_landings<'a>(
+    files: impl IntoIterator<Item = &'a [u8]>,
+) -> Vec<athena_data::history::Landing> {
+    files
+        .into_iter()
         .filter_map(|bytes| {
             match athena_data::history::HistoryRecord::parse(&String::from_utf8_lossy(bytes)) {
                 Ok(athena_data::history::HistoryRecord::Landing(l)) => Some(l),
@@ -308,6 +323,14 @@ impl Records {
     /// Loads every record in `treeish`.
     pub fn load(git: &Git, treeish: &str) -> Result<Records> {
         let set = RecordSet::load(git, treeish)?;
+        let files = landing_files(git, treeish);
+        let landings = parse_landings(files.iter().map(|(_, bytes)| bytes.as_slice()));
+        Ok(Records::from_set(&set, landings))
+    }
+
+    /// The records in `set`, with the landing records `landings` (in any order; duplicates by id are dropped).
+    /// `load` reads both from a commit; the evidence snapshot reads them from its copy.
+    pub fn from_set(set: &RecordSet, landings: Vec<athena_data::history::Landing>) -> Records {
         let mut records = Records::default();
         for file in &set.files {
             if file.error.is_some() {
@@ -371,10 +394,7 @@ impl Records {
         for job in records.jobs.values_mut() {
             job.sort();
         }
-        let mut landings = landings_in(git, treeish);
-        if let Ok(Some(tip)) = athena_git::records_branch::RecordsWriter::new(git).tip() {
-            landings.extend(landings_in(git, &tip));
-        }
+        let mut landings = landings;
         landings.sort_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)));
         landings.dedup_by(|a, b| a.id == b.id);
         records.landings = landings;
@@ -419,7 +439,7 @@ impl Records {
         records
             .proposals
             .sort_by(|a, b| (a.at, &a.record).cmp(&(b.at, &b.record)));
-        Ok(records)
+        records
     }
 
     /// Jobs other than the bootstrap, newest first.

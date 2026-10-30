@@ -411,8 +411,28 @@ fn pin_section(out: &mut String, pin: Option<&PinnedRepo>) {
     }
 }
 
+/// The section that names a job's evidence snapshot (`athena_core::snapshot`) and says that checks against the
+/// real records or main's history use it. Shared by the producer and verifier briefs.
+fn evidence_section(out: &mut String, path: &str) {
+    let _ = writeln!(
+        out,
+        "## Evidence snapshot\n\nThe working directory has no records/ and one commit. A read-only snapshot of the real \
+         records and of main's first-parent history, taken at dispatch, is at `{path}`: `records/` (a copy of the \
+         repository's records/), `landings/` (the landing records) and `history.json` (hash, commit time, subject and \
+         trailers of each commit, newest first). Any check against the real records or main's history uses this \
+         snapshot, not the working directory; for example `cargo run -p athena-cli -- status --snapshot {path}` prints \
+         the status of those records. Read it with Read, Grep, Glob and `ls`; it cannot be changed.\n"
+    );
+}
+
 /// The producer brief (design §7.1), stored verbatim as `brief-producer.md`.
 pub fn producer_brief(inputs: &ProducerInputs) -> String {
+    producer_brief_with_evidence(inputs, None)
+}
+
+/// The producer brief, with the path of the job's evidence snapshot when there is one. Without a path the text
+/// is exactly [`producer_brief`]'s.
+pub fn producer_brief_with_evidence(inputs: &ProducerInputs, evidence: Option<&str>) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "# Job {}: {}\n", inputs.job, inputs.reading.title);
     let _ = writeln!(out, "## Request (verbatim)\n\n{}\n", quote(&inputs.request));
@@ -455,6 +475,9 @@ pub fn producer_brief(inputs: &ProducerInputs) -> String {
                 seed.job
             );
         }
+    }
+    if let Some(path) = evidence {
+        evidence_section(&mut out, path);
     }
     let _ = writeln!(out, "## What the verifier sees\n\n{VERIFIER_VISIBILITY}\n");
     criteria_check_section(&mut out, &inputs.reading);
@@ -991,6 +1014,17 @@ pub fn verifier_brief_with_plan(
     plan: Option<&VerifierPlan>,
     inline_diff: bool,
 ) -> String {
+    verifier_brief_with_evidence(inputs, plan, inline_diff, None)
+}
+
+/// The verifier brief with an optional plan and the path of the job's evidence snapshot when there is one.
+/// Without a path the text is exactly [`verifier_brief_with_plan`]'s.
+pub fn verifier_brief_with_evidence(
+    inputs: &VerifierInputs,
+    plan: Option<&VerifierPlan>,
+    inline_diff: bool,
+    evidence: Option<&str>,
+) -> String {
     let mut out = String::new();
     let _ = writeln!(
         out,
@@ -1017,6 +1051,9 @@ pub fn verifier_brief_with_plan(
     pin_section(&mut out, inputs.pin.as_ref());
     if let Some(replay) = &inputs.replay {
         replay_section(&mut out, replay);
+    }
+    if let Some(path) = evidence {
+        evidence_section(&mut out, path);
     }
     let c = &inputs.candidate;
     let _ = writeln!(
@@ -3010,6 +3047,73 @@ mod tests {
             assert!(first.contains(text), "the plan section omits {text}");
         }
         assert_ne!(first, render_plan_section(&plan(3)));
+    }
+
+    const SNAPSHOT: &str = "/state/jobs/20261010-153012-k7q2/evidence";
+
+    /// What both briefs say about the evidence snapshot when a job has one.
+    fn assert_names_the_snapshot(brief: &str) {
+        assert!(brief.contains("## Evidence snapshot"), "{brief}");
+        assert!(brief.contains(&format!("is at `{SNAPSHOT}`")), "{brief}");
+        assert!(
+            brief.contains(
+                "Any check against the real records or main's history uses this snapshot, not the working directory"
+            ),
+            "{brief}"
+        );
+        assert!(
+            brief.contains(&format!("status --snapshot {SNAPSHOT}")),
+            "{brief}"
+        );
+        assert!(
+            brief.contains("records/, the owner's private files, and history are absent by design"),
+            "the working copy still has no records/"
+        );
+    }
+
+    #[test]
+    fn the_producer_brief_names_the_evidence_snapshot_in_both_working_directory_variants() {
+        let plain = producer_inputs(None);
+        assert_names_the_snapshot(&producer_brief_with_evidence(&plain, Some(SNAPSHOT)));
+        let mut retry = producer_inputs(None);
+        retry.retry_from = Some(RetrySeed {
+            job: "20261010-153012-aaaa".into(),
+            unmet: Vec::new(),
+            findings: Vec::new(),
+            must_address: Vec::new(),
+            progress_note: None,
+        });
+        assert_names_the_snapshot(&producer_brief_with_evidence(&retry, Some(SNAPSHOT)));
+    }
+
+    #[test]
+    fn the_verifier_brief_names_the_evidence_snapshot() {
+        let inputs = plain_verifier_inputs();
+        for inline in [true, false] {
+            assert_names_the_snapshot(&verifier_brief_with_evidence(
+                &inputs,
+                None,
+                inline,
+                Some(SNAPSHOT),
+            ));
+        }
+    }
+
+    #[test]
+    fn without_a_snapshot_neither_brief_mentions_one_and_the_text_is_unchanged() {
+        let producer = producer_inputs(None);
+        assert_eq!(
+            producer_brief_with_evidence(&producer, None),
+            producer_brief(&producer)
+        );
+        assert!(!producer_brief(&producer).contains("snapshot --"));
+        assert!(!producer_brief(&producer).contains("Evidence snapshot"));
+        let verifier = plain_verifier_inputs();
+        assert_eq!(
+            verifier_brief_with_evidence(&verifier, None, true, None),
+            verifier_brief(&verifier, true)
+        );
+        assert!(!verifier_brief(&verifier, true).contains("Evidence snapshot"));
     }
 
     fn plain_verifier_inputs() -> VerifierInputs {

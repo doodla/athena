@@ -315,6 +315,10 @@ Exit code: 0 only when the target was met; 2 for any other stop; 1 when Athena i
         job: Option<String>,
         #[arg(long)]
         json: bool,
+        /// Read the records and main's history from a job's evidence snapshot (the path its brief names)
+        /// instead of this checkout. The checkout needs no `records/`; it is not used with a job.
+        #[arg(long, value_name = "DIR", conflicts_with = "job")]
+        snapshot: Option<PathBuf>,
     },
     /// Record an intervention: anything you did beyond what a lazy user would.
     Intervene {
@@ -1208,8 +1212,22 @@ fn run(cli: Cli) -> Result<u8> {
             }
             Ok(0)
         }
-        Command::Status { job, json } => {
+        Command::Status {
+            job,
+            json,
+            snapshot,
+        } => {
             let athena = open(false)?;
+            if let Some(dir) = snapshot {
+                // Nothing is asked of the remote and no process is consulted: the snapshot is the evidence.
+                let view = athena.status_from_snapshot(&dir)?;
+                if json {
+                    print_json(&view)?
+                } else {
+                    print!("{}", display::status(&view))
+                }
+                return Ok(0);
+            }
             match job {
                 Some(job) => {
                     let trace = athena.trace(&job)?;

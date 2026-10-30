@@ -226,6 +226,7 @@ impl Athena {
                 root: self.state.job_dir(&id),
                 commands: verifier_commands,
                 writes: false,
+                read_roots: Vec::new(),
             },
             &|path| self.git.path_is_tree(&p, path).unwrap_or(false),
         );

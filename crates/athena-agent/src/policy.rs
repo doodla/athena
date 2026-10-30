@@ -38,6 +38,10 @@ pub struct Policy {
     pub commands: BTreeMap<String, Vec<String>>,
     /// Whether the role may write files (only the producer).
     pub writes: bool,
+    /// Directories outside `root` the role may read but never change (a job's evidence snapshot). Reads, `ls`
+    /// and `cargo run -- status --snapshot <dir>` may name a path under one; a write under one is denied.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub read_roots: Vec<PathBuf>,
 }
 
 /// The hook's answer.
@@ -83,7 +87,7 @@ pub fn evaluate(policy: &Policy, tool: &str, input: &Value, cwd: Option<&Path>) 
         "Read" | "Grep" | "Glob" | "LS" => {
             for key in ["file_path", "path", "notebook_path"] {
                 if let Some(path) = input.get(key).and_then(Value::as_str)
-                    && let Err(reason) = confine(&root, &cwd, path, false)
+                    && let Err(reason) = confine(policy, &root, &cwd, path, false)
                 {
                     return deny(reason);
                 }
@@ -94,6 +98,7 @@ pub fn evaluate(policy: &Policy, tool: &str, input: &Value, cwd: Option<&Path>) 
             {
                 let prefix = glob_prefix(pattern);
                 if let Err(reason) = confine(
+                    policy,
                     &root,
                     &cwd,
                     if prefix.is_empty() { "." } else { prefix },
@@ -118,7 +123,7 @@ pub fn evaluate(policy: &Policy, tool: &str, input: &Value, cwd: Option<&Path>) 
             }
             for key in ["file_path", "notebook_path"] {
                 if let Some(path) = input.get(key).and_then(Value::as_str)
-                    && let Err(reason) = confine(&root, &cwd, path, true)
+                    && let Err(reason) = confine(policy, &root, &cwd, path, true)
                 {
                     return deny(reason);
                 }
@@ -392,7 +397,13 @@ fn tokenize_word_prefix(text: &str) -> Result<(String, usize), String> {
 }
 
 /// Resolves `path` against `cwd` and checks it lies inside `root` (and, for writes, outside `.git`).
-fn confine(root: &Path, cwd: &Path, path: &str, write: bool) -> Result<PathBuf, String> {
+fn confine(
+    policy: &Policy,
+    root: &Path,
+    cwd: &Path,
+    path: &str,
+    write: bool,
+) -> Result<PathBuf, String> {
     if path.starts_with('~') {
         return Err(format!(
             "{path}: paths outside your working directory are not available"
@@ -422,6 +433,19 @@ fn confine(root: &Path, cwd: &Path, path: &str, write: bool) -> Result<PathBuf, 
     let mut resolved = existing.canonicalize().unwrap_or(existing);
     for part in rest.iter().rev() {
         resolved.push(part);
+    }
+    let under_read_root = policy
+        .read_roots
+        .iter()
+        .filter_map(|r| r.canonicalize().ok())
+        .any(|r| resolved.starts_with(r));
+    if under_read_root {
+        if write {
+            return Err(format!(
+                "{path} is in the read-only evidence snapshot; it cannot be changed"
+            ));
+        }
+        return Ok(resolved);
     }
     if !resolved.starts_with(root) {
         return Err(format!(
@@ -577,7 +601,7 @@ fn check_segment(
                 }
                 let path = if *glob { glob_prefix(arg) } else { arg };
                 let path = if path.is_empty() { "." } else { path };
-                confine(root, cwd, path, writes)?;
+                confine(policy, root, cwd, path, writes)?;
             }
             Ok(())
         }
@@ -636,7 +660,7 @@ fn check_cargo(
                 let value = inline
                     .map(str::to_string)
                     .or_else(|| rest.next().map(|(v, _)| v.to_string()));
-                confine(root, cwd, &value.unwrap_or_default(), false)?;
+                confine(policy, root, cwd, &value.unwrap_or_default(), false)?;
             }
             "--fix" | "--allow-dirty" | "--allow-staged" if !policy.writes => {
                 return Err(format!(
@@ -883,7 +907,7 @@ fn check_redirect(
             policy.role.as_str()
         ));
     }
-    confine(root, cwd, target, !input).map(|_| ())
+    confine(policy, root, cwd, target, !input).map(|_| ())
 }
 
 /// The permission allow rules matching a command list, for `--allowedTools`.
@@ -949,6 +973,56 @@ mod tests {
             root: root.to_path_buf(),
             commands,
             writes,
+            read_roots: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_read_root_is_readable_and_never_writable() {
+        let dir = snapshot();
+        let evidence = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(evidence.path().join("records")).unwrap();
+        let file = evidence.path().join("records/a.json");
+        std::fs::write(&file, "{}").unwrap();
+        let file = file.display().to_string();
+        let ev = evidence.path().display().to_string();
+        for role in [Role::Producer, Role::Verifier] {
+            let mut p = policy(role, dir.path());
+            // Without a read root the path is outside the working directory.
+            assert!(matches!(
+                evaluate(&p, "Read", &json!({ "file_path": file }), None),
+                Decision::Deny(_)
+            ));
+            assert!(matches!(bash(&p, &format!("ls {ev}")), Decision::Deny(_)));
+            p.read_roots = vec![evidence.path().to_path_buf()];
+            assert_eq!(
+                evaluate(&p, "Read", &json!({ "file_path": file }), None),
+                Decision::NoObjection
+            );
+            assert_eq!(
+                evaluate(&p, "Glob", &json!({ "path": ev, "pattern": "*" }), None),
+                Decision::NoObjection
+            );
+            assert_eq!(bash(&p, &format!("ls {ev}/records")), Decision::NoObjection);
+            assert_eq!(
+                bash(
+                    &p,
+                    &format!("cargo run -p athena-cli -- status --snapshot {ev}")
+                ),
+                Decision::NoObjection
+            );
+            // Never a write, even for the role that writes in its working directory.
+            for tool in ["Write", "Edit"] {
+                assert!(matches!(
+                    evaluate(&p, tool, &json!({ "file_path": file }), None),
+                    Decision::Deny(_)
+                ));
+            }
+            assert!(matches!(bash(&p, &format!("rm {file}")), Decision::Deny(_)));
+            assert!(matches!(
+                bash(&p, &format!("ls {ev}/../other")),
+                Decision::Deny(_)
+            ));
         }
     }
 
@@ -1229,6 +1303,7 @@ mod tests {
                 ("ls".to_string(), vec!["*".into()]),
             ]),
             writes: false,
+            read_roots: Vec::new(),
         }
     }
 

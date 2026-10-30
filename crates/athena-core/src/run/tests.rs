@@ -494,6 +494,286 @@ mod produce_and_verify_order_tests {
         assert_eq!(baseline.checks.len(), 1);
     }
 
+    /// What the fake agents saw of the evidence snapshot while the job ran (it is removed when the job closes).
+    #[derive(Default)]
+    struct Observed {
+        problems: Vec<String>,
+        paths: Vec<(Role, String)>,
+    }
+
+    fn require(problems: &mut Vec<String>, role: Role, ok: bool, what: &str) {
+        if !ok {
+            problems.push(format!("{role:?}: {what}"));
+        }
+    }
+
+    /// Checks, from inside a producer or verifier run, everything the evidence snapshot must be at that moment.
+    fn observe_evidence(
+        spec: &AgentInvocation,
+        base: &str,
+        repo: &std::path::Path,
+        state_root: &std::path::Path,
+        out: &Mutex<Observed>,
+    ) {
+        use athena_agent::policy::{Decision, Policy, evaluate};
+        let role = spec.role;
+        let mut p = Vec::new();
+        let prompt = &spec.user_prompt;
+        let named = prompt
+            .split("is at `")
+            .nth(1)
+            .and_then(|rest| rest.split('`').next())
+            .map(PathBuf::from);
+        require(
+            &mut p,
+            role,
+            named.is_some(),
+            "the prompt names the snapshot",
+        );
+        let Some(dir) = named else {
+            out.lock().unwrap().problems.extend(p);
+            return;
+        };
+        let job = prompt
+            .lines()
+            .next()
+            .and_then(|l| l.strip_prefix("# Job "))
+            .and_then(|l| l.split(':').next())
+            .unwrap_or("")
+            .to_string();
+        require(
+            &mut p,
+            role,
+            dir == state_root.join("jobs").join(&job).join("evidence"),
+            "the named path is the job's evidence directory under the state directory",
+        );
+        require(&mut p, role, dir.is_dir(), "the named snapshot exists");
+        require(
+            &mut p,
+            role,
+            !spec.workdir.join("records").exists(),
+            "the working copy has no records/",
+        );
+        // Read-only, against the user this runs as (root in CI): a new file and a rewrite both fail.
+        let created = std::fs::write(dir.join("probe"), b"x").is_ok();
+        require(&mut p, role, !created, "a file was created in the snapshot");
+        let rewrote = std::fs::OpenOptions::new()
+            .write(true)
+            .open(dir.join("history.json"))
+            .is_ok();
+        require(&mut p, role, !rewrote, "history.json opened for writing");
+        // The records as they were at the base commit, byte for byte.
+        let git = Git::at(repo);
+        let entries: Vec<_> = git
+            .ls_tree_under(base, "records")
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == "blob")
+            .collect();
+        let blobs = git
+            .cat_blobs(&entries.iter().map(|e| e.oid.clone()).collect::<Vec<_>>())
+            .unwrap();
+        require(&mut p, role, !entries.is_empty(), "the base has records");
+        for (entry, bytes) in entries.iter().zip(&blobs) {
+            let copied = std::fs::read(dir.join(&entry.path)).ok();
+            require(
+                &mut p,
+                role,
+                copied.as_deref() == Some(bytes.as_slice()),
+                &format!("{} differs from the base", entry.path),
+            );
+        }
+        // Main's history at dispatch: newest first, with hash, commit time, subject and trailers.
+        let history = crate::snapshot::read_history(&dir).unwrap();
+        require(
+            &mut p,
+            role,
+            history.first().map(|c| c.hash.as_str()) == Some(base),
+            "history starts at the base",
+        );
+        if let Some(newest) = history.first() {
+            let log = |format: &str| {
+                git.run(["log", "-1", format, base])
+                    .unwrap()
+                    .trim()
+                    .to_string()
+            };
+            require(
+                &mut p,
+                role,
+                newest.subject == log("--format=%s"),
+                "subject",
+            );
+            require(
+                &mut p,
+                role,
+                newest.committed_at == log("--format=%cI"),
+                "commit time",
+            );
+        }
+        // The first commit of the fixture repository carries a trailer.
+        require(
+            &mut p,
+            role,
+            history.last().is_some_and(|c| {
+                c.trailers
+                    .iter()
+                    .any(|t| t.key == "Athena-Job" && t.value == "bootstrap")
+            }),
+            "the oldest commit's Athena-Job trailer",
+        );
+        let first_parent = git
+            .run(["rev-list", "--first-parent", base])
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        require(
+            &mut p,
+            role,
+            history.iter().map(|c| c.hash.clone()).collect::<Vec<_>>() == first_parent,
+            "history is the first-parent chain",
+        );
+        // The hook's policy lets the role read the snapshot and never change it.
+        let hook = spec.hook.as_ref().expect("a hook");
+        require(
+            &mut p,
+            role,
+            hook.read_dirs == vec![dir.clone()],
+            "the hook lists the read directory",
+        );
+        let mut policy: Policy =
+            serde_json::from_str(&std::fs::read_to_string(&hook.policy_file).unwrap()).unwrap();
+        require(
+            &mut p,
+            role,
+            policy.read_roots == vec![dir.clone()],
+            "the policy has the read root",
+        );
+        policy.commands.insert("ls".into(), vec!["*".into()]);
+        policy.commands.insert("rm".into(), vec!["*".into()]);
+        policy.commands.insert("cargo".into(), vec!["run".into()]);
+        let record = dir.join(&entries[0].path).display().to_string();
+        let shown = dir.display().to_string();
+        let allowed = |tool: &str, input: serde_json::Value| {
+            evaluate(&policy, tool, &input, None) == Decision::NoObjection
+        };
+        require(
+            &mut p,
+            role,
+            allowed("Read", json!({ "file_path": record })),
+            "Read of a record is denied",
+        );
+        require(
+            &mut p,
+            role,
+            allowed("Bash", json!({ "command": format!("ls {shown}") })),
+            "ls of the snapshot is denied",
+        );
+        require(
+            &mut p,
+            role,
+            allowed(
+                "Bash",
+                json!({ "command": format!("cargo run -p athena-cli -- status --snapshot {shown}") }),
+            ),
+            "cargo run status --snapshot is denied",
+        );
+        for (tool, input) in [
+            ("Write", json!({ "file_path": record })),
+            ("Edit", json!({ "file_path": record })),
+            ("Bash", json!({ "command": format!("rm {record}") })),
+        ] {
+            require(
+                &mut p,
+                role,
+                !allowed(tool, input),
+                &format!("{tool} under the snapshot is allowed"),
+            );
+        }
+        let mut seen = out.lock().unwrap();
+        seen.problems.extend(p);
+        seen.paths.push((role, shown));
+    }
+
+    #[test]
+    fn evidence_snapshot_is_written_read_only_named_in_the_briefs_and_readable_by_the_agents() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let state_root = state.path().join("repo");
+        let observed = Arc::new(Mutex::new(Observed::default()));
+        let base = Arc::new(Mutex::new(String::new()));
+        let script: athena_agent::fake::Script = {
+            let (observed, base, repo_path, state_root) = (
+                observed.clone(),
+                base.clone(),
+                repo.path().to_path_buf(),
+                state_root.clone(),
+            );
+            let inner = base_script();
+            Box::new(move |spec: &AgentInvocation| {
+                if matches!(spec.role, Role::Producer | Role::Verifier) {
+                    let base = base.lock().unwrap().clone();
+                    observe_evidence(spec, &base, &repo_path, &state_root, &observed);
+                }
+                inner(spec)
+            })
+        };
+        let athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            script,
+        );
+        // Control, in this environment: a snapshot that is written and not locked takes a new file.
+        let control = tempfile::tempdir().unwrap();
+        let proposal = athena.ask("describe the demo", &Quiet).unwrap();
+        *base.lock().unwrap() = athena.head().unwrap();
+        crate::snapshot::write(
+            &athena.git,
+            &athena.head().unwrap(),
+            &control.path().join("e"),
+        )
+        .unwrap();
+        std::fs::write(control.path().join("e/probe"), b"x")
+            .expect("without the lock the same write succeeds");
+
+        let GoResult::Finished(finished) = athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Quiet)
+            .unwrap()
+        else {
+            panic!("expected the job to finish");
+        };
+        assert_eq!(finished.state, OutcomeState::Landed, "{}", finished.reason);
+        let seen = observed.lock().unwrap();
+        assert!(seen.problems.is_empty(), "{:#?}", seen.problems);
+        let roles: Vec<Role> = seen.paths.iter().map(|(r, _)| *r).collect();
+        assert_eq!(roles, [Role::Producer, Role::Verifier]);
+        assert_eq!(
+            seen.paths[0].1, seen.paths[1].1,
+            "both briefs name one path"
+        );
+
+        // The stored briefs are public record text: the placeholder, not this machine's path.
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        let job = &records.jobs[proposal.job.as_str()];
+        let placeholder = format!("<state>/jobs/{}/evidence", proposal.job.as_str());
+        for name in ["brief-producer", "brief-verifier"] {
+            let stored = &job.briefs[name];
+            assert!(stored.contains(&placeholder), "{name}: {stored}");
+            assert!(
+                !stored.contains(&state_root.display().to_string()),
+                "{name} holds the state path"
+            );
+        }
+        assert_eq!(
+            job.job.as_ref().unwrap().brief_sha256.as_deref(),
+            Some(sha256_hex(job.briefs["brief-producer"].as_bytes()).as_str()),
+            "the recorded hash is of the stored brief"
+        );
+    }
+
     /// A plan for the one criterion of `base_script`'s reading that creates README.md, which exists in the base:
     /// it breaks Athena's plan rule that a file to create must not exist.
     fn bad_plan() -> serde_json::Value {
