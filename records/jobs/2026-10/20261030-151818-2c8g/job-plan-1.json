@@ -1,0 +1,232 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261030-151818-2c8g",
+  "round": 1,
+  "at": "2026-10-30T21:40:15.027572201Z",
+  "invocation_seq": 4,
+  "approach": "Root cause: the job budget was checked only per invocation (check_budget in reading.rs), after reading and planning had already spent from it, so nothing compared what was left with the sum of the caps the job still needs (reader, planner, producer, verifier). Fix it where it starts, in reading.rs: a pure function `reserve_shortfall` (the sum and the shortfall) and one Athena method `preflight_budget` that wraps it and bails with a message naming the shortfall. Call the method from admission (`first_reading`, shared by `ask`, `read_queued` and `read_unread`), from `retry` (before it calls `ask`), and from dispatch in run/mod.rs (what `go` runs for a drain job). For drain, add a `Steps::preflight` hook (default `None`) that RealSteps implements through a thin core wrapper; `run_job` calls it first and turns a refusal into a skipped item with one note line. The existing per-invocation checks (reader, planner, critic, producer plus verifier, verifier rerun) stay untouched as the second line of defence. Revision: criterion 6 now says what fails without the change; the two non-deliverable test files are kept only because the new admission check makes their current budgets unreachable, and are flagged as an open question with the smallest possible edit (one config line each).",
+  "decisions": [
+    {
+      "choice": "One function computes the reserve and shortfall; the three core call sites and the drain's real steps all call it.",
+      "reason": "The class repeats because no place compares the remaining budget with the whole remaining need. One definition removes drift between sites (acceptance 2).",
+      "rejected": [
+        {
+          "option": "Add a bigger check inside planning.rs and run/mod.rs only",
+          "why": "That is the existing late check; it runs after reading and planning have spent, which is the fault."
+        },
+        {
+          "option": "Raise [budget] job_usd in athena.toml",
+          "why": "Out of scope (governance) and hides the missing comparison instead of fixing it."
+        }
+      ]
+    },
+    {
+      "choice": "Reserve = reader cap (only when a reading is about to be made) + planner cap (when planning applies or may apply) + producer cap + verifier cap. At admission planning is counted whenever [job_plan] is enabled (hard-mode marking is unknown before the reading); at dispatch it is exact: `job_plan.plans(reading.hard_reason.is_some())` and the capability does not pin a repository.",
+      "reason": "Matches the brief. Conservative only where facts are unknown. The shipped 12.00 covers 0.5 + 0.75 + 3.0 + 2.0 = 6.25.",
+      "rejected": [
+        {
+          "option": "Count the critic cap too",
+          "why": "The brief says the existing per-round checks cover the critic; it would overcount because the critic runs after the planner."
+        }
+      ]
+    },
+    {
+      "choice": "The retry preflight runs in `Athena::retry` with spend 0 before `ask`; recorded spend is covered at dispatch (`job.spent_usd()`) and in the drain wrapper.",
+      "reason": "A retry creates a new job via `ask`, so its own spend starts at zero. Refusing early in `retry` still happens before any agent runs and before the retry bookkeeping.",
+      "rejected": [
+        {
+          "option": "Charge the retried job's spend to the new job",
+          "why": "Changes budget semantics; not requested."
+        }
+      ]
+    },
+    {
+      "choice": "Drain: `Steps::preflight(&self, job) -> Option<String>` (default `None`). `run_job` calls it before `st.started += 1`; on `Some(reason)` it pushes a JobLine 'not started', writes one `note` line, and returns `RunStep::Refused`, which `attempts` maps to `ItemEnd::Skipped`.",
+      "reason": "Drain's own --budget accounting is a different budget from the per-job one. The refusal must be reported per item without stopping the drain; `Skipped` already means 'skip this item, continue'.",
+      "rejected": [
+        {
+          "option": "Rely on the error that `go` returns inside `run`",
+          "why": "The job is then counted as started and held against the budget, and reported as a failed run rather than a refusal before any spend."
+        }
+      ]
+    },
+    {
+      "choice": "Keep the three existing tests whose job_usd sits below reader plus later caps working by editing one config value each, not an assertion: run_pin_tests.rs (deliverable), crates/athena-cli/tests/lifecycle.rs `a_job_over_budget_is_refused_before_its_next_invocation` (job_usd 5.20 and reader_usd 0.10 via a replace of the plain line `reader_usd = 0.50`, which athena.toml line 35 has and test_config includes verbatim), and crates/athena-cli/tests/job_plan.rs `a_cap_between_the_producer_alone_and_planning_plus_the_producer_stops_the_job_before_the_producer` (reader_usd 0.01 beside job_usd 5.025; admission need 0.01+0.005+5.0 = 5.015 passes; dispatch need 5.005 against 5.015 left passes; the stop after planning still occurs).",
+      "reason": "Any admission check that covers the producer plus verifier (5.00) refuses lifecycle's job_usd 4.00 at `ask`, so that test cannot reach the `go` refusal it tests; the same holds for job_plan's 5.025 with reader 0.50. The conflict is inherent in acceptance 3 and cannot be avoided by placement of the check. The edits are the smallest that keep each test's original assertion meaningful.",
+      "rejected": [
+        {
+          "option": "Make admission skip the reader or planner cap so those tests pass unchanged",
+          "why": "Defeats acceptance 3, which requires refusal when the budget is below the reader, planner, producer and verifier caps."
+        },
+        {
+          "option": "Leave the two non-deliverable files unedited and let them fail",
+          "why": "cargo test would fail (acceptance 6)."
+        },
+        {
+          "option": "Delete those tests and re-create them in run_pin_tests.rs",
+          "why": "Loses existing coverage and is a larger edit to the same non-deliverable files."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Add pure `reserve_shortfall`, `Athena::preflight_budget`, and a pub `preflight_job(job_ref)` wrapper for the drain. Call the method in `first_reading` (admission) and in `retry` before `ask`. Add the arithmetic unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "In `dispatch`, call `preflight_budget` with the job's recorded spend and the exact planning decision, before `disk_gate`. The existing line-750 and line-931 checks are unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/planning.rs",
+      "action": "modify",
+      "purpose": "Listed deliverable; no behaviour change planned. Touch only if the per-round messages should share the shortfall wording. The per-round checks stay.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Add `Steps::preflight` (default `None`), the RealSteps impl via the core wrapper, `RunStep::Refused`, the 'not started' JobLine and one note in `run_job`, the `ItemEnd::Skipped` mapping in `attempts`, the `World.refuse` field and the drain test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "action": "modify",
+      "purpose": "Add the admission, dispatch/retry and shipped-budget tests. Change only the config value of `when_the_budget_runs_out_before_the_rerun_the_reason_reports_the_budget` (job_usd 3.00) so it passes admission.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased entry naming the root cause, jobs 20261028-082151-67fa and 20261030-033434-3v30, the preflight, and the intended extra refusals at admission.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "purpose": "Not a listed deliverable; required by acceptance 3. Config-only change to `a_job_over_budget_is_refused_before_its_next_invocation`: job_usd 5.20 and reader_usd 0.10, so `ask` passes admission and `go` is still refused. No assertion changes.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/job_plan.rs",
+      "action": "modify",
+      "purpose": "Not a listed deliverable; required by acceptance 3. Config-only change to the cap test: add reader_usd 0.01 beside job_usd 5.025 so admission passes and the stop after planning is still what it tests. No assertion changes.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In reading.rs add `reserve_shortfall(budget, job_plan, spent, include_reader, plan: PlanNeed{None,MayPlan,Plans}) -> Option<Shortfall{left, need, short, parts}>` with the 1e-9 tolerance of check_budget. Add `Athena::preflight_budget(&self, jc, spent, include_reader, plan)`, which bails with: 'the job has $L of its $J budget left, $S short of the $N that the reader, planner, producer and verifier need; raise [budget] in athena.toml through a job, or close this one'. Keep the words 'budget left'.",
+    "Call it in `first_reading` before `read_for` (spend = prior spend or 0, include_reader true, MayPlan when [job_plan] is enabled) and in `retry` before `self.ask` (spend 0). Add `pub fn preflight_job(&self, job_ref) -> Result<()>`, which loads the job's records, head config and latest reading, and computes the dispatch need with `spent_usd()` and the exact planning decision (`plans(hard_reason.is_some())` and not `capability.pins_repo()`), reader included only if the job has no reading.",
+    "In run/mod.rs `dispatch`, call `preflight_budget` with `job.spent_usd()`, include_reader false and the exact planning decision, right before `disk_gate`. Do not edit the existing checks.",
+    "In drain.rs add `fn preflight(&self, _job: &str) -> Option<String> { None }` to `Steps`; implement it in `RealSteps` through `athena.preflight_job`, formatting the error with `{error:#}`.",
+    "In `Drain::run_job`, after the stop and job-limit checks and before `st.started += 1`, call `self.steps.preflight(target)`. On `Some(reason)` push a JobLine 'not started', call `self.note(format!(\"item {} is not started: {}\", item.job, one_line(&reason)))` and return `RunStep::Refused`. Map `RunStep::Refused` to `ItemEnd::Skipped` in `attempts` and handle the variant wherever `RunStep` is matched. Update the module doc.",
+    "Write the drain test (World gets a `refuse` map and a `preflight` impl reading it). Write the core tests in run_pin_tests.rs (admission, dispatch/retry, shipped-budget) using only the existing `athena_with`, `repo`, `config`, `faulty_verifier` and `Tweak` seams. Confirm each new core test fails on the base logic by reasoning against the listed fails_without.",
+    "Adjust the three existing test setups by config value only: run_pin_tests.rs (job_usd 3.00), lifecycle.rs (job_usd 5.20, reader_usd 0.10 by replacing the plain line `reader_usd = 0.50`), job_plan.rs (reader_usd 0.01 with job_usd 5.025). Run each and check it still stops at its original check.",
+    "Add the CHANGELOG Unreleased entry naming the root cause, the two jobs, the preflight and the intended extra refusals.",
+    "Run `cargo fmt --all`, then `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`; fix fallout, keeping any further test-setup change config-only."
+  ],
+  "risks": [
+    {
+      "risk": "Admission refuses configurations that previously worked, for example a job_usd between the producer-plus-verifier total (5.0) and the full reserve (6.25).",
+      "mitigation": "The shipped athena.toml is 12.00. The message names the shortfall and says to raise [budget] through a job. The CHANGELOG states the stricter admission as intended."
+    },
+    {
+      "risk": "Admission counts the planner whenever [job_plan] is enabled, even for a job hard mode would not plan.",
+      "mitigation": "Conservative only where facts are unknown; dispatch uses the exact decision. Documented in the function's comment."
+    },
+    {
+      "risk": "The dispatch preflight runs before disk_gate and changes the order of a budget refusal versus a disk hold.",
+      "mitigation": "Both refuse before any agent runs or commit. The new test asserts the budget refusal; existing disk tests use ample budgets."
+    },
+    {
+      "risk": "Other Steps implementations (Stub, Housekeeping, World) use the default `None` and do not exercise the hook.",
+      "mitigation": "Only RealSteps overrides it; the drain test uses World's scripted override and the core tests cover the arithmetic through the real Athena."
+    },
+    {
+      "risk": "Other existing tests with tight budgets (grep of job_usd found lifecycle.rs 1007 and 1692, job_plan.rs 86, drain.rs 1899 and 1922 at 7.5/9.25, which cover the 6.25 reserve) could fail.",
+      "mitigation": "The producer runs the full cargo test and fixes any setup in the same config-only way; any further file outside the deliverables is reported, not silently edited."
+    },
+    {
+      "risk": "Editing two non-deliverable test files widens scope.",
+      "mitigation": "Each edit is one config value; assertions are untouched; both are named in files and open questions for confirmation."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the diff of CHANGELOG.md (content criterion).",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "A new Unreleased entry says the budget was checked only per invocation after reading and planning had spent, with no preflight against the planner plus producer plus verifier caps, and names jobs 20261028-082151-67fa and 20261030-033434-3v30. It also says more readings are refused at admission by design.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Read the diff (the Grep tool over crates/ for `fn reserve_shortfall` and `preflight_budget` gives the same view).",
+      "command": "git diff -- crates/athena-core/src/reading.rs crates/athena-core/src/run/mod.rs crates/athena-cli/src/drain.rs",
+      "observes": "`reserve_shortfall` and `preflight_budget` are defined once, in reading.rs. `preflight_budget` is called in `first_reading` (admission), in `retry` and in dispatch in run/mod.rs. drain.rs `RealSteps::preflight` calls the core wrapper and does not recompute the reserve. No other site sums the caps.",
+      "fails_without": null
+    },
+    {
+      "criterion": 3,
+      "method": "New test in run_pin_tests.rs. Entry point: `Athena::ask` (production admission), built by the existing `athena_with(dir, state, pinner, seen, tweak)` over `repo(config)` and the FakeAgentDriver. Precondition: `config(true)` plus an appended `[job_plan]` with enabled = true, and job_usd = 6.00, below 0.50 + 0.75 + 3.00 + 2.00 = 6.25. Seam: the existing `Tweak` closure that the driver script runs on every invocation; the test passes one that pushes each `spec.role` into an Arc<Mutex<Vec<Role>>>. It exists today (read in run_pin_tests.rs). The closure only records; the refusal logic is in production code.",
+      "command": "cargo test -p athena-core admission_refuses_a_budget_below_the_whole_reserve",
+      "observes": "`ask` returns Err whose text contains 'budget left' and the shortfall ('$0.25 short'); the recorded role list is empty (zero agent invocations); the repository head is unchanged.",
+      "fails_without": "On the base commit `ask` reads first (check_budget compares only the 0.50 reader cap with 6.00), the recorded role list contains Reader, and `ask` returns Ok; the Err assertion and the empty-list assertion both fail."
+    },
+    {
+      "criterion": 4,
+      "method": "New test in run_pin_tests.rs on the same fixtures. (a) Dispatch with recorded spend: job_usd 6.50 passes admission; a Tweak sets the reader turn's cost to 1.60; `Athena::go` is refused because 4.90 left is below producer + verifier 5.00, and the recorded roles are exactly [Reader]. (b) Control: a second job with reader cost 0.01 passes the preflight and `go` runs on to the producer (roles contain Producer). (c) Retry: reuse `faulty_verifier(runs, 2, 0.01)` to get a Rejected job, rewrite athena.toml in the repo with job_usd 3.00 and commit it with git, then call `Athena::retry(job)`. Seam: the `Tweak` closure and the `faulty_verifier` helper; both exist today.",
+      "command": "cargo test -p athena-core preflight_refuses_a_job_whose_spend_leaves_too_little",
+      "observes": "(a) refusal naming the shortfall, no Planner, Producer or Verifier recorded; (b) the producer runs; (c) `retry` returns Err naming the shortfall and no role is recorded after the earlier run.",
+      "fails_without": "On the base commit the retry part discriminates: `retry` calls `ask`, which reads (a Reader role is recorded) and returns Ok, so the Err assertion and the no-new-invocation assertion fail. (The dispatch part alone cannot tell, since base `go` fails later at the producer-plus-verifier check.)"
+    },
+    {
+      "criterion": 5,
+      "method": "New unit test in drain.rs `mod tests`. Entry point: `drain_with`, the loop `drain` calls, over the `World` Steps double, which gets a `refuse: HashMap<String,String>` field. The double implements only the new `Steps::preflight` hook, returning the scripted reason for a; the skip, the log line and moving on are in `run_job` and `attempts` (production). The core arithmetic is tested through the real Athena in criteria 3, 4 and 7, not in the double. Items: a (short) then b (enough). The hook is added by plan step 4; the `World` double exists today.",
+      "command": "cargo test -p athena-cli a_job_with_too_little_budget_is_not_dispatched_and_does_not_block_the_next_item",
+      "observes": "No 'read a' or 'start a' in the log; `report.notes` has exactly one line for a, containing the reason and 'not started'; b is read, run and landed (`report.landed == 1`); the stop reason is QueueEmpty, not Budget.",
+      "fails_without": "Without the `Steps::preflight` hook and the `RunStep::Refused` branch in `run_job`, item a is read and run, so the log contains 'read a' and 'start a' and no 'not started' note exists."
+    },
+    {
+      "criterion": 6,
+      "method": "Run the three Athena checks as three separate commands: `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, then `cargo test --locked`. The test run includes the three adjusted setups and all new tests.",
+      "command": "cargo test --locked",
+      "observes": "All three exit 0.",
+      "fails_without": "On the base commit with the new tests applied, `cargo test --locked` fails: the admission, retry and drain tests (criteria 3, 4, 5) and the shipped-budget pair (criterion 7) fail because no preflight exists. Separately, an unhandled new `RunStep::Refused` match arm or an unused item fails `cargo clippy`, and unformatted code fails `cargo fmt`."
+    },
+    {
+      "criterion": 7,
+      "method": "Unit test calling the pure `reserve_shortfall` with the shipped athena.toml [budget] and [job_plan] values (read with include_str! of athena.toml, parsed by the existing config loader) at job_usd 12.00, and again at 6.00 and 6.25. Seam: the pure function, added by plan step 1; no double. The 5% figure is an estimate that nothing here measures; the test checks that the shipped budget refuses no reading and the CHANGELOG records the stricter admission as intended.",
+      "command": "cargo test -p athena-core the_shipped_budget_covers_the_whole_reserve",
+      "observes": "Shortfall is None at 12.00 and at 6.25 (planning counted); Some with short = 0.25 at 6.00.",
+      "fails_without": "A reserve that ignored the planner or reader cap would report no shortfall at job_usd 6.00 and fail the paired below-sum assertion; a reserve that over-counted (for example added the critic) would report a shortfall at 12.00 and fail the shipped-budget assertion."
+    },
+    {
+      "criterion": 8,
+      "method": "Run the full crates' tests; the check code (planning.rs lines 116 and 280, run/mod.rs lines 750 and 931) is not edited. Existing tests keep their assertions. Only three tests change setup, by one config value each (run_pin_tests.rs, lifecycle.rs, job_plan.rs), because admission now refuses their budgets before the later check they test; this is flagged in open questions.",
+      "command": "cargo test --locked -p athena-core -p athena-cli",
+      "observes": "All pre-existing planner, critic and producer-plus-verifier budget tests pass with their assertions unchanged.",
+      "fails_without": "If the preflight were wired to replace or reorder the per-round and producer-plus-verifier checks, the existing planner, critic and run/mod.rs budget tests would fail or reach a different stop."
+    }
+  ],
+  "open_questions": [
+    "Acceptance 8 says existing tests pass 'unchanged', but lifecycle.rs M13 (job_usd 4.00) and job_plan.rs (job_usd 5.025 with reader 0.50) are refused at admission by any preflight that covers producer plus verifier, and neither file is a listed deliverable. The plan edits one config value in each, no assertions. Please confirm this scope extension; there is no way to satisfy acceptance 3 without it.",
+    "`retry` creates a new job, so the retried job's recorded spend cannot be charged to it. The plan checks the retry with spend 0 (full job_usd against the reserve) and covers recorded spend at dispatch and in the drain wrapper. Confirm that is the intended reading of acceptance 4.",
+    "planning.rs is a listed deliverable but needs no change; the plan leaves it unedited unless the producer shares message wording.",
+    "Acceptance 7's '5% of newly refused readings' is an estimate nothing here measures; the test checks only that the shipped 12.00 budget refuses none."
+  ],
+  "producer_section_sha256": "55cf2c9d0901c02c87b47e57c32eab8aed01cf09b656689853c03dec5baa74ae"
+}
