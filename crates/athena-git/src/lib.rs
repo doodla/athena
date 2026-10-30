@@ -899,6 +899,48 @@ impl Git {
         Ok(out.lines().map(str::to_string).collect())
     }
 
+    /// The newest `limit` commits on the first-parent chain of `rev`, newest first, each as (full hash,
+    /// committer time as RFC 3339, full message). Read-only: it runs one `git log`.
+    pub fn log_commit_times(
+        &self,
+        rev: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, String, String)>> {
+        let out = self.run([
+            "log".to_string(),
+            format!("-n{limit}"),
+            "--first-parent".into(),
+            "--format=%x01%H%x02%cI%x02%B".into(),
+            rev.to_string(),
+            "--".into(),
+        ])?;
+        Ok(out
+            .split('\u{1}')
+            .filter(|c| !c.is_empty())
+            .filter_map(|chunk| {
+                let mut f = chunk.splitn(3, '\u{2}');
+                Some((
+                    f.next()?.to_string(),
+                    f.next()?.to_string(),
+                    f.next().unwrap_or_default().to_string(),
+                ))
+            })
+            .collect())
+    }
+
+    /// The committer time of `commit` as RFC 3339, or None when the commit is not in this repository.
+    pub fn commit_time(&self, commit: &str) -> Option<String> {
+        let out = self
+            .run([
+                "show",
+                "-s",
+                "--format=%cI",
+                &format!("{commit}^{{commit}}"),
+            ])
+            .ok()?;
+        Some(out.trim().to_string()).filter(|t| !t.is_empty())
+    }
+
     /// The newest `limit` commits on the first-parent chain of `rev`, newest first, each with its short hash,
     /// committer date (`YYYY-MM-DD`), subject and changed paths (against the first parent; no rename
     /// detection). Read-only: it runs one `git log`.

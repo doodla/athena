@@ -644,8 +644,10 @@ pub const THROUGHPUT_WINDOW: usize = 20;
 /// Minutes a job spent in each stage. Reading is the reader's invocations; planning the planner's and the
 /// critic's; producer and verifier their own. Checks is the sum of the durations Athena measured for the
 /// job's checks. Landing and rebuild is one stage: the time from the end of the job's last invocation (the
-/// verifier, which runs after the checks) to the later of the landing outcome and the landing record
-/// (`landings/`, written after the merge), and never below zero. A job with no landing record ends at its outcome.
+/// verifier, which runs after the checks) to the later of the landing outcome and the job's own landing
+/// evidence, and never below zero. The evidence is the job's landing record (`landings/`, dated by the main
+/// commit it names), else the main commit that names the job, else the job's own commit. A job with none ends
+/// at its outcome and its landing stage is left out of the medians.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
 pub struct StageMinutes {
     pub reading: f64,
@@ -679,10 +681,11 @@ impl StageMinutes {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct LandedJob {
     pub id: String,
-    /// The end of landing and rebuild: the later of the landing outcome and the landing record.
+    /// The end of landing and rebuild: the later of the landing outcome and the job's own landing evidence.
     pub landed_at: jiff::Timestamp,
-    /// Whether a landing record (`landings/`) was found for the job; when not, `landed_at` is the outcome time.
-    pub landing_found: bool,
+    /// The job's own landing evidence; None when none was found, and then `landed_at` is the outcome time and
+    /// the landing stage is left out of the medians.
+    pub landing_evidence: Option<LandingEvidence>,
     pub stages: StageMinutes,
 }
 
@@ -707,8 +710,11 @@ pub struct Throughput {
     pub median_minutes: f64,
     /// The median of each stage over the same jobs.
     pub median_stages: StageMinutes,
-    /// How many of the window's jobs have a landing record; the others end at their landing outcome.
+    /// How many of the window's jobs have landing evidence of their own; the others have none, end at their
+    /// landing outcome, and are left out of the landing median.
     pub window_with_landing_record: usize,
+    /// The window's jobs with no landing evidence of their own, by id.
+    pub window_without_landing: Vec<String>,
     /// Minutes between jobs: the gaps between the merged busy intervals (invocations, checks, landing wait) of
     /// all request jobs.
     pub idle_minutes: f64,
@@ -767,9 +773,25 @@ fn check_minutes(job: &JobRecords) -> f64 {
     })
 }
 
-/// When the landing record for `job` was written: the newest `landings/` record with a job-landing commit
-/// of the job. None when there is none.
-fn landing_record_time(records: &Records, job: &JobRecords) -> Option<jiff::Timestamp> {
+/// Where a job's landing time came from, in the order the sources are tried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum LandingEvidence {
+    /// The job's own landing record (`landings/`), dated by the main commit it names.
+    Record,
+    /// The earliest commit on main whose message names the job.
+    MergeCommit,
+    /// The time of the job's own candidate commit.
+    JobCommit,
+}
+
+/// The landing time of `job` from its own evidence, never another job's: the landing record that lists a
+/// job-landing commit of this job (dated by the main commit it names, else by when it was written), else the
+/// main commit that names the job, else the job's own commit. None when there is none of these.
+fn landing_evidence(
+    records: &Records,
+    job: &JobRecords,
+) -> Option<(jiff::Timestamp, LandingEvidence)> {
+    let id = job.id().as_str();
     records
         .landings
         .iter()
@@ -779,17 +801,39 @@ fn landing_record_time(records: &Records, job: &JobRecords) -> Option<jiff::Time
                     && c.job.as_ref() == Some(job.id())
             })
         })
-        .map(|l| l.created_at)
+        .map(|l| {
+            records
+                .main_commit_times
+                .get(&l.host_commit)
+                .copied()
+                .unwrap_or(l.created_at)
+        })
         .max()
+        .map(|t| (t, LandingEvidence::Record))
+        .or_else(|| {
+            records
+                .main_job_commits
+                .get(id)
+                .map(|t| (*t, LandingEvidence::MergeCommit))
+        })
+        .or_else(|| {
+            records
+                .job_commit_times
+                .get(id)
+                .map(|t| (*t, LandingEvidence::JobCommit))
+        })
 }
 
-/// The end of a landed job's landing and rebuild: the later of the landing outcome and the landing record.
-/// The second value is whether a landing record was found.
-fn landing_end(records: &Records, job: &JobRecords) -> Option<(jiff::Timestamp, bool)> {
+/// The end of a landed job's landing and rebuild: the later of the landing outcome and the landing evidence.
+/// The second value is the evidence used; None means none was found and the end is the outcome.
+fn landing_end(
+    records: &Records,
+    job: &JobRecords,
+) -> Option<(jiff::Timestamp, Option<LandingEvidence>)> {
     let outcome = closing_outcome(job)?.at;
-    Some(match landing_record_time(records, job) {
-        Some(t) => (outcome.max(t), true),
-        None => (outcome, false),
+    Some(match landing_evidence(records, job) {
+        Some((t, source)) => (outcome.max(t), Some(source)),
+        None => (outcome, None),
     })
 }
 
@@ -856,13 +900,13 @@ pub fn landed_jobs(records: &Records) -> Vec<LandedJob> {
         .into_iter()
         .filter(|j| matches!(j.state(), JobState::Closed(OutcomeState::Landed)))
         .filter_map(|j| {
-            let (landed_at, landing_found) = landing_end(records, j)?;
+            let (landed_at, landing_evidence) = landing_end(records, j)?;
             let last_end = j.invocations.iter().map(|i| i.ended_at).max()?;
             let checks = check_minutes(j);
             Some(LandedJob {
                 id: j.id().as_str().to_string(),
                 landed_at,
-                landing_found,
+                landing_evidence,
                 stages: StageMinutes {
                     reading: role_minutes(j, &[Role::Reader]),
                     planning: role_minutes(j, &[Role::Planner, Role::Critic]),
@@ -909,7 +953,14 @@ impl Throughput {
             producer: column(|s| s.producer),
             checks: column(|s| s.checks),
             verifier: column(|s| s.verifier),
-            landing_and_rebuild: column(|s| s.landing_and_rebuild),
+            // Only jobs with their own landing evidence: the others have no measured landing time.
+            landing_and_rebuild: median(
+                &window
+                    .iter()
+                    .filter(|j| j.landing_evidence.is_some())
+                    .map(|j| j.stages.landing_and_rebuild)
+                    .collect::<Vec<_>>(),
+            ),
         };
         let median_minutes = median(&window.iter().map(|j| j.stages.total()).collect::<Vec<_>>());
 
@@ -951,7 +1002,15 @@ impl Throughput {
             window_jobs: window.len(),
             median_minutes,
             median_stages,
-            window_with_landing_record: window.iter().filter(|j| j.landing_found).count(),
+            window_with_landing_record: window
+                .iter()
+                .filter(|j| j.landing_evidence.is_some())
+                .count(),
+            window_without_landing: window
+                .iter()
+                .filter(|j| j.landing_evidence.is_none())
+                .map(|j| j.id.clone())
+                .collect(),
             idle_minutes,
             unlanded_jobs,
             unlanded_minutes,
@@ -973,19 +1032,18 @@ impl Throughput {
             .map(|d| format!("{} {}", d.day, d.landed))
             .collect::<Vec<_>>()
             .join(" · ");
-        let landing_basis = if self.window_with_landing_record == self.window_jobs {
-            "landing record (landings/) found for each".to_string()
-        } else if self.window_with_landing_record == 0 {
-            "no landing record (landings/) found, so landing ends at the landing outcome"
-                .to_string()
+        let landing_basis = if self.window_without_landing.is_empty() {
+            "landing evidence (its landing record, else its merge commit on main, else its own commit) found for each".to_string()
         } else {
             format!(
-                "landing record (landings/) found for {} of {}, the rest end at the landing outcome",
-                self.window_with_landing_record, self.window_jobs
+                "landing evidence not found for {} of {} ({}), so their landing stage is left out of the landing median and no other job's record is used",
+                self.window_without_landing.len(),
+                self.window_jobs,
+                self.window_without_landing.join(", ")
             )
         };
         format!(
-            "throughput {} landed ({days})\n           basis: landed jobs counted by their landing outcome's UTC day\n           median per landed job over the last {} measured: {:.1} min ({stages})\n           basis: invocation wall times, measured check durations, and landing and rebuild from the verifier's end to the later of the outcome and the landing record; {landing_basis}\n           idle between jobs {:.1} min\n           basis: gaps between merged busy intervals of all jobs (invocations, checks placed by estimate before the verifier, landing wait), not the time a job stayed open\n           did not land: {} job(s), {:.1} min\n           basis: time spent (invocation wall times plus measured check durations), not the time from dispatch to close",
+            "throughput {} landed ({days})\n           basis: landed jobs counted by their landing outcome's UTC day\n           median per landed job over the last {} measured: {:.1} min ({stages})\n           basis: invocation wall times, measured check durations, and landing and rebuild from the verifier's end to the later of the outcome and the job's own landing evidence; {landing_basis}\n           idle between jobs {:.1} min\n           basis: gaps between merged busy intervals of all jobs (invocations, checks placed by estimate before the verifier, landing wait), not the time a job stayed open\n           did not land: {} job(s), {:.1} min\n           basis: time spent (invocation wall times plus measured check durations), not the time from dispatch to close",
             self.landed_total,
             self.window_jobs,
             self.median_minutes,
@@ -3244,7 +3302,18 @@ pub(crate) mod planning_cost_tests {
             minutes(1.0, 0.0, 0.0, 0.0, 0.0, 9.0),
             OutcomeState::Rejected,
         ));
-        let throughput = Throughput::compute(&loaded(all)).expect("jobs landed");
+        let mut records = loaded(all);
+        // Each landed job's merge commit on main is at its outcome time.
+        for (job, at) in [
+            ("20261028-230000-aaaa", "2026-10-28T23:25:00Z"),
+            ("20261029-000000-aaab", "2026-10-29T00:49:00Z"),
+            ("20261029-003000-aaac", "2026-10-29T01:02:00Z"),
+        ] {
+            records
+                .main_job_commits
+                .insert(job.to_string(), at.parse().unwrap());
+        }
+        let throughput = Throughput::compute(&records).expect("jobs landed");
 
         assert_eq!(throughput.landed_total, 3);
         assert_eq!(
@@ -3330,7 +3399,7 @@ pub(crate) mod planning_cost_tests {
         records.landings = vec![landing_of(LANDED_JOB, t("2026-10-29T10:23:00Z"))];
         let landed = landed_jobs(&records);
         assert_eq!(landed.len(), 1);
-        assert!(landed[0].landing_found);
+        assert_eq!(landed[0].landing_evidence, Some(LandingEvidence::Record));
         assert!((landed[0].stages.landing_and_rebuild - 6.0).abs() < 1e-6);
         let throughput = Throughput::compute(&records).unwrap();
         assert!((throughput.median_stages.landing_and_rebuild - 6.0).abs() < 1e-6);
@@ -3347,23 +3416,94 @@ pub(crate) mod planning_cost_tests {
             t("2026-10-29T10:23:00Z"),
         )];
         let landed = landed_jobs(&records);
-        assert!(!landed[0].landing_found);
+        assert_eq!(landed[0].landing_evidence, None);
         assert!((landed[0].stages.landing_and_rebuild - 0.1).abs() < 1e-6);
     }
 
     #[test]
-    fn a_landed_job_with_no_landing_record_reports_the_outcome_time_and_says_so() {
+    fn a_landed_job_with_no_evidence_says_so_and_is_left_out_of_the_landing_median() {
         let records = landed_job_records();
         let landed = landed_jobs(&records);
-        assert!(!landed[0].landing_found);
-        assert!((landed[0].stages.landing_and_rebuild - 0.1).abs() < 1e-6);
-        let text = Throughput::compute(&records).unwrap().text();
+        assert_eq!(landed[0].landing_evidence, None);
+        let throughput = Throughput::compute(&records).unwrap();
+        assert_eq!(throughput.median_stages.landing_and_rebuild, 0.0);
+        assert_eq!(throughput.window_without_landing, vec![LANDED_JOB]);
+        let text = throughput.text();
         assert!(
-            text.contains(
-                "no landing record (landings/) found, so landing ends at the landing outcome"
-            ),
+            text.contains(&format!(
+                "landing evidence not found for 1 of 1 ({LANDED_JOB})"
+            )),
             "{text}"
         );
+    }
+
+    #[test]
+    fn each_job_takes_its_own_landing_evidence_and_never_a_neighbours() {
+        let own = "20261029-100000-ab11";
+        let none = "20261029-110000-ab12";
+        let near = "20261029-120000-ab13";
+        let mut all = Vec::new();
+        for (job, start) in [
+            (own, "2026-10-29T10:00:00Z"),
+            (none, "2026-10-29T11:00:00Z"),
+            (near, "2026-10-29T12:00:00Z"),
+        ] {
+            all.extend(timed_job(
+                job,
+                t(start),
+                minutes(0.0, 0.0, 10.0, 2.0, 5.0, 0.1),
+                OutcomeState::Landed,
+            ));
+        }
+        let mut records = loaded(all);
+        // `own` has a record, written an hour late but naming a main commit made at 10:23, which dates it.
+        // The record of the neighbour `near` is for a job that is no landed job here; it is no one else's.
+        let mut record = landing_of(own, t("2026-10-29T11:30:00Z"));
+        record.host_commit = "d".repeat(40);
+        records
+            .main_commit_times
+            .insert("d".repeat(40), t("2026-10-29T10:23:00Z"));
+        let mut other = landing_of("20261029-115900-prev", t("2026-10-29T12:30:00Z"));
+        other.host_commit = "e".repeat(40);
+        records.landings = vec![record, other];
+
+        let landed = landed_jobs(&records);
+        let by = |job: &str| landed.iter().find(|l| l.id == job).unwrap();
+        assert_eq!(by(own).landing_evidence, Some(LandingEvidence::Record));
+        // Verifier ended 10:17: 6 minutes to the main commit, not 73 to the record's write time.
+        assert!((by(own).stages.landing_and_rebuild - 6.0).abs() < 1e-6);
+        assert_eq!(by(none).landing_evidence, None);
+        assert_eq!(by(near).landing_evidence, None);
+        assert!((by(none).stages.landing_and_rebuild - 0.1).abs() < 1e-6);
+        assert!((by(near).stages.landing_and_rebuild - 0.1).abs() < 1e-6);
+
+        let throughput = Throughput::compute(&records).unwrap();
+        assert_eq!(throughput.median_stages.landing_and_rebuild, 6.0);
+        assert_eq!(throughput.window_without_landing, vec![none, near]);
+        let text = throughput.text();
+        assert!(
+            text.contains(&format!(
+                "landing evidence not found for 2 of 3 ({none}, {near})"
+            )),
+            "{text}"
+        );
+
+        // With no record, the merge commit on main that names the job comes next, then the job's own commit.
+        records
+            .main_job_commits
+            .insert(none.into(), t("2026-10-29T11:20:00Z"));
+        records
+            .job_commit_times
+            .insert(near.into(), t("2026-10-29T12:19:00Z"));
+        let landed = landed_jobs(&records);
+        let by = |job: &str| landed.iter().find(|l| l.id == job).unwrap();
+        assert_eq!(
+            by(none).landing_evidence,
+            Some(LandingEvidence::MergeCommit)
+        );
+        assert!((by(none).stages.landing_and_rebuild - 3.0).abs() < 1e-6);
+        assert_eq!(by(near).landing_evidence, Some(LandingEvidence::JobCommit));
+        assert!((by(near).stages.landing_and_rebuild - 2.0).abs() < 1e-6);
     }
 
     #[test]
@@ -3440,7 +3580,7 @@ pub(crate) mod planning_cost_tests {
             );
         }
         assert!(
-            text.contains("landing record (landings/) found for each"),
+            text.contains("its landing record, else its merge commit on main, else its own commit) found for each"),
             "{text}"
         );
         assert!(text.contains("placed by estimate"), "{text}");

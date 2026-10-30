@@ -203,6 +203,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- The throughput section's landing-and-rebuild stage now ends at each job's own landing evidence. After the
+  earlier fix it still reported a median of 273.8 minutes, while real landings take minutes (job
+  20261029-130605-mbpm: outcome 20:41:09 UTC, commit on main 20:44:56 UTC). The root cause was that the stage
+  was dated by when a landing record was written (`created_at`), not by the main commit the record names, and
+  the tests used only fixture records. The stage now takes, in order, the job's own landing record dated by the main
+  commit it names, else the earliest main commit whose message names the job, else the job's own commit time.
+  A job with none of these is reported as "landing evidence not found for N of M (ids)", is left out of the
+  landing median, and never borrows another job's record. A fixture test covers a job with its own record, a job
+  with none and a job next to another job's record. The real-records check (`athena status` against the five
+  most recent landed jobs, compared with `git log`) is run on a checkout that has the records; the job's
+  working copy has none, so that run is reported by the verifier.
 - Athena's own writers no longer write words that its admission scan rejects. On 2026-10-29 a steward
   proposal described a recurring duty with a boundary word for the person running Athena, and approving it
   failed at admission, so the proposal could never be worked. The root cause was that each writer copied
