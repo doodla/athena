@@ -256,6 +256,13 @@ pub struct Records {
     /// Landing records (`landings/`, written after each merge), oldest first. Read from the tree itself and
     /// from the local records branch; one that cannot be read is left out, so a missing branch reads as none.
     pub landings: Vec<athena_data::history::Landing>,
+    /// Committer time of each commit on the default branch's first-parent chain, by sha. Used to date a landing
+    /// record by the commit it names, not by when the record was written.
+    pub main_commit_times: std::collections::BTreeMap<String, jiff::Timestamp>,
+    /// For a job id, the earliest commit on that chain whose message names the job: its merge commit.
+    pub main_job_commits: std::collections::BTreeMap<String, jiff::Timestamp>,
+    /// For a job id, the committer time of the job's own candidate commit, when that commit is in the repository.
+    pub job_commit_times: std::collections::BTreeMap<String, jiff::Timestamp>,
     /// Files that are not acceptable records, by path.
     pub invalid: Vec<String>,
 }
@@ -305,6 +312,39 @@ fn job_of(record: &AnyRecord) -> Option<&JobId> {
 }
 
 impl Records {
+    /// Reads the commit times that date landings from git: the default branch's first-parent chain (`main`, else
+    /// `treeish`), and the candidate commit of each landed job. Anything git cannot show is left out, so the
+    /// status line reports no evidence for that job instead of guessing.
+    fn load_commit_times(&mut self, git: &Git, treeish: &str) {
+        let parse = |t: &str| t.parse::<jiff::Timestamp>().ok();
+        for rev in ["main", treeish] {
+            let Ok(commits) = git.log_commit_times(rev, 5000) else {
+                continue;
+            };
+            for (sha, time, message) in &commits {
+                let Some(time) = parse(time) else { continue };
+                self.main_commit_times.insert(sha.clone(), time);
+                for id in self.jobs.keys() {
+                    if message.contains(id.as_str()) {
+                        let e = self.main_job_commits.entry(id.clone()).or_insert(time);
+                        *e = (*e).min(time);
+                    }
+                }
+            }
+            break;
+        }
+        for (id, job) in &self.jobs {
+            if let Some(sha) = job
+                .candidate
+                .as_ref()
+                .and_then(|c| c.candidate_commit.as_ref())
+                && let Some(time) = git.commit_time(sha).as_deref().and_then(parse)
+            {
+                self.job_commit_times.insert(id.clone(), time);
+            }
+        }
+    }
+
     /// Loads every record in `treeish`.
     pub fn load(git: &Git, treeish: &str) -> Result<Records> {
         let set = RecordSet::load(git, treeish)?;
@@ -378,6 +418,7 @@ impl Records {
         landings.sort_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)));
         landings.dedup_by(|a, b| a.id == b.id);
         records.landings = landings;
+        records.load_commit_times(git, treeish);
         records.steward_runs.sort_by_key(|i| i.started_at);
         records.audience_runs.sort_by_key(|i| i.started_at);
         records.auditor_runs.sort_by_key(|i| i.started_at);
