@@ -113,6 +113,38 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- Structure pass job R8 (split step 4): stages S8 to S10 (the verifier's inputs, the verifier run with its one
+  rerun, and the redaction and assembly of the verification) and `verifier_snapshot` moved out of
+  `run/mod.rs` into the new `run/verification.rs`. No behavior change. In detail:
+  - What moved: the end of `check_and_verify`, from `let criteria = ...` to the closing `Ok(closing)`, became
+    `Athena::verification_stage`; `verifier_snapshot` moved with its doc comment. The moved text is the same;
+    the block was copied as it stood, apart from rustfmt wrapping. `produce_and_verify` body is not edited:
+    it was already a driver of the stages in order (57 lines). It gains a doc comment that lists the
+    stages in order, so the function with its doc is 67 lines.
+    `check_and_verify` now ends with one call to `verification_stage`.
+  - Visibility: `verification_stage`, `verifier_snapshot`, the new `Checked` struct and its fields are
+    `pub(super)`. No `pub` item changed, so no re-export is needed. `mod.rs` adds `mod verification;` and
+    `use verification::Checked;`.
+  - New carrier: `Checked` holds what the checks stage hands over: `vsnap`, `prepared`,
+    `tool_config_from_base`, `check_runs`, `cleanup`, `replay_record`, `verify_dir`, `capability_env`.
+    `closing` goes in by value and comes back in the `Result`.
+  - Locals read again inside the stage with the same text: `id`, `jc`, `p`, `c`, `f`, `seq`, `report_gaps`
+    and `left_criteria` (from `ctx` and `built`), and `usable_baseline` (a three-line statement that
+    `check_and_verify` also keeps for its own use). `check_and_verify` dropped the bindings only the moved
+    text used (`f`, `seq`, `report_gaps`, `left_criteria`) and the `mut` on `vsnap`.
+  - Early returns: one, the disk gate before the verifier (`return Ok(closing)`, old line 1446 of `mod.rs`,
+    now line 143 of `verification.rs`). The caller returns the stage's result unchanged, so no `Flow::Stop`
+    pairing is needed. The final `Ok(closing)` is the stage's tail.
+  - Caller check, `verifier_snapshot` (Grep over `crates/`): 2 files before (`run/mod.rs` and the unrelated
+    test helper of that name in `athena-git/src/snapshot.rs`), 3 after (those two and `run/verification.rs`).
+    Its callers are `check_and_verify` (now through the stage) and the rerun inside the stage; both resolve
+    unchanged.
+  - Caller check, `produce_and_verify` and `check_and_verify`: 1 file before (`run/mod.rs`), 1 after, since
+    neither moved. `verification_stage` and `Checked` are new names: 2 files (`run/mod.rs` and
+    `run/verification.rs`); the word `Checked` also appears in an unrelated line of `scope_guard.rs`.
+  - Tests: no test file or test module changed. The `run::` test list is the same 27 names before and after
+    (`cargo test -p athena-core --lib -- --list run::`). `main.rs`, `drain.rs`, `producer.rs`, `checks.rs` and
+    the R7 entry below are unchanged.
 - Structure pass job R7 (split step 3): `SnapExec` (the struct and its `Exec` impl), `take_baseline` and
   `baseline_checks` moved from `run/mod.rs` into the new `run/checks.rs` (stages S6 and S7). No behavior
   changed: the bodies are the same text. Altered beyond a name: `SnapExec` and its fields, and `take_baseline`,
