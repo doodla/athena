@@ -5,7 +5,7 @@ use crate::capability::{JobConfig, ToolGrant};
 use crate::checks::tail;
 use crate::commits::{NewFile, message};
 use crate::invocation::InvocationFacts;
-use crate::plan::Priority;
+use crate::plan::{Ending, JobEnd, Priority};
 use crate::store::{JobRecords, JobState, Records};
 use crate::{Athena, Ui};
 use anyhow::{Context, Result, bail};
@@ -1254,6 +1254,41 @@ pub fn has_retry_introspection(records: &Records, job: &JobRecords) -> bool {
 pub fn retried_job(records: &Records, request: &str) -> Option<JobId> {
     let reference = retry_reference(request).ok().flatten()?;
     records.resolve(reference).ok()
+}
+
+/// How each request job stands (landed; rejected, failed, timed out or stale; or any other state), with the
+/// job its request retries ("try again on <job>", see [`retried_job`]). This is the history [`crate::plan::Plan::build_with`]
+/// reads to tell a dependency that landed (or has a landed retry) from one that did not. A link to the job
+/// itself is ignored.
+pub fn job_history(records: &Records) -> Vec<JobEnd> {
+    records
+        .request_jobs()
+        .into_iter()
+        .map(|job| {
+            let ending = match job.state() {
+                JobState::Closed(OutcomeState::Landed) => Ending::Landed,
+                JobState::Closed(
+                    state @ (OutcomeState::Rejected
+                    | OutcomeState::Failed
+                    | OutcomeState::TimedOut
+                    | OutcomeState::Stale),
+                ) => Ending::Failed(state.as_str().replace('_', " ")),
+                _ => Ending::Other,
+            };
+            let id = job.id().as_str().to_string();
+            let retry_of = job
+                .request
+                .as_ref()
+                .and_then(|r| retried_job(records, &r.text))
+                .map(|j| j.as_str().to_string())
+                .filter(|j| *j != id);
+            JobEnd {
+                id,
+                ending,
+                retry_of,
+            }
+        })
+        .collect()
 }
 
 /// The job a request of the form "try again on <job>" may resume from its kept candidate: one that failed for

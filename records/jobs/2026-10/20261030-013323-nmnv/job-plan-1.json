@@ -1,0 +1,235 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261030-013323-nmnv",
+  "round": 1,
+  "at": "2026-10-30T08:29:07.522222684Z",
+  "invocation_seq": 4,
+  "approach": "Fix the rule in plan.rs, which both `athena plan` and drain reach through `Drain::prepare`. Add plain data `JobEnd` (id, how it ended, the job it retries) and `Plan::build_with(entries, history)`. `Plan::build(entries)` stays and calls it with an empty history, so existing callers and tests keep today's behavior. In `build_with`, a dependency outside the open entries is unmet when the history shows it rejected, failed, timed out or stale and no landed job reaches it through retry links (the chain may pass through other retries). An entry with an unmet dependency, and anything depending on it, moves from the order to `refused` with an empty `missing` and a reason naming the dependency. Drain gets `Steps::job_history()` with an empty default, so no stub, `PlanEntry` literal or `QueueView` literal changes. `RealSteps` overrides it via `reading::job_history(&Records)`, which uses job end states and the existing `retried_job` link. `display::plan` prints a refusal with empty `missing` as a `held` line with the reason. Tests: unit tests on `Plan::build_with` in plan.rs, and one real-records test through `drain::plan` and `display::plan`, appended to crates/athena-cli/tests/drain.rs. CHANGELOG entry and plan.rs docs updated.",
+  "decisions": [
+    {
+      "choice": "Pass the job history to a new `Plan::build_with(entries, &[JobEnd])`; keep `Plan::build(entries)` as the same call with an empty history.",
+      "reason": "The fault is in `Plan::build`: `!known.contains(d)` makes an id outside the open entries count as done, so rejected and landed jobs look alike. The rule needs end states that `Plan::build` never sees. Plain data keeps plan.rs pure and leaves every existing `Plan::build` call (plan.rs, reading.rs, drain.rs tests) untouched.",
+      "rejected": [
+        {
+          "option": "Add an `unmet_deps` field to `PlanEntry` (the reading's design)",
+          "why": "`PlanEntry` is built by struct literal in plan.rs tests, drain.rs unit tests and tests/drain.rs; a new field breaks them and forces edits to existing tests, against 'existing tests pass unchanged'."
+        },
+        {
+          "option": "Add a `history` field to `QueueView`",
+          "why": "tests/drain.rs builds `QueueView` with every field listed; it would stop compiling."
+        },
+        {
+          "option": "A closure `Fn(&str) -> Option<String>` as the seam",
+          "why": "The 'landed retry' rule would sit in the caller or test double. As data the rule lives in plan.rs and is unit-tested there."
+        }
+      ]
+    },
+    {
+      "choice": "Unit tests drive `Plan::build_with` with `JobEnd` values: rejected with no retry, a landed retry linked to it, a chain through a rejected retry, a cycle, a landed job linked elsewhere.",
+      "reason": "They run the real production rule with plain data as input; no logic sits in a double.",
+      "rejected": [
+        {
+          "option": "Test only through the CLI",
+          "why": "Slow to set up and cannot cover chains and cascades cheaply."
+        }
+      ]
+    },
+    {
+      "choice": "Unmet end states: rejected, failed, timed out, stale. Met: landed, or a landed job reaches it through retry links. Unknown, open, dropped, declined, abandoned ids keep today's behavior (met).",
+      "reason": "The request names rejected and failed jobs. Dropped, declined and abandoned are deliberate owner closes; timed out and stale are failed attempts a retry resolves. The link is the existing `reading::retried_job`; no new link is invented.",
+      "rejected": [
+        {
+          "option": "Met only if landed, holding every other end state",
+          "why": "Wider than the request: would hold items on dropped jobs and on ids absent from the records."
+        }
+      ]
+    },
+    {
+      "choice": "Held items go into `Plan::refused` via `Refusal::held(id, title, reason)` with empty `missing`. Dependents of a held item are held with 'depends on X, which is held back', repeated until nothing changes.",
+      "reason": "`refused` is what both `athena plan` and drain already list and refuse to work, and refused entries stay in `view.plan`, so drain does not run them as unplanned items. Empty `missing` marks 'held for a dependency' as opposed to 'plan incomplete'.",
+      "rejected": [
+        {
+          "option": "A new `Plan::held` list",
+          "why": "Needs new display and drain handling in two places and changes the held-back count."
+        },
+        {
+          "option": "Also hold dependents of items refused for an incomplete plan",
+          "why": "Changes behavior the brief does not ask for; left as an open question."
+        }
+      ]
+    },
+    {
+      "choice": "display.rs prints a refusal with empty `missing` as `held        <id> · <title>: <reason>`; the `flagged ... lacks ...` line stays for non-empty `missing`.",
+      "reason": "'lacks : reason' would read wrongly for a hold; the brief wants the reason under the held-back items.",
+      "rejected": [
+        {
+          "option": "Fill `missing` with 'dependency <id>'",
+          "why": "`missing` means plan fields the request lacks and existing tests assert on it."
+        }
+      ]
+    },
+    {
+      "choice": "Put the CLI test in crates/athena-cli/tests/drain.rs (append only), not tests/job_plan.rs. Fixing finding 2: this is a deliberate, named deviation from the brief's deliverable list, and the plan lists the file explicitly.",
+      "reason": "I read tests/job_plan.rs: it tests the planner and critic roles (`render_plan_section`, plan records, status output) and has no `drain::plan` or `RealSteps` use. The helpers the test needs (`real_steps`, `RecordingLander`, `StubPage`, `rated_scenario`, `commit_records_to`) are private to tests/drain.rs (lines ~1325, 2306, 3253, 3433). Putting the test in job_plan.rs would mean copying several hundred lines of helpers, which is a larger and worse change. The addition is one new test function; no existing test is edited.",
+      "rejected": [
+        {
+          "option": "Add the test to tests/job_plan.rs",
+          "why": "Wrong subject and it lacks the helpers; duplicating them widens the diff more than one appended test in the right file."
+        },
+        {
+          "option": "Make the helpers shared in tests/common",
+          "why": "Edits more files, including landed ones, for no behavior gain."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/plan.rs",
+      "action": "modify",
+      "purpose": "Add `JobEnd`, `Ending`, `Plan::build_with`, `Refusal::held`, the unmet-dependency lookup with retry-chain walk and the hold-with-dependents loop; `build` calls `build_with` with no history; update module header and docs; add unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Add `pub fn job_history(records: &Records) -> Vec<JobEnd>` from job states and `retried_job`; note in `plan_entry` docs.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Add `Steps::job_history()` with an empty default, override in `RealSteps`, and have `Drain::prepare` call `Plan::build_with`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "purpose": "In `plan`, print a refusal with empty `missing` as a `held` line with the reason under the held-back items.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Append one real-records test through `drain::plan` and `display::plan` showing the hold and the release. Not in the brief's list (which names tests/job_plan.rs, a file about the planner role that lacks the helpers); chosen because the needed helpers are private to this file. Append-only.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an Unreleased, Fixed entry for the new dependency rule.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "plan.rs: add `Ending` (Landed, or Failed with the end word such as 'rejected'), `JobEnd { id, ending, retry_of: Option<String> }` (Debug, Clone, PartialEq, Eq) and `Refusal::held(id, title, reason)` with empty `missing`.",
+    "plan.rs: add a private lookup: for a dependency id return None if it has no `JobEnd` or it landed; if it ended in failure return None when some landed job reaches it by following `retry_of` (visited set); else return the reason 'depends on <id>, which was <word> and has no landed retry; it is held until a retry of it lands'.",
+    "plan.rs: add `Plan::build_with(entries, history)`. After the incomplete-plan refusal, find held entries: first any with an unmet dependency that is not a complete open entry, then repeat for entries depending on a held entry ('depends on <id>, which is held back'). Push to `refused` in entry order, remove from `pending`, and keep the ordering code unchanged. `build(entries)` returns `build_with(entries, &[])`. Rewrite the module header Order bullet and both docs.",
+    "plan.rs tests: add `a_dependency_on_a_rejected_job_with_no_landed_retry_holds_the_item_and_its_dependents`, `a_dependency_is_met_once_a_retry_of_it_landed_and_the_item_is_ordered_after_it` (chain, unrelated landed job, cycle) and `a_dependent_of_a_held_item_is_held_too`; check `Plan::build` with no history still orders `b`.",
+    "reading.rs: add `pub fn job_history(records: &Records) -> Vec<JobEnd>` from `JobRecords::state()` and `retried_job`, including only jobs that landed or ended rejected, failed, timed out or stale; ignore self-links. Note in `plan_entry` docs.",
+    "drain.rs: add `fn job_history(&self) -> Vec<JobEnd> { Vec::new() }` to `Steps`; in `RealSteps` implement it as `self.records().map(|r| reading::job_history(&r)).unwrap_or_default()`; `Drain::prepare` calls `Plan::build_with(&entries, &self.steps.job_history())`.",
+    "display.rs: in `plan`, for a refusal with empty `missing`, write `held        {id} · {title}: {reason}` instead of the `flagged ... lacks` line.",
+    "tests/drain.rs: append `the_plan_holds_an_item_whose_dependency_was_rejected_until_a_retry_landed` using `Fixture`, `rated_scenario`, `athena.queue`, `athena.go`, `commit_records_to`, `real_steps`, `drain::plan` and `display::plan`; assert the hold and reason in `order`, `refused` and the text, then the release once a landed retry is linked.",
+    "CHANGELOG.md: add a bullet under Unreleased, Fixed, for the new rule, citing job 20261029-142858-5c0p as the case.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`; fix what they report."
+  ],
+  "risks": [
+    {
+      "risk": "The retry link is read from request text ('try again on <job>'). A job re-asked in other words has no link and does not release the item.",
+      "mitigation": "Reuse `retried_job`, the link scope_guard and steward use; no new link is invented (out of scope). The walk has a visited set. Unit tests cover a chain, a cycle and a landed job linked elsewhere."
+    },
+    {
+      "risk": "Drain and `athena plan` disagree if only one path gets the history.",
+      "mitigation": "Both share `Drain::prepare`; the CLI test asserts on `drain::plan` and display. The default method returns an empty history, so stubs behave as before."
+    },
+    {
+      "risk": "The CLI fixture needs a rejected job and a landed retry; hand-edited records may fail `Records::load` validation.",
+      "mitigation": "Use the existing builders and checks of the real-steps tests; if a rewritten Outcome is refused, use a scenario whose verdict fails (see open_questions)."
+    },
+    {
+      "risk": "The rule holds items that ran before, such as ones depending on old failed jobs with no retry.",
+      "mitigation": "This is the intended change. Only an id absent from the open entries is looked up, and only four end states hold. The full `cargo test` runs the existing plan and drain tests."
+    },
+    {
+      "risk": "The `held` display line breaks a test matching plan text.",
+      "mitigation": "Keep the `flagged` line for non-empty `missing`; existing 'held back' header assertions still match."
+    },
+    {
+      "risk": "Placing a test in a file outside the brief's list widens scope.",
+      "mitigation": "The change is one appended test function, named in the files list with its reason; no existing test edited."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "New unit test in plan.rs calling the production entry `Plan::build_with(&entries, &history)`. Entries come from the existing test helper `entry(...)` (exists today): a ready entry `b` with `depends_on` [\"x\"]; `x` is not an entry. `history` is plain data: one `JobEnd` for `x`, rejected, no retry link. No double. `JobEnd`, `Ending` and `build_with` are added by plan steps 1 and 3. A control call `Plan::build(&entries)` with no history still orders `b`.",
+      "command": "cargo test -p athena-core plan::tests::a_dependency_on_a_rejected_job_with_no_landed_retry_holds_the_item_and_its_dependents",
+      "observes": "`b` is not in `plan.order`; `plan.refused` has one item with id `b`, an empty `missing`, and a reason containing `x` and 'rejected'.",
+      "fails_without": "With `build_with` ignoring the history (today's rule, an id outside the entries counts as done), `b` is in `order` and `refused` is empty, so both assertions fail."
+    },
+    {
+      "criterion": 2,
+      "method": "New unit test in plan.rs, same entry point `Plan::build_with`, plain-data history. Case 1: `x` rejected, `r1` rejected with retry link to `x`, `r2` landed with link to `r1`. Case 2: `x` rejected and `r` landed linked to `x`, where `r` is also an open entry that `b` depends on. Each case calls `build_with` before and after the landed job is added. A landed job linked to a different job must not release `b`. A cycle in the links must end. Fixtures are passed as arguments; helper `entry` exists today.",
+      "command": "cargo test -p athena-core plan::tests::a_dependency_is_met_once_a_retry_of_it_landed_and_the_item_is_ordered_after_it",
+      "observes": "Before the landed retry exists `b` is refused. After, `b` is in `order`, `refused` is empty, and `b` comes after `r` where `r` is an entry. The unrelated landed job leaves `b` held.",
+      "fails_without": "If the retry link is not followed, `b` stays in `refused` after the landed retry is added, so the not-held and order assertions fail. If a landed retry were ignored, the chain case fails too."
+    },
+    {
+      "criterion": 3,
+      "method": "New test appended to crates/athena-cli/tests/drain.rs, calling production `drain::plan(&real_steps(&athena, &lander), 5.0, &Quiet)` and `display::plan(&report)`. Seam: `RealSteps` reading real records via `Records::load` (exists today); fixture `Fixture::new()` with `rated_scenario().script()` and real `athena.queue`/`athena.go` (exist today). Setup: job `x` is queued and run to landed, then its Outcome record is rewritten to rejected and committed with `commit_records_to`. Job `b` is queued with text naming `x`, a priority line and acceptance bullets. Then `athena.queue(\"try again on <x>\")` creates the retry, driven to landed by a real `go`; if that is not feasible, a landed Outcome re-keyed to the retry job is committed, and the producer must check `Records::load` accepts it. The reader `reading::job_history` and the `Steps::job_history` override are added by plan steps 5 and 6. The tests/job_plan.rs file is not used because it lacks these helpers.",
+      "command": "cargo test -p athena-cli --test drain the_plan_holds_an_item_whose_dependency_was_rejected_until_a_retry_landed",
+      "observes": "With `x` rejected and no landed retry: `report.plan.order` lacks `b`; `report.plan.refused` has `b` with a reason naming `x`; the `display::plan` text has a `held` line for `b` with that reason and the header counts 1 held back. After the landed retry: `b` is in `order`, `refused` has no `b`, and no `held` line for `b` appears.",
+      "fails_without": "Without the `Steps::job_history` override and `reading::job_history`, `drain::plan` passes no history, `b` is ordered, and the hold and display assertions fail."
+    },
+    {
+      "criterion": 4,
+      "method": "New unit test `a_dependent_of_a_held_item_is_held_too` calling `Plan::build_with` with `b` (depends on rejected `x`), `c` (depends on `b`), `d` (depends on `c`) and an unrelated `e`. The existing plan.rs and tests/drain.rs tests run unchanged in the full `cargo test --locked`; no existing test is edited.",
+      "command": "cargo test -p athena-core plan:: && cargo test --locked",
+      "observes": "`order` is exactly [`e`]; `refused` has `b`, `c`, `d` in that order, with 'depends on b, which is held back' on `c` and a matching reason on `d`. The full test run has no failure in existing tests.",
+      "fails_without": "If only direct dependents were held, or the hold ran after ordering, `d` or `c` would be ordered and the order assertion fails. If `Plan::build` semantics changed, an existing plan or drain test fails."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the three Athena checks on the finished diff. They cover the new code only because the new tests, the `JobEnd` fields, `build_with`, the `Steps` default method and the display change all must compile, be used and pass.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0: no format diff, no clippy warning (including dead-code on `JobEnd`, `Ending` and `Refusal::held`), and every test passes including the new ones.",
+      "fails_without": "If the rule were not wired in, `cargo test --locked` fails on the new criterion 1-4 tests, and `clippy -D warnings` fails on the unused `JobEnd`, `Ending` or `job_history` items (dead_code); if the code is unformatted, `fmt --check` fails."
+    },
+    {
+      "criterion": 6,
+      "method": "Read the CHANGELOG.md diff.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "A new bullet under `## [Unreleased]` (Fixed) says that a dependency on a rejected or failed job with no landed retry now holds the dependent item in `athena plan` and drain, with the reason under the held-back items.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Read the plan.rs diff for the module header and the doc comments of `Plan::build` and `Plan::build_with`.",
+      "command": "git diff -- crates/athena-core/src/plan.rs",
+      "observes": "The header's Order bullet no longer says an unlisted dependency counts as done for rejected or failed jobs. It states the rule: met when landed or when a landed job is linked as its retry, otherwise held with a reason. Both function docs say the same. Only unknown, open, dropped, declined and abandoned ids still count as done.",
+      "fails_without": null
+    },
+    {
+      "criterion": 8,
+      "method": "Check the changed-file list.",
+      "command": "git status",
+      "observes": "Changed files are only plan.rs, reading.rs, drain.rs, display.rs, tests/drain.rs and CHANGELOG.md. None is athena.toml, defaults.toml, a file under .github/workflows or a records file.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "The brief lists crates/athena-cli/tests/job_plan.rs, but it tests the planner role and cannot reach `drain::plan` without copying helpers. This plan appends one test to tests/drain.rs instead. Is that acceptable?",
+    "Dropped, declined, abandoned and blocked dependencies stay met (today's behavior). Should a dropped dependency also hold its dependents?",
+    "A dependent of an item refused for an incomplete plan is still ordered, as today. Should it be held?",
+    "Drain builds the plan once at the start; a retry that lands during the run releases a held item only at the next plan or drain.",
+    "How the test makes a job rejected: no helper exists in tests/drain.rs. The plan rewrites a landed job's Outcome to rejected; the producer must check `Records::load` accepts it, else use a scenario whose verdict fails.",
+    "A job re-asked in other words (no 'try again on <job>' text, as in the request's own example) has no link and does not release the item."
+  ],
+  "producer_section_sha256": "7447498cc51e537ab1b55c79ee447a7252cbae5dd2f229d20226c44fa8973d82"
+}

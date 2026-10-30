@@ -17,6 +17,14 @@
 //!   The job of an approved steward proposal is an item like any other: its priority is normal unless a
 //!   priority record or its raising role says otherwise ([`proposal_priority`]), and it is ordered by the same
 //!   rules, not worked ahead of the plan.
+//! - **Dependencies.** A dependency on another open item is met once that item is ordered. A dependency on a
+//!   job that is not an open item is met when that job landed, or when a landed job is linked to it as its
+//!   retry ("try again on <job>", also through a chain of retries). A dependency on a job that was rejected,
+//!   failed, timed out or went stale, with no landed retry, is unmet: the item is not ordered and is listed
+//!   in [`Plan::refused`] with a reason naming the dependency, and so is every item that depends on a held
+//!   item ([`Plan::build_with`], given the jobs' end states as [`JobEnd`]s). The retry itself ("try again on
+//!   <job>") names the job it retries and is not held by it. Only an id the history does not show failing
+//!   (unknown, dropped, declined or abandoned) still counts as done.
 //! - **Parallel groups.** A wave is split into groups of items that no dependency links and whose touched
 //!   paths are disjoint; the items of one group could run side by side. An item that names no touched path is
 //!   never grouped with another, because nothing is known about what it changes. The shared append-only files
@@ -316,6 +324,83 @@ impl Refusal {
     }
 }
 
+impl Refusal {
+    /// A refusal for an item held back because a job it depends on has not landed: `missing` is empty.
+    pub fn held(id: &str, title: &str, reason: &str) -> Refusal {
+        Refusal {
+            id: id.into(),
+            title: title.into(),
+            missing: Vec::new(),
+            reason: reason.into(),
+        }
+    }
+}
+
+/// How a job that is not an open request ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ending {
+    Landed,
+    /// Ended without landing and needing another attempt: the end word, such as `rejected`, `failed`,
+    /// `timed out` or `stale`.
+    Failed(String),
+    /// Any other state: not closed, or closed in a way that does not make a dependent wait (dropped, declined,
+    /// abandoned). Such a job is listed so that its retry link is known.
+    Other,
+}
+
+/// One finished job, for the dependency rule of [`Plan::build_with`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobEnd {
+    pub id: String,
+    pub ending: Ending,
+    /// The job this one retries ("try again on <job>"), if it names one.
+    pub retry_of: Option<String>,
+}
+
+/// Whether `item` is itself the retry of `dep` ("try again on <dep>"): a retry names the job it retries, and
+/// that job's failure is why it exists, so it is never held by it.
+fn retries(item: &str, dep: &str, history: &[JobEnd]) -> bool {
+    history
+        .iter()
+        .any(|j| j.id == item && j.retry_of.as_deref() == Some(dep))
+}
+
+/// Why the dependency `dep` is unmet, or None when it is met: it is not shown ending in failure, or it
+/// failed and a landed job reaches it through retry links.
+fn unmet_dependency(dep: &str, history: &[JobEnd]) -> Option<String> {
+    let word = match &history.iter().find(|j| j.id == dep)?.ending {
+        Ending::Landed | Ending::Other => return None,
+        Ending::Failed(word) => word,
+    };
+    let retried_by_landed = history
+        .iter()
+        .filter(|j| j.ending == Ending::Landed)
+        .any(|landed| {
+            // Walk the retry links up from the landed job; the visited list ends a loop of links.
+            let mut seen: Vec<&str> = vec![landed.id.as_str()];
+            let mut at = landed.retry_of.as_deref();
+            while let Some(parent) = at {
+                if parent == dep {
+                    return true;
+                }
+                if seen.contains(&parent) {
+                    return false;
+                }
+                seen.push(parent);
+                at = history
+                    .iter()
+                    .find(|j| j.id == parent)
+                    .and_then(|j| j.retry_of.as_deref());
+            }
+            false
+        });
+    (!retried_by_landed).then(|| {
+        format!(
+            "depends on {dep}, which was {word} and has no landed retry; it is held until a retry of it lands"
+        )
+    })
+}
+
 /// The coordinated plan of all open requests.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 pub struct Plan {
@@ -413,9 +498,23 @@ impl Plan {
         out
     }
 
-    /// Plans `entries`, given oldest first (the position is the age used as the tiebreak). A dependency on an
-    /// id that is not among the entries counts as done.
+    /// Plans `entries`, given oldest first (the position is the age used as the tiebreak), with no job history:
+    /// a dependency on an id that is not among the entries counts as done. Callers that know how earlier jobs
+    /// ended use [`Plan::build_with`], where a dependency on a rejected or failed job with no landed retry holds
+    /// the item.
     pub fn build(entries: &[PlanEntry]) -> Plan {
+        Plan::build_with(entries, &[])
+    }
+
+    /// Plans `entries`, given oldest first (the position is the age used as the tiebreak), with `history`: how
+    /// earlier jobs ended. A dependency on an id that is not among the entries is met when the job landed, when
+    /// a landed job is linked to it as its retry (directly, or through other retries), or when `history` does
+    /// not show it rejected, failed, timed out or stale (an unknown, dropped, declined or abandoned id counts
+    /// as done). A dependency on a rejected or failed job with no landed retry is unmet: the item is not
+    /// ordered but listed in [`Plan::refused`] with a reason naming the dependency (and an empty `missing`),
+    /// and so is everything that depends on a held item. An item that is itself the retry of that dependency
+    /// (the history links it to it) is not held by it.
+    pub fn build_with(entries: &[PlanEntry], history: &[JobEnd]) -> Plan {
         let mut plan = Plan::default();
         let mut pending: Vec<(usize, &PlanEntry)> = Vec::new();
         for (age, entry) in entries.iter().enumerate() {
@@ -439,6 +538,40 @@ impl Plan {
                 ));
             }
         }
+        // Hold items with an unmet dependency, and then whatever depends on a held item, until nothing changes.
+        let open: Vec<&str> = pending.iter().map(|(_, e)| e.id.as_str()).collect();
+        let mut held: Vec<(&str, String)> = Vec::new();
+        loop {
+            let mut changed = false;
+            for (_, entry) in &pending {
+                if held.iter().any(|(id, _)| *id == entry.id) {
+                    continue;
+                }
+                let reason = entry.depends_on.iter().find_map(|d| {
+                    if held.iter().any(|(id, _)| id == d) {
+                        Some(format!("depends on {d}, which is held back"))
+                    } else if open.contains(&d.as_str()) || retries(&entry.id, d, history) {
+                        None
+                    } else {
+                        unmet_dependency(d, history)
+                    }
+                });
+                if let Some(reason) = reason {
+                    held.push((entry.id.as_str(), reason));
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        for (_, entry) in &pending {
+            if let Some((_, reason)) = held.iter().find(|(id, _)| *id == entry.id) {
+                plan.refused
+                    .push(Refusal::held(&entry.id, &entry.title, reason));
+            }
+        }
+        pending.retain(|(_, e)| !held.iter().any(|(id, _)| *id == e.id));
         let known: Vec<&str> = pending.iter().map(|(_, e)| e.id.as_str()).collect();
         let planned: Vec<&PlanEntry> = pending.iter().map(|(_, e)| *e).collect();
         let effective = effective_priorities(&planned);
@@ -642,6 +775,147 @@ mod tests {
 
     fn rungs() -> (Ladder, Ladder) {
         (Ladder::BriefRequirements, Ladder::Implementation)
+    }
+
+    fn ended(id: &str, word: &str, retry_of: Option<&str>) -> JobEnd {
+        JobEnd {
+            id: id.into(),
+            ending: if word == "landed" {
+                Ending::Landed
+            } else {
+                Ending::Failed(word.into())
+            },
+            retry_of: retry_of.map(String::from),
+        }
+    }
+
+    #[test]
+    fn a_dependency_on_a_rejected_job_with_no_landed_retry_holds_the_item_and_its_dependents() {
+        let (_, low) = rungs();
+        let entries = [entry("b", low, &["a/"], &["x"])];
+        // Without a history the id outside the entries counts as done, as before.
+        assert_eq!(Plan::build(&entries).order, ["b"]);
+        let history = [ended("x", "rejected", None)];
+        let plan = Plan::build_with(&entries, &history);
+        assert!(plan.order.is_empty() && plan.groups.is_empty(), "{plan:?}");
+        assert_eq!(plan.refused.len(), 1);
+        let held = &plan.refused[0];
+        assert_eq!(held.id, "b");
+        assert!(held.missing.is_empty());
+        assert!(
+            held.reason.contains("depends on x") && held.reason.contains("rejected"),
+            "{}",
+            held.reason
+        );
+        // The retry of x names x, but is not held by it; an unrelated item that names x is.
+        let entries = [
+            entry("b", low, &["a/"], &["x"]),
+            entry("retry", low, &["c/"], &["x"]),
+        ];
+        let history = [
+            ended("x", "rejected", None),
+            JobEnd {
+                id: "retry".into(),
+                ending: Ending::Other,
+                retry_of: Some("x".into()),
+            },
+        ];
+        let plan = Plan::build_with(&entries, &history);
+        assert_eq!(plan.order, ["retry"]);
+        assert_eq!(plan.refused.len(), 1);
+        assert_eq!(plan.refused[0].id, "b");
+        let entries = [entry("b", low, &["a/"], &["x"])];
+        // A failed job, a timed-out job and a stale job hold the item too.
+        for word in ["failed", "timed out", "stale"] {
+            let plan = Plan::build_with(&entries, &[ended("x", word, None)]);
+            assert_eq!(plan.refused.len(), 1, "{word}");
+            assert!(plan.refused[0].reason.contains(word));
+        }
+        // Landed, dropped (not a failure end) and unknown dependencies are met.
+        assert_eq!(
+            Plan::build_with(&entries, &[ended("x", "landed", None)]).order,
+            ["b"]
+        );
+        assert_eq!(Plan::build_with(&entries, &[]).order, ["b"]);
+    }
+
+    #[test]
+    fn a_dependency_is_met_once_a_retry_of_it_landed_and_the_item_is_ordered_after_it() {
+        let (_, low) = rungs();
+        let entries = [entry("b", low, &["a/"], &["x"])];
+        // x was rejected and re-asked as r1, which was rejected too; r2 retried r1 and landed.
+        let mut history = vec![
+            ended("x", "rejected", None),
+            ended("r1", "rejected", Some("x")),
+        ];
+        assert_eq!(Plan::build_with(&entries, &history).refused.len(), 1);
+        history.push(ended("r2", "landed", Some("r1")));
+        let plan = Plan::build_with(&entries, &history);
+        assert_eq!(plan.order, ["b"]);
+        assert!(plan.refused.is_empty(), "{:?}", plan.refused);
+
+        // A landed job that retries some other job leaves b held; a rejected retry is no help.
+        let history = [
+            ended("x", "rejected", None),
+            ended("other", "landed", Some("y")),
+            ended("r", "rejected", Some("x")),
+        ];
+        assert_eq!(Plan::build_with(&entries, &history).refused.len(), 1);
+
+        // Links that loop end, and a loop that holds no landed job leaves b held.
+        let history = [
+            ended("x", "rejected", Some("r")),
+            ended("r", "rejected", Some("x")),
+            ended("l", "landed", Some("r")),
+        ];
+        assert!(Plan::build_with(&entries, &history).refused.is_empty());
+        let history = [
+            ended("x", "rejected", Some("r")),
+            ended("r", "rejected", Some("x")),
+            ended("l", "landed", Some("q")),
+            ended("q", "rejected", Some("l")),
+        ];
+        assert_eq!(Plan::build_with(&entries, &history).refused.len(), 1);
+
+        // The landed retry is also an open item that b needs: b comes after it.
+        let entries = [
+            entry("b", low, &["a/"], &["x", "r"]),
+            entry("r", low, &["c/"], &[]),
+        ];
+        let history = [
+            ended("x", "rejected", None),
+            ended("r", "landed", Some("x")),
+        ];
+        let plan = Plan::build_with(&entries, &history);
+        assert_eq!(plan.order, ["r", "b"]);
+        assert!(plan.refused.is_empty());
+    }
+
+    #[test]
+    fn a_dependent_of_a_held_item_is_held_too() {
+        let (_, low) = rungs();
+        // c and d come before b in the entries, so the hold must repeat until nothing changes.
+        let entries = [
+            entry("d", low, &["d/"], &["c"]),
+            entry("c", low, &["c/"], &["b"]),
+            entry("b", low, &["b/"], &["x"]),
+            entry("e", low, &["e/"], &[]),
+        ];
+        let plan = Plan::build_with(&entries, &[ended("x", "failed", None)]);
+        assert_eq!(plan.order, ["e"]);
+        let held: Vec<(&str, &str)> = plan
+            .refused
+            .iter()
+            .map(|r| (r.id.as_str(), r.reason.as_str()))
+            .collect();
+        assert_eq!(
+            held.iter().map(|(i, _)| *i).collect::<Vec<_>>(),
+            ["d", "c", "b"]
+        );
+        assert!(held[0].1.contains("depends on c, which is held back"));
+        assert!(held[1].1.contains("depends on b, which is held back"));
+        assert!(held[2].1.contains("depends on x") && held[2].1.contains("failed"));
+        assert!(plan.cyclic.is_empty());
     }
 
     #[test]
