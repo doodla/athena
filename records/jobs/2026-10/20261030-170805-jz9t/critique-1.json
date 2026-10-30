@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-170805-jz9t",
+  "round": 1,
+  "at": "2026-10-30T17:12:36.263419005Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The symbol check counts a name as existing only if the workspace's .rs files define it, so standard-library items, external-crate items and crate names written in code markup are refused.",
+      "evidence": "Decision 4 counts a symbol only when a fn/struct/enum/trait/type/const/static/mod/macro_rules line, a field line or a variant line in the snapshot's .rs blobs defines it. Decision 3 makes every marked CamelCase or UPPER_SNAKE name a candidate, and every snake_case name with an underscore a candidate even without a marker. Names that surveys routinely write, such as `BTreeSet`, `HashMap`, `PathBuf`, `serde_json::Value` and `athena_core::reading::read_once`, have no definition line in the workspace. `serde_json` and `athena_core` are snake_case segments, and athena-core is a Cargo package, not a `mod`. All of these would be refused. reading.rs alone uses BTreeSet, HashMap and similar names 16 times (Grep count), so surveys of this code will name them. The Criterion 5 demonstration accepts that a backticked `GitHub` is refused. The reader gets one correction, so this false-positive class could fail ordinary code readings, and the 8% expectation does not account for it. Fix: Count a name as existing when the corpus defines it or brings it into scope: any segment of a `use` path, or an `extern crate` line. Also skip `a::b` paths whose first segment is std, core, alloc or a crate name found in the workspace Cargo.toml dependencies (hyphens mapped to underscores). As an alternative, narrow Part 2 to symbols that also appear in an earlier job's carried text (approach, findings, reading criteria), which matches the root cause more closely. Add guard tests for `BTreeSet`, `serde_json::Value` and `athena_core::` in a survey.",
+      "location": "Plan Decision 3 and Decision 4 (Part 2 symbol corpus); Criterion 5 demonstration",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Part 3 only checks jobs the request cites, so a reading that names and relies on a job the request never mentions goes unchecked.",
+      "evidence": "`referenced_jobs` (reading.rs:2335) collects ids only from `request` (`job_ids_in(request)`). The root cause is stated as 'readings take a named earlier job's deliverable as existing', and the job that is named is named in the reading. A reading that brings in a job id of its own is not in `earlier`, so its unlanded files are never looked up. Fix: Also load the jobs whose ids appear in the reading's own text, through `records` in `read_once`, using the same `carry`. Otherwise, record this narrowing in the decision entry and the doc comment.",
+      "location": "Plan Decision 2 and step 5 (building `earlier` from `attempt` plus `referenced_jobs`)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The two-word window for the 'new' exemption misses common wording.",
+      "evidence": "In 'adds a new pure function `x`', the two words before `x` are 'pure function', so a symbol the change adds is refused and uses up the reader's one correction. Fix: Widen the window to the clause, for example up to the previous punctuation, or accept the marker anywhere within about five words before the name. Add a test for this wording.",
+      "location": "Plan Decision 3 ('new' marker in the two preceding words)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Criterion 6 asks for a replay or test over stored past readings; the plan substitutes a hand-built table.",
+      "evidence": "No stored reading files exist in the snapshot: Glob **/*reading*.json found none, and records/ is absent. The table is reasonable, but it does not observe real past readings, and the 8% stays unmeasured. Fix: Keep the table, but also run every fixture reading already in run_pin_tests.rs and run/tests.rs through the full chain. State in the CHANGELOG entry and the decision entry that no stored corpus was available, so the verifier does not read the table as a replay.",
+      "location": "Criterion 6 demonstration",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The plan chains a separate function after check_reading_acceptance instead of calling it from inside, which departs from the reading's wording.",
+      "evidence": "check_reading_acceptance (reading.rs:2678) is documented as 'Every check a built reading must pass'. The plan updates that doc comment and raises the point as an open question. The reasoning about call sites is sound, and Criterion 4's reader-level test proves the check is wired in. Fix: Keep the chain. State the departure in the decision entry so the verifier does not treat it as a missed requirement.",
+      "location": "Plan Decision 1 versus the reading ('run from read_once via check_reading_acceptance')",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan's code references with Read and Grep, and they hold. `read_once` (reading.rs:372) builds `referenced_jobs` from the request and calls `check_reading_acceptance` at line 520, which has the signature the plan describes (line 2678). `unaccounted_files` (2472), `names_path_token` (2516), `code_surveys` (2917), `replay_declaration` (3299), the `earlier()` test helper (5813), `EarlierAttempt` with its `changed_files` and `reading_deliverables` fields (briefs.rs:1437) and `Git::cat_blobs` (athena-git lib.rs:856) all exist. This job's own reading would pass the self-application test: its survey names `check_record_file`, which is defined in athena-data records.rs:2897. Part 3 now triggers only on what the reading itself names, which answers the earlier round's main finding. The demonstrations would fail without the behavior: Criterion 1 shows `check_reading_acceptance` alone returns Ok, and Criterion 4 goes through `Athena::ask`. One soundness problem needs revising. The Part 2 symbol check treats a name as existing only if the workspace defines it, so std types, external-crate paths and crate names in code markup (`BTreeSet`, `serde_json::Value`, `athena_core::...`) would be refused. That is an obvious false-positive class, and the reader has only one correction. It should be fixed by counting names imported by `use` lines and skipping std and dependency crate paths, or by narrowing Part 2 to symbols tied to an earlier job. The remaining findings are minor."
+}
