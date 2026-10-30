@@ -24,8 +24,9 @@ use athena_agent::policy::Policy;
 use athena_context::briefs::{
     AcceptedReading, CandidateView, CheckResultView, CheckView, CriticInputs, DeliverableFact,
     PlanRevision, PlannerInputs, ProducerInputs, ReplayView, RetryFindings, RetrySeed,
-    VerifierInputs, VerifierPlan, class_summaries, critic_brief, planner_brief, producer_brief,
-    producer_prompt_with_plan, render_plan_section, verifier_brief_with_plan,
+    VerifierInputs, VerifierPlan, class_summaries, critic_brief, planner_brief,
+    producer_brief_with_evidence, producer_prompt_with_plan, render_plan_section,
+    verifier_brief_with_evidence,
 };
 use athena_context::outputs::{
     CriticOutput, CritiqueVerdictOutput, DeliverableActionOutput, PlanOutput, ProducerOutput,
@@ -260,6 +261,12 @@ pub fn introducing_commit(athena: &Athena, rev: &str, path: &str) -> Result<Opti
 }
 
 impl Athena {
+    /// `text` with this machine's state directory replaced by `<state>` (the placeholder the redactor uses), so
+    /// a brief stored in the records names the evidence snapshot as `<state>/jobs/<id>/evidence`.
+    pub(crate) fn with_state_placeholder(&self, text: &str) -> String {
+        text.replace(&self.state.root().display().to_string(), "<state>")
+    }
+
     /// `athena go`: runs a proposed job to its terminal state, or retries the landing of a blocked one.
     ///
     /// A job that ends `rejected` or `failed` is introspected at once, with no request from the user. The
@@ -788,40 +795,59 @@ impl Athena {
                 command: c.run.join(" "),
             })
             .collect();
-        let brief = producer_brief(&ProducerInputs {
-            job: id.as_str().to_string(),
-            request: job
-                .request
-                .as_ref()
-                .map(|r| r.text.clone())
-                .unwrap_or_default(),
-            reading: accepted.clone(),
-            checks: check_views.clone(),
-            commands: athena_agent::policy::describe_commands(&producer_grant.commands),
-            pin: pinned.as_ref().map(|(record, _)| record.clone()),
-            retry_from: match (&retry_seed, &resume) {
-                (Some(s), _) => Some(RetrySeed {
-                    job: s.job.as_str().to_string(),
-                    unmet: s.unmet.clone(),
-                    findings: s.findings.clone(),
-                    must_address: s.must_address.clone(),
-                    progress_note: None,
+        // The evidence snapshot (`crate::snapshot`): the records and main's history at this base commit, read-only,
+        // beside the working copy. The briefs name its path; the producer's and verifier's policies let them read it.
+        let evidence = crate::snapshot::evidence_dir(&self.state, &id);
+        crate::pin::remove_tree(&evidence).with_context(|| {
+            format!(
+                "removing the earlier evidence snapshot {}",
+                evidence.display()
+            )
+        })?;
+        crate::snapshot::write(&self.git, head, &evidence)
+            .context("writing the evidence snapshot")?;
+        crate::snapshot::lock(&evidence).context("locking the evidence snapshot")?;
+        let evidence_path = evidence.display().to_string();
+        let brief = producer_brief_with_evidence(
+            &ProducerInputs {
+                job: id.as_str().to_string(),
+                request: job
+                    .request
+                    .as_ref()
+                    .map(|r| r.text.clone())
+                    .unwrap_or_default(),
+                reading: accepted.clone(),
+                checks: check_views.clone(),
+                commands: athena_agent::policy::describe_commands(&producer_grant.commands),
+                pin: pinned.as_ref().map(|(record, _)| record.clone()),
+                retry_from: match (&retry_seed, &resume) {
+                    (Some(s), _) => Some(RetrySeed {
+                        job: s.job.as_str().to_string(),
+                        unmet: s.unmet.clone(),
+                        findings: s.findings.clone(),
+                        must_address: s.must_address.clone(),
+                        progress_note: None,
+                    }),
+                    (None, Some(r)) => Some(RetrySeed {
+                        job: r.job.as_str().to_string(),
+                        unmet: Vec::new(),
+                        findings: Vec::new(),
+                        must_address: Vec::new(),
+                        progress_note: Some(r.note.clone()),
+                    }),
+                    (None, None) => None,
+                },
+                retry_findings: earlier_findings.map(|(job, findings)| RetryFindings {
+                    job: job.as_str().to_string(),
+                    findings,
                 }),
-                (None, Some(r)) => Some(RetrySeed {
-                    job: r.job.as_str().to_string(),
-                    unmet: Vec::new(),
-                    findings: Vec::new(),
-                    must_address: Vec::new(),
-                    progress_note: Some(r.note.clone()),
-                }),
-                (None, None) => None,
+                failure_classes: class_summaries(&records.introspections, &records.classes),
             },
-            retry_findings: earlier_findings.map(|(job, findings)| RetryFindings {
-                job: job.as_str().to_string(),
-                findings,
-            }),
-            failure_classes: class_summaries(&records.introspections, &records.classes),
-        });
+            Some(&evidence_path),
+        );
+        // The stored brief is a public record: it names the state directory by a placeholder, not this
+        // machine's path. The prompt keeps the real path.
+        let stored_brief = self.with_state_placeholder(&brief);
         let dispatched_at = crate::now();
         let clock = Instant::now();
         let budget = &jc.config.budget;
@@ -854,7 +880,7 @@ impl Athena {
             defaults_sha256: Some(jc.defaults_sha256.clone()),
             athena: Some(self.build.clone()),
             driver: Some(self.driver.info()),
-            brief_sha256: Some(sha256_hex(brief.as_bytes())),
+            brief_sha256: Some(sha256_hex(stored_brief.as_bytes())),
             dispatched_at: Some(dispatched_at),
             request_path: None,
             request_sha256: None,
@@ -865,7 +891,7 @@ impl Athena {
         };
         let files = vec![
             NewFile::record(&AnyRecord::Job(Box::new(job_record.clone()))),
-            NewFile::text(format!("{}/brief-producer.md", id.dir()), brief.clone()),
+            NewFile::text(format!("{}/brief-producer.md", id.dir()), stored_brief),
         ];
         let prediction = self.commit_records(
             &files,

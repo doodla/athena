@@ -64,6 +64,8 @@
 //! - [`code_health`]: file and function sizes of Athena's own sources, measured with `syn` after every landing;
 //!   a request is queued for each file over a threshold, and a design review every ten landings, counted from a
 //!   baseline record;
+//! - [`snapshot`]: the read-only evidence snapshot taken at dispatch (a copy of `records/`, the landing files and
+//!   main's first-parent log), which the producer and verifier read and `athena status --snapshot` reports on;
 //! - [`pin`]: a study's repository ref resolved to a commit by the core, and mounted read-only;
 //! - `test_support` (compiled for tests and the `test-support` feature only): the shared records-history
 //!   cutover fixture, a scratch repository with a bare remote and a history made through the real writers;
@@ -109,6 +111,7 @@ pub mod run;
 mod run_pin_tests;
 pub mod scope_guard;
 pub mod scoring;
+pub mod snapshot;
 pub mod state;
 pub mod status;
 pub mod steward;

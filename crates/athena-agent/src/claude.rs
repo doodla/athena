@@ -156,9 +156,21 @@ impl ClaudeCodeDriver {
                     shell_quote(&hook.athena_bin.display().to_string()),
                     shell_quote(&hook.policy_file.display().to_string())
                 );
-                serde_json::json!({
+                let mut settings = serde_json::json!({
                     "hooks": { "PreToolUse": [ { "matcher": "*", "hooks": [ { "type": "command", "command": command } ] } ] }
-                })
+                });
+                if !hook.read_dirs.is_empty() {
+                    // Claude Code's own scope: the directories are readable besides the working directory.
+                    // Athena's hook still denies every write under them.
+                    settings["permissions"] = serde_json::json!({
+                        "additionalDirectories": hook
+                            .read_dirs
+                            .iter()
+                            .map(|d| d.display().to_string())
+                            .collect::<Vec<_>>()
+                    });
+                }
+                settings
             }
             None => serde_json::json!({}),
         }
@@ -515,6 +527,7 @@ mod tests {
             hook: Some(HookSpec {
                 athena_bin: PathBuf::from("/opt/athena bin/athena"),
                 policy_file: PathBuf::from("/state/policy.json"),
+                read_dirs: Vec::new(),
             }),
             max_budget_usd: 3.0,
             timeout: Duration::from_secs(1800),
@@ -567,6 +580,22 @@ mod tests {
             command,
             "'/opt/athena bin/athena' hook pre-tool-use --policy '/state/policy.json'"
         );
+        assert!(
+            settings.get("permissions").is_none(),
+            "no read directory, no permissions block"
+        );
+    }
+
+    #[test]
+    fn read_dirs_become_additional_directories() {
+        let mut with_dir = spec();
+        with_dir.hook.as_mut().unwrap().read_dirs = vec![PathBuf::from("/state/jobs/x/evidence")];
+        let settings = ClaudeCodeDriver::settings(&with_dir);
+        assert_eq!(
+            settings["permissions"]["additionalDirectories"],
+            serde_json::json!(["/state/jobs/x/evidence"])
+        );
+        assert!(settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"].is_string());
     }
 }
 

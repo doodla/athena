@@ -5,7 +5,7 @@ use crate::Athena;
 use crate::manage::pending_quantities;
 use crate::state::format_bytes;
 use crate::store::{JobRecords, JobState, Records};
-use anyhow::Result;
+use anyhow::{Result, bail};
 use athena_data::records::{
     Build, BuildMeasurement, Critique, CritiqueVerdict, InterventionSource, Invocation, JobPlan,
     OutcomeState, Reading, Role, SccacheFigures, text_cites_job,
@@ -1164,7 +1164,32 @@ pub struct StatusView {
     /// [`Athena::status`], which asks nothing of the remote.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reconcile: Option<crate::reconcile::ReconcileReport>,
+    /// Set when the view was built from an evidence snapshot (`Athena::status_from_snapshot`) and not from
+    /// this checkout: where the records and history came from, and what the view leaves out.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<SnapshotNote>,
 }
+
+/// Where a snapshot-built [`StatusView`] came from, and what it does not show.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SnapshotNote {
+    /// The snapshot directory given to `athena status --snapshot`.
+    pub path: String,
+    /// The commits in the snapshot's history file; `head` is the newest.
+    pub commits: usize,
+    /// The sections left out because they need the live repository or process state, not records or history.
+    pub omitted: Vec<String>,
+}
+
+/// The sections a snapshot-built view leaves out.
+const SNAPSHOT_OMITS: [&str; 6] = [
+    "branch",
+    "stale build",
+    "kill switch",
+    "scope-guard lines",
+    "code health",
+    "spec gaps",
+];
 
 /// An intervention that still calls for follow-up, as `athena status` lists it under open work.
 #[derive(Debug, Clone, Serialize)]
@@ -1631,9 +1656,46 @@ impl Athena {
     /// The state of the work.
     pub fn status(&self) -> Result<StatusView> {
         self.state.registry().reap();
-        let head = self.head()?;
-        let records = Records::load(&self.git, &head)?;
-        let set = athena_gate::records::RecordSet::load(&self.git, &head)?;
+        self.status_from(None)
+    }
+
+    /// The state of the work as `status` reports it, but with the records and history read from the evidence
+    /// snapshot at `dir` (`crate::snapshot`) and not from this checkout. `head` is the snapshot's newest commit.
+    /// Job states come from the records alone, since no process of the snapshot's repository can be asked; the
+    /// branch, stale build, kill switch, scope-guard lines, code health and spec gaps are left out and named in
+    /// the view's `snapshot` note. Everything computed from the records, including the throughput section, is
+    /// the same code as `status`.
+    pub fn status_from_snapshot(&self, dir: &std::path::Path) -> Result<StatusView> {
+        self.status_from(Some(dir))
+    }
+
+    fn status_from(&self, snapshot: Option<&std::path::Path>) -> Result<StatusView> {
+        let (head, records, set, snapshot_note) = match snapshot {
+            None => {
+                let head = self.head()?;
+                let records = Records::load(&self.git, &head)?;
+                let set = athena_gate::records::RecordSet::load(&self.git, &head)?;
+                (head, records, set, None)
+            }
+            Some(dir) => {
+                let history = crate::snapshot::read_history(dir)?;
+                let Some(newest) = history.first() else {
+                    bail!("{} holds no history: history.json is empty", dir.display());
+                };
+                let note = SnapshotNote {
+                    path: dir.display().to_string(),
+                    commits: history.len(),
+                    omitted: SNAPSHOT_OMITS.iter().map(|s| s.to_string()).collect(),
+                };
+                (
+                    newest.hash.clone(),
+                    crate::snapshot::load_records(dir)?,
+                    crate::snapshot::record_set(dir)?,
+                    Some(note),
+                )
+            }
+        };
+        let from_snapshot = snapshot_note.is_some();
         let mut jobs_by_state: BTreeMap<String, usize> = BTreeMap::new();
         let mut recent = Vec::new();
         let mut open = Vec::new();
@@ -1653,10 +1715,15 @@ impl Athena {
                     counts.stopped += 1;
                 }
             }
-            let state = self.state_name(job);
+            // No process of the snapshot's repository can be asked, so a snapshot names the state its records give.
+            let state = if from_snapshot {
+                job.state().name().to_string()
+            } else {
+                self.state_name(job)
+            };
             *jobs_by_state.entry(state.clone()).or_default() += 1;
             let mut line = job_line(job, &state);
-            if state == "proposed" {
+            if state == "proposed" && !from_snapshot {
                 line.hold = crate::disk::read_hold(&self.state, job.id()).map(|h| h.text());
             }
             // Queued requests have not run; they show under open work.
@@ -1722,7 +1789,24 @@ impl Athena {
                 }
             })
             .collect();
-        let range = bootstrap_range(&self.git, &head)?;
+        let range = if from_snapshot {
+            // The same reading as `bootstrap_range`, from the snapshot's copy of the outcome record.
+            match set.bytes(BOOTSTRAP_OUTCOME) {
+                None => BootstrapRange::Open,
+                Some(bytes) => {
+                    match athena_data::records::AnyRecord::parse(BOOTSTRAP_OUTCOME, bytes) {
+                        Ok(athena_data::records::AnyRecord::Outcome(outcome)) => {
+                            BootstrapRange::ClosedThrough(
+                                outcome.through_commit.clone().unwrap_or_default(),
+                            )
+                        }
+                        _ => BootstrapRange::ClosedThrough(String::new()),
+                    }
+                }
+            }
+        } else {
+            bootstrap_range(&self.git, &head)?
+        };
         let bootstrap = match &range {
             BootstrapRange::Open => Bootstrap {
                 range_open: true,
@@ -1738,7 +1822,7 @@ impl Athena {
                 note: "closed: governed content changes only through verified landings and declared interventions".into(),
             },
         };
-        let kill_switch_on = self.state.registry().stopped();
+        let kill_switch_on = !from_snapshot && self.state.registry().stopped();
         let mut next = Vec::new();
         if kill_switch_on {
             next.push("athena start   # the kill switch is on; new work is blocked".into());
@@ -1754,7 +1838,11 @@ impl Athena {
                 _ => {}
             }
         }
-        let lines = crate::scope_guard::list_lines(&self.state);
+        let lines = if from_snapshot {
+            Vec::new()
+        } else {
+            crate::scope_guard::list_lines(&self.state)
+        };
         for l in lines.iter().filter(|l| l.is_pause()) {
             next.push(format!(
                 "line {} is paused ({})   # {}",
@@ -1770,7 +1858,15 @@ impl Athena {
                 .collect();
         // The stages athena.toml switches off are read from the configuration at HEAD; an unreadable
         // configuration leaves every cause live.
-        let job_config = crate::capability::JobConfig::at(&self.git, &head).ok();
+        // A snapshot holds no configuration; this checkout's `athena.toml` (the base's, in a job's working copy)
+        // answers.
+        let job_config = if from_snapshot {
+            self.head()
+                .ok()
+                .and_then(|local| crate::capability::JobConfig::at(&self.git, &local).ok())
+        } else {
+            crate::capability::JobConfig::at(&self.git, &head).ok()
+        };
         let disabled = job_config
             .as_ref()
             .map(|jc| crate::hestia::Stage::disabled(&jc.config))
@@ -1788,7 +1884,11 @@ impl Athena {
             ));
         }
         // A spec that cannot be read or parsed lists nothing here; the sweep's spec pass reports it.
-        let spec_gaps = crate::hestia::spec_gaps_at(&self.git, &head).unwrap_or_default();
+        let spec_gaps = if from_snapshot {
+            Vec::new()
+        } else {
+            crate::hestia::spec_gaps_at(&self.git, &head).unwrap_or_default()
+        };
         for g in &spec_gaps {
             next.push(g.next_line());
         }
@@ -1826,13 +1926,25 @@ impl Athena {
         if records.request_jobs().is_empty() {
             next.push("athena ask \"<a one- or two-line request>\"".into());
         }
-        let code_health = crate::code_health::compute(&self.git, &head, &records, crate::now())
-            .ok()
-            .map(|health| health.shown());
-        let stale_build = stale_build_line(&self.git, &self.build.source_commit, &head);
+        let code_health = if from_snapshot {
+            None
+        } else {
+            crate::code_health::compute(&self.git, &head, &records, crate::now())
+                .ok()
+                .map(|health| health.shown())
+        };
+        let stale_build = if from_snapshot {
+            None
+        } else {
+            stale_build_line(&self.git, &self.build.source_commit, &head)
+        };
         Ok(StatusView {
             repository: self.git.dir().display().to_string(),
-            branch: self.git.current_branch()?,
+            branch: if from_snapshot {
+                None
+            } else {
+                self.git.current_branch()?
+            },
             head,
             athena: self.build.clone(),
             stale_build,
@@ -1873,6 +1985,7 @@ impl Athena {
             invalid_records: records.invalid.clone(),
             next,
             reconcile: None,
+            snapshot: snapshot_note,
         })
     }
 
@@ -3337,6 +3450,102 @@ pub(crate) mod planning_cost_tests {
         assert_eq!(throughput.window_with_landing_record, 1);
         // The wait for the landing record is time spent, so it is not idle time.
         assert_eq!(throughput.idle_minutes, 0.0);
+    }
+
+    /// Commits `records` and one landing record in `athena`'s repository, as a landed job leaves them.
+    fn commit_records_and_landing(athena: &Athena, records: &[AnyRecord]) {
+        for record in records {
+            let file = crate::commits::NewFile::record(record);
+            let path = athena.git.dir().join(&file.path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, &file.bytes).unwrap();
+        }
+        let mut landing = landing_of(LANDED_JOB, t("2026-10-29T10:23:00Z"));
+        // A job landing names the verification that covers it, or the record is not acceptable.
+        landing.commits[0].verification =
+            Some(athena_data::RecordId::generate(t("2026-10-29T10:17:00Z")));
+        let dir = athena.git.dir().join("landings");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(format!("{}.json", landing.id)),
+            serde_json::to_string_pretty(&athena_data::history::HistoryRecord::Landing(landing))
+                .unwrap(),
+        )
+        .unwrap();
+        athena.git.run(["add", "-A"]).unwrap();
+        athena
+            .git
+            .run(["commit", "-q", "-m", "Records\n\nAthena-Job: bootstrap"])
+            .unwrap();
+    }
+
+    #[test]
+    fn status_snapshot_throughput_is_the_checkouts_throughput() {
+        let (_dir, _state, athena) = crate::code_health::tests::set_up();
+        let mut all = timed_job(
+            LANDED_JOB,
+            t("2026-10-29T10:00:00Z"),
+            minutes(0.0, 0.0, 10.0, 2.0, 5.0, 0.1),
+            OutcomeState::Landed,
+        );
+        all.extend(timed_job(
+            "20261029-120000-mnd2",
+            t("2026-10-29T12:00:00Z"),
+            minutes(1.0, 0.0, 7.0, 0.0, 0.0, 3.0),
+            OutcomeState::Failed,
+        ));
+        commit_records_and_landing(&athena, &all);
+        let head = athena.head().unwrap();
+
+        let out = tempfile::tempdir().unwrap();
+        let snapshot = out.path().join("evidence");
+        crate::snapshot::write(&athena.git, &head, &snapshot).unwrap();
+        crate::snapshot::lock(&snapshot).unwrap();
+        struct Unlock<'a>(&'a std::path::Path);
+        impl Drop for Unlock<'_> {
+            fn drop(&mut self) {
+                let _ = athena_git::snapshot::unlock_dir(self.0);
+            }
+        }
+        let _unlock = Unlock(&snapshot);
+
+        let checkout = athena.status().unwrap();
+        let from_snapshot = athena.status_from_snapshot(&snapshot).unwrap();
+        let throughput = checkout.throughput.clone().expect("a job landed");
+        assert_eq!(throughput.landed_total, 1);
+        assert_eq!(
+            throughput.window_with_landing_record, 1,
+            "the landing record travels with the snapshot"
+        );
+        assert!(!throughput.text().is_empty());
+        assert_eq!(from_snapshot.throughput.as_ref(), Some(&throughput));
+        assert_eq!(
+            from_snapshot.throughput.unwrap().text(),
+            throughput.text(),
+            "the rendered section is identical"
+        );
+        assert_eq!(from_snapshot.head, checkout.head);
+        assert_eq!(from_snapshot.jobs_by_state, checkout.jobs_by_state);
+        assert_eq!(
+            from_snapshot.bootstrap.range_open,
+            checkout.bootstrap.range_open
+        );
+        assert!(checkout.snapshot.is_none());
+        let note = from_snapshot.snapshot.expect("a snapshot view says so");
+        assert_eq!(note.commits, 2);
+        assert!(note.omitted.iter().any(|s| s == "code health"));
+        assert!(from_snapshot.code_health.is_none());
+    }
+
+    #[test]
+    fn status_snapshot_without_history_is_refused_by_name() {
+        let (_dir, _state, athena) = crate::code_health::tests::set_up();
+        let out = tempfile::tempdir().unwrap();
+        let error = athena
+            .status_from_snapshot(out.path())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("history.json"), "{error}");
     }
 
     #[test]

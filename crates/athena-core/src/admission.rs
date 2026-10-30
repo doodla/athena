@@ -515,6 +515,7 @@ mod tests {
             root: std::path::PathBuf::from("."),
             commands: Default::default(),
             writes: false,
+            read_roots: Vec::new(),
         };
         plan_findings(&plan, &reading(), &verifier, &|p| dirs.contains(&p))
             .into_iter()

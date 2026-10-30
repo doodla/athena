@@ -172,12 +172,14 @@ fn live_the_hook_denies_escapes() {
         root: work.path().to_path_buf(),
         commands: BTreeMap::from([("git".to_string(), vec!["status".to_string()])]),
         writes: false,
+        read_roots: Vec::new(),
     };
     let policy_file = job.path().join("policy.json");
     std::fs::write(&policy_file, serde_json::to_string(&policy).unwrap()).unwrap();
     let hook = HookSpec {
         athena_bin: env!("CARGO_BIN_EXE_athena").into(),
         policy_file,
+        read_dirs: Vec::new(),
     };
     let out = driver(job.path())
         .invoke(

@@ -235,11 +235,22 @@ impl Athena {
         let job_dir = self.state.job_dir(job);
         let scratch = job_dir.join("agent");
         std::fs::create_dir_all(&scratch)?;
+        // The producer and verifier may read the job's evidence snapshot (never write it).
+        let read_dirs: Vec<std::path::PathBuf> = if matches!(role, Role::Producer | Role::Verifier)
+        {
+            Some(crate::snapshot::evidence_dir(&self.state, job))
+                .filter(|dir| dir.exists())
+                .into_iter()
+                .collect()
+        } else {
+            Vec::new()
+        };
         let policy = Policy {
             role,
             root: snapshot.to_path_buf(),
             commands: grant.commands.clone(),
             writes: grant.writes,
+            read_roots: read_dirs.clone(),
         };
         let policy_file = scratch.join(format!("policy-{seq:02}-{}.json", role.as_str()));
         std::fs::write(&policy_file, serde_json::to_string_pretty(&policy)?)?;
@@ -271,6 +282,7 @@ impl Athena {
             hook: Some(athena_agent::HookSpec {
                 athena_bin: self.athena_bin.clone(),
                 policy_file,
+                read_dirs,
             }),
             max_budget_usd: cap_usd,
             timeout: Duration::from_secs(timeout_s),

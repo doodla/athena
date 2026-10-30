@@ -46,6 +46,9 @@ pub struct HookSpec {
     pub athena_bin: PathBuf,
     /// The policy file the hook evaluates against ([`policy::Policy`] as JSON).
     pub policy_file: PathBuf,
+    /// Directories outside the working directory the agent may read (a job's evidence snapshot). The driver
+    /// tells the agent runtime about them, so its own directory scope agrees with the policy's `read_roots`.
+    pub read_dirs: Vec<PathBuf>,
 }
 
 /// Everything needed to run one agent once.

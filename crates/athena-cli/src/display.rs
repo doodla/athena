@@ -996,15 +996,26 @@ pub fn status(v: &StatusView) -> String {
     if let Some(n) = &v.nested {
         let _ = writeln!(out, "nested      inside job {n}");
     }
-    let _ = writeln!(
-        out,
-        "kill switch {}",
-        if v.kill_switch_on {
-            "ON (athena start turns it off)"
-        } else {
-            "off"
-        }
-    );
+    if let Some(note) = &v.snapshot {
+        let _ = writeln!(
+            out,
+            "snapshot    records and history of {} ({} commits, newest {}); not shown: {}",
+            note.path,
+            note.commits,
+            &v.head[..v.head.len().min(12)],
+            note.omitted.join(", ")
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            "kill switch {}",
+            if v.kill_switch_on {
+                "ON (athena start turns it off)"
+            } else {
+                "off"
+            }
+        );
+    }
     let _ = writeln!(out, "bootstrap   {}", v.bootstrap.note);
     if let Some(report) = v.reconcile.as_ref().filter(|r| !r.is_quiet()) {
         for line in report.lines() {
