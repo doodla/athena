@@ -120,6 +120,7 @@ use athena_core::audience::{LivePage, Page, Target};
 use athena_core::gh::GhCli;
 use athena_core::plan::{Plan, PlanEntry, Refusal};
 use athena_core::pr::LinkState;
+use athena_core::state::{InFlightStage, InFlightTable};
 pub use athena_core::status::{BUILD_PATHS, touches_build};
 use athena_core::store::Records;
 use athena_core::{Athena, Ui, steward, work_decisions};
@@ -446,6 +447,16 @@ pub trait Steps {
     fn review_passes(&self) -> Vec<String> {
         Vec::new()
     }
+    /// The local table of jobs in flight. The drain reads it at its start, to report rows a drain that died
+    /// left behind, and rewrites it at each stage change. None (the default) keeps no table, as for steps
+    /// that have no state directory.
+    fn in_flight_table(&self) -> Option<InFlightTable> {
+        None
+    }
+    /// The work tree of `job`, recorded in the in-flight table. None (the default) records an empty path.
+    fn worktree(&self, _job: &str) -> Option<std::path::PathBuf> {
+        None
+    }
 }
 
 /// The file whose presence asks a running drain to stop at the next job boundary, inside the repository's
@@ -639,6 +650,8 @@ struct Drain<'a, S: ?Sized, U: ?Sized> {
     /// Held while a job is landed and while the page is rated: landings and ratings go one at a time even
     /// when jobs run side by side, because each pushes a branch and rates the page as it then stands.
     landing: Mutex<()>,
+    /// Held while the in-flight table is rewritten, so workers do not lose each other's rows.
+    table: Mutex<()>,
 }
 
 enum ItemEnd {
@@ -789,7 +802,11 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
             self.push(line);
             return RunStep::Budget;
         }
+        self.track(&job, InFlightStage::Producer);
         let run = self.steps.run(&job);
+        if run.outcome != Some(OutcomeState::Landed) {
+            self.untrack(&job);
+        }
         {
             let mut st = self.st();
             st.budget.release(self.caps.run);
@@ -846,7 +863,10 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
 
     fn land(&self, job: &str, at: usize) -> bool {
         let _one_at_a_time = self.landing.lock().unwrap_or_else(PoisonError::into_inner);
-        match self.steps.land(job) {
+        self.track(job, InFlightStage::Landing);
+        let landing = self.steps.land(job);
+        self.untrack(job);
+        match landing {
             Landing::Landed { changed } => {
                 let outcome = changes_outcome(&changed);
                 let build = touches_build(&changed);
@@ -1171,6 +1191,58 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 stop: None,
             }),
             landing: Mutex::new(()),
+            table: Mutex::new(()),
+        }
+    }
+
+    /// Records in the in-flight table that `job` is in `stage`. A table that cannot be written is a note, not
+    /// a failure: the table only helps a later drain find what this one left.
+    fn track(&self, job: &str, stage: InFlightStage) {
+        let Some(table) = self.steps.in_flight_table() else {
+            return;
+        };
+        let worktree = self.steps.worktree(job).unwrap_or_default();
+        let _one_writer = self.table.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Err(e) = table.set(job, stage, &worktree) {
+            self.note(format!(
+                "could not record job {job} in the in-flight table: {e:#}"
+            ));
+        }
+    }
+
+    /// Removes the row of a job that has closed from the in-flight table.
+    fn untrack(&self, job: &str) {
+        let Some(table) = self.steps.in_flight_table() else {
+            return;
+        };
+        let _one_writer = self.table.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Err(e) = table.remove(job) {
+            self.note(format!(
+                "could not remove job {job} from the in-flight table: {e:#}"
+            ));
+        }
+    }
+
+    /// Reads the in-flight table at the start of the drain and reports each row a drain that died left
+    /// behind. Nothing acts on the rows yet. A missing table is empty; one that cannot be read is a note.
+    fn report_leftover(&self) {
+        let Some(table) = self.steps.in_flight_table() else {
+            return;
+        };
+        match table.read() {
+            Ok(rows) => {
+                for row in rows {
+                    let text = format!(
+                        "job {} was left in flight at stage {} in {}",
+                        row.job,
+                        row.stage.as_str(),
+                        row.worktree
+                    );
+                    self.ui.line(&format!("drain      {text}"));
+                    self.note(text);
+                }
+            }
+            Err(e) => self.note(format!("the in-flight table was ignored: {e:#}")),
         }
     }
 
@@ -1310,6 +1382,7 @@ fn drain_with<'a, S: Steps + ?Sized, U: Ui + ?Sized>(
     for line in steps.review_passes() {
         d.ui.line(&line);
     }
+    d.report_leftover();
     let view = steps.queue()?;
     let previous = steps.previous_rating();
     let mut view = view;
@@ -1776,6 +1849,15 @@ impl<'a> RealSteps<'a> {
 }
 
 impl Steps for RealSteps<'_> {
+    fn in_flight_table(&self) -> Option<InFlightTable> {
+        Some(self.athena.state.in_flight_table())
+    }
+
+    fn worktree(&self, job: &str) -> Option<std::path::PathBuf> {
+        let id = athena_data::JobId::parse(job).ok()?;
+        Some(self.athena.state.kept_work_dir(&id))
+    }
+
     fn review_passes(&self) -> Vec<String> {
         self.athena.review_passes(self.ui)
     }
@@ -2349,5 +2431,213 @@ mod tests {
             assert!(!stop.label().is_empty() && !stop.meaning().is_empty());
         }
         assert!(Stop::QueueEmpty.meaning().contains("not success"));
+    }
+
+    /// Steps with one queued job and an in-flight table; `run` and `land` log the table's rows as they
+    /// find them.
+    struct Tracked {
+        table: InFlightTable,
+        seen: RefCell<Vec<String>>,
+    }
+
+    impl Tracked {
+        fn new(path: std::path::PathBuf) -> Tracked {
+            Tracked {
+                table: InFlightTable::at(path),
+                seen: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn log(&self, at: &str) {
+            let rows = self.table.read().unwrap();
+            let text = rows
+                .iter()
+                .map(|r| format!("{}:{}:{}", r.job, r.stage.as_str(), r.worktree))
+                .collect::<Vec<_>>()
+                .join(",");
+            self.seen.borrow_mut().push(format!("{at} [{text}]"));
+        }
+    }
+
+    impl Steps for Tracked {
+        fn in_flight_table(&self) -> Option<InFlightTable> {
+            Some(self.table.clone())
+        }
+        fn worktree(&self, job: &str) -> Option<std::path::PathBuf> {
+            Some(format!("/work/{job}").into())
+        }
+        fn caps(&self) -> anyhow::Result<Caps> {
+            Ok(Caps {
+                read: 0.5,
+                run: 1.0,
+                rate: 0.5,
+            })
+        }
+        fn queue(&self) -> anyhow::Result<QueueView> {
+            Ok(QueueView {
+                items: vec![Item::queued("j1", "t")],
+                ..QueueView::default()
+            })
+        }
+        fn approve(&self, _: &str) -> Approval {
+            Approval::default()
+        }
+        fn previous_rating(&self) -> Option<u8> {
+            None
+        }
+        fn read(&self, _: ReadOf<'_>) -> Read {
+            Read {
+                job: Some("job-a".into()),
+                cost: 0.1,
+                runnable: true,
+                error: None,
+            }
+        }
+        fn run(&self, _: &str) -> Run {
+            self.log("run");
+            Run {
+                outcome: Some(OutcomeState::Landed),
+                cost: 0.1,
+                ..Run::default()
+            }
+        }
+        fn land(&self, _: &str) -> Landing {
+            self.log("land");
+            Landing::Landed {
+                changed: vec!["studies/s/claims.json".into()],
+            }
+        }
+        fn check_page(&self) -> Check {
+            Check::pass("stub")
+        }
+        fn check_cap(&self) -> f64 {
+            0.5
+        }
+        fn rate(&self) -> Rate {
+            Rate {
+                rating: Some(3),
+                cost: 0.1,
+                error: None,
+            }
+        }
+    }
+
+    #[test]
+    fn the_drain_records_job_stage_and_worktree_at_each_stage_change_and_drops_the_job_when_it_closes()
+     {
+        let temp = tempfile::tempdir().unwrap();
+        let steps = Tracked::new(temp.path().join("in-flight.json"));
+        let report = drain(&steps, limits(5.0), &Quiet).unwrap();
+        assert_eq!(report.landed, 1);
+        assert_eq!(
+            *steps.seen.borrow(),
+            [
+                "run [job-a:producer:/work/job-a]",
+                "land [job-a:landing:/work/job-a]"
+            ]
+        );
+        assert!(steps.table.read().unwrap().is_empty(), "closed: no row");
+    }
+
+    #[test]
+    fn a_failed_run_leaves_no_row_in_the_table() {
+        struct Failing(Tracked);
+        impl Steps for Failing {
+            fn in_flight_table(&self) -> Option<InFlightTable> {
+                self.0.in_flight_table()
+            }
+            fn caps(&self) -> anyhow::Result<Caps> {
+                self.0.caps()
+            }
+            fn queue(&self) -> anyhow::Result<QueueView> {
+                self.0.queue()
+            }
+            fn approve(&self, p: &str) -> Approval {
+                self.0.approve(p)
+            }
+            fn previous_rating(&self) -> Option<u8> {
+                None
+            }
+            fn read(&self, w: ReadOf<'_>) -> Read {
+                self.0.read(w)
+            }
+            fn run(&self, _: &str) -> Run {
+                self.0.log("run");
+                Run {
+                    outcome: Some(OutcomeState::Failed),
+                    ..Run::default()
+                }
+            }
+            fn land(&self, j: &str) -> Landing {
+                self.0.land(j)
+            }
+            fn check_page(&self) -> Check {
+                Check::pass("stub")
+            }
+            fn check_cap(&self) -> f64 {
+                0.5
+            }
+            fn rate(&self) -> Rate {
+                self.0.rate()
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let steps = Failing(Tracked::new(temp.path().join("in-flight.json")));
+        drain(&steps, limits(5.0), &Quiet).unwrap();
+        assert!(steps.0.table.read().unwrap().is_empty());
+        assert!(
+            steps
+                .0
+                .seen
+                .borrow()
+                .iter()
+                .all(|s| s.starts_with("run [job-a:producer"))
+        );
+    }
+
+    #[test]
+    fn a_row_left_by_an_earlier_drain_is_read_at_the_start_and_reported() {
+        let temp = tempfile::tempdir().unwrap();
+        let steps = Tracked::new(temp.path().join("in-flight.json"));
+        steps
+            .table
+            .set(
+                "old-job",
+                athena_core::state::InFlightStage::Checks,
+                std::path::Path::new("/w/old"),
+            )
+            .unwrap();
+        let ui = Kept::default();
+        let report = drain(&steps, limits(5.0), &ui).unwrap();
+        let said = "job old-job was left in flight at stage checks in /w/old";
+        assert!(ui.0.lock().unwrap().iter().any(|l| l.contains(said)));
+        assert!(report.notes.iter().any(|n| n == said), "{:?}", report.notes);
+        // Nothing acts on it: the row stays, and this drain's own job still landed.
+        assert_eq!(report.landed, 1);
+        let rows = steps.table.read().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].job, "old-job");
+    }
+
+    #[test]
+    fn a_missing_table_and_a_corrupt_table_do_not_fail_the_drain() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = Tracked::new(temp.path().join("none/in-flight.json"));
+        let report = drain(&missing, limits(5.0), &Quiet).unwrap();
+        assert_eq!(report.landed, 1);
+        assert!(!report.notes.iter().any(|n| n.contains("in-flight")));
+        let path = temp.path().join("in-flight.json");
+        std::fs::write(&path, b"{not json").unwrap();
+        let corrupt = Tracked::new(path);
+        let report = drain(&corrupt, limits(5.0), &Quiet).unwrap();
+        assert_eq!(report.landed, 1);
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|n| n.starts_with("the in-flight table was ignored")),
+            "{:?}",
+            report.notes
+        );
     }
 }

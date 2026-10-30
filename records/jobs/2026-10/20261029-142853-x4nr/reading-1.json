@@ -1,0 +1,153 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261029-142853-x4nr",
+  "n": 1,
+  "at": "2026-10-30T00:12:55.051988596Z",
+  "invocation_seq": 1,
+  "base_commit": "3b66dbc42bed7695d353c3141175ad122dea89c3",
+  "config_sha256": "4686d6918e8a389a515edf47cdcb596e2ae4a147d9ffda0816f171979db719d1",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Add in-flight table written at stage changes, read at drain start",
+  "summary": "Build job A3 (D145, design section 7 crash bullet): add a local in-flight table file (job id, stage, worktree path) in athena-core state.rs, written by the drain at each stage change and read at drain start. Follows job 20261029-142849-04d9 (A2, [drain.pipeline] config), whose result is kept and unchanged; with max_in_flight = 1 drain behaves as today.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "All code is Rust in the two named crates."
+    },
+    {
+      "id": "tested",
+      "how": "New tests plus fmt, clippy -D warnings and cargo test criteria."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check the file contents through drain, not that types exist."
+    },
+    {
+      "id": "verified",
+      "how": "Behavior criteria name cargo commands the verifier runs."
+    },
+    {
+      "id": "small",
+      "how": "One focused change in the three named files."
+    },
+    {
+      "id": "strangers",
+      "how": "Doc comments and changelog written for outside readers."
+    },
+    {
+      "id": "public",
+      "how": "File holds only job ids, stages and paths; no secrets."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-cli/src/drain.rs (entry points drain and drain_concurrent -> drain_with, which reads the queue then runs run_serial/run_parallel; Steps trait, Drain struct) and crates/athena-core/src/state.rs (StateDir with root, job_dir, kept_work_dir; ResumeStage/ResumeMark). The table is a new type in state.rs beside StateDir, stored as a file under the state root; no record or data file is added under crates/, so the records allow-list, check_record_file and AnyRecord are not touched. The behavior is measured directly by calling drain/drain_concurrent with test Steps and reading the file back.",
+    "Job 20261029-142849-04d9 (A2): its landed changes to config.rs, CHANGELOG.md and docs/design/async-drain.md are kept and not edited here. Its findings: the stale line 21 in the design doc (minor), the unhelpful DrainPipeline error text (minor) and the MAX_CHECK_SLOTS_CEILING nit were all in A2's own files; they are left to a separate job and do not affect A3, which does not read the [drain.pipeline] values.",
+    "Stages recorded follow the design: at least producer and landing (plus checks); an entry is removed when a job closes. Atomic write via temp file and rename; a missing file means an empty table, a corrupt file is reported as a note, not a crash.",
+    "Read at drain start means loaded and surfaced (a note or line listing leftover entries, and entries kept in memory); acting on them to resume jobs is a later build job. Drain does not change decisions from the table, so existing behavior is preserved.",
+    "Not a refusal rule: nothing newly refuses readings, so no refusal-rate criterion is needed."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A test calls drain (the real entry point) with test Steps and max_in_flight = 1 and shows the in-flight file holds the job id, stage and worktree for the job at each stage change, and no entry for it after the job closes. Run: cargo test -p athena-cli drain.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test pre-writes an in-flight file with a leftover entry, starts drain, and shows the entry is read at start and reported; a missing file and a corrupt file are both handled without failing the drain. Run: cargo test -p athena-cli and cargo test -p athena-core state.",
+      "kind": "behavior"
+    },
+    {
+      "text": "state.rs unit tests show the table round-trips (write then read gives the same job id, stage, worktree), updates a job's stage in place, and removes an entry, with an atomic write. Run: cargo test -p athena-core.",
+      "kind": "behavior"
+    },
+    {
+      "text": "All existing drain tests pass unchanged: git diff shows no existing test in drain.rs modified or deleted, and cargo test passes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "cargo fmt --check, cargo clippy --workspace --all-targets -- -D warnings and cargo test --workspace all pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has a new entry describing the in-flight table (file with job id, stage, worktree; written at stage changes; read at drain start; behavior unchanged at max_in_flight = 1). Check with git diff CHANGELOG.md.",
+      "kind": "content"
+    },
+    {
+      "text": "The diff touches only crates/athena-cli/src/drain.rs, crates/athena-core/src/state.rs and CHANGELOG.md (plus athena.toml, defaults.toml and workflows unchanged), and the new public items have doc comments written for an outside reader.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/state.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "docs/design/async-drain.md",
+      "action": "modify",
+      "p": 0.1
+    }
+  ],
+  "out_of_scope": [
+    "Resuming or acting on leftover table entries (producer retry, landing re-check): later build jobs",
+    "Running more than one producer at once, or raising max_in_flight to 3 (build job 10)",
+    "Reading [drain.pipeline] values in the drain runtime",
+    "Fixing A2's findings in config.rs and the design doc (job 20261029-142849-04d9 work is kept as landed)",
+    "Changes to athena.toml, defaults.toml, .github/workflows",
+    "Disk-guard, check-slot, read-ahead, conflict-return behavior"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.72,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.2,
+        "p90": 3.0
+      },
+      "wall_time_s": {
+        "p10": 420.0,
+        "p50": 1700.0,
+        "p90": 3300.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.721832884097035,
+      "p_verification_passes": 0.6743421052631579,
+      "p_user_intervenes": 0.07865853658536585,
+      "cost_usd": {
+        "p10": 0.5317681251624881,
+        "p50": 1.1917796999999997,
+        "p90": 2.9642774754783683
+      },
+      "wall_time_s": {
+        "p10": 539.8880646620003,
+        "p50": 1697.5238782719996,
+        "p90": 3207.191520867002
+      }
+    }
+  },
+  "departures": "Slightly higher cost and lower pass chance than reference: the change spans two crates, adds persistent file I/O and must keep all existing drain tests unchanged."
+}

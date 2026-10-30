@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- In-flight table (async drain build job 3, `docs/design/async-drain.md`, D145): a local file, `in-flight.json` in
+  the repository's state directory, holding the job id, stage and work tree of each job the drain has started. The
+  drain writes it at each stage change (producer, then landing), through a temporary file and a rename, and removes
+  a job's row when the job closes. At its start the drain reads the file and reports any row a drain that died left
+  behind; a missing file is an empty table and an unreadable one is a note, not a failure. Nothing acts on the rows
+  yet. With `max_in_flight = 1` the drain behaves as today.
 - `[drain.pipeline]` config table (async drain build job 2, `docs/design/async-drain.md` sections 11 and 12) in
   `athena-data`: `max_in_flight`, `max_check_slots`, `read_ahead`, `reserve_disk_gb` and `max_conflict_returns`,
   defaulting to 1, 1, 1, 10 and 2 when the table or `[drain]` is absent. `max_in_flight` must be 1 to 8,
