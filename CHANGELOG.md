@@ -203,6 +203,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- Athena's own writers no longer write words that its admission scan rejects. On 2026-10-29 a steward
+  proposal described a recurring duty with a boundary word for the person running Athena, and approving it
+  failed at admission, so the proposal could never be worked. The root cause was that each writer copied
+  model, record or file text into a request or record without checking it against the scan. One shared check,
+  `plain_boundary_text` in `athena-context` (built on the scan's own word lists, and scanning its result
+  again), now rewrites each such word to plain wording ("the person running Athena" for the first word in the
+  list) and each machine path to `[local path]`. The steward's requests and work item titles, Hestia's error
+  review and root-cause requests, the introspection writer's record fields and new classes, and the request
+  that `athena approve-work` builds from a proposal all call it before anything is written. A key or file
+  path that holds such a word cannot be reworded and is refused with the word named. Tests feed each writer
+  a source with a boundary word and check the written text against the scan, and approve-work succeeds on
+  such a proposal.
 - The firstmate study page was rated 3 of 5 by a newcomer for four gaps: a missing finding id, an early
   study-id paragraph, no short definition of firstmate before its terms, and no install command in Next
   steps. The base already renders all four fixes (consecutive finding ids f1 to f3, the study id under

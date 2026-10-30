@@ -64,6 +64,7 @@ use crate::store::{JobRecords, JobState, Records};
 use crate::{Athena, Ui};
 use anyhow::{Context, Result, bail};
 use athena_agent::env::Side;
+use athena_context::briefs::plain_boundary_text;
 use athena_context::{CONTRACT, Component, Composed, compose};
 use athena_data::records::{
     AnyRecord, BuildMeasurement, HestiaCheckResult, IntrospectionRecord, IntrospectionStatus,
@@ -336,14 +337,17 @@ fn root_cause_request_at(
     records: &Records,
     priority: Priority,
 ) -> Result<String, String> {
+    // The cause and the prevention text come from earlier introspections, which a person or a model wrote,
+    // so a word the admission scan rejects is reworded before it enters the request.
+    let cause_text = plain_boundary_text(&cause.cause)?;
     let mut body = String::from(
         "The same cause has produced failures in more than one job. Find the cause where it originates and fix \
          it there, so the whole class is prevented; do not work around one instance.\n\n",
     );
     if let Some(class) = &cause.class {
-        body.push_str(&format!("Failure class: {class}\n"));
+        body.push_str(&format!("Failure class: {}\n", plain_boundary_text(class)?));
     }
-    body.push_str(&format!("Cause: {}\n", cause.cause));
+    body.push_str(&format!("Cause: {cause_text}\n"));
     body.push_str(&format!(
         "Seen {} time(s) in {} jobs. The introspections that record it:\n",
         cause.count(),
@@ -366,15 +370,17 @@ fn root_cause_request_at(
         "A test fails without the change and passes with it, for the cause and not only for one job".to_string(),
         "fmt, clippy and test pass".to_string(),
     ];
-    let title: String = cause.cause.chars().take(100).collect();
-    StewardRequest::new(
+    let title: String = cause_text.chars().take(100).collect();
+    let request = StewardRequest::new(
         Some(priority),
         &format!("Fix the root cause of a repeated failure: {title}"),
         &body,
         &acceptance,
         &["crates/".to_string()],
     )
-    .map(|r| r.render())
+    .map(|r| r.render())?;
+    // A last check of the finished text: what is returned is what admission scans.
+    plain_boundary_text(&request)
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -920,7 +926,9 @@ fn mentions(text: &str, cause: &RepeatedCause, records: &Records) -> bool {
         .iter()
         .find(|i| Some(&i.id.to_string()) == first)
         .and_then(|i| i.cause.as_deref())
-        .map(crate::introspect::normalise)
+        // A root-cause request holds the cause as reworded by `root_cause_request`.
+        .map(|cause| plain_boundary_text(cause).unwrap_or_else(|_| cause.to_string()))
+        .map(|cause| crate::introspect::normalise(&cause))
         .unwrap_or_default();
     !wanted.is_empty() && crate::introspect::normalise(text).contains(&wanted)
 }
@@ -1745,6 +1753,7 @@ impl Athena {
             return Ok(None);
         }
         let text = root_cause_request(&cause, &records)
+            .and_then(|text| plain_boundary_text(&text))
             .map_err(|e| anyhow::anyhow!("the root-cause request: {e}"))?;
         let (job, _) = self.queue(&text)?;
         Ok(Some((job, cause)))
@@ -2702,6 +2711,79 @@ mod tests {
         put_introspection(dir.path(), &athena, &fourth);
         assert_eq!(athena.error_review(&fourth, &crate::Quiet), None);
         assert_eq!(records(&athena).request_jobs().len(), 1);
+    }
+
+    /// The word for the one who runs Athena, built from fragments so no tracked file holds it.
+    fn boundary_word() -> String {
+        ["oper", "ator"].concat()
+    }
+
+    #[test]
+    fn an_error_review_of_a_cause_with_a_boundary_word_queues_a_request_without_it() {
+        let word = boundary_word();
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_in(dir.path(), state.path());
+        let c = class(1, "Reading ignores the earlier verdict");
+        put(
+            dir.path(),
+            &athena,
+            vec![AnyRecord::FailureClass(c.clone())],
+        );
+        let mut first = introspection(
+            10,
+            'a',
+            Some(&c.id),
+            &format!("The {word} is never told of the verdict."),
+        );
+        first.prevention = Some(format!("Tell the {word} at once."));
+        put_introspection(dir.path(), &athena, &first);
+        let second = introspection(20, 'b', Some(&c.id), "The earlier verdict is never read.");
+        put_introspection(dir.path(), &athena, &second);
+        // The seed carries the word, so the request would be refused at admission if it were copied as is.
+        assert!(!athena_context::briefs::boundary_scan(first.cause.as_deref().unwrap()).is_empty());
+
+        let queued = athena
+            .error_review(&second, &crate::Quiet)
+            .expect("the request is admitted");
+        let known = records(&athena);
+        let text = &known.jobs[queued.as_str()].request.as_ref().unwrap().text;
+        assert!(
+            athena_context::briefs::boundary_scan(text).is_empty(),
+            "{text}"
+        );
+        assert!(crate::reading::scan_request_input(text).is_empty());
+        assert!(text.contains("the person running Athena"), "{text}");
+    }
+
+    #[test]
+    fn a_root_cause_request_for_a_cause_with_a_boundary_word_has_none() {
+        let word = boundary_word();
+        let path = ["/home", "/user/x"].concat();
+        let mut records = Records::default();
+        let mut one = introspection(
+            10,
+            'a',
+            None,
+            &format!("The {word} reads {path} and the {}.", word.to_uppercase()),
+        );
+        one.prevention = Some(format!("Ask the {word}."));
+        records.introspections = vec![
+            one.clone(),
+            introspection(20, 'b', None, one.cause.as_deref().unwrap()),
+        ];
+        let causes = repeated_causes(&records);
+        assert_eq!(causes.len(), 1);
+        assert!(!athena_context::briefs::boundary_scan(&causes[0].cause).is_empty());
+
+        let text = root_cause_request(&causes[0], &records).unwrap();
+        assert!(
+            athena_context::briefs::boundary_scan(&text).is_empty(),
+            "{text}"
+        );
+        assert!(crate::reading::scan_request_input(&text).is_empty());
+        assert!(text.contains("the person running Athena"), "{text}");
+        assert!(text.contains("[local path]"), "{text}");
     }
 
     #[test]

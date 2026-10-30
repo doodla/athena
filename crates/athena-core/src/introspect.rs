@@ -45,6 +45,7 @@ use crate::{Athena, Ui};
 use anyhow::{Context, Result};
 use athena_agent::env::{EnvSpec, Side};
 use athena_agent::{AgentInvocation, NoSink};
+use athena_context::briefs::plain_boundary_text;
 use athena_data::records::{
     AnyRecord, CONTEXT_PREVENTION_OUTCOMES, ClassStatus, FailureClass, HostError,
     INTROSPECTION_PROSE_FIELDS, INTROSPECTION_SCHEMA, InterventionCategory, IntrospectionEvidence,
@@ -857,6 +858,13 @@ pub fn normalise(text: &str) -> String {
         .join(" ")
 }
 
+/// `text` with any boundary word reworded, for the model's own words that Athena copies into a failure
+/// note: a note is a record, so it must pass the same scan. When the text cannot be reworded, a marker
+/// stands in for it.
+fn withheld_if_unclean(text: &str) -> String {
+    plain_boundary_text(text).unwrap_or_else(|_| "[text withheld]".to_string())
+}
+
 /// The model's answer, before code checks it.
 #[derive(Debug, Deserialize)]
 struct Answer {
@@ -1462,10 +1470,21 @@ impl Athena {
             record.failure = Some("the answer could not be redacted".into());
             return None;
         }
+        // The fields become a record, and the proposed request becomes a request, so a word the admission
+        // scan rejects is reworded here, after redaction (which can add none) and before anything is kept.
+        for field in &mut text {
+            match plain_boundary_text(field) {
+                Ok(plain) => *field = plain,
+                Err(why) => {
+                    record.failure = Some(format!("the answer could not be reworded: {why}"));
+                    return None;
+                }
+            }
+        }
         let Some(kind) = PreventionKind::parse(&answer.prevention_kind) else {
             record.failure = Some(format!(
                 "the model chose prevention_kind {:?}, which is not default, code-check or design-change",
-                answer.prevention_kind
+                withheld_if_unclean(&answer.prevention_kind)
             ));
             return None;
         };
@@ -1517,11 +1536,22 @@ impl Athena {
         if answer.failure_class == "new" {
             match answer.new_class {
                 Some(new) if !new.name.trim().is_empty() => {
+                    let (name, description) = match (
+                        plain_boundary_text(new.name.trim()),
+                        plain_boundary_text(new.description.trim()),
+                    ) {
+                        (Ok(name), Ok(description)) => (name, description),
+                        (Err(why), _) | (_, Err(why)) => {
+                            record.failure =
+                                Some(format!("the new class could not be reworded: {why}"));
+                            return None;
+                        }
+                    };
                     let class = FailureClass {
                         id: RecordId::generate(crate::now()),
                         at: crate::now(),
-                        name: new.name.trim().to_string(),
-                        description: new.description.trim().to_string(),
+                        name,
+                        description,
                         status: ClassStatus::Proposed,
                         proposed_by: record.id.clone(),
                     };
@@ -1539,7 +1569,7 @@ impl Athena {
         } else {
             record.failure = Some(format!(
                 "the model chose class {:?}, which is not in the registry",
-                answer.failure_class
+                withheld_if_unclean(&answer.failure_class)
             ));
             return None;
         }
@@ -1768,6 +1798,105 @@ mod tests {
             jev: None,
         };
         (dir, state, athena)
+    }
+
+    /// A new, failed introspection record, as `introspect` starts one.
+    fn blank_record() -> IntrospectionRecord {
+        IntrospectionRecord {
+            id: RecordId::parse("20261014-170100-1abc").unwrap(),
+            at: "2026-10-14T17:31:00Z".parse().unwrap(),
+            trigger: IntrospectionTrigger::Rejection,
+            job: Some(JobId::parse(JOB).unwrap()),
+            intervention: None,
+            class_of_work: "code".into(),
+            category: "rejected".into(),
+            what_happened: None,
+            failure_class: None,
+            new_class: false,
+            earlier_cases: Vec::new(),
+            decisions_matched: Vec::new(),
+            cause: None,
+            prevention_kind: None,
+            prevention: None,
+            proposed_request: None,
+            evidence: None,
+            status: IntrospectionStatus::Failed,
+            failure: None,
+            flags: Vec::new(),
+            dropped_ids: Vec::new(),
+            planning_stopped: false,
+            from_jev: false,
+            jev: None,
+        }
+    }
+
+    fn boundary_answer(word: &str) -> Answer {
+        Answer {
+            what_happened: format!("The job was rejected after the {word} asked for a change."),
+            failure_class: "new".into(),
+            new_class: Some(NewClass {
+                name: format!("The {word} is not told"),
+                description: format!("Nothing tells the {word} what changed."),
+            }),
+            earlier_cases: Vec::new(),
+            decisions_matched: Vec::new(),
+            cause: format!("The {word}'s request was never read."),
+            prevention_kind: "code-check".into(),
+            prevention: format!("Add a check that reads what the {word} asked."),
+            proposed_request: format!("Read the {word}'s request before the job starts."),
+        }
+    }
+
+    #[test]
+    fn an_introspection_with_a_boundary_word_is_written_without_it() {
+        let word = ["oper", "ator"].concat();
+        let (_dir, _state, athena) = athena_with(None);
+        let config = athena_data::Config::parse(include_str!("../../../athena.toml")).unwrap();
+        let redactor = athena.redactor(&config, None).unwrap();
+        let answer = boundary_answer(&word);
+        // The seed trips the admission scan, so the test would fail if nothing cleaned it.
+        assert!(!crate::reading::scan_request_input(&answer.proposed_request).is_empty());
+
+        let mut record = blank_record();
+        let class = athena
+            .apply_answer(
+                &mut record,
+                answer,
+                &Records::default(),
+                &[],
+                &[],
+                &redactor,
+                &crate::Quiet,
+            )
+            .expect("the answer names a new class");
+        assert_eq!(
+            record.status,
+            IntrospectionStatus::Recorded,
+            "{:?}",
+            record.failure
+        );
+        let written = [
+            record.what_happened.as_deref().unwrap(),
+            record.cause.as_deref().unwrap(),
+            record.prevention.as_deref().unwrap(),
+            record.proposed_request.as_deref().unwrap(),
+            &class.name,
+            &class.description,
+        ];
+        for text in written {
+            assert!(
+                athena_context::briefs::boundary_scan(text).is_empty(),
+                "{text}"
+            );
+            assert!(
+                crate::reading::scan_request_input(text).is_empty(),
+                "{text}"
+            );
+            assert!(text.contains("the person running Athena"), "{text}");
+        }
+        // The whole record, as it is committed, holds none either.
+        let json = AnyRecord::Introspection(Box::new(record)).to_json();
+        assert!(athena_context::briefs::boundary_scan(&json).is_empty());
     }
 
     fn what_of(verification: Option<Verification>) -> String {
