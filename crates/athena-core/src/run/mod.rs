@@ -10,7 +10,7 @@ use crate::land::{Plan, plan};
 use crate::pin::{is_full_sha, mount};
 use crate::reading::{
     BinaryChecker, NO_HISTORY_REASON, Proposal, ReadingChecker, ReplayCheckers, ReplayRun,
-    TreeRetrySeed, planning_resume_seed, replay, replay_cases, replay_declaration_of,
+    ReserveStage, TreeRetrySeed, planning_resume_seed, replay, replay_cases, replay_declaration_of,
     resumable_job, retried_job, retry_findings, same_scope, tree_retry_seed,
 };
 use crate::scoring::{self, Happened, score, totals};
@@ -746,13 +746,17 @@ impl Athena {
         crate::disk::clear_hold(&self.state, &id);
         let capability_id = reading.capability.clone().expect("checked by the caller");
         let capability = self.capability(&capability_id)?;
-        let spent = job.spent_usd();
-        self.check_budget(
-            &jc,
-            spent,
-            jc.config.budget.producer_usd + jc.config.budget.verifier_usd,
-            "producer and verifier together",
-        )?;
+        // In `hard` mode only a reading marked hard is planned; the marking is the one that escalates the
+        // producer (job-planning.md section 9, D143).
+        let planned = jc
+            .config
+            .job_plan
+            .as_ref()
+            .is_some_and(|p| p.plans(reading.hard_reason.is_some()))
+            && !capability.pins_repo();
+        // The whole path still to run (every planning round, the producer and the verifier) must be
+        // affordable before anything is committed.
+        self.preflight(&jc, job.spent_usd(), ReserveStage::Dispatch { planned })?;
         let redactor = self.redactor(&jc.config, Some(&id))?;
 
         // A study's repository is pinned by the core, here, before anything is committed or any agent runs.
@@ -907,14 +911,6 @@ impl Athena {
         }
         let mut closing = Closing::new();
         let mut producer_prompt = brief.clone();
-        // In `hard` mode only a reading marked hard is planned; the marking is the one that escalates the
-        // producer (job-planning.md section 9, D143).
-        let planned = jc
-            .config
-            .job_plan
-            .as_ref()
-            .is_some_and(|p| p.plans(ctx.reading.hard_reason.is_some()))
-            && !ctx.capability.pins_repo();
         if planned {
             let seed = planning_resume_seed(records, request_text).map(|s| PlanRevision {
                 previous: s.plan,
@@ -928,12 +924,7 @@ impl Athena {
             };
             producer_prompt = producer_prompt_with_plan(&brief, &section);
             let spent = ctx.spent(&closing);
-            if let Err(e) = self.check_budget(
-                &jc,
-                spent,
-                jc.config.budget.producer_usd + jc.config.budget.verifier_usd,
-                "producer and verifier together",
-            ) {
+            if let Err(e) = self.preflight(&jc, spent, ReserveStage::Run) {
                 self.stop_planning(&ctx, &mut closing, &format!("{e}"));
                 return self.close_dispatched(&ctx, closing);
             }

@@ -1,0 +1,165 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261030-151818-2c8g",
+  "n": 1,
+  "at": "2026-10-30T21:36:07.552477645Z",
+  "invocation_seq": 2,
+  "base_commit": "4b2af0592e330a845b6589440710495463deee04",
+  "config_sha256": "d981dad648f6930542cadfb583fb19c7165ef87f8477868cef62f66e4afc4c3e",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Check the full planning-plus-producer-verifier reserve at admission and",
+  "summary": "Root cause: the job budget is checked only per invocation (reading.rs check_budget), so a job is admitted and spends on reading and planning before anything compares what is left with the planner plus producer plus verifier reserve; it then stops before any code is written (jobs 20261028-082151-67fa and 20261030-033434-3v30). Fix it with one preflight in reading.rs, called at admission, at retry and before drain dispatch, that refuses to start when the remaining budget is below the sum of the caps still needed.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "root-cause",
+      "how": "The fix is a single preflight at admission, retry and drain dispatch, not a patch for one job."
+    },
+    {
+      "id": "tested",
+      "how": "Tests fail on base and pass with the change; fmt, clippy and test pass."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check that refusal happens with zero agent invocations, not that wiring exists."
+    },
+    {
+      "id": "outcome-check",
+      "how": "The outcome is that no job reaches planning without enough budget to finish."
+    },
+    {
+      "id": "small",
+      "how": "One focused preflight function and its call sites."
+    },
+    {
+      "id": "strangers",
+      "how": "CHANGELOG entry names the cause for an outside reader."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: crates/athena-core/src/reading.rs (check_budget at line 287 compares one cap with the remaining budget; read_for checks only the reader cap at line 387), crates/athena-core/src/run/planning.rs (lines 116 and 280 check the planner and critic cap plus producer and verifier caps, but only after reading and earlier rounds have spent), crates/athena-core/src/run/mod.rs (line 750 checks only the producer plus verifier cap, after disk_gate and planning), athena.toml [budget] (reader 0.50, producer 3.00, verifier 2.00, job_usd 12.00). The property is measured directly: a job whose remaining budget is below the sum of the needed caps is refused before any agent runs, and the test asserts that no agent invocation was made. No record or data file is added, so check_record_file and AnyRecord are not affected.",
+    "Goal and audience: the people who run athena and drain, who today lose a job after planning with the message 'the job has $5.48 of its $8.00 budget left'. They should instead get a refusal at the start, before any spend, that names the shortfall.",
+    "Job 20261028-082151-67fa is addressed by dropping its candidate (it had no recorded changes); its four findings concern a different change (interrupted-job takeover, disk cleanup) and do not apply here except the final outcome, which this change prevents. Job 20261030-033434-3v30 is addressed the same way: its drain-ordering candidate is dropped (no recorded changes), and its findings about plan ordering do not apply; only its budget-stop outcome is addressed.",
+    "The reserve is computed in one function from athena.toml [budget] and the planner and critic caps in the planning config: the remaining budget must cover the reader cap (when no reading exists yet), the planner cap, and the producer plus verifier caps. The critic is covered by the existing per-round checks. Retry and drain use the spend already recorded for the job, so the refusal is raised before planning begins.",
+    "Governance: athena.toml, defaults.toml and workflows are not changed; the fix is in code. No prompt files change."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "CHANGELOG.md has an entry that names the root cause: the budget was checked only per invocation after reading and planning had spent, with no preflight against the planner plus producer plus verifier caps; the entry names jobs 20261028-082151-67fa and 20261030-033434-3v30.",
+      "kind": "content"
+    },
+    {
+      "text": "The preflight lives in one function in crates/athena-core/src/reading.rs and is called from admission, from the retry path, and from drain dispatch (Grep shows the call at each site), not duplicated per call site.",
+      "kind": "content"
+    },
+    {
+      "text": "A test in crates/athena-core fails on the base commit and passes with the change: with a fake driver and a job budget below the reader, planner, producer and verifier caps, admission refuses the job with a message naming the shortfall and the fake driver records zero agent invocations. Run: cargo test -p athena-core.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A second test covers the cause rather than one job: a retry of a job whose recorded spend leaves less than the planner plus producer plus verifier caps is refused before any planning round starts, and a job with enough budget still proceeds to planning. Run: cargo test -p athena-core.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A drain test shows a job whose remaining budget is short is not dispatched into planning, is reported with its reason on one log line, and does not block a later item that has enough budget. Run: cargo test -p athena-cli.",
+      "kind": "behavior"
+    },
+    {
+      "text": "cargo fmt --check, cargo clippy --all-targets -- -D warnings and cargo test all pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The change refuses more readings at admission and the higher refusal rate is intended: expected 5% of newly refused readings, since the shipped athena.toml budget of 12.00 covers all the caps.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Existing tests that exercise the per-round planner and critic checks and the producer-plus-verifier check at run/mod.rs still pass unchanged.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-core/src/run/planning.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    }
+  ],
+  "out_of_scope": [
+    "Changing athena.toml [budget] values, defaults.toml or workflows",
+    "The interrupted-job takeover, disk cleanup and verifier changes from job 20261028-082151-67fa; its candidate is dropped",
+    "Drain ordering and plan changes from job 20261030-033434-3v30; its candidate is dropped",
+    "Partial-plan resume for the planner",
+    "Changing producer, verifier or planner prompts"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.8,
+        "p50": 1.8,
+        "p90": 4.0
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 2000.0,
+        "p90": 4200.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7206434316353888,
+      "p_verification_passes": 0.6739130434782609,
+      "p_user_intervenes": 0.07635327635327635,
+      "cost_usd": {
+        "p10": 0.536424140722698,
+        "p50": 1.2095524000000002,
+        "p90": 3.0956726664711645
+      },
+      "wall_time_s": {
+        "p10": 540.7789343390651,
+        "p50": 1715.019728354191,
+        "p90": 3516.2918115171774
+      }
+    }
+  },
+  "departures": "Hard job touching admission, retry and drain gates across two crates, so cost and time are above the reference.",
+  "urgent_reason": "It stops jobs that fail before any code is written after spending on reading and planning, which wastes failed attempts and retries.",
+  "hard_reason": "Adds a rule that refuses or holds work at admission, retry and drain dispatch, and changes the run pipeline's budget gate.",
+  "producer_effort": "high"
+}

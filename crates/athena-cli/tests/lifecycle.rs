@@ -1689,9 +1689,9 @@ fn a_criterion_missing_from_the_report_counts_as_unmet() {
 #[test]
 fn a_job_over_budget_is_refused_before_its_next_invocation() {
     // M13 (blocks): a job over budget fails before its next invocation.
-    let fx = Fixture::with_config(&with_job_usd(&test_config(), "4.00"));
+    let fx = Fixture::with_config(&with_job_usd(&test_config(), "5.60"));
     let scenario = Scenario {
-        cost: 0.4,
+        cost: 0.7,
         ..Scenario::default()
     };
     let calls = scenario.invocations.clone();

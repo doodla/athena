@@ -1,0 +1,203 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261030-214204-x2fz",
+  "base_commit": "748e87c99431315eec437a318225c85405373d37",
+  "base_fingerprint": "sha256:69364be63f1b88ca9b25d60f225c2984821f027747228f687101bc34ee170006",
+  "previous_job": "20261030-185443-hydf",
+  "candidate_commit": "1864315b1c7cce912483b4de9309ea6cca13862d",
+  "candidate_tree": "d2c70607cb6b8e948846e09db33fe31b09291242",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 247297
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 160131
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 183492
+    },
+    {
+      "path": "crates/athena-cli/tests/job_plan.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 56131
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 124695
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 314911
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 65660
+    },
+    {
+      "path": "crates/athena-core/src/run/planning.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 22794
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 69082
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 73378
+    }
+  ],
+  "fingerprint": "sha256:1e9f8a235d8f65d9d6133351a464614e25b3e7469ed185372f092bd3ca15b2d7",
+  "violations": [],
+  "producer_report": {
+    "summary": "Added one shared budget reserve and made a short job stop before any spend. Root cause: the budget was checked only per invocation, after reading and planning had spent, and the reserve left out the critic and later planning rounds. `reading::budget_reserve(config, stage)` is now the only place the caps are added. All caps come from config. At admission it is the reader, plus max_rounds × (planner + critic) when `[job_plan]` is enabled, plus the producer and verifier (10.00 with the shipped caps). Later stages count only what is still to run: Dispatch{planned}, Planner{round}, Critic{round} and Run. `Athena::preflight` applies it and returns a typed `BudgetShort` that names the shortfall, the reserve and the `[budget] job_usd` line in athena.toml. Call sites: `first_reading` (admission, and a queued job's re-read with its prior spend), `retry` (judged on its own spend, starting at 0), `dispatch` (before any commit, and the Run stage after planning), and the planner and critic checks in run/planning.rs. The drain maps `BudgetShort` to a held item: one `item <id> is left queued: ...` note, outcome `budget short`, not a failure, and the next item runs. I added `Read.held` for this. New tests: core arithmetic and shipped-config tests, an admission test (8.00 refused, zero driver invocations), a real-round critic table, a dispatch hold, a retry test, and a drain test. A CHANGELOG entry names the root cause and the three jobs. I ran the full suite in pieces, not as one run. The one-shot `cargo test --locked` I started in the background hit its time limit and was killed. The pieces were athena-core lib, the athena-core integration tests, all of athena-cli, athena-cap-change, athena-cap-study and xtask, and all passed. I did not run athena-data, athena-context, athena-score, athena-agent, athena-gate or athena-git (untouched). `cargo fmt --all --check` and `cargo clippy --all-targets --locked -- -D warnings` are clean.",
+    "files": [
+      "crates/athena-core/src/reading.rs",
+      "crates/athena-core/src/run/planning.rs",
+      "crates/athena-core/src/run/mod.rs",
+      "crates/athena-cli/src/drain.rs",
+      "crates/athena-core/src/run_pin_tests.rs",
+      "crates/athena-core/src/run/tests.rs",
+      "crates/athena-cli/tests/lifecycle.rs",
+      "crates/athena-cli/tests/job_plan.rs",
+      "crates/athena-cli/tests/drain.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "no output"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "one collapsible-if in the new drain test was fixed first; clean after"
+      },
+      {
+        "command": "cargo test -p athena-core --locked --lib -q",
+        "result": "pass",
+        "note": "698 passed, 1 ignored"
+      },
+      {
+        "command": "cargo test -p athena-core --locked -q --test '*'",
+        "result": "pass",
+        "note": "2 passed"
+      },
+      {
+        "command": "cargo test -p athena-cli --locked -q",
+        "result": "pass",
+        "note": "every athena-cli test binary passed, including the new drain test (job_plan), the 110 tests in drain.rs and the edited lifecycle test"
+      },
+      {
+        "command": "cargo test --locked -q -p athena-cap-change -p athena-cap-study -p xtask",
+        "result": "pass",
+        "note": "includes the xtask policy test"
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "12 passed; the boundary word scan found nothing"
+      },
+      {
+        "command": "cargo test --locked (one run, background)",
+        "result": "not-run",
+        "note": "stopped at the background time limit while other cargo runs competed for the build lock; the crates listed above were run directly instead"
+      },
+      {
+        "command": "cargo test -p athena-cli --locked --test job_plan -- a_short_job (check removed in first_reading)",
+        "result": "fail",
+        "note": "deliberate: with the admission preflight commented out the drain test fails (reader count 0 vs 1 at the first assertion); check restored and the test passes"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "CHANGELOG.md has an entry naming the root cause: budget checked only per invocation after reading and planning had spent, with a reserve that left out the critic and later rounds; it names jobs 20261028-082151-67fa, 20261030-033434-3v30 and 20261030-151818-2c8g.",
+        "status": "met",
+        "evidence": "Read the new first entry under [Unreleased] → Fixed in CHANGELOG.md. It states the root cause in those terms and names all three job ids. It also records the edited existing tests and the `Read.held` field."
+      },
+      {
+        "criterion": "One reserve function in crates/athena-core/src/reading.rs sums reader, max_rounds×(planner+critic), producer and verifier from config; Grep shows it called from admission, retry, drain dispatch and the per-round check in run/planning.rs, with no duplicated arithmetic.",
+        "status": "met",
+        "evidence": "Grep `fn budget_reserve` finds one definition, in reading.rs. Grep `\\.preflight\\(` finds calls in reading.rs (first_reading for admission; retry), run/mod.rs (dispatch: Dispatch and Run stages) and run/planning.rs (Planner and Critic). `Athena::preflight` is the only caller of `budget_reserve` outside tests. The drain reaches dispatch and admission by calling `Athena::go`, and drain.rs only downcasts `BudgetShort`. The old `planner_usd + after` sums in planning.rs and mod.rs are removed."
+      },
+      {
+        "criterion": "Core test: with a fake driver and the recorded $8.00 budget against the shipped caps (reserve 10.00), admission refuses with a message naming the shortfall and the config line, and the driver records zero invocations. Run: cargo test -p athena-core.",
+        "status": "met",
+        "evidence": "Ran `cargo test -p athena-core --lib admission_refuses`: run_pin_tests::admission_refuses_a_job_short_of_the_whole_planning_reserve passes. It asserts a BudgetShort error whose text contains `$2.00 short`, `$10.00`, `[budget] job_usd` and `athena.toml`, an invocation counter of 0, and an unchanged git head. The same caps at 12.00 are admitted and the reader runs once."
+      },
+      {
+        "criterion": "Core test: the preflight and the per-round critic check agree at $5.75, at the single-round total and at the full multi-round total; a retry whose recorded spend leaves less than the reserve is refused before planning, and a job with enough budget proceeds. Run: cargo test -p athena-core.",
+        "status": "met",
+        "evidence": "The real-round table `round_one_critic_check_follows_the_shared_reserve` (run/tests.rs) passes. It runs production ask and go, and the critic is called or not as the shared reserve says. Left 5.75 and 8.74 with three rounds: not called, shortfall $3.00 and $0.01. Left 8.75 with three rounds: called. Single round, left 5.74: not called; left 5.75: called. Refused rows record the plan and no critique. `a_retry_is_judged_on_its_own_spend_and_stopped_before_planning` passes: the retry is admitted, `go` returns BudgetShort ($1.50 short) with no new planner call and an unchanged head. The unit test `every_stage_counts_only_what_is_still_to_run_and_takes_its_caps_from_config` (reading.rs) passes. One departure from the plan: the retry model of the job being retried is as the plan said, but no spend is carried over."
+      },
+      {
+        "criterion": "Core test of the real preflight on a real stored job, with spend chosen so left ≥ producer+verifier but < the full reserve: base reaches the planner, the change records no invocation. Run: cargo test -p athena-core.",
+        "status": "met",
+        "evidence": "`dispatch_holds_a_job_that_cannot_afford_every_planning_round` (run/tests.rs) passes. The reader spends 4.00, leaving 8.00, which is at least 5.00 for the producer and verifier and below the 9.50 dispatch reserve. `go` returns BudgetShort containing `$1.50 short` and `[budget] job_usd`. The recorded invocations are exactly [Reader], and the git head is unchanged, so no prediction commit was made. I did not run this test against the base commit to see it fail there."
+      },
+      {
+        "criterion": "Drain test through the real preflight path: a short job is skipped with its reason on one log line and the next item with enough budget still runs; it fails if the check is removed. Run: cargo test -p athena-cli.",
+        "status": "met",
+        "evidence": "`a_short_job_is_skipped_with_its_reason_and_the_next_item_runs` (tests/job_plan.rs) passes under `cargo test -p athena-cli`. It runs the real drain over RealSteps. Item A's first reader call fails at $0.60 under a $6.00 budget, so its second read is refused at admission with $0.10 short. Asserted: exactly one `item <A> is left queued:` note with `$0.10 short` and `[budget] job_usd`; exactly one `(budget short)` drain log line; the reader ran once for A; the stop is not RepeatedFailure; B is landed. I temporarily disabled the preflight in first_reading and the test failed, then restored it."
+      },
+      {
+        "criterion": "cargo fmt --check, cargo clippy --all-targets -- -D warnings and cargo test all pass, with edits to existing tests config-only.",
+        "status": "met",
+        "evidence": "left to Athena's checks for the recorded fmt, clippy and full-suite results. I ran `cargo fmt --all --check` and `cargo clippy --all-targets --locked -- -D warnings` clean, and the test pieces listed in checks_run all pass. The single full `cargo test --locked` run was stopped at its time limit. Existing-test edits are numbers only: run_pin_tests.rs `reader_usd = 0.10`; job_plan.rs `reader_usd = 0.01` and `max_rounds = 1`; lifecycle.rs job_usd 5.60 with scenario cost 0.7; run/tests.rs `repo_with_planning(5)` → 4. The exception is two struct literals in tests/drain.rs that got the new field `held: false`."
+      },
+      {
+        "criterion": "The change refuses more readings at admission and the higher refusal rate is intended: expected 10% of newly refused readings, since the shipped athena.toml budget of 12.00 covers the 10.00 reserve.",
+        "status": "met",
+        "evidence": "`shipped_budget_covers_the_reserve` (reading.rs) passes: the reserve parsed from the shipped athena.toml is 10.00 within 1e-9, the shipped job_usd of 12.00 covers it, and the 8.00 case is $2.00 short with the `[budget] job_usd` line in the text. The CHANGELOG entry states that the higher refusal at admission is intended and that 12.00 covers 10.00. The 10% figure is a forecast and not measured; the tests do not check it."
+      }
+    ],
+    "open_issues": [
+      "Plan departure: the lifecycle.rs edit is job_usd 5.60 with the scenario cost 0.7, not 5.60 alone. With 5.60 and cost 0.4 the job clears dispatch (5.20 left against 5.00 needed), so the test's expected refusal never happened. Both are numbers, and no assertion changed.",
+      "Plan departure: tests/drain.rs is not a listed deliverable, but `Read` gained a `held` field and two struct literals there (the Stub's `read` and the parallel Shared's `read`) needed `held: false`. A compile fix with no behavior change.",
+      "Plan departure: the drain test's premise was wrong. `athena.queue` makes no reader call and spends nothing. The test instead uses the reader failing on its first drain read ($0.60), so the drain's second read of the same item reaches admission with 0.60 prior spend. Request texts carry an acceptance bullet so the drain's own planning pass does not read them first.",
+      "The Run-stage hold from `go` carries the label `budget short` as a reason prefix, which `run_job` checks, because a new `Run` field would have broken the existing exhaustive Run literal in tests/drain.rs. A typed field would be cleaner if edits to that file are acceptable.",
+      "Dispatch counts the planning terms for a job that resumes from a kept candidate (no planner or producer runs), so such a resume can be held with less than the planning reserve left. This is the over-reserving the plan accepted; no existing test hit it.",
+      "`correct` (re-reading a proposed job) does not call the preflight; the brief names admission, retry, dispatch and per-round checks only.",
+      "A non-retryable job with a short budget now reports the budget shortfall from `retry`'s early preflight rather than 'not retryable'. No existing test asserted the other wording."
+    ],
+    "mistakes": [
+      "My first drain test used plain requests with no acceptance bullet, so the drain's planning pass read item A ahead and consumed the scripted failing reader call; the item was 'not worked' instead of held. I rewrote the requests.",
+      "My first retry test failed because the scripted reader's summary did not name the retried job; fixed in the cost wrapper.",
+      "clippy's collapsible-if flagged the first version of the drain test's script; collapsed."
+    ],
+    "learnings": [
+      "`athena.queue` (ask --later) makes no reader call; a queued item is read by the drain's `go`, and the drain's own planning pass reads a queued request first if its words leave the plan without acceptance. A drain test of the read path needs a request with an acceptance bullet.",
+      "The fake agent driver enforces no per-role cap and does not clamp a turn's cost_usd, so tests can make a planner turn cost more than planner_usd.",
+      "A reading of a retry is refused unless its summary, assumptions or criteria name the retried job, so a retry test's scripted reader must put the job id in its summary.",
+      "`RETRY_PREFIX` (`try again on `) is private to reading.rs. Test scripts match the literal text.",
+      "Adding a field to `drain::Read` or `drain::Run` breaks struct literals in tests/drain.rs, and every `Read {` literal in the repo is listed above; `Read` and `Run` derive Default.",
+      "The shipped athena.toml has [job_plan] enabled with 0.75/0.75/3 rounds. The core pin tests, run/tests.rs repo_with_config and cli test_config strip it; tests that want planning append their own section."
+    ],
+    "desires": [
+      "A way to read the output of a background cargo run; it was written outside the working directory, which the read tools refuse, so I could not see why the long run was stopped.",
+      "A shared test helper (tests/common) for StubPage and a recording Lander, so job_plan.rs would not need local copies."
+    ]
+  }
+}

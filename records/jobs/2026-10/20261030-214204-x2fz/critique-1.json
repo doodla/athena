@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-214204-x2fz",
+  "round": 1,
+  "at": "2026-10-30T21:51:07.782476932Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/tests.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/tests.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The plan's retry check charges the new job with the old job's spend. The code does not model a retry that way, and the rule would stop most retries of jobs that failed during planning.",
+      "evidence": "reading.rs:909-936: retry calls self.ask(\"try again on <id>\"), which makes a new job. first_reading:855 sets before = prior.map_or(0.0, spent_usd), so a new job starts at $0 against its own job_usd. Under the plan, any failed job whose recorded spend is above job_usd − reserve (12.00 − 10.00 = $2.00 with the shipped config) can never be retried. That includes jobs that failed in planning after spending on the reader, planner and critic, which is the class this change is about, and possibly this retry of 20261030-151818-2c8g. The plan lists this as an open question but still builds it into the design. Fix: Count the retry job's own recorded spend (its reader cost) and stop it at its own admission and dispatch preflight, before the planner runs. In the criterion 4(b) test, make the retry's reader cost leave less than the dispatch reserve, then show that go stops it with no Planner invocation. If the user really wants the old spend carried over, ask them first, and make the refusal text say so.",
+      "location": "Decision 4 / Step 2 (retry preflight using the retried job's spent_usd)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The agreement test calls budget_reserve and preflight directly. It never runs the critic check in planning.rs, so it would pass even if planning.rs kept its old check.",
+      "evidence": "The test compares preflight(Admission, 0) with preflight(Critic{1}, reader+planner). Both calls go to the same new function, so they agree by construction. The plan's 'fails without' line says the test fails 'if the round check still used the old cap + producer + verifier sum', but the round check is the call at planning.rs:280. If that call stays check_budget(critic_usd + after), this unit test still passes. Fix: Add a test that runs a real planning round. Use the run/tests.rs harness (repo_with_planning / run_planned, already in athena-core) or job_plan.rs Fixture+Scenario. Choose spend and job_usd so that the money left at the round-1 critic is at or just below the Critic{1} reserve, for example at $5.75. Assert that the critic is not called and that the job stops with the shortfall, and that the critic runs once the job has the full reserve. On the base commit, the critic is called at $5.75, so the test fails there.",
+      "location": "Demonstrations, criterion 4(a)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan moves criterion 5's command from athena-core to athena-cli, saying no athena-core harness reaches a planner. But run/tests.rs is an athena-core file with a planning harness, and the plan already edits it.",
+      "evidence": "run/tests.rs:268 has repo_with_planning(max_rounds), and its tests at :616, :652 and :710 run planned jobs through run_planned. The plan edits this file anyway (the 5 → 4 change). Fix: Either put the criterion 5 test in run/tests.rs and keep `cargo test -p athena-core`, listing the file as touched for that reason, or keep the job_plan.rs test and get the user's consent to the new command. Do not leave it to the producer.",
+      "location": "Demonstrations, criterion 5 / Open questions",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The setup that gives item A $0.60 of recorded spend from a failed reader was not read. The plan leaves a fallback to the producer, so the criterion's seam is not pinned down.",
+      "evidence": "The plan says the mechanism 'was not read' and that the producer will find it with Grep. drain.rs:1150-1159 shows that a queued job whose reader failed comes back as Unread and is read once more. The plan does not show that this second read goes through first_reading with the prior spend. Fix: Name the actual mechanism: an invalid Scenario.reading with cost 0.60, then a drain pass that re-reads through first_reading with prior set. Confirm that the admission preflight sees the $0.60, and state the expected log line exactly.",
+      "location": "Demonstrations, criterion 6 (setup of item A)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The plan gives the wrong line for StubPage in tests/drain.rs.",
+      "evidence": "Grep finds `struct StubPage;` at crates/athena-cli/tests/drain.rs:1325, not at ~2349. Fix: Change the reference to line 1325.",
+      "location": "Demonstrations, criterion 6 (StubPage source)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The core design fits the request and puts the fix where the fault starts. It adds one budget_reserve function in reading.rs, driven by config, and calls it at admission, retry, dispatch and the planner and critic checks. The places it names exist: check_budget at reading.rs:287, first_reading at :841, retry at :909, the planner and critic checks at planning.rs:116 and :280, and the dispatch checks at run/mod.rs:750 and :931. Scenario's cost, invocations, plans and critiques fields exist in tests/common/mod.rs. The reserve figures add up: 10.00 at admission, 9.50 at dispatch, 13.00 for repo_with_planning(5). Two problems need a revision. First, the plan charges a retry with the failed job's recorded spend, although the code starts every retry as a fresh job at $0. That rule would stop any job that once spent more than $2 from ever being retried, possibly including this very retry. Second, the criterion 4 agreement test only compares the pure function with itself, so it would still pass if planning.rs kept its old critic check. Smaller points: criterion 5's command moves to athena-cli although run/tests.rs (an athena-core file the plan already edits) has a planning harness; criterion 6's setup for item A was not read; and one location is wrong."
+}

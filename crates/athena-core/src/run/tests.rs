@@ -707,7 +707,7 @@ mod produce_and_verify_order_tests {
 
     #[test]
     fn a_plan_that_still_breaks_a_rule_after_two_mechanical_passes_stops_without_the_critic() {
-        let repo = repo_with_planning(5);
+        let repo = repo_with_planning(4);
         // The critic queue is empty, so any critic call fails the test.
         let (finished, calls) = run_planned(&repo, vec![bad_plan()], vec![]);
         assert_eq!(finished.state, OutcomeState::Failed);
@@ -727,6 +727,193 @@ mod produce_and_verify_order_tests {
         for role in [Role::Critic, Role::Producer, Role::Verifier] {
             assert!(prompts_of(&calls, role).is_empty(), "{role:?} was called");
         }
+    }
+
+    /// `script` with a chosen cost for the reader (read from a cell, so a test can change it between jobs) and
+    /// for every planner call. The fake driver enforces no cap, so a turn may cost more than the role's cap.
+    fn costing(
+        script: athena_agent::fake::Script,
+        reader: Arc<Mutex<f64>>,
+        planner: f64,
+    ) -> athena_agent::fake::Script {
+        Box::new(move |spec: &AgentInvocation| {
+            let mut turn = script(spec);
+            match spec.role {
+                Role::Reader => {
+                    turn.cost_usd = *reader.lock().unwrap();
+                    // A reading of a retry must name the job it retries.
+                    if let Some((_, rest)) = spec.user_prompt.split_once("try again on ")
+                        && let Some(id) = rest.split_whitespace().next()
+                        && let Some(reading) = turn.structured.as_mut()
+                    {
+                        reading["summary"] = format!("Retry {id}: describe the demo.").into();
+                    }
+                }
+                Role::Planner => turn.cost_usd = planner,
+                _ => {}
+            }
+            turn
+        })
+    }
+
+    #[test]
+    fn round_one_critic_check_follows_the_shared_reserve() {
+        // job_usd is 12.00 and the reader costs 0.01, so left at the first critic is 11.99 less the planner.
+        // The critic's reserve is this critic, every later round, the producer and the verifier: 8.75 for 3
+        // rounds and 5.75 for one. The old check (critic + producer + verifier = 5.75) let the 3-round job
+        // call the critic at 5.75 with its later rounds unaffordable.
+        let rows: [(u32, f64, bool, &str); 5] = [
+            (3, 6.24, false, "$3.00 short"),
+            (3, 3.25, false, "$0.01 short"),
+            (3, 3.24, true, ""),
+            (1, 6.25, false, "$0.01 short"),
+            (1, 6.24, true, ""),
+        ];
+        for (max_rounds, planner_cost, critic_called, shortfall) in rows {
+            let repo = repo_with_planning(max_rounds);
+            let state = tempfile::tempdir().unwrap();
+            let calls = Calls::default();
+            let script = costing(
+                planning_script(vec![good_plan()], vec![accepting_critique()], calls.clone()),
+                Arc::new(Mutex::new(0.01)),
+                planner_cost,
+            );
+            let athena = athena_with(
+                &repo,
+                &state,
+                PASSES,
+                crate::test_support::plenty_of_space,
+                script,
+            );
+            let (job, finished) = finished_job(&athena);
+            let calls = calls.lock().unwrap().clone();
+            let label = format!("{max_rounds} rounds, planner ${planner_cost}");
+            assert_eq!(
+                prompts_of(&calls, Role::Critic).len(),
+                usize::from(critic_called),
+                "{label}: {}",
+                finished.reason
+            );
+            if critic_called {
+                assert_eq!(finished.state, OutcomeState::Landed, "{label}");
+                continue;
+            }
+            assert_eq!(finished.state, OutcomeState::Failed, "{label}");
+            assert!(
+                finished
+                    .reason
+                    .starts_with(athena_data::records::PLANNING_STOPPED_PREFIX),
+                "{label}: {}",
+                finished.reason
+            );
+            assert!(
+                finished.reason.contains(shortfall),
+                "{label}: {}",
+                finished.reason
+            );
+            assert!(
+                finished.reason.contains("[budget] job_usd"),
+                "{label}: {}",
+                finished.reason
+            );
+            for role in [Role::Producer, Role::Verifier] {
+                assert!(prompts_of(&calls, role).is_empty(), "{label}: {role:?}");
+            }
+            // The plan stands as a record although no critic reviewed it.
+            let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+            let stored = &records.jobs[job.as_str()];
+            assert_eq!(stored.plans.len(), 1, "{label}");
+            assert!(stored.critiques.is_empty(), "{label}");
+        }
+    }
+
+    #[test]
+    fn dispatch_holds_a_job_that_cannot_afford_every_planning_round() {
+        // Three rounds are planned: admission needs 10.00 and passes at 12.00. The reader then spends 4.00,
+        // so 8.00 is left: enough for the producer and verifier (5.00) but not for three rounds on top
+        // (9.50). The job is held before the planner, with the shortfall.
+        let repo = repo_with_planning(3);
+        let state = tempfile::tempdir().unwrap();
+        let calls = Calls::default();
+        let script = costing(
+            planning_script(vec![good_plan()], vec![accepting_critique()], calls.clone()),
+            Arc::new(Mutex::new(4.0)),
+            0.01,
+        );
+        let athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            script,
+        );
+        let proposal = athena.ask("describe the demo", &Quiet).unwrap();
+        assert!(proposal.reading.is_some());
+        let head = athena.head().unwrap();
+        let error = athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Quiet)
+            .expect_err("the job cannot afford every planning round");
+        let text = format!("{error:#}");
+        assert!(
+            error
+                .downcast_ref::<crate::reading::BudgetShort>()
+                .is_some(),
+            "{text}"
+        );
+        assert!(text.contains("$1.50 short"), "{text}");
+        assert!(text.contains("[budget] job_usd"), "{text}");
+        let calls = calls.lock().unwrap().clone();
+        let roles: Vec<Role> = calls.iter().map(|(r, _)| *r).collect();
+        assert_eq!(roles, [Role::Reader], "no planner, critic or producer ran");
+        assert_eq!(athena.head().unwrap(), head, "no prediction commit");
+    }
+
+    #[test]
+    fn a_retry_is_judged_on_its_own_spend_and_stopped_before_planning() {
+        let repo = repo_with_planning(3);
+        let state = tempfile::tempdir().unwrap();
+        let calls = Calls::default();
+        let reader_cost = Arc::new(Mutex::new(0.01));
+        let script = costing(
+            planning_script(vec![good_plan()], vec![revising_critique()], calls.clone()),
+            reader_cost.clone(),
+            0.01,
+        );
+        let athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            script,
+        );
+        // The funded job runs its planner and critic through every round and fails in planning.
+        let (job, finished) = finished_job(&athena);
+        assert_eq!(finished.state, OutcomeState::Failed, "{}", finished.reason);
+        let planners =
+            |calls: &Calls| prompts_of(&calls.lock().unwrap().clone(), Role::Planner).len();
+        let ran = planners(&calls);
+        assert_eq!(ran, 3);
+
+        // The retry is a new job judged on its own spend, which starts at 0: the old job's spend is not
+        // carried over, so it is admitted. Its reader now spends 4.00, which leaves less than the 9.50
+        // that three rounds, the producer and the verifier need.
+        *reader_cost.lock().unwrap() = 4.0;
+        let (proposal, _) = athena.retry(job.as_str(), &Quiet).unwrap();
+        assert!(proposal.reading.is_some(), "{:?}", proposal.reader_error);
+        let head = athena.head().unwrap();
+        let error = athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Quiet)
+            .expect_err("the retry cannot afford every planning round");
+        let text = format!("{error:#}");
+        assert!(
+            error
+                .downcast_ref::<crate::reading::BudgetShort>()
+                .is_some(),
+            "{text}"
+        );
+        assert!(text.contains("$1.50 short"), "{text}");
+        assert_eq!(planners(&calls), ran, "the retry reached no planner");
+        assert_eq!(athena.head().unwrap(), head);
     }
 
     const MARKER: &str = "MARKER";

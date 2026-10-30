@@ -1,0 +1,34 @@
+{
+  "schema": "athena.introspection/1",
+  "id": "20261030-214133-cp86",
+  "at": "2026-10-30T21:41:33.308084842Z",
+  "trigger": "failure",
+  "job": "20261030-151818-2c8g",
+  "intervention": null,
+  "class_of_work": "code",
+  "category": "failed",
+  "what_happened": "Job 20261030-151818-2c8g, which asked for a check of the full planning-plus-producer-verifier budget reserve at admission, failed in planning before any code was written. After round 1 of 3 the critic said the reading partly misread the request. The plan's structure fit: one function in reading.rs called at admission, retry and dispatch, plus a drain hook that skips a short item. The functions it names exist. The major finding was the arithmetic. The reserve counted reader, planner, producer and verifier ($6.25) but left out the critic cap and later planning rounds. Each round's critic check needs critic + producer + verifier = $5.75, and max_rounds is 3. A job with $8.00 would pass the new preflight and still stop at a critic check, so the failure class would remain. The reading also wrongly said the critic was already covered by the per-round checks. Minor findings: the criterion 7 test pins the wrong total; the dispatch test does not discriminate and the end-to-end preflight is untested; two test files (lifecycle.rs, job_plan.rs) are not among the reading's deliverables; the config-only test edits must be recomputed. No acceptance criteria were reported unmet and no repo checks failed. Nothing was delivered.",
+  "failure_class": "20261028-091806-tng9",
+  "new_class": false,
+  "earlier_cases": [
+    "20261030-153131-skzk",
+    "20261030-151759-gmz2"
+  ],
+  "decisions_matched": [],
+  "cause": "The job to fix the budget-shortfall class was itself built on a reading that did not model how the existing budget check works. The reading assumed the per-round critic check already covers the critic. Nothing makes the reading or the plan derive the reserve from the actual stage caps and round count in planning.rs, so the total was written from partial knowledge. The $8.00 budget is close to the sum of the caps, so a reserve that omits any term still lets jobs through. This job was also re-asked after related jobs stopped for the same shortfall, and no budget check ran at its admission. Planning's three fixed rounds then leave no room to repair the arithmetic, and the failure shows up only after planning spend is gone.",
+  "prevention_kind": "code-check",
+  "prevention": "Define the reserve in one function that sums the stage caps from config, as planner + critic per round for max_rounds, plus producer and verifier. Use that same function in admission, retry, dispatch and the per-round check. Add a test that fails if the preflight passes any budget the per-round critic check would later refuse. For example, assert that the preflight and the per-round check give the same verdict at $5.75, $6.25 and the full multi-round total. The reading and plan for any budget-gate job should be checked against that function, so a reserve that omits a stage cap cannot be accepted.",
+  "proposed_request": "Make Athena refuse or hold a job whose remaining budget cannot cover the whole planning-plus-producer-verifier path, before any money is spent.\n\nOutcome:\n- The reserve counts every stage cap from athena.toml: the reader, then planner + critic for each of max_rounds planning rounds, then the producer and the verifier. It is computed in one shared function.\n- That function is used at admission (first reading), at `athena retry`, at dispatch, and before each planning round, so the preflight never passes a job that a later per-round critic check would stop.\n- A job with too little budget is held with a message naming the shortfall and the config line to raise, and drain skips it without stopping the drain.\n\nAcceptance criteria:\n1. The reserve function includes the critic cap and all planning rounds. A test with the configured caps shows the preflight and the per-round critic check give the same verdict at $5.75, at the single-round total and at the full multi-round total.\n2. A $8.00 job with prior planning spend that leaves less than the reserve is held at admission, retry and dispatch, with the shortfall in the message.\n3. A drain test shows a short item is skipped and logged, and the next item still runs.\n4. The dispatch test fails if the check is removed. It runs through the real preflight path, not a stub.\n5. Existing tests that depend on budget numbers (lifecycle.rs, job_plan.rs, run_pin_tests.rs) are updated to the new totals, and these files are listed as allowed deliverables.\n6. Changing a stage cap in athena.toml changes the reserve without a code change.",
+  "evidence": {
+    "model": "claude-sonnet-5-5",
+    "cost_usd": 0.096614,
+    "input_tokens": 2,
+    "output_tokens": 1601
+  },
+  "status": "recorded",
+  "failure": null,
+  "flags": [],
+  "dropped_ids": [],
+  "planning_stopped": true,
+  "from_jev": false
+}
