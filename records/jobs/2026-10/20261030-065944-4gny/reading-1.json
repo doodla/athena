@@ -1,0 +1,152 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261030-065944-4gny",
+  "n": 1,
+  "at": "2026-10-30T07:00:16.141588271Z",
+  "invocation_seq": 1,
+  "base_commit": "edfc4d76143a24ce283e4a2adf6a04a19d9178c8",
+  "config_sha256": "4686d6918e8a389a515edf47cdcb596e2ae4a147d9ffda0816f171979db719d1",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Fix landing-stage matching in athena status; no outcome-as-evidence",
+  "summary": "Retry of job 20261029-233021-e5sg: in status.rs only, end each landed job's landing stage at its own landing record (earliest matching, not newest), and report \"no evidence\" instead of using the outcome or another job's record. The earlier candidate's store.rs and athena-git edits are dropped, as is its job-commit fallback. The audience is the maintainer reading `athena status` throughput.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "Change is Rust only."
+    },
+    {
+      "id": "tested",
+      "how": "New fixture tests; fmt, clippy -D warnings and cargo test criterion."
+    },
+    {
+      "id": "verified",
+      "how": "Behavior criterion runs athena status against git log."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check durations against git log, not wiring."
+    },
+    {
+      "id": "outcome-check",
+      "how": "Outcome is correct landing durations on real data, not only fixtures."
+    },
+    {
+      "id": "small",
+      "how": "Two files only; earlier out-of-scope edits dropped."
+    },
+    {
+      "id": "root-cause",
+      "how": "Fix the record-matching rule, not the one job."
+    },
+    {
+      "id": "strangers",
+      "how": "CHANGELOG entry and test names written for outside readers."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-core/src/status.rs (landing_record_time, landing_end, busy_intervals at ~L770-830; fixture tests ~L3294-3450), crates/athena-data/src/history.rs (Landing has created_at, host_commit, commits with kind/job) and crates/athena-core/src/store.rs (Records.landings). Entry point is `athena status`, which loads Records and computes throughput; landing_end is called from busy_intervals. No record or data file is added under crates/, so check_record_file and AnyRecord are not touched. The property is measured directly as the landing duration per job against `git log` times.",
+    "Job 20261029-233021-e5sg findings: (blocker) real-records validation missing: addressed by criterion 5 and a before/after report; the snapshot has no records, so the verifier can only check what its commands can show. (major) JobCommit fallback equals the outcome: dropped; a job with no landing record is reported as no evidence. (major) out-of-scope edits to store.rs and athena-git: reverted, not kept. (minor) .max() over matching records: replaced by the earliest matching record. (minor) substring matching over commit messages and one git show per job: dropped with the git-based fallback.",
+    "Root cause assumed: landing_record_time takes the newest record listing the job's commit, so a later record that also lists it (or one whose created_at is long after the merge) inflates the stage; the producer must confirm this with a test that uses records shaped as the real writers produce them.",
+    "Job 20261029-130605-mbpm is evidence only; its landed files are not touched.",
+    "Any git-derived evidence is out unless it can be had from existing Records data; if real records cannot be exercised in the working copy, the report must say so plainly rather than claim validation."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "crates/athena-core/src/status.rs has a fixture test with three jobs: one with its own landing record (stage = record time minus outcome), one with no landing record (reported as no evidence, not counted in the median), and one whose neighbouring job's landing record exists and is not used for it.",
+      "kind": "content"
+    },
+    {
+      "text": "A test shows a job that has only an outcome and no landing record is not counted as having landing evidence, and a second landing record listing the same job's commit later does not extend its stage (earliest matching record wins). Grep status.rs for these tests.",
+      "kind": "content"
+    },
+    {
+      "text": "The status output states 'no landing evidence' for each job lacking it; no fallback treats the job's outcome time as evidence.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo run -- status` and `git log --format='%H %cI' -n 10`: for the five most recent landed jobs the reported landing durations are within 3 minutes of outcome-to-main-commit time, and the old 273.8-minute median is gone; if records/ is absent in the checkout the output says so and the report must show the before and after median.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test`; all pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has a Fixed entry that describes only what the diff does (earliest own landing record, explicit no evidence, no outcome stand-in) and does not claim a real-records validation that was not run.",
+      "kind": "content"
+    },
+    {
+      "text": "`git diff --stat` shows only crates/athena-core/src/status.rs and CHANGELOG.md changed; store.rs and crates/athena-git/src/lib.rs are unchanged from the base.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/store.rs",
+      "action": "modify",
+      "p": 0.08
+    }
+  ],
+  "out_of_scope": [
+    "Fixing the two minor findings of job 20261029-130605-mbpm (stale spec.toml comment; OLY-B-WHO-01 open-question note)",
+    "Editing job 20261029-130605-mbpm's landed files: docs/spec.toml, xtask/tests/spec.rs, docs/enforcement.md, crates/athena-core/src/hestia.rs",
+    "Candidate changes to crates/athena-git/src/lib.rs and the new git-time loading in crates/athena-core/src/store.rs from job 20261029-233021-e5sg: dropped, not kept",
+    "Changing athena.toml, defaults.toml, workflow files or records/",
+    "Redesigning other throughput stages or the busy-interval model"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.5,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.2,
+        "p90": 3.0
+      },
+      "wall_time_s": {
+        "p10": 420.0,
+        "p50": 1700.0,
+        "p90": 3300.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7198924731182796,
+      "p_verification_passes": 0.6720257234726688,
+      "p_user_intervenes": 0.07678571428571429,
+      "cost_usd": {
+        "p10": 0.5441679488882005,
+        "p50": 1.194743764052125,
+        "p90": 3.0942509624446877
+      },
+      "wall_time_s": {
+        "p10": 538.2793156890889,
+        "p50": 1704.323319354,
+        "p90": 3423.549911959623
+      }
+    }
+  },
+  "departures": "Lower verification pass: the snapshot lacks real records, so the real-records criterion is hard to exercise.",
+  "urgent_reason": "Cuts repeated rejected attempts: this is the third rejection of the same landing-throughput line, so it reduces redo-work retries."
+}
