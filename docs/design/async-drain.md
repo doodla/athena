@@ -202,6 +202,11 @@ max_conflict_returns = 2 # conflict returns before a thrash stop
 
 The block ships with every value at today's behavior. Job 10 is the one that raises `max_in_flight`.
 
+Build job 2 implemented this block in `athena-data`'s `Config` (`[drain.pipeline]`). The config refuses
+`max_in_flight` outside 1 to 8 (the `[parallel]` ceiling), `max_check_slots` outside 1 to 8, `read_ahead` of 0,
+`max_conflict_returns` of 0 and any unknown key. `reserve_disk_gb` may be any non-negative whole number. The table is
+left out of a reading's config digest. No drain code reads these values yet.
+
 ## 12. Ordered build jobs
 
 Each job is sized for one producer run (about 15 minutes, one focused change, tests included) and lists what must

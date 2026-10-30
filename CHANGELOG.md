@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `[drain.pipeline]` config table (async drain build job 2, `docs/design/async-drain.md` sections 11 and 12) in
+  `athena-data`: `max_in_flight`, `max_check_slots`, `read_ahead`, `reserve_disk_gb` and `max_conflict_returns`,
+  defaulting to 1, 1, 1, 10 and 2 when the table or `[drain]` is absent. `max_in_flight` must be 1 to 8,
+  `max_check_slots` 1 to 8, `read_ahead` and `max_conflict_returns` at least 1; unknown keys are refused. Nothing in
+  the drain reads the values yet, so with `max_in_flight = 1` the drain behaves as today, and the table does not
+  change a reading's config digest.
 - D145 accepted, decided by the brain under Sri's delegation on 2026-10-29. `docs/decisions.md` also gains an
   "A1 measurements" entry (design section 12, job 1) that is not a measurement: `sccache --show-stats`, `du`, `df` and
   `git worktree add` were each refused by the producer shell, so the entry records the command and error for each,
